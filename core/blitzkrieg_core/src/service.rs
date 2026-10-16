@@ -282,6 +282,13 @@ pub struct CoreConfig {
     /// `settlements.jsonl` beside the order log; `order_log_path: None` means no
     /// persistence, i.e. settlement idempotency is per-session.
     pub settlement_log_path: Option<String>,
+    /// The ledger cash journal directory: one `data/ledger/<account>.journal.jsonl`
+    /// per account, one append per cash movement, replayed at boot so the
+    /// balance survives a restart (last row's `balance_after`). `None` = the
+    /// historical memory-only ledger (`--no-ledger-journal`, the backtester,
+    /// in-process tests) — nothing is written and nothing is replayed, and
+    /// boot seeds exactly as before.
+    pub ledger_journal_dir: Option<String>,
     /// TEST HOOK, dry mode only: make the first N redemption attempts of every
     /// claim fail before one succeeds. `0` (the default) is the production
     /// behaviour — the simulated redemption always lands. A failure is a real
@@ -854,6 +861,7 @@ impl Default for CoreConfig {
             audit_interval_sec: 30,
             audit_log_path: None,
             applied_log_path: None,
+            ledger_journal_dir: None,
             audit_halt_entries: true,
             settlement_log_path: None,
             dry_redeem_fail: 0,
@@ -1424,6 +1432,12 @@ pub struct Core {
     /// Newest external (unknown-order) fill timestamp already folded into the
     /// position book; persisted next to the position log.
     recon_watermark_ms: i64,
+    /// Whether this core's boot REPLAYED durable cash journals (at least one
+    /// `data/ledger/<account>.journal.jsonl` existed on disk). The server's
+    /// post-construction seed reads it: a replayed balance is a boot fact and
+    /// must not be re-seeded over. Always false when
+    /// `config.ledger_journal_dir` is `None`.
+    boot_replayed_journal: bool,
     /// Newest trading-capability self-check report (panel visibility).
     last_self_check: Option<blitzkrieg_market_api::SelfCheckReport>,
     /// Durable journal of the applied-fill idempotency table (issue #178). The
@@ -1823,6 +1837,10 @@ impl Core {
         config: CoreConfig,
         mut accounts: crate::account::AccountLedgers,
     ) -> Self {
+        // Whether the boot below replayed durable cash journals (the server's
+        // post-construction seed reads it — a replayed balance must not be
+        // re-seeded over).
+        let mut boot_replayed_journal = false;
         // #363: the execution policy loads fail-closed at boot. A missing
         // file is the zero-config deployment (code defaults, no account
         // sections); a file that exists but does not parse, misses a field
@@ -1979,14 +1997,41 @@ impl Core {
                 }
             }
         });
-        // E28 (§9.5): a locally-settling mode has no venue to reconcile
-        // against; seed the local cash so the reserve/overspend gate is
-        // meaningful for embedders that don't seed it. Uses the predicate, not
-        // `== Dry`: the equality form is invisible to the compiler and left
-        // ReadOnly funding at zero. EVERY account is seeded (§9.3: the books
-        // are separate wallets, not one wallet with aliases); with one
-        // account this is exactly the single `set_balance` 0.2 ran.
-        if config.mode.settles_locally() {
+        // Durable cash journals (data/ledger/<account>.journal.jsonl): replay
+        // BEFORE seeding. A deployment with journals on disk restores the
+        // opening balance from each journal's last row and skips the boot seed
+        // — re-seeding over a replay would reset the balance to the seed and
+        // vaporize the盈亏 history across every restart. A fresh deployment
+        // (no journal files — first boot, or a replay corpus) takes the
+        // historical seed_all path, bit for bit. A malformed journal line is
+        // skipped with one warn (the jsonl::load contract — the trailing
+        // balance comes from the last GOOD row); the file itself is append-
+        // only evidence, never rewritten by this path.
+        if let Some(dir) = config.ledger_journal_dir.as_deref() {
+            let dir = std::path::Path::new(dir);
+            let replayed = accounts.any_journal_on_disk(dir);
+            accounts.attach_journals(dir);
+            // E28 (§9.5): a locally-settling mode has no venue to reconcile
+            // against; seed the local cash so the reserve/overspend gate is
+            // meaningful for embedders that don't seed it. Uses the predicate,
+            // not `== Dry`: the equality form is invisible to the compiler and
+            // left ReadOnly funding at zero. EVERY account is seeded (§9.3:
+            // the books are separate wallets, not one wallet with aliases);
+            // with one account this is exactly the single `seed` 0.2 ran.
+            // Skipped when a journal replayed: the balance is a boot-replay
+            // fact now, not the seed.
+            if config.mode.settles_locally() && !replayed {
+                accounts.seed_all(config.dry_seed_balance);
+            }
+            boot_replayed_journal = replayed;
+        } else if config.mode.settles_locally() {
+            // E28 (§9.5): a locally-settling mode has no venue to reconcile
+            // against; seed the local cash so the reserve/overspend gate is
+            // meaningful for embedders that don't seed it. Uses the predicate,
+            // not `== Dry`: the equality form is invisible to the compiler and
+            // left ReadOnly funding at zero. EVERY account is seeded (§9.3:
+            // the books are separate wallets, not one wallet with aliases);
+            // with one account this is exactly the single `seed` 0.2 ran.
             accounts.seed_all(config.dry_seed_balance);
         }
         let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
@@ -2066,6 +2111,7 @@ impl Core {
             consecutive_sweep_failures: 0,
             last_error: None,
             recon_watermark_ms: 0,
+            boot_replayed_journal,
             last_self_check: None,
             applied_log,
             unified_ledger,
@@ -2634,6 +2680,15 @@ impl Core {
     /// `account_id` instead.
     pub fn ledger(&self) -> &Ledger {
         self.accounts.active_ledger()
+    }
+
+    /// Whether THIS core's boot replayed durable cash journals (at least one
+    /// account's `data/ledger/<account>.journal.jsonl` existed on disk). The
+    /// server boot reads it to skip the post-construction seed: a replayed
+    /// balance is a boot fact, and re-seeding it would reset the account to
+    /// the seed and vaporize the盈亏 history the journal exists to keep.
+    pub fn boot_replayed_journal(&self) -> bool {
+        self.boot_replayed_journal
     }
 
     /// #388: the wallet-level cash the core credited from the stream —
@@ -4150,7 +4205,11 @@ impl Core {
                 }
                 self.accounts
                     .active_ledger_mut()
-                    .credit_cashflow(*amount_usd);
+                    .credit_cashflow(*amount_usd, which.as_str());
+                // ponytail: the row names no account — DataEvent::Cashflow
+                // carries none (#388) and inventing one would mis-attribute.
+                // The venue wallet is a process-level funder fact; the credit
+                // stays on the active book, disclosed here.
             }
             // #427: a confirmed cross-venue mapping rides the stream as
             // strategy-layer state. The core counts it (corpus completeness)
@@ -8849,8 +8908,12 @@ impl Core {
             ..Default::default()
         };
 
-        // 5) 重新 seed 全部账户到配置值（与启动 `accounts.seed_all` 同一路径）。
-        self.accounts.seed_all(self.config.dry_seed_balance);
+        // 5) 重新 seed 全部账户到配置值。语义与启动 seed_all 一致（余额回到
+        //    种子值），但走 `reset_to_seed`：现金流水记一条 `Reset` 行（差额
+        //    入 trail，append-only 证据不截断），而不是 `Seed` —— 回放时这是
+        //    「环境被重置」而不是「又一次启动注资」。
+        self.accounts
+            .reset_all_to_seed(self.config.dry_seed_balance);
 
         // 6) 自校验：live 索引空 / 记录文件 0 行 / 每个账户余额 == seed。
         //    校验失败显式报错 —— 一个静默失败的重置比失败更糟（操作者以为
@@ -10520,7 +10583,7 @@ impl Core {
     ) {
         match result.failure {
             None => {
-                let Some(payout) = self.settlement.note_confirmed(
+                let Some((account_id, payout)) = self.settlement.note_confirmed(
                     &result.id,
                     result.tx_hash.clone(),
                     result.block_number,
@@ -10534,13 +10597,39 @@ impl Core {
                     );
                     return;
                 };
-                // E28: settlement redemption credits the ACTIVE account's book
-                // (§9.3: settlement claims carry no account identity in 0.3 —
-                // the claim's cash lands where the process funder says).
-                self.accounts.active_ledger_mut().credit_redemption(payout);
+                // §9.2: the payout lands in the CLAIM's own account — the claim
+                // carried `account_id` from the position at booking time, the
+                // same attribution the merge path already lives by. An empty
+                // account (a settlement journal written before the field
+                // existed) and an unknown account both fall back to the ACTIVE
+                // book, the 0.3 behaviour, loudly: the cash has no address of
+                // its own, so it goes where the process funder says — visible
+                // in the log, never silently swallowed.
+                if account_id.is_empty() {
+                    self.accounts
+                        .active_ledger_mut()
+                        .credit_redemption(payout, &result.id);
+                } else {
+                    let a = AccountId::from(account_id.as_str());
+                    match self.accounts.get_mut(&a) {
+                        Ok(l) => l.credit_redemption(payout, &result.id),
+                        Err(e) => {
+                            tracing::warn!(
+                                claim = %result.id,
+                                account = %account_id,
+                                error = %e,
+                                "redemption claim names an unconfigured account — payout credited to the active book (0.3 fallback)"
+                            );
+                            self.accounts
+                                .active_ledger_mut()
+                                .credit_redemption(payout, &result.id);
+                        }
+                    }
+                }
                 tracing::info!(
                     claim = %result.id,
                     condition = %result.condition_id,
+                    account = %account_id,
                     payout_usd = %payout,
                     tx = result.tx_hash.as_deref().unwrap_or(""),
                     block = result.block_number.unwrap_or_default(),
@@ -10621,7 +10710,7 @@ impl Core {
                 };
                 match self.accounts.get_mut(&AccountId::from(account_id.as_str())) {
                     Ok(l) => {
-                        l.credit_merge(usd);
+                        l.credit_merge(usd, &result.id);
                         tracing::info!(
                             claim = %result.id,
                             condition = %result.condition_id,

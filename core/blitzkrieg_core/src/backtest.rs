@@ -612,6 +612,10 @@ impl EventBacktester {
         core_cfg.trade_log_path = None;
         core_cfg.order_log_path = None;
         core_cfg.position_log_path = None;
+        // The durable cash journals are a live-deployment persistence; a
+        // replay neither appends to nor replays them (the corpus is the only
+        // input), and the boot seed must run exactly as it always did.
+        core_cfg.ledger_journal_dir = None;
         core_cfg.near_miss_path = None;
         core_cfg.discovery_enabled = false;
         core_cfg.feed_ws_enabled = false;

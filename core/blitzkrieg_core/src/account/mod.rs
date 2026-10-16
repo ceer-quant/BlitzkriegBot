@@ -270,11 +270,25 @@ impl AccountLedgers {
     /// a multi-account book is not one wallet with n aliases — each account
     /// owns a book that starts on its own seed, so the reserve/overspend gate
     /// is meaningful per account exactly as it was for the single one. With
-    /// one configured account this is the same single `set_balance` 0.2 ran
-    /// (bit-identical path for the existing deployment).
+    /// one configured account this is the same single `seed` 0.2 ran
+    /// (bit-identical path for the existing deployment). Journal kind =
+    /// `Seed` (never `Realign`): the boot placement is a seed, and the
+    /// boot-replay logic keys on that spelling.
     pub fn seed_all(&mut self, seed: rust_decimal::Decimal) {
         for ledger in self.ledgers.values_mut() {
-            ledger.set_balance(seed);
+            ledger.seed(seed);
+        }
+    }
+
+    /// `system.reset_trading`'s re-seed: every account returns to the
+    /// configured seed, and the cash journal records the gap as ONE `Reset`
+    /// row per account (append-only evidence — a Dry reset is an audited
+    /// wipe, not a trail truncation). Distinct from [`Self::seed_all`]'s
+    /// `Seed` kind so a replay can tell "boot funding" from "the operator
+    /// reset the environment".
+    pub fn reset_all_to_seed(&mut self, seed: rust_decimal::Decimal) {
+        for ledger in self.ledgers.values_mut() {
+            ledger.reset_to_seed(seed);
         }
     }
 
@@ -282,6 +296,44 @@ impl AccountLedgers {
     /// at the IPC layer per connection and NEVER mutate this.
     pub fn active_id(&self) -> &AccountId {
         &self.active
+    }
+
+    /// Attach the durable cash-journal file to every account's ledger
+    /// (`data/ledger/<account>.journal.jsonl` in the caller-provided
+    /// directory) and REPLAY it: the last row's `balance_after` becomes the
+    /// account's opening balance. The boot seed (`seed_all`) runs AFTER this
+    /// and the caller must SKIP it for accounts that replayed a journal —
+    /// [`Core::with_account_book`] reports which did through
+    /// [`Self::any_journal_on_disk`]-style checks at the call site.
+    pub(crate) fn attach_journals(&mut self, dir: &std::path::Path) {
+        for (id, ledger) in self.ledgers.iter_mut() {
+            let path = dir.join(format!("{}.journal.jsonl", id.as_str()));
+            ledger.set_journal_path(path.clone());
+            let rows = crate::jsonl::load::<crate::ledger::JournalEntry>(
+                &path,
+                "ledger journal: skipped unparseable lines",
+            );
+            if !rows.is_empty() {
+                tracing::info!(
+                    account = %id.as_str(),
+                    rows = rows.len(),
+                    path = %path.display(),
+                    "replaying ledger cash journal — balance restored from the last row"
+                );
+            }
+            ledger.replay_journal(rows);
+        }
+    }
+
+    /// Whether ANY account's journal file already exists on disk. The boot
+    /// seed decision reads this: a deployment with journals replays them and
+    /// must NOT be re-seeded (a re-seed would overwrite the restored balance
+    /// and vaporize the盈亏 history — the exact fault this migration exists
+    /// to fix); a fresh deployment (no journal files) seeds exactly as before.
+    pub fn any_journal_on_disk(&self, dir: &std::path::Path) -> bool {
+        self.accounts
+            .keys()
+            .any(|id| dir.join(format!("{}.journal.jsonl", id.as_str())).exists())
     }
 
     pub fn active_ledger(&self) -> &Ledger {

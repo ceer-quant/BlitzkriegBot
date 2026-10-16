@@ -267,7 +267,13 @@ pub async fn run(
     // with INSUFFICIENT_FUNDS. Behaviourally that made read-only look like a
     // broken dry mode rather than a promise — the local-settlement guarantee was
     // in place, the ledger it settles into was not.
-    if config.mode.settles_locally() {
+    //
+    // SKIPPED when a durable cash journal replayed inside `Core::new`
+    // (`config.ledger_journal_dir` set and at least one journal file on
+    // disk): the boot balance is the replayed trail then, and re-seeding
+    // here would overwrite it — the exact fault the journal exists to fix
+    // (a restart must not vaporize the盈亏 history).
+    if config.mode.settles_locally() && !core.boot_replayed_journal() {
         core.set_balance(config.dry_seed_balance);
     }
 

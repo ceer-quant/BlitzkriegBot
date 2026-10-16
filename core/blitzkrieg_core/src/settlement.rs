@@ -92,6 +92,9 @@ pub struct SettlementBooking {
     /// Collateral the winning shares are worth: `shares × payout`.
     pub payout_usd: Decimal,
     pub winning: bool,
+    /// E28 §9.2: the account the position belongs to — the redemption claim
+    /// (and its eventual payout) lands in THIS account's book.
+    pub account_id: String,
     /// Index of the position's token in the resolution's outcome order, when the
     /// resolution names it (drives the NegRisk redeem amounts).
     pub outcome_index: Option<usize>,
@@ -132,6 +135,7 @@ pub fn booking_for(p: &OpenPosition, resolution: &MarketResolution) -> Option<Se
         payout_per_share,
         payout_usd: shares * payout_per_share,
         winning: payout_per_share > Decimal::ZERO,
+        account_id: p.account_id.as_str().to_string(),
         outcome_index,
         claim_id: String::new(),
     })
@@ -170,16 +174,29 @@ pub struct SettlementRecord {
     #[serde(default)]
     pub outcome_count: usize,
     pub source: String,
+    /// The account the payout lands in (§9.2), carried so a restart's claim
+    /// replay can restore the attribution. Empty on journal lines written
+    /// before the field existed — the credit path routes that to the active
+    /// book, the 0.3 behaviour.
+    #[serde(default)]
+    pub account_id: String,
     pub applied_at_ms: i64,
 }
 
 /// A settled position whose collateral has not reached the wallet yet: the
-/// receivable. One claim per market, so a market with positions on both
-/// outcomes redeems once.
+/// receivable. One claim per (market, account): a market with positions on
+/// both outcomes redeems once — but positions of DIFFERENT accounts on the
+/// same market never share a claim (the payout lands in the wallet that paid
+/// for the shares, §9.2; the account split happens at booking time).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RedemptionClaim {
     pub id: String,
     pub condition_id: String,
+    /// The account whose wallet the redemption pays into — carried from the
+    /// position's `account_id` at booking time (E28 §9.2, the same principle
+    /// `MergeClaim.account_id` already lives by). A claim redeems into
+    /// exactly one book.
+    pub account_id: String,
     pub neg_risk: bool,
     pub winning_token_id: String,
     /// Shares held per outcome, aligned to the resolution's outcome order: the
@@ -403,6 +420,11 @@ impl SettlementBook {
                         .or_insert_with(|| RedemptionClaim {
                             id: record.claim_id.clone(),
                             condition_id: record.condition_id.clone(),
+                            // Restored from the record (journals written before
+                            // the field existed replay under the empty spelling;
+                            // the credit path routes that to the active book
+                            // exactly as 0.3 did).
+                            account_id: record.account_id.clone(),
                             neg_risk: record.neg_risk,
                             winning_token_id: record.winning_token_id.clone(),
                             outcome_shares: Vec::new(),
@@ -706,17 +728,26 @@ impl SettlementBook {
         if self.is_applied(&booking.key) {
             return None;
         }
-        // The market's open claim, if it has one (redemption removes it).
+        // The market+account's open claim, if it has one (redemption removes
+        // it). One claim per (market, account): both outcomes of one account's
+        // market still redeem once (one NegRisk call), but a second account's
+        // positions on the same market get their OWN claim — the payout lands
+        // in the wallet that paid for the shares (§9.2). An empty
+        // `booking.account_id` (a journal written before the field existed)
+        // keeps the historical single-claim shape under the empty-string key.
         let open_claim = self
             .claims
             .values()
-            .find(|c| c.condition_id == booking.condition_id)
+            .find(|c| c.condition_id == booking.condition_id && c.account_id == booking.account_id)
             .map(|c| c.id.clone());
-        let claim_id = if booking.payout_usd > Decimal::ZERO {
-            Some(open_claim.unwrap_or_else(|| self.claim_id_for(&booking.condition_id)))
-        } else {
-            open_claim
-        };
+        let claim_id =
+            if booking.payout_usd > Decimal::ZERO {
+                Some(open_claim.unwrap_or_else(|| {
+                    self.claim_id_for(&booking.condition_id, &booking.account_id)
+                }))
+            } else {
+                open_claim
+            };
         let winning_token_id = resolution
             .winning_token()
             .cloned()
@@ -749,6 +780,7 @@ impl SettlementBook {
             outcome_count: resolution.payouts.len().max(2),
             claim_id: claim_id.unwrap_or_default(),
             source: resolution.source.clone(),
+            account_id: booking.account_id.clone(),
             applied_at_ms: now_ms,
         };
         self.applied.insert(record.key.clone(), record.clone());
@@ -768,8 +800,9 @@ impl SettlementBook {
         Some(settled)
     }
 
-    /// Fold one booking into its market's open claim (one claim per market, so a
-    /// market holding positions on both outcomes redeems once).
+    /// Fold one booking into its market+account's open claim (one claim per
+    /// market PER ACCOUNT, so one account's positions on both outcomes redeem
+    /// once while a second account's positions get their own claim).
     fn accumulate_claim(
         &mut self,
         claim_id: &str,
@@ -785,6 +818,7 @@ impl SettlementBook {
             .or_insert_with(|| RedemptionClaim {
                 id: claim_id.to_string(),
                 condition_id: booking.condition_id.clone(),
+                account_id: booking.account_id.clone(),
                 neg_risk: resolution.neg_risk,
                 winning_token_id: winning_token_id.to_string(),
                 outcome_shares: Vec::new(),
@@ -818,8 +852,10 @@ impl SettlementBook {
 
     /// The claim id for a new settlement on this market: the plain condition id
     /// for the market's FIRST claim, then `#2`, `#3`, … (the claim's ordinal), so
-    /// a redeemed id is never reused.
-    fn claim_id_for(&self, condition_id: &str) -> String {
+    /// a redeemed id is never reused. A SECOND account settling the same market
+    /// (its claim id is taken) also falls through to the next ordinal — two
+    /// accounts never share a claim id, so their payouts stay attributable.
+    fn claim_id_for(&self, condition_id: &str, _account_id: &str) -> String {
         let used = self
             .redeemed_per_condition
             .get(condition_id)
@@ -938,14 +974,16 @@ impl SettlementBook {
     }
 
     /// A redemption landed: the claim leaves the receivable. Returns the payout
-    /// that must be credited to the cash ledger (once).
+    /// that must be credited to the cash ledger (once) and the account whose
+    /// book it lands in (§9.2; empty on journals written before the field —
+    /// the caller routes that to the active book, the 0.3 behaviour).
     pub fn note_confirmed(
         &mut self,
         id: &str,
         tx_hash: Option<String>,
         block_number: Option<u64>,
         now_ms: i64,
-    ) -> Option<Decimal> {
+    ) -> Option<(String, Decimal)> {
         let claim = self.claims.remove(id)?;
         *self
             .redeemed_per_condition
@@ -960,7 +998,7 @@ impl SettlementBook {
                 block_number,
             });
         }
-        Some(claim.payout_usd)
+        Some((claim.account_id, claim.payout_usd))
     }
 
     /// One-line summary for the log/panel.
@@ -1288,11 +1326,14 @@ mod tests {
         assert!(due[0].neg_risk, "the neg-risk flag survives a restart");
         assert_eq!(due[0].winning_token_id, "up");
 
-        // Confirming it clears the receivable and is durable too.
-        let payout = reopened
+        // Confirming it clears the receivable and is durable too. The payout
+        // carries its account (empty here: the test positions carry the
+        // default account id, so the claim names `default`).
+        let (account, payout) = reopened
             .note_confirmed(&due[0].id, Some("0xabc".into()), Some(7), 101)
             .unwrap();
         assert_eq!(payout, dec!(10));
+        assert_eq!(account, "default");
         assert_eq!(reopened.receivable_usd(), Decimal::ZERO);
         drop(reopened);
 

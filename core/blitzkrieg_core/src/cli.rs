@@ -534,6 +534,15 @@ pub const FLAGS: &[FlagSpec] = &[
         "Do not persist positions.",
         "positions ARE persisted — to the default path",
     ),
+    risky(
+        "--no-ledger-journal",
+        "",
+        "Do not persist the per-account cash journal (data/ledger/): the \
+         in-memory balance runs the session and boot re-seeds instead of \
+         replaying — the盈亏 history does not survive a restart.",
+        "the cash journal IS persisted (data/ledger/<account>.journal.jsonl) — \
+         boot replays it and the balance survives restarts",
+    ),
     flag(
         "--event-archive",
         "<path>",

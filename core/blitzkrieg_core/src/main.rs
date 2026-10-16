@@ -237,6 +237,10 @@ struct Args {
     no_order_log: bool,
     position_log: Option<String>,
     no_position_log: bool,
+    /// The ledger cash-journal directory (`data/ledger/`). `None` after
+    /// `--no-ledger-journal`: the historical memory-only ledger — nothing is
+    /// written per cash movement, and boot seeds instead of replaying.
+    ledger_journal_dir: Option<String>,
     /// E25 (#331): silence the intent-audit WRITES only — the arbitration
     /// gates always run (P1 proves both settings hit the same baseline).
     no_intent_audit: bool,
@@ -882,6 +886,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut no_order_log = false;
     let mut position_log: Option<String> = None;
     let mut no_position_log = false;
+    let mut no_ledger_journal = false;
     let mut no_intent_audit = false;
     let mut allow_shared_data = false;
     let mut market_plugin: Option<String> = None;
@@ -1038,6 +1043,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--no-order-log" => no_order_log = true,
             "--position-log" => position_log = Some(path_value!(it, "--position-log")),
             "--no-position-log" => no_position_log = true,
+            "--no-ledger-journal" => no_ledger_journal = true,
             "--no-intent-audit" => no_intent_audit = true,
             "--allow-shared-data" => allow_shared_data = true,
             "--market-plugin" => market_plugin = Some(path_value!(it, "--market-plugin")),
@@ -2110,6 +2116,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         no_order_log,
         position_log,
         no_position_log,
+        ledger_journal_dir: if no_ledger_journal {
+            None
+        } else {
+            Some("data/ledger".to_string())
+        },
         no_intent_audit,
         allow_shared_data,
         market_plugin,
@@ -2754,6 +2765,7 @@ async fn main() -> anyhow::Result<()> {
         trade_log_path,
         order_log_path,
         position_log_path,
+        ledger_journal_dir: args.ledger_journal_dir.clone(),
         discovery_enabled: args.discovery,
         update_check_enabled: args.update_check_enabled.unwrap_or(false),
         update_auto: args.update_auto.unwrap_or(false),
@@ -3029,6 +3041,9 @@ async fn main() -> anyhow::Result<()> {
         cfg.event_archive_max_mb = 0;
         cfg.event_archive_rotate_mb = 0;
         cfg.event_archive_min_free_mb = 0;
+        // A replay never writes (or replays) the durable cash journals — the
+        // corpus is the only input, the report the only output.
+        cfg.ledger_journal_dir = None;
         // #351: an explicit mode takes the mode runner (mine / verify /
         // sweep); an empty mode keeps the historic single-run shape so every
         // existing gate and script is byte-identical.
@@ -4971,6 +4986,7 @@ mod tests {
         line!("no_order_log", a.no_order_log.to_string());
         line!("position_log", format!("{:?}", a.position_log));
         line!("no_position_log", a.no_position_log.to_string());
+        line!("ledger_journal_dir", format!("{:?}", a.ledger_journal_dir));
         line!("no_intent_audit", a.no_intent_audit.to_string());
         line!("allow_shared_data", a.allow_shared_data.to_string());
         line!("market_plugin", format!("{:?}", a.market_plugin));
@@ -5170,6 +5186,7 @@ order_log=None\n\
 no_order_log=false\n\
 position_log=None\n\
 no_position_log=false\n\
+ledger_journal_dir=Some(\"data/ledger\")\n\
 no_intent_audit=false\n\
 allow_shared_data=false\n\
 market_plugin=None\n\
