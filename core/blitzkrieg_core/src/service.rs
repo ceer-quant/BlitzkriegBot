@@ -3823,54 +3823,73 @@ impl Core {
                 }
             }
             crate::engine::DataEvent::RoundMarkets { markets, .. } => {
-                self.stats.rounds += 1;
-                // #377 (治 #2): record which markets the archive promised a
-                // verdict for. Their dry-ladder queries are suppressed below —
-                // the stream settles them, and a query stamped here would wait
-                // for an answer that never comes (blind-alert false positive).
-                for m in markets {
-                    if m.archive_verdict {
-                        self.archive_verdicts.insert(m.condition_id.clone());
+                // #498: a same-slot second feed is a STAGGERED-LISTING top-up
+                // (the engine merges it into the scanner without any rollover),
+                // so the rollover bookkeeping below must not run for it: it
+                // would kill in-flight taker legs whose token the top-up's
+                // partial list doesn't carry, sweep live exit reasons and wake
+                // the replay fast path for a round that never changed. The
+                // predicate mirrors the engine's: the scanner already holds
+                // this slot means "top-up", not "new round". The event still
+                // reaches `engine.on_data` below — only THIS arm's extras skip.
+                let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
+                let top_up = slot != 0
+                    && self.engine.as_ref().is_some_and(|e| {
+                        e.scanner()
+                            .markets()
+                            .first()
+                            .is_some_and(|m| m.round_slot == slot)
+                    });
+                if !top_up {
+                    self.stats.rounds += 1;
+                    // #377 (治 #2): record which markets the archive promised a
+                    // verdict for. Their dry-ladder queries are suppressed below —
+                    // the stream settles them, and a query stamped here would wait
+                    // for an answer that never comes (blind-alert false positive).
+                    for m in markets {
+                        if m.archive_verdict {
+                            self.archive_verdicts.insert(m.condition_id.clone());
+                        }
                     }
-                }
-                // Replay fast path: a rollover replaces the scanner's market
-                // list and restarts the round clock — the next evaluation sees
-                // a different round context, and the timing verdict flips.
-                if self.replay_sched() {
-                    self.fast_eval_wake = true;
-                    self.fast_next_timing_ms = now_ms;
-                }
-                // A round rollover replaces the whole round (`engine.markets`
-                // carries the new list), so it is the moment any pending-close
-                // reason whose position is gone can no longer belong to
-                // anything live (issue #190).
-                self.sweep_exit_reasons();
-                // #351: the rollover closed every market of the old round. A
-                // taker leg still un-matched for a token the new round does
-                // not carry can never fill — the venue rejects a FOK for a
-                // closed market — so the honest model kills it NOW (it
-                // reports as a rejection at its report time, reservation
-                // released). A leg that already matched keeps its fill: the
-                // venue matched it before the close.
-                let tokens: Vec<String> = markets
-                    .iter()
-                    .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
-                    .collect();
-                for leg in self.inflight_takers.iter_mut() {
-                    if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
-                        let ended = self
-                            .ome
-                            .get(&leg.order_id)
-                            .map(|o| !tokens.contains(&o.token_id))
-                            .unwrap_or(true);
-                        if ended {
-                            leg.rejected_msg = Some(format!(
-                                "taker_killed_round_ended: the order's market closed while the leg was in flight (token {})",
-                                self.ome
-                                    .get(&leg.order_id)
-                                    .map(|o| o.token_id.clone())
-                                    .unwrap_or_default()
-                            ));
+                    // Replay fast path: a rollover replaces the scanner's market
+                    // list and restarts the round clock — the next evaluation sees
+                    // a different round context, and the timing verdict flips.
+                    if self.replay_sched() {
+                        self.fast_eval_wake = true;
+                        self.fast_next_timing_ms = now_ms;
+                    }
+                    // A round rollover replaces the whole round (`engine.markets`
+                    // carries the new list), so it is the moment any pending-close
+                    // reason whose position is gone can no longer belong to
+                    // anything live (issue #190).
+                    self.sweep_exit_reasons();
+                    // #351: the rollover closed every market of the old round. A
+                    // taker leg still un-matched for a token the new round does
+                    // not carry can never fill — the venue rejects a FOK for a
+                    // closed market — so the honest model kills it NOW (it
+                    // reports as a rejection at its report time, reservation
+                    // released). A leg that already matched keeps its fill: the
+                    // venue matched it before the close.
+                    let tokens: Vec<String> = markets
+                        .iter()
+                        .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+                        .collect();
+                    for leg in self.inflight_takers.iter_mut() {
+                        if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
+                            let ended = self
+                                .ome
+                                .get(&leg.order_id)
+                                .map(|o| !tokens.contains(&o.token_id))
+                                .unwrap_or(true);
+                            if ended {
+                                leg.rejected_msg = Some(format!(
+                                    "taker_killed_round_ended: the order's market closed while the leg was in flight (token {})",
+                                    self.ome
+                                        .get(&leg.order_id)
+                                        .map(|o| o.token_id.clone())
+                                        .unwrap_or_default()
+                                ));
+                            }
                         }
                     }
                 }
