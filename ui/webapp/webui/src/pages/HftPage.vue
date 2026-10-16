@@ -15,7 +15,7 @@ import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
-import { filterByAccount } from '@/lib/account-filter'
+import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import { newestFirst, tradeIdentity } from '@/lib/trades'
 import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
@@ -207,7 +207,14 @@ const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 // history-derived view (cumulative header, equity curve, filters, stats)
 // reads the filtered list so the page cannot mix two accounts in one number.
 const accountFilter = computed(() => filterByAccount(store.tradeRows, store.activeAccount))
-const historyRows = computed<TradeRow[]>(() => accountFilter.value.rows)
+// venue 层（账户绑定交易所的下游过滤）：账户切换器就是交易所切换器 ——
+// active 账户绑定了 venue X 时，页面只显示 X 的行；未绑定 = 可交易任意
+// 交易所，页面也就显示全部。这层过滤按行数据的 venue 字段（issue 427）走，
+// 与 accountId 过滤互补：pre-E28 无归属的旧行同样能被 venue 层过滤到。
+const activeVenue = computed(() => store.activeAccountVenue)
+const historyRows = computed<TradeRow[]>(() =>
+  filterByVenue(accountFilter.value.rows, activeVenue.value).rows,
+)
 const cumStats = computed(() => {
   const s = snap.value?.tradeSummary
   const rows = historyRows.value
@@ -250,6 +257,21 @@ const cumStats = computed(() => {
 
 // ── balance (本金 + 净利 is the real balance; cash is the ledger it commits against)
 const recon = computed(() => balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees))
+// E28 多账户的诚实标注：瓦片的现金/本金读数来自内核进程级活动账本（§9.5
+// gateway 走 active_ledger），不是会话切换账户的自有账本——多账户下两者可以
+// 不同，标签必须说出来而不是让两套数字冒充一套。单账户（<=1 行）不加后缀，
+// 与 0.2 部署逐字一致。账户级余额瓦片（读 account.list 行）等内核暴露
+// 会话级账本读数后再换源（wallet 重构批次）。
+const balanceAccountNote = computed(() => {
+  const id = store.activeAccount
+  if (!id || store.accounts.length <= 1) return ''
+  return ` 当前读数属于进程默认账户「${id}」（本面板连接的 §9.5 会话级默认）；切换账户不会改写这个账本的读数。`
+})
+const balanceAccountSuffix = (label: string): string => {
+  const id = store.activeAccount
+  if (!id || store.accounts.length <= 1) return label
+  return `${label} · ${id}`
+}
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
@@ -441,7 +463,12 @@ const tradeStats = computed(() => {
 const tab = ref<'positions' | 'orders' | 'history'>('positions')
 // E28 (§9.5): positions are the session account's too — same filter discipline
 // as the history rows (unattributed rows from a pre-E28 core stay visible).
-const positions = computed(() => filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows)
+const positions = computed(() =>
+  filterByVenue(
+    filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
+    activeVenue.value,
+  ).rows,
+)
 
 // ── issue 456: 挂单簿 + 强平 ────────────────────────────────────────────────
 // 轮次是否已过期：round_slot N 覆盖 [N·dur, (N+1)·dur)，与内核过期扫描同一
@@ -473,13 +500,23 @@ const accountFiltered = computed(() =>
   (filterByAccount(snap.value?.positions ?? [], store.activeAccount).attributed ||
     filterByAccount(store.tradeRows, store.activeAccount).attributed),
 )
+// venue 层标注：active 账户绑定了 venue 且行数据带 venue 标签时，过滤真的
+// 在生效 —— 标注要说清「过滤器在哪、为什么在」（账户绑定，不是独立控件）。
+const venueFiltered = computed(() =>
+  activeVenue.value !== '' &&
+  (filterByVenue(snap.value?.positions ?? [], activeVenue.value).attributed ||
+    filterByVenue(store.tradeRows, activeVenue.value).attributed),
+)
 const orderRows = computed<OrderRow[]>(() => {
   // snapshot 里已带 orders（网关从 orders.list 拉的同一份）；不在时回落
   // 到专用读路径，两边都是内核的 TrackedOrder wire 形状。
   // E28 (§9.5): rows are scoped to the session's default account — same
   // discipline as positions/history (pre-E28 unattributed rows stay visible).
   const fromSnap = (snap.value as unknown as { orders?: OrderRow[] } | null)?.orders
-  return filterByAccount(fromSnap ?? [], store.activeAccount).rows
+  return filterByVenue(
+    filterByAccount(fromSnap ?? [], store.activeAccount).rows,
+    activeVenue.value,
+  ).rows
 })
 const expiredOrderRows = computed(() => orderRows.value.filter((o) => o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING').filter(orderExpired))
 
@@ -957,13 +994,13 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             subset of what the history tab below already shows.
           -->
           <StatRow
-            :label="isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额')"
+            :label="balanceAccountSuffix(isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额'))"
             :value="recon.equity !== null ? money(recon.equity) : money(recon.cash)"
             :tone="isDry ? 'gold' : 'default'"
           />
           <p v-if="recon.equity !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
             本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }}
-            <Tooltip :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 扣费后净利 ${signedMoney(recon.net)}。手续费是成本：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利。手续费不改变本金，因此不并入余额。`">
+            <Tooltip :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 扣费后净利 ${signedMoney(recon.net)}。手续费是成本：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利。手续费不改变本金，因此不并入余额。${balanceAccountNote}`">
               <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
                 手续费支出 {{ money(recon.fees) }}
               </span>
@@ -1008,6 +1045,13 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         >
           <Info class="mr-1 inline size-3 align-[-1px]" />{{ accountFiltered ? '已按账户过滤' : '账户' }}
           <span class="text-fg">{{ accountBadge }}</span>
+        </span>
+        <span
+          v-if="venueFiltered"
+          class="text-[11.5px] text-faint-fg"
+          :title="'当前账户绑定了交易所（顶栏账户卡可改绑定）；以下只显示该交易所的行情与交易'"
+        >
+          <Info class="mr-1 inline size-3 align-[-1px]" />已按账户绑定的交易所过滤：<span class="text-fg">{{ activeVenue }}</span>
         </span>
         <!-- issue 456: 批量清理过期挂单 —— 逐单调 orders.force_close，内核
              逐单拒绝仍活着的轮次，逐单写审计。只清理「轮次已过期」的行，
@@ -1142,7 +1186,9 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无持仓" hint="启用策略后，成交平仓即出现在这里。" compact />
+        <EmptyState v-else :text="venueFiltered ? `暂无 ${activeVenue} 的持仓` : '无持仓'" :hint="venueFiltered
+          ? `当前账户绑定了 ${activeVenue}，只显示该交易所的持仓。若该所行情未喂入，请到插件页确认插件已启用（插件启用将随账户派生：绑定即启用）。`
+          : '启用策略后，成交平仓即出现在这里。'" compact />
       </div>
 
       <!-- issue 456: 挂单簿 —— 内核记账的订单，逐行强平（确认词门） -->
