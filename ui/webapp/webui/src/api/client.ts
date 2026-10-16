@@ -612,6 +612,29 @@ export interface KlineHistoryDoc {
   error?: string
 }
 
+// ── 钱包现金流水（account.journal，#509 内核 / #511 动词）────────────────────
+
+/** 一行流水：JournalEntry 的 camelCase wire 形状，amount/balanceAfter 是
+ *  crate::decimal 字符串（内核约定：小数一律字符串过线）。 */
+export interface AccountJournalRowDoc {
+  atMs: number
+  /** snake_case：seed/buy_fill/sell_fill/fee/merge/redemption/cashflow/realign/reset。 */
+  kind: string
+  amount: string
+  balanceAfter: string
+  /** 产生该行的来源标记（boot / venue / 订单 id / 审计行 …）。 */
+  ref: string
+}
+
+/** `account.journal` 回执：最近 limit 行（升序）；truncated = 内存窗口比返回
+ *  的多 —— 读者看到的是窗口（JOURNAL_CAP = 10000），不是全史。 */
+export interface AccountJournalDoc {
+  accountId: string
+  rows: AccountJournalRowDoc[]
+  truncated: boolean
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -788,6 +811,17 @@ export const api = {
       symbol: params.symbol,
       interval: params.interval,
       limit: params.limit,
+    }),
+  /**
+   * 钱包现金流水卡的读路径（`account.journal`，#511，只读）：一个账户的
+   * append-only 现金流水最近 limit 行（升序）。accountId 缺省 = 会话默认
+   * 账户（§9.5）；limit 缺省 100、内核 clamp 1..=500。truncated = true 时
+   * 内存窗口比返回的多，面板必须把「这是窗口不是全史」说出来。
+   */
+  accountJournal: (params?: { accountId?: string; limit?: number }) =>
+    request<AccountJournalDoc>('/account-journal', {}, {
+      accountId: params?.accountId,
+      limit: params?.limit,
     }),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
