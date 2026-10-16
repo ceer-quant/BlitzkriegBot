@@ -132,11 +132,11 @@ const roundDirty = computed(
     && roundPending.value !== roundDoc.value?.nextSessionSec,
 )
 const roundFlagLocked = computed(
-  () => roundDoc.value?.source === 'cli_or_env_or_toml',
+  () => roundDoc.value?.source === 'cli_or_env',
 )
 const roundSourceLabel = computed(() => {
   switch (roundDoc.value?.source) {
-    case 'cli_or_env_or_toml': return '命令行/环境变量/配置文件'
+    case 'cli_or_env': return '命令行/环境变量'
     case 'runtime': return '面板设置'
     case 'toml': return '配置文件'
     case 'env': return '环境变量'
@@ -321,7 +321,7 @@ async function doResetTrading(): Promise<void> {
           <div class="flex items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
             <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
             <span v-if="roundFlagLocked">
-              当前轮次由启动参数显式指定（命令行/环境变量/配置文件）。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉 --round-sec 启动参数后重启。
+              当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
             </span>
             <span v-else-if="roundDoc.persisted">
               已有面板设置：下次会话按 {{ roundDoc.nextSessionSec }}s 运行。清除后回落到启动参数解析。
