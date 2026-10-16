@@ -190,7 +190,12 @@ pub fn plugin_readout(
 /// later), then an atomic persist-cell write. The running session's
 /// feed/discovery/executor were all built around the plugin chosen at ITS
 /// boot and are never moved by this call.
-pub async fn apply_plugin_set(
+///
+/// The persisted cell is cwd-relative (`data/runtime/config.json`); a core
+/// without a runtime config path (backtester, in-process tests) refuses the
+/// write and says so — the same posture as `round_duration.set`, so a test
+/// can never write into whatever checkout it happens to run in.
+pub(crate) async fn apply_plugin_set(
     registry: &registry::MarketPluginRegistry,
     core: &tokio::sync::Mutex<crate::service::Core>,
     patch: &crate::ipc::schema::SetMarketPluginParams,
@@ -249,31 +254,47 @@ pub async fn apply_plugin_set(
     }
 
     // 写路径：plan-first（未注册名拒绝，格不动），然后原子写。
+    // `name` 是一个逗号列表（`market.plugin.set` 与 boot/read 路径共用
+    // `parse_plugin_list` 的同一语法）：拆开逐名验证注册 —— plan-first
+    // 语义是全有或全无，任一名未注册则整个写拒绝、格不动，绝不写一个
+    // boot 会拒绝的半合法格（读路径对格的整体过滤规则是逐名 all-registered，
+    // 写路径必须先于它满足同一条规则）。单值字符串走同一条路，行为逐字
+    // 不变（parse_plugin_list("polymarket") == ["polymarket"]）。
     let Some(name) = name else {
         unreachable!("the both-given/none-given paths returned above");
     };
-    if registry.get(name).is_none() {
+    let names = parse_plugin_list(name);
+    if names.is_empty() {
+        // 拆完为空（全逗号/空白）：与「needs name or reset」同一拒绝面 ——
+        // 这个字符串从不携带可验证的插件名。
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            "market.plugin.set needs name (a registered plugin) or reset: true".to_string(),
+        ));
+    }
+    if let Some(bad) = names.iter().find(|n| registry.get(n).is_none()) {
         let known = registry.names();
         let known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
         return Err(CoreError::new(
             CoreErrorCode::InvalidParams,
             format!(
-                "market.plugin.set: '{name}' is not a registered plugin — the \
+                "market.plugin.set: '{bad}' is not a registered plugin — the \
                  switchable set is {known:?}"
             ),
         ));
     }
-    persist_cell(core, Some(name), actor, now_ms).await?;
+    let cell = names.join(",");
+    persist_cell(core, Some(&cell), actor, now_ms).await?;
     tracing::info!(
         target: "risk",
         actor = %actor,
         reason = patch.reason.as_deref().unwrap_or(""),
-        plugin = %name,
+        plugin = %cell,
         "market plugin cell written — next session selects it at boot \
          ({MARKET_PLUGIN_SET_NOTE})"
     );
     Ok(MarketPluginUpdate {
-        next_session_plugin: name.to_string(),
+        next_session_plugin: cell,
         reset: false,
         at_ms: now_ms,
         actor: actor.to_string(),
@@ -484,4 +505,243 @@ pub async fn apply_credentials_set(
         reason: patch.reason.clone(),
         note: CREDENTIALS_SET_NOTE,
     })
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+    use crate::ipc::schema::SetMarketPluginParams;
+    use crate::model::CoreErrorCode;
+
+    /// A tiny registered plugin — the registry is compiled in, so a test that
+    /// wants a controllable switchable set registers its own two names.
+    struct Stub {
+        name: String,
+    }
+    impl blitzkrieg_market_api::MarketPlugin for Stub {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+            blitzkrieg_market_api::MarketType::Prediction
+        }
+    }
+
+    fn registry_with(names: &[&str]) -> registry::MarketPluginRegistry {
+        let reg = registry::MarketPluginRegistry::new();
+        for n in names {
+            reg.register(Box::new(Stub {
+                name: (*n).to_string(),
+            }));
+        }
+        reg
+    }
+
+    fn core_with_cell(path: Option<String>) -> tokio::sync::Mutex<crate::service::Core> {
+        let cfg = crate::service::CoreConfig {
+            runtime_config_path: path,
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        tokio::sync::Mutex::new(crate::service::Core::new(cfg))
+    }
+
+    fn cell_in(dir: &std::path::Path) -> String {
+        dir.join("config.json").to_string_lossy().into_owned()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bk-plugin-set-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    fn patch(name: Option<&str>, reset: bool) -> SetMarketPluginParams {
+        SetMarketPluginParams {
+            name: name.map(str::to_string),
+            reset,
+            reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_value_round_trips_verbatim() {
+        let dir = scratch("single");
+        let core = core_with_cell(Some(cell_in(&dir)));
+        let reg = registry_with(&["alpha"]);
+        let update = apply_plugin_set(&reg, &core, &patch(Some("alpha"), false), "uid:test", 1)
+            .await
+            .expect("a single registered name writes");
+        // Single-value spelling is EXACTLY the historical shape — the reply
+        // carries the value verbatim (no commas, no reordering).
+        assert_eq!(update.next_session_plugin, "alpha");
+        let cell = crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(
+            &cell_in(&dir),
+        ))
+        .expect("the cell must hold the write");
+        assert_eq!(cell.plugin, "alpha");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_multi_value_write_lands_and_reads_back_as_a_list() {
+        let dir = scratch("multi");
+        let core = core_with_cell(Some(cell_in(&dir)));
+        let reg = registry_with(&["alpha", "beta"]);
+        let update = apply_plugin_set(
+            &reg,
+            &core,
+            &patch(Some("alpha,beta"), false),
+            "uid:test",
+            1,
+        )
+        .await
+        .expect("both names are registered — the write lands");
+        assert_eq!(update.next_session_plugin, "alpha,beta");
+        assert!(!update.reset);
+        // The cell carries the whole comma string; the READ path
+        // (parse_plugin_list, what the boot actually runs) re-derives both
+        // names from it in order.
+        let cell = crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(
+            &cell_in(&dir),
+        ))
+        .expect("the cell must hold the write");
+        assert_eq!(parse_plugin_list(&cell.plugin), vec!["alpha", "beta"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn whitespace_and_empty_segments_are_trimmed_like_the_read_path() {
+        let dir = scratch("trim");
+        let core = core_with_cell(Some(cell_in(&dir)));
+        let reg = registry_with(&["alpha", "beta"]);
+        let update = apply_plugin_set(
+            &reg,
+            &core,
+            &patch(Some(" alpha , ,beta, "), false),
+            "uid:test",
+            1,
+        )
+        .await
+        .expect("empty segments are dropped, names trimmed");
+        // The same normalisation the boot applies — the wire and the disk
+        // disagree only in whitespace, never in names.
+        assert_eq!(parse_plugin_list(&update.next_session_plugin).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn one_unregistered_name_refuses_the_whole_write() {
+        let dir = scratch("mixed");
+        let cell = cell_in(&dir);
+        // Pre-seed a good cell: a refused write must leave it untouched
+        // (plan-first — the validation happens before anything touches disk).
+        crate::ipc::runtime_config::persist_market_plugin_to(
+            std::path::Path::new(&cell),
+            Some("alpha"),
+            "seed",
+            0,
+        )
+        .expect("seed the cell");
+        let core = core_with_cell(Some(cell.clone()));
+        let reg = registry_with(&["alpha", "beta"]);
+        let err = apply_plugin_set(
+            &reg,
+            &core,
+            &patch(Some("alpha,ghost"), false),
+            "uid:test",
+            1,
+        )
+        .await
+        .expect_err("one bad name poisons the whole list");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("'ghost' is not a registered plugin"),
+            "the refusal names the offender: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("alpha"),
+            "the refusal lists the switchable set: {}",
+            err.message
+        );
+        // And the cell is exactly as it was — nothing was half-written.
+        let after =
+            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
+                .expect("the seeded cell survived");
+        assert_eq!(after.plugin, "alpha");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_list_that_trims_to_empty_is_the_needs_name_refusal() {
+        let core = core_with_cell(None);
+        let reg = registry_with(&["alpha"]);
+        for junk in [",,,", "  "] {
+            let err = apply_plugin_set(&reg, &core, &patch(Some(junk), false), "uid:test", 1)
+                .await
+                .expect_err("a name that parses to nothing is not a name");
+            assert_eq!(err.code, CoreErrorCode::InvalidParams);
+            assert!(
+                err.message.contains("needs name"),
+                "junk {junk:?} refuses as needs-name: {}",
+                err.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_semantics_are_unchanged() {
+        let dir = scratch("reset");
+        let cell = cell_in(&dir);
+        let core = core_with_cell(Some(cell.clone()));
+        let reg = registry_with(&["alpha", "beta"]);
+        reg.set_active("alpha");
+        // A write first, so the reset has something to clear.
+        apply_plugin_set(
+            &reg,
+            &core,
+            &patch(Some("alpha,beta"), false),
+            "uid:test",
+            1,
+        )
+        .await
+        .expect("multi-value write");
+        let update = apply_plugin_set(&reg, &core, &patch(None, true), "uid:test", 2)
+            .await
+            .expect("reset clears the cell");
+        assert!(update.reset);
+        // The fallback a reset arms is the registry's ACTIVE name — the
+        // session's own boot resolution, not a cell value.
+        assert_eq!(update.next_session_plugin, "alpha");
+        assert!(
+            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
+                .is_none(),
+            "the cell holds nothing after a reset"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pathless_core_refuses_the_multi_value_write_too() {
+        let core = core_with_cell(None);
+        let reg = registry_with(&["alpha", "beta"]);
+        let err = apply_plugin_set(
+            &reg,
+            &core,
+            &patch(Some("alpha,beta"), false),
+            "uid:test",
+            1,
+        )
+        .await
+        .expect_err("no runtime config path, no write");
+        assert!(
+            err.message.contains("persistence is disabled"),
+            "the persist refusal carries the round_duration.set posture: {}",
+            err.message
+        );
+    }
 }
