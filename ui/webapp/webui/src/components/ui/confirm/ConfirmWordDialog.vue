@@ -58,7 +58,7 @@ function close(): void {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="close"
     >
-      <div class="w-full max-w-md rounded-lg border border-line bg-panel shadow-lg">
+      <div class="w-full max-w-md rounded-lg border border-line bg-panel-solid shadow-lg">
         <div class="flex items-center gap-2 border-b border-line px-4 py-3">
           <TriangleAlert class="size-4 text-down" />
           <h3 class="text-[13.5px] font-semibold">{{ title }}</h3>

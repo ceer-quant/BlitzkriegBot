@@ -358,7 +358,13 @@ pub struct SupervisorConfig {
     pub tick_ms: u64,
     pub max_order_notional: String,
     pub assets: Vec<String>,
-    pub round_sec: u64,
+    /// `Some(n)` = the launcher owns the round length (CLI flag or
+    /// `HFT_ROUND_SEC` spoke) and passes `--round-sec` to the core. `None` =
+    /// the launcher stays silent, so the kernel's own tier resolution applies
+    /// (factory TOML default, then the UI card's persisted cell — issue 499).
+    /// A hardcoded 900 here is what pinned every session to 15m rounds: the
+    /// launcher's flag outranked the cell by design, so the cell never won.
+    pub round_sec: Option<u64>,
     pub min_round_age: u64,
     pub min_time_left: u64,
     pub max_positions: u64,
@@ -419,7 +425,9 @@ impl SupervisorConfig {
             tick_ms: 50,
             max_order_notional: notional,
             assets,
-            round_sec: env_num("HFT_ROUND_SEC", 900),
+            round_sec: std::env::var("HFT_ROUND_SEC")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
             min_round_age: 30,
             min_time_left: 180,
             max_positions: 2,
@@ -444,8 +452,12 @@ impl SupervisorConfig {
             self.max_order_notional.clone(),
             "--assets".into(),
             self.assets.join(","),
-            "--round-sec".into(),
-            self.round_sec.to_string(),
+        ];
+        if let Some(sec) = self.round_sec {
+            a.push("--round-sec".into());
+            a.push(sec.to_string());
+        }
+        a.extend([
             "--min-round-age".into(),
             self.min_round_age.to_string(),
             "--min-time-left".into(),
@@ -456,7 +468,7 @@ impl SupervisorConfig {
             self.min_shares.to_string(),
             "--max-shares".into(),
             self.max_shares.to_string(),
-        ];
+        ]);
         a.extend(self.extra_args.iter().cloned());
         a
     }
@@ -1041,6 +1053,28 @@ mod tests {
         assert!(args.contains(&"--feed-ws".to_string()));
         let i = args.iter().position(|a| a == "--assets").unwrap();
         assert_eq!(args[i + 1], "BTC,ETH");
+    }
+
+    #[test]
+    fn silent_round_sec_leaves_the_persisted_cell_in_charge() {
+        // No HFT_ROUND_SEC and no CLI flag: the launcher must NOT pass
+        // --round-sec — the core's own tier resolution (TOML default, then the
+        // UI card's persisted cell) is what owns the round length. A launcher
+        // flag here outranked the cell by design and pinned every session to
+        // the launcher default (the 15m-forever defect).
+        std::env::remove_var("HFT_ROUND_SEC");
+        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+        assert!(cfg.round_sec.is_none());
+        assert!(!cfg.to_args().contains(&"--round-sec".to_string()));
+
+        // An explicit spoke still reaches the core.
+        std::env::set_var("HFT_ROUND_SEC", "300");
+        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+        std::env::remove_var("HFT_ROUND_SEC");
+        assert_eq!(cfg.round_sec, Some(300));
+        let args = cfg.to_args();
+        let i = args.iter().position(|a| a == "--round-sec").unwrap();
+        assert_eq!(args[i + 1], "300");
     }
 
     #[test]
