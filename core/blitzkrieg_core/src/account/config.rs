@@ -49,6 +49,12 @@ struct AccountFileEntry {
     passphrase_env: Option<String>,
     #[serde(default)]
     private_key_env: Option<String>,
+    /// The optional account↔venue binding: a market-plugin name the account
+    /// is pinned to. Missing/empty = unbound (trades any venue — the
+    /// historical behaviour; `deny_unknown_fields` is why the field must be
+    /// declared here at all).
+    #[serde(default)]
+    venue: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +86,10 @@ impl AccountFileEntry {
                 // (`read_credential_keys`); a config file can only name keys.
                 loaded: false,
             },
+            // The account↔venue binding (§9.1 first batch): empty = unbound —
+            // the account trades any venue, the historical behaviour. A
+            // non-empty value pins `orders.place` to that venue's markets.
+            venue: self.venue.unwrap_or_default(),
             updated_at_ms: now_ms,
         })
     }
@@ -310,6 +320,36 @@ status = "read_only"
             typo.message.contains("unknown account status"),
             "{}",
             typo.message
+        );
+    }
+
+    #[test]
+    fn the_venue_binding_parses_and_defaults_to_unbound() {
+        // An explicit binding rides through as data…
+        let bound = from_str(
+            "[[account]]\nid = \"poly\"\nvenue = \"polymarket\"\n\n[[account]]\nid = \"kal\"\nvenue = \"kalshi\"\n",
+            1,
+        )
+        .expect("venue bindings parse");
+        assert_eq!(
+            bound.account(&AccountId("poly".into())).unwrap().venue,
+            "polymarket"
+        );
+        assert_eq!(
+            bound.account(&AccountId("kal".into())).unwrap().venue,
+            "kalshi"
+        );
+        // …a missing field is UNBOUND (the 0.2 behaviour)…
+        let unbound = from_str("[[account]]\nid = \"solo\"\n", 1).expect("minimal entry");
+        assert_eq!(
+            unbound.account(&AccountId("solo".into())).unwrap().venue,
+            ""
+        );
+        // …and the zero-config default account is unbound too.
+        let default_book = AccountLedgers::single_default(1);
+        assert_eq!(
+            default_book.account(&default_account_id()).unwrap().venue,
+            ""
         );
     }
 

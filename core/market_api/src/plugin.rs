@@ -45,14 +45,22 @@ pub trait MarketHost: Send + Sync {
     ) -> BoxFuture<'a, ()>;
 
     // ── Execution egress ────────────────────────────────────────────────────
-    /// Orders accepted locally with no venue id yet.
-    fn take_pending_orders(&self) -> BoxFuture<'_, Vec<PendingOrder>>;
+    /// Orders accepted locally with no venue id yet. `plugin` is the calling
+    /// executor's market-plugin name: with multiple executors running
+    /// concurrently, each must drain only ITS venue's orders — a Polymarket
+    /// executor must never POST a Kalshi order. Untagged orders (hosts that
+    /// do not label markets, legacy corpora) fall back to the host's active
+    /// plugin, which keeps the single-plugin behaviour byte-identical.
+    fn take_pending_orders<'a>(&'a self, plugin: &str) -> BoxFuture<'a, Vec<PendingOrder>>;
     /// Venue order ids the core has retired locally (regime pull, round
     /// cleanup, escalation, explicit cancel) but the venue may still hold
     /// resting. The executor must forward each as a real venue cancel — a
     /// local-only retire that never reaches the venue is exactly how resting
-    /// orphans are born.
-    fn take_pending_cancels(&self) -> BoxFuture<'_, Vec<String>>;
+    /// orphans are born. `plugin` is the calling executor's market-plugin
+    /// name: the queue is take-once, so with multiple executors running each
+    /// must drain only ITS venue's ids — a sibling draining them first would
+    /// swallow the cancel forever (the orphan the rule above forbids).
+    fn take_pending_cancels<'a>(&'a self, plugin: &str) -> BoxFuture<'a, Vec<String>>;
     fn on_order_accepted(&self, core_order_id: &str, venue_order_id: &str) -> BoxFuture<'_, ()>;
     /// The venue refused a locally-accepted order. `error` carries the venue's
     /// own failure text when the POST returned one, so the core can classify

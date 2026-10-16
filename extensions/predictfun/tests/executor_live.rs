@@ -105,10 +105,13 @@ impl MarketHost for ExecSink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn take_pending_orders(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<PendingOrder>> {
+    fn take_pending_orders(
+        &self,
+        _: &str,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<PendingOrder>> {
         Box::pin(async { std::mem::take(&mut *self.pending_orders.lock().await) })
     }
-    fn take_pending_cancels(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
         Box::pin(async { std::mem::take(&mut *self.pending_cancels.lock().await) })
     }
     fn on_order_accepted(

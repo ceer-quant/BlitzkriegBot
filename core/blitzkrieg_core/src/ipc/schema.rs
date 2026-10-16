@@ -1831,6 +1831,10 @@ pub struct AccountView {
     /// Presence fact only (§9.4): the kernel probed its own environment; the
     /// values never cross the wire in either direction.
     pub credentials_loaded: bool,
+    /// The account's venue binding (a market-plugin name). Empty string =
+    /// unbound — the account may trade any venue. The panel's account card
+    /// renders the binding; an empty value renders as no binding.
+    pub venue: String,
     pub open_positions: usize,
     #[serde(with = "crate::decimal")]
     pub day_realized_usd: Decimal,

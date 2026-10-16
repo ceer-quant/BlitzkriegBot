@@ -175,7 +175,7 @@ pub async fn spawn_if_configured(
             // first serializes it: the old order is gone (or provably still
             // failing) before anything new is submitted.
             let mut cancel_strikes = 0u32;
-            for id in host.take_pending_cancels().await {
+            for id in host.take_pending_cancels("polymarket").await {
                 match venue.cancel(id.clone()).await {
                     Ok(()) => host.note_orphan_cancelled(&id).await,
                     Err(e) => {
@@ -194,9 +194,11 @@ pub async fn spawn_if_configured(
             // a replacement onto it is exactly the double-exposure the
             // reordering above exists to prevent. The pending queue is
             // re-read from the core next tick (500 ms), so the hold is one
-            // tick wide and the cancel is retried first.
+            // tick wide and the cancel is retried first. `take_pending_orders`
+            // routes by this plugin's venue name — with multiple executors
+            // running, each drains only ITS venue's orders.
             if cancel_strikes == 0 {
-                for order in host.take_pending_orders().await {
+                for order in host.take_pending_orders("polymarket").await {
                     let core_order_id = order.core_order_id.clone();
                     match venue.place(order).await {
                         Ok(p) => {
