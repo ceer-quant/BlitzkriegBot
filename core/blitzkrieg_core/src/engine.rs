@@ -634,6 +634,64 @@ impl Engine {
                 return Vec::new();
             }
             DataEvent::RoundMarkets { markets, now_ms } => {
+                // #498: a venue can list the round's markets STAGGERED — Kalshi's
+                // four crypto assets open minutes apart, and a discovery that
+                // locks the slot on its first non-empty tick then feeds 2 of 4.
+                // The late listings arrive as a SECOND RoundMarkets for the SAME
+                // round_slot: a full rollover replay here would wipe
+                // `pending_tokens` (re-arming duplicate entries mid-round) and
+                // restart the candidates-stable window for nothing. So a
+                // same-slot event MERGES: append the markets the scanner does
+                // not carry yet and hand the strategy layer only the genuinely
+                // new books — no `on_round` re-fire, no pending/candidate
+                // reset, no clock change (the first feed already observed the
+                // round's one expiry). A different slot is a real rollover and
+                // keeps the full replay below.
+                let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
+                let scanner_holds_slot = slot != 0
+                    && self
+                        .scanner
+                        .markets()
+                        .first()
+                        .is_some_and(|m| m.round_slot == slot);
+                if scanner_holds_slot {
+                    let known: std::collections::HashSet<&str> = self
+                        .scanner
+                        .markets()
+                        .iter()
+                        .flat_map(|m| [m.up_token_id.as_str(), m.down_token_id.as_str()])
+                        .collect();
+                    let fresh: Vec<CryptoMarket> = markets
+                        .into_iter()
+                        .filter(|m| {
+                            !known.contains(m.up_token_id.as_str())
+                                && !known.contains(m.down_token_id.as_str())
+                        })
+                        .collect();
+                    if fresh.is_empty() {
+                        // Pure duplicate: nothing to add, nothing to restart.
+                        return Vec::new();
+                    }
+                    // Seed the genuinely new tokens from any book that has
+                    // already arrived (the descriptors usually precede their
+                    // first book event) BEFORE the scanner grows: the borrow
+                    // of the merged list ends with `set_markets`, and the
+                    // seeds only need `fresh`.
+                    for t in fresh
+                        .iter()
+                        .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
+                    {
+                        if let Some(snap) = self.book_snapshot(&t) {
+                            for s in &mut self.strategies {
+                                s.strategy.on_book(&t, &snap, now_ms);
+                            }
+                        }
+                    }
+                    let mut merged = self.scanner.markets().to_vec();
+                    merged.extend(fresh);
+                    self.scanner.set_markets(merged);
+                    return Vec::new();
+                }
                 // The venue's own round declaration beats the local slot grid:
                 // `expires_at_ms` is the exchange's actual round end, and
                 // `time_left_sec` (the exit policy's and the D-31 floor's
@@ -1751,6 +1809,122 @@ mod tests {
     use crate::service::{Core, CoreConfig};
     use rust_decimal_macros::dec;
     use std::sync::{Arc, Mutex};
+
+    // ── #498: staggered venue listings must MERGE, not rollover ─────────────
+
+    /// A probe that counts `on_round` fires and reports the scanner's market
+    /// count — the exact state a same-slot top-up must and must not touch.
+    struct RoundProbe {
+        rounds: Arc<Mutex<Vec<i64>>>,
+    }
+    impl EngineStrategy for RoundProbe {
+        fn name(&self) -> &str {
+            "round_probe"
+        }
+        fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _n: i64) {}
+        fn on_round(&mut self, slot: i64, _left: i64, _now: i64) {
+            self.rounds.lock().unwrap().push(slot);
+        }
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<crate::signal::TradeSignal> {
+            Vec::new()
+        }
+    }
+
+    fn eth_market(end_ms: i64) -> CryptoMarket {
+        CryptoMarket {
+            asset: "ETH".into(),
+            condition_id: "cond-eth".into(),
+            question_id: "q-eth".into(),
+            up_token_id: "eth-up".into(),
+            down_token_id: "eth-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: String::new(),
+            neg_risk: true,
+            question: "ETH up or down".into(),
+        }
+    }
+
+    #[test]
+    fn a_same_slot_round_feed_merges_without_a_rollover() {
+        let rounds = Arc::new(Mutex::new(Vec::new()));
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(RoundProbe {
+                rounds: rounds.clone(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        let end = 1_800_000; // slot 2000
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(end)],
+            now_ms: 1_000,
+        });
+        assert_eq!(*rounds.lock().unwrap(), vec![2]);
+
+        // The venue lists the ETH market a minute into the round: a same-slot
+        // feed. It must grow the scanner to 2 markets and NOT re-fire
+        // on_round (the round never changed).
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(end), eth_market(end)],
+            now_ms: 61_000,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the late listing joins the round's market list"
+        );
+        assert_eq!(
+            *rounds.lock().unwrap(),
+            vec![2],
+            "a same-slot top-up is not a round transition"
+        );
+
+        // A pure duplicate (both markets already known) is inert.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(end), eth_market(end)],
+            now_ms: 62_000,
+        });
+        assert_eq!(e.scanner.markets().len(), 2);
+        assert_eq!(*rounds.lock().unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn a_same_slot_top_up_keeps_pending_tokens_and_the_clock() {
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(end)],
+            now_ms: 1_000,
+        });
+        // Simulate an in-flight entry: the rollover path clears this set
+        // (re-arming duplicate entries mid-round); a top-up must not.
+        e.pending_tokens.insert("up".into());
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(end), eth_market(end)],
+            now_ms: 61_000,
+        });
+        assert!(
+            e.pending_tokens.contains("up"),
+            "the top-up must not re-arm an entry that is already pending"
+        );
+
+        // The next real rollover still clears it.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(2_700_000)],
+            now_ms: 1_800_000,
+        });
+        assert!(
+            !e.pending_tokens.contains("up"),
+            "a genuine rollover keeps its historic semantics"
+        );
+        assert_eq!(e.scanner.markets().len(), 1, "a new slot replaces the list");
+    }
 
     fn cfg() -> EngineConfig {
         EngineConfig {

@@ -50,6 +50,10 @@ pub fn spawn(
             }
 
             let mut markets: Vec<MarketDescriptor> = Vec::new();
+            // #498: which configured assets actually landed a market THIS poll —
+            // the venue can list rounds staggered, and the gate below decides
+            // whether the slot may lock yet.
+            let mut found_assets: Vec<String> = Vec::new();
             for asset in &assets {
                 let Some(slug) = slug_for(asset, round_sec, now / 1000) else {
                     continue;
@@ -93,6 +97,7 @@ pub fn spawn(
                 if end_ms <= now {
                     continue; // already expired
                 }
+                found_assets.push(asset.clone());
                 markets.push(MarketDescriptor {
                     asset: asset.to_uppercase(),
                     condition_id,
@@ -119,7 +124,28 @@ pub fn spawn(
             if markets.is_empty() {
                 continue; // retry next tick (market may not be live yet)
             }
-            last_slot = slot;
+            // #498: same shape as the kalshi gate — Gamma can publish the
+            // round's asset markets at different instants, so keep polling
+            // inside the slot until every configured asset has landed (or
+            // only assets the slug builder itself rejects remain missing,
+            // which is a configuration fact, not a late listing).
+            let found: std::collections::HashSet<&str> =
+                found_assets.iter().map(|s| s.as_str()).collect();
+            let missing: Vec<&String> = assets
+                .iter()
+                .filter(|a| {
+                    !found.contains(a.as_str())
+                        && duration_label(round_sec).is_some()
+                        && slug_for(a, round_sec, now / 1000).is_some()
+                })
+                .collect();
+            if slot == last_slot {
+                if !missing.is_empty() {
+                    continue; // still hoping Gamma lists the stragglers
+                }
+            } else {
+                last_slot = slot;
+            }
 
             let count = markets.len();
             let label_summary = markets
@@ -131,8 +157,20 @@ pub fn spawn(
             // Registers the round with the engine AND subscribes its tokens on the
             // running data feed (both inside the host).
             host.on_round_markets(markets).await;
+            let note = if missing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [partial: {} still unlisted, re-polling within the slot]",
+                    missing
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
             eprintln!(
-                "polymarket-extension: discovered round slot={slot} ({count} markets: {label_summary})"
+                "polymarket-extension: discovered round slot={slot} ({count} markets: {label_summary}){note}"
             );
         }
     })

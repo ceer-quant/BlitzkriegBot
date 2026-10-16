@@ -258,7 +258,32 @@ pub(crate) fn spawn(
             if markets.is_empty() {
                 continue; // retry next tick (nothing open for the configured assets)
             }
-            last_slot = slot;
+            // #498: the venue lists the round's asset events STAGGERED — the
+            // same slot has been observed at 2, then 3, then 4 markets on
+            // reboots minutes apart. Locking `last_slot` on the first
+            // non-empty tick froze the round at whatever subset the first
+            // poll caught, so the missing assets never traded that round
+            // ("只剩一个币对"). Keep re-polling INSIDE the slot until every
+            // configured asset has a market (or no asset is still missing a
+            // series that exists — an asset the venue genuinely has nothing
+            // for is already skipped silently above), and re-feed the FULL
+            // set when it grows: the feed's subscription is replace-semantics
+            // and the engine merges a same-slot feed additively.
+            let found_assets: std::collections::HashSet<&str> =
+                discovered.iter().map(|d| d.asset.as_str()).collect();
+            let missing: Vec<&String> = assets
+                .iter()
+                .filter(|a| {
+                    !found_assets.contains(a.as_str()) && series_ticker_for(a, round_sec).is_some()
+                })
+                .collect();
+            if slot == last_slot {
+                if !missing.is_empty() {
+                    continue; // still hoping the venue lists the stragglers
+                }
+            } else {
+                last_slot = slot;
+            }
 
             let count = markets.len();
             let summary = discovered
@@ -270,7 +295,21 @@ pub(crate) fn spawn(
             // Registers the round with the engine AND subscribes the tickers
             // on the running data feed (both inside the host).
             host.on_round_markets(markets).await;
-            eprintln!("kalshi-extension: discovered slot={slot} ({count} markets: {summary})");
+            let note = if missing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [partial: {} still unlisted, re-polling within the slot]",
+                    missing
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            eprintln!(
+                "kalshi-extension: discovered slot={slot} ({count} markets: {summary}){note}"
+            );
         }
     })
 }
