@@ -655,6 +655,8 @@ impl Ome {
             role: OrderRole::Pending,
             // E28 (§9.2): the order belongs to the account its request named.
             account_id: r.account_id.clone(),
+            // Derived at read time (list_orders); never stored.
+            venue: String::new(),
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());

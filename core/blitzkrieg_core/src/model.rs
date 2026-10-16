@@ -262,6 +262,17 @@ pub struct TrackedOrder {
     /// explicitly on every new order (read old, write new).
     #[serde(default = "default_account_id")]
     pub account_id: AccountId,
+    /// The order's venue tag for `orders.list` — the venue binding of the
+    /// account the order was placed from (the same fact `account.list`
+    /// reports; #505 routes the execution by it). A DERIVED read: written
+    /// empty on every new/restored order (so the persisted log lines and the
+    /// backtest/replay wire stay byte-identical) and filled in when the
+    /// view is read. Empty = the account is unbound (or unknown to the
+    /// book) — the row renders untagged and the panel's venue filter keeps
+    /// it visible. Never inferred from the token or market (#427's mapping
+    /// is a different system; the order path does not reach into it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub venue: String,
 }
 
 // ── Exit reasons & orderbook ─────────────────────────────────────────────────
