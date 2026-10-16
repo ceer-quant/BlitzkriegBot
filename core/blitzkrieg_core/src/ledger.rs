@@ -2,10 +2,71 @@
 //! orders whose notional exceeds available collateral. Balances are periodically
 //! reconciled against the venue (set_balance); P0 enforces the local gate, the
 //! on-chain/REST reconciliation loop lands with P1.
+//!
+//! Every cash movement also lands in an append-only JOURNAL (the audit trail):
+//! one [`JournalEntry`] per change, `amount` = the actual signed delta
+//! (post-clamp), `balance_after` = the resulting balance. The balance itself is
+//! still maintained incrementally — O(1), never a traversal — the journal is
+//! the trail that makes the number explainable and boot-replayable. The
+//! invariant the tests pin: `balance == Σ journal.amount` for a trail with
+//! nothing evicted, every retained row chains (`row[i].balance_after` is what
+//! `row[i+1]` moved from), and the LAST row's `balance_after` is always the
+//! live balance. Reserve/release never touch `balance` and never journal.
 
 use crate::model::{CoreError, CoreErrorCode, CoreResult, OrderId};
+use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+
+/// The cash-movement kinds, one per place the balance actually changes.
+/// Wire/file spelling is `snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalKind {
+    /// Boot/seed placement (`dry_seed_balance`).
+    Seed,
+    /// A BUY fill's cash cost (or its rollback correction — the sign tells).
+    BuyFill,
+    /// A SELL fill's proceeds net of its venue fee (one cash event at the
+    /// venue; the fee is inside the amount).
+    SellFill,
+    /// An entry-side cash fee (`charge_fee`).
+    Fee,
+    /// MERGE collateral confirmed on-chain ($1.00 per pair).
+    Merge,
+    /// A settled position's redemption payout confirmed on-chain.
+    Redemption,
+    /// A wallet-level venue cash row (MAKER_REBATE / REWARD, #388).
+    Cashflow,
+    /// The venue-reported balance realigned the local book (live reconcile).
+    Realign,
+    /// `system.reset_trading` re-seeded the book (the trail keeps running —
+    /// append-only evidence, never a truncation).
+    Reset,
+}
+
+/// One cash movement: the audit-trail row and the boot-replay unit. Money is
+/// serialized through `crate::decimal` (strings on the wire/file).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalEntry {
+    pub at_ms: i64,
+    pub kind: JournalKind,
+    #[serde(with = "crate::decimal")]
+    pub amount: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub balance_after: Decimal,
+    /// What moved the money: order id for fills, claim id for
+    /// redemption/merge, `rebate`/`reward` for cashflow, `boot`/`reset` for
+    /// the seed family, `venue` for a realign. Free text — never parsed.
+    #[serde(rename = "ref")]
+    pub ref_: String,
+}
+
+/// In-memory journal window per account. The FILE is the durable record; this
+/// cap only bounds memory — eviction never rewrites the file.
+const JOURNAL_CAP: usize = 10_000; // ponytail: fixed window, not unbounded — replay reads the file, not this
 
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
@@ -13,6 +74,14 @@ pub struct Ledger {
     balance: Decimal,
     /// Notional reserved per resting BUY order.
     reservations: HashMap<OrderId, Decimal>,
+    /// The cash-movement audit trail, oldest → newest, capped at
+    /// [`JOURNAL_CAP`]. Rows also append to [`Self::journal_path`] when the
+    /// deployment persists one.
+    journal: VecDeque<JournalEntry>,
+    /// Where journal rows append (`data/ledger/<account>.journal.jsonl`).
+    /// `None` = memory-only (backtester, in-process tests): nothing is
+    /// written or replayed.
+    journal_path: Option<PathBuf>,
 }
 
 impl Ledger {
@@ -20,9 +89,64 @@ impl Ledger {
         Self::default()
     }
 
-    /// Seed/refresh the venue balance during reconciliation.
-    pub fn set_balance(&mut self, balance: Decimal) {
-        self.balance = balance.max(Decimal::ZERO);
+    /// Attach the durable journal file. Boot-replay only — a ledger that
+    /// already holds rows keeps them (the replay path fills this itself).
+    pub(crate) fn set_journal_path(&mut self, path: PathBuf) {
+        self.journal_path = Some(path);
+    }
+
+    /// Boot replay: adopt rows loaded from the durable file and restore the
+    /// opening balance from the LAST row's `balance_after` — O(1), never a
+    /// summing traversal. Only the newest [`JOURNAL_CAP`] rows stay in memory.
+    pub(crate) fn replay_journal(&mut self, rows: Vec<JournalEntry>) {
+        self.journal.clear();
+        for row in rows {
+            if self.journal.len() == JOURNAL_CAP {
+                self.journal.pop_front();
+            }
+            self.journal.push_back(row);
+        }
+        if let Some(last) = self.journal.back() {
+            self.balance = last.balance_after;
+        }
+    }
+
+    /// The ONE entry every balance change goes through. `requested` is the
+    /// arithmetic delta; the recorded `amount` is the ACTUAL delta after the
+    /// zero-floor clamp, so `Σ amounts == balance` stays exact even where a
+    /// fill costs more than the book holds.
+    fn apply(&mut self, kind: JournalKind, requested: Decimal, ref_: &str) -> Decimal {
+        let new_balance = (self.balance + requested).max(Decimal::ZERO);
+        let amount = new_balance - self.balance;
+        self.balance = new_balance;
+        if amount != Decimal::ZERO {
+            let entry = JournalEntry {
+                at_ms: now_ms(),
+                kind,
+                amount,
+                balance_after: self.balance,
+                ref_: ref_.to_string(),
+            };
+            if let Some(path) = self.journal_path.clone() {
+                crate::jsonl::append(&path, &entry);
+            }
+            if self.journal.len() == JOURNAL_CAP {
+                self.journal.pop_front();
+            }
+            self.journal.push_back(entry);
+        }
+        amount
+    }
+
+    /// Read-only audit view, oldest → newest (at most the retained window).
+    pub fn journal_snapshot(&self) -> Vec<JournalEntry> {
+        self.journal.iter().cloned().collect()
+    }
+
+    /// Seed/refresh the book at boot (`seed_all`). kind = `Seed`.
+    pub fn seed(&mut self, balance: Decimal) {
+        let target = balance.max(Decimal::ZERO);
+        self.apply(JournalKind::Seed, target - self.balance, "boot");
     }
 
     pub fn balance(&self) -> Decimal {
@@ -70,6 +194,15 @@ impl Ledger {
     /// Release a BUY reservation on cancel/reject/expiry.
     pub fn release(&mut self, order_id: &str) -> Decimal {
         self.reservations.remove(order_id).unwrap_or(Decimal::ZERO)
+    }
+
+    /// Realign the book to the venue's last report — kind = `Realign` when the
+    /// number moved, a silent no-op when it did not (the periodic free-cash
+    /// sync would otherwise flood the trail with zero rows). Negative targets
+    /// clamp to zero, unchanged.
+    pub fn set_balance(&mut self, balance: Decimal) {
+        let target = balance.max(Decimal::ZERO);
+        self.apply(JournalKind::Realign, target - self.balance, "venue");
     }
 
     /// Set a BUY order's outstanding commitment to exactly `remaining_notional`
@@ -143,7 +276,9 @@ impl Ledger {
                 "buy settlement released more than was reserved"
             );
         }
-        self.balance = (self.balance - cost_usd).max(Decimal::ZERO);
+        // One journal row for the whole fill: the cash that actually left, net
+        // of nothing (the entry fee arrives separately through `charge_fee`).
+        self.apply(JournalKind::BuyFill, -cost_usd, order_id);
         draw
     }
 
@@ -175,25 +310,29 @@ impl Ledger {
     /// Settle a SELL fill: add proceeds, minus the venue trading fee charged
     /// on the way out. Without the fee the cash ledger credits the full
     /// notional and the cash view drifts above the realized-net view the trade
-    /// records use.
+    /// records use. One journal row (kind = `SellFill`): the venue pays the
+    /// notional and takes its fee in the same cash event, so the row's
+    /// `amount` is the net.
     pub fn settle_sell_fill(&mut self, proceeds: Decimal, fee_usd: Decimal) {
-        self.balance = (self.balance + proceeds - fee_usd).max(Decimal::ZERO);
+        self.apply(JournalKind::SellFill, proceeds - fee_usd, "sell");
     }
 
     /// Charge an entry-side cash fee (buy fills pay it on top of the cost).
+    /// kind = `Fee`.
     pub fn charge_fee(&mut self, fee_usd: Decimal) {
-        self.balance = (self.balance - fee_usd).max(Decimal::ZERO);
+        self.apply(JournalKind::Fee, -fee_usd, "entry fee");
     }
 
     /// Credit collateral redeemed on-chain (issue #175): the payout of a settled
     /// position moving out of the receivable and into spendable cash. Called
     /// exactly once per claim — the settlement book's durable journal is the
     /// idempotency guard, so a replayed redemption result cannot credit twice.
-    pub fn credit_redemption(&mut self, payout_usd: Decimal) {
+    /// kind = `Redemption`, `ref` = the claim id.
+    pub fn credit_redemption(&mut self, payout_usd: Decimal, claim_id: &str) {
         if payout_usd <= Decimal::ZERO {
             return;
         }
-        self.balance += payout_usd;
+        self.apply(JournalKind::Redemption, payout_usd, claim_id);
     }
 
     /// Credit the collateral of MERGED share-pairs (task 2.2): one complete
@@ -201,12 +340,13 @@ impl Ledger {
     /// collection channel of pair-discount arbitrage (@almach: 12,570 merges,
     /// zero sells). `pairs` counts share-pairs; each credits $1.00. Idempotence
     /// lives upstream: the merged shares leave the position book in the same
-    /// transaction, so a replayed merge finds no pair to burn.
-    pub fn credit_merge(&mut self, pairs: Decimal) {
+    /// transaction, so a replayed merge finds no pair to burn. kind = `Merge`,
+    /// `ref` = the claim id.
+    pub fn credit_merge(&mut self, pairs: Decimal, claim_id: &str) {
         if pairs <= Decimal::ZERO {
             return;
         }
-        self.balance += pairs;
+        self.apply(JournalKind::Merge, pairs, claim_id);
     }
 
     /// #388: credit one wallet-level venue cash payment (a MAKER_REBATE or
@@ -215,11 +355,22 @@ impl Ledger {
     /// credits the active account exactly once per row. A zero/negative row
     /// is a no-op: the venue does not claw cash back through these rows, and
     /// a phantom debit would corrupt the cash identity the audit reconciles.
-    pub fn credit_cashflow(&mut self, amount_usd: Decimal) {
+    /// kind = `Cashflow`, `ref` = `rebate` / `reward`.
+    pub fn credit_cashflow(&mut self, amount_usd: Decimal, which: &str) {
         if amount_usd <= Decimal::ZERO {
             return;
         }
-        self.balance += amount_usd;
+        self.apply(JournalKind::Cashflow, amount_usd, which);
+    }
+
+    /// `system.reset_trading` re-seed (or a deployer's explicit re-seed): the
+    /// balance returns to the configured seed and the trail records the gap as
+    /// one `Reset` row — append-only evidence, never a truncation (a Live core
+    /// refuses a reset outright; a Dry/ReadOnly wipe leaves the audit trail).
+    /// kind = `Reset`, `ref` = `reset`.
+    pub fn reset_to_seed(&mut self, seed: Decimal) {
+        let target = seed.max(Decimal::ZERO);
+        self.apply(JournalKind::Reset, target - self.balance, "reset");
     }
 }
 
@@ -295,10 +446,10 @@ mod tests {
     fn merge_credits_one_dollar_per_pair() {
         let mut l = Ledger::new();
         l.set_balance(dec!(10));
-        l.credit_merge(dec!(7));
+        l.credit_merge(dec!(7), "cond#merge");
         assert_eq!(l.balance(), dec!(17));
-        l.credit_merge(Decimal::ZERO);
-        l.credit_merge(dec!(-3));
+        l.credit_merge(Decimal::ZERO, "cond#merge");
+        l.credit_merge(dec!(-3), "cond#merge");
         assert_eq!(l.balance(), dec!(17));
     }
 
@@ -310,12 +461,12 @@ mod tests {
     fn cashflow_credits_exactly_once_per_row() {
         let mut l = Ledger::new();
         l.set_balance(dec!(100000));
-        l.credit_cashflow(dec!(331.2175));
+        l.credit_cashflow(dec!(331.2175), "rebate");
         assert_eq!(l.balance(), dec!(100331.2175), "one row, exact amount");
-        l.credit_cashflow(dec!(659.995));
+        l.credit_cashflow(dec!(659.995), "reward");
         assert_eq!(l.balance(), dec!(100991.2125), "the second row adds on");
-        l.credit_cashflow(Decimal::ZERO);
-        l.credit_cashflow(dec!(-5));
+        l.credit_cashflow(Decimal::ZERO, "rebate");
+        l.credit_cashflow(dec!(-5), "reward");
         assert_eq!(l.balance(), dec!(100991.2125), "no phantom debit");
         assert!(l.is_balanced(), "the cash identity survives the credit");
     }
@@ -415,5 +566,172 @@ mod tests {
         assert_eq!(l.settle_buy_fill("o1", dec!(1), dec!(9)), dec!(4));
         assert_eq!(l.reserved(), Decimal::ZERO);
         assert!(l.is_balanced());
+    }
+
+    // ── Journal: the audit trail + the Σ invariant ──────────────────────────
+
+    /// THE invariant, over every cash-moving path at once: with nothing
+    /// evicted, `balance == Σ journal.amount`, every row chains to the next
+    /// (`row[i].balance_after` is what `row[i+1]` moved from) and the last
+    /// row's `balance_after` IS the live balance. Zero rows are never recorded
+    /// (a no-op credit leaves no trail), reserve/release never journal.
+    #[test]
+    fn journal_invariant_holds_over_every_cash_path() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(100)); // realign from 0 → the Seed row records the seed
+        // — actually seed through the seed path so the row kind is honest:
+        let mut l = Ledger::new();
+        l.seed(dec!(100));
+        l.reserve("o1", dec!(40)).unwrap(); // no cash movement, no row
+        assert_eq!(l.journal_snapshot().len(), 1, "reserve never journals");
+        l.settle_buy_fill("o1", dec!(30), dec!(40)); // buy fill
+        l.charge_fee(dec!(2)); // entry fee
+        l.settle_sell_fill(dec!(45), dec!(3)); // sell fill net of fee
+        l.credit_merge(dec!(5), "cond#merge");
+        l.credit_redemption(dec!(7), "cond#1");
+        l.credit_cashflow(dec!(1.5), "rebate");
+        l.credit_cashflow(Decimal::ZERO, "reward"); // no row: zero is a no-op
+        l.credit_cashflow(dec!(-1), "reward"); // no row: negative is a no-op
+        l.set_balance(dec!(200)); // venue realign (+…)
+        l.reset_to_seed(dec!(150)); // reset re-seed
+        l.release("o1"); // no cash movement, no row
+        // Zero-delta set_balance is a silent no-op (no flood of realign rows):
+        l.set_balance(dec!(150));
+        let rows = l.journal_snapshot();
+        let sum = rows.iter().fold(Decimal::ZERO, |a, r| a + r.amount);
+        assert_eq!(sum, l.balance(), "balance == Σ journal.amount");
+        for pair in rows.windows(2) {
+            assert_eq!(
+                pair[0].balance_after,
+                pair[1].amount + pair[0].balance_after - pair[1].amount,
+                "chain sanity"
+            );
+            // The direct chain check: the next row's delta applied to the
+            // previous row's balance_after lands exactly on its balance_after.
+        }
+        for w in rows.windows(2) {
+            assert_eq!(
+                w[0].balance_after + w[1].amount,
+                w[1].balance_after,
+                "row chains: prev.balance_after + amount == next.balance_after"
+            );
+        }
+        assert_eq!(
+            rows.last().map(|r| r.balance_after),
+            Some(l.balance()),
+            "the last row's balance_after IS the live balance"
+        );
+        // The kinds arrived in the order the calls made them.
+        let kinds: Vec<JournalKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                JournalKind::Seed,
+                JournalKind::BuyFill,
+                JournalKind::Fee,
+                JournalKind::SellFill,
+                JournalKind::Merge,
+                JournalKind::Redemption,
+                JournalKind::Cashflow,
+                JournalKind::Realign,
+                JournalKind::Reset,
+            ]
+        );
+        // The zero/negative rows really were skipped:
+        assert_eq!(rows.len(), 9);
+    }
+
+    /// Clamped fills still satisfy the identity because the row records the
+    /// ACTUAL delta (post-clamp), not the request: a fill that overdraws the
+    /// book journals what really moved.
+    #[test]
+    fn journal_amounts_are_post_clamp_actual_deltas() {
+        let mut l = Ledger::new();
+        l.seed(dec!(10));
+        // A fill costing 30 against a 10 balance: the book floors at zero and
+        // the row says −10, not −30.
+        l.settle_buy_fill("o1", dec!(30), Decimal::ZERO);
+        let rows = l.journal_snapshot();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].amount, dec!(-10));
+        assert_eq!(rows[1].balance_after, Decimal::ZERO);
+        assert_eq!(rows[1].kind, JournalKind::BuyFill);
+        assert_eq!(rows[1].ref_, "o1", "the order id is the fill's ref");
+        let sum = rows.iter().fold(Decimal::ZERO, |a, r| a + r.amount);
+        assert_eq!(sum, l.balance());
+    }
+
+    /// The durable file: every row appends through `jsonl::append`, and a
+    /// fresh ledger replaying the file restores the last row's `balance_after`
+    /// as its opening balance — O(1), never a summing traversal. (The test
+    /// scratch lives in a temp dir beside the other file-backed tests.)
+    #[test]
+    fn journal_persists_and_replays_the_last_balance_after() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-ledger-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("default.journal.jsonl");
+        let mut l = Ledger::new();
+        l.set_journal_path(path.clone());
+        l.seed(dec!(100));
+        l.settle_buy_fill("o1", dec!(30), Decimal::ZERO);
+        l.credit_redemption(dec!(7), "cond#1");
+        l.charge_fee(dec!(1));
+        drop(l);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "one line per cash movement");
+        let last: JournalEntry = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(last.kind, JournalKind::Fee);
+        assert_eq!(last.balance_after, dec!(76));
+
+        // Replay: adopt the rows, restore the opening balance from the tail.
+        let mut restored = Ledger::new();
+        restored.replay_journal(crate::jsonl::load::<JournalEntry>(
+            &path,
+            "ledger journal: skipped unparseable lines",
+        ));
+        assert_eq!(restored.balance(), dec!(76));
+        assert_eq!(restored.journal_snapshot().len(), 4);
+        // A further movement chains onto the restored balance and appends:
+        restored.credit_cashflow(dec!(3), "rebate");
+        let tail = restored.journal_snapshot().pop().unwrap();
+        assert_eq!(tail.balance_after, dec!(79));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The memory window is a CAP on memory, not on history: eviction drops
+    /// the OLDEST rows only, the Σ invariant holds against the live balance
+    /// from the retained prefix's end (older rows live in the file), and the
+    /// last row still chains to the balance.
+    #[test]
+    fn journal_window_evicts_only_the_oldest_rows() {
+        let mut l = Ledger::new();
+        l.seed(dec!(1));
+        for i in 0..(JOURNAL_CAP + 50) {
+            l.credit_cashflow(Decimal::from(1), &format!("row-{i}"));
+        }
+        let rows = l.journal_snapshot();
+        assert_eq!(rows.len(), JOURNAL_CAP, "the window is the cap");
+        assert_eq!(rows[0].ref_, "row-50", "the oldest rows were evicted");
+        assert_eq!(
+            rows.last().unwrap().balance_after,
+            l.balance(),
+            "the tail still chains to the live balance"
+        );
+        let retained_sum = rows.iter().fold(Decimal::ZERO, |a, r| a + r.amount);
+        // Evicted: the seed row (amount 1) + rows 0..=49 (50 × 1).
+        let evicted = Decimal::from(1 + 50);
+        assert_eq!(
+            retained_sum,
+            l.balance() - evicted,
+            "retained rows sum to everything after the evicted prefix"
+        );
     }
 }
