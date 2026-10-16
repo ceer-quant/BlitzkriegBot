@@ -2097,6 +2097,29 @@ impl WebServer {
                     serde_json::Value::Object(serde_json::Map::new()),
                 )
             }
+            ("GET", "/api/unified-candidates") => {
+                // ④: the current round's cross-venue pairing PROPOSALS
+                // (auto-matching proposes, the operator disposes). Read-only
+                // proxy of `unified.candidates`.
+                self.proxy_backtest(
+                    "unified.candidates",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("POST", "/api/unified/confirm") => {
+                // ④: the operator confirms one candidate pair — the body IS
+                // the `unified.confirm` params object (`{title, listings,
+                // actor?}`), forwarded verbatim. The ledger revalidates
+                // everything (titles, assets, one-listing-one-event); a
+                // refused confirm moves nothing.
+                self.proxy_backtest_body("unified.confirm", &req.body)
+            }
+            ("POST", "/api/unified/revoke") => {
+                // ④: withdraw a confirmed mapping — the body IS the
+                // `unified.revoke` params object (`{eventId, actor?}`),
+                // forwarded verbatim.
+                self.proxy_backtest_body("unified.revoke", &req.body)
+            }
             ("GET", "/api/strategy-params") => {
                 // Issue #481 (G3): one strategy's declared tunables + the
                 // values in force (`strategy.params.get`, read-only). The

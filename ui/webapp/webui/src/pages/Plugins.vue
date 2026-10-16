@@ -12,7 +12,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { Puzzle, Radio, Plug, AlertTriangle, Link2, Power, RefreshCw } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
-import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc, type PluginCredentialRowDoc, type NetCheckDoc } from '@/api/client'
+import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type UnifiedCandidateRow, type MarketPluginReadoutDoc, type PluginCredentialRowDoc, type NetCheckDoc } from '@/api/client'
 import { readNetCheck } from '@/lib/net-check'
 import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
 import Card from '@/components/ui/card/Card.vue'
@@ -141,6 +141,70 @@ async function loadUnified(): Promise<void> {
   }
 }
 onMounted(loadUnified)
+
+// ── ④ 统一映射候选：自动匹配只提议，操作员 confirm 才生效 ─────────────────
+const unifiedCandidates = ref<UnifiedCandidateRow[]>([])
+const unifiedCandidatesLoading = ref(false)
+/** 进行中的确认/撤销行（candidate 索引 / event id 键控），防重复点击。 */
+const unifiedBusy = ref<string | null>(null)
+const unifiedMsg = ref<{ tone: 'error' | 'info'; text: string } | null>(null)
+
+async function loadUnifiedCandidates(): Promise<void> {
+  unifiedCandidatesLoading.value = true
+  try {
+    const doc = await api.unifiedCandidates()
+    unifiedCandidates.value = doc.candidates ?? []
+  } catch {
+    // 候选架是附加视图：读失败静默（主表格的错误已经有 unifiedError 承载）。
+    unifiedCandidates.value = []
+  } finally {
+    unifiedCandidatesLoading.value = false
+  }
+}
+
+/** 确认一个候选：标题用两侧相同的 question（ledger 仍会重新验证相似度），
+ *  listings 原样回传。成功后同时刷新候选架与已确认映射。 */
+async function confirmCandidate(c: UnifiedCandidateRow, idx: number): Promise<void> {
+  if (unifiedBusy.value) return
+  unifiedBusy.value = `cand-${idx}`
+  unifiedMsg.value = null
+  try {
+    const title = c.a.title || c.b.title
+    const doc = await api.unifiedConfirm({ title, listings: [c.a, c.b] })
+    if (doc.error) {
+      unifiedMsg.value = { tone: 'error', text: doc.error }
+    } else {
+      unifiedMsg.value = { tone: 'info', text: `已确认映射「${doc.event?.title ?? title}」。` }
+    }
+  } catch (e) {
+    unifiedMsg.value = { tone: 'error', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    unifiedBusy.value = null
+    await Promise.all([loadUnified(), loadUnifiedCandidates()])
+  }
+}
+
+/** 撤销一个已确认映射：账本落审计、引擎视图同步拔除。 */
+async function revokeEvent(e: UnifiedEventRow): Promise<void> {
+  if (unifiedBusy.value) return
+  unifiedBusy.value = `evt-${e.id}`
+  unifiedMsg.value = null
+  try {
+    const doc = await api.unifiedRevoke({ eventId: e.id })
+    if (doc.error) {
+      unifiedMsg.value = { tone: 'error', text: doc.error }
+    } else {
+      unifiedMsg.value = { tone: 'info', text: `已撤销映射「${e.title || e.id}」。` }
+    }
+  } catch (err) {
+    unifiedMsg.value = { tone: 'error', text: err instanceof Error ? err.message : String(err) }
+  } finally {
+    unifiedBusy.value = null
+    await Promise.all([loadUnified(), loadUnifiedCandidates()])
+  }
+}
+
+onMounted(loadUnifiedCandidates)
 
 // ── issue 485 插件启停/切换 ────────────────────────────────────────────────────────
 
@@ -610,6 +674,37 @@ onMounted(loadCredentials)
           <Badge variant="gold" dot><RollingNumber :value="unifiedEvents.length" /> 映射</Badge>
         </template>
       </CardHeader>
+      <!-- ④ 候选提议架：自动匹配只提议、操作员 confirm 才生效。列表为空 =
+           本轮没有 ≥2 个已声明 venue 的候选（单插件世界常态），不显示区块。 -->
+      <div v-if="unifiedCandidates.length" class="mx-2 mb-2 rounded-lg border border-line bg-panel-2/40 p-2.5">
+        <div class="mb-1.5 flex items-center gap-2">
+          <span class="label-micro">待确认候选</span>
+          <Badge variant="info" dot>{{ unifiedCandidates.length }}</Badge>
+          <span class="text-[11px] text-faint-fg">两个场地发现了疑似同一事件 —— 确认后映射才生效</span>
+        </div>
+        <div
+          v-for="(c, i) in unifiedCandidates"
+          :key="`cand-${i}`"
+          class="flex flex-wrap items-center gap-2 border-t border-line/60 py-2 first:border-t-0"
+        >
+          <span class="min-w-0 flex-1 truncate text-[12px]" :title="c.a.title || c.b.title">
+            {{ c.a.title || c.b.title }}
+          </span>
+          <Badge variant="outline">{{ c.a.venue }}</Badge>
+          <Link2 class="size-3 text-faint-fg" />
+          <Badge variant="outline">{{ c.b.venue }}</Badge>
+          <span class="text-[11px] text-faint-fg">分 {{ c.score.toFixed(2) }}</span>
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="unifiedBusy !== null"
+            @click="confirmCandidate(c, i)"
+          >确认配对</Button>
+        </div>
+      </div>
+      <div v-if="unifiedMsg" class="px-2 pb-2">
+        <AlertBanner :tone="unifiedMsg.tone" :title="unifiedMsg.text" />
+      </div>
       <div v-if="unifiedEvents.length" class="-mx-2 overflow-x-auto">
         <table class="w-full min-w-[680px] text-[13px]">
           <thead>
@@ -618,6 +713,7 @@ onMounted(loadCredentials)
               <th class="label-micro px-2 pb-2.5">状态</th>
               <th class="label-micro px-2 pb-2.5">场地</th>
               <th class="label-micro px-2 pb-2.5">差异标记</th>
+              <th class="label-micro px-2 pb-2.5">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -653,6 +749,16 @@ onMounted(loadCredentials)
                   </Badge>
                 </span>
                 <span v-else class="text-[12px] text-faint-fg">无</span>
+              </td>
+              <td class="px-2 py-2.5">
+                <!-- ④ 撤销：账本落审计、引擎视图同步拔除（策略立刻看不见）。 -->
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  :disabled="unifiedBusy !== null"
+                  :title="`撤销映射 ${e.id}（可重新确认）`"
+                  @click="revokeEvent(e)"
+                >撤销</Button>
               </td>
             </tr>
           </tbody>

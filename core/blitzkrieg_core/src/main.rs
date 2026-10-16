@@ -2816,6 +2816,9 @@ async fn main() -> anyhow::Result<()> {
         // like every other `data/` writer). Always on for a real process —
         // the backtester builds its own CoreConfig with None.
         runtime_config_path: Some("data/runtime/config.json".to_string()),
+        // ④ 统一映射账本（cwd-relative）。confirmed 的跨所映射跨重启存活；
+        // 自动配对只提议、操作员 confirm 才写这里。回测/测试 None = 纯内存。
+        unified_ledger_path: Some("data/runtime/unified-mapping.json".to_string()),
         // #458: where manual destructive operations audit themselves. Always
         // on for a real process; the backtester/tests carry None and refuse.
         manual_ops_audit_path: Some("data/audit/manual-ops.jsonl".to_string()),
