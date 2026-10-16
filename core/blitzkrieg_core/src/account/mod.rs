@@ -359,6 +359,29 @@ impl AccountLedgers {
         Ok(())
     }
 
+    /// The account↔venue binding write (`account.venue.set`): an EMPTY string
+    /// is the legal "unbound" value (the account trades any venue — the
+    /// historical behaviour), a non-empty one pins the account to that
+    /// market-plugin name. Multiple accounts MAY share one venue — same
+    /// exchange, several API sets, one account each, is precisely the
+    /// deployment model the book exists for, so no uniqueness is enforced
+    /// here or anywhere downstream.
+    ///
+    /// Forward-looking: this field is the input face of the next batch's
+    /// plugin-ENABLEMENT derivation (boot reads the account book and enables
+    /// every venue at least one account is bound to), so both arms of the
+    /// write — this in-memory one and the accounts.toml persist beside it —
+    /// must stay exactly correct.
+    pub fn set_venue(&mut self, id: &AccountId, venue: &str, now_ms: i64) -> CoreResult<()> {
+        let account = self
+            .accounts
+            .get_mut(id)
+            .ok_or_else(|| unknown_account(id))?;
+        account.venue = venue.to_string();
+        account.updated_at_ms = now_ms;
+        Ok(())
+    }
+
     /// E28 Gate 2 (§9.1): the account's lifecycle status must PERMIT this
     /// order — only `Active` places new entries; closes pass every posture
     /// except `ReadOnly` (a freeze must never be the reason a position is
@@ -513,6 +536,39 @@ mod book_tests {
             .set_status(&AccountId("ghost".into()), AccountStatus::Frozen, 42)
             .expect_err("unknown");
         assert_eq!(err.code, CoreErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn set_venue_writes_unbinds_and_refuses_unknown_accounts() {
+        let mut book = two_accounts();
+        // Bind: the non-empty value pins the account to a plugin name.
+        book.set_venue(&AccountId("paper".into()), "kalshi", 7)
+            .expect("configured");
+        let a = book.account(&AccountId("paper".into())).unwrap();
+        assert_eq!(a.venue, "kalshi");
+        assert_eq!(a.updated_at_ms, 7, "the write refreshes the record");
+        // Unbind: the empty string is the legal unbound value again.
+        book.set_venue(&AccountId("paper".into()), "", 8)
+            .expect("empty venue = unbound");
+        assert_eq!(book.account(&AccountId("paper".into())).unwrap().venue, "");
+        // Two accounts MAY carry the same venue — same exchange, several API
+        // sets, one account each, is the book's whole deployment model.
+        book.set_venue(&default_account_id(), "kalshi", 9)
+            .expect("same venue on a second account is legal");
+        book.set_venue(&AccountId("paper".into()), "kalshi", 9)
+            .expect("…and re-binding after an unbind");
+        assert_eq!(book.account(&default_account_id()).unwrap().venue, "kalshi");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "kalshi"
+        );
+        // An unknown account is refused explicitly, never created.
+        let err = book
+            .set_venue(&AccountId("ghost".into()), "kalshi", 10)
+            .expect_err("unknown");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("unknown account `ghost`"));
+        assert!(book.account(&AccountId("ghost".into())).is_none());
     }
 
     #[test]

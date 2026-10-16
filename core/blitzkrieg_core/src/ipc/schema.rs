@@ -317,6 +317,21 @@ pub mod method {
     /// Tighten one account's lifecycle status (§12.1: a live call may never
     /// GRANT a capability — unfreezing is config + restart).
     pub const ACCOUNT_STATUS: &str = "account.status";
+    /// The account↔venue binding readout: one row per configured account
+    /// (empty string = unbound). Read-only.
+    pub const ACCOUNT_VENUE_GET: &str = "account.venue.get";
+    /// The account↔venue binding write (`accountId` + `venue`): non-empty
+    /// venue pins the account to that market-plugin name (MUST be registered
+    /// — plan-first), the empty string unbinds. The SAME venue on SEVERAL
+    /// accounts is the deployment model (one exchange, several API sets, one
+    /// account each), so no uniqueness is enforced. Next the binding gates
+    /// `orders.place` cross-venue (the existing refuse_cross_venue_order
+    /// guard reads the in-memory field), and — forward-looking — it becomes
+    /// the next batch's plugin-ENABLEMENT derivation input (boot reads the
+    /// account book and enables every venue at least one account is bound
+    /// to), which is why the write persists to accounts.toml and must never
+    /// lose a sibling account's fields on the way.
+    pub const ACCOUNT_VENUE_SET: &str = "account.venue.set";
 
     // ── #363 — execution policy surface ─────────────────────────────────────
     /// List every account section the loaded policy names, plus the effective
@@ -1861,6 +1876,75 @@ pub struct AccountStatusResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
 }
+
+// ── account↔venue binding — account.venue.get / account.venue.set ───────────
+
+/// `account.venue.get` params: `accountId` narrows to ONE account; absent
+/// (or empty) reports every configured one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountVenueGetParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+/// One account's binding row: empty string = UNBOUND (the account trades any
+/// venue — the historical behaviour).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountVenueRow {
+    pub account_id: String,
+    pub venue: String,
+    pub updated_at_ms: i64,
+    /// Who performed the binding write (`account.venue.set`'s audit trail);
+    /// a boot-loaded binding reports `boot`.
+    pub actor: String,
+}
+
+/// `account.venue.get` result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountVenueGetResult {
+    pub version: String,
+    pub venues: Vec<AccountVenueRow>,
+    /// This connection's default account (the SESSION cell when switched,
+    /// else the process-level one — the same spelling `account.list` uses).
+    pub active: String,
+}
+
+/// `account.venue.set` params: `venue` MUST name a registered market plugin
+/// (plan-first) or be the empty string (unbind). `reason` is audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountVenueSetParams {
+    pub account_id: String,
+    pub venue: String,
+    /// Audit trail only — echoed in the reply and the log line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.venue.set` result: the binding that is now in force (memory AND
+/// accounts.toml — `persisted` says the file write landed; a persist failure
+/// refuses the whole write so the two stores cannot disagree).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountVenueSetResult {
+    pub account_id: String,
+    pub venue: String,
+    pub persisted: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`AccountVenueSetResult::note`] — one spelling, used by the reply and the
+/// log line.
+pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
+     unbound); persisted to accounts.toml, re-read at next boot; the same \
+     venue on several accounts is the deployment model, not a conflict";
 
 // ── Server → Node events ─────────────────────────────────────────────────────
 

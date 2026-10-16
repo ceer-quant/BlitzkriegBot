@@ -52,6 +52,18 @@ pub struct CoreConfig {
     /// checkout the caller happens to run from (the same posture as
     /// `strategy_state_path`).
     pub runtime_config_path: Option<String>,
+    /// The account book's own file (`user_layer/configs/accounts.toml` in
+    /// production) — the write half of `account.venue.set` persists the
+    /// binding HERE, read back at the next boot. `None` disables the write
+    /// path: the backtester and most in-process tests run with `None`, and a
+    /// venue bind then refuses with "persistence is disabled" instead of
+    /// writing into whatever checkout the caller happens to run from (the
+    /// same posture as `runtime_config_path`, which this mirrors). The READ
+    /// half never consults this — `Core::new` loads the book from the
+    /// cwd-relative `ACCOUNTS_CONFIG_PATH` at boot, tests inject a book via
+    /// [`Core::with_account_book`]; only tests that exercise the persist
+    /// round-trip set this to their own private file.
+    pub accounts_config_path: Option<String>,
     /// #458: where manual, destructive operations (`system.reset_trading`,
     /// and later `orders.force_close`) append their audit record. `None`
     /// (the backtester, most in-process tests) means a reset REFUSES rather
@@ -777,6 +789,7 @@ impl Default for CoreConfig {
             round_duration_sec: 900,
             round_duration_source: "default",
             runtime_config_path: None,
+            accounts_config_path: None,
             manual_ops_audit_path: None,
             unified_ledger_path: None,
             auto_exits_enabled: true,
@@ -2727,6 +2740,70 @@ impl Core {
             ));
         }
         self.accounts.set_status(id, status, now_ms)
+    }
+
+    /// The account↔venue binding write (`account.venue.set`): the in-memory
+    /// write through [`crate::account::AccountLedgers::set_venue`] and the
+    /// durable write into the account book's own file are ONE transaction —
+    /// the persist happens FIRST (plan-and-persist before apply: a persist
+    /// failure leaves both the file and the memory exactly as they were, so
+    /// the two stores can never disagree), the in-memory record moves only
+    /// after the file accepted. A core without an
+    /// [`CoreConfig::accounts_config_path`] (backtester, most in-process
+    /// tests) refuses instead of writing into whatever checkout it happens
+    /// to run from — the `runtime_config_path` posture, kept.
+    ///
+    /// Validation of the venue NAME (a registered plugin, or empty = unbind)
+    /// is the caller's job — it needs the compiled-in registry, which the
+    /// market-agnostic core deliberately cannot see.
+    pub fn set_account_venue_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        venue: &str,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::ACCOUNT_VENUE_SET_NOTE;
+        // Existence first, with the standard unknown-account refusal, before
+        // anything touches disk.
+        self.accounts.require(id)?;
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.venue.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_venue(
+            std::path::Path::new(path),
+            id.as_str(),
+            venue,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.venue.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.accounts.set_venue(id, venue, now_ms)?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            venue = %venue,
+            reason = %reason,
+            "account venue binding written — orders.place is gated by it \
+             immediately{}; the binding re-reads at next boot \
+             ({ACCOUNT_VENUE_SET_NOTE})",
+            if venue.is_empty() { " (empty venue = unbound)" } else { "" },
+        );
+        Ok(())
     }
 
     pub fn ome(&self) -> &Ome {
