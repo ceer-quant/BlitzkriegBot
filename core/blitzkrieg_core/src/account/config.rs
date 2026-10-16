@@ -17,7 +17,7 @@ use super::{
 };
 use crate::model::{CoreError, CoreErrorCode};
 use blitzkrieg_market_api::MarketType;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// The optional config file (§9.5). Absent → single `default` account.
@@ -26,7 +26,11 @@ pub const ACCOUNTS_CONFIG_PATH: &str = "user_layer/configs/accounts.toml";
 /// One `[[account]]` table as it sits on disk. Credential fields hold the
 /// NAMES of environment variables — §9.4: the value never appears in any
 /// config file, log, or IPC answer.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` exists for the venue write-back only ([`persist_account_venue`]
+/// re-renders the parsed file); the wire types are separate (§12.1), so this
+/// never leaves the config layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct AccountFileEntry {
     id: String,
@@ -57,7 +61,7 @@ struct AccountFileEntry {
     venue: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccountsFile {
     account: Vec<AccountFileEntry>,
@@ -160,6 +164,82 @@ pub fn from_str(text: &str, now_ms: i64) -> Result<AccountLedgers, CoreError> {
         accounts[0].id.clone()
     };
     Ok(AccountLedgers::new(accounts, active))
+}
+
+/// The persisted write-back of ONE account's venue binding
+/// (`account.venue.set`). Read-modify-write over the whole file: parse the
+/// existing toml, update the named `[[account]]`'s `venue` key (an empty
+/// `venue` REMOVES the key — the file spells "unbound" by absence, the same
+/// shape a pre-binding file had), render, atomically replace (same-directory
+/// temp + rename, so a half-written file can never be what the next boot
+/// reads).
+///
+/// Rendering disclosure: the toml crate re-serialises the whole document, so
+/// comments and layout above/inside the file do NOT survive a venue write —
+/// the re-rendered file carries every FIELD (the parse is `deny_unknown_
+/// fields`, so nothing unparseable could have been in there anyway) but not
+/// the operator's comments. Accepted trade-off: hand-maintaining a
+/// comment-preserving TOML editor is not worth it for a value the panel now
+/// owns; every semantic field round-trips, which is the invariant the tests
+/// pin. A file that does not parse is REFUSED, never overwritten (fail-
+/// closed: a write must not be able to "fix" a typo by flattening the
+/// operator's book into a shape they never wrote).
+///
+/// Forward-looking: `Account.venue` is the next batch's plugin-ENABLEMENT
+/// derivation input (boot reads this book and enables every venue at least
+/// one account is bound to), so this persist is the durability half of the
+/// whole multi-plugin model — losing a sibling account's fields here would
+/// silently shrink both the book and the derived enablement set.
+pub fn persist_account_venue(path: &Path, account_id: &str, venue: &str) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the venue write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the venue write: {e}"),
+        )
+    })?;
+    let target = file
+        .account
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+            )
+        })?;
+    if venue.is_empty() {
+        target.venue = None;
+    } else {
+        target.venue = Some(venue.to_string());
+    }
+    let out = toml::to_string(&file).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not render: {e}"),
+        )
+    })?;
+    // Atomic replace: write the sibling temp first, then rename over the
+    // original — the boot's read and a concurrent reload can never see a
+    // partial document.
+    let tmp = path.with_extension("toml.venue.tmp");
+    std::fs::write(&tmp, out).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml venue write failed: {e}"),
+        )
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml venue rename failed: {e}"),
+        )
+    })
 }
 
 /// Probe the kernel's OWN environment for the configured key names (§9.4: the
@@ -372,5 +452,155 @@ status = "read_only"
             missing.api_key_env.as_deref(),
             Some("BK_E28_DEFINITELY_UNSET_KEY")
         );
+    }
+
+    // ── account.venue.set persistence (write-back of the venue binding) ──────
+
+    /// A multi-field, multi-account fixture — the file the persist must NOT
+    /// shrink: every field of BOTH entries must survive a one-account venue
+    /// write.
+    const MULTI_FIELD_BOOK: &str = r#"
+[[account]]
+id = "default"
+name = "Poly Main"
+market_type = "prediction"
+api_key_env = "POLY_API_KEY"
+secret_env = "POLY_SECRET"
+passphrase_env = "POLY_PASSPHRASE"
+private_key_env = "POLY_PRIVATE"
+
+[[account]]
+id = "paper"
+name = "Paper Trading"
+market_type = "prediction"
+status = "read_only"
+venue = "kalshi"
+"#;
+
+    #[test]
+    fn persist_account_venue_writes_back_and_every_sibling_field_survives() {
+        // Mutation note: this test is the "the persist call happens" guard.
+        // Delete the persist_account_venue call from the venue.set arm (or
+        // make it a no-op) and the reloaded book below still parses — but the
+        // `venue` assertion on the RELOADED file goes red: the in-memory
+        // write alone never reaches this file.
+        let dir = std::env::temp_dir().join(format!("bk-venue-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // Bind `default` to polymarket: the write lands, and a FRESH load —
+        // the same call the boot makes — sees the binding plus EVERY sibling
+        // field of BOTH accounts.
+        persist_account_venue(&p, "default", "polymarket").expect("the write lands");
+        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().venue,
+            "polymarket",
+            "the new binding is durable"
+        );
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "kalshi",
+            "a sibling account's binding is untouched"
+        );
+        let d = book.account(&AccountId("default".into())).unwrap();
+        assert_eq!(d.name, "Poly Main");
+        assert!(matches!(d.market_type, MarketType::Prediction));
+        assert!(matches!(d.status, Active));
+        assert_eq!(
+            d.credential_keys.api_key_env.as_deref(),
+            Some("POLY_API_KEY")
+        );
+        assert_eq!(d.credential_keys.secret_env.as_deref(), Some("POLY_SECRET"));
+        assert_eq!(
+            d.credential_keys.passphrase_env.as_deref(),
+            Some("POLY_PASSPHRASE")
+        );
+        assert_eq!(
+            d.credential_keys.private_key_env.as_deref(),
+            Some("POLY_PRIVATE")
+        );
+        // The other account's status — the file's only restriction — rode
+        // through: a persist must never loosen what the operator wrote.
+        assert!(matches!(
+            book.account(&AccountId("paper".into())).unwrap().status,
+            ReadOnly
+        ));
+
+        // Re-binding the SECOND account over its existing value: same
+        // guarantees on a file the writer itself produced (round two of the
+        // read-modify-write cycle).
+        persist_account_venue(&p, "paper", "polymarket").expect("rebind lands");
+        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "polymarket"
+        );
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().venue,
+            "polymarket",
+            "the first write survived the second"
+        );
+
+        // Unbind: venue = "" REMOVES the key — the file returns to the
+        // "unbound by absence" shape a pre-binding deployment had.
+        persist_account_venue(&p, "paper", "").expect("unbind lands");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !text.contains("paper") || !text.split("[[account]]").nth(2).unwrap().contains("venue"),
+            "the unbound entry carries no venue key: {text}"
+        );
+        let book = load_account_ledgers(&p, 5).expect("the unbound file re-parses");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "",
+            "absence loads as unbound"
+        );
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().venue,
+            "polymarket",
+            "the other account's binding survives the unbind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_account_venue_refuses_unknown_ids_and_broken_files() {
+        let dir = std::env::temp_dir().join(format!("bk-venue-persist2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // An id the file never declared: refused, and the file is untouched.
+        let before = std::fs::read_to_string(&p).unwrap();
+        let err = persist_account_venue(&p, "ghost", "polymarket").expect_err("unknown id");
+        assert!(
+            err.message.contains("no `[[account]]` with id `ghost`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
+
+        // A file that does not parse: refused fail-closed, never flattened.
+        std::fs::write(&p, "[[account]]\nid = \"x\"\nbogus = 1\n").unwrap();
+        let err = persist_account_venue(&p, "x", "polymarket").expect_err("does not parse");
+        assert!(
+            err.message.contains("does not parse; refusing"),
+            "{}",
+            err.message
+        );
+
+        // A file that cannot even be read: refused with the same posture.
+        let err = persist_account_venue(&dir.join("nope.toml"), "x", "polymarket")
+            .expect_err("unreadable file");
+        assert!(err.message.contains("unreadable"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
