@@ -2562,6 +2562,51 @@ async fn handle_line(
             .await
         }
 
+        // ── #509 的读面：account.journal（钱包流水的面板可读面）────────────
+        // 只读：照 `account.list` 的 session_active 模式解析账户（缺省 =
+        // 本连接的会话格，否则进程级 active），ledger 不加新方法 —— 动词层
+        // 取 `journal_snapshot()` 全量后取尾部 limit。`truncated` 披露内存
+        // 窗口（JOURNAL_CAP = 10000）：真 = 快照比返回的行多，读者看到的
+        // 是窗口不是全史。
+        method::ACCOUNT_JOURNAL => {
+            typed(params, |p: AccountJournalParams| {
+                let core = core.clone();
+                async move {
+                    let limit = p.limit.unwrap_or(100).clamp(1, 500);
+                    let c = core.lock().await;
+                    let id = match p.account_id.as_deref() {
+                        Some(id) if !id.trim().is_empty() => AccountId::from(id),
+                        _ => session
+                            .session_active
+                            .clone()
+                            .unwrap_or_else(|| c.accounts().active_id().clone()),
+                    };
+                    let rows = c.accounts().ledger_of(&id)?.journal_snapshot();
+                    let total = rows.len();
+                    let tail: Vec<AccountJournalRow> = rows
+                        .into_iter()
+                        .skip(total.saturating_sub(limit))
+                        .map(|e| AccountJournalRow {
+                            at_ms: e.at_ms,
+                            kind: e.kind,
+                            amount: e.amount,
+                            balance_after: e.balance_after,
+                            r#ref: e.ref_,
+                        })
+                        .collect();
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(AccountJournalResult {
+                            account_id: id.as_str().to_string(),
+                            truncated: total > tail.len(),
+                            rows: tail,
+                        })
+                        .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
+
         // ── #363: execution policy surface ─────────────────────────────────
         // The two write arms go through one path: serialize the section to
         // TOML, rewrite the file, full-reload in memory, land one audit line.
@@ -5949,6 +5994,164 @@ mod tests {
         );
         let rows = reply["result"]["venues"].as_array().expect("rows");
         assert_eq!(rows.len(), 2);
+    }
+
+    // ── #509 的读面：account.journal，at the wire ───────────────────────────
+
+    /// The journal readout returns the LAST `limit` rows in ascending
+    /// (journal) order and discloses a truncated window: a seeded default
+    /// book holds exactly one `Seed` row, so a small limit answers that row
+    /// with `truncated == false` … until the book moves — a `set_balance`
+    /// realign appends a second row, `limit: 1` then answers only the NEWEST
+    /// (the Realign) with `truncated == true`. An explicit `accountId` names
+    /// its own book (the un-seeded `paper` journal is empty); an omitted one
+    /// rides the session's default.
+    #[tokio::test]
+    async fn account_journal_returns_the_tail_in_order_and_discloses_truncation() {
+        use rust_decimal_macros::dec;
+        let (core, registry, peer) = two_account_fixture().await;
+
+        // No session switch: the omitted accountId resolves to the process
+        // default, whose journal carries exactly the boot Seed row.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.journal","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        assert_eq!(reply["result"]["accountId"], serde_json::json!("default"));
+        let rows = reply["result"]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "the seeded book journals its Seed: {reply}");
+        assert_eq!(rows[0]["kind"], serde_json::json!("seed"));
+        assert_eq!(
+            rows[0]["ref"],
+            serde_json::json!("boot"),
+            "the JournalEntry's ref_ rides verbatim"
+        );
+        assert!(
+            rows[0]["amount"].is_number() && rows[0]["balanceAfter"].is_number(),
+            "money follows the decimal wire convention: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["truncated"],
+            serde_json::json!(false),
+            "1 snapshot row <= 1 returned row: nothing withheld"
+        );
+
+        // A realign appends a second row on the default book.
+        core.lock().await.set_balance(dec!(9_999));
+
+        // limit=1: only the NEWEST row (the Realign), and the disclosure
+        // that rows exist beyond the window.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.journal","params":{"limit":1}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        let rows = reply["result"]["rows"].as_array().expect("rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "limit=1 must return exactly one row: {reply}"
+        );
+        assert_eq!(
+            rows[0]["kind"],
+            serde_json::json!("realign"),
+            "the tail is the newest row, not the oldest: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["truncated"],
+            serde_json::json!(true),
+            "2 snapshot rows > 1 returned row: the window is disclosed"
+        );
+
+        // An explicit accountId names its own book: the boot seeds EVERY
+        // account (§9.3 — separate wallets, not aliases), so `paper` carries
+        // its own Seed row and truncation reads against ITS window only.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.journal","params":{"accountId":"paper","limit":50}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        assert_eq!(reply["result"]["accountId"], serde_json::json!("paper"));
+        let rows = reply["result"]["rows"].as_array().expect("rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "paper's own book seeded exactly once: {reply}"
+        );
+        assert_eq!(rows[0]["kind"], serde_json::json!("seed"));
+        assert_eq!(reply["result"]["truncated"], serde_json::json!(false));
+
+        // limit above the 500 ceiling clamps instead of erroring (the
+        // kline.history posture: a big ask shrinks, it never refuses).
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.journal","params":{"limit":9999}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "an over-ceiling limit clamps, it does not refuse: {reply}"
+        );
+        let rows = reply["result"]["rows"].as_array().expect("rows");
+        assert_eq!(
+            rows[0]["kind"],
+            serde_json::json!("seed"),
+            "the whole trail fits under the clamp: oldest first"
+        );
+        assert_eq!(
+            rows[1]["kind"],
+            serde_json::json!("realign"),
+            "ascending journal order is the wire order"
+        );
+    }
+
+    /// A journal read for an account the deployment never configured is the
+    /// same client fault the neighbours report: the ledger lookup's
+    /// `unknown account` error, riding the `typed` tail (APPLICATION with
+    /// coreCode INVALID_PARAMS — the same envelope `account.venue.set`'s
+    /// unknown-account refusal uses). No implicit book, ever.
+    #[tokio::test]
+    async fn account_journal_names_an_unknown_account_as_invalid_params() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.journal","params":{"accountId":"ghost"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_some(),
+            "an unknown account must fail loud: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "a client fault at heart: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown account `ghost`"),
+            "the refusal names the account: {reply}"
+        );
     }
 
     // ── #363: the execution policy surface, at the wire ─────────────────────
