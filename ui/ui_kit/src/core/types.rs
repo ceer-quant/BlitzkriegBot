@@ -612,6 +612,10 @@ pub struct OrderView {
     /// carries it; cores before E28 omit → empty string, row stays visible).
     #[serde(default)]
     pub account_id: String,
+    /// The venue binding of the order's account (older cores omit → empty,
+    /// row stays visible in the venue filter).
+    #[serde(default)]
+    pub venue: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

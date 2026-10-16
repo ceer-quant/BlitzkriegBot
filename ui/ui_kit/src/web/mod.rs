@@ -377,6 +377,8 @@ pub fn render_json_full(
             "filledSize": o.filled_size, "status": o.status,
             // E28 (§9.2): the account the order belongs to (empty = pre-E28 core).
             "accountId": o.account_id,
+            // The order's venue tag (the account's binding; empty = untagged).
+            "venue": o.venue,
             "roundSlot": o.round_slot })).collect::<Vec<_>>(),
         "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
         // All-time totals (trades.summary): cumulative order count + net profit
@@ -2975,6 +2977,7 @@ mod tests {
             status: "LIVE".into(),
             round_slot: 123,
             account_id: "default".into(),
+            venue: "polymarket".into(),
         }];
         let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
         let row = &doc["orders"][0];
@@ -2984,6 +2987,8 @@ mod tests {
         assert_eq!(row["price"], serde_json::json!(0.39));
         // E28: the account rides along so the panel can filter rows per account.
         assert_eq!(row["accountId"], serde_json::json!("default"));
+        // The venue tag rides along too (empty = untagged, filter keeps the row).
+        assert_eq!(row["venue"], serde_json::json!("polymarket"));
         assert_eq!(doc["orders"].as_array().map(|a| a.len()), Some(1));
     }
 

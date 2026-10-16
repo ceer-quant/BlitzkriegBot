@@ -6055,7 +6055,23 @@ impl Core {
             .collect()
     }
     pub fn list_orders(&self) -> Vec<TrackedOrder> {
-        self.ome.all().into_iter().cloned().collect()
+        self.ome
+            .all()
+            .into_iter()
+            .map(|o| {
+                let mut o = o.clone();
+                // The order's venue tag is the venue binding of the account it
+                // was placed from — the same fact `account.list` reports (the
+                // execution routes by it too). Unknown account / unbound → empty
+                // (the field is skipped on the wire, the panel keeps the row).
+                o.venue = self
+                    .accounts
+                    .account(&o.account_id)
+                    .map(|a| a.venue.clone())
+                    .unwrap_or_default();
+                o
+            })
+            .collect()
     }
 
     // ── Live venue entry points ─────────────────────────────────────────────
@@ -13446,6 +13462,7 @@ mod tests {
             escalate_at_ms: None,
             maker_timeout_ms: 0,
             account_id: crate::model::default_account_id(),
+            venue: String::new(),
         };
         std::fs::write(&log, serde_json::to_string(&restored).unwrap() + "\n").unwrap();
         let mut c = Core::new(CoreConfig {
@@ -21728,6 +21745,12 @@ mod audit_fix_tests {
     /// `paper` is unbound. The engine carries two labelled round markets so
     /// the token→venue lookup has something real to read.
     fn venue_bound_core() -> Core {
+        venue_bound_core_opts(None)
+    }
+
+    /// [`venue_bound_core`] with a durable order log — the persistence-path
+    /// tests read what `place` appends.
+    fn venue_bound_core_opts(order_log_path: Option<String>) -> Core {
         let book = crate::account::AccountLedgers::new(
             vec![
                 crate::account::Account {
@@ -21765,7 +21788,7 @@ mod audit_fix_tests {
                 // the reset tests' self-check. A fixture that trades carries
                 // no durable logs — same contract as `hot_reload_fixture`.
                 trade_log_path: None,
-                order_log_path: None,
+                order_log_path,
                 position_log_path: None,
                 ..Default::default()
             },
@@ -21885,6 +21908,92 @@ mod audit_fix_tests {
             by_id("paper").venue,
             "",
             "unbound renders as the empty string"
+        );
+    }
+
+    /// The order's venue tag is the venue binding of the account it was
+    /// placed from — the same fact `account.list` reports. An order placed
+    /// by an account bound to kalshi reads `venue: "kalshi"`; an order
+    /// placed by an UNBOUND account carries NO venue key at all on the wire
+    /// (empty string is skipped), so the panel's venue filter keeps the row
+    /// visible (an untagged row must not be silently dropped).
+    #[test]
+    fn order_views_carry_the_account_venue_binding() {
+        let mut c = venue_bound_core();
+        // `default` is bound to polymarket: its order tags polymarket.
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+        // `paper` is unbound: its order carries no venue tag.
+        let mut paper = bound_order("kal-up", "k2");
+        paper.account_id = crate::account::AccountId::from("paper");
+        c.place(paper, 0, 2).unwrap();
+        assert_eq!(c.list_orders().len(), 2);
+
+        let mut rows = c.list_orders();
+        rows.sort_by(|a, b| a.internal_key.cmp(&b.internal_key));
+        assert_eq!(rows[0].internal_key, "k1");
+        assert_eq!(
+            rows[0].venue, "polymarket",
+            "the tag is the placing account's binding, not the token's venue"
+        );
+        assert_eq!(rows[1].internal_key, "k2");
+        assert_eq!(rows[1].venue, "", "an unbound account's order is untagged");
+        // The wire contract: the empty tag is ABSENT (skip_serializing_if),
+        // the non-empty one present. The panel's filterByVenue keeps rows
+        // without the key visible.
+        let wire: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|o| serde_json::to_value(o).unwrap())
+            .collect();
+        assert_eq!(
+            wire[0]["venue"],
+            serde_json::json!("polymarket"),
+            "the bound order's venue key is present"
+        );
+        assert!(
+            wire[1].get("venue").is_none(),
+            "the unbound order's wire row carries NO venue key: {}",
+            wire[1]
+        );
+    }
+
+    /// The venue tag is a DERIVED read, never stored: the persisted order
+    /// log stays byte-identical to its pre-#427-orders shape (empty tag is
+    /// skipped on write), and a rebinding changes what `orders.list` reads
+    /// without touching any stored row.
+    #[test]
+    fn the_order_venue_tag_is_derived_not_stored() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-order-venue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = venue_bound_core_opts(Some(
+            dir.join("orders.jsonl").to_string_lossy().into_owned(),
+        ));
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+
+        // The persisted line carries no venue key (skip_serializing_if).
+        let line = std::fs::read_to_string(dir.join("orders.jsonl")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert!(
+            doc.get("venue").is_none(),
+            "the persisted order line must not gain a venue key: {doc}"
+        );
+
+        // Rebinding is a fact about the ACCOUNT, not the order: the same
+        // stored order now reads with the new tag, nothing rewritten.
+        c.accounts_mut()
+            .set_venue(&crate::account::AccountId::from("default"), "kalshi", 2)
+            .unwrap();
+        assert_eq!(c.list_orders()[0].venue, "kalshi");
+        let line2 = std::fs::read_to_string(dir.join("orders.jsonl")).unwrap();
+        assert_eq!(
+            line, line2,
+            "the order log is untouched by a venue rebinding"
         );
     }
 
