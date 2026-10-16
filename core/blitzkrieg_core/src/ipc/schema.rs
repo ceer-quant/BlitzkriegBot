@@ -332,6 +332,13 @@ pub mod method {
     /// to), which is why the write persists to accounts.toml and must never
     /// lose a sibling account's fields on the way.
     pub const ACCOUNT_VENUE_SET: &str = "account.venue.set";
+    /// One account's cash-journal tail (#509's read surface): the append-only
+    /// `JournalEntry` rows the ledger records for every balance change.
+    /// Read-only — answers from the in-memory window
+    /// (`journal_snapshot()`), never touches the file. `accountId` absent =
+    /// the SESSION's default account (the same resolution `account.list`
+    /// uses); `limit` defaults to 100, capped at 500.
+    pub const ACCOUNT_JOURNAL: &str = "account.journal";
 
     // ── #363 — execution policy surface ─────────────────────────────────────
     /// List every account section the loaded policy names, plus the effective
@@ -1945,6 +1952,49 @@ pub struct AccountVenueSetResult {
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
      unbound); persisted to accounts.toml, re-read at next boot; the same \
      venue on several accounts is the deployment model, not a conflict";
+
+// ── #509 的读面 — account.journal（钱包流水的面板可读面）─────────────────────
+
+/// `account.journal` params: `accountId` absent = the SESSION's default
+/// account (the `account.list` resolution, §9.5); `limit` defaults to 100
+/// and is clamped into `1..=500` (the same clamp posture `kline.history`
+/// takes — a big ask shrinks, it never errors).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountJournalParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One cash-movement row as `account.journal` reports it: `JournalEntry`
+/// verbatim (camelCase, money as decimal strings through `crate::decimal`,
+/// `ref` carried by the type's own rename). Ascending `atMs` — the ledger's
+/// journal order IS the wire order.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountJournalRow {
+    pub at_ms: i64,
+    pub kind: crate::ledger::JournalKind,
+    #[serde(with = "crate::decimal")]
+    pub amount: Decimal,
+    #[serde(with = "crate::decimal")]
+    pub balance_after: Decimal,
+    pub r#ref: String,
+}
+
+/// `account.journal` result: the newest `limit` rows, oldest → newest.
+/// `truncated` is the disclosure the in-memory window owes the panel: TRUE
+/// when the snapshot held MORE rows than `rows` returned, so a reader knows
+/// the tail they see is a window, not the whole trail.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountJournalResult {
+    pub account_id: String,
+    pub rows: Vec<AccountJournalRow>,
+    pub truncated: bool,
+}
 
 // ── Server → Node events ─────────────────────────────────────────────────────
 
