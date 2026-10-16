@@ -285,7 +285,7 @@ fn build_supervisor_config(cli: &ParsedCli, fallback_socket: String) -> Supervis
     }
     // CLI knobs beat the HFT_* environment values `from_env` already filled in.
     if let Some(v) = cli.round_sec {
-        cfg.round_sec = v;
+        cfg.round_sec = Some(v);
     }
     if let Some(v) = cli.min_round_age {
         cfg.min_round_age = v;
