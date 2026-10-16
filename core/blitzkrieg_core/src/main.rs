@@ -2402,6 +2402,22 @@ async fn run_net_check(plugin: Option<&str>) -> i32 {
     if report.ok { 0 } else { 1 }
 }
 
+/// Which tier owns `engine.round_sec` at boot — and therefore whether the UI
+/// card's persisted cell (data/runtime/config.json) may apply. Only an
+/// explicit CLI flag or BK_* env var suppresses the cell; the factory TOML's
+/// `engine.round_sec` is a default FOR the card, not a veto over it. The
+/// config_report lines carry the winning layer in parentheses, so the tier
+/// is readable straight off them.
+fn round_duration_source_from(report: &[String]) -> &'static str {
+    if report.iter().any(|l| {
+        l.starts_with("engine.round_sec=") && (l.ends_with("(cli)") || l.ends_with("(env)"))
+    }) {
+        "cli_or_env"
+    } else {
+        "default"
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // #184: INFO by default, not ERROR — `EnvFilter::from_default_env()` with no
@@ -2789,21 +2805,13 @@ async fn main() -> anyhow::Result<()> {
         market_plugin: args.market_plugin,
         round_duration_sec: args.round_sec,
         // The round-duration UI card's persisted cell (data/runtime/config.json)
-        // sits between the TOML/default tiers and an explicit spoke: if
-        // `engine.round_sec` appears in the config_report, some layer ABOVE the
-        // compiled default (flag/env/TOML) resolved it, and that layer wins —
-        // the persisted cell is applied below, only when no layer spoke. An
-        // explicit flag (replays, censuses) always outranks a UI toggle: the
-        // bit-exact gate baselines must never be hijacked by the card.
-        round_duration_source: if args
-            .config_report
-            .iter()
-            .any(|l| l.starts_with("engine.round_sec="))
-        {
-            "cli_or_env_or_toml"
-        } else {
-            "default"
-        },
+        // outranks the factory TOML and the compiled default; only an explicit
+        // CLI flag or BK_* env var beats it (the bit-exact gate baselines run
+        // with those flags, so they can never be hijacked by the card). The
+        // config_report names the winning layer: "(cli)"/"(env)" suppress the
+        // cell below; "(toml)" does not — the cell still applies (the site
+        // further down reads it whenever the source is not "cli_or_env").
+        round_duration_source: round_duration_source_from(&args.config_report),
         // The durable cell the round-duration UI card writes (cwd-relative,
         // like every other `data/` writer). Always on for a real process —
         // the backtester builds its own CoreConfig with None.
@@ -3215,11 +3223,13 @@ async fn main() -> anyhow::Result<()> {
     let _shutdown_tx = tx;
 
     // The round-duration UI card's persisted cell (data/runtime/config.json):
-    // applied ONLY when no boot layer above the compiled default spoke
-    // (round_duration_source == "default"). Next-session semantics by
-    // construction — this runs once at boot, so a `round_duration.set` write
-    // can never move the running session's grid.
-    if config.round_duration_source == "default"
+    // outranks the TOML/default tiers — applied whenever no explicit CLI flag
+    // or BK_* env var spoke (round_duration_source != "cli_or_env"; the
+    // bit-exact gate baselines always carry one, so they stay immune). The
+    // factory TOML's `engine.round_sec` is a DEFAULT for the card, not a veto.
+    // Next-session semantics by construction — this runs once at boot, so a
+    // `round_duration.set` write can never move the running session's grid.
+    if config.round_duration_source != "cli_or_env"
         && let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
             blitzkrieg_core::ipc::runtime_config::load_round_duration_from(std::path::Path::new(p))
         })
@@ -3227,7 +3237,7 @@ async fn main() -> anyhow::Result<()> {
     {
         eprintln!(
             "blitzkrieg-core: round duration {}s -> {}s (persisted UI setting, \
-             data/runtime/config.json; an explicit --round-sec outranks it)",
+             data/runtime/config.json; an explicit --round-sec or BK_ROUND_SEC outranks it)",
             config.round_duration_sec, cell.duration_sec
         );
         config.round_duration_sec = cell.duration_sec;
@@ -4472,6 +4482,32 @@ mod tests {
                 .iter()
                 .any(|l| l == "engine.round_sec=60 (cli)")
         );
+    }
+
+    // The UI card's persisted cell outranks the factory TOML: only an explicit
+    // flag/env var suppresses it. #474's "旗标 > 格 > 默认" promise, kept.
+    #[test]
+    fn a_toml_round_sec_does_not_veto_the_persisted_cell() {
+        // TOML spoke → the cell still applies (the boot site tests
+        // `!= "cli_or_env"`, and "default" is what TOML resolves to here).
+        let file = file_with(
+            r#"
+            [engine]
+            round_sec = 300
+            "#,
+        );
+        let a = parse_args(&file, &[], &EnvVars::default());
+        assert_eq!(round_duration_source_from(&a.config_report), "default");
+        // A CLI flag spoke → the cell is suppressed.
+        let a = parse_args(
+            &file,
+            &["--round-sec".into(), "60".into()],
+            &EnvVars::default(),
+        );
+        assert_eq!(round_duration_source_from(&a.config_report), "cli_or_env");
+        // The gate site and the judge share one spelling: a source the judge
+        // emits as "cli_or_env" is exactly the one the gate refuses.
+        assert_ne!("cli_or_env", "default");
     }
 
     #[test]

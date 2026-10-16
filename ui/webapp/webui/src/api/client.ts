@@ -447,7 +447,7 @@ export interface RoundDurationOption {
 /** `round_duration.get` 回执：本会话生效值 + 来源 + 白名单 + 下次会话将解析到什么。 */
 export interface RoundDurationDoc {
   effectiveSec: number
-  /** cli_or_env_or_toml = 显式旗标在管（本卡写入不会赢）；default/runtime/toml/env。 */
+  /** cli_or_env = 显式旗标/环境变量在管（本卡写入不会赢）；default/runtime/toml/env。 */
   source: string
   allowed: RoundDurationOption[]
   nextSessionSec: number
