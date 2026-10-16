@@ -1620,6 +1620,7 @@ mod tests {
             filled_size: 0.0,
             status: "LIVE".into(),
             round_slot: 123,
+            account_id: String::new(),
         }];
         assert!(matches!(app.on_key(key('f')), Action::ConfirmToggle(_)));
         // The main loop sets the bar from a ConfirmToggle when the predicate

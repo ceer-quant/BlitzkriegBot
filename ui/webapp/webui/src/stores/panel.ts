@@ -12,6 +12,20 @@ import { registryStrategyRows } from '../lib/strategy-source'
 import { feedProgress } from '../lib/feed'
 import { classifyOutcome } from '../lib/session'
 
+/**
+ * One account row as `account.list` reports it (E28 §12.1 AccountView) — only
+ * the fields pages render. Decimals cross as strings or numbers (the core's
+ * Decimal wire allows both); pages format through lib/format.
+ */
+export interface PanelAccountRow {
+  id: string
+  name: string
+  marketType: string
+  status: string
+  balance: string | number
+  available: string | number
+}
+
 export const usePanelStore = defineStore('panel', () => {
   const snapshot = ref<Snapshot | null>(null)
   const plugins = ref<PluginsDoc | null>(null)
@@ -54,6 +68,21 @@ export const usePanelStore = defineStore('panel', () => {
    * page's mount — a stale request must not overwrite a later manual edit.
    */
   const blueprintPreload = ref<string | null>(null)
+
+  /**
+   * E28 (§9.5) 镜像：本面板连接的默认账户（id）与账户簿（account.list 的行）。
+   * 唯一写入方是 AccountSwitcher（`accounts` / `account <id>` 走 /api/command，
+   * 与 TUI 命令条同一命令面）——这里只是读取视图，页面据此标注「这屏数字属于
+   * 哪个账户」。切账户不持久：进程重启回到内核配置的初始账户，所以 readback
+   * 为 null 时渲染「未知」而不是猜 `default`。
+   */
+  const activeAccount = ref<string | null>(null)
+  const accounts = ref<PanelAccountRow[]>([])
+
+  function setAccounts(active: string, rows: PanelAccountRow[]): void {
+    activeAccount.value = active
+    accounts.value = rows
+  }
 
   function requestNav(tab: string): void {
     navRequest.value = { tab }
@@ -170,6 +199,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
+    activeAccount, accounts, setAccounts,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
   }

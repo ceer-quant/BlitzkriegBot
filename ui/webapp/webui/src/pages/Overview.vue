@@ -13,6 +13,7 @@ import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
+import { filterByAccount } from '@/lib/account-filter'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner,
 } from '@/lib/safety'
@@ -97,8 +98,28 @@ const balanceTitle = computed(() => {
   return isDry.value ? '内核现金账' : '交易所余额'
 })
 
+/**
+ * E28 (§9.5): WHICH account this tile's figures belong to. The switcher's
+ * `accounts` fetch mirrors the book into the store; the name comes along so
+ * the tile can read 「default · 实盘主账户」 instead of a bare id. Unfetched
+ * (or a pre-switcher mount race) renders nothing — never a guessed `default`.
+ */
+const accountBadge = computed(() => {
+  const id = store.activeAccount
+  if (!id) return ''
+  const row = store.accounts.find((a) => a.id === id)
+  return row?.name ? `${id} · ${row.name}` : id
+})
+
 const round = computed(() => snap.value?.round ?? null)
-const positions = computed(() => snap.value?.positions ?? [])
+// E28 (§9.5): the 当前持仓 table is scoped to the session's default account
+// (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
+// The balance tile above is deliberately NOT account-filtered — the kernel's
+// `ledger.balance` reads the process-level active book, and pretending
+// otherwise would fabricate a per-account number the wire does not carry.
+const positions = computed(() =>
+  filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
+)
 const engine = computed(() => snap.value?.stats ?? {})
 
 /**
@@ -126,6 +147,7 @@ const counters = computed(() => [
   },
 ])
 
+// 浮动合计读的是上面已按账户过滤后的持仓集合（数字与当前持仓表同口径）。
 const unrealized = computed(() =>
   positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0) * (Number(p.shares) || 0), 0),
 )
@@ -208,8 +230,19 @@ const needsStrategyHint = computed(() =>
         -->
         <div v-if="isDry" class="mt-2 flex items-center gap-1.5 text-[10.5px] text-faint-fg">
           <CircleDot class="size-3" /> 模拟资金，非真实资产
+          <template v-if="accountBadge">
+            <span class="opacity-50">·</span>
+            <!-- 账户标识符不是读数（不滚动），故不进 num 槽位（round-header 门禁）。 -->
+            <span>{{ accountBadge }}</span>
+          </template>
         </div>
-        <div v-else-if="walletAddr" class="mt-2 text-[11px] text-faint-fg num">{{ shortAddr(walletAddr) }}</div>
+        <div v-else-if="accountBadge || walletAddr" class="mt-2 text-[11px] text-faint-fg">
+          <!-- 账户标识符不是读数（不滚动），不进 num 槽位（round-header 门禁）；
+               num 只包钱包地址这一标识符（TEXT_MARKERS 豁免 shortAddr）。 -->
+          <span v-if="accountBadge">{{ accountBadge }}</span>
+          <span v-if="accountBadge && walletAddr" class="opacity-50"> · </span>
+          <span v-if="walletAddr" class="num">{{ shortAddr(walletAddr) }}</span>
+        </div>
       </StatTile>
 
       <StatTile label="当前轮次" :value="round ? `#${round.slot}` : '—'">

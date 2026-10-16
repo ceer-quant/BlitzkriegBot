@@ -15,6 +15,7 @@ import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
+import { filterByAccount } from '@/lib/account-filter'
 import { newestFirst, tradeIdentity } from '@/lib/trades'
 import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
@@ -200,7 +201,13 @@ useIntervalFn(() => { nowMs.value = Date.now() }, 2000)
 const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 
 // ── cumulative all-time totals (core summary preferred, rows as fallback) ────
-const historyRows = computed<TradeRow[]>(() => store.tradeRows)
+// E28 (§9.5): the history is scoped to the session's default account —
+// `accountFilter.rows` is the account's slice of the log (unattributed rows
+// from a pre-E28 core stay visible, see lib/account-filter). Every
+// history-derived view (cumulative header, equity curve, filters, stats)
+// reads the filtered list so the page cannot mix two accounts in one number.
+const accountFilter = computed(() => filterByAccount(store.tradeRows, store.activeAccount))
+const historyRows = computed<TradeRow[]>(() => accountFilter.value.rows)
 const cumStats = computed(() => {
   const s = snap.value?.tradeSummary
   const rows = historyRows.value
@@ -432,7 +439,9 @@ const tradeStats = computed(() => {
 })
 
 const tab = ref<'positions' | 'orders' | 'history'>('positions')
-const positions = computed(() => snap.value?.positions ?? [])
+// E28 (§9.5): positions are the session account's too — same filter discipline
+// as the history rows (unattributed rows from a pre-E28 core stay visible).
+const positions = computed(() => filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows)
 
 // ── issue 456: 挂单簿 + 强平 ────────────────────────────────────────────────
 // 轮次是否已过期：round_slot N 覆盖 [N·dur, (N+1)·dur)，与内核过期扫描同一
@@ -442,11 +451,35 @@ const roundDurSec = 900
 function orderExpired(o: OrderRow): boolean {
   return o.roundSlot > 0 && Date.now() / 1000 >= (o.roundSlot + 1) * roundDurSec
 }
+
+/**
+ * E28 (§9.5): the account these 挂单/历史 rows belong to. The gateway serves
+ * this panel through ONE long-lived IPC connection, so every read on this page
+ * reflects the SESSION's default account — the switcher's `account <id>` moves
+ * that context, the next poll re-pulls everything through it, and the rows are
+ * filtered locally (lib/account-filter) to the active account. `filtered`
+ * is true only when the kernel actually attributes rows (E28): on a pre-E28
+ * core every row is unattributed and nothing is filtered — the label below
+ * says 范围, not 已过滤, accordingly. Null id = book never fetched.
+ */
+const accountBadge = computed(() => {
+  const id = store.activeAccount
+  if (!id) return ''
+  const row = store.accounts.find((a) => a.id === id)
+  return row?.name ? `${id} · ${row.name}` : id
+})
+const accountFiltered = computed(() =>
+  accountBadge.value !== '' &&
+  (filterByAccount(snap.value?.positions ?? [], store.activeAccount).attributed ||
+    filterByAccount(store.tradeRows, store.activeAccount).attributed),
+)
 const orderRows = computed<OrderRow[]>(() => {
   // snapshot 里已带 orders（网关从 orders.list 拉的同一份）；不在时回落
   // 到专用读路径，两边都是内核的 TrackedOrder wire 形状。
+  // E28 (§9.5): rows are scoped to the session's default account — same
+  // discipline as positions/history (pre-E28 unattributed rows stay visible).
   const fromSnap = (snap.value as unknown as { orders?: OrderRow[] } | null)?.orders
-  return fromSnap ?? []
+  return filterByAccount(fromSnap ?? [], store.activeAccount).rows
 })
 const expiredOrderRows = computed(() => orderRows.value.filter((o) => o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING').filter(orderExpired))
 
@@ -964,6 +997,18 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           ]"
           size="sm"
         />
+        <!-- E28：账户范围标注。真过滤生效（内核带 accountId）时说「已过滤」；
+             老内核/旧记录（accountId 空）只说「范围」，行全显不过滤。 -->
+        <span
+          v-if="accountBadge"
+          class="text-[11.5px] text-faint-fg"
+          :title="accountFiltered
+            ? '本面板连接的默认账户（顶栏可切换）；持仓、挂单与历史已按该账户过滤，无归属的旧行仍然显示'
+            : '本面板连接的默认账户（顶栏可切换）；当前内核未标注行归属，以下为全部行'"
+        >
+          <Info class="mr-1 inline size-3 align-[-1px]" />{{ accountFiltered ? '已按账户过滤' : '账户' }}
+          <span class="text-fg">{{ accountBadge }}</span>
+        </span>
         <!-- issue 456: 批量清理过期挂单 —— 逐单调 orders.force_close，内核
              逐单拒绝仍活着的轮次，逐单写审计。只清理「轮次已过期」的行，
              活跃挂单原样保留（强平只兜幽灵，不做无差别撤单）。 -->

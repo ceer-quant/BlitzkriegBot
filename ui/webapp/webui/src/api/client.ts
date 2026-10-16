@@ -475,6 +475,11 @@ export interface OrderRow {
   filledSize: number | string
   status: string
   roundSlot: number
+  /**
+   * E28 (§9.2): the account the order belongs to. Empty/absent = pre-E28
+   * core — unattributed, shown regardless of the active account.
+   */
+  accountId?: string
 }
 
 /** `orders.force_close` 请求体：只点名订单，判定（幽灵/活轮）在内核。 */
@@ -1507,6 +1512,12 @@ export interface Position {
   remainingSec?: number
   /** #427: the venue the position's market listed on (older cores omit). */
   venue?: string
+  /**
+   * E28 (§9.2): the account the position settles into (gateway forwards the
+   * kernel's own field). Empty/absent = a pre-E28 core — the row is
+   * unattributed and the panel shows it regardless of the active account.
+   */
+  accountId?: string
 }
 
 export interface TradeRow {
@@ -1527,6 +1538,11 @@ export interface TradeRow {
   exitTime?: number
   /** #427: the venue the trade's market listed on (older cores omit). */
   venue?: string
+  /**
+   * E28 (§9.2): the account the trade settled in. Empty/absent = pre-E28
+   * record/core — unattributed, shown regardless of the active account.
+   */
+  accountId?: string
 }
 
 export interface TradeSummary {
