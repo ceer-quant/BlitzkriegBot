@@ -1226,6 +1226,16 @@ pub struct MarketPluginReadout {
     /// True when an explicit `--market-plugin` flag resolved this session —
     /// the UI must say a write cannot move a flag-pinned session.
     pub flag_pinned: bool,
+    /// Where THIS session's enablement came from — the boot's four-layer
+    /// resolution, disclosed: `flag`（显式 --market-plugin）、`accounts`
+    /// （绑定即启用：从账户 venue 绑定派生 —— 本层生效时 market.plugin.set
+    /// 被拒）、`persisted`（旧 market.plugin.set 持久格，仅在无绑定时生效）、
+    /// `fallback`（全空 —— 回落首个注册者）。
+    pub source: &'static str,
+    /// The derived venue set (deduped non-empty `Account.venue` bindings) the
+    /// accounts layer produced — empty whenever `source` is not `accounts`.
+    /// Provenance only, never a decision input.
+    pub derived_venues: Vec<String>,
 }
 
 /// One row of the registered-plugin list.

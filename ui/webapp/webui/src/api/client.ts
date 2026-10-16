@@ -1764,6 +1764,14 @@ export interface MarketPluginReadoutDoc {
   persisted: boolean
   /** 本会话由显式 `--market-plugin` 解析 —— 写入动不了旗标钉住的会话。 */
   flagPinned: boolean
+  /**
+   * 本会话启用来源（boot 四层解析的披露）：`flag`（显式旗标）、
+   * `accounts`（绑定即启用 —— 由账户 venue 绑定派生）、`persisted`
+   * （旧持久格，仅在无绑定时生效）、`fallback`（全空回落首个注册者）。
+   */
+  source?: 'accounts' | 'persisted' | 'flag' | 'fallback'
+  /** 派生出的 venue 集合（去重后的非空账户绑定）；source 非 accounts 时为空。 */
+  derivedVenues?: string[]
   error?: string
 }
 
