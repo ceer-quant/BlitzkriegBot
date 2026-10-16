@@ -30,6 +30,7 @@ import PluginsPage from './pages/Plugins.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import LoginView from './components/LoginView.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
+import AccountSwitcher from './components/AccountSwitcher.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
@@ -187,6 +188,10 @@ onMounted(() => {
           </span>
           <span class="text-[11.5px] text-faint-fg num">{{ modeLabel }}</span>
         </span>
+        <!-- E28 多账户：切换的是本面板连接的默认账户（§9.5 会话级）。成功后
+             AccountSwitcher 自己 store.refresh()，快照/插件读数随下一次轮询
+             全量重拉，无需各页另挂监听。 -->
+        <AccountSwitcher />
         <span class="hidden items-center gap-1.5 text-[11.5px] text-faint-fg xl:flex">
           <Radio class="size-3.5" />
           <span class="num">{{ clockTime(now.getTime()) }}</span>

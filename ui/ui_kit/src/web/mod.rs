@@ -362,6 +362,9 @@ pub fn render_json_full(
             "strategy": p.strategy, "shares": p.shares,
             // #427: the Venue column (empty = undeclared).
             "venue": p.venue,
+            // E28 (§9.2): the account the position settles into (empty on a
+            // pre-E28 core — the panel leaves unattributed rows visible).
+            "accountId": p.account_id,
             "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
         // issue 456: the order book as the kernel tracks it (orders.list wire
         // shape, camelCase). The WebUI's 挂单 card renders it and derives its
@@ -372,6 +375,8 @@ pub fn render_json_full(
             "direction": o.direction, "tokenId": o.token_id, "side": o.side,
             "mode": o.mode, "price": o.price, "size": o.size,
             "filledSize": o.filled_size, "status": o.status,
+            // E28 (§9.2): the account the order belongs to (empty = pre-E28 core).
+            "accountId": o.account_id,
             "roundSlot": o.round_slot })).collect::<Vec<_>>(),
         "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
         // All-time totals (trades.summary): cumulative order count + net profit
@@ -398,6 +403,9 @@ pub fn render_json_full(
             "holdTimeSec": t.hold_time_sec,
             // #427: the Venue column (empty = undeclared).
             "venue": t.venue,
+            // E28 (§9.2): the account the trade settled in (empty = pre-E28
+            // record/core; the panel leaves unattributed rows visible).
+            "accountId": t.account_id,
             "entryTime": t.entry_time, "exitTime": t.exit_time })).collect::<Vec<_>>(),
         // E9-g: per-strategy accounting rows for the plugins/strategies page.
         "strategyStats": s.strategy_stats.iter().map(|r| serde_json::json!({
@@ -2966,6 +2974,7 @@ mod tests {
             filled_size: 0.0,
             status: "LIVE".into(),
             round_slot: 123,
+            account_id: "default".into(),
         }];
         let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
         let row = &doc["orders"][0];
@@ -2973,7 +2982,61 @@ mod tests {
         assert_eq!(row["status"], serde_json::json!("LIVE"));
         assert_eq!(row["roundSlot"], serde_json::json!(123));
         assert_eq!(row["price"], serde_json::json!(0.39));
+        // E28: the account rides along so the panel can filter rows per account.
+        assert_eq!(row["accountId"], serde_json::json!("default"));
         assert_eq!(doc["orders"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    /// E28 (§9.2) backward compatibility: a core older than the account book
+    /// omits `accountId` on every row wire — the views must still parse
+    /// (serde default = empty string) and the gateway must emit the empty
+    /// string rather than drop the key, so the panel can tell "unattributed
+    /// row, show it" apart from "attributed row, filter on it".
+    #[test]
+    fn a_pre_e28_core_without_account_ids_still_parses_and_renders() {
+        // Raw `positions.list` / `trades.history` / `orders.list` shapes as a
+        // pre-E28 core answers them: no accountId anywhere.
+        let pos: crate::core::types::PositionView = serde_json::from_value(serde_json::json!({
+            "id": "p1", "asset": "BTC_UP", "direction": "up", "tokenId": "tok-1",
+            "entryPrice": 0.4, "currentPrice": 0.5, "shares": 10, "unrealizedPct": 25.0
+        }))
+        .expect("a pre-E28 position row must parse without accountId");
+        assert_eq!(pos.account_id, "", "missing accountId defaults to empty");
+
+        let trade: crate::core::types::TradeView = serde_json::from_value(serde_json::json!({
+            "id": "hft-1", "asset": "BTC_UP", "direction": "up",
+            "entryPrice": 0.4, "exitPrice": 0.5, "shares": 10, "netPnlUsd": 1.0
+        }))
+        .expect("a pre-E28 trade row must parse without accountId");
+        assert_eq!(trade.account_id, "");
+
+        let order: crate::core::types::OrderView = serde_json::from_value(serde_json::json!({
+            "orderId": "dry_1", "asset": "BTC_UP", "direction": "up", "tokenId": "tok-1",
+            "side": "buy", "price": 0.4, "size": 10, "status": "LIVE"
+        }))
+        .expect("a pre-E28 order row must parse without accountId");
+        assert_eq!(order.account_id, "");
+
+        // And a NEW-core row (accountId present) parses through the same views.
+        let attributed: crate::core::types::PositionView =
+            serde_json::from_value(serde_json::json!({
+                "id": "p2", "asset": "BTC_UP", "direction": "up", "tokenId": "tok-1",
+                "entryPrice": 0.4, "currentPrice": 0.5, "shares": 10,
+                "unrealizedPct": 25.0, "accountId": "paper"
+            }))
+            .expect("an E28 position row parses with accountId");
+        assert_eq!(attributed.account_id, "paper");
+
+        // The gateway's snapshot mapping forwards whatever it parsed: empty
+        // stays empty (the panel's "show unattributed" signal), "paper" stays
+        // "paper".
+        let mut snap = UiSnapshot::default();
+        snap.positions = vec![pos, attributed];
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        let rows = doc["positions"].as_array().expect("positions array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["accountId"], serde_json::json!(""));
+        assert_eq!(rows[1]["accountId"], serde_json::json!("paper"));
     }
 
     /// #186: a supervisor that has given up must be impossible to miss.

@@ -96,6 +96,12 @@ pub struct PositionView {
     pub token_id: String,
     #[serde(default)]
     pub venue: String,
+    /// E28 (§9.2): the account the position settles into. The kernel's
+    /// `ipc::schema::PositionView` writes it on every row; a core older than
+    /// E28 omits it and the empty string keeps the row visible (the panel
+    /// filters only on a non-empty accountId).
+    #[serde(default)]
+    pub account_id: String,
     #[serde(deserialize_with = "de_num")]
     pub entry_price: f64,
     #[serde(deserialize_with = "de_num")]
@@ -418,6 +424,11 @@ pub struct TradeView {
     /// #427: the venue the trade's market listed on (older cores omit).
     #[serde(default)]
     pub venue: String,
+    /// E28 (§9.2): the account the trade settled in (`trade_db::TradeRecord`
+    /// writes it camelCase on every new row; pre-E28 records and older cores
+    /// omit it → empty string = the panel shows the row unfiltered).
+    #[serde(default)]
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -597,6 +608,10 @@ pub struct OrderView {
     pub status: String,
     #[serde(default)]
     pub round_slot: i64,
+    /// E28 (§9.2): the account the order belongs to (`model::TrackedOrder`
+    /// carries it; cores before E28 omit → empty string, row stays visible).
+    #[serde(default)]
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

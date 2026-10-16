@@ -65,7 +65,6 @@ const doc = ref<AccountsDoc | null>(null)
 
 const active = computed(() => doc.value?.active ?? '')
 const rows = computed(() => doc.value?.accounts ?? [])
-
 async function command(cmd: string): Promise<CommandOutcome> {
   const res = await fetch('/api/command', {
     method: 'POST',
@@ -104,6 +103,20 @@ async function refresh(): Promise<void> {
     if (!out.ok) throw new Error(out.message ?? '账户列表不可用')
     if (!out.data) throw new Error('网关未返回账户数据')
     doc.value = out.data
+    // Mirror into the store: pages read the active id + rows from here to
+    // label their figures (余额瓦片 / 挂单卡 / 插件页信息行) without each
+    // re-speaking the command surface.
+    store.setAccounts(
+      out.data.active,
+      out.data.accounts.map((a) => ({
+        id: a.id,
+        name: a.name,
+        marketType: a.marketType,
+        status: a.status,
+        balance: a.balance,
+        available: a.available,
+      })),
+    )
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -126,6 +139,10 @@ function onKey(e: KeyboardEvent): void {
 onMounted(() => {
   document.addEventListener('click', onOutside)
   document.addEventListener('keydown', onKey)
+  // First paint: the header button shows the active account's id, so the book
+  // is pulled once at mount — not only on open — and the store mirror fills
+  // for every page that labels its figures with it.
+  void refresh()
 })
 onBeforeUnmount(() => {
   document.removeEventListener('click', onOutside)

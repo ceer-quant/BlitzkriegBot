@@ -26,6 +26,18 @@ import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
 
+/**
+ * E28 (只读)：本面板连接的默认账户及其 marketType —— 数据来自 AccountSwitcher
+ * 拉的 `account.list`（store 镜像），本页不发第二个命令。下批给 Account 加
+ * venue 字段后在这里补场地显示；本批只渲染 id / name / marketType / status，
+ * 不预测 wire 上还没有的键。
+ */
+const activeAccountRow = computed(() => {
+  const id = store.activeAccount
+  if (!id) return null
+  return store.accounts.find((a) => a.id === id) ?? { id, name: '', marketType: '', status: '' }
+})
+
 const KIND_META = {
   extension: { label: '扩展插件', icon: Puzzle },
   market: { label: '行情插件', icon: Radio },
@@ -487,6 +499,25 @@ onMounted(loadCredentials)
           </Button>
         </template>
       </CardHeader>
+      <!-- E28：账户 ↔ marketType 信息行（只读）。下单执行的账户语境由顶栏
+           切换器决定；行情插件决定的是数据面 —— 两者在本卡并排对上号。 -->
+      <div
+        v-if="activeAccountRow"
+        class="mx-3 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-panel-2 px-2.5 py-2 text-[12px]"
+      >
+        <span class="text-faint-fg">默认账户</span>
+        <!-- id/name 是标识符不是读数（不滚动），不进 num 槽位（round-header 门禁）。 -->
+        <span class="font-semibold text-fg">{{ activeAccountRow.id }}</span>
+        <span v-if="activeAccountRow.name" class="text-muted-fg">{{ activeAccountRow.name }}</span>
+        <template v-if="activeAccountRow.marketType">
+          <span class="opacity-50">·</span>
+          <span class="text-faint-fg">市场</span>
+          <Badge variant="info">{{ marketTypeLabel(activeAccountRow.marketType) || activeAccountRow.marketType }}</Badge>
+        </template>
+        <span v-if="activeAccountRow.status && activeAccountRow.status !== 'active'" class="text-down">
+          （{{ activeAccountRow.status }}）
+        </span>
+      </div>
       <div v-if="marketDoc && !marketDoc.error" class="px-3 pb-3">
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-[12px] text-faint-fg">本会话活跃：</span>
