@@ -285,38 +285,75 @@ pub async fn run(
     // `None` would leave the handshake inert.
     let registry = crate::market::registry::MarketPluginRegistry::new();
     crate::market::register_builtin_markets(&registry);
-    // The plugin page's persisted cell (data/runtime/config.json `marketPlugin`):
-    // applied ONLY when no explicit `--market-plugin` flag spoke — a flag-pinned
-    // session (replays, censuses, an operator's boot choice) always outranks the
-    // UI toggle, exactly the round-duration cell's precedence. A cell naming a
-    // plugin that is not compiled in is refused with a warning (fall through to
-    // the flag/first-registered resolution) — a stale cell must not brick the
-    // boot, and the readout reports the same refusal.
+    // The enablement chain resolves here — four layers, first non-empty wins:
+    // 1. an explicit `--market-plugin` flag — everything else is ignored
+    //    (replays and the corpus baselines pin their plugin this way);
+    // 2. 绑定即启用: the account book's venue bindings — adding a venue's API
+    //    account IS enabling that venue's plugin; ANY derived set outranks the
+    //    persisted cell, which the boot then retires (migration, one INFO
+    //    line, inside `boot_enablement`);
+    // 3. the persisted cell (the old market.plugin.set write) — kept alive
+    //    only while NO binding speaks;
+    // 4. first-registered — inside `active_market_plugins`, the historical
+    //    fallback.
     let mut plugin = config.market_plugin.clone();
-    if plugin.is_none()
-        && let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
-        })
-    {
+    if plugin.is_none() {
         // Multi-plugin data plane: the value is a comma-separated list
         // ("polymarket,kalshi"; a single name is the historical form). A cell
         // naming ANY plugin that is not compiled in is refused as a whole
         // (same posture as the single-value cell — a stale entry must not
-        // silently boot half a data plane), falling back to the
-        // flag/first-registered resolution.
-        let names = crate::market::parse_plugin_list(&cell.plugin);
-        if !names.is_empty() && names.iter().all(|n| registry.get(n).is_some()) {
+        // silently boot half a data plane), falling back to the next layer.
+        let cell = config
+            .runtime_config_path
+            .as_deref()
+            .and_then(|p| {
+                crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
+            })
+            .filter(|cell| {
+                let names = crate::market::parse_plugin_list(&cell.plugin);
+                !names.is_empty() && names.iter().all(|n| registry.get(n).is_some())
+            });
+        if let Some(cell) = &cell {
             eprintln!(
                 "blitzkrieg-core: market plugin '{}' (persisted UI setting, \
-                 data/runtime/config.json; an explicit --market-plugin outranks it)",
+                 data/runtime/config.json; an explicit --market-plugin and the \
+                 accounts' venue bindings outrank it)",
                 cell.plugin
             );
-            plugin = Some(cell.plugin);
         } else {
+            // A cell that loaded but did not arm (all-commas junk or an
+            // unregistered name) keeps its historical refusal warning — the
+            // operator wrote SOMETHING and must hear why it did not apply.
+            if let Some(raw) = config
+                .runtime_config_path
+                .as_deref()
+                .and_then(|p| {
+                    crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
+                })
+                .map(|c| c.plugin)
+                .filter(|v| !crate::market::parse_plugin_list(v).is_empty())
+            {
+                eprintln!(
+                    "blitzkrieg-core: persisted market plugin '{}' is not fully compiled in — \
+                     the cell is ignored (falling back to the flag/bindings/first-registered)",
+                    raw
+                );
+            }
+        }
+        // The chain resolves through the shared `boot_enablement` — the same
+        // function the readout re-derives with, so `market.plugin.get` can
+        // never disagree with this boot: it returns the cell value (layer 3)
+        // or, when the accounts' derived set wins (layer 2), clears the
+        // retired cell and lets the fallback resolution run.
+        let (resolved, source) =
+            crate::market::boot_enablement(&core, &registry, None, cell.as_ref());
+        plugin = resolved;
+        if source == crate::market::PluginEnableSource::Accounts {
+            let venues = crate::market::derived_venue_set(&core);
             eprintln!(
-                "blitzkrieg-core: persisted market plugin '{}' is not fully compiled in — \
-                 the cell is ignored (falling back to the flag/first-registered)",
-                cell.plugin
+                "blitzkrieg-core: market plugins {venues:?} enabled from the accounts' \
+                 venue bindings (绑定即启用) — market.plugin.set is refused while this \
+                 derivation is live"
             );
         }
     }
