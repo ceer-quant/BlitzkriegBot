@@ -1310,11 +1310,14 @@ pub struct Core {
     /// declaration are ABSENT = undeclared = the handshake does not apply
     /// (§8.1 — every 0.2 library's state).
     strategy_declarations: HashMap<String, Vec<blitzkrieg_strategy_api::StrategyMode>>,
-    /// E27 (§8.2): the active plugin's declaration snapshot, injected by the
+    /// E27 (§8.2): every active plugin's declaration snapshot, injected by the
     /// server assembly BEFORE any strategy is loaded or enabled, so all three
-    /// handshake sites judge against the same view. `None` (backtester,
-    /// tests) leaves the handshake inert: nothing to be incompatible with.
-    plugin_modes: Option<crate::market::compat::PluginModes>,
+    /// handshake sites judge against the same view. Multi-plugin: a strategy's
+    /// declaration must be satisfiable by ANY ONE of these — a venue the
+    /// strategy cannot serve must not block the venues it can. Empty
+    /// (backtester, tests) leaves the handshake inert: nothing to be
+    /// incompatible with.
+    plugin_modes: Vec<crate::market::compat::PluginModes>,
     /// Per-plugin subscription controls (P4 → multi-plugin data plane). The
     /// key is the market-plugin name; with one active plugin this map holds a
     /// single entry and behaves exactly as the old `feed: Option<...>` slot.
@@ -1387,7 +1390,12 @@ pub struct Core {
     /// cancel) while the venue may still hold the order resting. The live
     /// bridge drains this and issues the actual venue cancels — retiring an
     /// order locally without telling the venue leaves a resting orphan.
-    pending_venue_cancels: Vec<String>,
+    /// Each entry carries the owning venue (read off the order token's round
+    /// market at enqueue time; `""` = untagged) so the multi-plugin drain can
+    /// hand every id to ITS venue's executor — the queue is take-once, and a
+    /// sibling executor swallowing another venue's id would strand the cancel
+    /// forever.
+    pending_venue_cancels: Vec<(String, String)>,
     /// Consecutive LIVE venue rejections (a successful placement resets).
     /// Reaching the threshold trips the freeze (kill switch).
     consecutive_venue_rejects: u32,
@@ -1987,7 +1995,7 @@ impl Core {
             strategy_exits: Vec::new(),
             engine: None,
             strategy_declarations: HashMap::new(),
-            plugin_modes: None,
+            plugin_modes: Vec::new(),
             feeds: std::collections::BTreeMap::new(),
             extensions: {
                 use crate::extension::Extension;
@@ -2683,6 +2691,7 @@ impl Core {
                     available: ledger.available(),
                     reserved: ledger.reserved(),
                     credentials_loaded: a.credential_keys.loaded,
+                    venue: a.venue.clone(),
                     open_positions,
                     day_realized_usd,
                     updated_at_ms: a.updated_at_ms,
@@ -2802,31 +2811,57 @@ impl Core {
     /// undeclared strategy participates not (§8.1 — every 0.2 library's
     /// state), and no active plugin (backtester, tests) leaves nothing to
     /// refuse against.
+    ///
+    /// Multi-plugin: the declaration is judged against EVERY snapshot and the
+    /// strategy loads when ANY ONE plugin can serve it; the refusal names each
+    /// plugin's own mismatch so the diagnostic stays complete. Single-plugin
+    /// books render exactly the historical message (no per-plugin prefix).
     fn modes_refusal(
-        plugin: Option<&crate::market::compat::PluginModes>,
+        plugins: &[crate::market::compat::PluginModes],
         name: &str,
         modes: &[blitzkrieg_strategy_api::StrategyMode],
     ) -> Option<String> {
         if modes.is_empty() {
             return None;
         }
-        let plugin = plugin?;
-        crate::market::compat::check_compatibility(name, modes, plugin).err()
+        if plugins.is_empty() {
+            return None;
+        }
+        let refusals: Vec<String> = plugins
+            .iter()
+            .filter_map(|p| crate::market::compat::check_compatibility(name, modes, p).err())
+            .collect();
+        if refusals.len() < plugins.len() {
+            // At least one plugin passed (its refusal is absent): ANY one
+            // satisfiable venue loads the strategy — a venue the strategy
+            // cannot serve must not block the venues it can.
+            return None;
+        }
+        // Every plugin refused: the diagnostic names each mismatch. ONE plugin
+        // → the bare historical message, byte-identical; several → prefixed
+        // and joined so the full mismatch surface is visible.
+        if plugins.len() == 1 {
+            return refusals.into_iter().next();
+        }
+        Some(format!(
+            "incompatible modes: strategy '{name}' is not served by any active plugin — {}",
+            refusals.join(" | ")
+        ))
     }
 
     /// The handshake verdict for a strategy already in the dispatch, by name.
     pub(crate) fn compatibility_refusal(&self, name: &str) -> Option<String> {
         match self.strategy_declarations.get(name) {
-            Some(modes) => Self::modes_refusal(self.plugin_modes.as_ref(), name, modes),
+            Some(modes) => Self::modes_refusal(&self.plugin_modes, name, modes),
             None => None,
         }
     }
 
-    /// Inject the active plugin's declaration snapshot (server assembly,
+    /// Inject every active plugin's declaration snapshot (server assembly,
     /// BEFORE any strategy is loaded or enabled, so all three §8.2 handshake
-    /// sites judge against the same view). `None` leaves the handshake inert
+    /// sites judge against the same view). Empty leaves the handshake inert
     /// (backtester, tests).
-    pub fn set_plugin_modes(&mut self, modes: Option<crate::market::compat::PluginModes>) {
+    pub fn set_plugin_modes(&mut self, modes: Vec<crate::market::compat::PluginModes>) {
         self.plugin_modes = modes;
     }
 
@@ -2875,7 +2910,7 @@ impl Core {
                     .iter()
                     .map(blitzkrieg_strategy_api::modes::mode_wire_json)
                     .collect();
-                let refusal = Self::modes_refusal(self.plugin_modes.as_ref(), name, modes);
+                let refusal = Self::modes_refusal(&self.plugin_modes, name, modes);
                 (serde_json::Value::Array(wire), refusal.is_none(), refusal)
             }
         }
@@ -3339,11 +3374,8 @@ impl Core {
                     // logs, so the library registers disabled and the receipt
                     // itself names the mismatch; the enable handshake is the
                     // gate there. Either way the text names both sides (R-B).
-                    let refusal = Self::modes_refusal(
-                        self.plugin_modes.as_ref(),
-                        &name,
-                        &loaded.declared_modes,
-                    );
+                    let refusal =
+                        Self::modes_refusal(&self.plugin_modes, &name, &loaded.declared_modes);
                     if enforce && let Some(refusal) = refusal {
                         // `refusal` already opens with "incompatible modes:" and
                         // names both sides (§8.2) — prefix only the verdict tag.
@@ -3446,7 +3478,7 @@ impl Core {
                 let exemptions = loaded.gate_exemptions;
                 // E27 (§8.2): the SAME handshake verdict BEFORE registration.
                 let refusal =
-                    Self::modes_refusal(self.plugin_modes.as_ref(), &name, &loaded.declared_modes);
+                    Self::modes_refusal(&self.plugin_modes, &name, &loaded.declared_modes);
                 if enforce && let Some(refusal) = refusal {
                     return format!("Failed: {refusal}");
                 }
@@ -5916,6 +5948,9 @@ impl Core {
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
         self.refuse_cross_account_close(&req)?;
+        // Account↔venue binding (first batch), same rule as `place`: an
+        // account pinned to venue V may not trade another venue's tokens.
+        self.refuse_cross_venue_order(&req)?;
         self.risk
             .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
         let id = self.new_order_id();
@@ -7380,6 +7415,33 @@ impl Core {
             .collect()
     }
 
+    /// [`Self::pending_unbound`] filtered to ONE venue: the multi-plugin
+    /// executor drain. A pending order's venue is read off the token's
+    /// CURRENT round market (the same lookup the position book's Venue column
+    /// uses); an order whose token belongs to no live market, or to a market
+    /// with no venue label, is UNTAGGED and routes to the requested plugin
+    /// only when it is the host's active plugin — the single-plugin
+    /// behaviour, unchanged. With the lookup empty (engine down, replay
+    /// corpora) every order is untagged, so each executor sees all of them
+    /// exactly as the pre-routing bridge did.
+    pub fn pending_unbound_for_venue(&self, venue: &str) -> Vec<TrackedOrder> {
+        self.pending_unbound()
+            .into_iter()
+            .filter(|o| self.venue_of_token(&o.token_id) == venue)
+            .collect()
+    }
+
+    /// The venue a token belongs to under the live round list, `""` when the
+    /// engine is down or the token belongs to no labelled market. Empty means
+    /// UNTAGGED, never "venue empty-string": callers route untagged work to
+    /// the active plugin instead of guessing.
+    pub fn venue_of_token(&self, token_id: &str) -> String {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.venue_of(token_id))
+            .unwrap_or_default()
+    }
+
     /// Attach the venue id returned by a successful LIVE POST and mark it live.
     pub fn bind_venue(
         &mut self,
@@ -7795,7 +7857,8 @@ impl Core {
             self.fast_orders_dirty = true;
         }
         if was_live && let Some(vid) = order.venue_order_id {
-            self.queue_venue_cancel(vid);
+            let venue = self.venue_of_token(&order.token_id);
+            self.queue_venue_cancel(venue, vid);
         }
         tracing::warn!(
             order = %id,
@@ -9162,6 +9225,38 @@ impl Core {
         Ok(())
     }
 
+    /// Account↔venue binding (first batch): an order whose token belongs to a
+    /// DIFFERENT venue's live round market than the account is pinned to is
+    /// refused, naming both venues. Untagged on either side passes — an
+    /// unbound account (`venue == ""`, the zero-config default) trades
+    /// anywhere, and an order whose token belongs to no labelled market (the
+    /// engine down, a legacy corpus) carries no venue evidence to judge. The
+    /// token→venue lookup is the SAME one the executor drain and the panels'
+    /// Venue column use.
+    fn refuse_cross_venue_order(&self, req: &OrderRequest) -> CoreResult<()> {
+        let Some(account) = self.accounts.account(&req.account_id) else {
+            // Unknown accounts are refused by the ledger lookup right after;
+            // nothing venue-shaped to check here.
+            return Ok(());
+        };
+        let bound = account.venue.as_str();
+        if bound.is_empty() {
+            return Ok(());
+        }
+        let token_venue = self.venue_of_token(&req.token_id);
+        if token_venue.is_empty() || token_venue == bound {
+            return Ok(());
+        }
+        Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "cross-venue order refused: account `{}` is bound to venue `{bound}` but the \
+                 order's token {} belongs to venue `{token_venue}`",
+                req.account_id, req.token_id
+            ),
+        ))
+    }
+
     fn place_gated(
         &mut self,
         mut req: OrderRequest,
@@ -9197,6 +9292,16 @@ impl Core {
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
         self.refuse_cross_account_close(&req)?;
+        // Account↔venue binding (first batch): an account pinned to venue V
+        // may not trade a token that belongs to venue W's round market —
+        // money must not leave through a book that was never wired to that
+        // venue. Unbound accounts (venue == "") and orders whose token
+        // belongs to no labelled live market pass untouched, so the 0.2
+        // single-plugin behaviour is bit-identical. The account.switch
+        // linkage (switching accounts switching the default plugin) is left
+        // for the next batch — the "switch" semantics (session vs process
+        // level) are still ambiguous and must not be guessed here.
+        self.refuse_cross_venue_order(&req)?;
         // #202: the equity-relative per-order cap is a percentage of the account
         // AT SUBMISSION, so the gate is handed the live balance rather than a
         // remembered copy of it. E28: the account is the one the request names —
@@ -9886,17 +9991,25 @@ impl Core {
         // bridge for a real cancel. Nothing to cancel when the venue never
         // acknowledged the order (no id — the venue never heard of it).
         if was_live && let Some(vid) = order.venue_order_id {
-            self.queue_venue_cancel(vid);
+            let venue = self.venue_of_token(&order.token_id);
+            self.queue_venue_cancel(venue, vid);
         }
         self.emit_order(id);
         Ok(())
     }
 
-    /// Enqueue one venue cancel (deduped, bounded so a pathological loop
+    /// Enqueue one venue cancel (deduped by id, bounded so a pathological loop
     /// cannot grow it without bound). The live bridge drains it every tick.
-    fn queue_venue_cancel(&mut self, venue_order_id: String) {
-        if !self.pending_venue_cancels.contains(&venue_order_id) {
-            self.pending_venue_cancels.push(venue_order_id);
+    /// `venue` labels the entry for the per-venue executor drain (`""` =
+    /// untagged — routes to the active plugin's drain, the single-plugin
+    /// behaviour).
+    fn queue_venue_cancel(&mut self, venue: String, venue_order_id: String) {
+        if !self
+            .pending_venue_cancels
+            .iter()
+            .any(|(_, id)| id == &venue_order_id)
+        {
+            self.pending_venue_cancels.push((venue, venue_order_id));
             if self.pending_venue_cancels.len() > 256 {
                 self.pending_venue_cancels.remove(0);
             }
@@ -9907,6 +10020,31 @@ impl Core {
     /// a real `DELETE /order` — see [`Self::cancel`].
     pub fn take_pending_venue_cancels(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_venue_cancels)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// The multi-plugin drain: every cancel id whose order's round market
+    /// names `venue`, plus the UNTAGGED ids when `venue` is the host's active
+    /// plugin (the single-plugin fallback the orders drain uses). Take-once
+    /// per entry: a sibling executor never sees an id this drain returned.
+    pub fn take_pending_venue_cancels_for_venue(
+        &mut self,
+        venue: &str,
+        untagged_fallback: bool,
+    ) -> Vec<String> {
+        let mut taken = Vec::new();
+        let mut rest = Vec::new();
+        for (v, id) in std::mem::take(&mut self.pending_venue_cancels) {
+            if v == venue || (untagged_fallback && v.is_empty()) {
+                taken.push(id);
+            } else {
+                rest.push((v, id));
+            }
+        }
+        self.pending_venue_cancels = rest;
+        taken
     }
 
     /// E31-c: retire the RESTING remainder of a partially filled order while
@@ -13585,12 +13723,19 @@ mod tests {
             "the refusal names the missing audit: {err}"
         );
 
-        // 有审计路径 → 重置落地：记录清空、余额复原、审计行存在。
+        // 有审计路径 → 重置落地：记录清空、余额复原、审计行存在。The three
+        // log paths are PRIVATE absolute paths: the reset self-check counts
+        // the log files and parallel tests trade on the default RELATIVE
+        // data/ paths (in a cwd this test family used to hijack), so a
+        // shared path would count a neighbour's lines as a failed reset.
         let dir = reset_audit_dir("happy");
         let audit = dir.join("manual-ops.jsonl");
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
         let mut c = Core::new(CoreConfig {
             manual_ops_audit_path: Some(audit.to_string_lossy().into_owned()),
-            trade_log_path: Some(dir.join("trades.jsonl").to_string_lossy().into_owned()),
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: log("orders.jsonl"),
+            position_log_path: log("positions.jsonl"),
             dry_seed_balance: Decimal::from(5_000),
             ..Default::default()
         });
@@ -15687,14 +15832,14 @@ mod strategy_dispatch_tests {
         // adapters are about to declare (prediction/binary_outcome_wheel,
         // set below through the same registration record the loader keeps).
         // This is the production shape of a plugin switch.
-        c.set_plugin_modes(Some(PluginModes {
+        c.set_plugin_modes(vec![PluginModes {
             name: "spot_venue".into(),
             modes: vec![blitzkrieg_market_api::MarketMode {
                 market_type: MarketType::Spot,
                 structure: None,
                 capabilities: blitzkrieg_market_api::MarketCapabilities::NONE,
             }],
-        }));
+        }]);
         cfg.install_engine(&mut c).expect("engine install");
         let cfg2 = cfg.engine_config();
         crate::strategies::test_support::host_disabled(
@@ -15737,6 +15882,103 @@ mod strategy_dispatch_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E27 multi-plugin handshake: ANY active plugin can serve ─────────────
+
+    fn prediction_plugin_modes(name: &str) -> crate::market::compat::PluginModes {
+        crate::market::compat::PluginModes {
+            name: name.into(),
+            modes: vec![blitzkrieg_market_api::MarketMode {
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                structure: Some(blitzkrieg_market_api::MarketStructure::BinaryOutcomeWheel),
+                capabilities: blitzkrieg_market_api::MarketCapabilities::NONE,
+            }],
+        }
+    }
+
+    fn spot_plugin_modes(name: &str) -> crate::market::compat::PluginModes {
+        crate::market::compat::PluginModes {
+            name: name.into(),
+            modes: vec![blitzkrieg_market_api::MarketMode {
+                market_type: blitzkrieg_market_api::MarketType::Spot,
+                structure: None,
+                capabilities: blitzkrieg_market_api::MarketCapabilities::NONE,
+            }],
+        }
+    }
+
+    fn prediction_declaration() -> Vec<blitzkrieg_strategy_api::StrategyMode> {
+        vec![blitzkrieg_strategy_api::StrategyMode {
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            structure: Some(blitzkrieg_market_api::MarketStructure::BinaryOutcomeWheel),
+        }]
+    }
+
+    #[test]
+    fn a_declaration_served_by_any_active_plugin_loads() {
+        // polymarket can serve the prediction declaration; kalshi (spot-shaped
+        // here, only to make a second distinct plugin) cannot. Any one
+        // satisfiable plugin loads the strategy — a venue the strategy cannot
+        // serve must not block the venues it can.
+        let mut c = Core::new(CoreConfig::default());
+        c.set_plugin_modes(vec![
+            prediction_plugin_modes("polymarket"),
+            spot_plugin_modes("kalshi"),
+        ]);
+        c.set_strategy_declarations_for_test("served", prediction_declaration());
+        assert!(
+            c.compatibility_refusal("served").is_none(),
+            "one satisfiable plugin is enough: {:?}",
+            c.compatibility_refusal("served")
+        );
+    }
+
+    #[test]
+    fn a_declaration_no_plugin_serves_names_every_plugin() {
+        // A FUTURES declaration against a prediction plugin and a spot plugin:
+        // both refuse, and the diagnostic names BOTH plugins so the operator
+        // can see the full mismatch surface.
+        let mut c = Core::new(CoreConfig::default());
+        c.set_plugin_modes(vec![
+            prediction_plugin_modes("polymarket"),
+            spot_plugin_modes("kalshi"),
+        ]);
+        c.set_strategy_declarations_for_test(
+            "unserved",
+            vec![blitzkrieg_strategy_api::StrategyMode {
+                market_type: blitzkrieg_market_api::MarketType::Futures,
+                structure: None,
+            }],
+        );
+        let refusal = c.compatibility_refusal("unserved").expect("all refused");
+        assert!(refusal.contains("polymarket"), "{refusal}");
+        assert!(refusal.contains("kalshi"), "{refusal}");
+        assert!(refusal.contains("futures"), "{refusal}");
+    }
+
+    #[test]
+    fn a_single_plugin_refusal_keeps_the_historical_message() {
+        // One plugin, refused: the message must be byte-identical to the
+        // pre-multi-plugin wording (no per-plugin prefix, no join separator).
+        let mut c = Core::new(CoreConfig::default());
+        c.set_plugin_modes(vec![spot_plugin_modes("spot_venue")]);
+        c.set_strategy_declarations_for_test("s", prediction_declaration());
+        let refusal = c.compatibility_refusal("s").expect("refused");
+        assert!(
+            refusal.starts_with("incompatible modes: strategy 's' wants ["),
+            "the historical format, unprefixed: {refusal}"
+        );
+        assert_eq!(refusal.matches("incompatible modes:").count(), 1);
+    }
+
+    #[test]
+    fn an_empty_plugin_snapshot_leaves_the_handshake_inert() {
+        // Backtester / tests: no snapshot injected, nothing refuses.
+        let mut c = Core::new(CoreConfig::default());
+        c.set_plugin_modes(Vec::new());
+        c.set_strategy_declarations_for_test("s", prediction_declaration());
+        assert!(c.compatibility_refusal("s").is_none());
     }
 
     /// No `strategy_state_path` (backtests, most tests) — a toggle works but
@@ -21141,6 +21383,7 @@ mod audit_fix_tests {
                     market_type: blitzkrieg_market_api::MarketType::Prediction,
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -21149,6 +21392,7 @@ mod audit_fix_tests {
                     market_type: blitzkrieg_market_api::MarketType::Prediction,
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -21218,6 +21462,172 @@ mod audit_fix_tests {
         assert!(
             c.ledger().balance() > SEED,
             "default's book took the profit"
+        );
+    }
+
+    // ── Account↔venue binding (first batch) ─────────────────────────────────
+
+    /// A two-account core where `default` is PINNED to venue `polymarket` and
+    /// `paper` is unbound. The engine carries two labelled round markets so
+    /// the token→venue lookup has something real to read.
+    fn venue_bound_core() -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "polymarket".into(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                risk: RiskConfig {
+                    max_order_notional: dec!(100),
+                    ..Default::default()
+                },
+                dry_seed_balance: SEED,
+                auto_exits_enabled: false,
+                // These fixtures PLACE orders: the default config's relative
+                // data/ log paths would append into whatever the process cwd
+                // is at this instant (parallel tests move it), re-dirtying
+                // the reset tests' self-check. A fixture that trades carries
+                // no durable logs — same contract as `hot_reload_fixture`.
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            },
+            book,
+        );
+        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig {
+            scanner: crate::scanner::ScannerConfig {
+                assets: vec!["BTC".into()],
+                round_duration_sec: 900,
+                min_round_age_sec: 0,
+                min_time_left_sec: 0,
+            },
+            ..Default::default()
+        }));
+        let now: i64 = 1_000_000;
+        let slot = now / 1000 / 900;
+        let market = |venue: &str, up: &str, down: &str| crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-{venue}"),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![
+                    market("polymarket", "poly-up", "poly-down"),
+                    market("kalshi", "kal-up", "kal-down"),
+                ],
+                now_ms: now,
+            },
+            now,
+        );
+        c
+    }
+
+    fn bound_order(token: &str, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Maker,
+            price: dec!(0.40),
+            size: dec!(1),
+            internal_key: key.into(),
+            strategy: STRATEGY.into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    #[test]
+    fn an_order_for_another_venue_is_refused_when_the_account_is_bound() {
+        let mut c = venue_bound_core();
+        // `default` is pinned to polymarket; the kalshi token belongs to
+        // another venue's round market — refused, naming BOTH venues.
+        let err = c.place(bound_order("kal-up", "k1"), 0, 1).unwrap_err();
+        assert!(err.message.contains("cross-venue order refused"), "{err}");
+        assert!(
+            err.message.contains("`polymarket`") && err.message.contains("`kalshi`"),
+            "the refusal must name both venues: {err}"
+        );
+        // The order never reached the book.
+        assert!(c.list_orders().is_empty());
+    }
+
+    #[test]
+    fn a_bound_account_trades_its_own_venue_and_an_unbound_one_trades_anywhere() {
+        let mut c = venue_bound_core();
+        // The account's OWN venue: passes.
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+        // The UNBOUND account on the OTHER venue: passes — binding restricts
+        // only the account that declares it.
+        let mut paper = bound_order("kal-up", "k2");
+        paper.account_id = crate::account::AccountId::from("paper");
+        c.place(paper, 0, 2).unwrap();
+        assert_eq!(c.list_orders().len(), 2);
+    }
+
+    #[test]
+    fn an_order_on_an_unlabelled_token_passes_the_venue_guard() {
+        // A token that belongs to NO live labelled market carries no venue
+        // evidence — the guard cannot judge it, so it passes (the legacy /
+        // unlabelled-host behaviour). Whatever refuses it must be another
+        // gate with its own reason.
+        let mut c = venue_bound_core();
+        let out = c.place(bound_order("ghost-token", "k1"), 0, 1);
+        assert!(
+            out.is_ok() || !out.unwrap_err().message.contains("cross-venue"),
+            "an untagged token is not venue evidence"
+        );
+    }
+
+    #[test]
+    fn account_views_carry_the_venue_binding() {
+        let c = venue_bound_core();
+        let views = c.account_views(1);
+        let by_id = |id: &str| {
+            views
+                .iter()
+                .find(|v| v.id == id)
+                .unwrap_or_else(|| panic!("no view for {id}"))
+        };
+        assert_eq!(by_id("default").venue, "polymarket");
+        assert_eq!(
+            by_id("paper").venue,
+            "",
+            "unbound renders as the empty string"
         );
     }
 

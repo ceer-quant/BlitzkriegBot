@@ -198,6 +198,14 @@ pub struct Account {
     pub status: AccountStatus,
     #[serde(default)]
     pub credential_keys: CredentialKeys,
+    /// The venue this account trades on (a market-plugin name, e.g.
+    /// `polymarket`). Empty = UNBOUND: the account may trade any venue — the
+    /// 0.2 behaviour, and what `single_default()` and a file without the
+    /// field produce. Non-empty: `orders.place` refuses an order whose token
+    /// belongs to a different venue's round market (money must not leave
+    /// through a book that was never wired to that venue).
+    #[serde(default)]
+    pub venue: String,
     pub updated_at_ms: i64,
 }
 
@@ -249,6 +257,9 @@ impl AccountLedgers {
                 market_type: MarketType::Prediction,
                 status: AccountStatus::Active,
                 credential_keys: CredentialKeys::default(),
+                // Zero-config deployment: unbound — trades whatever venue is
+                // active, exactly the 0.2 behaviour.
+                venue: String::new(),
                 updated_at_ms: now_ms,
             }],
             default_account_id(),
@@ -402,6 +413,7 @@ mod book_tests {
                     market_type: MarketType::Prediction,
                     status: AccountStatus::Active,
                     credential_keys: CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: 1,
                 },
                 Account {
@@ -410,6 +422,7 @@ mod book_tests {
                     market_type: MarketType::Prediction,
                     status: AccountStatus::ReadOnly,
                     credential_keys: CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: 1,
                 },
             ],

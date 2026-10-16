@@ -94,10 +94,11 @@ impl MarketHost for BookSink {
     // reverse-acceptance gates below only observe the data ingress path.
     fn take_pending_orders(
         &self,
+        _: &str,
     ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::PendingOrder>> {
         Box::pin(async { Vec::new() })
     }
-    fn take_pending_cancels(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
     fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {

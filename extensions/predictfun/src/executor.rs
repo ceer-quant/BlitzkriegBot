@@ -263,7 +263,7 @@ pub(crate) async fn executor_loop(
         // 1) Cancels first (same serialization rule as the sibling executors:
         //    the old order is gone before a replacement is submitted).
         let mut cancel_strikes = 0u32;
-        for id in host.take_pending_cancels().await {
+        for id in host.take_pending_cancels("predictfun").await {
             match client.cancel_orders(&[&id]).await {
                 Ok(_) => host.note_orphan_cancelled(&id).await,
                 Err(e) => {
@@ -274,9 +274,11 @@ pub(crate) async fn executor_loop(
             }
         }
 
-        // 2) Submit locally-accepted orders.
+        // 2) Submit locally-accepted orders. `take_pending_orders` routes by
+        //    this plugin's venue name — with multiple executors running, each
+        //    drains only ITS venue's orders.
         if cancel_strikes == 0 {
-            for order in host.take_pending_orders().await {
+            for order in host.take_pending_orders("predictfun").await {
                 match place(&client, &signer, &order, &mut token_idsentities).await {
                     Ok((placed, order_hash)) => {
                         place_failures = 0;

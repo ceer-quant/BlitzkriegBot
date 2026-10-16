@@ -272,17 +272,60 @@ impl MarketHost for CoreHost {
         })
     }
 
-    fn take_pending_orders(&self) -> BoxFuture<'_, Vec<api::PendingOrder>> {
+    fn take_pending_orders<'a>(&'a self, plugin: &str) -> BoxFuture<'a, Vec<api::PendingOrder>> {
+        let plugin = plugin.to_string();
         Box::pin(async move {
             let c = self.core.lock().await;
-            c.pending_unbound().iter().map(pending_to_api).collect()
+            // Per-venue executor drain (multi-plugin): each executor pulls only
+            // the orders whose token's round market names ITS venue. An order
+            // whose token belongs to no live labelled market is UNTAGGED and
+            // routes to the ACTIVE plugin's drain — the single-plugin fallback
+            // the task pins. When no active plugin was ever set (hosts that
+            // skipped `set_active_plugin`, most in-process tests), the legacy
+            // "" bucket takes ALL orders: the exact pre-routing behaviour.
+            // Single pass over `live_orders()` order, so the drain order the
+            // historical bridge saw is untouched.
+            let active = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
+            let legacy_all = active.is_empty();
+            c.pending_unbound()
+                .iter()
+                .filter(|o| {
+                    let venue = c.venue_of_token(&o.token_id);
+                    legacy_all || venue == plugin || (venue.is_empty() && plugin == active)
+                })
+                .map(pending_to_api)
+                .collect()
         })
     }
 
-    fn take_pending_cancels(&self) -> BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels<'a>(&'a self, plugin: &str) -> BoxFuture<'a, Vec<String>> {
+        let plugin = plugin.to_string();
         Box::pin(async move {
             let mut c = self.core.lock().await;
-            c.take_pending_venue_cancels()
+            // Per-venue cancel drain: the queue is take-once, so with multiple
+            // executors each must pull only ITS venue's ids — a sibling
+            // swallowing them first would strand the cancel forever (the
+            // resting orphan). Untagged ids (order placed before the round
+            // list carried a venue label) fall back to the ACTIVE plugin's
+            // drain, matching the orders-drain fallback; hosts that never set
+            // an active plugin get the whole queue under the legacy "" bucket
+            // — the pre-routing behaviour.
+            let active = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
+            let untagged_fallback = plugin == active && !active.is_empty();
+            let legacy_all = active.is_empty();
+            if legacy_all {
+                c.take_pending_venue_cancels()
+            } else {
+                c.take_pending_venue_cancels_for_venue(&plugin, untagged_fallback)
+            }
         })
     }
 
@@ -476,6 +519,16 @@ impl MarketHost for CoreHost {
     }
 
     fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<api::RedemptionRequest>> {
+        // Multi-plugin note (left for the next batch, deliberately): the
+        // request carries only condition_id/neg_risk/outcome_shares — no venue
+        // field — so a per-venue split needs an ABI addition, not just a
+        // filter. Today it is SAFE to leave global: only the polymarket bridge
+        // consumes this queue (single consumer), the CTF redeem burns the
+        // caller's OWN tokens (a wrong-venue request cannot move another
+        // venue's collateral), and a foreign condition_id fails its bytes32
+        // parse or mines a no-op whose zero payout the receipt audit refuses
+        // (`paid_to_holder == 0 < expected`) — a harmless failure, retried on
+        // backoff, never a mis-directed transfer.
         Box::pin(async move {
             let now = now_ms();
             let mut c = self.core.lock().await;
@@ -492,6 +545,13 @@ impl MarketHost for CoreHost {
     }
 
     fn take_pending_merges(&self) -> BoxFuture<'_, Vec<api::MergeRequest>> {
+        // Multi-plugin note (left for the next batch, deliberately): same
+        // verdict as `take_pending_redemptions` — the request carries no venue
+        // field (ABI addition needed for a real split), the only consumer is
+        // the polymarket bridge, and a merge of a foreign condition_id burns
+        // nothing (the CTF `mergePositions` reverts with no pairs held or
+        // mines a no-op), reported as a failed claim and retried — no
+        // collateral can land on the wrong venue.
         Box::pin(async move {
             let now = now_ms();
             let mut c = self.core.lock().await;
@@ -505,5 +565,261 @@ impl MarketHost for CoreHost {
             let mut c = self.core.lock().await;
             c.on_merge_result(result, now);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    use crate::model::{Mode, OrderRequest};
+    use crate::risk::RiskConfig;
+    use crate::service::{Core, CoreConfig};
+    use blitzkrieg_market_api::{FillPolicy, MarketType};
+
+    /// A LIVE core with the engine installed and TWO labelled round markets —
+    /// `poly-up`/`poly-down` on venue `polymarket` and `kal-up`/`kal-down` on
+    /// venue `kalshi` — so a pending order's token carries a venue to route
+    /// by. Books are seeded for both tokens so the entries can rest.
+    fn two_venue_live_core() -> Core {
+        let mut c = Core::new(CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(10_000),
+            round_duration_sec: 900,
+            // These tests PLACE live orders: the default config's relative
+            // data/ log paths would append into the process cwd (parallel
+            // tests move it), re-dirtying the reset tests' self-check. A
+            // fixture that trades carries no durable logs.
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        });
+        c.set_balance(dec!(10));
+        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig {
+            scanner: crate::scanner::ScannerConfig {
+                assets: vec!["BTC".into()],
+                round_duration_sec: 900,
+                min_round_age_sec: 0,
+                min_time_left_sec: 0,
+            },
+            ..Default::default()
+        }));
+        let now: i64 = 1_000_000;
+        let slot = now / 1000 / 900;
+        let market = |venue: &str, up: &str, down: &str| crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-{venue}"),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![
+                    market("polymarket", "poly-up", "poly-down"),
+                    market("kalshi", "kal-up", "kal-down"),
+                ],
+                now_ms: now,
+            },
+            now,
+        );
+        c
+    }
+
+    fn live_order(token: &str, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side: crate::model::Side::Buy,
+            mode: FillPolicy::Maker,
+            price: dec!(0.40),
+            size: dec!(1),
+            internal_key: key.into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_orders_route_by_the_token_round_venue() {
+        let mut c = two_venue_live_core();
+        // One maker per venue — both rest Pending→Live... (LIVE mode keeps the
+        // order Pending until the venue acks, which is exactly the unbound
+        // queue the executors drain).
+        let (poly_id, _) = c.place(live_order("poly-up", "k1"), 0, 1).unwrap();
+        let (kal_id, _) = c.place(live_order("kal-up", "k2"), 0, 2).unwrap();
+
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        host.set_active_plugin("polymarket");
+
+        // Each executor drains ONLY its own venue's orders.
+        let poly_drain = host.take_pending_orders("polymarket").await;
+        assert_eq!(
+            poly_drain
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![poly_id.as_str()],
+            "the polymarket executor must take only the polymarket order"
+        );
+        let kal_drain = host.take_pending_orders("kalshi").await;
+        assert_eq!(
+            kal_drain
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![kal_id.as_str()],
+            "the kalshi executor must take only the kalshi order — cross-venue \
+             orders must never leak into the sibling drain"
+        );
+        // The drain is a per-tick RE-READ, not take-once: an order leaves the
+        // pending set only when its venue id binds (`on_order_accepted`). So
+        // re-draining returns the SAME order — the routing property is who
+        // sees what, never a consume-once partition.
+        let again = host.take_pending_orders("polymarket").await;
+        assert_eq!(
+            again
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![poly_id.as_str()],
+            "re-draining before the venue acks re-offers the same order"
+        );
+        assert_eq!(
+            host.take_pending_orders("kalshi")
+                .await
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![kal_id.as_str()]
+        );
+    }
+
+    #[tokio::test]
+    async fn untagged_orders_fall_back_to_the_active_plugin_drain() {
+        let mut c = two_venue_live_core();
+        // A token that belongs to NO labelled round market (the legacy /
+        // unlabelled-host case): the venue lookup comes back empty.
+        let (id, _) = c.place(live_order("ghost-token", "k1"), 0, 1).unwrap();
+
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        host.set_active_plugin("polymarket");
+
+        // The ACTIVE plugin's drain takes the untagged order (the
+        // single-plugin fallback); the sibling does not.
+        let poly_drain = host.take_pending_orders("polymarket").await;
+        assert_eq!(
+            poly_drain
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![id.as_str()],
+            "untagged orders route to the active plugin — the single-plugin \
+             behaviour preserved"
+        );
+        assert!(
+            host.take_pending_orders("kalshi").await.is_empty(),
+            "a sibling executor must not take the untagged order"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_host_without_active_plugin_takes_all_orders() {
+        let mut c = two_venue_live_core();
+        let (poly_id, _) = c.place(live_order("poly-up", "k1"), 0, 1).unwrap();
+        let (kal_id, _) = c.place(live_order("kal-up", "k2"), 0, 2).unwrap();
+
+        // No `set_active_plugin` call — hosts that never told the core who is
+        // active (most in-process tests). The legacy "" bucket takes ALL
+        // orders: the exact pre-routing behaviour.
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        let drain = host.take_pending_orders("").await;
+        let mut got: Vec<&str> = drain.iter().map(|o| o.core_order_id.as_str()).collect();
+        got.sort();
+        let mut want: Vec<&str> = vec![poly_id.as_str(), kal_id.as_str()];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "no active plugin = the historical one-drain-takes-all behaviour"
+        );
+    }
+
+    #[tokio::test]
+    async fn venue_cancels_route_to_the_owning_executor() {
+        let mut c = two_venue_live_core();
+        // Bind venue ids so a cancel queues a REAL venue cancel.
+        let (poly_id, _) = c.place(live_order("poly-up", "k1"), 0, 1).unwrap();
+        c.bind_venue(&poly_id, "poly-v1".into(), 2).unwrap();
+        let (kal_id, _) = c.place(live_order("kal-up", "k2"), 0, 3).unwrap();
+        c.bind_venue(&kal_id, "kal-v1".into(), 4).unwrap();
+        c.cancel(&poly_id, 5).unwrap();
+        c.cancel(&kal_id, 6).unwrap();
+
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        host.set_active_plugin("polymarket");
+
+        // Each executor cancels only ITS venue's ids: the queue is take-once,
+        // so a sibling swallowing the other's id would strand the cancel.
+        assert_eq!(
+            host.take_pending_cancels("polymarket").await,
+            vec!["poly-v1".to_string()]
+        );
+        assert_eq!(
+            host.take_pending_cancels("kalshi").await,
+            vec!["kal-v1".to_string()]
+        );
+        assert!(host.take_pending_cancels("polymarket").await.is_empty());
+        assert!(host.take_pending_cancels("kalshi").await.is_empty());
+    }
+
+    /// Pins the drain's market-lookup wiring: a token whose round market
+    /// carries a venue reaches exactly that venue's drain, through the SAME
+    /// `venue_of` read the panels' Venue column uses.
+    #[test]
+    fn the_token_venue_lookup_reads_the_round_list() {
+        let c = two_venue_live_core();
+        assert_eq!(c.venue_of_token("poly-up"), "polymarket");
+        assert_eq!(c.venue_of_token("kal-down"), "kalshi");
+        assert_eq!(c.venue_of_token("ghost-token"), "");
+    }
+
+    /// The handshake judge stays single-plugin; this pins its wire shape so a
+    /// signature change here is a deliberate act, not a drive-by.
+    #[test]
+    fn compat_judge_keeps_its_single_plugin_signature() {
+        let p = crate::market::compat::PluginModes::for_plugin(&BarePlugin);
+        let modes = vec![blitzkrieg_strategy_api::StrategyMode {
+            market_type: MarketType::Prediction,
+            structure: None,
+        }];
+        assert!(crate::market::compat::check_compatibility("s", &modes, &p).is_ok());
+    }
+
+    struct BarePlugin;
+    impl blitzkrieg_market_api::MarketPlugin for BarePlugin {
+        fn name(&self) -> &str {
+            "bare"
+        }
+        fn market_type(&self) -> MarketType {
+            MarketType::Prediction
+        }
     }
 }

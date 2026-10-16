@@ -315,12 +315,17 @@ pub async fn run(
         }
     }
     let actives = crate::market::active_market_plugins(&registry, plugin.as_deref());
-    // Strategy handshake stays SINGLE-plugin this batch: the executor (and the
-    // PluginModes snapshot it shares) routes through the FIRST selected
-    // plugin. Handshake multi-value is the next batch.
-    core.set_plugin_modes(Some(crate::market::compat::PluginModes::for_plugin(
-        actives[0].as_ref(),
-    )));
+    // Strategy handshake, multi-plugin: EVERY selected plugin's declaration is
+    // snapshotted and a strategy loads when ANY ONE active plugin can serve
+    // it — a venue the strategy cannot serve must not block the venues it
+    // can. An empty list (backtester, market-free builds) leaves the
+    // handshake inert.
+    core.set_plugin_modes(
+        actives
+            .iter()
+            .map(|p| crate::market::compat::PluginModes::for_plugin(p.as_ref()))
+            .collect(),
+    );
 
     if config.engine_enabled {
         // A refusal here (the #265 startup self-check: an explicit
@@ -406,17 +411,34 @@ pub async fn run(
     // why `may_trade()` is the single predicate rather than a chain of conditions
     // each future edit could widen back open.
     if config.mode.may_trade() {
-        // Data-plane multi-plugin ONLY this batch: the executor stays
-        // single-plugin and starts for the first selected plugin (the
-        // registry's `active`). Order / cancel / settlement routing per
-        // plugin is the NEXT batch — do not loop this block.
-        if let Some(exec) = actives[0].executor() {
-            let cfg = blitzkrieg_market_api::ExecutorConfig {
-                markets: config.markets.clone(),
-            };
-            match exec.start(host.clone(), cfg).await {
-                Ok(()) => eprintln!("blitzkrieg-core: live order executor started"),
-                Err(e) => eprintln!("blitzkrieg-core: live executor failed to start: {e}"),
+        // Multi-plugin: EVERY selected plugin with an executor starts its own
+        // instance, and its `take_pending_orders(<name>)` drain is venue-routed
+        // (CoreHost filters the pending queue by the order token's round-list
+        // venue; untagged orders fall back to the active plugin). Cancel /
+        // settlement drains stay global this batch — see the CoreHost comment
+        // on `take_pending_cancels`.
+        for p in &actives {
+            if let Some(exec) = p.executor() {
+                // `markets` is the operator's global `--market` condition-id
+                // subscription list, not a per-venue allocation — it gates the
+                // user-WS subscribe set and is passed through untouched.
+                let cfg = blitzkrieg_market_api::ExecutorConfig {
+                    markets: config.markets.clone(),
+                };
+                match exec.start(host.clone(), cfg).await {
+                    Ok(()) => {
+                        eprintln!(
+                            "blitzkrieg-core: live order executor started for {}",
+                            p.name()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "blitzkrieg-core: live executor failed to start for {}: {e}",
+                            p.name()
+                        )
+                    }
+                }
             }
         }
     } else if config.mode.readonly() {
@@ -4355,13 +4377,16 @@ mod tests {
     /// #458 `system.reset_trading` 的 wire 合同：三道门（Live 拒绝 / 确认词
     /// 逐字 RESET / 无审计路径拒绝）+ 重置闭环（停策略、清记录、re-seed、
     /// 自校验）+ 审计行 + 反向验收（审计流不清除/余额必复原/记录必空）。
-    /// 记录文件挂在 scratch cwd 的 `data/` 下（Hard Disk 写入策略）。
+    /// 记录文件挂在本测试的私有 scratch 目录（Hard Disk 写入策略）。这些路径
+    /// 曾是挂到 scratch cwd 的相对 `data/`——但 `set_current_dir` 是进程全局
+    /// 的，并行测试的默认相对路径 core 会追进这只测试的 cwd，重置自检的
+    /// 行数窗口就会数到别人的行。私有绝对路径 + 不动 cwd，窗口才真正闭合。
     #[tokio::test]
     async fn system_reset_trading_wipes_and_reseeds_with_audit() {
         let dir = std::env::temp_dir().join(format!("bk-reset-trading-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_current_dir(&dir).unwrap();
+        let log = |name: &str| Some(dir.join("data").join(name).to_string_lossy().into_owned());
         let audit_str = dir
             .join("audit")
             .join("manual-ops.jsonl")
@@ -4371,9 +4396,9 @@ mod tests {
         let (core, registry, peer) = {
             let cfg = CoreConfig {
                 manual_ops_audit_path: Some(audit_str.clone()),
-                trade_log_path: Some("data/trades/trades.jsonl".to_string()),
-                order_log_path: Some("data/orders/orders.jsonl".to_string()),
-                position_log_path: Some("data/positions/positions.jsonl".to_string()),
+                trade_log_path: log("trades.jsonl"),
+                order_log_path: log("orders.jsonl"),
+                position_log_path: log("positions.jsonl"),
                 ..Default::default()
             };
             let mut c = Core::new(cfg.clone());
@@ -4494,8 +4519,8 @@ mod tests {
             summary.get("error").is_none() || summary["result"]["totalTrades"].as_u64() == Some(0),
             "the trade summary is zeroed: {summary}"
         );
-        for f in ["data/trades/trades.jsonl", "data/orders/orders.jsonl"] {
-            let text = std::fs::read_to_string(dir.join(f)).unwrap_or_default();
+        for f in ["trades.jsonl", "orders.jsonl"] {
+            let text = std::fs::read_to_string(dir.join("data").join(f)).unwrap_or_default();
             assert!(
                 text.trim().is_empty(),
                 "{f} is empty after the reset ({} bytes)",
@@ -5132,6 +5157,7 @@ mod tests {
                     market_type: blitzkrieg_market_api::MarketType::Prediction,
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -5140,6 +5166,7 @@ mod tests {
                     market_type: blitzkrieg_market_api::MarketType::Prediction,
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
                     updated_at_ms: now,
                 },
             ],
@@ -5536,6 +5563,7 @@ mod tests {
                         market_type: blitzkrieg_market_api::MarketType::Prediction,
                         status: AccountStatus::Active,
                         credential_keys: crate::account::CredentialKeys::default(),
+                        venue: String::new(),
                         updated_at_ms: now,
                     })
                     .collect(),
