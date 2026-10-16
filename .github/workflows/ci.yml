@@ -292,6 +292,13 @@ jobs:
       # 脚本自己的 scratch cwd。
       - name: Plugin toggle gate (market-plugin cell + extension lifecycle)
         run: node scripts/market-plugin-cell-check.mjs
+      # 行情插件凭据（market.credentials.status/set）：真内核 spawn 验证
+      # status 读数（每插件需求表+ready，值不过线）、写路径落持久格、
+      # plan-first 拒绝（未注册插件/表外变量名）、reset 只清该插件、重启
+      # boot 注入（日志出现变量名，值不落日志）。一切写入都在脚本自己的
+      # scratch cwd。
+      - name: Market credentials gate (status/set + boot injection)
+        run: node scripts/market-credentials-check.mjs
       # 交易环境重置（system.reset_trading，#458）：真内核 spawn 验证确认词
       # 门（逐字 RESET，拒绝时零副作用）、重置闭环（挂单索引空/记录文件 0 行/
       # 余额复原 seed/回执带计数与 pre 快照）、manual-ops 审计行（失败尝试不

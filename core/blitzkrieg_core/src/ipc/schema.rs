@@ -154,6 +154,12 @@ pub mod method {
     /// 拒绝（注册表编译在内核里，一个不存在的名字不能等到重启才发现）。
     /// 显式 `--market-plugin` outrank 持久格 —— 回放基线不被 UI 劫持。
     pub const MARKET_PLUGIN_SET: &str = "market.plugin.set";
+    /// 行情插件凭据：只读报表（每插件所需 env 变量名 + 下一会话是否齐全，
+    /// 值永不过线）与 next_session 写路径（原子写持久格 credentials，
+    /// 重启后 boot 注入环境；真实环境变量 outrank 格）。名字按插件需求表
+    /// plan-first 校验。
+    pub const MARKET_CREDENTIALS_STATUS: &str = "market.credentials.status";
+    pub const MARKET_CREDENTIALS_SET: &str = "market.credentials.set";
     pub const ORDER_PLACE: &str = "orders.place";
     pub const ORDER_CANCEL: &str = "orders.cancel";
     pub const ORDER_CANCEL_ALL: &str = "orders.cancel_all";
@@ -1213,6 +1219,67 @@ pub struct MarketPluginUpdate {
 pub const MARKET_PLUGIN_SET_NOTE: &str = "next session: the data feed, discovery and executor are all built around \
      the plugin chosen at boot, so a switch is a restart; an explicit \
      --market-plugin flag still outranks this setting";
+
+// ── 行情插件凭据（next_session）— market.credentials.status / .set ──────────
+
+/// One plugin's credential requirement, as the status readout reports it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCredentialRow {
+    pub plugin: String,
+    /// The env var names the plugin's executor reads at boot, in table order.
+    pub required_vars: Vec<String>,
+    /// Which of those names are resolved for the NEXT session (environment
+    /// variable or persisted cell — the cell loses to the environment). Names
+    /// only; values never travel back over IPC.
+    pub resolved_vars: Vec<String>,
+    /// All required names resolved → the executor will actually trade.
+    pub ready: bool,
+}
+
+/// `market.credentials.status` result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialsStatus {
+    pub rows: Vec<PluginCredentialRow>,
+}
+
+/// `market.credentials.set` params: `vars` maps ENV VAR NAMES to values for
+/// one plugin. Names are validated against the plugin's requirement table —
+/// an unknown name is refused (a typo must fail now, not as a silent inert
+/// executor). `reset: true` instead clears the plugin's cell entries.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCredentialsParams {
+    pub plugin: String,
+    /// env var name → value. Empty map = clear the plugin's entries.
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub reset: bool,
+    /// Audit trail only — echoed in the reply and the log line.
+    pub reason: Option<String>,
+}
+
+/// `market.credentials.set` result. Values are never echoed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialsUpdate {
+    pub plugin: String,
+    /// Var names written (or cleared).
+    pub written: Vec<String>,
+    pub reset: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`CredentialsUpdate::note`] — one spelling, used by the reply and the log.
+pub const CREDENTIALS_SET_NOTE: &str = "next session: the executor reads its credentials from the environment at \
+     boot, so a write takes effect after a restart; a real environment \
+     variable (e.g. from .env) still outranks this setting";
 
 // ── system.reset_trading (#458) ─────────────────────────────────────────────
 

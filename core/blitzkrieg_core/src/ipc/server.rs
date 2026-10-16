@@ -1139,6 +1139,36 @@ async fn handle_line(
             .await
         }
 
+        // 凭据状态：每个注册插件需要哪些环境变量、当前解析到没有（真实 env
+        // 或持久格），executor 就绪与否。只读，值永不过线。
+        method::MARKET_CREDENTIALS_STATUS => {
+            let c = core.lock().await;
+            Ok(
+                serde_json::to_value(crate::market::credentials_status(registry, &c))
+                    .unwrap_or(Value::Null),
+            )
+        }
+
+        // 凭据 next_session 写路径：plan-first（未注册插件名/表外变量名在写盘
+        // 前拒绝）+ 原子持久格写入。executor 在 boot 时一次性读环境，本会话
+        // 不动；重启后 boot 把格注入 env（真实 env 优先）。值只落格不上行。
+        method::MARKET_CREDENTIALS_SET => {
+            typed(params, |p: SetCredentialsParams| {
+                let core = core.clone();
+                async move {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    let update =
+                        crate::market::apply_credentials_set(registry, &core, &p, &actor, now_ms())
+                            .await?;
+                    Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
         // #458 交易环境重置：三道门（Live / 确认词 / 审计路径）都在内核
         // 方法里，派发层只做 actor 归因。回执携带自检后的余额与清理计数。
         method::SYSTEM_RESET_TRADING => {

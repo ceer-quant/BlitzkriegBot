@@ -12,7 +12,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { Puzzle, Radio, Plug, AlertTriangle, Link2, Power, RefreshCw } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
-import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc, type NetCheckDoc } from '@/api/client'
+import { api, marketTypeLabel, type PluginRow, type UnifiedEventRow, type MarketPluginReadoutDoc, type PluginCredentialRowDoc, type NetCheckDoc } from '@/api/client'
 import { readNetCheck } from '@/lib/net-check'
 import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
 import Card from '@/components/ui/card/Card.vue'
@@ -282,6 +282,106 @@ async function resetMarketPlugin(): Promise<void> {
 }
 
 onMounted(loadMarketPlugin)
+
+// ── API 凭据卡（market.credentials.status / .set）：每插件所需 env 变量、
+//    下一会话解析到没有；写入落持久格，重启后 boot 注入（真实 env 优先）。
+//    值只在输入框里，从不回读 —— status 读数只有名字与有无。 ──────────────────
+const credRows = ref<PluginCredentialRowDoc[]>([])
+const credBusy = ref(false)
+const credMsg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
+/** 正在编辑凭据的插件名（一次展开一行）；编辑值为插件名键控的表。 */
+const credEditing = ref<string | null>(null)
+const credDraft = ref<Record<string, string>>({})
+
+async function loadCredentials(): Promise<void> {
+  credBusy.value = true
+  try {
+    const doc = await api.marketCredentials()
+    credRows.value = doc.rows ?? []
+    if (doc.error) credMsg.value = { tone: 'err', text: doc.error }
+  } catch (e) {
+    credMsg.value = { tone: 'err', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    credBusy.value = false
+  }
+}
+
+function credRow(name: string): PluginCredentialRowDoc | undefined {
+  return credRows.value.find((r) => r.plugin === name)
+}
+
+/** 展开某插件的凭据编辑行：草稿清空（值从不回显），占位符提示已有解析。 */
+function editCredentials(name: string): void {
+  if (credEditing.value === name) {
+    credEditing.value = null
+    return
+  }
+  credEditing.value = name
+  credDraft.value = Object.fromEntries((credRow(name)?.requiredVars ?? []).map((v) => [v, '']))
+}
+
+/** 只提交有输入的字段 —— 已解析的名字留空即不覆盖（真实 env 仍 outrank）。 */
+async function saveCredentials(name: string): Promise<void> {
+  if (credBusy.value) return
+  const vars = Object.fromEntries(
+    Object.entries(credDraft.value).filter(([, v]) => v.trim() !== ''),
+  )
+  if (!Object.keys(vars).length) {
+    credMsg.value = { tone: 'err', text: '没有填写任何值（留空的字段不会覆盖）。' }
+    return
+  }
+  credBusy.value = true
+  credMsg.value = null
+  try {
+    const res = await api.marketCredentialsSet({
+      plugin: name,
+      vars,
+      reason: 'webui 面板凭据卡',
+    })
+    if (res.error) {
+      credMsg.value = { tone: 'err', text: res.error }
+    } else {
+      credMsg.value = {
+        tone: 'ok',
+        text: `已保存 ${name} 的 ${(res.written ?? []).length} 项凭据：${RESTART_DELAY_SEC}s 后自动重启内核注入生效；值不再回显。`,
+      }
+      credEditing.value = null
+      await loadCredentials()
+      restart.schedule()
+    }
+  } catch (e) {
+    credMsg.value = { tone: 'err', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    credBusy.value = false
+  }
+}
+
+/** 清除某插件已存的格内凭据（真实 env 不受影响）。 */
+async function clearCredentials(name: string): Promise<void> {
+  if (credBusy.value) return
+  credBusy.value = true
+  credMsg.value = null
+  try {
+    const res = await api.marketCredentialsSet({
+      plugin: name,
+      reset: true,
+      reason: 'webui 面板凭据卡清除',
+    })
+    if (res.error) {
+      credMsg.value = { tone: 'err', text: res.error }
+    } else {
+      credMsg.value = { tone: 'ok', text: `已清除 ${name} 的格内凭据：${RESTART_DELAY_SEC}s 后自动重启。` }
+      await loadCredentials()
+      restart.schedule()
+    }
+  } catch (e) {
+    credMsg.value = { tone: 'err', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    credBusy.value = false
+  }
+}
+
+onMounted(loadCredentials)
 </script>
 
 <template>
@@ -420,6 +520,86 @@ onMounted(loadMarketPlugin)
       </div>
       <div v-else class="px-3 pb-3 text-[12px] text-faint-fg">
         {{ marketDoc?.error ?? '行情源读数不可用（核心未连接时会自动刷新）。' }}
+      </div>
+    </Card>
+
+    <!-- API 凭据卡：需要凭据的行情插件（executor）在这里填 key —— 值只下行
+         不回显，写入落持久格、重启后 boot 注入环境（真实 env/.env 仍优先）。
+         ready 徽标 = 下一会话 executor 能动；数据面（行情/发现）不需要凭据。 -->
+    <Card class="mt-3.5" dense>
+      <CardHeader label="API 凭据（下单执行器）">
+        <template #action>
+          <Button variant="ghost" size="sm" :disabled="credBusy" title="刷新读数" @click="loadCredentials">
+            <RefreshCw class="size-3.5" :class="credBusy && 'animate-spin'" />
+          </Button>
+        </template>
+      </CardHeader>
+      <div class="px-3 pb-3">
+        <p class="text-[11.5px] text-faint-fg">
+          行情/发现不需要凭据即可看数据；要真实下单（Live 或带下单的模拟盘）需为对应插件配置 API。值保存到
+          <span class="font-mono">data/runtime/config.json</span>（仅属主可读），重启后注入内核环境 ——
+          <span class="font-mono">.env</span> 里的真实环境变量始终优先。如何创建 API 见
+          <button class="text-primary underline" @click="store.requestNav('settings')">设置页</button>。
+        </p>
+        <div class="mt-2 space-y-1.5">
+          <div v-for="r in credRows" :key="r.plugin" class="rounded-md border border-line bg-panel-2 px-3 py-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-[12.5px] font-semibold">{{ r.plugin }}</span>
+              <Badge :variant="r.ready ? 'up' : r.requiredVars.length ? 'default' : 'default'" dot>
+                {{ r.requiredVars.length ? (r.ready ? '凭据齐全' : '缺凭据') : '无需凭据' }}
+              </Badge>
+              <span v-if="r.requiredVars.length" class="text-[11.5px] text-faint-fg">
+                {{ r.resolvedVars.length }}/{{ r.requiredVars.length }} 已解析
+              </span>
+              <span class="flex-1" />
+              <Button
+                v-if="r.requiredVars.length"
+                size="sm"
+                variant="outline"
+                :disabled="credBusy"
+                @click="editCredentials(r.plugin)"
+              >{{ credEditing === r.plugin ? '收起' : '配置' }}</Button>
+              <Button
+                v-if="r.requiredVars.length && r.resolvedVars.length"
+                size="sm"
+                variant="ghost"
+                :disabled="credBusy"
+                title="清除格内凭据（真实环境变量不受影响）"
+                @click="clearCredentials(r.plugin)"
+              >清除</Button>
+            </div>
+            <div v-if="r.requiredVars.length" class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+              <span v-for="v in r.requiredVars" :key="v" class="font-mono" :class="r.resolvedVars.includes(v) ? 'text-up' : 'text-faint-fg'">
+                {{ r.resolvedVars.includes(v) ? '✓' : '○' }} {{ v }}
+              </span>
+            </div>
+            <!-- 编辑行：值只下行；占位符提示该名字是否已有解析，从不带出旧值。 -->
+            <div v-if="credEditing === r.plugin" class="mt-2 space-y-1.5 border-t border-line pt-2">
+              <div v-for="v in r.requiredVars" :key="v" class="flex items-center gap-2">
+                <label class="w-56 shrink-0 truncate font-mono text-[11.5px] text-muted-fg" :title="v">{{ v }}</label>
+                <input
+                  v-model="credDraft[v]"
+                  type="password"
+                  autocomplete="off"
+                  class="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] outline-none focus:border-primary"
+                  :placeholder="r.resolvedVars.includes(v) ? '已解析（留空不覆盖）' : '未配置'"
+                />
+              </div>
+              <div class="flex gap-2">
+                <Button size="sm" variant="outline" :disabled="credBusy" @click="saveCredentials(r.plugin)">保存</Button>
+                <Button size="sm" variant="ghost" :disabled="credBusy" @click="credEditing = null">取消</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="credMsg" class="mt-2 text-[12px]" :class="credMsg.tone === 'ok' ? 'text-primary' : 'text-down'">
+          {{ credMsg.text }}
+        </div>
+        <div v-if="restart.counting.value" class="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <span class="text-[12px] font-semibold text-gold">{{ restart.countdown.value }}s 后自动重启内核</span>
+          <Button size="sm" variant="outline" :disabled="restart.restarting.value" @click="restart.now">立即重启</Button>
+          <Button size="sm" variant="ghost" :disabled="restart.restarting.value" @click="restart.cancel">取消</Button>
+        </div>
       </div>
     </Card>
 

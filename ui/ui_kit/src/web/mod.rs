@@ -2155,6 +2155,25 @@ impl WebServer {
                 // session's feed/discovery/executor never move.
                 self.proxy_backtest_body("market.plugin.set", &req.body)
             }
+            ("GET", "/api/market-credentials") => {
+                // 行情插件凭据读数：每插件所需 env 变量名 + 下一会话解析
+                // 到没有（ready），值永不过线（`market.credentials.status`，
+                // 只读）。The wire shape is the kernel's own.
+                self.proxy_backtest(
+                    "market.credentials.status",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+            }
+            ("POST", "/api/market-credentials/set") => {
+                // 凭据写路径（next_session）—— the body IS the
+                // `market.credentials.set` params object
+                // (`{plugin, vars?, reset?, reason?}`), forwarded verbatim.
+                // The kernel refuses an unregistered plugin / a name outside
+                // the requirement table plan-first and writes the durable
+                // cell; the executor reads its environment once at boot, so
+                // the running session never moves.
+                self.proxy_backtest_body("market.credentials.set", &req.body)
+            }
             ("POST", "/api/extension/set") => {
                 // Issue #485: the extension rows' 启用/停用 buttons — the
                 // body IS the params object (`{name, enabled}`), forwarded

@@ -648,6 +648,28 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /**
+   * 行情插件凭据的读路径（`market.credentials.status`，只读）：每插件所需
+   * env 变量名 + 下一会话解析到没有（真实 env 或持久格，env 优先），ready
+   * = executor 下一会话能动。值永不过线 —— 只有名字和有无。
+   */
+  marketCredentials: () => request<CredentialsStatusDoc>('/market-credentials'),
+  /**
+   * 行情插件凭据的写路径（`market.credentials.set`）：next_session ——
+   * executor 在 boot 时一次性读环境，写入只落持久格（data/runtime/
+   * config.json 的 credentials），重启后 boot 注入（真实 env 仍 outrank）。
+   * 未注册插件名 / 需求表外变量名在内核 plan-first 拒绝。
+   */
+  marketCredentialsSet: (body: {
+    plugin: string
+    vars?: Record<string, string>
+    reset?: boolean
+    reason?: string
+  }) =>
+    request<CredentialsUpdateDoc>('/market-credentials/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
    * 轮次时间周期设置卡的读路径（`round_duration.get`，只读）：本会话生效
    * 秒数、来源、可切换白名单、下次会话将解析到什么（持久格 outranks TOML/
    * 默认，但显式 `--round-sec` outranks 持久格 —— source 字段如实报告）。
@@ -1679,6 +1701,35 @@ export interface MarketPluginReadoutDoc {
 /** `market.plugin.set` 回执（next_session 语义，内核原样）。 */
 export interface MarketPluginUpdateDoc {
   nextSessionPlugin?: string
+  reset?: boolean
+  atMs?: number
+  actor?: string
+  reason?: string | null
+  note?: string
+  error?: string
+}
+
+/** 一个插件一行：需要哪些 env 变量、下一会话哪些解析到了、ready 与否。 */
+export interface PluginCredentialRowDoc {
+  plugin: string
+  /** executor 在 boot 读的变量名（表序）。 */
+  requiredVars: string[]
+  /** 下一会话将解析到的名字（环境或持久格，env 优先）——只有名字。 */
+  resolvedVars: string[]
+  /** 全部所需名都解析到 → executor 下一会话能动。 */
+  ready: boolean
+}
+
+/** `market.credentials.status` 读数。 */
+export interface CredentialsStatusDoc {
+  rows: PluginCredentialRowDoc[]
+  error?: string
+}
+
+/** `market.credentials.set` 回执 —— written 只含变量名，值从不回显。 */
+export interface CredentialsUpdateDoc {
+  plugin?: string
+  written?: string[]
   reset?: boolean
   atMs?: number
   actor?: string

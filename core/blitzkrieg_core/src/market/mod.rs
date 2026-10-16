@@ -260,3 +260,166 @@ async fn persist_cell(
         )
     })
 }
+
+// ── 行情插件凭据（API 配置 UI 的内核侧）─────────────────────────────────────
+
+/// The env vars each market plugin's executor reads at boot, in the order the
+/// plugins themselves read them. ONE table: `market.credentials.status`
+/// reports it, `market.credentials.set` validates names against it, and the
+/// UI renders it. A plugin missing from the table has no executor credentials
+/// (its data plane is credential-free).
+///
+/// Kept in the CORE (not the plugin crates) because the status readout must
+/// answer for every registered plugin, including ones whose executor never
+/// starts in this session. A new credential-bearing plugin adds its row here
+/// AND reads the vars in its own executor — the gate test fails when the two
+/// drift.
+pub fn plugin_credential_vars(plugin: &str) -> &'static [&'static str] {
+    match plugin {
+        "polymarket" => &["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"],
+        "kalshi" => &["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
+        "predictfun" => &["PREDICT_API_KEY", "PREDICT_PRIVATE_KEY"],
+        "polysimulator" => &["POLYSIM_API_KEY"],
+        _ => &[],
+    }
+}
+
+/// `market.credentials.status`: for every registered plugin, which of its
+/// required vars will resolve for the NEXT session — environment first, the
+/// persisted cell second (the cell never outranks the environment, matching
+/// .env posture). Values never leave the process; names and presence only.
+pub fn credentials_status(
+    registry: &registry::MarketPluginRegistry,
+    core: &crate::service::Core,
+) -> crate::ipc::schema::CredentialsStatus {
+    use crate::ipc::schema::{CredentialsStatus, PluginCredentialRow};
+    let cell = core
+        .config()
+        .runtime_config_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .map(|p| crate::ipc::runtime_config::load_credentials_from(p, None))
+        .unwrap_or_default();
+    let rows = registry
+        .list()
+        .iter()
+        .map(|p| {
+            let required: Vec<String> = plugin_credential_vars(&p.name)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let resolved: Vec<String> = required
+                .iter()
+                .filter(|v| {
+                    std::env::var_os(v).is_some_and(|s| !s.is_empty())
+                        || cell
+                            .get(&p.name)
+                            .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty()))
+                })
+                .cloned()
+                .collect();
+            let ready = !required.is_empty() && resolved.len() == required.len();
+            PluginCredentialRow {
+                plugin: p.name.clone(),
+                required_vars: required,
+                resolved_vars: resolved,
+                ready,
+            }
+        })
+        .collect();
+    CredentialsStatus { rows }
+}
+
+/// `market.credentials.set`: validate every var name against the plugin's
+/// requirement table (a typo must fail now, not as a silently inert
+/// executor), then persist atomically. next_session only — the executor
+/// reads the environment once at boot.
+pub async fn apply_credentials_set(
+    registry: &registry::MarketPluginRegistry,
+    core: &tokio::sync::Mutex<crate::service::Core>,
+    patch: &crate::ipc::schema::SetCredentialsParams,
+    actor: &str,
+    now_ms: i64,
+) -> Result<crate::ipc::schema::CredentialsUpdate, crate::model::CoreError> {
+    use crate::ipc::schema::{CREDENTIALS_SET_NOTE, CredentialsUpdate};
+    use crate::model::{CoreError, CoreErrorCode};
+
+    let plugin = patch.plugin.trim();
+    if registry.get(plugin).is_none() {
+        let known = registry.names();
+        let known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "market.credentials.set: '{plugin}' is not a registered plugin — the switchable set is {known:?}"
+            ),
+        ));
+    }
+    let allowed = plugin_credential_vars(plugin);
+    let path = core
+        .lock()
+        .await
+        .config()
+        .runtime_config_path
+        .clone()
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "market.credentials.set: no runtime config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            )
+        })?;
+
+    let mut vars = patch.vars.clone();
+    for name in vars.keys() {
+        if !allowed.contains(&name.as_str()) {
+            let known: Vec<&str> = allowed.to_vec();
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "market.credentials.set: '{name}' is not a credential {plugin} reads — it needs {known:?}"
+                ),
+            ));
+        }
+    }
+
+    let written: Vec<String> = if patch.reset {
+        allowed.iter().map(|s| s.to_string()).collect()
+    } else {
+        vars.keys().cloned().collect()
+    };
+    if patch.reset {
+        vars.clear();
+    }
+    crate::ipc::runtime_config::persist_credentials_to(
+        std::path::Path::new(&path),
+        plugin,
+        Some(&vars),
+    )
+    .map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("market.credentials.set: persist failed, nothing changed: {e}"),
+        )
+    })?;
+    tracing::info!(
+        target: "risk",
+        actor = %actor,
+        reason = patch.reason.as_deref().unwrap_or(""),
+        plugin = %plugin,
+        vars = ?written,
+        "credential cell written — next session injects it at boot \
+         ({CREDENTIALS_SET_NOTE})"
+    );
+    Ok(CredentialsUpdate {
+        plugin: plugin.to_string(),
+        written,
+        reset: patch.reset,
+        at_ms: now_ms,
+        actor: actor.to_string(),
+        reason: patch.reason.clone(),
+        note: CREDENTIALS_SET_NOTE,
+    })
+}
