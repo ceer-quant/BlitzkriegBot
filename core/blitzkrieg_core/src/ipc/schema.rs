@@ -234,6 +234,17 @@ pub mod method {
     /// snapshot — per event: status, the venues holding a leg, and the
     /// discrepancy marks. The panel's 配对视图 data source.
     pub const UNIFIED_LIST: &str = "unified.list";
+    /// ④: the latest round's cross-venue mapping CANDIDATES (auto-matching
+    /// proposes, the operator disposes). Read-only: `a`/`b` listings + score.
+    pub const UNIFIED_CANDIDATES: &str = "unified.candidates";
+    /// ④: the operator confirms a candidate pair as a cross-venue mapping.
+    /// Params: `title` (operator-facing event name), `listings` (≥2, distinct
+    /// venues — the candidate JSON round-trips verbatim), optional `actor`
+    /// (default "panel"). The ledger revalidates everything; a refused
+    /// confirm moves nothing.
+    pub const UNIFIED_CONFIRM: &str = "unified.confirm";
+    /// ④: withdraw a confirmed mapping. Params: `eventId`, optional `actor`.
+    pub const UNIFIED_REVOKE: &str = "unified.revoke";
     /// Extension lifecycle: list / enable / disable / uninstall.
     pub const EXTENSION_LIST: &str = "extension.list";
     pub const EXTENSION_ENABLE: &str = "extension.enable";
@@ -1144,6 +1155,30 @@ pub struct RoundDurationUpdate {
 pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
      grid index) and live positions/orders were slotted under the old length; \
      an explicit --round-sec flag still outranks this setting";
+
+// ── ④ 统一映射：unified.candidates / unified.confirm / unified.revoke ─────
+
+/// `unified.confirm` params. `listings` is the candidate pair verbatim (the
+/// `unified.candidates` rows round-trip: `PlatformListing` is serde both
+/// ways); the ledger revalidates everything on its side.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedConfirmParams {
+    pub title: String,
+    pub listings: Vec<blitzkrieg_market_api::unified::PlatformListing>,
+    /// Audit trail only; defaults to "panel".
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+/// `unified.revoke` params.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedRevokeParams {
+    pub event_id: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
 
 // ── 行情插件切换（next_session）— market.plugin.get / market.plugin.set ─────
 

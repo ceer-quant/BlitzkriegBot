@@ -708,6 +708,8 @@ async fn handle_line(
         method::MARKET_PLUGIN_SET,
         method::SYSTEM_RESET_TRADING,
         method::STRATEGY_PARAMS_SET,
+        method::UNIFIED_CONFIRM,
+        method::UNIFIED_REVOKE,
     ];
     if READONLY_REFUSED.contains(&method) && core.lock().await.mode() == Mode::ReadOnly {
         return fail(
@@ -1700,6 +1702,111 @@ async fn handle_line(
                 "version": crate::ipc::schema::PROTOCOL_VERSION,
                 "events": c.unified_list(),
             }))
+        }
+
+        // ④: the current round's cross-venue pairing proposals (read-only).
+        method::UNIFIED_CANDIDATES => {
+            let c = core.lock().await;
+            Ok(serde_json::json!({
+                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "candidates": c.unified_candidates(),
+            }))
+        }
+
+        // ④: operator confirmation of one candidate pair. The ledger
+        // revalidates (titles, assets, one-listing-one-event) — a refused
+        // confirm returns the refusal as the error and moves nothing. The
+        // confirmed event goes back as `event` so the panel can refresh
+        // without a second round trip.
+        method::UNIFIED_CONFIRM => {
+            let params: crate::ipc::schema::UnifiedConfirmParams =
+                match serde_json::from_value(params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return fail(
+                            id,
+                            Failure::PARSE_ERROR,
+                            format!("invalid unified.confirm params: {e}"),
+                            None,
+                        );
+                    }
+                };
+            let title = params.title.trim().to_string();
+            let actor = params
+                .actor
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("panel")
+                .to_string();
+            if title.is_empty() {
+                Err((
+                    Failure::APPLICATION,
+                    "unified.confirm requires a non-empty `title`".to_string(),
+                    None,
+                ))
+            } else if params.listings.len() < 2 {
+                Err((
+                    Failure::APPLICATION,
+                    "unified.confirm requires at least two listings".to_string(),
+                    None,
+                ))
+            } else {
+                let mut c = core.lock().await;
+                match c.unified_confirm(&title, &actor, params.listings, now_ms()) {
+                    Ok(event) => Ok(serde_json::json!({
+                        "version": crate::ipc::schema::PROTOCOL_VERSION,
+                        "event": {
+                            "id": event.id,
+                            "title": event.title,
+                            "status": event.status,
+                            "venues": event.listings.values().map(|l| l.venue.as_str()).collect::<Vec<_>>(),
+                        },
+                    })),
+                    Err(e) => Err((Failure::APPLICATION, e, None)),
+                }
+            }
+        }
+
+        // ④: withdraw a confirmed mapping (audited in the ledger; the Engine
+        // copy is removed so strategies stop seeing it immediately).
+        method::UNIFIED_REVOKE => {
+            let params: crate::ipc::schema::UnifiedRevokeParams =
+                match serde_json::from_value(params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return fail(
+                            id,
+                            Failure::PARSE_ERROR,
+                            format!("invalid unified.revoke params: {e}"),
+                            None,
+                        );
+                    }
+                };
+            let event_id = params.event_id.trim().to_string();
+            let actor = params
+                .actor
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("panel")
+                .to_string();
+            if event_id.is_empty() {
+                Err((
+                    Failure::APPLICATION,
+                    "unified.revoke requires a non-empty `eventId`".to_string(),
+                    None,
+                ))
+            } else {
+                let mut c = core.lock().await;
+                match c.unified_revoke(&event_id, &actor, now_ms()) {
+                    Ok(()) => Ok(serde_json::json!({
+                        "version": crate::ipc::schema::PROTOCOL_VERSION,
+                        "revoked": event_id,
+                    })),
+                    Err(e) => Err((Failure::APPLICATION, e, None)),
+                }
+            }
         }
 
         method::EXTENSION_LIST => {

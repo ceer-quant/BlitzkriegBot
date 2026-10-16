@@ -463,6 +463,14 @@ impl Engine {
         self.unified_mappings.insert(event.id.clone(), event);
     }
 
+    /// ④: drop one confirmed mapping (operator revocation). The Engine holds
+    /// only `put` semantics — the host removes the copy here on
+    /// `unified.revoke` so strategies stop seeing the event immediately.
+    /// Removing an unknown id is a no-op.
+    pub fn remove_unified_mapping(&mut self, event_id: &str) {
+        self.unified_mappings.remove(event_id);
+    }
+
     /// #427: the confirmed cross-venue mappings, event-id ordered. The read
     /// view behind `bk.unified_events()` — an immutable snapshot the strategy
     /// layer assembles its cross-venue legs from.

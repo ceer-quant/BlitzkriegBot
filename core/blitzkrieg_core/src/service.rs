@@ -59,6 +59,11 @@ pub struct CoreConfig {
     /// only trace a reset leaves. Production resolves this to
     /// `data/audit/manual-ops.jsonl` in `main.rs`, like `runtime_config_path`.
     pub manual_ops_audit_path: Option<String>,
+    /// #481/④: where the cross-venue mapping ledger persists
+    /// (`data/runtime/unified-mapping.json` in production). `None` keeps the
+    /// ledger in memory — the backtester and most in-process tests never
+    /// confirm a mapping, so there is nothing to persist.
+    pub unified_ledger_path: Option<String>,
     /// When false the core never auto-submits exits on tick; positions are only
     /// closed by explicit fills/flatten. Used by order-layer tests and for a
     /// "positions managed externally" deployment. Default true.
@@ -463,6 +468,16 @@ impl CoreConfig {
             }
             crate::strategy_state::save(std::path::Path::new(path), &enabled);
         }
+        // ④ 统一映射：install_engine 换掉了整个 Engine（插件切换、进化重
+        // 注册），Engine 内存里的 confirmed 映射会一起丢 —— 账本是唯一真值
+        // 源，每次安装后把 confirmed 事件回灌一遍。revocation 走
+        // `unified.revoke`（service 层同步删 Engine 条目），Engine 自身只有
+        // put 语义。
+        if let Some(e) = core.engine.as_mut() {
+            for event in core.unified_ledger.events() {
+                e.put_unified_mapping(event.clone());
+            }
+        }
         self.strategy_startup_self_check(core)
     }
 
@@ -763,6 +778,7 @@ impl Default for CoreConfig {
             round_duration_source: "default",
             runtime_config_path: None,
             manual_ops_audit_path: None,
+            unified_ledger_path: None,
             auto_exits_enabled: true,
             intent_audit_enabled: true,
             engine_enabled: false,
@@ -1336,6 +1352,14 @@ pub struct Core {
     /// Optional mirror of every market-data event into a JSONL archive (P-1.3).
     /// The backtester replays this file.
     event_archive: Option<crate::data_source::EventArchive>,
+    /// ④ 统一映射账本：候选配对的唯一真值源（自动配对只提议、操作员
+    /// confirm 才生效）。confirmed 的事件灌进 Engine（put_unified_mapping）
+    /// 供策略与 unified.list 读；本字段持有持久态与审计线。
+    unified_ledger: blitzkrieg_market_api::unified::MappingLedger,
+    /// ④ 统一映射：最近一轮的跨所配对候选（自动匹配只提议）。每个新轮
+    /// 全量替换；confirm 成功的配对离开货架。会话内状态，不持久化 ——
+    /// 下一轮会重新提议，持久化只会留下过期货架。
+    unified_candidates: Vec<blitzkrieg_market_api::unified::matching::MatchCandidate>,
     /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
     /// restart, like `stats`; the durable per-trade record is the trade log.
     strategy_accounting: HashMap<String, StrategyAccounting>,
@@ -1685,6 +1709,60 @@ impl Core {
     }
 }
 
+/// ④ 统一映射：一个 listing 的面板形状（`unified.candidates` / confirm
+/// 请求体共用）。`PlatformListing` 本身可 serde，但表单字段名直接固化在
+/// 这里，避免把 Rust 内部字段漂移暴露成协议。
+fn listing_json(l: &blitzkrieg_market_api::unified::PlatformListing) -> serde_json::Value {
+    serde_json::json!({
+        "venue": l.venue,
+        "conditionId": l.condition_id,
+        "upTokenId": l.up_token_id,
+        "downTokenId": l.down_token_id,
+        "asset": l.asset,
+        "title": l.title,
+        "settlementRules": l.settlement_rules,
+        "settlementSource": l.settlement_source,
+        "expiresAtMs": l.expires_at_ms,
+        "status": l.status,
+    })
+}
+
+/// ④ ConfirmError has no Display (the ledger crate keeps refusals as data);
+/// the IPC layer needs one operator-facing line per variant.
+fn confirm_error_text(e: blitzkrieg_market_api::unified::ledger::ConfirmError) -> String {
+    use blitzkrieg_market_api::unified::ledger::ConfirmError;
+    match e {
+        ConfirmError::NeedsTwoVenues => {
+            "confirm refused: a mapping needs at least two distinct venues".to_string()
+        }
+        ConfirmError::DuplicateVenue(v) => {
+            format!(
+                "confirm refused: two listings from the same venue ({})",
+                v.as_str()
+            )
+        }
+        ConfirmError::TitleTooDissimilar { a, b, similarity } => {
+            format!("confirm refused: titles too dissimilar ({similarity:.2}) between {a} and {b}")
+        }
+        ConfirmError::AssetMismatch {
+            a,
+            b,
+            a_asset,
+            b_asset,
+        } => format!(
+            "confirm refused: different assets ({a_asset} vs {b_asset}) between {a} and {b}"
+        ),
+        ConfirmError::AlreadyMapped {
+            venue,
+            condition_id,
+            event_id,
+        } => format!(
+            "confirm refused: {} listing {condition_id} is already mapped in event {event_id}",
+            venue.as_str()
+        ),
+    }
+}
+
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
         // E28 (§9.5): the account book loads from `user_layer/configs/
@@ -1773,6 +1851,13 @@ impl Core {
         };
         let applied_log =
             side_log_path(&config.applied_log_path, "applied-fills.jsonl").map(AppliedFillLog::new);
+        // ④ 统一映射账本：有路径就加载持久态（候选→人工确认的映射跨重启
+        // 存活），无路径（回测/进程内测试）就纯内存。自动配对只提议，
+        // confirm 才写账本 —— ledger 的设计合同，接线必须遵守。
+        let unified_ledger = match config.unified_ledger_path.as_deref() {
+            Some(p) => blitzkrieg_market_api::unified::MappingLedger::load(std::path::Path::new(p)),
+            None => blitzkrieg_market_api::unified::MappingLedger::new(),
+        };
         let audit_log = side_log_path(&config.audit_log_path, "reconcile.jsonl");
         let settlement_log = side_log_path(&config.settlement_log_path, "settlements.jsonl");
         // #463: the close-credential journal rides the same derivation — a
@@ -1955,6 +2040,8 @@ impl Core {
             recon_watermark_ms: 0,
             last_self_check: None,
             applied_log,
+            unified_ledger,
+            unified_candidates: Vec::new(),
             audit: AuditRuntime {
                 audit_log_path: audit_log,
                 ..Default::default()
@@ -3065,6 +3152,140 @@ impl Core {
             .unwrap_or_default()
     }
 
+    /// ④ 统一映射：一轮 RoundMarkets 到达后，把这轮每个市场转成
+    /// [`PlatformListing`] 喂给映射账本的候选匹配器（只提议、绝不自动
+    /// confirm —— ledger 的合同是 "automatic matching proposes, the operator
+    /// disposes"，自动配对会违反 cross_venue_replay_check 的 0 订单负向门）。
+    /// settlement 字段发现链路拿不到：空 rules + Unknown source（双空规则在
+    /// matcher 里不捏造冲突）。结果存 `unified_candidates` 供
+    /// `unified.candidates` 读；每个新轮全量替换（旧轮的过期候选不留）。
+    fn propose_unified_candidates(&mut self, markets: &[crate::model::CryptoMarket], now_ms: i64) {
+        use blitzkrieg_market_api::unified::{
+            ListingStatus, PlatformListing, SettlementSource, Venue,
+        };
+        self.unified_candidates.clear();
+        let venue_of = |s: &str| match s {
+            "polymarket" => Some(Venue::Polymarket),
+            "kalshi" => Some(Venue::Kalshi),
+            "predictfun" => Some(Venue::PredictFun),
+            "polysimulator" => Some(Venue::PolySimulator),
+            _ => None, // undeclared venue (old archives): nothing to pair
+        };
+        let mut by_venue: std::collections::BTreeMap<Venue, Vec<PlatformListing>> =
+            Default::default();
+        for m in markets {
+            let Some(v) = venue_of(m.venue.as_str()) else {
+                continue;
+            };
+            by_venue.entry(v).or_default().push(PlatformListing {
+                venue: v,
+                condition_id: m.condition_id.clone(),
+                up_token_id: m.up_token_id.clone(),
+                down_token_id: m.down_token_id.clone(),
+                // matcher 的资产信号是归一化小写（"bitcoin"）；发现链路给的是 "BTC"。
+                asset: Some(m.asset.to_lowercase()),
+                title: m.question.clone(),
+                settlement_rules: String::new(),
+                settlement_source: SettlementSource::Unknown,
+                expires_at_ms: m.expires_at_ms,
+                status: if m.expires_at_ms > now_ms {
+                    ListingStatus::Active
+                } else {
+                    ListingStatus::Expired
+                },
+            });
+        }
+        if by_venue.len() < 2 {
+            return;
+        }
+        let buckets: Vec<Vec<PlatformListing>> = by_venue.into_values().collect();
+        for i in 0..buckets.len() {
+            for j in (i + 1)..buckets.len() {
+                for cand in self
+                    .unified_ledger
+                    .candidates(&buckets[i], &buckets[j], 10 * 60 * 1000)
+                {
+                    tracing::info!(
+                        target: "risk",
+                        score = cand.score,
+                        a_venue = cand.a.venue.as_str(),
+                        b_venue = cand.b.venue.as_str(),
+                        title_a = %cand.a.title,
+                        title_b = %cand.b.title,
+                        "unified: cross-venue mapping candidate proposed — confirm via unified.confirm"
+                    );
+                    self.unified_candidates.push(cand);
+                }
+            }
+        }
+    }
+
+    /// `unified.candidates` (④): the latest proposal snapshot as read-only
+    /// JSON. Empty when the current round has fewer than two declared venues.
+    pub fn unified_candidates(&self) -> Vec<serde_json::Value> {
+        self.unified_candidates
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "a": listing_json(&c.a),
+                    "b": listing_json(&c.b),
+                    "score": c.score,
+                    "expiryDeltaMs": c.expiry_delta_ms,
+                })
+            })
+            .collect()
+    }
+
+    /// `unified.confirm` (④): the operator confirms a candidate pair as a
+    /// cross-venue mapping. The ledger revalidates (title similarity, asset
+    /// identity, one-listing-one-event) and persists; the confirmed event is
+    /// pushed into the Engine so strategies see it immediately, and the
+    /// confirmed listings leave the proposal shelf.
+    pub fn unified_confirm(
+        &mut self,
+        title: &str,
+        actor: &str,
+        listings: Vec<blitzkrieg_market_api::unified::PlatformListing>,
+        at_ms: i64,
+    ) -> Result<blitzkrieg_market_api::unified::UnifiedEvent, String> {
+        let event = self
+            .unified_ledger
+            .confirm(title, actor, &listings, at_ms)
+            .map_err(confirm_error_text)?;
+        let confirmed_ids: std::collections::HashSet<&str> = event
+            .listings
+            .values()
+            .map(|l| l.condition_id.as_str())
+            .collect();
+        self.unified_candidates.retain(|c| {
+            !confirmed_ids.contains(c.a.condition_id.as_str())
+                && !confirmed_ids.contains(c.b.condition_id.as_str())
+        });
+        if let Some(e) = self.engine.as_mut() {
+            e.put_unified_mapping(event.clone());
+        }
+        Ok(event)
+    }
+
+    /// `unified.revoke` (④): withdraw a confirmed mapping. The ledger drops
+    /// the event (audited, persisted); the Engine's copy is removed here too
+    /// — the Engine has only `put` semantics, so revocation is the host's
+    /// job.
+    pub fn unified_revoke(
+        &mut self,
+        event_id: &str,
+        actor: &str,
+        at_ms: i64,
+    ) -> Result<(), String> {
+        self.unified_ledger
+            .revoke(event_id, actor, at_ms)
+            .map_err(|e| format!("unified revoke refused: {e:?}"))?;
+        if let Some(e) = self.engine.as_mut() {
+            e.remove_unified_mapping(event_id);
+        }
+        Ok(())
+    }
+
     /// Load an external v2 strategy shared library and register it into the
     /// driving engine's live dispatch (the IPC `strategy.load` entry). Runs
     /// the E27 handshake in ENFORCE mode: a library whose declaration the
@@ -3842,6 +4063,10 @@ impl Core {
                     });
                 if !top_up {
                     self.stats.rounds += 1;
+                    // ④ 统一映射：新的一轮带来新市场 ⇒ 重新提议跨所配对候选
+                    // （只提议不 confirm）。top-up 跳过：#498 增量合并不换轮，
+                    // 旧候选仍然有效，重复刷只是日志噪声。
+                    self.propose_unified_candidates(markets, now_ms);
                     // #377 (治 #2): record which markets the archive promised a
                     // verdict for. Their dry-ladder queries are suppressed below —
                     // the stream settles them, and a query stamped here would wait
@@ -14271,6 +14496,350 @@ mod strategy_params_tests {
             .collect();
         assert!(names.contains(&"polymarket") && names.contains(&"kalshi"));
         assert_eq!(row["discrepancies"].as_array().unwrap().len(), 0);
+    }
+
+    // ── ④ 统一映射接线：提议只提议、confirm 才生效、revoke 全链拔除 ─────
+
+    /// ④ fixture: a Core with an engine and one crypto market per venue in
+    /// the SAME round, same asset, near-identical titles (above the confirm
+    /// similarity bar). Single venue (or undeclared venue) rounds propose
+    /// nothing.
+    fn unified_core() -> Core {
+        let mut c = core_with_strategies();
+        let now = 1_000_000_000i64;
+        let slot = now / 1000 / 900;
+        let market = |venue: &str, cond: &str, up: &str, down: &str| {
+            crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: cond.into(),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "Bitcoin Up or Down: October 16, 2PM ET — resolves to the Binance 1 minute candle for the BTC price at 2pm ET".into(),
+        }
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![
+                    market("polymarket", "0xpm", "pm-up", "pm-down"),
+                    market("kalshi", "KXBTC", "k-up", "k-down"),
+                ],
+                now_ms: now,
+            },
+            now,
+        );
+        c
+    }
+
+    /// The auto-matcher PROPOSES (candidates JSON carries the pair with
+    /// normalized asset + token ids) but never CONFIRMS: no ledger event, no
+    /// Engine mapping, `unified.list` stays empty. This is the service-side
+    /// twin of the cross-venue replay negative gate (a proposal that traded
+    /// on its own would be the bug).
+    #[test]
+    fn round_markets_propose_candidates_without_confirming() {
+        let c = unified_core();
+
+        let cands = c.unified_candidates();
+        assert_eq!(cands.len(), 1, "one polymarket × one kalshi = one proposal");
+        let a = &cands[0]["a"];
+        let b = &cands[0]["b"];
+        // The matcher's ordering is score-internal; identify by venue.
+        let (pm, ks) = if a["venue"] == "polymarket" {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        assert_eq!(pm["venue"], "polymarket");
+        assert_eq!(pm["conditionId"], "0xpm");
+        assert_eq!(pm["upTokenId"], "pm-up");
+        assert_eq!(
+            pm["asset"], "btc",
+            "the discovered asset arrives as given (lowercased)"
+        );
+        assert_eq!(ks["conditionId"], "KXBTC");
+
+        assert!(
+            c.unified_list().is_empty(),
+            "a proposal is NOT a mapping — unified.list must stay empty"
+        );
+        assert!(
+            c.engine.as_ref().unwrap().unified_mappings().is_empty(),
+            "the engine never sees an unconfirmed candidate"
+        );
+    }
+
+    /// Rounds without two declared venues propose nothing (single-plugin
+    /// world unchanged: empty shelf, empty list, zero engine mappings).
+    #[test]
+    fn single_venue_round_proposes_nothing() {
+        let mut c = core_with_strategies();
+        let now = 1_000_000_000i64;
+        let mut m = crate::test_fixtures::round_market(now);
+        m.venue = "polymarket".into();
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![m],
+                now_ms: now,
+            },
+            now,
+        );
+        assert!(c.unified_candidates().is_empty());
+        assert!(c.unified_list().is_empty());
+        // And the pre-#427 undeclared-venue shape stays silent too.
+        let mut c2 = core_with_strategies();
+        let m2 = crate::test_fixtures::round_market(now);
+        c2.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![m2],
+                now_ms: now,
+            },
+            now,
+        );
+        assert!(c2.unified_candidates().is_empty());
+    }
+
+    /// Confirming the proposed pair makes it real everywhere at once: the
+    /// ledger holds it (persisted), `unified.list` reports it, the Engine
+    /// mapping view carries it (what `bk.unified_events()` reads), and the
+    /// confirmed pair leaves the proposal shelf.
+    #[test]
+    fn confirm_pushes_the_mapping_into_the_ledger_list_and_engine() {
+        let mut c = unified_core();
+        let cands = c.unified_candidates();
+        assert_eq!(
+            cands.len(),
+            1,
+            "precondition: the fixture proposed one pair"
+        );
+        let listings: Vec<blitzkrieg_market_api::unified::PlatformListing> = vec![
+            serde_json::from_value(cands[0]["a"].clone()).expect("candidate a round-trips"),
+            serde_json::from_value(cands[0]["b"].clone()).expect("candidate b round-trips"),
+        ];
+        let event = c
+            .unified_confirm("Bitcoin Up or Down 2PM ET", "uid:op", listings, 1_000)
+            .expect("a matching pair confirms");
+
+        assert_eq!(c.unified_list().len(), 1);
+        assert_eq!(c.unified_list()[0]["id"], event.id);
+        let mappings = c.engine.as_ref().unwrap().unified_mappings();
+        assert_eq!(
+            mappings.len(),
+            1,
+            "the engine view (bk.unified_events) sees it"
+        );
+        assert!(mappings.contains_key(&event.id));
+        assert!(
+            c.unified_candidates().is_empty(),
+            "a confirmed pair leaves the proposal shelf"
+        );
+    }
+
+    /// The ledger's own refusals surface as `Err` strings and move nothing:
+    /// a below-bar title pair is refused even from the operator side.
+    #[test]
+    fn confirm_refusal_is_an_error_and_moves_nothing() {
+        let mut c = core_with_strategies();
+        let listing = |venue: blitzkrieg_market_api::unified::Venue, cond: &str, title: &str| {
+            blitzkrieg_market_api::unified::PlatformListing {
+                venue,
+                condition_id: cond.into(),
+                up_token_id: format!("{cond}-up"),
+                down_token_id: format!("{cond}-down"),
+                asset: Some("bitcoin".into()),
+                title: title.into(),
+                settlement_rules: String::new(),
+                settlement_source: blitzkrieg_market_api::unified::SettlementSource::Unknown,
+                expires_at_ms: 2_000_000,
+                status: blitzkrieg_market_api::unified::ListingStatus::Active,
+            }
+        };
+        let listings = vec![
+            listing(
+                blitzkrieg_market_api::unified::Venue::Polymarket,
+                "0xa",
+                "totally unrelated question about weather",
+            ),
+            listing(
+                blitzkrieg_market_api::unified::Venue::Kalshi,
+                "KXA",
+                "will the rocket launch before friday night",
+            ),
+        ];
+        let err = c
+            .unified_confirm("arbitrary title", "uid:op", listings, 1_000)
+            .expect_err("dissimilar titles refuse even on explicit confirm");
+        assert!(err.contains("refused"), "the refusal names itself: {err}");
+        assert!(
+            c.unified_list().is_empty(),
+            "a refused confirm maps nothing"
+        );
+    }
+
+    /// Revocation pulls the mapping out of all three places at once: the
+    /// ledger (a later confirm of the same pair works again), the
+    /// `unified.list` readout and the Engine view.
+    #[test]
+    fn revoke_removes_the_mapping_everywhere() {
+        let mut c = unified_core();
+        let cands = c.unified_candidates();
+        let listings: Vec<blitzkrieg_market_api::unified::PlatformListing> = vec![
+            serde_json::from_value(cands[0]["a"].clone()).unwrap(),
+            serde_json::from_value(cands[0]["b"].clone()).unwrap(),
+        ];
+        let event = c
+            .unified_confirm("Bitcoin Up or Down 2PM ET", "uid:op", listings, 1_000)
+            .expect("precondition: confirm lands");
+        assert_eq!(c.unified_list().len(), 1);
+
+        c.unified_revoke(&event.id, "uid:op", 2_000)
+            .expect("revoking a live mapping succeeds");
+        assert!(c.unified_list().is_empty(), "unified.list drops it");
+        assert!(
+            c.engine.as_ref().unwrap().unified_mappings().is_empty(),
+            "the engine view drops it (strategies stop seeing it immediately)"
+        );
+        // The ledger freed the listings: the same pair confirms again. The
+        // re-proposal needs a NEW round slot — the same slot re-fires the
+        // #498 top-up predicate (the scanner already holds it), and a top-up
+        // deliberately skips the proposal step (old candidates stay valid).
+        let now = 1_000_000_000i64;
+        let now2 = now + 900_000;
+        let slot2 = now2 / 1000 / 900;
+        let market = |venue: &str, cond: &str, up: &str, down: &str| {
+            crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: cond.into(),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: (slot2 + 1) * 900 * 1000,
+            round_slot: slot2,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "Bitcoin Up or Down: October 16, 2PM ET — resolves to the Binance 1 minute candle for the BTC price at 2pm ET".into(),
+        }
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![
+                    market("polymarket", "0xpm", "pm-up", "pm-down"),
+                    market("kalshi", "KXBTC", "k-up", "k-down"),
+                ],
+                now_ms: now2,
+            },
+            now2,
+        );
+        assert_eq!(
+            c.unified_candidates().len(),
+            1,
+            "after revoke the same pair is proposed again"
+        );
+    }
+
+    /// A confirmed mapping survives a Core rebuild on the same ledger path:
+    /// `MappingLedger::load` re-reads it, `install_engine` re-feeds it into
+    /// the fresh Engine, and `unified.list` sees it without any new round.
+    #[test]
+    fn confirmed_mappings_survive_a_rebuild_through_the_ledger_refeed() {
+        let scratch = crate::service::settlement_service_tests::scratch("unified-rebuild");
+        let path = scratch.join("unified-mapping.json");
+        let build = |ledger_path: Option<&std::path::Path>| {
+            let mut c = Core::new(CoreConfig {
+                risk: RiskConfig::default(),
+                dry_seed_balance: dec!(1000),
+                unified_ledger_path: ledger_path.map(|p| p.to_string_lossy().into_owned()),
+                ..Default::default()
+            });
+            let mut engine = crate::engine::Engine::new(crate::engine::EngineConfig::default());
+            crate::strategies::test_support::host_disabled(
+                &mut engine,
+                Default::default(),
+                Default::default(),
+            );
+            c.enable_engine(engine);
+            c
+        };
+
+        let mut c = build(Some(&path));
+        let now = 1_000_000_000i64;
+        let slot = now / 1000 / 900;
+        let market = |venue: &str, cond: &str, up: &str, down: &str| {
+            crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: cond.into(),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "Bitcoin Up or Down: October 16, 2PM ET — resolves to the Binance 1 minute candle for the BTC price at 2pm ET".into(),
+        }
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![
+                    market("polymarket", "0xpm", "pm-up", "pm-down"),
+                    market("kalshi", "KXBTC", "k-up", "k-down"),
+                ],
+                now_ms: now,
+            },
+            now,
+        );
+        let cands = c.unified_candidates();
+        let listings: Vec<blitzkrieg_market_api::unified::PlatformListing> = vec![
+            serde_json::from_value(cands[0]["a"].clone()).unwrap(),
+            serde_json::from_value(cands[0]["b"].clone()).unwrap(),
+        ];
+        let event = c
+            .unified_confirm("Bitcoin Up or Down 2PM ET", "uid:op", listings, 1_000)
+            .expect("confirm persists");
+        drop(c);
+
+        // A rebuilt core on the same path: no new round arrives. The ledger
+        // re-feed lives in `install_engine` (the real boot path), so the
+        // rebuild goes through it — exactly what a plugin switch does.
+        let mut c2 = build(Some(&path));
+        let cfg2 = CoreConfig {
+            risk: RiskConfig::default(),
+            dry_seed_balance: dec!(1000),
+            unified_ledger_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        cfg2.install_engine(&mut c2)
+            .expect("an empty enable-set installs");
+        assert_eq!(
+            c2.unified_list().len(),
+            1,
+            "the confirmed mapping survived the rebuild"
+        );
+        assert_eq!(c2.unified_list()[0]["id"], event.id);
+        assert!(
+            c2.engine
+                .as_ref()
+                .unwrap()
+                .unified_mappings()
+                .contains_key(&event.id),
+            "install_engine re-fed the ledger into the fresh Engine"
+        );
     }
 }
 
