@@ -8761,6 +8761,17 @@ impl Core {
         self.settlement = crate::settlement::SettlementBook::new(None);
         self.recon_watermark_ms = 0;
 
+        // 记账审计与交易记录同生共死：trade_db 清零后，带着旧 realized 的锚点
+        // 会让 trade_ledger_identity 永久假红（锚点不动但账目已归零），
+        // halt_entries 把之后每一笔意图都拦在门外。重置即回到 boot 同款
+        // AuditRuntime（保留 audit_log_path）——下一次审计在干净账目上重新
+        // 取锚，与「重置=回到全新环境」的语义一致。
+        let audit_log_path = self.audit.audit_log_path.clone();
+        self.audit = AuditRuntime {
+            audit_log_path,
+            ..Default::default()
+        };
+
         // 5) 重新 seed 全部账户到配置值（与启动 `accounts.seed_all` 同一路径）。
         self.accounts.seed_all(self.config.dry_seed_balance);
 
@@ -13750,6 +13761,86 @@ mod tests {
         let rec: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(rec["op"], serde_json::json!("reset_trading"));
         assert_eq!(rec["pre"]["balance"], serde_json::json!("5000"));
+    }
+
+    /// 重置必须连记账审计的状态一起清：trade_db 归零后，带着旧 realized 的
+    /// 锚点会让 trade_ledger_identity 永久假红（真实事故 2026-10-16：重置后
+    /// 漂移 94.72，halt_entries 拦下之后每一笔意图——策略页看着在下单，
+    /// 行情页一支挂单都没有）。重置后下一次审计必须在干净账目上重新取锚、
+    /// 不 halt；而不是把锚点永远钉在过去。
+    #[test]
+    fn reset_trading_re_anchors_the_accounting_audit_instead_of_halting_forever() {
+        let dir = reset_audit_dir("reanchor");
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let mut c = Core::new(CoreConfig {
+            manual_ops_audit_path: Some(
+                dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+            ),
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: log("orders.jsonl"),
+            position_log_path: log("positions.jsonl"),
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        });
+        c.set_balance(Decimal::from(1_000));
+
+        // 一个已平仓的交易把 realized 写进 summary（重置前的事实）。
+        let closed = crate::position::ClosedPosition {
+            id: "hft-r1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            entry_price: Decimal::ONE / Decimal::from(2),
+            exit_price: Decimal::ONE,
+            shares: Decimal::from(10),
+            cost_usd: Decimal::from(5),
+            was_maker_entry: true,
+            was_maker_exit: false,
+            entry_fee_pct: Decimal::ZERO,
+            exit_fee_pct: Decimal::ZERO,
+            pnl_usd: Decimal::from(5),
+            pnl_pct: Decimal::from(100),
+            net_pnl_usd: Decimal::from(94),
+            net_pnl_pct: Decimal::from(100),
+            high_pnl_pct: Decimal::ZERO,
+            low_pnl_pct: Decimal::ZERO,
+            hold_time_sec: 0,
+            exit_reason: crate::model::ExitReason::TakeProfit,
+            entered_at_ms: 0,
+            exited_at_ms: 1,
+            entry_role: crate::model::OrderRole::Maker,
+            exit_role: crate::model::OrderRole::Taker,
+            dust_shares: Decimal::ZERO,
+            account_id: crate::model::default_account_id(),
+            venue: "polymarket".into(),
+        };
+        c.trade_db
+            .as_mut()
+            .expect("trade_log_path set")
+            .record(&crate::trade_db::TradeRecord::from_closed(&closed), 1);
+        // 锚点在旧账目上取下：realized=94 成为本轮基线。
+        let anchored = c.run_accounting_audit(2);
+        assert!(anchored.ok, "pre-reset audit on consistent books is clean");
+
+        // 重置：记录归零、现金重播种——审计状态必须跟着归零。
+        c.reset_trading(&reset_params("RESET"), "uid:t", 3).unwrap();
+
+        // 修复断言：下一次审计不带旧锚点——realized 0 对 0，干净取锚不 halt。
+        let _after_report = c.run_accounting_audit(4);
+        let v = c.accounting_audit_view();
+        assert_eq!(
+            v["halted"],
+            serde_json::json!(false),
+            "reset must clear the audit halt: old anchor vs wiped books is not drift; \
+             entries must not stay blocked"
+        );
+        assert_eq!(
+            v["anchored"],
+            serde_json::json!(true),
+            "the post-reset audit re-anchors on the clean books"
+        );
     }
 
     fn live_core(balance: Decimal) -> Core {
