@@ -13,6 +13,7 @@ import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
 import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
 import { useSettingsStore } from '@/stores/settings'
+import { usePanelStore } from '@/stores/panel'
 import { useTheme, type ThemeMode } from '@/lib/theme'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
@@ -25,6 +26,10 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
 
 const settings = useSettingsStore()
+/** 指引卡跳转到插件页的凭据卡（requestNav 是面板级导航的统一入口）。 */
+function navToPlugins(): void {
+  usePanelStore().requestNav('plugins')
+}
 const { theme, setTheme, sound, setSoundEnabled } = useTheme()
 
 // ── session state: reachability from ping, the token's fate from a real call ─
@@ -454,6 +459,72 @@ async function doResetTrading(): Promise<void> {
           </div>
           <Switch :model-value="settings.fastPoll" @update:model-value="settings.setFastPoll" />
         </div>
+      </div>
+    </Card>
+
+    <!-- ── 如何创建 API（行情插件凭据指引）：静态指引卡。配置入口在插件页
+         的 API 凭据卡；这里只回答「去哪申请、哪个变量填什么」。 ─────────────── -->
+    <Card class="mt-3.5">
+      <CardHeader label="如何创建 API（行情插件凭据）">
+        <template #title>
+          <KeyRound class="size-4 text-faint-fg" />
+        </template>
+      </CardHeader>
+      <div class="space-y-2.5 text-[12px] text-muted-fg">
+        <p>
+          行情与发现不需要凭据即可看数据；只有<b class="text-fg">下单执行器</b>在启动时读取环境变量。
+          配置入口在 <button class="text-primary underline" @click="navToPlugins">插件页 → API 凭据</button>
+          （或直接写 <span class="font-mono">.env</span>，真实环境变量始终优先）。
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full min-w-[620px] text-[12px]">
+            <thead>
+              <tr class="text-left">
+                <th class="label-micro px-2 pb-2">插件</th>
+                <th class="label-micro px-2 pb-2">变量</th>
+                <th class="label-micro px-2 pb-2">怎么拿到</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-semibold" rowspan="2">polymarket</td>
+                <td class="px-2 py-2 font-mono text-[11px]">POLYMARKET_PRIVATE_KEY</td>
+                <td class="px-2 py-2 text-faint-fg">Polygon 钱包私钥（导出钱包时获得）</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-mono text-[11px]">POLYMARKET_FUNDER_ADDRESS</td>
+                <td class="px-2 py-2 text-faint-fg">Polymarket 账户的资金地址（0x…，Profile 页可复制）</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-semibold" rowspan="2">kalshi</td>
+                <td class="px-2 py-2 font-mono text-[11px]">KALSHI_API_KEY_ID</td>
+                <td class="px-2 py-2 text-faint-fg">Kalshi 账户 API 页创建的 Key ID（demo 环境用 demo 站点的）</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-mono text-[11px]">KALSHI_RSA_PRIVATE_KEY</td>
+                <td class="px-2 py-2 text-faint-fg">创建 Key 时下载的 RSA 私钥文件全文（PEM，含首尾行）</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-semibold" rowspan="2">predictfun</td>
+                <td class="px-2 py-2 font-mono text-[11px]">PREDICT_API_KEY</td>
+                <td class="px-2 py-2 text-faint-fg">Predict.fun 账户设置里生成的 API Key</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-mono text-[11px]">PREDICT_PRIVATE_KEY</td>
+                <td class="px-2 py-2 text-faint-fg">签名用的钱包私钥</td>
+              </tr>
+              <tr class="border-t border-line">
+                <td class="px-2 py-2 font-semibold">polysimulator</td>
+                <td class="px-2 py-2 font-mono text-[11px]">POLYSIM_API_KEY</td>
+                <td class="px-2 py-2 text-faint-fg">PolySimulator（第三方模拟盘）启动时自己签发的 Key</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-[11.5px] text-faint-fg">
+          安全：值只下行不回显，保存在 <span class="font-mono">data/runtime/config.json</span>（仅属主可读），
+          随 .env 一样留在本机；Live 模式风控与审计照常生效。改完凭据记得重启内核（凭据卡会自动安排）。
+        </p>
       </div>
     </Card>
   </div>

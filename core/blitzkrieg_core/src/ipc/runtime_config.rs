@@ -48,6 +48,15 @@ struct RuntimeConfigDoc {
     market_plugin_actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     market_plugin_at_ms: Option<i64>,
+    /// Per-plugin credential overrides the WebUI writes through
+    /// `market.credentials.set` (`plugin` → `env var name` → value). Applied
+    /// at boot BEFORE the executor reads the environment; a real environment
+    /// variable always outranks the cell (same posture as .env). Values live
+    /// in the user's data directory and never travel back over IPC — the
+    /// status readout reports presence only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credentials:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
 }
 
 /// What the boot resolution needs to know about the cell.
@@ -197,6 +206,90 @@ pub fn persist_round_duration_to(
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Read the persisted credential cell. `plugin=None` returns every plugin's
+/// map; a plugin name narrows it to that one entry.
+pub fn load_credentials_from(
+    path: &std::path::Path,
+    plugin: Option<&str>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return Default::default(), // first-boot normal case
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Default::default(),
+    };
+    let Some(all) = v.get("credentials").and_then(|c| c.as_object()).map(|o| {
+        o.iter()
+            .map(|(k, m)| {
+                (
+                    k.clone(),
+                    m.as_object()
+                        .map(|vars| {
+                            vars.iter()
+                                .filter_map(|(vk, vv)| {
+                                    vv.as_str().map(|s| (vk.clone(), s.to_string()))
+                                })
+                                .collect::<std::collections::BTreeMap<_, _>>()
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    }) else {
+        return Default::default();
+    };
+    match plugin {
+        Some(p) => all.into_iter().filter(|(k, _)| k == p).collect(),
+        None => all,
+    }
+}
+
+/// Write (or, with `vars=None`, clear) one plugin's credential overrides in
+/// the shared cell. Atomic read-modify-write: the other cells share this file
+/// and must survive. Values are operator input for the NEXT session's
+/// environment; the caller decides whether any name is acceptable (the IPC
+/// layer validates against the plugin table).
+pub fn persist_credentials_to(
+    path: &std::path::Path,
+    plugin: &str,
+    vars: Option<&std::collections::BTreeMap<String, String>>,
+) -> std::io::Result<()> {
+    let mut doc: RuntimeConfigDoc = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let mut all = doc.credentials.take().unwrap_or_default();
+    match vars {
+        Some(vars) => {
+            if vars.is_empty() {
+                all.remove(plugin);
+            } else {
+                all.insert(plugin.to_string(), vars.clone());
+            }
+        }
+        None => {
+            all.remove(plugin);
+        }
+    }
+    doc.credentials = if all.is_empty() { None } else { Some(all) };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
+    // Owner-only: the file now carries credential values. On the TEMP file
+    // before the rename — the final path may not exist yet, and a chmod on a
+    // missing file would silently leave the first write world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -360,5 +453,71 @@ mod tests {
     fn a_missing_file_yields_no_plugin_cell() {
         let d = tmpdir("noplugin");
         assert_eq!(load_market_plugin_from(&d.join("config.json")), None);
+    }
+
+    #[test]
+    fn credentials_round_trip_and_survive_sibling_cell_writes() {
+        let d = tmpdir("credtrip");
+        let p = d.join("config.json");
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("KALSHI_API_KEY_ID".to_string(), "key-1".to_string());
+        vars.insert(
+            "KALSHI_RSA_PRIVATE_KEY".to_string(),
+            "-----BEGIN".to_string(),
+        );
+        persist_credentials_to(&p, "kalshi", Some(&vars)).unwrap();
+        // 600 is off the round-duration whitelist; arm a legal one.
+        persist_round_duration_to(&p, Some(900), "uid:test", 2_000).unwrap();
+        // The sibling cell write must not clobber the credentials…
+        let got = load_credentials_from(&p, Some("kalshi"));
+        assert_eq!(got["kalshi"]["KALSHI_API_KEY_ID"], "key-1");
+        assert_eq!(got["kalshi"]["KALSHI_RSA_PRIVATE_KEY"], "-----BEGIN");
+        assert_eq!(
+            load_round_duration_from(&p),
+            Some(RoundDurationCell { duration_sec: 900 })
+        );
+        // …and a round-duration write must not clobber the credentials.
+        persist_round_duration_to(&p, Some(300), "uid:test", 3_000).unwrap();
+        assert_eq!(load_credentials_from(&p, None)["kalshi"].len(), 2);
+    }
+
+    #[test]
+    fn credentials_reset_removes_only_that_plugin() {
+        let d = tmpdir("credreset");
+        let p = d.join("config.json");
+        let mut a = std::collections::BTreeMap::new();
+        a.insert("KALSHI_API_KEY_ID".to_string(), "k".to_string());
+        persist_credentials_to(&p, "kalshi", Some(&a)).unwrap();
+        let mut b = std::collections::BTreeMap::new();
+        b.insert("POLYSIM_API_KEY".to_string(), "s".to_string());
+        persist_credentials_to(&p, "polysimulator", Some(&b)).unwrap();
+        persist_credentials_to(&p, "kalshi", None).unwrap(); // reset arm
+        let got = load_credentials_from(&p, None);
+        assert!(!got.contains_key("kalshi"));
+        assert_eq!(got["polysimulator"]["POLYSIM_API_KEY"], "s");
+        // Clearing the last plugin drops the key entirely.
+        persist_credentials_to(&p, "polysimulator", None).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !text.contains("credentials"),
+            "empty map must not arm the key: {text}"
+        );
+    }
+
+    #[test]
+    fn credentials_file_is_owner_only_after_write() {
+        let d = tmpdir("credperm");
+        let p = d.join("config.json");
+        let mut v = std::collections::BTreeMap::new();
+        v.insert("POLYSIM_API_KEY".to_string(), "secret".to_string());
+        persist_credentials_to(&p, "polysimulator", Some(&v)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "credential values demand owner-only");
+        }
+        #[cfg(not(unix))]
+        let _ = p;
     }
 }

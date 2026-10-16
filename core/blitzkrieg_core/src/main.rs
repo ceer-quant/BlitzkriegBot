@@ -3244,6 +3244,44 @@ async fn main() -> anyhow::Result<()> {
         config.round_duration_source = "runtime";
     }
 
+    // The credentials cell (`market.credentials.set`, data/runtime/config.json):
+    // inject each stored value into THIS process's environment before the server
+    // builds the plugin components — `exec.start` reads the vars once, so a
+    // cell write is next-session by construction. A real environment variable
+    // (e.g. from the launcher's .env) outranks the cell: only a name the process
+    // does not already carry is injected. Names were validated against the
+    // plugin tables at write time; values never appear in the log.
+    if let Some(path) = config.runtime_config_path.as_deref() {
+        for (plugin, vars) in blitzkrieg_core::ipc::runtime_config::load_credentials_from(
+            std::path::Path::new(path),
+            None,
+        ) {
+            let mut injected: Vec<&str> = Vec::new();
+            for (name, value) in &vars {
+                if value.is_empty() {
+                    continue;
+                }
+                if std::env::var_os(name).is_some_and(|v| !v.is_empty()) {
+                    continue;
+                }
+                // SAFETY: single-threaded process setup — the server that spawns
+                // every plugin task starts below, so nothing reads the
+                // environment concurrently while the cell is applied.
+                unsafe { std::env::set_var(name, value) };
+                injected.push(name.as_str());
+            }
+            if !injected.is_empty() {
+                injected.sort_unstable();
+                eprintln!(
+                    "blitzkrieg-core: credentials injected from the persisted cell \
+                     (plugin '{plugin}'): {} — a real environment variable outranks \
+                     the cell (market.credentials.set)",
+                    injected.join(", ")
+                );
+            }
+        }
+    }
+
     server::run(args.socket.clone(), config, args.tick_ms, rx).await?;
     eprintln!("blitzkrieg-core stopped");
     Ok(())
