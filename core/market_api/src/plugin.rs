@@ -25,6 +25,25 @@ pub trait SubscriptionControl: Send + Sync {
 pub trait MarketHost: Send + Sync {
     // ── Data ingress ────────────────────────────────────────────────────────
     fn on_book(&self, update: BookUpdate) -> BoxFuture<'_, ()>;
+    /// 盘口批次原子化：一次请求拿到多本盘口的批式拉取（polymarket
+    /// `POST /books` 一类）改走这里 —— 整批 book + 单一批次时间戳，一次
+    /// 应用、引擎统一看到同一批快照。逐 token 发射会在主机两次持锁的间隙
+    /// 让策略读到「一半新一半旧」的撕裂状态（跨腿策略据此对一对不存在的
+    /// 折价开火）。实现方必须保证：批内所有 book 在同一次锁区间内应用完，
+    /// 批内时间戳一致；策略评估点不可能插入批次中间。
+    ///
+    /// 单 book 场景（WebSocket 增量、逐 token REST）继续走 [`MarketHost::on_book`]
+    /// —— 那里没有批可撕。默认实现退化为逐本 [`MarketHost::on_book`]：现有
+    /// 的 trait 实现者零破坏，但只能拿到「逐本」的原子性，撕裂守卫只在
+    /// 覆写了本方法的宿主上成立。
+    fn on_books<'a>(&'a self, updates: Vec<BookUpdate>, ts_ms: i64) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            for u in updates {
+                self.on_book(u).await;
+            }
+            let _ = ts_ms;
+        })
+    }
     fn on_top_of_book(&self, update: TopOfBookUpdate) -> BoxFuture<'_, ()>;
     fn on_spot(&self, update: SpotUpdate) -> BoxFuture<'_, ()>;
     fn on_round_markets(&self, markets: Vec<MarketDescriptor>) -> BoxFuture<'_, ()>;

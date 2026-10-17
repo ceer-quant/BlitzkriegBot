@@ -2,6 +2,7 @@
 //! implements every typed command. Synchronous except for the event sink, so it
 //! is fully unit-testable; the async UDS layer and live venue sit on top.
 
+use crate::engine::BatchBook;
 use crate::ipc::schema::Event;
 use crate::ledger::Ledger;
 use crate::model::*;
@@ -4710,6 +4711,14 @@ impl Core {
                     self.fast_eval_wake = true;
                 }
             }
+            // 盘口批次原子化：批次是 N 本书的合体 —— 每本各计一次 books（与
+            // 逐事件路径同口径），一次唤醒（引擎在批次后只应评估一次）。
+            crate::engine::DataEvent::Books { books, .. } => {
+                self.stats.books += books.len() as u64;
+                if self.replay_sched() {
+                    self.fast_eval_wake = true;
+                }
+            }
             crate::engine::DataEvent::TopOfBook { .. } => {
                 self.stats.tops += 1;
                 if self.replay_sched() {
@@ -4898,7 +4907,7 @@ impl Core {
         // reads (`run_exit_checks`). Without this, a Rust-native feed (--feed-ws)
         // left Core.books empty, so open positions never re-valued and NO
         // non-forced exit (TP/trailing/SL) could ever fire.
-        let mirrored_token = match &ev {
+        let mirrored_tokens: Vec<(String, i64)> = match &ev {
             crate::engine::DataEvent::Book {
                 token_id,
                 bids,
@@ -4916,7 +4925,30 @@ impl Core {
                         received_ms: *event_ms,
                     },
                 );
-                Some(token_id.clone())
+                vec![(token_id.clone(), *event_ms)]
+            }
+            // 盘口批次原子化：整批按事件顺序逐本镜像（每本自己的批次时间戳
+            // `received_ms`）。镜像本身无撕裂可言 —— 它只喂 exit 的 mark，
+            // 不喂策略评估；撕裂的根在策略读的那一面，由下面的 Batch 应用
+            // 顺序消除。这里借用已结束，循环里的本地副本随取随用。
+            crate::engine::DataEvent::Books {
+                books,
+                now_ms: event_ms,
+            } => {
+                for (token_id, bids, asks) in books {
+                    self.books.insert(
+                        token_id.clone(),
+                        crate::sim::Book {
+                            bids: bids.clone(),
+                            asks: asks.clone(),
+                            received_ms: *event_ms,
+                        },
+                    );
+                }
+                books
+                    .iter()
+                    .map(|(t, _, _)| (t.clone(), *event_ms))
+                    .collect()
             }
             crate::engine::DataEvent::TopOfBook {
                 token_id,
@@ -4947,12 +4979,12 @@ impl Core {
                             received_ms: *event_ms,
                         },
                     );
-                    Some(token_id.clone())
+                    vec![(token_id.clone(), *event_ms)]
                 } else {
-                    None
+                    Vec::new()
                 }
             }
-            _ => None,
+            _ => Vec::new(),
         };
 
         // Replay fast path: the mirrored book is the ONLY input a position's
@@ -4961,7 +4993,7 @@ impl Core {
         // nofast replay needs the same wake — its ladder runs on deadlines
         // plus dirty tokens, so a book event must reach the next tick's pass
         // there too. The set is a pure dirty marker; both paths consume it.
-        if let Some(token) = &mirrored_token {
+        for (token, _) in &mirrored_tokens {
             self.fast_dirty_tokens.insert(token.clone());
         }
 
@@ -4969,18 +5001,18 @@ impl Core {
         // `book_snapshot` does — a crossing feed event is exactly when a
         // dry maker fill would happen at the venue, and skipping it made every
         // dry entry escalate to taker (a systematically more expensive economy).
-        if let Some(token) = mirrored_token
-            && self.config.mode.settles_locally()
-        {
-            let ids: Vec<String> = self
-                .ome
-                .live_orders()
-                .into_iter()
-                .filter(|o| o.token_id == token && rests_on_book(o.mode))
-                .map(|o| o.order_id.clone())
-                .collect();
-            for id in ids {
-                self.try_maker_fill(&id, now_ms);
+        if self.config.mode.settles_locally() {
+            for (token, _) in &mirrored_tokens {
+                let ids: Vec<String> = self
+                    .ome
+                    .live_orders()
+                    .into_iter()
+                    .filter(|o| o.token_id == *token && rests_on_book(o.mode))
+                    .map(|o| o.order_id.clone())
+                    .collect();
+                for id in ids {
+                    self.try_maker_fill(&id, now_ms);
+                }
             }
         }
 
@@ -4992,6 +5024,9 @@ impl Core {
         // and diluted the counterfactual. Capture what we need before `ev` moves.
         enum ShadowFeed {
             Book(String, i64),
+            /// 盘口批次原子化：一个批次的整组 (token, 批次时间戳)。双胞胎按
+            /// 批次逐本喂入（同一时间戳），与 live 的 Batch 应用保持一致。
+            Books(Vec<(String, i64)>),
             Round(Vec<CryptoMarket>, i64),
         }
         let shadow_feed = if self.shadow_evolution.is_enabled() {
@@ -5006,6 +5041,9 @@ impl Core {
                     now_ms: t,
                     ..
                 } => Some(ShadowFeed::Book(token_id.clone(), *t)),
+                crate::engine::DataEvent::Books { books, now_ms: t } => Some(ShadowFeed::Books(
+                    books.iter().map(|(t2, _, _)| (t2.clone(), *t)).collect(),
+                )),
                 crate::engine::DataEvent::RoundMarkets { markets, now_ms: t } => {
                     Some(ShadowFeed::Round(markets.clone(), *t))
                 }
@@ -5055,6 +5093,19 @@ impl Core {
                     self.shadow_evolution_on_tick(&token_id, &book, t);
                 }
             }
+            Some(ShadowFeed::Books(books)) => {
+                // 同一批次逐本喂给双胞胎：双胞胎的 on_book 是逐本观测的
+                // （与 live 策略相同），整批共享一个时间戳。
+                for (token_id, t) in books {
+                    let book = self
+                        .engine
+                        .as_ref()
+                        .and_then(|e| e.book_snapshot(&token_id));
+                    if let Some(book) = book {
+                        self.shadow_evolution_on_tick(&token_id, &book, t);
+                    }
+                }
+            }
             Some(ShadowFeed::Round(markets, t)) => {
                 // Seed the twins with the same opening mids the live engine replays
                 // for this round (engine.rs RoundMarkets), so confirmation clocks
@@ -5076,6 +5127,94 @@ impl Core {
                 self.shadow_evolution_on_round(&markets, &seeds, t)
             }
             None => {}
+        }
+    }
+
+    /// 盘口批次原子化：批式拉取（polymarket `POST /books` 一类）的整批 book
+    /// 一次性入核 —— 调用方必须已经持有 Core 锁（或本调用就是唯一持锁点），
+    /// 批内所有 book 在同一次持锁区间里完成镜像 + 引擎应用，维护/评估 tick
+    /// 不可能插进来读到「一半新一半旧」的撕裂状态。
+    ///
+    /// 与 [`Self::engine_on_data`] 的差异只有两点：归档为一条 `k:"books"` 批
+    /// 行（新增的 kind，旧语料没有它、逐事件回放基线不受影响）；无
+    /// `DataEvent` 归档/影子复用 —— 引擎应用走 [`Engine::on_data_books`]，
+    /// 每本书与单事件路径同一段 apply/notify 代码。返回被趋势断裂命中的
+    /// token 上的 resting 买单（已撤），供调用方记账。
+    pub fn engine_on_books(&mut self, books: Vec<BatchBook>, ts_ms: i64) {
+        // #351：与 engine_on_data 同序 —— 先推进在途 taker 腿，再让本批书
+        // 落进引擎（腿按「事件到达时」的盘口撮合，永远不与本批同瞬）。
+        self.drain_inflight_takers(ts_ms);
+
+        // 镜像（exit/mark 路径）：与 Batch 事件同语义 —— 每本 received_ms
+        // 统一为批次时间戳。
+        for (token_id, bids, asks) in &books {
+            self.books.insert(
+                token_id.clone(),
+                crate::sim::Book {
+                    bids: bids.clone(),
+                    asks: asks.clone(),
+                    received_ms: ts_ms,
+                },
+            );
+        }
+        for (token_id, _, _) in &books {
+            self.fast_dirty_tokens.insert(token_id.clone());
+        }
+        // KI-1：与 engine_on_data 同规则 —— 本地结算内核在盘口事件落地时
+        // 结算 resting maker 单（逐 token，跨整批）。
+        if self.config.mode.settles_locally() {
+            for (token_id, _, _) in &books {
+                let ids: Vec<String> = self
+                    .ome
+                    .live_orders()
+                    .into_iter()
+                    .filter(|o| o.token_id == *token_id && rests_on_book(o.mode))
+                    .map(|o| o.order_id.clone())
+                    .collect();
+                for id in ids {
+                    self.try_maker_fill(&id, ts_ms);
+                }
+            }
+        }
+
+        // 引擎：整批一次应用。撕裂的根在逐 token 的两次独立应用之间 ——
+        // 这里一次调用顺序应用整批，策略观测永远对齐同一批次快照。
+        if let Some(engine) = self.engine.as_mut() {
+            let broken = engine.on_data_books(&books, ts_ms);
+            let closed_bars = engine.take_closed_klines();
+            for (token, _price) in broken {
+                // Regime change: pull resting entry bids for this token.
+                let ids: Vec<String> = self
+                    .ome
+                    .live_orders()
+                    .into_iter()
+                    .filter(|o| o.side == Side::Buy && o.token_id == token)
+                    .map(|o| o.order_id.clone())
+                    .collect();
+                for id in ids {
+                    let _ = self.cancel(&id, ts_ms);
+                }
+            }
+            for bar in closed_bars {
+                self.emit(Event::KlineUpdate { kline: bar });
+            }
+        }
+
+        // 影子演化：与 live 同一批次逐本喂入（时间戳统一）。
+        if self.shadow_evolution.is_enabled() {
+            for (token_id, _, _) in &books {
+                let book = self.engine.as_ref().and_then(|e| e.book_snapshot(token_id));
+                if let Some(book) = book {
+                    self.shadow_evolution_on_tick(token_id, &book, ts_ms);
+                }
+            }
+        }
+
+        // 回放唤醒：批次是引擎输入，下一拍要真评估（与 Book 事件同效果，
+        // 计数在 stats match 外由调用方 on_books 完成 —— 这里补计数）。
+        self.stats.books += books.len() as u64;
+        if self.replay_sched() {
+            self.fast_eval_wake = true;
         }
     }
 

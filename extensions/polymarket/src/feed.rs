@@ -168,14 +168,27 @@ fn cadence_warning(poll_ms: u64) -> Option<String> {
     cadence_warning_with(poll_ms, effective_stale_budget_ms())
 }
 
+/// One book of a batch: `(token_id, bids, asks)` — the same shape
+/// `MarketHost::on_books` carries, named so the event/loop literals stay readable.
+pub type BatchBook = (String, Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>);
+
 /// Market-data event produced by the feed loops, consumed by the pump which
 /// forwards each one onto the [`MarketHost`].
 #[derive(Debug, Clone)]
 pub enum FeedEvent {
+    /// Single-token book (one event per `on_book`): kept for the Info/Spot
+    /// pump shape and any future single-book source.
     Book {
         token_id: String,
         bids: Vec<(Decimal, Decimal)>,
         asks: Vec<(Decimal, Decimal)>,
+        now_ms: i64,
+    },
+    /// 盘口批次原子化：一次 `POST /books` 拿到的整批 book，`now_ms` 是本批
+    /// 统一时间戳。整批一次 `on_books` 进核 —— 逐 token 发射会在主机两次
+    /// 持锁的间隙把「up 新 down 旧」的撕裂快照暴露给策略评估。
+    Books {
+        books: Vec<BatchBook>,
         now_ms: i64,
     },
     Spot {
@@ -215,6 +228,19 @@ pub async fn spawn_feed(
                             ts_ms: now_ms,
                         })
                         .await;
+                    }
+                    // 盘口批次原子化：整批一次进核（单锁、单批次时间戳）。
+                    FeedEvent::Books { books, now_ms } => {
+                        let updates: Vec<BookUpdate> = books
+                            .into_iter()
+                            .map(|(token_id, bids, asks)| BookUpdate {
+                                token_id,
+                                bids,
+                                asks,
+                                ts_ms: now_ms,
+                            })
+                            .collect();
+                        host.on_books(updates, now_ms).await;
                     }
                     FeedEvent::Spot {
                         asset,
@@ -369,6 +395,14 @@ async fn poly_rest_loop(
         {
             Ok(Ok(books)) => {
                 interval_ms = base_ms; // recovered: back to the configured cadence
+                // 盘口批次原子化：先收集整批，再一次 send —— 批内共享一个
+                // 本地时钟时间戳，pump 侧一次 `on_books` 整批进核。逐 token
+                // send 的旧路径会在两次持锁的间隙把撕裂快照暴露给策略评估
+                // （up 是本批、down 还是上一批），这正是跨腿折价幻觉的来源。
+                // 单次响应的解析仍是纯本地计算（无 await），收集不引入额外
+                // 的批内时间漂移。
+                let now = now_ms();
+                let mut batch: Vec<BatchBook> = Vec::with_capacity(books.len());
                 for book in books {
                     let bids: Vec<(Decimal, Decimal)> =
                         book.bids.iter().map(|l| (l.price, l.size)).collect();
@@ -381,18 +415,18 @@ async fn poly_rest_loop(
                     // aligned with ours. Staleness is already bounded by the poll
                     // cadence: if a poll fails or hangs, no event is emitted and the
                     // book correctly ages out on its own.
-                    if ev_tx
-                        .send(FeedEvent::Book {
-                            token_id: book.asset_id.to_string(),
-                            bids,
-                            asks,
-                            now_ms: now_ms(),
+                    batch.push((book.asset_id.to_string(), bids, asks));
+                }
+                if !batch.is_empty()
+                    && ev_tx
+                        .send(FeedEvent::Books {
+                            books: batch,
+                            now_ms: now,
                         })
                         .await
                         .is_err()
-                    {
-                        return; // host is gone
-                    }
+                {
+                    return; // host is gone
                 }
             }
             Ok(Err(e)) => {
@@ -732,7 +766,9 @@ mod tests {
 
     /// A poll must deliver a book per subscribed token, with the venue's depth
     /// intact: the REST response replaces the book wholesale, so dropping levels
-    /// here would silently narrow what every strategy sees.
+    /// here would silently narrow what every strategy sees. 盘口批次原子化：
+    /// 整批书必须以一个 `FeedEvent::Books` 一次性交付 —— 每本同批时间戳，
+    /// 深度原样携带。
     #[tokio::test]
     async fn poll_delivers_a_book_for_every_subscribed_token() {
         let srv = FakeClob::start(200).await;
@@ -748,28 +784,29 @@ mod tests {
             250,
         ));
 
-        let mut seen: HashMap<String, Depth> = HashMap::new();
-        while seen.len() < 2 {
-            let ev = tokio::time::timeout(Duration::from_secs(5), ev_rx.recv())
-                .await
-                .expect("no book arrived within 5s")
-                .expect("feed closed");
-            if let FeedEvent::Book {
-                token_id,
-                bids,
-                asks,
-                ..
-            } = ev
-            {
-                seen.insert(token_id, (bids, asks));
-            }
-        }
+        // 第一条 book 事件必须是整批 Books（两 token 一条事件、同一时间戳）。
+        let ev = tokio::time::timeout(Duration::from_secs(5), ev_rx.recv())
+            .await
+            .expect("no book arrived within 5s")
+            .expect("feed closed");
         handle.abort();
-
+        let FeedEvent::Books {
+            books,
+            now_ms: batch_ts,
+        } = ev
+        else {
+            panic!("expected a batch Books event, got {ev:?}");
+        };
+        assert_eq!(books.len(), 2, "the whole poll batch rides one event");
+        let mut seen: HashMap<String, Depth> = HashMap::new();
+        for (token_id, bids, asks) in books {
+            seen.insert(token_id, (bids, asks));
+        }
         let (bids, asks) = seen.get(&a).expect("no book for the first token");
         assert_eq!(bids, &vec![(dec("0.40"), dec("10"))]);
         assert_eq!(asks, &vec![(dec("0.50"), dec("5"))]);
         assert!(seen.contains_key(&b), "no book for the second token");
+        assert!(batch_ts > 0, "the batch carries a real timestamp");
     }
 
     /// A round rollover must switch the polled set over, and must not keep asking
@@ -888,7 +925,7 @@ mod tests {
         assert!(
             !ev_rx
                 .try_recv()
-                .is_ok_and(|e| matches!(e, FeedEvent::Book { .. })),
+                .is_ok_and(|e| matches!(e, FeedEvent::Book { .. } | FeedEvent::Books { .. })),
             "a rate-limited response must not produce a book"
         );
     }
