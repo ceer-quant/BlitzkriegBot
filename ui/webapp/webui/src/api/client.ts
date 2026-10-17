@@ -635,6 +635,37 @@ export interface AccountJournalDoc {
   error?: string
 }
 
+// ── 账户↔交易所绑定（account.venue.get / account.venue.set）─────────────────
+
+/** 一行绑定：venue 空串 = 未绑定（可交易任意交易所）。 */
+export interface AccountVenueRowDoc {
+  accountId: string
+  venue: string
+  /** 谁写的（boot / panel / venue-derive-migration …）。 */
+  actor: string
+  updatedAtMs: number
+}
+
+/** `account.venue.get` 回执。 */
+export interface AccountVenueDoc {
+  version: string
+  venues: AccountVenueRowDoc[]
+  /** 本连接的默认账户（会话切换后 = 会话值）。 */
+  active: string
+  error?: string
+}
+
+/** `account.venue.set` 回执：persisted=false = 内存生效但未落盘。 */
+export interface AccountVenueSetDoc {
+  accountId: string
+  venue: string
+  persisted: boolean
+  atMs: number
+  actor: string
+  note: string
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -822,6 +853,22 @@ export const api = {
     request<AccountJournalDoc>('/account-journal', {}, {
       accountId: params?.accountId,
       limit: params?.limit,
+    }),
+  // ── 账户↔交易所绑定（account.venue.get / account.venue.set）────────────────
+  // 专用代理路由（#508 的教训：JSON-RPC 信封走 /command 文本动词通道会被
+  // 网关当 unknown command 拒掉 —— 绑定面必须走自己的 proxy 路由，同
+  // account-journal 的纪律）。
+
+  /** 绑定读数（只读）：accountId 缺省 = 全簿。venue 空串 = 未绑定。 */
+  accountVenue: (params?: { accountId?: string }) =>
+    request<AccountVenueDoc>('/account-venue', {}, {
+      accountId: params?.accountId,
+    }),
+  /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
+  accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
+    request<AccountVenueSetDoc>('/account-venue/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>

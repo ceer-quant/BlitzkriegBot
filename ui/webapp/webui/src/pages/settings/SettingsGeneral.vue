@@ -26,7 +26,7 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
 
 const settings = useSettingsStore()
-/** 指引卡跳转到插件页的凭据卡（requestNav 是面板级导航的统一入口）。 */
+/** 指引卡跳转到顶栏账户切换器（添加账户弹窗；requestNav 是面板级导航的统一入口）。 */
 function navToPlugins(): void {
   usePanelStore().requestNav('plugins')
 }
@@ -462,8 +462,9 @@ async function doResetTrading(): Promise<void> {
       </div>
     </Card>
 
-    <!-- ── 如何创建 API（行情插件凭据指引）：静态指引卡。配置入口在插件页
-         的 API 凭据卡；这里只回答「去哪申请、哪个变量填什么」。 ─────────────── -->
+    <!-- ── 如何创建 API（行情插件凭据指引）：静态指引卡。凭据录入的入口在
+         顶栏账户切换器（添加账户弹窗，选交易所 + 填 API）；这里只回答
+         「去哪申请、哪个变量填什么」。 ─────────────── -->
     <Card class="mt-3.5">
       <CardHeader label="如何创建 API（行情插件凭据）">
         <template #title>
@@ -473,7 +474,7 @@ async function doResetTrading(): Promise<void> {
       <div class="space-y-2.5 text-[12px] text-muted-fg">
         <p>
           行情与发现不需要凭据即可看数据；只有<b class="text-fg">下单执行器</b>在启动时读取环境变量。
-          配置入口在 <button class="text-primary underline" @click="navToPlugins">插件页 → API 凭据</button>
+          配置入口在 <button class="text-primary underline" @click="navToPlugins">顶栏账户切换器 → 添加账户</button>
           （或直接写 <span class="font-mono">.env</span>，真实环境变量始终优先）。
         </p>
         <div class="overflow-x-auto">

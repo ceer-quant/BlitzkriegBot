@@ -2834,6 +2834,16 @@ async fn main() -> anyhow::Result<()> {
         // #458: where manual destructive operations audit themselves. Always
         // on for a real process; the backtester/tests carry None and refuse.
         manual_ops_audit_path: Some("data/audit/manual-ops.jsonl".to_string()),
+        // The account book's config source (E28 §9.5, cwd-relative like every
+        // other `data/`-family writer). `Core::new` already LOADS the book
+        // from this exact path — without naming it here too, every runtime
+        // write face (`account.venue.set`, and the panel's account
+        // create/remove) refuses with "persistence is disabled". The
+        // backtester zeroes it again (backtest.rs), so a replay can never
+        // write the operator's file.
+        accounts_config_path: Some(
+            blitzkrieg_core::account::config::ACCOUNTS_CONFIG_PATH.to_string(),
+        ),
         // #363: the EXPLICIT flag only (None = let the policy file decide).
         max_positions_per_asset: args.max_positions_per_asset,
         positions: PositionConfig {

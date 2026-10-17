@@ -176,7 +176,8 @@ function editVenue(a: AccountRow): void {
 
 /**
  * 保存绑定：`account.venue.set` params `{accountId, venue, reason}`，
- * venue 空 = 解绑。老内核没有该动词 → 命令失败，提示需要升级内核而不是崩。
+ * venue 空 = 解绑。走 /api/account-venue/set 专用代理路由（body 即 params，
+ * 逐字转发）—— /api/command 是文本动词通道，不认 JSON-RPC 信封。
  */
 async function saveVenue(a: AccountRow): Promise<void> {
   if (venueBusy.value) return
@@ -185,26 +186,20 @@ async function saveVenue(a: AccountRow): Promise<void> {
   venueMsg.value = null
   const next = venueDraft.value.trim()
   try {
-    const res = await api.command(JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'account.venue.set',
-      params: { accountId: a.id, venue: next, reason: 'panel' },
-    }))
-    if (!res.ok) throw new Error(res.message ?? '绑定被内核拒绝')
+    const res = await api.accountVenueSet({
+      accountId: a.id,
+      venue: next,
+      reason: 'panel',
+    })
+    if (res.error) throw new Error(res.error)
     venueMsg.value = next
-      ? `已绑定：账户 ${a.id} → ${next}（立即生效）。`
-      : `已解绑：账户 ${a.id} 可交易任意交易所（立即生效）。`
+      ? `已绑定：账户 ${a.id} → ${next}${res.persisted ? '（已落盘）' : ''}。`
+      : `已解绑：账户 ${a.id} 可交易任意交易所${res.persisted ? '（已落盘）' : ''}。`
     venueEditing.value = null
     await refresh()
     store.refresh()
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    // 未知动词（内核早于 account.venue.set）按「需要升级」提示 —— 这份 UI
-    // 先合，内核合上后自动活。
-    venueErr.value = /unknown|not found|method|未知的|不支持/i.test(msg)
-      ? '当前内核不支持账户↔交易所绑定，需要升级内核后生效。'
-      : msg
+    venueErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     venueBusy.value = false
     setTimeout(() => { venueMsg.value = null }, 6000)
@@ -252,7 +247,7 @@ onBeforeUnmount(() => {
       class="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-line bg-panel-solid p-2 shadow-lg"
     >
       <div class="mb-1 flex items-center justify-between px-2 py-1">
-        <span class="label-micro">账户账本 · E28</span>
+        <span class="label-micro">账户账本</span>
         <button
           class="text-faint-fg transition-colors hover:text-fg"
           title="重新加载"

@@ -2363,6 +2363,26 @@ impl WebServer {
                 }
                 self.proxy_backtest("account.journal", serde_json::Value::Object(params))
             }
+            ("GET", "/api/account-venue") => {
+                // #508: the account↔venue binding readout — a thin proxy of
+                // `account.venue.get` (read-only). `?accountId=` narrows to
+                // one account; absent = the whole book. The wire shape is the
+                // kernel's own.
+                let mut params = serde_json::Map::new();
+                if let Some(v) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(v));
+                }
+                self.proxy_backtest("account.venue.get", serde_json::Value::Object(params))
+            }
+            ("POST", "/api/account-venue/set") => {
+                // #508: the binding write — the body IS the
+                // `account.venue.set` params object
+                // (`{accountId, venue, reason?}`), forwarded verbatim. An
+                // empty `venue` string unbinds. The kernel validates the
+                // name against its market-plugin registry and persists into
+                // accounts.toml; the gateway shapes nothing.
+                self.proxy_backtest_body("account.venue.set", &req.body)
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.
