@@ -252,6 +252,10 @@ mod tests {
             timestamp_ms: 1,
             bid_levels: 3,
             ask_levels: 3,
+            // OPTIONAL-field protocol: new BookUpdate fields default, so a
+            // strategy_api addition never breaks the generated crate (the
+            // devcheck gate compiled against a fresh workspace build).
+            ..Default::default()
         });
         let ctx = RoundContext {
             round: crate::template_round(),
