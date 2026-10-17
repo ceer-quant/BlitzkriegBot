@@ -1867,6 +1867,24 @@ impl Engine {
         self.strategies.iter().any(|s| s.strategy.name() == name)
     }
 
+    /// Strategy names the DEFAULT scope hosts, in registration order. The
+    /// INHERIT resolution of `account.strategies.set {default, []}`: the empty
+    /// assignment means "keep what boot fanned out", and this is exactly that
+    /// set — handing it back as the resolved request makes the scope rebuild
+    /// a no-op instead of a teardown of every live default scope.
+    pub fn default_scope_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.strategies {
+            if s.account_id == blitzkrieg_market_api::DEFAULT_ACCOUNT_ID {
+                let name = s.strategy.name().to_string();
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
     /// (strategy name → source string) for every REGISTERED scope, first
     /// scope wins. The host reads this BEFORE opening its engine borrow so
     /// the scope-builder closure can re-instantiate packages without
@@ -1921,6 +1939,15 @@ impl Engine {
             }
         }
         // 2. Drop removed-and-flat.
+        //
+        // An ENABLED scope is not droppable here: enabled means it may be
+        // mid-round with live entry orders, and a silent teardown would pull
+        // a trading strategy out from under the engine (the same contract
+        // `unregister_user_strategy` enforces for the explicit unload path —
+        // disable first, then the write that drops it succeeds). This guard
+        // is what keeps an INHERIT race or a caller bug from silently
+        // stopping a trading strategy with no error anywhere.
+        let mut refused: Vec<String> = Vec::new();
         self.strategies.retain(|s| {
             if s.account_id != account {
                 return true;
@@ -1928,8 +1955,23 @@ impl Engine {
             let name = s.strategy.name();
             // An exits-only scope stays until the account is flat in the
             // strategy; a plain removed scope (no positions) drops now.
-            requested.iter().any(|r| r == name) || held.iter().any(|h| h == name)
+            let keep = requested.iter().any(|r| r == name)
+                || held.iter().any(|h| h == name)
+                || (s.enabled && !held.iter().any(|h| h == name));
+            if !keep && s.enabled {
+                refused.push(name.to_string());
+            }
+            keep || s.enabled
         });
+        for name in refused {
+            tracing::warn!(
+                strategy = %name,
+                account = %account,
+                "account.strategies.set: ENABLED scope not in the assignment was \
+                 KEPT — disable it first (strategy.enable {name} false), then the \
+                 assignment write drops it"
+            );
+        }
         // 3. Add newly-requested scopes.
         for name in requested {
             match self
@@ -5257,5 +5299,102 @@ mod tests {
         Box::new(NamedStub {
             name: name.to_string(),
         })
+    }
+
+    /// INHERIT reads the default scope's own names back (the
+    /// `account.strategies.set {default, []}` resolution input): the set is
+    /// exactly what boot fanned out, so handing it back as the request makes
+    /// the rebuild a no-op. Today-red on the resolution itself is impossible
+    /// here (the fn did not exist) — the牙 lives in the service test; this
+    /// pins the fn's contract the resolution rides on.
+    #[test]
+    fn default_scope_names_reports_boot_fanout_exactly() {
+        let mut e = engine();
+        // The fixture hosts spread_arb/trend_follow/mean_reversion as default
+        // scopes — exactly the boot-fanout shape. Read them back.
+        let names = e.default_scope_names();
+        assert_eq!(names.len(), 3, "every hosted default scope listed once");
+        assert!(names.contains(&"spread_arb".to_string()));
+        // A paper scope must not leak into the default reading.
+        e.rebuild_account_scopes("paper", &["gamma".into()], &[], &mut |name, _| {
+            Some(probe_rebuild(name, "paper"))
+        });
+        assert!(!e.default_scope_names().contains(&"gamma".to_string()));
+        assert_eq!(e.default_scope_names().len(), 3, "paper scope excluded");
+    }
+
+    /// The INHERIT round-trip on the DEFAULT scope: resolve empty → the
+    /// current default names, rebuild with them — every scope (including an
+    /// ENABLED one) survives. This is the 生产 16:29 shape: the old code
+    /// handed the empty list straight to the rebuild, whose DROP phase swept
+    /// every default scope out and the enabled strategy stopped trading
+    /// silently.
+    #[test]
+    fn inherit_on_default_keeps_every_default_scope_alive() {
+        let mut e = engine();
+        e.rebuild_account_scopes(
+            DEFAULT_ACCT,
+            &["alpha".into(), "beta".into()],
+            &[],
+            &mut |name, _| Some(probe_rebuild(name, "default")),
+        );
+        // Boot shape: an enabled default scope (what strategy-state.json replays).
+        assert!(e.set_strategy_enabled("alpha", true));
+
+        // The INHERIT resolution: empty request → the default scope's names.
+        let requested = e.default_scope_names();
+        e.rebuild_account_scopes(DEFAULT_ACCT, &requested, &[], &mut |name, _| {
+            Some(probe_rebuild(name, "default"))
+        });
+        assert!(
+            e.strategy_registered("alpha") && e.strategy_registered("beta"),
+            "INHERIT keeps both scopes: enabled alpha and disabled beta"
+        );
+        assert!(
+            e.strategies
+                .iter()
+                .any(|s| s.strategy.name() == "alpha" && s.enabled),
+            "the enabled scope rides INHERIT untouched"
+        );
+    }
+
+    /// The ENABLED-guard on the DROP phase itself (defense in depth under the
+    /// INHERIT resolution): a rebuild whose request omits an ENABLED default
+    /// scope refuses to tear it down — a trading strategy is never silently
+    /// pulled from under the engine (same contract as `unregister_user_strategy`).
+    #[test]
+    fn rebuild_refuses_to_drop_an_enabled_scope_it_was_not_asked_about() {
+        let mut e = engine();
+        e.rebuild_account_scopes(
+            DEFAULT_ACCT,
+            &["alpha".into(), "beta".into(), "gamma".into()],
+            &[],
+            &mut |name, _| Some(probe_rebuild(name, "default")),
+        );
+        assert!(e.set_strategy_enabled("alpha", true));
+        // A caller bug / INHERIT race hands a request missing alpha.
+        e.rebuild_account_scopes(DEFAULT_ACCT, &["beta".into()], &[], &mut |name, _| {
+            Some(probe_rebuild(name, "default"))
+        });
+        assert!(
+            e.strategies
+                .iter()
+                .any(|s| s.strategy.name() == "alpha" && s.enabled),
+            "the enabled scope survives the omission"
+        );
+        // The disabled, un-requested one drops as before.
+        assert!(
+            !e.strategies.iter().any(|s| s.strategy.name() == "gamma"),
+            "removed-and-flat-and-disabled scope still drops"
+        );
+        // After an explicit disable the drop goes through.
+        assert!(e.set_strategy_enabled("alpha", false));
+        e.rebuild_account_scopes(DEFAULT_ACCT, &["beta".into()], &[], &mut |name, _| {
+            Some(probe_rebuild(name, "default"))
+        });
+        assert!(
+            !e.strategies.iter().any(|s| s.strategy.name() == "alpha"),
+            "disabled + un-requested = the drop succeeds"
+        );
     }
 }

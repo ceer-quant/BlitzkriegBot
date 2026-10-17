@@ -2932,6 +2932,19 @@ impl Core {
     /// assignment are instantiated from the SAME lua package the default
     /// scope loaded (own Lua state, own book).
     ///
+    /// INHERIT: an EMPTY assignment is NOT "remove everything". For `default`
+    /// it resolves to the set of names the default scope currently hosts
+    /// (exactly what boot installed — inherit = keep running whatever the
+    /// boot fanned out), so the restore-write a probe/panel sends after a
+    /// named assignment cannot sweep the live scopes out from under the
+    /// engine. For a non-default account the book already normalizes empty
+    /// → None (`strategy_assignment`), and boot never fans non-default
+    /// scopes out, so empty = no scopes, which is what the rebuild then
+    /// installs. (The empty-on-default shape is what 16:29 生产 probe 实锤:
+    /// the old code handed the empty list straight to the rebuild, whose
+    /// DROP phase deleted every default scope — `strategy.list` went empty
+    /// and the enabled strategy stopped trading with no error anywhere.)
+    ///
     /// Returns the exits-only keep-list for the reply.
     pub fn set_account_strategies_persisting(
         &mut self,
@@ -2969,7 +2982,24 @@ impl Core {
                 "account.strategies.set: no strategy engine attached".to_string(),
             ));
         }
-        for name in &requested {
+        // INHERIT on `default`: an empty assignment means "keep running what
+        // boot fanned out", not "tear every default scope down". Resolving it
+        // to the names the default scope currently hosts makes the rebuild a
+        // no-op on scopes — a subsequent NAMED assignment can trim it
+        // explicitly. Non-default accounts keep the empty = no-scopes reading
+        // (boot never fans them out). The resolution drives ONLY the engine
+        // rebuild: the file and the in-memory book keep spelling the ORIGINAL
+        // request (empty = INHERIT by absence) — materializing the resolved
+        // set would pin today's fanout and silently un-inherit strategies
+        // boot adds later.
+        let mut resolved = requested.clone();
+        if requested.is_empty()
+            && *id == crate::account::default_account_id()
+            && let Some(e) = self.engine.as_ref()
+        {
+            resolved = e.default_scope_names();
+        }
+        for name in &resolved {
             if !self
                 .engine
                 .as_ref()
@@ -3021,8 +3051,9 @@ impl Core {
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
         // Engine rebuild. Removed-and-flat scopes drop; removed-and-held
-        // scopes are marked exits-only; added scopes instantiate.
-        let kept_exits_only = self.rebuild_account_scopes(id, &requested, &held);
+        // scopes are marked exits-only; added scopes instantiate. The
+        // resolution from INHERIT rides here, not into the file.
+        let kept_exits_only = self.rebuild_account_scopes(id, &resolved, &held);
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -16032,6 +16063,91 @@ mod strategy_dispatch_tests {
             5,
             "with the fast path off, every scheduled cycle evaluates"
         );
+    }
+
+    /// 生产 16:29 形状的端到端牙（多账户 PR A 缺陷）：
+    /// `account.strategies.set {default, []}` 的 INHERIT 语义必须把 default
+    /// scope 全数保留 —— 旧代码把空列表直递 rebuild，DROP 阶段把 boot 扇出的
+    /// 全部 default scope 拆掉，enabled 策略静默停摆（strategy.list 变空、
+    /// 无任何 error 行）。命名分配仍照删不误（那张牙是 engine.rs 的
+    /// rebuild_drops_removed_and_flat_scopes）。
+    #[test]
+    fn strategies_set_inherit_on_default_keeps_the_boot_fanout_alive() {
+        let dir = std::env::temp_dir().join(format!("bk-inherit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        // Boot shape: one enabled default scope (what strategy-state.json replays).
+        assert!(
+            c.engine
+                .as_mut()
+                .unwrap()
+                .set_strategy_enabled("spread_arb", true)
+        );
+
+        // The restore write the panel/probe sends: empty = INHERIT.
+        let kept = c
+            .set_account_strategies_persisting(
+                &crate::account::AccountId::from("default"),
+                Vec::new(),
+                "test",
+                "inherit restore",
+                2,
+            )
+            .expect("the inherit write lands");
+        assert!(
+            kept.is_empty(),
+            "no exits-only promotion is part of inherit"
+        );
+        let e = c.engine.as_ref().unwrap();
+        assert!(
+            e.strategy_registered("spread_arb")
+                && e.strategy_registered("trend_follow")
+                && e.strategy_registered("mean_reversion"),
+            "INHERIT keeps every default scope the boot fanned out"
+        );
+        assert!(
+            e.enabled_strategies() == vec!["spread_arb".to_string()],
+            "the enabled scope rides the inherit untouched"
+        );
+        // The persisted file spells INHERIT by absence (the config half's own牙).
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let row = text.split("[[account]]").nth(1).unwrap();
+        assert!(!row.contains("strategies"), "inherit spelled by absence");
+
+        // A NAMED assignment on default still trims explicitly.
+        c.set_account_strategies_persisting(
+            &crate::account::AccountId::from("default"),
+            vec!["spread_arb".into()],
+            "test",
+            "named trim",
+            3,
+        )
+        .expect("the named write lands");
+        let e = c.engine.as_ref().unwrap();
+        assert!(
+            e.strategy_registered("spread_arb") && !e.strategy_registered("trend_follow"),
+            "a named assignment drops the un-named disabled scope"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── E2-a: per-strategy sizing + independent quotas ──────────────────────
