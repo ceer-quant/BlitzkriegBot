@@ -2861,6 +2861,181 @@ impl Core {
         Ok(())
     }
 
+    /// `account.create`（账户簿运行时增删的建半）：新账户落内存 AND
+    /// accounts.toml，一个事务 —— persist 先行（失败则两个存储都不动），文件
+    /// 收下后才动内存，与 [`Self::set_account_venue_persisting`] 同一姿态。
+    /// 身份合同在这里钉死：id 非空 / trim 后非空 / 不允许保留名 `default` /
+    /// 不允许与簿内现有 id 重复；status 恒 `Active`（运行时铸造一个受限账户
+    /// 等于变相放宽，收紧是 `account.status` 的事）；market_type 恒
+    /// `Prediction`（0.3 唯一有插件的市场类型，与文件缺省一致）。凭据面完全
+    /// 不存在（§9.4：值永不进内核）—— 面板在身份落地后走既有
+    /// `market.credentials.set`（env var 名 → 值，值不出内核）自己组织。
+    /// 无 [`CoreConfig::accounts_config_path`] 的内核（回测、多数进程内测试）
+    /// 拒绝 —— 同 venue.set 的 "persistence is disabled" 文案形状。
+    ///
+    /// venue 名的注册校验（plan-first）是调用方的职责 —— 编译进来的插件注册
+    /// 表在 IPC 层，市场无关的 core 看不见（同 [`Self::set_account_venue_persisting`]）。
+    pub fn create_account_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        name: Option<&str>,
+        venue: Option<&str>,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::ACCOUNT_CREATE_NOTE;
+        // Reserved name first — BEFORE the empty-id check, so the refusal
+        // names the contract, not the spelling (`"default"` trimmed and
+        // whitespace-padded variants land on the same reserved refusal).
+        let trimmed = id.as_str().trim();
+        if trimmed == crate::account::DEFAULT_ACCOUNT_ID {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.create: id `default` is reserved — the zero-config \
+                 deployment and the active-cell fallback both own it; add your \
+                 accounts under their own ids"
+                    .to_string(),
+            ));
+        }
+        if trimmed.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.create: id is empty — an account without an identity \
+                 cannot be addressed or audited"
+                    .to_string(),
+            ));
+        }
+        let id = crate::account::AccountId::from(trimmed);
+        // Existence (duplicate) with an honest refusal, before disk.
+        if self.accounts.account(&id).is_some() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("account.create: account `{id}` already exists"),
+            ));
+        }
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.create: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_create(
+            std::path::Path::new(path),
+            id.as_str(),
+            name,
+            venue,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.create: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.accounts.insert(crate::account::Account {
+            id: id.clone(),
+            name: name.unwrap_or(id.as_str()).to_string(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: crate::account::AccountStatus::Active,
+            credential_keys: crate::account::CredentialKeys::default(),
+            venue: venue.filter(|v| !v.is_empty()).unwrap_or("").to_string(),
+            updated_at_ms: now_ms,
+        })?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            name = %name.unwrap_or(id.as_str()),
+            venue = %venue.unwrap_or(""),
+            reason = %reason,
+            "account created — ACTIVE prediction account minted and persisted; \
+             credentials ride market.credentials.set (names only, never values) \
+             ({ACCOUNT_CREATE_NOTE})",
+        );
+        Ok(())
+    }
+
+    /// `account.remove`（账户簿运行时增删的删半）：账户离开内存 AND
+    /// accounts.toml，同一事务姿态。拒绝面：保留名 `default`（簿层也拒，
+    /// 双保险）；仍有 open position 的账户（钱不能变成不可寻址的）；未知 id
+    /// 标准拒绝。被删的是进程级 active 账户时自动回切 `default`（会话级
+    /// 切换器在下次读时照簿解析，无需此处操心）。
+    pub fn remove_account_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        actor: &str,
+        reason: &str,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::ACCOUNT_REMOVE_NOTE;
+        // Reserved name first (the book layer refuses too — belt and braces).
+        if *id == crate::account::default_account_id() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.remove: id `default` is reserved — every deployment \
+                 falls back to it, so it is never removable"
+                    .to_string(),
+            ));
+        }
+        // Existence, with the standard unknown-account refusal, before disk.
+        self.accounts.require(id)?;
+        // Open positions pin the account: retiring it would leave inventory
+        // with no book, no ledger and no close path — money must not become
+        // unaddressable.
+        let open = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| &p.account_id == id)
+            .count();
+        if open > 0 {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.remove: `{id}` still holds {open} open position(s) — \
+                     close them first (an account whose book leaves the kernel \
+                     takes no inventory with it)"
+                ),
+            ));
+        }
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.remove: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_remove(std::path::Path::new(path), id.as_str())
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.remove: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
+        self.accounts.remove(id)?;
+        self.accounts.repair_active_after_removal(id);
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            reason = %reason,
+            "account removed — identity and ledger retired, the active cell \
+             re-activates `default` when it named the removed account \
+             ({ACCOUNT_REMOVE_NOTE})",
+        );
+        Ok(())
+    }
+
     pub fn ome(&self) -> &Ome {
         &self.ome
     }

@@ -434,6 +434,78 @@ impl AccountLedgers {
         Ok(())
     }
 
+    /// The runtime-mint half of `account.create`: register a NEW account with
+    /// a fresh zero `Ledger`. The storage layer refuses a duplicate id (the
+    /// caller's arms refuse the reserved `default` and the empty spellings
+    /// before this is reached — here the invariant is a pure book one: two
+    /// accounts with one id would collapse into a HashMap slot, the exact
+    /// accident the file loader refuses at boot). The account arrives as the
+    /// caller built it (`Active` + `Prediction` is the only posture the IPC
+    /// verb mints) and its ledger starts at zero — funding rides the normal
+    /// journal/seed paths, never an implicit balance.
+    pub fn insert(&mut self, account: Account) -> CoreResult<()> {
+        if self.accounts.contains_key(&account.id) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account `{}` already exists — accounts are unique, a second \
+                     book under one id would silently pay for the first's orders",
+                    account.id
+                ),
+            ));
+        }
+        self.ledgers.insert(account.id.clone(), Ledger::new());
+        self.accounts.insert(account.id.clone(), account);
+        Ok(())
+    }
+
+    /// The retirement half of `account.remove`: drop the account AND its
+    /// ledger. `default` is refused here (the reserved identity every
+    /// deployment falls back to — the contract says the runtime never removes
+    /// it, whatever the caller's arm checks first). An unknown id is the
+    /// standard refusal; removing the ACTIVE account is legal at this layer —
+    /// the caller re-activates `default` beside it (the session switchers
+    /// resolve against the book on their next read).
+    pub fn remove(&mut self, id: &AccountId) -> CoreResult<()> {
+        if *id == default_account_id() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account `default` is reserved — every deployment falls back \
+                 to it (the active-cell repair, the zero-config book), so it \
+                 is never removable"
+                    .to_string(),
+            ));
+        }
+        if self.accounts.remove(id).is_none() {
+            return Err(unknown_account(id));
+        }
+        self.ledgers.remove(id);
+        Ok(())
+    }
+
+    /// Repair the process-level active cell after a removal: when the retired
+    /// id WAS active, fall back to `default` (which exists — `remove` refuses
+    /// the reserved id, and the boot guarantees the active names a configured
+    /// account; when the book never configured `default` the first surviving
+    /// entry takes the cell, the same resolution the file loader runs).
+    pub fn repair_active_after_removal(&mut self, removed: &AccountId) {
+        if self.active == *removed && !self.accounts.contains_key(&self.active) {
+            self.active = if self.accounts.contains_key(&default_account_id()) {
+                default_account_id()
+            } else {
+                // `remove` left at least one account (the empty-book refusal
+                // upstream); HashMap order is not stable, so take the lowest
+                // id — the file loader's "first entry" analogue for a book
+                // whose order is now memory-only.
+                self.accounts
+                    .keys()
+                    .min()
+                    .cloned()
+                    .unwrap_or_else(default_account_id)
+            };
+        }
+    }
+
     /// E28 Gate 2 (§9.1): the account's lifecycle status must PERMIT this
     /// order — only `Active` places new entries; closes pass every posture
     /// except `ReadOnly` (a freeze must never be the reason a position is
@@ -669,5 +741,106 @@ mod book_tests {
             .expect_err("unknown account");
         assert_eq!(err.code, CoreErrorCode::InvalidParams);
         assert!(book.account(&AccountId("ghost".into())).is_none());
+    }
+
+    // ── account.create / account.remove 的簿内半（存储层）─────────────────────
+
+    fn fresh_account(id: &str, now_ms: i64) -> Account {
+        Account {
+            id: AccountId::from(id),
+            name: id.to_string(),
+            market_type: MarketType::Prediction,
+            status: AccountStatus::Active,
+            credential_keys: CredentialKeys::default(),
+            venue: String::new(),
+            updated_at_ms: now_ms,
+        }
+    }
+
+    #[test]
+    fn insert_registers_the_account_with_a_fresh_zero_ledger() {
+        let mut book = two_accounts();
+        book.insert(fresh_account("poly-main", 7))
+            .expect("a new id inserts");
+        let a = book.account(&AccountId("poly-main".into())).unwrap();
+        assert_eq!(a.id.as_str(), "poly-main");
+        assert!(matches!(a.status, AccountStatus::Active));
+        assert_eq!(a.updated_at_ms, 7, "the caller's stamp rides");
+        // The new book is a ZERO book: present, funded by nothing.
+        assert_eq!(
+            book.ledger_of(&AccountId("poly-main".into()))
+                .unwrap()
+                .balance(),
+            dec!(0)
+        );
+        // It is addressable by the standard gates and listable in order.
+        book.require(&AccountId("poly-main".into()))
+            .expect("require accepts the minted account");
+        let ids: Vec<&str> = book.account_list().iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["default", "paper", "poly-main"]);
+    }
+
+    #[test]
+    fn insert_refuses_a_duplicate_id_and_default_never_slips_through() {
+        let mut book = two_accounts();
+        let err = book
+            .insert(fresh_account("paper", 7))
+            .expect_err("duplicate id");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("already exists"), "{}", err.message);
+        // The refused insert created nothing: the existing record is intact.
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().name,
+            "paper"
+        );
+    }
+
+    #[test]
+    fn remove_drops_account_and_ledger_but_never_default() {
+        let mut book = two_accounts();
+        book.get_mut(&AccountId("paper".into()))
+            .unwrap()
+            .set_balance(dec!(42));
+        book.remove(&AccountId("paper".into())).expect("retires");
+        assert!(book.account(&AccountId("paper".into())).is_none());
+        assert!(
+            book.ledger_of(&AccountId("paper".into())).is_err(),
+            "the ledger goes with the account — no orphan book"
+        );
+        // `default` is the reserved identity: refused at the storage layer too.
+        let err = book.remove(&default_account_id()).expect_err("reserved");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("reserved"), "{}", err.message);
+        // An unknown id is the standard refusal.
+        let err = book
+            .remove(&AccountId("ghost".into()))
+            .expect_err("unknown");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("unknown account `ghost`"));
+    }
+
+    #[test]
+    fn removing_the_active_account_repairs_the_cell_to_default() {
+        let mut book = two_accounts();
+        book.switch(&AccountId("paper".into())).unwrap();
+        book.remove(&AccountId("paper".into())).unwrap();
+        book.repair_active_after_removal(&AccountId("paper".into()));
+        assert_eq!(
+            book.active_id().as_str(),
+            DEFAULT_ACCOUNT_ID,
+            "the retired active falls back to the reserved default"
+        );
+        // The cell repair is a no-op when the removed id was not active.
+        book.switch(&AccountId("paper".into())).ok(); // unknown now — refused
+        book.insert(fresh_account("other", 1)).unwrap();
+        book.switch(&AccountId("other".into())).unwrap();
+        book.remove(&AccountId("default".into()))
+            .expect_err("default stays");
+        book.repair_active_after_removal(&AccountId("default".into()));
+        assert_eq!(
+            book.active_id().as_str(),
+            "other",
+            "an unrelated removal leaves the active cell alone"
+        );
     }
 }

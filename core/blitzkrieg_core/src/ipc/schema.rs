@@ -339,6 +339,24 @@ pub mod method {
     /// the SESSION's default account (the same resolution `account.list`
     /// uses); `limit` defaults to 100, capped at 500.
     pub const ACCOUNT_JOURNAL: &str = "account.journal";
+    /// Create ONE account at runtime (`accountId` + optional `name`/`venue`):
+    /// the identity lands in the in-memory book AND accounts.toml — the same
+    /// plan-and-persist transaction `account.venue.set` runs. Status is
+    /// ALWAYS `active` (a runtime call that minted a restricted account would
+    /// be a loosening in disguise — tightening is `account.status`'s job);
+    /// market_type is ALWAYS `prediction` (the only type a 0.3 plugin
+    /// exists for, identical to the file's own default). NO credential field
+    /// travels here (§9.4: the value never enters the kernel) — credentials
+    /// are the existing `market.credentials.set` env-name path, wired by the
+    /// panel after the identity exists. `default` is refused (reserved).
+    pub const ACCOUNT_CREATE: &str = "account.create";
+    /// Remove ONE account at runtime: the row leaves the in-memory book AND
+    /// accounts.toml. `default` is refused (reserved); an account with any
+    /// OPEN position is refused (its money must not become unaddressable);
+    /// removing the process-active account re-activates `default` (the
+    /// session switchers resolve against the book, this only fixes the
+    /// process-level cell).
+    pub const ACCOUNT_REMOVE: &str = "account.remove";
 
     // ── #363 — execution policy surface ─────────────────────────────────────
     /// List every account section the loaded policy names, plus the effective
@@ -1962,6 +1980,85 @@ pub struct AccountVenueSetResult {
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
      unbound); persisted to accounts.toml, re-read at next boot; the same \
      venue on several accounts is the deployment model, not a conflict";
+
+// ── account.create / account.remove — 账户簿运行时增删 ──────────────────────
+
+/// `account.create` params: the new account's identity. NO credential field
+/// exists here (§9.4 — the panel wires credentials through the existing
+/// `market.credentials.set` env-name path AFTER the identity exists); `name`
+/// absent = the id; `venue` absent/empty = unbound (the account trades any
+/// venue — the historical behaviour; a non-empty name is checked against the
+/// plugin registry plan-first, exactly like `account.venue.set`). `actor` is
+/// audit-only, `reason` audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCreateParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub venue: Option<String>,
+    /// Audit trail only — who asked for the identity (the panel sends
+    /// "panel"); echoed in the reply and the log line.
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.create` result: the created id, whether the accounts.toml write
+/// landed (`false` is impossible today — a persist failure refuses the whole
+/// call, the field is the contract's honesty disclosure), and one fixed note.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCreateResult {
+    pub id: String,
+    pub persisted: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`AccountCreateResult::note`] — one spelling, used by the reply and the
+/// log line.
+pub const ACCOUNT_CREATE_NOTE: &str = "creates one ACTIVE prediction account (a restricted one is \
+     account.status's job, never a runtime mint); persisted to accounts.toml, \
+     re-read at next boot; credentials are wired separately through \
+     market.credentials.set — no credential value ever travels IPC";
+
+/// `account.remove` params: the account to retire. `actor`/`reason`
+/// audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRemoveParams {
+    pub id: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.remove` result: the retired id, whether the accounts.toml write
+/// landed, and one fixed note.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRemoveResult {
+    pub id: String,
+    pub persisted: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+/// [`AccountRemoveResult::note`] — one spelling, used by the reply and the
+/// log line.
+pub const ACCOUNT_REMOVE_NOTE: &str = "removes the account from the book (memory AND accounts.toml, \
+     re-read at next boot); refused while the account still holds open \
+     positions; removing the process-active account re-activates `default`";
 
 // ── #509 的读面 — account.journal（钱包流水的面板可读面）─────────────────────
 
