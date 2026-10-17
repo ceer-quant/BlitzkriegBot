@@ -17,5 +17,10 @@ mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
 # §11.1 dependency direction: lua_runtime ──► strategy_api (type alignment
 # only). This crate must never depend on the core.
 blitzkrieg-strategy-api = { path = "../strategy_api" }
+# `bk.vwap_for_size` walks the ladder in EXACT arithmetic host-side
+# (checked add/mul, one final div, result emitted as a decimal STRING) —
+# the numbers-as-strings wire rule every `bk.*` projection follows. Never
+# a Lua-integer/float domain: rust_decimal mantissas reach 28 digits.
+rust_decimal = "1"
 # Diagnostics payload (`LuaStrategy::diagnostics`) is JSON.
 serde_json = "1"

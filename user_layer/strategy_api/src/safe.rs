@@ -44,6 +44,13 @@ pub fn dec(field: &Option<String>) -> Option<rust_decimal::Decimal> {
 /// STRINGS (`None` = field absent). Parse with [`dec`] or `rust_decimal`
 /// directly — never via `f64`, or a resting price can drift by a tick.
 /// Side-level counts reflect how many ladder rows the host delivered.
+///
+/// The ladders carry the top [`LADDER_LEVELS`] levels best-first
+/// (`(price, size)` decimal-STRING pairs, the SAME numbers the raw ABI's
+/// `BkLevel` arrays hand over) — the data a depth-aware cost model needs.
+/// Empty side → empty ladder AND the top fields `None`, never fabricated.
+/// A host that predates the ladders delivers empty vecs (an OPTIONAL field,
+/// exactly like a 0.2 library that never read `bids`).
 #[derive(Debug, Clone, Default)]
 pub struct BookUpdate {
     pub symbol: String,
@@ -59,6 +66,10 @@ pub struct BookUpdate {
     pub timestamp_ms: i64,
     pub bid_levels: usize,
     pub ask_levels: usize,
+    /// Top-N bid ladder, best-first: `(price, size)` decimal strings.
+    pub bid_ladder: Vec<(String, String)>,
+    /// Top-N ask ladder, best-first: `(price, size)` decimal strings.
+    pub ask_ladder: Vec<(String, String)>,
 }
 
 /// New round notification.
@@ -375,6 +386,24 @@ pub fn parse_params(json: &str) -> ParamBag {
 
 pub fn parse_book(view: &crate::BkBookView) -> BookUpdate {
     unsafe {
+        // SAFETY: the host guarantees `bid_count`/`ask_count` BkLevel rows,
+        // each a borrowed NUL-terminated decimal string pair, live for the
+        // call. A non-null pointer with a zero count is treated as empty.
+        let levels = |ptr: *const crate::BkLevel, count: usize| {
+            if ptr.is_null() || count == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(ptr, count)
+                    .iter()
+                    .map(|l| {
+                        (
+                            field(l.price).unwrap_or_default(),
+                            field(l.size).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            }
+        };
         BookUpdate {
             symbol: cstr(view.symbol).unwrap_or_default(),
             asset: cstr(view.asset).unwrap_or_default(),
@@ -397,6 +426,8 @@ pub fn parse_book(view: &crate::BkBookView) -> BookUpdate {
             } else {
                 view.ask_count
             },
+            bid_ladder: levels(view.bids, view.bid_count),
+            ask_ladder: levels(view.asks, view.ask_count),
         }
     }
 }

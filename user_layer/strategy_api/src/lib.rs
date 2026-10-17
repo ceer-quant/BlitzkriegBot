@@ -198,6 +198,14 @@ pub struct BkLevel {
     pub size: *const c_char,
 }
 
+/// How many ladder levels the projections hand out (best-first). The kernel's
+/// `LocalBook` keeps the FULL depth it was fed; the exposure surface is capped
+/// at the top 10 so a strategy's per-tick render cost is bounded — a cost
+/// model ("eat the book") only ever needs the near touches. `BookUpdate`'s
+/// ladders and the Lua `bk.book()` ladder tables all honour this cap, and the
+/// depth SUMS (`bid_depth`/`ask_depth`) stay full-depth as before.
+pub const LADDER_LEVELS: usize = 10;
+
 /// Full order-book view for one token. The bid/ask ladders are length-prefixed
 /// arrays (`bids` is sorted best→worst descending by price; `asks` ascending).
 /// All derived metrics are precomputed by the HOST using the same
