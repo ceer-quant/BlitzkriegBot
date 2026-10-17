@@ -48,7 +48,7 @@ const activeVenueNote = computed(() => {
   if (!id) return ''
   const venue = store.activeAccountVenue
   return venue
-    ? `当前账户「${id}」绑定 ${venue} —— 拉取该 venue 的链上数据请用其钱包地址；数据集不区分 venue，回放按数据集自身的 archive 口径。`
+    ? `当前账户「${id}」绑定 ${venue} —— 拉取该 venue 的链上数据请用其钱包地址；数据集不区分 venue，回测按数据集自身的 archive 口径。`
     : `当前账户「${id}」未绑定 venue —— 可拉任意 venue 的链上数据。`
 })
 
