@@ -246,6 +246,11 @@ impl CashflowKind {
     }
 }
 
+/// One book of a batch: `(token_id, bids, asks)` — the shape
+/// [`DataEvent::Books`] and [`Engine::on_data_books`] both carry, named so the
+/// signatures stay readable.
+pub type BatchBook = (String, Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>);
+
 /// Market-data events the engine consumes (produced by the feed layer or, in
 /// tests, driven directly).
 #[derive(Debug, Clone)]
@@ -257,6 +262,13 @@ pub enum DataEvent {
         asks: Vec<(Decimal, Decimal)>,
         now_ms: i64,
     },
+    /// 盘口批次原子化：一次 REST 批式拉取（如 polymarket `POST /books`）的
+    /// 整批 book，`now_ms` 是这个批次的统一时间戳。整批必须一次应用 ——
+    /// 逐 token 发射会在两次锁的间隙让策略读到「一半新一半旧」的撕裂状态
+    /// （up 腿是本批、down 腿还是上一批，一对不存在的折价就是从这来的）。
+    /// 批内按 `Vec` 顺序应用；每一本仍走与 [`DataEvent::Book`] 完全相同的
+    /// apply/notify/kline 路径，只是共享一次锁与一个批次时间戳。
+    Books { books: Vec<BatchBook>, now_ms: i64 },
     /// Top-of-book only update (price_change / best_bid_ask).
     TopOfBook {
         token_id: String,
@@ -757,6 +769,20 @@ impl Engine {
                 self.near_miss.on_book(&token_id, &snap, now_ms);
                 self.feed_klines(&token_id, &snap, now_ms);
             }
+            DataEvent::Books { .. } => {
+                // 盘口批次原子化：批事件不在本 match 里展开 —— 撕裂的根就是
+                // 逐 token 的独立 apply。归档回放（`k:"books"` 批行 →
+                // `event_from_json` → 本函数）与任何直接喂入都拿到与
+                // [`Engine::on_data_books`] 同一条整批路径：一次调用顺序应用，
+                // 策略永远看到同一批快照。静默吞掉（旧实现）会让回放里整批
+                // tick 消失——比撕裂更坏的假象。
+                let books = match ev {
+                    DataEvent::Books { books, now_ms } => (books, now_ms),
+                    _ => unreachable!("matched Books arm"),
+                };
+                let (books, now_ms) = books;
+                return self.on_data_books(&books, now_ms);
+            }
             DataEvent::TopOfBook {
                 token_id,
                 best_bid,
@@ -947,6 +973,29 @@ impl Engine {
                 // the strategy layer can read it through the view; the match
                 // arm stays inert to trading.
             }
+        }
+        self.drain_breaks()
+    }
+
+    /// 盘口批次原子化：整批 book 在同一次调用里顺序应用，每一本走与
+    /// [`DataEvent::Book`] 完全相同的 apply → 逐策略 `on_book` → near-miss →
+    /// K-line 路径，策略因此永远看到同一批快照（时间戳一致、新旧一致），
+    /// 不存在「批内一半新一半旧」的中间态。批次时间戳 `now_ms` 由调用方
+    /// 统一给定（批式拉取一次请求一个时钟）。返回聚合的趋势断裂供调用方
+    /// 撤单（与 [`Engine::on_data`] 的返回语义相同）。
+    pub fn on_data_books(&mut self, books: &[BatchBook], now_ms: i64) -> Vec<(String, Decimal)> {
+        for (token_id, bids, asks) in books {
+            let b = match self.books.get_mut(token_id) {
+                Some(b) => b,
+                None => self.books.entry(token_id.clone()).or_default(),
+            };
+            b.apply_snapshot(bids, asks, now_ms);
+            let snap = b.snapshot(token_id);
+            for s in &mut self.strategies {
+                s.strategy.on_book(token_id, &snap, now_ms);
+            }
+            self.near_miss.on_book(token_id, &snap, now_ms);
+            self.feed_klines(token_id, &snap, now_ms);
         }
         self.drain_breaks()
     }
@@ -2347,6 +2396,241 @@ mod tests {
         });
         assert_eq!(e.scanner.markets().len(), 2);
         assert_eq!(*rounds.lock().unwrap(), vec![2]);
+    }
+
+    // ── 盘口批次原子化：Batch 应用路径 ─────────────────────────────────────
+
+    /// BatchProbe 的观测账：`(token, timestamp, best_bid mantissa)`。
+    type SeenObs = Vec<(&'static str, i64, i64)>;
+
+    /// 逐事件观测器：记录每次 on_book 调用的 (token, timestamp, best_bid)。
+    /// 撕裂探测用它对齐「批次喂入途中」各 token 的可见状态。
+    struct BatchProbe {
+        seen: Arc<Mutex<SeenObs>>,
+    }
+    impl EngineStrategy for BatchProbe {
+        fn name(&self) -> &str {
+            "batch_probe"
+        }
+        fn on_book(&mut self, t: &str, s: &OrderbookSnapshot, _n: i64) {
+            let tok: &'static str = if t == "up" {
+                "up"
+            } else if t == "down" {
+                "down"
+            } else {
+                "other"
+            };
+            self.seen
+                .lock()
+                .unwrap()
+                .push((tok, s.timestamp, s.best_bid.mantissa() as i64));
+        }
+        fn on_round(&mut self, _slot: i64, _left: i64, _now: i64) {}
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<crate::signal::TradeSignal> {
+            Vec::new()
+        }
+    }
+
+    fn two_leg_market(end_ms: i64) -> CryptoMarket {
+        CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-batch".into(),
+            question_id: "q-batch".into(),
+            up_token_id: "up".into(),
+            down_token_id: "down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: String::new(),
+            neg_risk: false,
+            question: "?".into(),
+        }
+    }
+
+    fn batch_engine() -> (Engine, Arc<Mutex<SeenObs>>) {
+        let mut e = Engine::new(cfg());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        e.register_user_strategy(Box::new(BatchProbe { seen: seen.clone() }), "test".into())
+            .expect("probe registers");
+        e.set_strategy_enabled("batch_probe", true);
+        (e, seen)
+    }
+
+    /// 红测试（修复前）：一个 up+down 批次以两个单事件喂入，策略在第二条
+    /// on_book 途中读到的 up 是新批次、down 还是上一批 —— 一对不存在的腿间
+    /// 折价。修复后 Batch 路径一次应用整批：第二条 on_book 读到的 down 已经
+    /// 是同一批（时间戳一致的）快照，两条观测的时间戳必然相同。
+    ///
+    /// 反过来单事件路径保持原语义：两条逐个喂入的 Book 观测时间戳不同
+    /// （它们本来就是两个独立事件），行为逐位不变。
+    #[test]
+    fn a_batch_of_books_is_observed_at_one_consistent_timestamp() {
+        let (mut e, seen) = batch_engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![two_leg_market(1_800_000)],
+            now_ms: 1_000,
+        });
+
+        // 上一批（老价格，都是 0.40 的 bid）。
+        e.on_data(DataEvent::Books {
+            books: vec![
+                (
+                    "up".into(),
+                    vec![(dec!(0.40), dec!(10))],
+                    vec![(dec!(0.60), dec!(10))],
+                ),
+                (
+                    "down".into(),
+                    vec![(dec!(0.40), dec!(10))],
+                    vec![(dec!(0.60), dec!(10))],
+                ),
+            ],
+            now_ms: 10_000,
+        });
+        seen.lock().unwrap().clear();
+
+        // 新批次：up 涨到 0.50，down 涨到 0.55 —— 同一个批次时间戳 20_000。
+        e.on_data(DataEvent::Books {
+            books: vec![
+                (
+                    "up".into(),
+                    vec![(dec!(0.50), dec!(10))],
+                    vec![(dec!(0.60), dec!(10))],
+                ),
+                (
+                    "down".into(),
+                    vec![(dec!(0.55), dec!(10))],
+                    vec![(dec!(0.60), dec!(10))],
+                ),
+            ],
+            now_ms: 20_000,
+        });
+
+        let obs = seen.lock().unwrap().clone();
+        assert_eq!(
+            obs.len(),
+            2,
+            "the batch seeds every strategy once per token: {obs:?}"
+        );
+        assert!(
+            obs.iter().all(|(_, ts, _)| *ts == 20_000),
+            "every token of one batch must be observed under the SAME batch \
+             timestamp — a torn half-old/half-new read is exactly what this \
+             forbids: {obs:?}"
+        );
+        let up = obs
+            .iter()
+            .find(|(t, _, _)| *t == "up")
+            .expect("up observed");
+        let down = obs
+            .iter()
+            .find(|(t, _, _)| *t == "down")
+            .expect("down observed");
+        assert_eq!(up.2, 50, "the up leg carries its NEW batch price; {obs:?}");
+        assert_eq!(
+            down.2, 55,
+            "the down leg carries its NEW batch price in the same apply; {obs:?}"
+        );
+    }
+
+    /// 撕裂窗口本体的守卫（变异验证的载体）：把「整批一次应用」退化为
+    /// 「逐 token 独立事件应用」后，批次第二条 on_book 途中 up 已是 20_000
+    /// 的新价、down 还停在 10_000 的旧价 —— 观测时间戳必然分裂。本测试
+    /// 断言这个分裂不存在（绿色），变异后它变红。
+    #[test]
+    fn a_degenerate_single_token_batch_still_carries_one_timestamp() {
+        let (mut e, seen) = batch_engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![two_leg_market(1_800_000)],
+            now_ms: 1_000,
+        });
+        // 同一批 ts 的两个 token 拆成两个 Batch 事件（退化批次）：每次应用
+        // 仍各带自己的批次时间戳，一次只动一本 —— 喂入途中不出现跨 token
+        // 的一致性假象，也不出现「一个事件两个时间戳」的缝合。
+        e.on_data(DataEvent::Books {
+            books: vec![(
+                "up".into(),
+                vec![(dec!(0.50), dec!(10))],
+                vec![(dec!(0.60), dec!(10))],
+            )],
+            now_ms: 20_000,
+        });
+        e.on_data(DataEvent::Books {
+            books: vec![(
+                "down".into(),
+                vec![(dec!(0.55), dec!(10))],
+                vec![(dec!(0.60), dec!(10))],
+            )],
+            now_ms: 20_000,
+        });
+        let obs = seen.lock().unwrap().clone();
+        assert_eq!(obs.len(), 2);
+        assert!(
+            obs.iter().all(|(_, ts, _)| *ts == 20_000),
+            "each single-token apply stamps its own batch ts: {obs:?}"
+        );
+    }
+
+    /// 空 Batch 是显式无效输入：不发任何 on_book，也不碰任何状态。
+    #[test]
+    fn an_empty_batch_is_inert() {
+        let (mut e, seen) = batch_engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![two_leg_market(1_800_000)],
+            now_ms: 1_000,
+        });
+        let before = e.books.len();
+        e.on_data(DataEvent::Books {
+            books: Vec::new(),
+            now_ms: 30_000,
+        });
+        assert!(seen.lock().unwrap().is_empty(), "no observation fired");
+        assert_eq!(e.books.len(), before, "no book state touched");
+    }
+
+    /// 单事件旧路径守卫：Book 的 timestamp 就是事件自己的 now_ms，逐位不变
+    /// —— 回放语料（一个 book 一个事件）的基线语义由这里钉住。
+    #[test]
+    fn the_single_book_path_keeps_its_event_timestamp() {
+        let (mut e, seen) = batch_engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![two_leg_market(1_800_000)],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::Book {
+            token_id: "up".into(),
+            bids: vec![(dec!(0.42), dec!(10))],
+            asks: vec![(dec!(0.58), dec!(10))],
+            now_ms: 11_111,
+        });
+        let obs = seen.lock().unwrap().clone();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(
+            obs[0].1, 11_111,
+            "the single-event path stamps the event's own now_ms, byte-identical"
+        );
+    }
+
+    /// 单事件 TopOfBook 旧路径守卫（同上，回放基线的另一半）。
+    #[test]
+    fn the_single_top_of_book_path_keeps_its_event_timestamp() {
+        let (mut e, seen) = batch_engine();
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![two_leg_market(1_800_000)],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::TopOfBook {
+            token_id: "up".into(),
+            best_bid: Some(dec!(0.44)),
+            best_ask: Some(dec!(0.56)),
+            now_ms: 12_222,
+        });
+        let obs = seen.lock().unwrap().clone();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].1, 12_222);
     }
 
     #[test]

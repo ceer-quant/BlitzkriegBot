@@ -105,6 +105,7 @@ pub trait DataSink {
 pub fn event_at_ms(ev: &DataEvent) -> i64 {
     match ev {
         DataEvent::Book { now_ms, .. }
+        | DataEvent::Books { now_ms, .. }
         | DataEvent::TopOfBook { now_ms, .. }
         | DataEvent::Spot { now_ms, .. }
         | DataEvent::RoundMarkets { now_ms, .. }
@@ -132,6 +133,23 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "t": token_id,
             "b": levels_json(bids),
             "a": levels_json(asks),
+        }),
+        // 盘口批次原子化：整批 book 归档为一条 `k:"books"` 批行 —— `ts` 是
+        // 批次的统一时间戳，`books` 逐本携带 (t, b, a)。新增的 kind：旧语料
+        // 不含它，逐事件回放基线不受影响；含它的语料回到旧核会因未知 kind
+        // 被拒绝（fail-closed，正是归档该有的行为）。
+        DataEvent::Books { books, now_ms } => json!({
+            "at": now_ms,
+            "k": "books",
+            "ts": now_ms,
+            "books": books
+                .iter()
+                .map(|(t, b, a)| json!({
+                    "t": t,
+                    "b": levels_json(b),
+                    "a": levels_json(a),
+                }))
+                .collect::<Vec<Value>>(),
         }),
         DataEvent::TopOfBook {
             token_id,
@@ -266,6 +284,26 @@ pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
             best_ask: opt_dec(v.get("ba"))?,
             now_ms,
         }),
+        // 盘口批次原子化：`k:"books"` 批行解码。整批一个事件、一个时间戳 ——
+        // 回放端一次喂入整批，与 live 的 Batch 应用逐位同构。
+        "books" => {
+            let arr = v
+                .get("books")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "missing `books`".to_string())?;
+            let mut books = Vec::with_capacity(arr.len());
+            for item in arr {
+                let token_id = item
+                    .get("t")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "missing `books[].t`".to_string())?
+                    .to_string();
+                let bids = levels(item.get("b"))?;
+                let asks = levels(item.get("a"))?;
+                books.push((token_id, bids, asks));
+            }
+            Ok(DataEvent::Books { books, now_ms })
+        }
         "spot" => Ok(DataEvent::Spot {
             asset: str_field(v, "s")?,
             price: dec_field(v, "p")?,
@@ -643,6 +681,7 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
     let mut out = ev.clone();
     match &mut out {
         DataEvent::Book { now_ms, .. }
+        | DataEvent::Books { now_ms, .. }
         | DataEvent::TopOfBook { now_ms, .. }
         | DataEvent::Spot { now_ms, .. }
         | DataEvent::RoundMarkets { now_ms, .. }

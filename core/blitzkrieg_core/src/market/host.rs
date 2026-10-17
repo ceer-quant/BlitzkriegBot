@@ -179,6 +179,23 @@ impl MarketHost for CoreHost {
         })
     }
 
+    /// 盘口批次原子化：整批 book 在同一次 `core.lock()` 区间里应用完。
+    /// 撕裂的机理正是旧路径的「每本一把锁」—— 两次锁的间隙里维护 tick
+    /// （`engine_evaluate`）可以插进来，读到 up 腿是本批、down 腿还是上一批。
+    /// 批内共享一个批次时间戳（`ts_ms`），feed 层保证它来自同一次拉取。
+    fn on_books<'a>(&'a self, updates: Vec<api::BookUpdate>, ts_ms: i64) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let mut c = self.core.lock().await;
+            c.engine_on_books(
+                updates
+                    .into_iter()
+                    .map(|u| (u.token_id, u.bids, u.asks))
+                    .collect(),
+                ts_ms,
+            );
+        })
+    }
+
     fn on_top_of_book(&self, update: api::TopOfBookUpdate) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let now = now_ms();
@@ -811,6 +828,103 @@ mod tests {
             structure: None,
         }];
         assert!(crate::market::compat::check_compatibility("s", &modes, &p).is_ok());
+    }
+
+    // ── 盘口批次原子化 ─────────────────────────────────────────────────────
+
+    /// 批次观测探针：记录每次 on_book 的 (token, 时间戳, best_bid)。
+    struct BatchProbe {
+        seen: Arc<std::sync::Mutex<Vec<(String, i64, i64)>>>,
+    }
+    impl crate::strategies::EngineStrategy for BatchProbe {
+        fn name(&self) -> &str {
+            "batch_probe_host"
+        }
+        fn on_book(&mut self, t: &str, s: &crate::model::OrderbookSnapshot, _n: i64) {
+            self.seen.lock().unwrap().push((
+                t.to_string(),
+                s.timestamp,
+                s.best_bid.mantissa() as i64,
+            ));
+        }
+        fn on_round(&mut self, _slot: i64, _left: i64, _now: i64) {}
+        fn find_candidates(
+            &mut self,
+            _ctx: &crate::strategies::StrategyCtx<'_>,
+        ) -> Vec<crate::signal::TradeSignal> {
+            Vec::new()
+        }
+    }
+
+    /// 红→绿（撕裂窗口本体）：`on_books` 的整批应用必须对策略呈现为一次
+    /// 原子跃迁 —— 同一调用里的两条 on_book 观测共享同一批次时间戳，up 和
+    /// down 都是新批价格；绝不允许「up 已是 20_000 的新价、down 还停在
+    /// 10_000 的旧价」的中间态。变异验证：把 `CoreHost::on_books` 退化为
+    /// 逐本 `engine_on_data`（两次独立锁）后，本测试变红。
+    #[tokio::test]
+    async fn on_books_applies_the_whole_batch_under_one_lock() {
+        let mut c = two_venue_live_core();
+        // 追加两腿市场（up/down），书先给个旧批（与修复测试同构）。
+        let now: i64 = 1_000_000;
+        let slot = now / 1000 / 900;
+        let end = (slot + 1) * 900 * 1000;
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".into(),
+                    condition_id: "cond-batch".into(),
+                    question_id: "q".into(),
+                    up_token_id: "up".into(),
+                    down_token_id: "down".into(),
+                    up_price: rust_decimal_macros::dec!(0.6),
+                    down_price: rust_decimal_macros::dec!(0.4),
+                    expires_at_ms: end,
+                    round_slot: slot,
+                    round_duration_sec: 900,
+                    archive_verdict: false,
+                    venue: "polymarket".into(),
+                    neg_risk: false,
+                    question: "?".into(),
+                }],
+                now_ms: now,
+            },
+            now,
+        );
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let engine = c.engine.as_mut().expect("engine present");
+            engine
+                .register_user_strategy(Box::new(BatchProbe { seen: seen.clone() }), "test".into())
+                .expect("probe registers");
+            engine.set_strategy_enabled("batch_probe_host", true);
+        }
+
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        let mk = |token: &str, bid: rust_decimal::Decimal| blitzkrieg_market_api::BookUpdate {
+            token_id: token.to_string(),
+            bids: vec![(bid, dec!(10))],
+            asks: vec![(rust_decimal_macros::dec!(0.60), dec!(10))],
+            ts_ms: 20_000,
+        };
+        host.on_books(
+            vec![
+                mk("up", rust_decimal_macros::dec!(0.50)),
+                mk("down", rust_decimal_macros::dec!(0.55)),
+            ],
+            20_000,
+        )
+        .await;
+
+        let obs = seen.lock().unwrap().clone();
+        assert_eq!(obs.len(), 2, "both legs observed exactly once each");
+        assert!(
+            obs.iter().all(|(_, ts, _)| *ts == 20_000),
+            "one batch = one timestamp for every token; torn: {obs:?}"
+        );
+        let up = obs.iter().find(|(t, _, _)| t == "up").expect("up");
+        let down = obs.iter().find(|(t, _, _)| t == "down").expect("down");
+        assert_eq!(up.2, 50, "up carries the new batch price; {obs:?}");
+        assert_eq!(down.2, 55, "down carries the new batch price; {obs:?}");
     }
 
     struct BarePlugin;

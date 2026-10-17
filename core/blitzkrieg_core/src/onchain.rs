@@ -1611,6 +1611,9 @@ fn convert(
         DataEvent::Resolution { .. } => 4,
         DataEvent::RoundEnd { .. } => 5,
         DataEvent::Book { .. } => 6,
+        // 盘口批次原子化：批行与其逐本展开落在同一 instant 的同一序位
+        // （books 排在 book 之前：一个批次先于其中任何一本被消费）。
+        DataEvent::Books { .. } => 6,
         DataEvent::Cashflow { .. } => 7,
     };
     let mut events: Vec<DataEvent> = Vec::new();
