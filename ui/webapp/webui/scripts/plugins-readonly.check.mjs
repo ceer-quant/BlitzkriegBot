@@ -64,13 +64,16 @@ check('绑定即启用 handover copy is on the page', () => {
 })
 
 // ③ The status view still carries the facts: mode declarations and the
-//    registered/active state per plugin card.
+//    registered/active state per plugin card. (The 活跃行情源 card is gone
+//    per the 2026-10-17 operator ruling — the registration table's own
+//    active badge and the identity strip's 活跃源 line survive as the
+//    session facts.)
 check('plugin cards still render modes and registered/active state', () => {
   assert.match(page, /modesList\(/, 'modes badges no longer rendered')
   assert.match(page, /r\.modes/, 'PluginRow.modes no longer read')
   assert.match(page, /注册状态/, '注册状态 column header missing')
-  assert.match(page, /p\.active/, 'registered[].active no longer rendered')
-  assert.match(page, /marketDoc\.activePlugin/, 'active market plugin no longer rendered')
+  assert.match(page, /s\.active === r\.name/, 'the row active badge no longer rendered')
+  assert.match(page, /activeMarketName/, 'the identity strip active-source line missing')
 })
 
 console.log(`\nRESULT: ${failures > 0 ? `FAIL — ${failures} check(s) red` : 'PASS — plugins page is a status view: no enable/set writer, handover copy present, modes + registered state still rendered'}`)

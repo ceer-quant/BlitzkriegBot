@@ -49,22 +49,27 @@ check('AccountSwitcher edits bindings via account.venue.set', () => {
 
 check('empty string unbinds (option present + save path sends it)', () => {
   // The unbind choice is a <option> whose value is '', and saveVenue sends
-  // the trimmed draft verbatim — so the wire can carry the empty string.
+  // the trimmed draft verbatim through the /api/account-venue/set proxy —
+  // so the wire can carry the empty string.
   assert.match(switcher, /<option value=""/, 'no empty-string unbind option')
   assert.match(
     switcher,
-    /params:\s*\{\s*accountId[^}]*venue:\s*next/,
-    'saveVenue must send the (trimmed) draft verbatim: empty string = unbind',
+    /accountVenueSet\(\{\s*accountId:\s*a\.id,\s*venue:\s*next/,
+    'saveVenue must send the (trimmed) draft verbatim via the accountVenueSet proxy: empty string = unbind',
   )
 })
 
-check('pre-#506 core degrades to an upgrade hint, not a crash', () => {
+check('binding write goes through the dedicated proxy route, not the text command channel', () => {
+  // The /api/command channel speaks TEXT verbs; a JSON-RPC envelope sent
+  // there comes back "unknown command" (which used to masquerade as an
+  // old-core hint). The binding editor must use its own proxy route.
+  assert.doesNotMatch(switcher, /method:\s*'account\.venue\.set'/, 'JSON-RPC envelope via api.command must not return')
+  const client = read('src/api/client.ts')
   assert.match(
-    switcher,
-    /unknown\|not found\|method|未知的|不支持/i,
-    'old-kernel error tolerance missing',
+    client,
+    /accountVenueSet[^`]*'\/account-venue\/set'/,
+    'client must post to /account-venue/set',
   )
-  assert.match(switcher, /升级内核/, 'upgrade hint copy missing')
 })
 
 check('the pairing rationale is stated in prose (绑定即启用)', () => {

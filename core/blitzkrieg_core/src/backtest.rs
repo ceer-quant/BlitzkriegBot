@@ -616,6 +616,12 @@ impl EventBacktester {
         // replay neither appends to nor replays them (the corpus is the only
         // input), and the boot seed must run exactly as it always did.
         core_cfg.ledger_journal_dir = None;
+        // The account book's config file is likewise live-deployment
+        // persistence: a replay must never write back to
+        // user_layer/configs/accounts.toml (venue binds, account.create/
+        // account.remove all refuse when this is None — the same posture the
+        // backtester's other None-ing of durable writers takes).
+        core_cfg.accounts_config_path = None;
         core_cfg.near_miss_path = None;
         core_cfg.discovery_enabled = false;
         core_cfg.feed_ws_enabled = false;
