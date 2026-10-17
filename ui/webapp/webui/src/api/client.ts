@@ -666,6 +666,30 @@ export interface AccountVenueSetDoc {
   error?: string
 }
 
+// ── 账户簿运行时增删（account.create / account.remove，#516 内核面）─────────
+
+/** `account.create` 回执。 */
+export interface AccountCreateDoc {
+  id: string
+  persisted: boolean
+  atMs: number
+  actor: string
+  reason?: string
+  note: string
+  error?: string
+}
+
+/** `account.remove` 回执。 */
+export interface AccountRemoveDoc {
+  id: string
+  persisted: boolean
+  atMs: number
+  actor: string
+  reason?: string
+  note: string
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -867,6 +891,22 @@ export const api = {
   /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
   accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
     request<AccountVenueSetDoc>('/account-venue/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // ── 账户簿运行时增删（#517：添加账户弹窗 / 账户删除，只删不改）──────────────
+  // 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
+  // 凭据不走这两个动词 —— 另行 market.credentials.set（值只下行、从不回显）。
+
+  /** 建户：id 非空且不与现有重复、default 保留名被内核拒绝；venue 缺省 = 未绑定。 */
+  accountCreate: (body: { id: string; name?: string; venue?: string; reason?: string }) =>
+    request<AccountCreateDoc>('/account-create', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** 删户：default 与有持仓的账户内核拒绝；删的是当前默认时内核回切。 */
+  accountRemove: (body: { id: string; reason?: string }) =>
+    request<AccountRemoveDoc>('/account-remove', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
