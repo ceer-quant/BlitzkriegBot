@@ -413,13 +413,16 @@ pub async fn run(
         let ntp_interval = config.ntp_interval_secs;
         if crate::probe::should_spawn_ntp(&ntp_host) && ntp_interval > 0 {
             let core = core.clone();
+            // The probe thread has no reactor: capture the Handle HERE (we are
+            // inside the async runtime) and spawn through it from the closure.
+            let rt = tokio::runtime::Handle::current();
             crate::probe::spawn_loop(
                 ntp_host,
                 ntp_interval,
                 std::sync::Arc::new(move |offset| {
                     // Fire-and-forget: the probe never blocks trading on NTP.
                     let core = core.clone();
-                    tokio::spawn(async move {
+                    rt.spawn(async move {
                         let mut c = core.lock().await;
                         c.note_ntp_offset(offset, now_ms());
                     });
