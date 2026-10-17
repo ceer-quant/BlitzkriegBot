@@ -810,6 +810,8 @@ async fn handle_line(
         method::ROUND_DURATION_SET,
         method::MARKET_PLUGIN_SET,
         method::ACCOUNT_VENUE_SET,
+        method::ACCOUNT_CREATE,
+        method::ACCOUNT_REMOVE,
         method::SYSTEM_RESET_TRADING,
         method::STRATEGY_PARAMS_SET,
         method::UNIFIED_CONFIRM,
@@ -2592,6 +2594,87 @@ async fn handle_line(
                         actor,
                         reason: p.reason,
                         note: ACCOUNT_VENUE_SET_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
+        // ── 账户簿运行时增删：account.create / account.remove ───────────────
+        // 「添加账户」弹窗的内核面。照 venue.set 的完整模式：plan-first 的
+        // 注册校验（create 的非空 venue 名必须是已注册插件 —— 一个拼错的绑定
+        // 要现在失败，而不是等下次 boot 的 fail-closed 拒绝）、actor 从
+        // PeerAuth、persist 先行（失败两个存储都不动）、内存随后。方法层的
+        // 拒绝全是客户端错（保留名 / 空 id / 重复 id / 持仓未清 / 持久化关
+        // / 未知 id），经 typed 的 CoreError 尾部落成 wire 的 INVALID_PARAMS。
+        // 凭据值没有任何路径进来 —— 凭据走既有 market.credentials.set（env
+        // 名 → 值，值不出内核），本组动词只动身份（§9.4）。
+        method::ACCOUNT_CREATE => {
+            typed(params, |p: AccountCreateParams| {
+                let core = core.clone();
+                async move {
+                    let actor = p.actor.clone().unwrap_or_else(|| match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    });
+                    // Plan-first: a NON-empty venue name must be REGISTERED.
+                    let venue = p.venue.as_deref().map(str::trim).filter(|v| !v.is_empty());
+                    if let Some(v) = venue
+                        && registry.get(v).is_none()
+                    {
+                        let known = registry.names();
+                        let known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
+                        return Err(CoreError::new(
+                            CoreErrorCode::InvalidParams,
+                            format!(
+                                "account.create: '{v}' is not a registered plugin — \
+                                 the bindable set is {known:?}"
+                            ),
+                        ));
+                    }
+                    let id = AccountId::from(p.id.as_str());
+                    let mut c = core.lock().await;
+                    c.create_account_persisting(
+                        &id,
+                        p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+                        venue,
+                        &actor,
+                        p.reason.as_deref().unwrap_or(""),
+                        now_ms(),
+                    )?;
+                    Ok(serde_json::to_value(AccountCreateResult {
+                        id: id.as_str().to_string(),
+                        persisted: true,
+                        at_ms: now_ms(),
+                        actor,
+                        reason: p.reason,
+                        note: ACCOUNT_CREATE_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
+        method::ACCOUNT_REMOVE => {
+            typed(params, |p: AccountRemoveParams| {
+                let core = core.clone();
+                async move {
+                    let actor = p.actor.clone().unwrap_or_else(|| match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    });
+                    let id = AccountId::from(p.id.as_str());
+                    let mut c = core.lock().await;
+                    c.remove_account_persisting(&id, &actor, p.reason.as_deref().unwrap_or(""))?;
+                    Ok(serde_json::to_value(AccountRemoveResult {
+                        id: id.as_str().to_string(),
+                        persisted: true,
+                        at_ms: now_ms(),
+                        actor,
+                        reason: p.reason,
+                        note: ACCOUNT_REMOVE_NOTE,
                     })
                     .unwrap_or(Value::Null))
                 }
@@ -5607,6 +5690,11 @@ mod tests {
             serde_json::json!(Failure::INVALID_PARAMS),
             "an unknown account must fail loud: {reply}"
         );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
         assert!(
             reply["error"]["message"]
                 .as_str()
@@ -5694,6 +5782,11 @@ mod tests {
             reply["error"]["code"],
             serde_json::json!(Failure::INVALID_PARAMS),
             "suspended -> active must be refused with INVALID_PARAMS: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
         );
         assert!(
             reply["error"]["message"]
@@ -6031,6 +6124,555 @@ mod tests {
         );
         let rows = reply["result"]["venues"].as_array().expect("rows");
         assert_eq!(rows.len(), 2);
+    }
+
+    // ── 账户簿运行时增删：account.create / account.remove，at the wire ────────
+
+    /// A two-account core PLUS its private accounts.toml — the persist half
+    /// needs a file, and it must never be the checkout's own
+    /// `user_layer/configs/accounts.toml`. The in-memory book mirrors the
+    /// file (default + paper) so list/persist assertions can never disagree.
+    /// The scratch dir is per-CALL (an atomic counter, not just the pid): two
+    /// wire tests in the same process run their fixtures CONCURRENTLY under
+    /// the suite, and a pid-keyed dir would have them rename over each other.
+    async fn two_account_persist_fixture() -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+        std::path::PathBuf,
+    ) {
+        static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bk-acct-verbs-wire-{}-{}",
+            std::process::id(),
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+        let now = now_ms();
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: AccountId::from("default"),
+                    name: "main".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    updated_at_ms: now,
+                },
+                crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    updated_at_ms: now,
+                },
+            ],
+            AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let c = Core::with_account_book(cfg, book);
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+            accounts_path,
+        )
+    }
+
+    /// `account.create` 的闭环：创建 → `account.list` 出现（active + prediction
+    /// + 零余额 + 绑定带出）→ 测试私有的 accounts.toml 读回有该表（重新
+    /// load_account_ledgers，boot 的同一调用）→ 重复 id 拒 → 空 id 拒 →
+    /// 保留名 default 拒 → 未注册 venue 名拒（plan-first）→ 文件在拒绝下
+    /// 逐字节不动。
+    #[tokio::test]
+    async fn account_create_round_trips_list_and_the_persisted_file() {
+        let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
+        registry.register(Box::new(VenueStubPlugin {
+            name: "polysimulator".to_string(),
+        }));
+
+        // Create: the mint lands on the wire, in memory, and in the file.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.create","params":{"id":"poly-main","name":"Poly Main 2","venue":"polysimulator","actor":"panel","reason":"add account dialog"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the create must land: {reply}"
+        );
+        assert_eq!(reply["result"]["id"], serde_json::json!("poly-main"));
+        assert_eq!(reply["result"]["persisted"], serde_json::json!(true));
+        assert_eq!(reply["result"]["actor"], serde_json::json!("panel"));
+        assert_eq!(
+            reply["result"]["note"].as_str().map(|s| !s.is_empty()),
+            Some(true)
+        );
+
+        // account.list carries the new account with the minted posture.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        let created = accounts
+            .iter()
+            .find(|a| a["id"] == "poly-main")
+            .expect("the created account is listed");
+        assert_eq!(created["status"], serde_json::json!("active"));
+        assert_eq!(created["name"], serde_json::json!("Poly Main 2"));
+        assert_eq!(created["venue"], serde_json::json!("polysimulator"));
+        assert_eq!(
+            created["balance"].as_f64(),
+            Some(0.0),
+            "a zero book: {}",
+            created
+        );
+        assert_eq!(accounts.len(), 3);
+
+        // The FILE: a fresh load — the boot's own call — sees the row.
+        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
+            .expect("the written file re-parses");
+        let created = book.account(&AccountId::from("poly-main")).unwrap();
+        assert!(matches!(created.status, AccountStatus::Active));
+        assert!(matches!(
+            created.market_type,
+            blitzkrieg_market_api::MarketType::Prediction
+        ));
+        assert_eq!(created.venue, "polysimulator");
+        assert_eq!(created.name, "Poly Main 2");
+        // Siblings rode through untouched.
+        assert_eq!(
+            book.account(&AccountId::from("default")).unwrap().name,
+            "main"
+        );
+
+        // Duplicate id: refused, INVALID_PARAMS, file untouched.
+        let before = std::fs::read_to_string(&accounts_path).unwrap();
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.create","params":{"id":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "duplicate id: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already exists"),
+            "{}",
+            reply["error"]["message"]
+        );
+        // Empty id: refused.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.create","params":{"id":"   "}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "empty id: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        // The reserved `default`: refused, at any spelling.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":5,"method":"account.create","params":{"id":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "reserved id: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reserved"),
+            "{}",
+            reply["error"]["message"]
+        );
+        // An unregistered venue name: refused plan-first.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":6,"method":"account.create","params":{"id":"ghost-venue","venue":"ghostvenue"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "unregistered venue: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        // Every refusal left the file byte-identical.
+        assert_eq!(
+            std::fs::read_to_string(&accounts_path).unwrap(),
+            before,
+            "a refused create never touches the file"
+        );
+        let scratch = accounts_path
+            .parent()
+            .expect("the fixture file has a parent")
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// `account.remove` 的闭环：删掉 → list 消失 → 文件读回没有 → 保留名
+    /// default 拒 → 有 open position 的账户拒（报持仓数）→ 未知 id 拒 →
+    /// 文件在拒绝下逐字节不动。删进程级 active 账户回切 default 也钉在
+    /// 这里（fixture 把 paper 换成 active 的场景在簿层测试已覆盖，线上走
+    /// default active 的常规路径）。
+    #[tokio::test]
+    async fn account_remove_round_trips_list_and_the_persisted_file() {
+        let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
+
+        // Remove: the retirement lands on the wire, in memory, and in the file.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.remove","params":{"id":"paper","actor":"panel","reason":"cleanup"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the remove must land: {reply}"
+        );
+        assert_eq!(reply["result"]["id"], serde_json::json!("paper"));
+        assert_eq!(reply["result"]["persisted"], serde_json::json!(true));
+        assert_eq!(reply["result"]["actor"], serde_json::json!("panel"));
+
+        // account.list no longer carries it.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert_eq!(accounts.len(), 1, "paper left the book");
+        assert_eq!(accounts[0]["id"], serde_json::json!("default"));
+
+        // The FILE: a fresh load agrees.
+        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
+            .expect("the written file re-parses");
+        assert!(book.account(&AccountId::from("paper")).is_none());
+        assert!(book.account(&AccountId::from("default")).is_some());
+
+        // The reserved `default`: refused.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.remove","params":{"id":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "reserved id: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        // An unknown id: the standard refusal.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.remove","params":{"id":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "unknown id: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown account `paper`"),
+            "{}",
+            reply["error"]["message"]
+        );
+
+        // An account with an OPEN position: refused, with the count named.
+        // `default` is refused on reserved grounds before the position check;
+        // the position pin needs a non-reserved id, so create one. The
+        // byte-identity snapshot is taken AFTER that create (the create is
+        // expected to write) and before the refusals it guards.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":6,"method":"account.create","params":{"id":"pinned"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "pinned must create: {reply}");
+        {
+            use crate::model::SignalDirection;
+            use crate::position::OpenParams;
+            let mut c = core.lock().await;
+            // One position for `default` as well: removing a funded account
+            // must not disturb the OTHER accounts' inventory either way.
+            c.positions_mut().open(
+                OpenParams {
+                    strategy: "spread_arb".into(),
+                    asset: "BTC".into(),
+                    direction: SignalDirection::Up,
+                    token_id: "tok-up".into(),
+                    condition_id: "cond".into(),
+                    account_id: AccountId::from("default"),
+                    venue: String::new(),
+                    partner_token_id: String::new(),
+                    entry_price: rust_decimal_macros::dec!(0.48),
+                    expires_at_ms: 900_000,
+                    was_maker: true,
+                    target_exit_price: None,
+                },
+                now_ms(),
+            );
+            c.positions_mut().open(
+                OpenParams {
+                    strategy: "spread_arb".into(),
+                    asset: "ETH".into(),
+                    direction: SignalDirection::Down,
+                    token_id: "tok-down".into(),
+                    condition_id: "cond".into(),
+                    account_id: AccountId::from("pinned"),
+                    venue: String::new(),
+                    partner_token_id: String::new(),
+                    entry_price: rust_decimal_macros::dec!(0.45),
+                    expires_at_ms: 900_000,
+                    was_maker: true,
+                    target_exit_price: None,
+                },
+                now_ms(),
+            );
+        }
+        let before = std::fs::read_to_string(&accounts_path).unwrap();
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":7,"method":"account.remove","params":{"id":"pinned"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "open positions pin the account: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("1 open position"),
+            "{}",
+            reply["error"]["message"]
+        );
+        // The pinned account survived every refusal, on the wire AND the file.
+        assert_eq!(
+            std::fs::read_to_string(&accounts_path).unwrap(),
+            before,
+            "a refused remove never touches the file"
+        );
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":8,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert!(
+            accounts.iter().any(|a| a["id"] == "pinned"),
+            "the pinned account is still listed: {reply}"
+        );
+        let scratch = accounts_path
+            .parent()
+            .expect("the fixture file has a parent")
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// 两个新动词都是写动词：只读模式的内核拒绝（READONLY_REFUSED 名单，
+    /// 同 venue.set 的文案形状）。
+    #[tokio::test]
+    async fn account_create_and_remove_are_refused_in_read_only_mode() {
+        let (core, registry, peer, _accounts_path) = two_account_persist_fixture().await;
+        core.lock().await.config_mut().mode = Mode::ReadOnly;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.create","params":{"id":"poly-main"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "read-only refuses the configuration verb: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only mode"),
+            "{}",
+            reply["error"]["message"]
+        );
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.remove","params":{"id":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "read-only refuses the configuration verb: {reply}"
+        );
+    }
+
+    /// 无 accounts_config_path 的内核（回测、多数进程内测试）拒绝两个动词
+    /// —— 与 venue.set 的 "persistence is disabled" 同一文案形状：一个
+    /// 不能持久化的写入是对操作员的谎报。
+    #[tokio::test]
+    async fn account_create_and_remove_refuse_without_a_config_path() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.create","params":{"id":"poly-main"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "no persist path: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence is disabled"),
+            "{}",
+            reply["error"]["message"]
+        );
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.remove","params":{"id":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "no persist path: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence is disabled"),
+            "{}",
+            reply["error"]["message"]
+        );
     }
 
     // ── #509 的读面：account.journal，at the wire ───────────────────────────

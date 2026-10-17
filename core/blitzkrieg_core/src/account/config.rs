@@ -242,6 +242,134 @@ pub fn persist_account_venue(path: &Path, account_id: &str, venue: &str) -> Resu
     })
 }
 
+/// The persisted write of a NEW account (`account.create`): append one
+/// `[[account]]` row to the book — read-modify-write over the whole file, the
+/// exact posture [`persist_account_venue`] runs (a non-parsing file is
+/// REFUSED, never flattened; atomic same-directory temp + rename; the toml
+/// re-render does not carry the operator's comments — the same accepted
+/// trade-off, every FIELD round-trips because the parse is
+/// `deny_unknown_fields`). The row carries `id`/`name`/`venue` only:
+/// `market_type` and `status` are the file's own defaults (`prediction`,
+/// `active`) — a runtime mint that wrote an explicit restriction would be a
+/// loosening spelled backwards; tightening stays `account.status`'s job.
+/// Credential ENV-NAMES are NOT written here — the create call carries no
+/// credential surface at all (§9.4); the panel edits the file (or a later
+/// venue-style verb) for key names.
+pub fn persist_account_create(
+    path: &Path,
+    account_id: &str,
+    name: Option<&str>,
+    venue: Option<&str>,
+) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the create write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the create write: {e}"),
+        )
+    })?;
+    if file.account.iter().any(|a| a.id == account_id) {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml already declares `[[account]]` with id `{account_id}`"),
+        ));
+    }
+    file.account.push(AccountFileEntry {
+        id: account_id.to_string(),
+        name: name.map(|n| n.to_string()),
+        market_type: None,
+        status: None,
+        api_key_env: None,
+        secret_env: None,
+        passphrase_env: None,
+        private_key_env: None,
+        venue: venue.filter(|v| !v.is_empty()).map(|v| v.to_string()),
+    });
+    let out = toml::to_string(&file).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not render: {e}"),
+        )
+    })?;
+    write_accounts_file_atomic(path, &out, "create")
+}
+
+/// The persisted removal of ONE account (`account.remove`): drop the named
+/// `[[account]]` from the book — read-modify-write, the same fail-closed
+/// posture as every accounts.toml writer above. The CALLER owns the
+/// refusals that need runtime facts (open positions, the reserved `default`);
+/// this layer refuses only what the file itself decides (an unknown id, a
+/// file that does not parse) and never leaves the last row removable-broken:
+/// an empty book would fail the next boot's parse, so removing the FINAL
+/// account is refused here with the honest diagnostic.
+pub fn persist_account_remove(path: &Path, account_id: &str) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the remove write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the remove write: {e}"),
+        )
+    })?;
+    let before = file.account.len();
+    file.account.retain(|a| a.id != account_id);
+    if file.account.len() == before {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+        ));
+    }
+    if file.account.is_empty() {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "removing `[[account]]` `{account_id}` would leave accounts.toml \
+                 empty — the next boot refuses an empty book; delete the file \
+                 itself (single default account) instead"
+            ),
+        ));
+    }
+    let out = toml::to_string(&file).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not render: {e}"),
+        )
+    })?;
+    write_accounts_file_atomic(path, &out, "remove")
+}
+
+/// The atomic tail both accounts.toml writers share: write the sibling temp
+/// first, then rename over the original — the boot's read and a concurrent
+/// reload can never see a partial document. `op` names the caller in the
+/// diagnostics (the same spelling each writer's own messages carry).
+fn write_accounts_file_atomic(path: &Path, contents: &str, op: &str) -> Result<(), CoreError> {
+    let tmp = path.with_extension(format!("toml.{op}.tmp"));
+    std::fs::write(&tmp, contents)
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml {op} write failed: {e}"),
+            )
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!("accounts.toml {op} rename failed: {e}"),
+                )
+            })
+        })
+}
+
 /// Probe the kernel's OWN environment for the configured key names (§9.4: the
 /// kernel process is the only credential reader; strategies never see keys or
 /// values). The returned `CredentialKeys` carries the names through untouched
@@ -601,6 +729,128 @@ venue = "kalshi"
         let err = persist_account_venue(&dir.join("nope.toml"), "x", "polymarket")
             .expect_err("unreadable file");
         assert!(err.message.contains("unreadable"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── account.create / account.remove 的持久化半（文件层）───────────────────
+
+    #[test]
+    fn persist_account_create_appends_a_default_row_and_siblings_survive() {
+        let dir = std::env::temp_dir().join(format!("bk-acct-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // Create: the write lands, and a FRESH load — the boot's call — sees
+        // the new account with the file's own defaults (active + prediction,
+        // unbound) plus EVERY sibling field of BOTH old accounts.
+        persist_account_create(&p, "poly-main", Some("Poly Main 2"), Some("polymarket"))
+            .expect("the create lands");
+        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let created = book.account(&AccountId("poly-main".into())).unwrap();
+        assert!(
+            matches!(created.status, Active),
+            "the file default is active"
+        );
+        assert!(
+            matches!(created.market_type, MarketType::Prediction),
+            "the file default is prediction"
+        );
+        assert_eq!(created.venue, "polymarket");
+        assert_eq!(created.name, "Poly Main 2");
+        // Both old accounts rode through untouched.
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().name,
+            "Poly Main"
+        );
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "kalshi"
+        );
+
+        // A create with neither name nor venue: the row is the bare id, the
+        // name falls back to the id and the binding is unbound.
+        persist_account_create(&p, "bare", None, None).expect("the bare create lands");
+        let book = load_account_ledgers(&p, 4).expect("re-parses");
+        let bare = book.account(&AccountId("bare".into())).unwrap();
+        assert_eq!(bare.name, "bare");
+        assert_eq!(bare.venue, "");
+
+        // A duplicate id is refused (in-memory AND at the file layer) and the
+        // file is untouched.
+        let before = std::fs::read_to_string(&p).unwrap();
+        let err = persist_account_create(&p, "paper", None, None).expect_err("duplicate");
+        assert!(
+            err.message
+                .contains("already declares `[[account]]` with id `paper`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "a refused create leaves the file byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_account_remove_drops_the_row_refuses_unknown_and_the_last_row() {
+        let dir = std::env::temp_dir().join(format!("bk-acct-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // Remove: the row leaves, the survivor keeps every field, and the
+        // fresh load (the boot's call) agrees.
+        persist_account_remove(&p, "paper").expect("the remove lands");
+        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        assert!(book.account(&AccountId("paper".into())).is_none());
+        let d = book.account(&AccountId("default".into())).unwrap();
+        assert_eq!(d.name, "Poly Main");
+        assert_eq!(
+            d.credential_keys.api_key_env.as_deref(),
+            Some("POLY_API_KEY"),
+            "a sibling account's fields survive the removal"
+        );
+
+        // Unknown id: refused, file untouched.
+        let before = std::fs::read_to_string(&p).unwrap();
+        let err = persist_account_remove(&p, "ghost").expect_err("unknown id");
+        assert!(
+            err.message.contains("no `[[account]]` with id `ghost`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "a refused remove leaves the file byte-identical"
+        );
+
+        // The LAST row: refused — the empty book would fail the next boot.
+        let err = persist_account_remove(&p, "default").expect_err("the last row");
+        assert!(
+            err.message.contains("empty") && err.message.contains("next boot"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "the empty-book refusal leaves the file byte-identical"
+        );
+
+        // A file that does not parse: refused fail-closed, never flattened.
+        std::fs::write(&p, "[[account]]\nid = \"x\"\nbogus = 1\n").unwrap();
+        let err = persist_account_remove(&p, "x").expect_err("does not parse");
+        assert!(
+            err.message.contains("does not parse; refusing"),
+            "{}",
+            err.message
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
