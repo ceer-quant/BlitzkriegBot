@@ -680,7 +680,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <div class="min-w-0">
           <div class="flex items-center gap-2">
             <Badge variant="gold">{{ marketTypeText || '市场' }}</Badge>
-            <span class="truncate text-[13px] font-semibold">{{ marketName ?? '未激活插件' }}</span>
+            <span class="truncate text-[13px] font-semibold">{{ marketName ?? '等待行情接入' }}</span>
             <span class="label-micro">#{{ round?.slot ?? '—' }}</span>
           </div>
           <div class="mt-1.5 flex items-center gap-2 text-[11.5px] text-faint-fg">
@@ -870,15 +870,15 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </div>
     <Card v-else class="mt-3.5">
       <!--
-        issue 488: 连不上 ≠ 未启用。插件活跃（marketName 有值）但行情卡空 =
-        数据源拉不到（网络/代理/对端），指向网络自检而不是叫操作员去启用
-        一个已经启用的插件 —— 那条提示是误导。
+        issue 488: 连不上 ≠ 未接入。插件已接入（marketName 有值）但行情卡空 =
+        数据源拉不到（网络/代理/对端），指向网络自检而不是叫操作员去绑定
+        一个已经接入的插件 —— 那条提示是误导。
       -->
       <EmptyState
-        :text="marketName ? `行情插件 ${marketName} 活跃，但暂无行情到达` : '暂无行情数据（等待报价插件）'"
+        :text="marketName ? `行情插件 ${marketName} 已接入，但暂无行情到达` : '暂无行情数据（等待报价插件）'"
         :hint="marketName
           ? '通常是网络/代理拦住了数据源域名。运行网关命令 netcheck 做网络自检，或检查本机代理是否放行该插件的 API 域名。'
-          : '到「插件」页选定一个行情源（重启内核后生效）。'"
+          : '行情按账户绑定自动接入：在右上角账户切换器里给账户绑定交易所（绑定即启用）。'"
         compact
       />
     </Card>

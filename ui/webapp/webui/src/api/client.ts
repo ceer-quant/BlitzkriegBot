@@ -666,6 +666,35 @@ export interface AccountVenueSetDoc {
   error?: string
 }
 
+// ── 多账户扇出（account.trading.set / account.strategies.set）───────────────
+// 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
+
+/** `account.trading.set` 回执：关 = 拒开仓、平仓照放；persist 失败内核整体拒绝。 */
+export interface AccountTradingSetDoc {
+  accountId: string
+  enabled: boolean
+  persisted: boolean
+  atMs: number
+  reason?: string
+  note: string
+  error?: string
+}
+
+/**
+ * `account.strategies.set` 回执。keptExitsOnly = 该账户仍持仓但被移出分配
+ * 的策略 —— 内核以 exits-only 保活到平完，安全网永不孤儿化持仓。
+ */
+export interface AccountStrategiesSetDoc {
+  accountId: string
+  strategies: string[]
+  keptExitsOnly: string[]
+  persisted: boolean
+  atMs: number
+  reason?: string
+  note: string
+  error?: string
+}
+
 // ── 账户簿运行时增删（account.create / account.remove，#516 内核面）─────────
 
 /** `account.create` 回执。 */
@@ -891,6 +920,24 @@ export const api = {
   /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
   accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
     request<AccountVenueSetDoc>('/account-venue/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // ── 多账户扇出（account.trading.set / account.strategies.set）──────────────
+  // 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
+
+  /** 交易开关写：关 = 该账户拒开仓、平仓照放（内核 Gate 2 裁决并持久化）。 */
+  accountTradingSet: (body: { accountId: string; enabled: boolean; reason?: string }) =>
+    request<AccountTradingSetDoc>('/account-trading/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 策略分配写：空列表 = 继承全部全局启用；非空 = 精确钉住。返回的
+   * keptExitsOnly 是被移出但仍持仓的策略 —— 内核保活到平完。
+   */
+  accountStrategiesSet: (body: { accountId: string; strategies: string[]; reason?: string }) =>
+    request<AccountStrategiesSetDoc>('/account-strategies/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

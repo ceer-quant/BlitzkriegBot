@@ -2383,6 +2383,23 @@ impl WebServer {
                 // accounts.toml; the gateway shapes nothing.
                 self.proxy_backtest_body("account.venue.set", &req.body)
             }
+            ("POST", "/api/account-trading/set") => {
+                // 多账户扇出（PR B of #518）：交易开关写 —— body 即
+                // `account.trading.set` 的 params 对象
+                // （`{accountId, enabled, reason?}`），逐字转发。关 = 该
+                // 账户拒开仓、平仓照放（Gate 2 内核裁决）；persist 失败
+                // 内核整体拒绝。网关零加工。
+                self.proxy_backtest_body("account.trading.set", &req.body)
+            }
+            ("POST", "/api/account-strategies/set") => {
+                // 多账户扇出（PR B of #518）：策略分配写 —— body 即
+                // `account.strategies.set` 的 params 对象
+                // （`{accountId, strategies, reason?}`），逐字转发。空
+                // 列表 = 继承全部全局启用；非空 = 精确钉住。被移出但
+                // 持仓的策略内核以 exits-only 保活（keptExitsOnly 回执
+                // 带回）。网关零加工。
+                self.proxy_backtest_body("account.strategies.set", &req.body)
+            }
             ("POST", "/api/account-create") => {
                 // #517 (the add-account dialog): the body IS the
                 // `account.create` params object
