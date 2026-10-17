@@ -64,11 +64,13 @@ struct AccountFileEntry {
     /// at Gate 2; its exits keep flowing.
     #[serde(default)]
     trading_enabled: Option<bool>,
-    /// The strategies THIS account runs. Missing/empty = INHERIT every
-    /// globally-enabled strategy (the single-book shape). A non-empty list
-    /// pins the account to exactly those strategies (the engine hosts one
-    /// instance per (account, strategy)). Names are validated at write time
-    /// (`account.strategies.set`), not at parse.
+    /// The strategies THIS account runs. Missing/empty = the account runs NO
+    /// strategies (assignments are explicit; there is no inherit — the boot
+    /// migration materialized the one implicit default set that ever existed).
+    /// A non-empty list pins the account to exactly those strategies (the
+    /// engine hosts one instance per (account, strategy), each ENABLED).
+    /// Names are validated at write time (`account.strategies.set`), not at
+    /// parse.
     #[serde(default)]
     strategies: Option<Vec<String>>,
 }
@@ -364,10 +366,10 @@ pub fn persist_account_trading(
 
 /// The persisted write of ONE account's strategy assignment
 /// (`account.strategies.set`). An EMPTY list REMOVES the key (the file
-/// spells "inherit every globally-enabled strategy" by absence); a
-/// non-empty list is stored verbatim — the write-time validation against
-/// the registered set is the CALLER's job (it has the plugin/strategy
-/// registry; this layer only owns the file).
+/// spells "this account runs no strategies" by absence); a non-empty list
+/// is stored verbatim — the write-time validation against the registered
+/// set is the CALLER's job (it has the plugin/strategy registry; this layer
+/// only owns the file).
 pub fn persist_account_strategies(
     path: &Path,
     account_id: &str,

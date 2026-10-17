@@ -216,11 +216,13 @@ pub struct Account {
     /// `account.create` all produce a trading account.
     #[serde(default = "default_true")]
     pub trading_enabled: bool,
-    /// The strategies THIS account runs. Empty = INHERIT: the account runs
-    /// every globally-enabled strategy (the historical single-book shape).
-    /// Non-empty = the explicit assignment (the engine hosts one instance
-    /// per (account, strategy) pair). Names are validated against the
-    /// registered set at write time (`account.strategies.set`), not here.
+    /// The strategies THIS account runs. Empty = the account runs NO
+    /// strategies — assignments are explicit, there is no inherit (the boot
+    /// migration materialized the one implicit default set that ever
+    /// existed). Non-empty = the explicit assignment (the engine hosts one
+    /// instance per (account, strategy) pair, each ENABLED — assignment IS
+    /// enablement). Names are validated against the registered set at write
+    /// time (`account.strategies.set`), not here.
     #[serde(default)]
     pub strategies: Vec<String>,
     pub updated_at_ms: i64,
@@ -499,9 +501,10 @@ impl AccountLedgers {
     }
 
     /// This account's strategy assignment, for the engine's scope rebuild:
-    /// `None` = INHERIT every globally-enabled strategy (the single-book
-    /// shape); `Some([])` can never come back — an empty list is stored as
-    /// inherit, so a `Some` is always non-empty.
+    /// `None` (missing or empty key) = this account runs NO strategies —
+    /// assignments are explicit, there is no inherit (the boot migration
+    /// materialized the one implicit set that ever existed); a `Some` is
+    /// always non-empty.
     pub fn strategy_assignment(&self, id: &AccountId) -> Option<&Vec<String>> {
         self.accounts
             .get(id)
