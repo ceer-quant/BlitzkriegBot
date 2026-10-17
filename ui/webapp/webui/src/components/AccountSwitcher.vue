@@ -13,10 +13,12 @@
  * and this component would not render one if there were.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Wallet, ChevronDown, Check, RefreshCw, Link2 } from 'lucide-vue-next'
+import { Wallet, ChevronDown, Check, RefreshCw, Link2, Plus, Trash2 } from 'lucide-vue-next'
 import { getToken, api } from '../api/client'
 import { money } from '../lib/format'
 import { usePanelStore } from '../stores/panel'
+import AddAccountDialog from './AddAccountDialog.vue'
+import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
 
 /** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
  *  `venue` 是账户↔交易所绑定（market-plugin 名）；老内核不回该字段 →
@@ -209,6 +211,51 @@ async function saveVenue(a: AccountRow): Promise<void> {
 const venueLabel = (v: string | undefined): string =>
   v ? v : '未绑定（可交易任意交易所）'
 
+// ── 添加账户（#517）：弹窗（选交易所→填 API）。可选项 = 已注册的行情插件。──
+const addOpen = ref(false)
+const registeredVenues = computed<string[]>(() => {
+  const doc = store.plugins
+  if (!doc) return []
+  return doc.marketPlugins.map((p) => p.name).filter(Boolean)
+})
+function onCreated(id: string): void {
+  void refresh()
+  store.refresh()
+}
+
+// ── 删除账户（#517）：只删不改。default 与有持仓的账户由内核拒绝；
+//    确认词 = 账户 id（自由文本门，误触不可能被归咎于双击）。
+const removeTarget = ref<AccountRow | null>(null)
+const removeOpen = ref(false)
+const removeBusy = ref(false)
+const removeErr = ref<string | null>(null)
+
+function askRemove(a: AccountRow): void {
+  if (a.id === 'default') return
+  removeErr.value = null
+  removeTarget.value = a
+  removeOpen.value = true
+}
+
+async function doRemove(): Promise<void> {
+  const a = removeTarget.value
+  if (!a || removeBusy.value) return
+  removeBusy.value = true
+  removeErr.value = null
+  try {
+    const res = await api.accountRemove({ id: a.id, reason: 'panel remove' })
+    if (res.error) throw new Error(res.error)
+    removeOpen.value = false
+    removeTarget.value = null
+    await refresh()
+    store.refresh()
+  } catch (e) {
+    removeErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    removeBusy.value = false
+  }
+}
+
 const root = ref<HTMLElement | null>(null)
 function onOutside(e: MouseEvent): void {
   if (open.value && root.value && !root.value.contains(e.target as Node)) open.value = false
@@ -248,13 +295,22 @@ onBeforeUnmount(() => {
     >
       <div class="mb-1 flex items-center justify-between px-2 py-1">
         <span class="label-micro">账户账本</span>
-        <button
-          class="text-faint-fg transition-colors hover:text-fg"
-          title="重新加载"
-          @click="refresh"
-        >
-          <RefreshCw class="size-3.5" :class="loading ? 'animate-spin' : ''" />
-        </button>
+        <span class="flex items-center gap-1">
+          <button
+            class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] font-semibold text-primary transition-colors hover:bg-primary/10"
+            title="添加账户：选交易所 + 填 API（绑定即启用）"
+            @click.stop="addOpen = true"
+          >
+            <Plus class="size-3" />添加账户
+          </button>
+          <button
+            class="text-faint-fg transition-colors hover:text-fg"
+            title="重新加载"
+            @click="refresh"
+          >
+            <RefreshCw class="size-3.5" :class="loading ? 'animate-spin' : ''" />
+          </button>
+        </span>
       </div>
 
       <p v-if="error" class="px-2 py-1.5 text-[12px] text-down">{{ error }}</p>
@@ -302,6 +358,12 @@ onBeforeUnmount(() => {
               :title="'编辑账户绑定的交易所'"
               @click.stop="editVenue(a)"
             >{{ venueEditing === a.id ? '收起' : '绑定' }}</button>
+            <button
+              v-if="a.id !== 'default'"
+              class="shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-down"
+              :title="`删除账户 ${a.id}（不可撤销；有持仓时内核拒绝）`"
+              @click.stop="askRemove(a)"
+            ><Trash2 class="size-3" /></button>
           </span>
           <span v-if="venueEditing === a.id" class="mt-1.5 block" @click.stop>
             <span class="flex items-center gap-1.5">
@@ -338,5 +400,25 @@ onBeforeUnmount(() => {
         绑定交易所的账户只能交易该交易所（插件启用将随账户派生——绑定即启用）。
       </p>
     </div>
+
+    <AddAccountDialog
+      v-model:open="addOpen"
+      :venues="registeredVenues"
+      @created="onCreated"
+    />
+    <ConfirmWordDialog
+      v-model:open="removeOpen"
+      :word="removeTarget?.id ?? ''"
+      title="删除账户"
+      :lines="[
+        `账户 ${removeTarget?.id ?? ''} 将从账户簿删除（accounts.toml 落盘）——不可撤销。`,
+        '该账户的现金流水历史保留在账本日志里；default 账户与有持仓的账户内核会拒绝。',
+        '删除的是当前默认账户时，面板默认账户自动回切 default。',
+      ]"
+      action-label="确认删除"
+      :busy="removeBusy"
+      :error="removeErr"
+      @confirm="doRemove"
+    />
   </div>
 </template>

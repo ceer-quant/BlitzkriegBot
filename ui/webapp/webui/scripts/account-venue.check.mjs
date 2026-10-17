@@ -76,6 +76,38 @@ check('the pairing rationale is stated in prose (绑定即启用)', () => {
   assert.match(switcher, /绑定即启用/, 'footer must state the derivation rule')
 })
 
+// ── 1b. the add-account dialog (#517): 选交易所 → 填 API → account.create ──
+const dialog = read('src/components/AddAccountDialog.vue')
+
+check('AddAccountDialog creates the identity through account.create', () => {
+  assert.match(dialog, /accountCreate\(/, 'the dialog must call api.accountCreate')
+  assert.match(dialog, /venue:\s*venue\.value/, 'the chosen venue must ride the create call (绑定即启用)')
+  const client = read('src/api/client.ts')
+  assert.match(client, /accountCreate[^`]*'\/account-create'/, 'client must post to /account-create')
+})
+
+check('credentials ride market.credentials.set, never the create call', () => {
+  // The credential VALUES flow only through market.credentials.set (kernel
+  // cell, values never echo); the create call carries identity fields only.
+  assert.doesNotMatch(dialog, /accountCreate\(\{[^}]*vars/, 'credentials must not ride account.create')
+  assert.match(dialog, /marketCredentialsSet\(/, 'the dialog must call api.marketCredentialsSet for the API keys')
+  assert.match(dialog, /type="password"/, 'credential inputs must not echo')
+  // The var NAMES come from the kernel readout, not a UI-side table.
+  assert.match(dialog, /marketCredentials\(\)/, 'required var names must come from the credentials status readout')
+})
+
+check('the venue picker is mandatory before anything can be submitted', () => {
+  assert.match(dialog, /canSubmit[^=]*=[^>]*=>[^>]*venue\.value\.trim\(\) !== ''/, 'empty venue must disable the submit button')
+})
+
+// ── 1c. account removal (#517): 只删不改，确认词 = 账户 id ──────────────────
+check('account removal is delete-only behind a confirm-word gate', () => {
+  assert.match(switcher, /accountRemove\(\{[^}]*id:\s*a\.id/, 'the remove path must name the row account')
+  assert.match(switcher, /ConfirmWordDialog/, 'removal must go through the confirm-word dialog')
+  assert.match(switcher, /word="removeTarget\?\.id/, 'the confirm word must be the account id itself')
+  assert.doesNotMatch(switcher, /editAccount|renameAccount/, 'accounts are delete-only: no edit/rename surface may exist')
+})
+
 // ── 2. the 行情 page derives its venue view from the active account ──────
 const hft = read('src/pages/HftPage.vue')
 

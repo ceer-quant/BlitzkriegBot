@@ -2383,6 +2383,25 @@ impl WebServer {
                 // accounts.toml; the gateway shapes nothing.
                 self.proxy_backtest_body("account.venue.set", &req.body)
             }
+            ("POST", "/api/account-create") => {
+                // #517 (the add-account dialog): the body IS the
+                // `account.create` params object
+                // (`{id, name?, venue?, actor?, reason?}`), forwarded
+                // verbatim. The kernel refuses duplicates / the reserved
+                // `default` / an empty id, persists into accounts.toml and
+                // inserts the in-memory ledger; the gateway shapes nothing.
+                // Credentials do NOT ride this call — they go through
+                // /api/market-credentials/set (values never echo).
+                self.proxy_backtest_body("account.create", &req.body)
+            }
+            ("POST", "/api/account-remove") => {
+                // #517: the retirement write — the body IS the
+                // `account.remove` params object (`{id, actor?, reason?}`),
+                // forwarded verbatim. The kernel refuses `default` and an
+                // account with open positions, re-homes the session default
+                // if it was the one removed, and persists the book.
+                self.proxy_backtest_body("account.remove", &req.body)
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.
