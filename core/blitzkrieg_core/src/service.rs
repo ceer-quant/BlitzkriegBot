@@ -1615,6 +1615,7 @@ impl Core {
             .iter()
             .map(|p| crate::strategies::HeldPosition {
                 strategy: p.strategy.clone(),
+                account_id: p.account_id.to_string(),
                 condition_id: p.condition_id.clone(),
                 token_id: p.token_id.clone(),
                 direction: p.direction.as_str().to_string(),
@@ -2760,6 +2761,8 @@ impl Core {
                     reserved: ledger.reserved(),
                     credentials_loaded: a.credential_keys.loaded,
                     venue: a.venue.clone(),
+                    trading_enabled: a.trading_enabled,
+                    strategies: a.strategies.clone(),
                     open_positions,
                     day_realized_usd,
                     updated_at_ms: a.updated_at_ms,
@@ -2861,6 +2864,202 @@ impl Core {
         Ok(())
     }
 
+    /// The trading-switch write (`account.trading.set`): memory AND
+    /// accounts.toml in one transaction — persist FIRST (a failure leaves
+    /// both stores untouched), memory after. The engine mirror needs no
+    /// separate push here: the next evaluation cycle re-pushes every
+    /// account's trading fact, so the gate is in force within one cycle.
+    /// `default` is settable like any account (a single-book deployment may
+    /// want its one account's entries off too).
+    pub fn set_account_trading_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        enabled: bool,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::ACCOUNT_TRADING_SET_NOTE;
+        self.accounts.require(id)?;
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.trading.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_trading(
+            std::path::Path::new(path),
+            id.as_str(),
+            enabled,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.trading.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.accounts.set_trading(id, enabled, now_ms)?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            enabled = %enabled,
+            reason = %reason,
+            "account trading switch written — {} re-reads at next boot \
+             ({ACCOUNT_TRADING_SET_NOTE})",
+            if enabled { "entries re-open; " } else { "new entries refused (exits flow); " },
+        );
+        Ok(())
+    }
+
+    /// The strategy-assignment write (`account.strategies.set`): memory AND
+    /// accounts.toml in one transaction, plus the engine scope rebuild.
+    ///
+    /// Names are validated against the engine's REGISTERED set (plan-first —
+    /// a typo fails here, never as a silently inert assignment). The rebuild:
+    /// every (account, strategy) scope NOT in the new assignment and holding
+    /// NO open position for this account is torn down (Drop); one with open
+    /// positions is kept as an EXITS-ONLY instance (enabled stays whatever it
+    /// was, but the engine drops its entry candidates for this account from
+    /// the next cycle on — see `Engine::scope_rebuild`) until the account is
+    /// flat in it, then a later call (or boot) drops it. New names in the
+    /// assignment are instantiated from the SAME lua package the default
+    /// scope loaded (own Lua state, own book).
+    ///
+    /// Returns the exits-only keep-list for the reply.
+    pub fn set_account_strategies_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        strategies: Vec<String>,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<Vec<String>> {
+        use crate::ipc::schema::ACCOUNT_STRATEGIES_SET_NOTE;
+        self.accounts.require(id)?;
+        // Dedupe + order-stable: an assignment that names a strategy twice
+        // is a caller bug, but the honest handling is collapse, not refusal.
+        let mut requested: Vec<String> = Vec::new();
+        for s in &strategies {
+            let name = s.trim();
+            if name.is_empty() {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    "account.strategies.set: an empty strategy name in the \
+                     list cannot be addressed"
+                        .to_string(),
+                ));
+            }
+            if !requested.iter().any(|r| r == name) {
+                requested.push(name.to_string());
+            }
+        }
+        // Plan-first validation: every requested name must be REGISTERED in
+        // the engine (any scope). The registered set is the loadable set —
+        // the default scope hosts every loaded package.
+        if self.engine.is_none() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.strategies.set: no strategy engine attached".to_string(),
+            ));
+        }
+        for name in &requested {
+            if !self
+                .engine
+                .as_ref()
+                .expect("engine presence checked above")
+                .strategy_registered(name)
+            {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.strategies.set: strategy `{name}` is not \
+                         registered — the assignable set is what \
+                         `strategy.list` reports"
+                    ),
+                ));
+            }
+        }
+        // Positions THIS account holds, by strategy — the exits-only safety
+        // net's input.
+        let held: Vec<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == *id)
+            .map(|p| p.strategy.clone())
+            .collect();
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.strategies.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_strategies(
+            std::path::Path::new(path),
+            id.as_str(),
+            &requested,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.strategies.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.accounts
+            .set_strategies(id, requested.clone(), now_ms)?;
+        // Engine rebuild. Removed-and-flat scopes drop; removed-and-held
+        // scopes are marked exits-only; added scopes instantiate.
+        let kept_exits_only = self.rebuild_account_scopes(id, &requested, &held);
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            strategies = ?requested,
+            exits_only = ?kept_exits_only,
+            reason = %reason,
+            "account strategy assignment written — engine scopes rebuilt, \
+             re-read at next boot ({ACCOUNT_STRATEGIES_SET_NOTE})",
+        );
+        Ok(kept_exits_only)
+    }
+
+    /// The engine half of a strategy-assignment write: delegate to the
+    /// engine's own scope rebuild, handing it a closure that re-instantiates
+    /// Lua packages (the only rebuildable source) from their dir. Returns
+    /// the names kept EXITS-ONLY for this account.
+    fn rebuild_account_scopes(
+        &mut self,
+        id: &crate::account::AccountId,
+        requested: &[String],
+        held: &[String],
+    ) -> Vec<String> {
+        let account = id.as_str().to_string();
+        let Some(engine) = self.engine.as_mut() else {
+            return Vec::new();
+        };
+        // NOTE: `build` borrows `self` mutably while `engine` is borrowed —
+        // impossible directly, so the lua re-loader is a FREE function over
+        // captured state (name + source dir come from the DEFAULT scope's
+        // registration, read before the engine borrow opens).
+        let sources: std::collections::HashMap<String, String> =
+            engine.scope_sources().into_iter().collect();
+        let mut build = |name: &str, account: &str| build_lua_scope(&sources, name, account);
+        engine.rebuild_account_scopes(&account, requested, held, &mut build)
+    }
+
     /// `account.create`（账户簿运行时增删的建半）：新账户落内存 AND
     /// accounts.toml，一个事务 —— persist 先行（失败则两个存储都不动），文件
     /// 收下后才动内存，与 [`Self::set_account_venue_persisting`] 同一姿态。
@@ -2945,6 +3144,8 @@ impl Core {
             status: crate::account::AccountStatus::Active,
             credential_keys: crate::account::CredentialKeys::default(),
             venue: venue.filter(|v| !v.is_empty()).unwrap_or("").to_string(),
+            trading_enabled: true,
+            strategies: Vec::new(),
             updated_at_ms: now_ms,
         })?;
         tracing::info!(
@@ -4761,10 +4962,23 @@ impl Core {
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
         // can never be sized against a balance the process no longer has.
-        // E28: the engine sizes against the ACTIVE account's book (§9.4: the
-        // kernel drives strategies with no account of their own; per-account
-        // routing happens when each order passes through the gates).
+        // E28: the legacy scalar mirrors the ACTIVE account's book; the
+        // per-scope pushes below carry every configured account's own book,
+        // trading switch, and venue binding, so each scope sizes/gates
+        // against ITS account. (§9.4: the kernel drives strategies; per-
+        // account routing happens when each order passes through the gates.)
         engine.set_equity_usd(self.accounts.active_ledger().balance());
+        for a in self.accounts.account_list() {
+            let id = a.id.as_str();
+            let equity = self
+                .accounts
+                .ledger_of(&a.id)
+                .map(|l| l.balance())
+                .unwrap_or_default();
+            engine.set_account_equity(id, equity);
+            engine.set_account_trading(id, a.trading_enabled);
+            engine.set_account_venue(id, &a.venue);
+        }
         engine.set_positions_view(held_view);
         let orders = engine.evaluate(now_ms);
         // Replay fast path: recompute when the round-timing verdict can next
@@ -5161,6 +5375,7 @@ impl Core {
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
             }
+            let placed_account = req.account_id.clone();
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -5168,7 +5383,7 @@ impl Core {
                         .or_default()
                         .placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
-                        engine.note_order_placed(&token);
+                        engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }
                     placed += 1;
                 }
@@ -5230,8 +5445,21 @@ impl Core {
             .map(|e| {
                 // #202: the same per-cycle equity push the real cycle makes,
                 // so a replayed ticket is sized against the balance the
-                // process has NOW.
+                // process has NOW. The per-scope mirrors ride along (the
+                // replay book is single-default — the loop is one iteration,
+                // byte-identical outcomes with the pre-scope shape).
                 e.set_equity_usd(self.accounts.active_ledger().balance());
+                for a in self.accounts.account_list() {
+                    let id = a.id.as_str();
+                    let equity = self
+                        .accounts
+                        .ledger_of(&a.id)
+                        .map(|l| l.balance())
+                        .unwrap_or_default();
+                    e.set_account_equity(id, equity);
+                    e.set_account_trading(id, a.trading_enabled);
+                    e.set_account_venue(id, &a.venue);
+                }
                 e.set_positions_view(held_view);
                 e.replay_candidates(now_ms)
             })
@@ -5459,6 +5687,7 @@ impl Core {
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
             }
+            let placed_account = req.account_id.clone();
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -5466,7 +5695,7 @@ impl Core {
                         .or_default()
                         .placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
-                        engine.note_order_placed(&token);
+                        engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }
                     placed += 1;
                 }
@@ -5570,10 +5799,16 @@ impl Core {
         if cap <= Decimal::ZERO {
             return Ok(());
         }
+        // The cap is per-ACCOUNT: each account's notional pot is its own
+        // (positions + resting buys of THAT account only) — A's full book
+        // must not freeze B's fresh entry. The default scope's filter is a
+        // no-op on a single-book deployment (every position already carries
+        // `default`), so the historical numbers are unchanged.
         let used: Decimal = self
             .positions
             .open_positions()
             .iter()
+            .filter(|p| p.account_id == req.account_id)
             .map(|p| p.cost_usd)
             // #461: resting BUY orders are committed cash — they count
             // against the portfolio cap the moment they rest, not only
@@ -5582,7 +5817,7 @@ impl Core {
                 self.ome
                     .live_orders()
                     .iter()
-                    .filter(|o| o.side == Side::Buy)
+                    .filter(|o| o.side == Side::Buy && o.account_id == req.account_id)
                     .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
             )
             .sum();
@@ -5612,7 +5847,7 @@ impl Core {
             .positions
             .open_positions()
             .iter()
-            .filter(|p| p.strategy == req.strategy)
+            .filter(|p| p.strategy == req.strategy && p.account_id == req.account_id)
             .collect();
         if let Some(max_pos) = limit.max_open_positions {
             let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count();
@@ -5626,12 +5861,17 @@ impl Core {
         if let Some(max_notional) = limit.max_open_notional_usd {
             let used: Decimal = open.iter().map(|p| p.cost_usd).sum::<Decimal>()
                 // #461: the strategy's own resting BUY orders are committed
-                // cash too — same rule as the portfolio cap.
+                // cash too — same rule as the portfolio cap. Both pots read
+                // THIS account's slice (a per-strategy cap is per-scope).
                 + self
                     .ome
                     .live_orders()
                     .iter()
-                    .filter(|o| o.side == Side::Buy && o.strategy == req.strategy)
+                    .filter(|o| {
+                        o.side == Side::Buy
+                            && o.strategy == req.strategy
+                            && o.account_id == req.account_id
+                    })
                     .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO))
                     .sum::<Decimal>();
             let incoming = req.price * req.size;
@@ -6383,7 +6623,11 @@ impl Core {
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             // The rejected entry never rested: its token may be re-attempted.
             if let Some(engine) = self.engine.as_mut() {
-                engine.release_pending_token_for_strategy(&o.strategy, &o.token_id);
+                engine.release_pending_token_for_strategy(
+                    o.account_id.as_str(),
+                    &o.strategy,
+                    &o.token_id,
+                );
             }
             self.emit_order(id);
             let e = err.unwrap_or_else(|| {
@@ -8178,7 +8422,11 @@ impl Core {
         self.ome
             .mark_terminal(id, OrderStatus::ForceClosed, now_ms)?;
         if let Some(engine) = self.engine.as_mut() {
-            engine.release_pending_token_for_strategy(&order.strategy, &order.token_id);
+            engine.release_pending_token_for_strategy(
+                order.account_id.as_str(),
+                &order.strategy,
+                &order.token_id,
+            );
         }
         if self.replay_sched() {
             self.fast_orders_dirty = true;
@@ -9736,10 +9984,12 @@ impl Core {
                 ));
             }
             let direction = parse_direction(&req.direction);
-            if let Err(reason) = self
-                .positions
-                .can_open(Some(&req.asset), Some(direction), now_ms)
-            {
+            if let Err(reason) = self.positions.can_open(
+                req.account_id.as_str(),
+                Some(&req.asset),
+                Some(direction),
+                now_ms,
+            ) {
                 // PAIR-COMPLETION exemption (hold-to-settlement strategies
                 // only): the one-position-per-asset gate would reject the
                 // second leg of a complete set, but UP + DOWN of the SAME
@@ -9979,6 +10229,7 @@ impl Core {
                                     // be re-attempted on a refreshed book.
                                     if let Some(engine) = self.engine.as_mut() {
                                         engine.release_pending_token_for_strategy(
+                                            order.account_id.as_str(),
                                             &order.strategy,
                                             &order.token_id,
                                         );
@@ -10322,7 +10573,11 @@ impl Core {
         // entry leaves no resting order behind, so a later cycle may re-attempt
         // (the strategy's own latch still bounds it to one attempt per book).
         if was_live && let Some(engine) = self.engine.as_mut() {
-            engine.release_pending_token_for_strategy(&order.strategy, &order.token_id);
+            engine.release_pending_token_for_strategy(
+                order.account_id.as_str(),
+                &order.strategy,
+                &order.token_id,
+            );
         }
         // Replay fast path: a live order just left the book — the escalation
         // sweep and the audit input changed.
@@ -12244,6 +12499,42 @@ fn parse_direction(s: &str) -> SignalDirection {
         "down" => SignalDirection::Down,
         _ => SignalDirection::Up,
     }
+}
+
+/// Instantiate ONE account scope of a registered Lua strategy from its
+/// package dir (the source the default scope recorded at load: `lua:<dir>`).
+/// Returns `None` when the source is not a reloadable Lua package (a dylib
+/// or a vanished dir) — the scope-rebuild caller skips the name with a
+/// warning, it never panics. Mirrors `load_lua_package_inner`'s adapter
+/// wiring: the manifest declares (holds/exemptions) + the kernel's ONE fee
+/// schedule stamped into the Lua state.
+fn build_lua_scope(
+    sources: &std::collections::HashMap<String, String>,
+    name: &str,
+    account: &str,
+) -> Option<Box<dyn crate::strategies::EngineStrategy>> {
+    use crate::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
+    let source = sources.get(name)?;
+    let dir = source.strip_prefix("lua:")?;
+    let loaded = load_lua_package(std::path::Path::new(dir)).ok()?;
+    if loaded.name != name {
+        // The dir drifted (another package now lives there): refuse — a
+        // scope must host the strategy the assignment names.
+        return None;
+    }
+    let mut adapter = LuaEngineAdapter::scoped_new(
+        loaded.strategy,
+        loaded.tunables.clone(),
+        account.to_string(),
+    );
+    adapter = adapter.declare(loaded.holds_to_settlement, loaded.gate_exemptions);
+    let sched = crate::exit_policy::fee_schedule();
+    adapter.set_fee_schedule(blitzkrieg_lua_runtime::FeeScheduleView {
+        name: sched.name.to_string(),
+        rate: sched.rate.to_string(),
+        exponent: sched.exponent,
+    });
+    Some(Box::new(adapter))
 }
 
 /// Price a taker EXIT to actually fill: the limit nudged a few ticks below
@@ -15782,6 +16073,7 @@ mod strategy_dispatch_tests {
                     if book.mid_price <= self.buy_below {
                         out.push(crate::signal::TradeSignal {
                             strategy: self.name.clone(),
+                            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                             asset: market.asset.clone(),
                             direction,
                             token_id: token_id.clone(),
@@ -21833,6 +22125,8 @@ mod audit_fix_tests {
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -21842,6 +22136,8 @@ mod audit_fix_tests {
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -21935,6 +22231,8 @@ mod audit_fix_tests {
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: "polymarket".into(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -21944,6 +22242,8 @@ mod audit_fix_tests {
                     status: crate::account::AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],

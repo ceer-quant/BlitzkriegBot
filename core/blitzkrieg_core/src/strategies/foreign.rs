@@ -300,6 +300,11 @@ pub struct ForeignStrategy {
     vtable: BkStrategyVtable,
     handle: BkHandle,
     name: String,
+    /// The account scope this INSTANCE trades for (set by the loader when the
+    /// host registers a per-account scope; default-scope loads keep the
+    /// default account). Packages are account-blind by declaration — this is
+    /// host metadata, never strategy input.
+    account_id: String,
     version: String,
     /// Deallocator resolved from THIS library for its JSON outputs.
     free_string: Option<unsafe extern "C" fn(*mut c_char)>,
@@ -344,7 +349,12 @@ impl ForeignStrategy {
     /// vtable, valid create/destroy, JSON outputs freed by its own
     /// `bk_strategy_free_string`), and it is only ever driven single-threaded
     /// by the kernel's strategy loop.
-    pub unsafe fn from_loaded(lib: Arc<LoadedLibrary>, name: String, version: String) -> Self {
+    pub unsafe fn from_loaded(
+        lib: Arc<LoadedLibrary>,
+        name: String,
+        version: String,
+        account_id: String,
+    ) -> Self {
         let vtable = unsafe { std::ptr::read(lib.vtable()) };
         // SAFETY: negotiation in the loader established a v2 library with a
         // static vtable and a non-null create().
@@ -360,6 +370,7 @@ impl ForeignStrategy {
             vtable,
             handle,
             name,
+            account_id,
             version,
             free_string,
             gate_exemptions_fn,
@@ -758,7 +769,14 @@ impl EngineStrategy for ForeignStrategy {
         // The JSON→intents adoption lives in a FREE function so the §2.4
         // reserved-key seal is testable without a loaded library — reverse
         // acceptance B drives it directly (`reserved_key_tests` below).
-        adopt_eval_json(&self.name, v, ctx, &mut self.exit_intents, &mut self.breaks)
+        adopt_eval_json(
+            &self.name,
+            &self.account_id,
+            v,
+            ctx,
+            &mut self.exit_intents,
+            &mut self.breaks,
+        )
     }
 
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
@@ -916,6 +934,7 @@ impl ShadowFactory for ForeignShadowFactory {
             vtable,
             handle,
             name: self.name.clone(),
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             version: String::new(),
             free_string: self.lib.free_string,
             gate_exemptions_fn: self.lib.gate_exemptions_fn,
@@ -985,6 +1004,7 @@ fn parse_breaks(v: &serde_json::Value) -> Vec<(String, Decimal)> {
 /// the JSON value and the round context.
 fn adopt_eval_json(
     strategy_name: &str,
+    scope: &str,
     v: serde_json::Value,
     ctx: &StrategyCtx<'_>,
     exit_intents: &mut Vec<StrategyExitIntent>,
@@ -1071,6 +1091,7 @@ fn adopt_eval_json(
             if m.up_token_id == token {
                 candidates.push(TradeSignal {
                     strategy: strategy_name.to_string(),
+                    account_id: scope.to_string(),
                     asset: m.asset.clone(),
                     direction: crate::model::SignalDirection::Up,
                     token_id: m.up_token_id.clone(),
@@ -1084,6 +1105,7 @@ fn adopt_eval_json(
             if m.down_token_id == token {
                 candidates.push(TradeSignal {
                     strategy: strategy_name.to_string(),
+                    account_id: scope.to_string(),
                     asset: m.asset.clone(),
                     direction: crate::model::SignalDirection::Down,
                     token_id: m.down_token_id.clone(),
@@ -1202,8 +1224,22 @@ mod reserved_key_tests {
         let (with, without) = tracing::subscriber::with_default(subscriber, || {
             let mut exits = Vec::new();
             let mut breaks = Vec::new();
-            let with = adopt_eval_json("probe", with_key, &ctx, &mut exits, &mut breaks);
-            let without = adopt_eval_json("probe", without_key, &ctx, &mut exits, &mut breaks);
+            let with = adopt_eval_json(
+                "probe",
+                "blitzkrieg_market_api::DEFAULT_ACCOUNT_ID",
+                with_key,
+                &ctx,
+                &mut exits,
+                &mut breaks,
+            );
+            let without = adopt_eval_json(
+                "probe",
+                "blitzkrieg_market_api::DEFAULT_ACCOUNT_ID",
+                without_key,
+                &ctx,
+                &mut exits,
+                &mut breaks,
+            );
             (with, without)
         });
 

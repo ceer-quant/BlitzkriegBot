@@ -885,7 +885,7 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     );
     assert!(net < dec!(-10), "expected a real loss, got {net}");
     assert!(!pm.daily_loss_tripped());
-    assert!(pm.can_open(None, None, NOW + 2_000).is_ok());
+    assert!(pm.can_open("default", None, None, NOW + 2_000).is_ok());
 
     // A second one crosses it, and the freeze is immediate.
     realize(
@@ -898,7 +898,7 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     );
     assert!(pm.daily_loss_tripped(), "the cap must latch");
     let err = pm
-        .can_open(None, None, NOW + 4_000)
+        .can_open("default", None, None, NOW + 4_000)
         .expect_err("a tripped cap must refuse new entries");
     assert!(err.contains("Daily loss limit"), "{err}");
 
@@ -920,7 +920,10 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     assert_eq!(roll.limit_usd, dec!(14), "20% of the new $70 equity");
     assert_eq!(pm.daily_pnl(), Decimal::ZERO);
     assert!(!pm.daily_loss_tripped(), "the new day starts clean");
-    assert!(pm.can_open(None, None, NOW + DAY_MS + 1_000).is_ok());
+    assert!(
+        pm.can_open("default", None, None, NOW + DAY_MS + 1_000)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -971,7 +974,7 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
         "the restored budget is already spent"
     );
     let err = second
-        .can_open(None, None, NOW + 2_000)
+        .can_open("default", None, None, NOW + 2_000)
         .expect_err("a restored loss must gate the very first entry");
     assert!(err.contains("Daily loss limit"), "{err}");
 
@@ -1677,7 +1680,7 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
     assert!(realized <= dec!(-30), "expected ≈ −$30, got {realized}");
     assert!(realized > dec!(-2_000), "…but inside the seeded cap");
     assert!(!dry.daily_loss_tripped());
-    assert!(dry.can_open(None, None, NOW + 2_000).is_ok());
+    assert!(dry.can_open("default", None, None, NOW + 2_000).is_ok());
     drop(dry);
 
     // Live, $50, same UTC day: the cap is now $10 and the day is already past it.
@@ -1704,7 +1707,7 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
         "the freeze must be part of the same warning: {logs}"
     );
     let err = live
-        .can_open(None, None, NOW + 61_000)
+        .can_open("default", None, None, NOW + 61_000)
         .expect_err("entries must be refused");
     assert!(err.contains("Daily loss limit"), "{err}");
 

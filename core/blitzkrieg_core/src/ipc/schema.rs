@@ -332,6 +332,17 @@ pub mod method {
     /// to), which is why the write persists to accounts.toml and must never
     /// lose a sibling account's fields on the way.
     pub const ACCOUNT_VENUE_SET: &str = "account.venue.set";
+    /// The per-account trading switch (`account.trading.set`): `false` =
+    /// this account's NEW ENTRIES are refused while its EXITS keep flowing
+    /// (positions stay strategy-managed until flat). Persisted to
+    /// accounts.toml, re-read at next boot.
+    pub const ACCOUNT_TRADING_SET: &str = "account.trading.set";
+    /// The per-account strategy assignment (`account.strategies.set`): an
+    /// empty list = inherit every globally-enabled strategy; non-empty =
+    /// the account runs exactly those (one engine instance per (account,
+    /// strategy)). A removed strategy with open positions keeps managing
+    /// them exits-only until flat.
+    pub const ACCOUNT_STRATEGIES_SET: &str = "account.strategies.set";
     /// One account's cash-journal tail (#509's read surface): the append-only
     /// `JournalEntry` rows the ledger records for every balance change.
     /// Read-only — answers from the in-memory window
@@ -1885,6 +1896,12 @@ pub struct AccountView {
     /// unbound — the account may trade any venue. The panel's account card
     /// renders the binding; an empty value renders as no binding.
     pub venue: String,
+    /// The trading switch the panel renders as 「交易中/已停止」. `false` =
+    /// Gate 2 refuses this account's new entries; its exits keep flowing.
+    pub trading_enabled: bool,
+    /// The strategies this account runs. Empty = INHERIT every globally
+    /// enabled strategy; non-empty = the explicit per-account assignment.
+    pub strategies: Vec<String>,
     pub open_positions: usize,
     #[serde(with = "crate::decimal")]
     pub day_realized_usd: Decimal,
@@ -1980,6 +1997,76 @@ pub struct AccountVenueSetResult {
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
      unbound); persisted to accounts.toml, re-read at next boot; the same \
      venue on several accounts is the deployment model, not a conflict";
+
+// ── 账户交易开关 + 策略分配 — account.trading.set / account.strategies.set ──
+
+/// `account.trading.set` params: the per-account trading switch. `false` =
+/// the account's NEW ENTRIES are refused (engine drop + Gate 2 backstop)
+/// while its EXITS keep flowing — positions stay strategy-managed until
+/// flat. `reason` is audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTradingSetParams {
+    pub account_id: String,
+    pub enabled: bool,
+    /// Audit trail only — echoed in the reply and the log line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.trading.set` result: the switch that is now in force (memory
+/// AND accounts.toml; a persist failure refuses the whole write).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTradingSetResult {
+    pub account_id: String,
+    pub enabled: bool,
+    pub persisted: bool,
+    pub at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+pub const ACCOUNT_TRADING_SET_NOTE: &str = "false = new entries refused for this account, existing \
+     positions stay managed until flat (exits always flow); persisted to \
+     accounts.toml, re-read at next boot";
+
+/// `account.strategies.set` params: the strategies THIS account runs. An
+/// empty list = INHERIT every globally-enabled strategy (the single-book
+/// shape); a non-empty list pins the account to exactly those. Names are
+/// validated against the REGISTERED strategy set plan-first (a typo must
+/// fail now, not as a silently inert assignment). `reason` is audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStrategiesSetParams {
+    pub account_id: String,
+    pub strategies: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.strategies.set` result. `kept_exits_only` names strategies the
+/// account still holds positions in but that were REMOVED from the
+/// assignment — they keep running as exits-only instances until flat (the
+/// safety net: a removed strategy never orphans its positions).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStrategiesSetResult {
+    pub account_id: String,
+    pub strategies: Vec<String>,
+    pub kept_exits_only: Vec<String>,
+    pub persisted: bool,
+    pub at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+pub const ACCOUNT_STRATEGIES_SET_NOTE: &str = "empty list = inherit every globally-enabled strategy; \
+     non-empty = the account runs exactly those (one engine instance per \
+     (account, strategy)); a removed strategy with open positions keeps \
+     managing them exits-only until flat";
 
 // ── account.create / account.remove — 账户簿运行时增删 ──────────────────────
 

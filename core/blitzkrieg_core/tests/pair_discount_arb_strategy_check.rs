@@ -356,6 +356,7 @@ fn a_partially_filled_leg_is_topped_up_to_its_counterpart() {
     assert_eq!(got.len(), 2, "arming pass emits both legs");
     // Pass 2: the UP leg filled, the DOWN leg did not.
     let held = vec![HeldPosition {
+        account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
         strategy: "pair_discount_arb".into(),
         condition_id: COND.into(),
         token_id: UP.into(),

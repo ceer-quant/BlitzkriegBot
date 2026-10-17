@@ -434,6 +434,7 @@ fn a_held_pair_releases_when_the_discount_falls_back() {
     // which listing wins each side at the current quotes.
     let held = vec![
         blitzkrieg_core::strategies::HeldPosition {
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             strategy: "cross_venue_arb".into(),
             condition_id: PM.into(),
             token_id: PM_UP.into(),
@@ -443,6 +444,7 @@ fn a_held_pair_releases_when_the_discount_falls_back() {
             round_slot: SLOT,
         },
         blitzkrieg_core::strategies::HeldPosition {
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             strategy: "cross_venue_arb".into(),
             condition_id: KX.into(),
             token_id: KX_DOWN.into(),
@@ -452,6 +454,7 @@ fn a_held_pair_releases_when_the_discount_falls_back() {
             round_slot: SLOT,
         },
         blitzkrieg_core::strategies::HeldPosition {
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             strategy: "cross_venue_arb".into(),
             condition_id: KX.into(),
             token_id: KX_UP.into(),
@@ -461,6 +464,7 @@ fn a_held_pair_releases_when_the_discount_falls_back() {
             round_slot: SLOT,
         },
         blitzkrieg_core::strategies::HeldPosition {
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             strategy: "cross_venue_arb".into(),
             condition_id: PM.into(),
             token_id: PM_DOWN.into(),

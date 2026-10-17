@@ -240,6 +240,7 @@ impl EngineStrategy for InTreeParity {
                 (SignalDirection::Down, m.down_token_id.clone())
             };
             out.push(TradeSignal {
+                account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                 strategy: self.name().to_string(),
                 asset: m.asset.clone(),
                 direction,

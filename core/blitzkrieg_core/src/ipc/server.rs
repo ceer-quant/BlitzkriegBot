@@ -2601,6 +2601,73 @@ async fn handle_line(
             .await
         }
 
+        // ── 账户交易开关 + 策略分配：account.trading.set / account.strategies.set
+        // 「交易中/已停止」开关与「该账户跑哪些策略」编辑器的内核面。同
+        // venue.set 的事务姿态：persist 先行（失败两个存储都不动），内存随后；
+        // 引擎镜像不用这里推 —— 下个评估周期 host 重推每个账户的
+        // trading/venue/equity 事实，一周期内生效。方法层的拒绝全是客户端错
+        // （未知 id / 持久化关 / 策略名未注册），经 typed 的 CoreError 尾部
+        // 落成 wire 的 INVALID_PARAMS。
+        method::ACCOUNT_TRADING_SET => {
+            typed(params, |p: AccountTradingSetParams| {
+                let core = core.clone();
+                async move {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    c.set_account_trading_persisting(
+                        &id,
+                        p.enabled,
+                        "panel",
+                        p.reason.as_deref().unwrap_or(""),
+                        now_ms(),
+                    )?;
+                    Ok(serde_json::to_value(AccountTradingSetResult {
+                        account_id: id.as_str().to_string(),
+                        enabled: p.enabled,
+                        persisted: true,
+                        at_ms: now_ms(),
+                        reason: p.reason,
+                        note: ACCOUNT_TRADING_SET_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
+        method::ACCOUNT_STRATEGIES_SET => {
+            typed(params, |p: AccountStrategiesSetParams| {
+                let core = core.clone();
+                async move {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    // The method layer adds nothing to the transaction: the
+                    // service plan-first checks names against the REGISTERED
+                    // set, persists, flips the book, rebuilds the engine
+                    // scopes (exits-only safety net included), and returns
+                    // the kept-exits-only list for the reply.
+                    let kept_exits_only = c.set_account_strategies_persisting(
+                        &id,
+                        p.strategies.clone(),
+                        "panel",
+                        p.reason.as_deref().unwrap_or(""),
+                        now_ms(),
+                    )?;
+                    Ok(serde_json::to_value(AccountStrategiesSetResult {
+                        account_id: id.as_str().to_string(),
+                        strategies: p.strategies,
+                        kept_exits_only,
+                        persisted: true,
+                        at_ms: now_ms(),
+                        reason: p.reason,
+                        note: ACCOUNT_STRATEGIES_SET_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
         // ── 账户簿运行时增删：account.create / account.remove ───────────────
         // 「添加账户」弹窗的内核面。照 venue.set 的完整模式：plan-first 的
         // 注册校验（create 的非空 venue 名必须是已注册插件 —— 一个拼错的绑定
@@ -5443,6 +5510,8 @@ mod tests {
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -5452,6 +5521,8 @@ mod tests {
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: now,
                 },
             ],
@@ -5867,6 +5938,8 @@ mod tests {
                         status: AccountStatus::Active,
                         credential_keys: crate::account::CredentialKeys::default(),
                         venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
                         updated_at_ms: now,
                     },
                     crate::account::Account {
@@ -5876,6 +5949,8 @@ mod tests {
                         status: AccountStatus::Active,
                         credential_keys: crate::account::CredentialKeys::default(),
                         venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
                         updated_at_ms: now,
                     },
                 ],
@@ -6165,6 +6240,8 @@ mod tests {
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -6174,6 +6251,8 @@ mod tests {
                     status: AccountStatus::Active,
                     credential_keys: crate::account::CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: now,
                 },
             ],
@@ -6895,6 +6974,8 @@ mod tests {
                         status: AccountStatus::Active,
                         credential_keys: crate::account::CredentialKeys::default(),
                         venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
                         updated_at_ms: now,
                     })
                     .collect(),

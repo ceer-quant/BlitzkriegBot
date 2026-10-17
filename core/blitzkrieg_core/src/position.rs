@@ -2234,8 +2234,17 @@ impl PositionManager {
     /// positions held both shipped slots for 6 days; a restart restores the
     /// book, so the freeze never cleared on its own). Cooldowns and the
     /// daily-loss breaker keep judging every position as before.
+    ///
+    /// `account` scopes BOTH capacity caps: `max_positions` and
+    /// `max_positions_per_asset` are per-account books, not one shared pot —
+    /// account A filling its slots must not freeze account B's fresh entry.
+    /// Cooldowns stay GLOBAL: they exist to stop the strategy from re-firing
+    /// into the same wound, and two accounts hold the same asset by choice.
+    /// The `default` scope passes the pre-scope positions unchanged (a
+    /// single-book deployment counts exactly what it counted before).
     pub fn can_open(
         &self,
+        account: &str,
         asset: Option<&str>,
         direction: Option<SignalDirection>,
         now_ms: i64,
@@ -2243,7 +2252,7 @@ impl PositionManager {
         let live = self
             .open
             .iter()
-            .filter(|p| p.expires_at_ms > now_ms)
+            .filter(|p| p.expires_at_ms > now_ms && p.account_id.as_str() == account)
             .count();
         if live >= self.config.max_positions {
             return Err(format!("Max positions ({})", self.config.max_positions));
@@ -2284,7 +2293,9 @@ impl PositionManager {
             let in_asset = self
                 .open
                 .iter()
-                .filter(|p| p.asset == asset && p.expires_at_ms > now_ms)
+                .filter(|p| {
+                    p.asset == asset && p.expires_at_ms > now_ms && p.account_id.as_str() == account
+                })
                 .count();
             if in_asset >= self.config.max_positions_per_asset as usize {
                 return Err(format!("Already in {asset}"));
@@ -2625,11 +2636,11 @@ mod tests {
             0,
         );
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000)
+            pm.can_open("default", Some("BTC"), Some(SignalDirection::Up), 1000)
                 .is_err()
         );
         assert!(
-            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 1000)
+            pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 1000)
                 .is_ok()
         );
         enter(
@@ -2639,7 +2650,7 @@ mod tests {
             1000,
         );
         assert!(
-            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
+            pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 1000)
                 .is_err()
         ); // max positions
     }
@@ -2662,7 +2673,7 @@ mod tests {
         let mut pm = PositionManager::new(cfg);
         for i in 0..3 {
             assert!(
-                pm.can_open(Some("BTC"), Some(SignalDirection::Up), 1000 + i)
+                pm.can_open("default", Some("BTC"), Some(SignalDirection::Up), 1000 + i)
                     .is_ok(),
                 "entry {i} of 3 must pass the per-asset cap"
             );
@@ -2675,12 +2686,12 @@ mod tests {
         }
         // The 4th same-asset entry is refused, with the pinned vocabulary.
         let err = pm
-            .can_open(Some("BTC"), Some(SignalDirection::Up), 2000)
+            .can_open("default", Some("BTC"), Some(SignalDirection::Up), 2000)
             .unwrap_err();
         assert_eq!(err, "Already in BTC");
         // A different asset is unaffected by BTC's count.
         assert!(
-            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
+            pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_ok()
         );
     }
@@ -2718,7 +2729,7 @@ mod tests {
             0,
         );
         assert!(
-            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 1000)
+            pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 1000)
                 .is_err(),
             "both slots are held by live positions"
         );
@@ -2727,8 +2738,13 @@ mod tests {
         // venue never answers).
         let expiry = second.expires_at_ms;
         assert!(
-            pm.can_open(Some("SOL"), Some(SignalDirection::Up), expiry + 1)
-                .is_ok(),
+            pm.can_open(
+                "default",
+                Some("SOL"),
+                Some(SignalDirection::Up),
+                expiry + 1
+            )
+            .is_ok(),
             "an expired round's position must not hold a capacity slot"
         );
         // Same rule for the per-asset count: an expired BTC position no
@@ -2746,7 +2762,7 @@ mod tests {
             .map(|p| p.expires_at_ms)
             .unwrap();
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Up), btc + 1)
+            pm.can_open("default", Some("BTC"), Some(SignalDirection::Up), btc + 1)
                 .is_ok(),
             "an expired position must not count toward the per-asset cap"
         );
@@ -2773,11 +2789,16 @@ mod tests {
         );
         let expiry = pos.expires_at_ms;
         assert!(
-            pm.can_open(Some("ETH"), Some(SignalDirection::Up), expiry - 1)
-                .is_err()
+            pm.can_open(
+                "default",
+                Some("ETH"),
+                Some(SignalDirection::Up),
+                expiry - 1
+            )
+            .is_err()
         );
         assert!(
-            pm.can_open(Some("ETH"), Some(SignalDirection::Up), expiry)
+            pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), expiry)
                 .is_ok()
         );
     }
@@ -2802,9 +2823,55 @@ mod tests {
             0,
         );
         let err = pm
-            .can_open(Some("BTC"), Some(SignalDirection::Up), 1000)
+            .can_open("default", Some("BTC"), Some(SignalDirection::Up), 1000)
             .unwrap_err();
         assert_eq!(err, "Already in BTC");
+    }
+
+    /// The capacity gates are PER-ACCOUNT books: account "a" holding every
+    /// `max_positions` slot (and its own per-asset cap) never blocks
+    /// account "b"'s first entry — the whole-book counting of the pre-fanout
+    /// manager would have refused "b" on "a"'s fullness.
+    #[test]
+    fn capacity_is_per_account_a_full_book_leaves_b_free() {
+        let mut pm = PositionManager::new(PositionConfig {
+            max_positions: 1,
+            max_positions_per_asset: 1,
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            exit_cooldown_sec: 0,
+            ..Default::default()
+        });
+        // Account "a" holds the only slot, in BTC.
+        let mut a = params("BTC", SignalDirection::Up, dec!(0.4));
+        a.account_id = crate::model::AccountId("a".into());
+        enter(&mut pm, a, OrderRole::Maker, 0);
+        // "a" is full — both caps refuse it.
+        assert!(
+            pm.can_open("a", Some("ETH"), Some(SignalDirection::Up), 1000)
+                .is_err(),
+            "account a's own book is full"
+        );
+        assert!(
+            pm.can_open("a", Some("BTC"), Some(SignalDirection::Down), 1000)
+                .is_err(),
+            "account a's per-asset cap holds too"
+        );
+        // "b" trades the SAME asset freely: "a"'s book is not "b"'s pot.
+        assert!(
+            pm.can_open("b", Some("BTC"), Some(SignalDirection::Up), 1000)
+                .is_ok(),
+            "account b's fresh book admits the asset account a is full in"
+        );
+        // ...and "b"'s own entry then binds "b"'s book without touching "a"'s.
+        let mut b = params("BTC", SignalDirection::Up, dec!(0.4));
+        b.account_id = crate::model::AccountId("b".into());
+        enter(&mut pm, b, OrderRole::Maker, 0);
+        assert!(
+            pm.can_open("b", Some("ETH"), Some(SignalDirection::Up), 1000)
+                .is_err(),
+            "b's own cap now binds"
+        );
     }
 
     #[test]
@@ -2825,13 +2892,18 @@ mod tests {
             .unwrap();
         // Immediately after a loss, re-entry is blocked by asset/loss cooldown.
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 11_000)
+            pm.can_open("default", Some("BTC"), Some(SignalDirection::Down), 11_000)
                 .is_err()
         );
         // Far in the future it clears.
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 10_000 + 200_000)
-                .is_ok()
+            pm.can_open(
+                "default",
+                Some("BTC"),
+                Some(SignalDirection::Down),
+                10_000 + 200_000
+            )
+            .is_ok()
         );
     }
 
@@ -2855,7 +2927,7 @@ mod tests {
             .unwrap();
         assert!(pm.daily_pnl() < dec!(-1));
         assert!(
-            pm.can_open(Some("ETH"), Some(SignalDirection::Up), 2000)
+            pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_err()
         );
     }
@@ -2911,7 +2983,7 @@ mod tests {
             "realized {realized} + unrealized −20 must breach the 10 cap"
         );
         assert!(
-            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 2000)
+            pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 2000)
                 .is_err(),
             "the net breach freezes entries"
         );
@@ -2945,7 +3017,7 @@ mod tests {
             "realized-only: {realized} against a 10 cap is not a trip"
         );
         assert!(
-            pm.can_open(Some("SOL"), Some(SignalDirection::Up), 2000)
+            pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 2000)
                 .is_ok()
         );
     }
@@ -3357,12 +3429,12 @@ mod tests {
         assert!(pm.open_positions().is_empty());
         // The collection channel must not lock the next round out.
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Up), 2_000)
+            pm.can_open("default", Some("BTC"), Some(SignalDirection::Up), 2_000)
                 .is_ok(),
             "merge arms no exit cooldown"
         );
         assert!(
-            pm.can_open(Some("BTC"), Some(SignalDirection::Down), 2_000)
+            pm.can_open("default", Some("BTC"), Some(SignalDirection::Down), 2_000)
                 .is_ok(),
             "merge arms no loss/asset cooldown either"
         );

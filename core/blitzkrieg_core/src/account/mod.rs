@@ -206,7 +206,30 @@ pub struct Account {
     /// through a book that was never wired to that venue).
     #[serde(default)]
     pub venue: String,
+    /// The trading switch (the panel's per-account 「开启交易/关闭交易」).
+    /// `false` = the account REFUSES new entries at Gate 2 while its exits
+    /// keep flowing (positions stay strategy-managed until flat). It is a
+    /// boolean axis SEPARATE from `status`: Frozen/ReadOnly are risk words
+    /// (tighten-only, no runtime loosening) and ReadOnly refuses closes too —
+    /// neither spells "stop entering, finish managing what you hold".
+    /// Default `true` — a file without the field, `single_default()`, and
+    /// `account.create` all produce a trading account.
+    #[serde(default = "default_true")]
+    pub trading_enabled: bool,
+    /// The strategies THIS account runs. Empty = INHERIT: the account runs
+    /// every globally-enabled strategy (the historical single-book shape).
+    /// Non-empty = the explicit assignment (the engine hosts one instance
+    /// per (account, strategy) pair). Names are validated against the
+    /// registered set at write time (`account.strategies.set`), not here.
+    #[serde(default)]
+    pub strategies: Vec<String>,
     pub updated_at_ms: i64,
+}
+
+/// serde default for `trading_enabled` — a named fn because `bool::default`
+/// spells `false`, the wrong default for a trading switch.
+fn default_true() -> bool {
+    true
 }
 
 /// The per-account money truth (§9.3): one `Ledger` instance per `AccountId`
@@ -260,6 +283,10 @@ impl AccountLedgers {
                 // Zero-config deployment: unbound — trades whatever venue is
                 // active, exactly the 0.2 behaviour.
                 venue: String::new(),
+                trading_enabled: true,
+                // Inherit: the single-book deployment runs every globally
+                // enabled strategy, exactly the 0.2 behaviour.
+                strategies: Vec::new(),
                 updated_at_ms: now_ms,
             }],
             default_account_id(),
@@ -434,6 +461,54 @@ impl AccountLedgers {
         Ok(())
     }
 
+    /// The trading-switch write (`account.trading.set`): `false` = the
+    /// account's NEW ENTRIES are refused at Gate 2 while its EXITS keep
+    /// flowing; `true` re-opens entries. A separate boolean axis from
+    /// `status` — this is the operator's day-to-day switch, `status` is the
+    /// risk posture (tighten-only). The caller owns the accounts.toml
+    /// persist (memory first, disk after — a persist failure refuses the
+    /// whole write upstream).
+    pub fn set_trading(&mut self, id: &AccountId, enabled: bool, now_ms: i64) -> CoreResult<()> {
+        let account = self
+            .accounts
+            .get_mut(id)
+            .ok_or_else(|| unknown_account(id))?;
+        account.trading_enabled = enabled;
+        account.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    /// The strategy-assignment write (`account.strategies.set`): the names
+    /// are stored verbatim (the CALLER validated them against the
+    /// registered set; an empty list is the legal INHERIT). The engine's
+    /// scope-instance rebuild rides a separate path — this only moves the
+    /// book's fact.
+    pub fn set_strategies(
+        &mut self,
+        id: &AccountId,
+        strategies: Vec<String>,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        let account = self
+            .accounts
+            .get_mut(id)
+            .ok_or_else(|| unknown_account(id))?;
+        account.strategies = strategies;
+        account.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    /// This account's strategy assignment, for the engine's scope rebuild:
+    /// `None` = INHERIT every globally-enabled strategy (the single-book
+    /// shape); `Some([])` can never come back — an empty list is stored as
+    /// inherit, so a `Some` is always non-empty.
+    pub fn strategy_assignment(&self, id: &AccountId) -> Option<&Vec<String>> {
+        self.accounts
+            .get(id)
+            .filter(|a| !a.strategies.is_empty())
+            .map(|a| &a.strategies)
+    }
+
     /// The runtime-mint half of `account.create`: register a NEW account with
     /// a fresh zero `Ledger`. The storage layer refuses a duplicate id (the
     /// caller's arms refuse the reserved `default` and the empty spellings
@@ -517,16 +592,23 @@ impl AccountLedgers {
             return Err(unknown_account(id));
         };
         let allowed = if is_close {
+            // A closed trading switch never traps a position: exits flow on
+            // every posture and every trading_enabled value — 「关=拒开仓、
+            // 放平仓」 is exactly this line plus the entry arm below.
             account.status.allows_closes()
         } else {
-            account.status.allows_entries()
+            account.trading_enabled && account.status.allows_entries()
         };
         if !allowed {
+            let why = if !account.trading_enabled && !is_close {
+                "trading-closed (开仓拒、平仓放行)".to_string()
+            } else {
+                account.status.to_string()
+            };
             return Err(CoreError::new(
                 CoreErrorCode::AccountLimit,
                 format!(
-                    "account `{id}` is {} — {} refused at Gate 2",
-                    account.status,
+                    "account `{id}` is {why} — {} refused at Gate 2",
                     if is_close { "closes" } else { "new entries" },
                 ),
             ));
@@ -561,6 +643,8 @@ mod book_tests {
                     status: AccountStatus::Active,
                     credential_keys: CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 1,
                 },
                 Account {
@@ -570,6 +654,8 @@ mod book_tests {
                     status: AccountStatus::ReadOnly,
                     credential_keys: CredentialKeys::default(),
                     venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
                     updated_at_ms: 1,
                 },
             ],
@@ -743,6 +829,75 @@ mod book_tests {
         assert!(book.account(&AccountId("ghost".into())).is_none());
     }
 
+    /// The trading switch (「关=拒开仓、放平仓」) is an INDEPENDENT axis from
+    /// AccountStatus: OFF refuses entries but never traps a close, even with
+    /// the account otherwise Active; ON restores entries; the stamp rides
+    /// the writes; unknown ids refuse.
+    #[test]
+    fn trading_switch_refuses_entries_passes_closes() {
+        let mut book = two_accounts();
+        book.set_trading(&default_account_id(), false, 5)
+            .expect("the default account takes the switch");
+        // Entry refused, close allowed — the exact contract of the switch.
+        let err = book
+            .permits_order(&default_account_id(), false)
+            .expect_err("trading-off refuses entries");
+        assert_eq!(err.code, CoreErrorCode::AccountLimit);
+        assert!(
+            err.message.contains("trading-closed"),
+            "the refusal names the switch, not the status: {}",
+            err.message
+        );
+        assert!(
+            book.permits_order(&default_account_id(), true).is_ok(),
+            "trading-off never traps a close"
+        );
+        // The status axis is untouched: the account is still Active.
+        assert!(matches!(
+            book.account(&default_account_id()).unwrap().status,
+            AccountStatus::Active
+        ));
+        // Re-open restores entries; the stamp rode the writes.
+        book.set_trading(&default_account_id(), true, 9).unwrap();
+        assert!(book.permits_order(&default_account_id(), false).is_ok());
+        assert_eq!(
+            book.account(&default_account_id()).unwrap().updated_at_ms,
+            9
+        );
+        // Unknown ids refuse on the switch path too.
+        assert!(
+            book.set_trading(&AccountId("ghost".into()), false, 11)
+                .is_err()
+        );
+    }
+
+    /// The assignment write (`account.strategies.set` book half): names ride
+    /// verbatim (the CALLER validated them against the registered set), an
+    /// empty list is the legal INHERIT, `strategy_assignment` normalizes
+    /// empty → None, and unknown ids refuse.
+    #[test]
+    fn strategy_assignment_rides_verbatim_and_normalizes_empty_to_inherit() {
+        let mut book = two_accounts();
+        let paper = AccountId("paper".into());
+        book.set_strategies(&paper, vec!["spread_arb".into()], 3)
+            .expect("a named assignment rides");
+        assert_eq!(
+            book.strategy_assignment(&paper).unwrap(),
+            &vec!["spread_arb".to_string()]
+        );
+        // INHERIT: the empty list stores and reads back as None.
+        book.set_strategies(&paper, Vec::new(), 4).unwrap();
+        assert!(
+            book.strategy_assignment(&paper).is_none(),
+            "empty assignment = inherit-all (None)"
+        );
+        // Unknown id refuses.
+        assert!(
+            book.set_strategies(&AccountId("ghost".into()), vec!["x".into()], 5)
+                .is_err()
+        );
+    }
+
     // ── account.create / account.remove 的簿内半（存储层）─────────────────────
 
     fn fresh_account(id: &str, now_ms: i64) -> Account {
@@ -753,6 +908,8 @@ mod book_tests {
             status: AccountStatus::Active,
             credential_keys: CredentialKeys::default(),
             venue: String::new(),
+            trading_enabled: true,
+            strategies: Vec::new(),
             updated_at_ms: now_ms,
         }
     }

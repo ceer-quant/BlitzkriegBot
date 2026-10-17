@@ -167,15 +167,20 @@ pub struct StrategyExitIntent {
 }
 
 /// A position slice the host hands a strategy for one evaluation cycle —
-/// THIS strategy's open positions only (the engine filters by strategy name
-/// before constructing the view). Enough to see a partially-filled leg's
-/// shortfall against its pair attempt (the gap-fill loop), not enough to
-/// touch another strategy's book.
+/// THIS scope's open positions only (the engine filters by strategy name AND
+/// account before constructing the view). Enough to see a partially-filled
+/// leg's shortfall against its pair attempt (the gap-fill loop), not enough
+/// to touch another scope's book.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldPosition {
     /// Owning strategy — `evaluate` slices the host's flat view by this, so a
     /// package's `bk.holdings()` never shows another package's book.
     pub strategy: String,
+    /// Owning account — the SECOND slice key. The same strategy on two
+    /// accounts is two independent books; without this the slice would leak
+    /// account B's holdings into account A's gap-fill view. Serde default
+    /// keeps pre-fanout persisted views loading as default-scope.
+    pub account_id: String,
     pub condition_id: String,
     pub token_id: String,
     /// "up" | "down" — the leg label the wire uses everywhere else.
@@ -434,6 +439,7 @@ mod held_position_tests {
         assert!(ctx.held_positions().is_empty(), "default view is empty");
 
         let held = vec![HeldPosition {
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             strategy: "pair_discount_arb".into(),
             condition_id: "cond".into(),
             token_id: "tok".into(),
