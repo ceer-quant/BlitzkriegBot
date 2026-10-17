@@ -378,6 +378,24 @@ pub async fn run(
         if let Err(why) = config.install_engine(&mut core) {
             anyhow::bail!("{why}");
         }
+        // The accounts file's strategy assignments, applied at boot: every
+        // account with a non-empty `strategies` key gets those scopes
+        // instantiated AND enabled (assignment IS enablement). The one-time
+        // migration materializes the default account's implicit enabled set
+        // into accounts.toml, after which the file is the only truth
+        // (empty = the account runs nothing). Production-only: the replay/
+        // backtest boot goes through `install_engine` alone and its
+        // single-default book stays byte-identical (the exit-economics
+        // baseline).
+        let migrated = core.apply_account_strategy_assignments_at_boot();
+        if !migrated.is_empty() {
+            eprintln!(
+                "blitzkrieg-core: strategy assignment migration — the default account now \
+                 explicitly runs {:?} (accounts.toml; empty assignments mean a strategy-less \
+                 account, there is no inherit)",
+                migrated
+            );
+        }
         eprintln!("blitzkrieg-core: self-driving engine enabled");
     }
     let core = Arc::new(AsyncMutex::new(core));

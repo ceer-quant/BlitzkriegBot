@@ -2982,24 +2982,7 @@ impl Core {
                 "account.strategies.set: no strategy engine attached".to_string(),
             ));
         }
-        // INHERIT on `default`: an empty assignment means "keep running what
-        // boot fanned out", not "tear every default scope down". Resolving it
-        // to the names the default scope currently hosts makes the rebuild a
-        // no-op on scopes — a subsequent NAMED assignment can trim it
-        // explicitly. Non-default accounts keep the empty = no-scopes reading
-        // (boot never fans them out). The resolution drives ONLY the engine
-        // rebuild: the file and the in-memory book keep spelling the ORIGINAL
-        // request (empty = INHERIT by absence) — materializing the resolved
-        // set would pin today's fanout and silently un-inherit strategies
-        // boot adds later.
-        let mut resolved = requested.clone();
-        if requested.is_empty()
-            && *id == crate::account::default_account_id()
-            && let Some(e) = self.engine.as_ref()
-        {
-            resolved = e.default_scope_names();
-        }
-        for name in &resolved {
+        for name in &requested {
             if !self
                 .engine
                 .as_ref()
@@ -3051,9 +3034,12 @@ impl Core {
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
         // Engine rebuild. Removed-and-flat scopes drop; removed-and-held
-        // scopes are marked exits-only; added scopes instantiate. The
-        // resolution from INHERIT rides here, not into the file.
-        let kept_exits_only = self.rebuild_account_scopes(id, &resolved, &held);
+        // scopes are marked exits-only; added scopes instantiate. An EMPTY
+        // assignment is explicit "this account runs no strategies" — the
+        // rebuild then drops every flat scope of the account (the INHERIT
+        // reading this used to carry was retired: per-account assignments
+        // are the only truth, the default account included).
+        let kept_exits_only = self.rebuild_account_scopes(id, &requested, &held);
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -3089,6 +3075,109 @@ impl Core {
             engine.scope_sources().into_iter().collect();
         let mut build = |name: &str, account: &str| build_lua_scope(&sources, name, account);
         engine.rebuild_account_scopes(&account, requested, held, &mut build)
+    }
+
+    /// Boot application of the accounts file's strategy assignments — the
+    /// production `run()` calls this ONCE after `install_engine`. For every
+    /// account with a NON-EMPTY `strategies` key the named scopes are
+    /// instantiated and ENABLED (assignment IS enablement); the default
+    /// account with NO key and a non-empty persisted enabled-set is MIGRATED
+    /// once: today's enabled set is materialized into accounts.toml, so the
+    /// file becomes the only truth from that boot on (the INHERIT reading
+    /// empty used to carry is retired — an account assigned nothing runs
+    /// nothing, by decree).
+    ///
+    /// NOT part of `install_engine`: the replay/backtest boot goes through
+    /// that path too and its single-default book must keep byte-identical
+    /// outcomes (the exit-economics baseline). Production assembly is the
+    /// only caller.
+    ///
+    /// Returns the migrated default assignment (empty when nothing migrated)
+    /// so the caller can report it on stderr.
+    pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
+        let Some(path) = self.config.accounts_config_path.clone() else {
+            return Vec::new();
+        };
+        // The persisted enabled-set (strategy-state.json) drives the one-time
+        // migration of the default account. Read BEFORE any write.
+        let persisted_enabled: Vec<String> = match self.config.strategy_state_path.as_deref() {
+            Some(p) => crate::strategy_state::load(std::path::Path::new(p)),
+            None => Vec::new(),
+        };
+        let default_id = crate::account::default_account_id();
+        // The default account's assignment key decides whether the boot runs
+        // on the file's spelling (migration already happened) or migrates.
+        let default_has_key = self
+            .accounts
+            .account(&default_id)
+            .is_some_and(|a| !a.strategies.is_empty());
+        let mut migrated: Vec<String> = Vec::new();
+        if !default_has_key && !persisted_enabled.is_empty() {
+            // One-time migration: the file gains the explicit default
+            // assignment, spelling exactly what the old implicit behaviour
+            // (inherit the persisted enabled set) produced. The write is
+            // best-effort — a read-only tree keeps the implicit shape and
+            // the boot proceeds (the persisted set is re-read next boot).
+            if crate::account::config::persist_account_strategies(
+                std::path::Path::new(&path),
+                default_id.as_str(),
+                &persisted_enabled,
+            )
+            .is_ok()
+            {
+                let _ =
+                    self.accounts
+                        .set_strategies(&default_id, persisted_enabled.clone(), now_ms());
+                migrated = persisted_enabled;
+                tracing::info!(
+                    strategies = ?migrated,
+                    "strategy assignment migration: the default account's implicit \
+                     enabled set is materialized into accounts.toml — the file is \
+                     the only truth from here on (empty = runs nothing)"
+                );
+            }
+        }
+        // Apply every account's explicit assignment (the default's included —
+        // after migration it spells the old behaviour; an empty key means the
+        // account runs nothing and nothing is instantiated).
+        let assignments: Vec<(String, Vec<String>)> = self
+            .accounts
+            .account_list()
+            .iter()
+            .filter(|a| !a.strategies.is_empty())
+            .map(|a| (a.id.as_str().to_string(), a.strategies.clone()))
+            .collect();
+        for (account, strategies) in assignments {
+            // Assignment IS enablement — a scope built here starts enabled.
+            // Unknown names are skipped with a warning by the rebuild (the
+            // registered set is what the strategy dir loaded this boot).
+            self.set_account_scopes_at_boot(&account, &strategies);
+        }
+        migrated
+    }
+
+    /// The boot-flavoured scope application: instantiate `strategies` for
+    /// `account` and enable every one that landed. No exits-only handling —
+    /// at boot the position book is restored AFTER this runs, so nothing is
+    /// held yet (the restored positions reattach to the rebuilt scopes by
+    /// name; a position whose strategy is not in the account's assignment
+    /// keeps getting exit-managed because the position book drives exits, not
+    /// the scope set).
+    fn set_account_scopes_at_boot(&mut self, account: &str, strategies: &[String]) {
+        // The engine borrow and the Lua re-loader cannot overlap: read the
+        // source map first (same shape as `rebuild_account_scopes`).
+        let sources: std::collections::HashMap<String, String> = self
+            .engine
+            .as_ref()
+            .map(|e| e.scope_sources().into_iter().collect())
+            .unwrap_or_default();
+        let mut build = |name: &str, acct: &str| build_lua_scope(&sources, name, acct);
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        // DEMOTE/DROP phases are irrelevant at boot (no held positions yet);
+        // the rebuild's ADD phase instantiates + enables.
+        engine.rebuild_account_scopes(account, strategies, &[], &mut build);
     }
 
     /// `account.create`（账户簿运行时增删的建半）：新账户落内存 AND
@@ -16198,13 +16287,12 @@ mod strategy_dispatch_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `account.strategies.set {default, []}` 的 INHERIT 语义必须把 default
-    /// scope 全数保留 —— 旧代码把空列表直递 rebuild，DROP 阶段把 boot 扇出的
-    /// 全部 default scope 拆掉，enabled 策略静默停摆（strategy.list 变空、
-    /// 无任何 error 行）。命名分配仍照删不误（那张牙是 engine.rs 的
-    /// rebuild_drops_removed_and_flat_scopes）。
+    /// 空分配 = 该账户零策略（INHERIT 已按操作者裁决废除：显式分配是唯一
+    /// 真相源，default 账户一视同仁）。旧行为把 `{default, []}` 解析成
+    /// 「继承 boot 已装集」，DROP 阶段反而因此漏拆 —— 新语义下空分配把
+    /// 无持仓的 scope 全数拆掉，文件同样按 absence 拼写「不跑任何策略」。
     #[test]
-    fn strategies_set_inherit_on_default_keeps_the_boot_fanout_alive() {
+    fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         let dir = std::env::temp_dir().join(format!("bk-inherit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -16235,54 +16323,170 @@ mod strategy_dispatch_tests {
                 .set_strategy_enabled("spread_arb", true)
         );
 
-        // The restore write the panel/probe sends: empty = INHERIT.
+        // The empty write is explicit "run nothing": every default scope
+        // drops outright — the enabled one included. The trim is a decision
+        // (durable exposure would ride the exits-only DEMOTE had positions
+        // been held; none are).
         let kept = c
             .set_account_strategies_persisting(
                 &crate::account::AccountId::from("default"),
                 Vec::new(),
                 "test",
-                "inherit restore",
+                "explicit stop",
                 2,
             )
-            .expect("the inherit write lands");
+            .expect("the empty write lands");
         assert!(
             kept.is_empty(),
-            "no exits-only promotion is part of inherit"
+            "no positions are held, so nothing is promoted exits-only"
         );
         let e = c.engine.as_ref().unwrap();
+        // `strategy_registered` is the ASSIGNABLE set now (sticky provenance,
+        // teardown-proof); scope liveness is `strategy_scopes`.
+        let scopes = |name: &str| e.strategy_scopes(name);
         assert!(
-            e.strategy_registered("spread_arb")
-                && e.strategy_registered("trend_follow")
-                && e.strategy_registered("mean_reversion"),
-            "INHERIT keeps every default scope the boot fanned out"
+            scopes("spread_arb").is_empty()
+                && scopes("trend_follow").is_empty()
+                && scopes("mean_reversion").is_empty(),
+            "an empty assignment runs nothing — every flat scope drops, enabled included"
         );
         assert!(
-            e.enabled_strategies() == vec!["spread_arb".to_string()],
-            "the enabled scope rides the inherit untouched"
+            e.strategy_registered("spread_arb"),
+            "the package stays assignable after the teardown (sticky provenance)"
         );
-        // The persisted file spells INHERIT by absence (the config half's own牙).
+        assert!(
+            e.enabled_strategies().is_empty(),
+            "nothing enabled remains after the empty write"
+        );
+        // The persisted file spells the empty assignment by absence (the
+        // config half's own牙).
         let text = std::fs::read_to_string(&accounts_path).unwrap();
         let row = text.split("[[account]]").nth(1).unwrap();
-        assert!(!row.contains("strategies"), "inherit spelled by absence");
+        assert!(!row.contains("strategies"), "empty spelled by absence");
 
-        // A NAMED assignment on default still trims explicitly.
+        // A NAMED assignment restores exactly one scope. The rebuild's ADD
+        // phase (incl. "assignment IS enablement") is pinned by the engine
+        // tests (`rebuild_drops_an_enabled_scope_the_assignment_omits`); the
+        // in-process test adapters are not Lua packages, so a rebuilt scope
+        // here would need the source seam — the FILE half is what this test
+        // adds on top of the engine teeth.
         c.set_account_strategies_persisting(
             &crate::account::AccountId::from("default"),
             vec!["spread_arb".into()],
             "test",
-            "named trim",
+            "named restore",
             3,
         )
-        .expect("the named write lands");
-        let e = c.engine.as_ref().unwrap();
+        .expect("the named write lands (build fn declines a non-Lua source: warn, no panic)");
+        let book_assignment = c
+            .accounts
+            .strategy_assignment(&crate::account::AccountId::from("default"))
+            .expect("the named assignment is in the book");
+        assert_eq!(
+            book_assignment,
+            &vec!["spread_arb".to_string()],
+            "the book spells the named assignment"
+        );
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let row = text.split("[[account]]").nth(1).unwrap();
         assert!(
-            e.strategy_registered("spread_arb") && !e.strategy_registered("trend_follow"),
-            "a named assignment drops the un-named disabled scope"
+            row.contains("strategies = [\"spread_arb\"]"),
+            "the file spells the named assignment"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── E2-a: per-strategy sizing + independent quotas ──────────────────────
+    /// boot 分配应用（生产 `run()` 专属路径，回放不经过）：三条腿 ——
+    /// ① default 无键 + strategy-state 非空 → 一次性迁移物化进 accounts.toml
+    /// 且返回迁移集；② 已显式键的账户照文件执行（不再迁移）；③ 空键账户
+    /// boot 时零 scope（无 INHERIT）。scope 实例化是 Lua 源专属（test 适配器
+    /// 建不出来），所以 engine 侧断言钉在「分配即启用」的 rebuild 牙上，这里
+    /// 钉迁移与簿/文件拼写。
+    #[test]
+    fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
+        let dir = std::env::temp_dir().join(format!("bk-boot-assign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"probe2\"\nname = \"probe two\"\nstrategies = [\"spread_arb\"]\n",
+        )
+        .expect("fixture");
+        let state_path = dir.join("strategy-state.json");
+        crate::strategy_state::save(&state_path, &["spread_arb".into(), "trend_follow".into()]);
+
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+
+        // ①+③: the default migrates (file gains the key), probe2's key is
+        // honored (its book spelling is already explicit).
+        let migrated = c.apply_account_strategy_assignments_at_boot();
+        assert_eq!(
+            migrated,
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "the migration returns the materialized default assignment"
+        );
+        let default_id = crate::account::default_account_id();
+        assert_eq!(
+            c.accounts
+                .strategy_assignment(&default_id)
+                .expect("migrated into the book"),
+            &vec!["spread_arb".to_string(), "trend_follow".to_string()],
+        );
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let default_row = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            default_row.contains("strategies"),
+            "the file gained the default's explicit assignment"
+        );
+
+        // Idempotence: a SECOND boot call does not re-report (the file now
+        // carries the key — the migration is one-time by construction).
+        let again = c.apply_account_strategy_assignments_at_boot();
+        assert!(
+            again.is_empty(),
+            "the migration never runs twice: the file is the truth now"
+        );
+
+        // ②: an account with NO key (and no persisted set to migrate — the
+        // file now has one for default, so wipe the state file's role by
+        // pointing the config away) boots zero scopes: no INHERIT.
+        let mut c2 = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: None,
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c2.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c2.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        let migrated2 = c2.apply_account_strategy_assignments_at_boot();
+        assert!(migrated2.is_empty(), "no state file, no migration");
+        assert!(
+            c2.enabled_strategy_names().is_empty(),
+            "probe2's assignment names a strategy whose scope the test adapters \
+             cannot rebuild (non-Lua source) and default has no key — nothing enabled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A test strategy that dips on an explicit asset list. Declaring the assets
     /// lets several strategies share one cycle without fighting over a token.
