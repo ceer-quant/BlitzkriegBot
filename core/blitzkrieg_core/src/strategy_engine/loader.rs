@@ -998,6 +998,7 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
             shared,
             name.clone(),
             version.clone(),
+            blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
         )
     };
     // Read the OPTIONAL declarations once, here, so the load report can state

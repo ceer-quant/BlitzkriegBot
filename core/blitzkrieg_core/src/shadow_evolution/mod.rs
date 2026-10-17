@@ -1457,6 +1457,7 @@ mod tests {
             }
             vec![TradeSignal {
                 strategy: self.name.clone(),
+                account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                 asset: market.asset.clone(),
                 direction: SignalDirection::Up,
                 token_id: token,

@@ -349,6 +349,9 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
 /// Lua state machine on the inside. Same role as `ForeignStrategy` for dylibs.
 pub struct LuaEngineAdapter {
     inner: LuaStrategy,
+    /// The account scope this INSTANCE trades for (host metadata set at
+    /// registration; packages are account-blind by declaration).
+    account_id: String,
     /// token → asset, refreshed from the live round at every evaluate (labels
     /// `on_book` rows between evaluations).
     assets: HashMap<String, String>,
@@ -384,6 +387,20 @@ pub struct LuaEngineAdapter {
 
 impl LuaEngineAdapter {
     pub fn new(inner: LuaStrategy, tunables: HashMap<String, String>) -> Self {
+        Self::scoped_new(
+            inner,
+            tunables,
+            blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+        )
+    }
+
+    /// A scope instance: same package, own Lua state, own account. The
+    /// default-scope `new` stays the single constructor most callers use.
+    pub fn scoped_new(
+        inner: LuaStrategy,
+        tunables: HashMap<String, String>,
+        account_id: String,
+    ) -> Self {
         // Seed `bk.params()` with the manifest defaults; a registry cell (if
         // ever attached) merges over the bag per evaluate.
         let state = inner.state();
@@ -395,6 +412,7 @@ impl LuaEngineAdapter {
             .unwrap_or_default();
         Self {
             inner,
+            account_id,
             assets: HashMap::new(),
             last_books: HashMap::new(),
             exit_intents: Vec::new(),
@@ -423,6 +441,7 @@ impl LuaEngineAdapter {
         }
         Self {
             inner,
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             assets: HashMap::new(),
             last_books: HashMap::new(),
             exit_intents: Vec::new(),
@@ -691,6 +710,7 @@ impl EngineStrategy for LuaEngineAdapter {
                 if m.up_token_id == entry.token {
                     candidates.push(TradeSignal {
                         strategy: self.name().to_string(),
+                        account_id: self.account_id.clone(),
                         asset: m.asset.clone(),
                         direction: SignalDirection::Up,
                         token_id: m.up_token_id.clone(),
@@ -704,6 +724,7 @@ impl EngineStrategy for LuaEngineAdapter {
                 if m.down_token_id == entry.token {
                     candidates.push(TradeSignal {
                         strategy: self.name().to_string(),
+                        account_id: self.account_id.clone(),
                         asset: m.asset.clone(),
                         direction: SignalDirection::Down,
                         token_id: m.down_token_id.clone(),

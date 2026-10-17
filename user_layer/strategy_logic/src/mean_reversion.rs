@@ -471,6 +471,7 @@ pub fn evaluate_mean_reversion(
         }
         return Some(TradeSignal {
             strategy: "mean_reversion".into(),
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             asset: asset.to_string(),
             direction: dir,
             token_id: token.to_string(),

@@ -364,6 +364,12 @@ impl Default for SpreadArbConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TradeSignal {
     pub strategy: String,
+    /// The account scope the strategy instance belongs to. Populated by the
+    /// ENGINE when it lifts a scope's candidates into the shared submission
+    /// pipeline — a strategy package never sets it (packages are
+    /// account-blind by declaration). Default scope keeps
+    /// `blitzkrieg_market_api::DEFAULT_ACCOUNT_ID`.
+    pub account_id: String,
     pub asset: String,
     pub direction: SignalDirection,
     pub token_id: String,
@@ -437,6 +443,7 @@ pub fn evaluate_spread_arb(
         }
         return Some(TradeSignal {
             strategy: "spread_arb".into(),
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             asset: asset.to_string(),
             direction: dir,
             token_id: token.to_string(),

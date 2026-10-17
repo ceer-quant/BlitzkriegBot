@@ -59,6 +59,18 @@ struct AccountFileEntry {
     /// declared here at all).
     #[serde(default)]
     venue: Option<String>,
+    /// Missing = `true` (a trading account — the historical shape of a file
+    /// that predates the switch). `false` = the account refuses new entries
+    /// at Gate 2; its exits keep flowing.
+    #[serde(default)]
+    trading_enabled: Option<bool>,
+    /// The strategies THIS account runs. Missing/empty = INHERIT every
+    /// globally-enabled strategy (the single-book shape). A non-empty list
+    /// pins the account to exactly those strategies (the engine hosts one
+    /// instance per (account, strategy)). Names are validated at write time
+    /// (`account.strategies.set`), not at parse.
+    #[serde(default)]
+    strategies: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,6 +106,8 @@ impl AccountFileEntry {
             // the account trades any venue, the historical behaviour. A
             // non-empty value pins `orders.place` to that venue's markets.
             venue: self.venue.unwrap_or_default(),
+            trading_enabled: self.trading_enabled.unwrap_or(true),
+            strategies: self.strategies.unwrap_or_default(),
             updated_at_ms: now_ms,
         })
     }
@@ -289,6 +303,8 @@ pub fn persist_account_create(
         passphrase_env: None,
         private_key_env: None,
         venue: venue.filter(|v| !v.is_empty()).map(|v| v.to_string()),
+        trading_enabled: None,
+        strategies: None,
     });
     let out = toml::to_string(&file).map_err(|e| {
         CoreError::new(
@@ -297,6 +313,103 @@ pub fn persist_account_create(
         )
     })?;
     write_accounts_file_atomic(path, &out, "create")
+}
+
+/// The persisted write of ONE account's trading switch
+/// (`account.trading.set`): read-modify-write over the whole file, the exact
+/// fail-closed posture [`persist_account_venue`] runs (a non-parsing file is
+/// REFUSED, never flattened; same-directory temp + rename; the re-render
+/// does not carry comments — every FIELD round-trips). `false` is written
+/// explicitly; `true` REMOVES the key (the file spells "trading" by
+/// absence, the same shape a pre-switch file had).
+pub fn persist_account_trading(
+    path: &Path,
+    account_id: &str,
+    enabled: bool,
+) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the trading write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the trading write: {e}"),
+        )
+    })?;
+    let target = file
+        .account
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+            )
+        })?;
+    target.trading_enabled = Some(enabled).filter(|v| !v);
+    write_accounts_file_atomic(
+        path,
+        &toml::to_string(&file).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml does not render: {e}"),
+            )
+        })?,
+        "trading",
+    )
+}
+
+/// The persisted write of ONE account's strategy assignment
+/// (`account.strategies.set`). An EMPTY list REMOVES the key (the file
+/// spells "inherit every globally-enabled strategy" by absence); a
+/// non-empty list is stored verbatim — the write-time validation against
+/// the registered set is the CALLER's job (it has the plugin/strategy
+/// registry; this layer only owns the file).
+pub fn persist_account_strategies(
+    path: &Path,
+    account_id: &str,
+    strategies: &[String],
+) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the strategies write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the strategies write: {e}"),
+        )
+    })?;
+    let target = file
+        .account
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+            )
+        })?;
+    target.strategies = if strategies.is_empty() {
+        None
+    } else {
+        Some(strategies.to_vec())
+    };
+    write_accounts_file_atomic(
+        path,
+        &toml::to_string(&file).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml does not render: {e}"),
+            )
+        })?,
+        "strategies",
+    )
 }
 
 /// The persisted removal of ONE account (`account.remove`): drop the named
@@ -791,6 +904,83 @@ venue = "kalshi"
             std::fs::read_to_string(&p).unwrap(),
             before,
             "a refused create leaves the file byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trading switch and strategy assignment round-trip through
+    /// accounts.toml: an OFF switch and a non-empty assignment are the only
+    /// shapes that occupy file keys (absence = ON / INHERIT), sibling rows
+    /// survive, and unknown ids refuse with the file untouched.
+    #[test]
+    fn persist_account_trading_and_strategies_round_trip_by_absence_and_presence() {
+        let dir = std::env::temp_dir().join(format!("bk-acct-trade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // OFF writes an explicit key; a fresh load reads it as false.
+        persist_account_trading(&p, "default", false).expect("the off write lands");
+        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        assert!(
+            !book
+                .account(&AccountId("default".into()))
+                .unwrap()
+                .trading_enabled,
+            "the OFF switch is durable"
+        );
+        // A sibling row rode through untouched (still trading, no key).
+        assert!(
+            book.account(&AccountId("paper".into()))
+                .unwrap()
+                .trading_enabled,
+            "the sibling's default ON survives"
+        );
+
+        // ON removes the key — the file returns to the pre-switch shape.
+        persist_account_trading(&p, "default", true).expect("the on write lands");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let default_row = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            !default_row.contains("trading_enabled"),
+            "ON is spelled by absence: {text}"
+        );
+        let book = load_account_ledgers(&p, 4).expect("re-parses");
+        assert!(
+            book.account(&AccountId("default".into()))
+                .unwrap()
+                .trading_enabled,
+            "absence loads as ON"
+        );
+
+        // A non-empty assignment rides verbatim; a fresh load reads it whole.
+        persist_account_strategies(&p, "paper", &["spread_arb".into(), "mad_dog".into()])
+            .expect("the assignment lands");
+        let book = load_account_ledgers(&p, 5).expect("re-parses");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().strategies,
+            vec!["spread_arb".to_string(), "mad_dog".to_string()],
+            "the assignment is durable, verbatim and ordered"
+        );
+
+        // The INHERIT spelling: an empty list REMOVES the key.
+        persist_account_strategies(&p, "paper", &[]).expect("the inherit lands");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let paper_row = text.split("[[account]]").nth(2).unwrap();
+        assert!(
+            !paper_row.contains("strategies"),
+            "inherit is spelled by absence: {text}"
+        );
+
+        // Unknown ids refuse on both writers; the file is untouched.
+        let before = std::fs::read_to_string(&p).unwrap();
+        assert!(persist_account_trading(&p, "ghost", false).is_err());
+        assert!(persist_account_strategies(&p, "ghost", &["x".into()]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

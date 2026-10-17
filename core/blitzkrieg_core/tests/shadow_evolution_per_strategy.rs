@@ -104,6 +104,7 @@ impl EngineStrategy for CapStrategy {
                 continue;
             }
             out.push(TradeSignal {
+                account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                 strategy: self.name.clone(),
                 asset: market.asset.clone(),
                 direction: SignalDirection::Up,

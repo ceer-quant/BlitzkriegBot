@@ -966,6 +966,8 @@ mod derive_tests {
                 status: crate::account::AccountStatus::Active,
                 credential_keys: crate::account::CredentialKeys::default(),
                 venue: (*venue).to_string(),
+                trading_enabled: true,
+                strategies: Vec::new(),
                 updated_at_ms: now,
             })
             .collect();
