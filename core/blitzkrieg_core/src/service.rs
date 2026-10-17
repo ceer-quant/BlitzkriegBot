@@ -3188,13 +3188,22 @@ impl Core {
         // seeded: the venue's real cash is the balance, realigned from the
         // venue report. The journal row (kind Seed, ref `account.create`)
         // makes the funding a replayable boot fact for the NEXT boot.
+        //
+        // The journal only lands if the minted ledger has a journal PATH —
+        // boot's `attach_journals` never sees accounts that did not exist at
+        // boot, so the path is attached HERE. Without it the funding row stays
+        // in the in-memory trail only and a restart wakes the account at zero
+        // (生产 probe2 实锤: balance 1000 → restart → 0).
+        let ledger = self.accounts.get_mut(&id)?;
+        if let Some(dir) = self.config.ledger_journal_dir.as_deref() {
+            ledger.set_journal_path(
+                std::path::Path::new(dir).join(format!("{}.journal.jsonl", id.as_str())),
+            );
+        }
         if self.config.mode.settles_locally()
             && self.config.dry_seed_balance > rust_decimal::Decimal::ZERO
         {
-            self.accounts
-                .get_mut(&id)
-                .expect("the minted account has a ledger (insert ran above)")
-                .fund(self.config.dry_seed_balance, "account.create");
+            ledger.fund(self.config.dry_seed_balance, "account.create");
         }
         tracing::info!(
             target: "risk",
@@ -16091,12 +16100,20 @@ mod strategy_dispatch_tests {
     /// skipped wholesale once ANY account has a journal (an established
     /// deployment always does). LIVE mints stay at zero: the venue's real
     /// cash is the balance there.
+    ///
+    /// The second half is the DURABILITY of that funding (生产 probe2 二次
+    /// 实锤: balance 1000 → restart → 0): the minted ledger gets its journal
+    /// path attached at mint time, so the funding row (and every later cash
+    /// event) lands in `data/ledger/<account>.journal.jsonl` and the next
+    /// boot's `attach_journals` replay restores it.
     #[test]
     fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         let dir = std::env::temp_dir().join(format!("bk-mint-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let accounts_path = dir.join("accounts.toml");
+        let journal_dir = dir.join("ledger");
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
         std::fs::write(
             &accounts_path,
             "[[account]]\nid = \"default\"\nname = \"main\"\n",
@@ -16107,6 +16124,7 @@ mod strategy_dispatch_tests {
             CoreConfig {
                 mode: Mode::Dry,
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
                 ..Default::default()
             },
             crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
@@ -16130,19 +16148,24 @@ mod strategy_dispatch_tests {
             "the mint wakes with the configured seed, not zero"
         );
 
-        // The journal row rides the funded ledger's durable path… — actually
-        // the ledger is memory-only until a journal is attached; the row is in
-        // the in-memory trail. What matters for the NEXT boot is the ledger
-        // file the boot attach reads: assert the in-memory journal spelled it.
-        let trail = c.accounts.ledger_of(&probe).unwrap().journal_snapshot();
-        let seed_row = trail
+        // The funding row is DURABLE: the mint attached the journal path, so
+        // the row landed on disk and a fresh boot's `attach_journals` replay
+        // restores the balance — the restart does not vaporize it.
+        let journal_path = journal_dir.join("probe2.journal.jsonl");
+        let rows: Vec<crate::ledger::JournalEntry> =
+            crate::jsonl::load(&journal_path, "test journal");
+        let seed_row = rows
             .iter()
             .find(|r| r.ref_ == "account.create")
-            .expect("the funding row is in the trail");
+            .expect("the funding row is ON DISK");
         assert_eq!(seed_row.amount, c.config.dry_seed_balance);
 
-        // LIVE: the venue owns the cash — a mint stays at zero.
+        // LIVE: the venue owns the cash — a mint stays at zero (and no journal
+        // path is needed to remember a venue truth, but attaching one is
+        // harmless; the balance stays 0 and no row is written).
         let accounts_path_live = dir.join("accounts-live.toml");
+        let journal_dir_live = dir.join("ledger-live");
+        std::fs::create_dir_all(&journal_dir_live).expect("live journal dir");
         std::fs::write(
             &accounts_path_live,
             "[[account]]\nid = \"default\"\nname = \"main\"\n",
@@ -16152,6 +16175,7 @@ mod strategy_dispatch_tests {
             CoreConfig {
                 mode: Mode::Live,
                 accounts_config_path: Some(accounts_path_live.to_string_lossy().into_owned()),
+                ledger_journal_dir: Some(journal_dir_live.to_string_lossy().into_owned()),
                 ..Default::default()
             },
             crate::account::config::load_account_ledgers(&accounts_path_live, 1).unwrap(),
@@ -16166,6 +16190,10 @@ mod strategy_dispatch_tests {
                 .balance(),
             rust_decimal::Decimal::ZERO,
             "LIVE mints stay at zero — venue cash is the balance"
+        );
+        assert!(
+            !journal_dir_live.join("probe3.journal.jsonl").exists(),
+            "a zero funding records no journal row, so no file is created"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
