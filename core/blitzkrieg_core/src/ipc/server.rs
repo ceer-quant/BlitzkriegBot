@@ -1533,8 +1533,13 @@ async fn handle_line(
 
         // Cumulative closed-trade summary straight from the persisted
         // `summary.json` (all-time totals, unlike the windowed history rows).
+        // Optional `accountId` scopes the aggregation to ONE account: the
+        // persisted summary is a global accumulator, so an account query folds
+        // that account's rows on the fly (pre-H cores ignore the field — the
+        // panel falls back to row-side filtering when the totals don't match).
         method::TRADES_SUMMARY => {
-            let summary = core.lock().await.trade_summary();
+            let account = params.get("accountId").and_then(|v| v.as_str());
+            let summary = core.lock().await.trade_summary(account);
             Ok(serde_json::json!({
                 "version": crate::ipc::schema::PROTOCOL_VERSION,
                 "summary": summary,
@@ -1671,7 +1676,21 @@ async fn handle_line(
             .await
         }
 
-        method::ENGINE_STATS => Ok(core.lock().await.engine_stats()),
+        method::ENGINE_STATS => {
+            // PR H (账户筛选修复)：可选 `accountId` 把 per-strategy 计数行
+            // 切到单个账户（`strategy_stats_for_account` — 同形状，counters
+            // 只读该账户 slice）。缺席 = 全局 fold，老客户端逐字节不变。
+            let account = params.get("accountId").and_then(|v| v.as_str());
+            match account {
+                Some(a) => {
+                    let c = core.lock().await;
+                    let mut stats = c.engine_stats();
+                    stats["strategies"] = serde_json::json!(c.strategy_stats_for_account(a));
+                    Ok(stats)
+                }
+                None => Ok(core.lock().await.engine_stats()),
+            }
+        }
 
         method::STRATEGY_LIST => {
             let c = core.lock().await;

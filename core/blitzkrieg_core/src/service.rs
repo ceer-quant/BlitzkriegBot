@@ -1393,6 +1393,11 @@ pub struct Core {
     unified_candidates: Vec<blitzkrieg_market_api::unified::matching::MatchCandidate>,
     /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
     /// restart, like `stats`; the durable per-trade record is the trade log.
+    ///
+    /// Keyed (strategy, account) — PR H: two accounts assigned the same
+    /// strategy are two independent scopes, and the panel reads the stats of
+    /// the ACTIVE account. Key form `(strategy, '\u{1}', account)`; the
+    /// single-name helpers below keep the call sites readable.
     strategy_accounting: HashMap<String, StrategyAccounting>,
     /// Venue-rejection cooldowns keyed by placement intent (`internal_key`):
     /// after the venue refuses an order, retries of the SAME intent back off
@@ -3417,12 +3422,22 @@ impl Core {
     }
 
     // ── Strategy engine & extensions (P0.5) ─────────────────────────────────
-    /// Strategy names the kernel supports (the self-driving engine's set).
+    /// Strategy names the kernel supports (the self-driving engine's set),
+    /// deduplicated and sorted. Multi-account deployment hosts one scope per
+    /// (strategy, account) pair, so the raw engine list repeats a strategy
+    /// once per account — `strategy.list` and the stats surface are per-
+    /// NAME tables and must see each name exactly once (PR H). Sorted, not
+    /// run-length deduped: the second scope of a name registers AFTER every
+    /// first-scope name, so duplicates are never adjacent.
     pub fn strategy_names(&self) -> Vec<String> {
-        self.engine
+        let mut names = self
+            .engine
             .as_ref()
             .map(|e| e.supported_strategies())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        names.sort();
+        names.dedup();
+        names
     }
     /// Enabled strategy names.
     pub fn enabled_strategy_names(&self) -> Vec<String> {
@@ -4298,13 +4313,46 @@ impl Core {
     /// totalNetPnl / …). Prefers the persisted summary tracked by the trade db;
     /// falls back to totals recomputed over the JSONL (or in-memory history)
     /// when no db is attached.
-    pub fn trade_summary(&self) -> serde_json::Value {
-        if let Some(db) = self.trade_db.as_ref() {
+    ///
+    /// `account = None` is the historical all-accounts call, byte-identical to
+    /// pre-H behaviour. `account = Some(id)` recomputes the SAME aggregation
+    /// over only that account's rows: the persisted summary is a GLOBAL
+    /// accumulator (it cannot answer "this account alone"), so an account query
+    /// always folds rows — the persisted file stays the all-accounts headline.
+    /// Rows predating E28 carry no accountId and read as the default account,
+    /// so an account query on a legacy log still sees them.
+    pub fn trade_summary(&self, account: Option<&str>) -> serde_json::Value {
+        if account.is_none()
+            && let Some(db) = self.trade_db.as_ref()
+        {
             return serde_json::to_value(db.summary()).unwrap_or(serde_json::Value::Null);
         }
-        // Fallback: aggregate over whatever history we can reach.
+        // Fallback / per-account path: aggregate over whatever history we can
+        // reach, filtered to the requested account when one was named. The
+        // account comparison goes through the record's serde-defaulted
+        // accountId: empty on pre-E28 rows = the default account.
+        let want = account.unwrap_or(crate::account::DEFAULT_ACCOUNT_ID);
         let empty = Vec::new();
-        let rows = self.recent_trades(0);
+        let all_rows = self.recent_trades(0);
+        let rows: Vec<serde_json::Value> = match account {
+            None => all_rows,
+            Some(_) => all_rows
+                .into_iter()
+                .filter(|r| {
+                    let rid = r
+                        .get("accountId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    // An unattributed (pre-E28) row belongs to the default
+                    // account; every other row matches by exact id.
+                    if rid.is_empty() {
+                        want == crate::account::DEFAULT_ACCOUNT_ID
+                    } else {
+                        rid == want
+                    }
+                })
+                .collect(),
+        };
         let rows = if rows.is_empty() { &empty } else { &rows };
         let mut s = serde_json::json!({
             "totalTrades": 0u64, "wins": 0u64, "losses": 0u64, "winRate": 0.0,
@@ -5267,7 +5315,10 @@ impl Core {
                     req.token_id, req.price);
                 self.stats.place_rejected += 1;
                 self.stats.illegal_price_rejected += 1;
-                let acc = self.strategy_accounting.entry(name).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                    .or_default();
                 acc.rejected += 1;
                 *acc.rejection_causes
                     .entry("illegal.price".to_string())
@@ -5286,7 +5337,10 @@ impl Core {
                         "entry rejected: strategy={name} cause=policy.cooldown account={} \
                          {}s left", req.account_id, (until - now_ms + 999) / 1000);
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5307,7 +5361,10 @@ impl Core {
                     tracing::info!(target: "strategy",
                         "entry rejected: strategy={name} cause=policy.skip reason={reason}");
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5322,7 +5379,10 @@ impl Core {
                         "policy cooldown: account={} {}s (entries resume at {})",
                         req.account_id, seconds, until);
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5353,7 +5413,10 @@ impl Core {
                              budget {budget_usd} USD cannot buy one share at {}",
                             req.price);
                         self.stats.place_rejected += 1;
-                        let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                        let acc = self
+                            .strategy_accounting
+                            .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                            .or_default();
                         acc.rejected += 1;
                         *acc.rejection_causes
                             .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5369,7 +5432,10 @@ impl Core {
                         "entry refused: strategy={name} account={} policy refusal: {}",
                         req.account_id, refusal.reason);
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5456,7 +5522,10 @@ impl Core {
             } = &outcome.decision
             {
                 self.stats.place_rejected += 1;
-                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, intent.request.account_id.as_str()))
+                    .or_default();
                 acc.rejected += 1;
                 // Bucket through the EXISTING classifier over the gate's own
                 // message, so the attribution vocabulary is the one place()
@@ -5494,7 +5563,10 @@ impl Core {
             // (kill switch, price band, per-order cap) are untouched.
             if let Err(reason) = self.portfolio_limit_ok(&req) {
                 self.stats.strategy_limit_rejected += 1;
-                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                    .or_default();
                 acc.limit_rejected += 1;
                 *acc.rejection_causes
                     .entry("limit.portfolioNotionalCap".into())
@@ -5516,7 +5588,10 @@ impl Core {
                     "limit.other"
                 };
                 self.stats.strategy_limit_rejected += 1;
-                let acc = self.strategy_accounting.entry(name).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                    .or_default();
                 acc.limit_rejected += 1;
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
@@ -5525,7 +5600,7 @@ impl Core {
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
-                        .entry(name.clone())
+                        .entry(strategy_acc_key(&name, placed_account.as_str()))
                         .or_default()
                         .placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
@@ -5542,7 +5617,10 @@ impl Core {
                     tracing::info!(target: "strategy",
                         "entry rejected: strategy={name} cause={bucket} reason={}",
                         err.message);
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, placed_account.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes.entry(bucket).or_default() += 1;
                 }
@@ -5667,7 +5745,10 @@ impl Core {
                     tracing::info!(target: "strategy",
                         "entry rejected: strategy={name} cause=policy.skip reason={reason}");
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5682,7 +5763,10 @@ impl Core {
                         "policy cooldown: account={} {}s (entries resume at {})",
                         req.account_id, seconds, until);
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5704,7 +5788,10 @@ impl Core {
                              budget {budget_usd} USD cannot buy one share at {}",
                             req.price);
                         self.stats.place_rejected += 1;
-                        let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                        let acc = self
+                            .strategy_accounting
+                            .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                            .or_default();
                         acc.rejected += 1;
                         *acc.rejection_causes
                             .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5717,7 +5804,10 @@ impl Core {
                         "entry refused: strategy={name} account={} policy refusal: {}",
                         req.account_id, refusal.reason);
                     self.stats.place_rejected += 1;
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes
                         .entry(crate::execution_policy::PolicyOutput::SKIP_BUCKET.into())
@@ -5784,7 +5874,10 @@ impl Core {
             } = &outcome.decision
             {
                 self.stats.place_rejected += 1;
-                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, intent.request.account_id.as_str()))
+                    .or_default();
                 acc.rejected += 1;
                 let cause = classify_rejection(&crate::model::CoreError::new(
                     crate::arbitration::reason_code(*reason),
@@ -5809,7 +5902,10 @@ impl Core {
             // E16/#98 portfolio-level exposure cap (0 = off).
             if let Err(reason) = self.portfolio_limit_ok(&req) {
                 self.stats.strategy_limit_rejected += 1;
-                let acc = self.strategy_accounting.entry(name.clone()).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                    .or_default();
                 acc.limit_rejected += 1;
                 *acc.rejection_causes
                     .entry("limit.portfolioNotionalCap".into())
@@ -5828,7 +5924,10 @@ impl Core {
                     "limit.other"
                 };
                 self.stats.strategy_limit_rejected += 1;
-                let acc = self.strategy_accounting.entry(name).or_default();
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy_acc_key(&name, req.account_id.as_str()))
+                    .or_default();
                 acc.limit_rejected += 1;
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
@@ -5837,7 +5936,7 @@ impl Core {
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
-                        .entry(name.clone())
+                        .entry(strategy_acc_key(&name, placed_account.as_str()))
                         .or_default()
                         .placed += 1;
                     if let Some(engine) = self.engine.as_mut() {
@@ -5851,7 +5950,10 @@ impl Core {
                     tracing::info!(target: "strategy",
                         "entry rejected: strategy={name} cause={bucket} reason={}",
                         err.message);
-                    let acc = self.strategy_accounting.entry(name).or_default();
+                    let acc = self
+                        .strategy_accounting
+                        .entry(strategy_acc_key(&name, placed_account.as_str()))
+                        .or_default();
                     acc.rejected += 1;
                     *acc.rejection_causes.entry(bucket).or_default() += 1;
                 }
@@ -6033,16 +6135,62 @@ impl Core {
 
     /// Per-strategy accounting (P-1.1): open exposure (live) plus session order
     /// counters and realized PnL per registered strategy.
+    ///
+    /// PR H: one row per strategy NAME (a strategy assigned to two accounts is
+    /// one strategy — the old per-scope fan-out produced duplicate rows the
+    /// panel read as separate strategies). The row aggregates across scopes and
+    /// carries `accounts`: the account ids that hold a live scope of this
+    /// strategy, so the panel can slice to the active account. The
+    /// `enabled` flag reads "any scope enabled" — a name is either globally
+    /// togglable or per-scope from the assignment write, and both arrive here.
     pub fn strategy_stats(&self) -> Vec<serde_json::Value> {
         let enabled = self.enabled_strategy_names();
-        self.strategy_names()
+        // The row set is the engine's registered names UNION every name that
+        // already has accounting slices. A strategy whose scope was torn down
+        // (or a test core without an engine) still owns its closed-trade
+        // history — dropping the row would make realized PnL vanish from the
+        // page mid-session.
+        let mut names = self.strategy_names();
+        for k in self.strategy_accounting.keys() {
+            if let Some(name) = k.split('\u{1}').next()
+                && !names.iter().any(|n| n == name)
+            {
+                names.push(name.to_string());
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
             .into_iter()
             .map(|name| {
-                let acc = self
+                // Fold the (strategy, account) map across every scope of this
+                // strategy: the row's counters are the strategy's TOTALS, and
+                // `accounts` names the slices a per-account view can pick.
+                let mut acc = StrategyAccounting::default();
+                let prefix = format!("{name}\u{1}");
+                let mut accounts: Vec<String> = self
                     .strategy_accounting
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_default();
+                    .keys()
+                    .filter_map(|k| k.strip_prefix(&prefix))
+                    .map(str::to_string)
+                    .collect();
+                accounts.sort();
+                accounts.dedup();
+                for a in &accounts {
+                    if let Some(one) = self.strategy_accounting.get(&strategy_acc_key(&name, a)) {
+                        acc.placed += one.placed;
+                        acc.rejected += one.rejected;
+                        acc.limit_rejected += one.limit_rejected;
+                        acc.closed_trades += one.closed_trades;
+                        acc.wins += one.wins;
+                        acc.losses += one.losses;
+                        acc.fees_usd += one.fees_usd;
+                        acc.net_pnl_usd += one.net_pnl_usd;
+                        for (cause, n) in &one.rejection_causes {
+                            *acc.rejection_causes.entry(cause.clone()).or_default() += n;
+                        }
+                    }
+                }
                 let opens: Vec<&crate::position::OpenPosition> = self
                     .positions
                     .open_positions()
@@ -6090,6 +6238,9 @@ impl Core {
                     "name": name,
                     "enabled": enabled.contains(&name),
                     "source": source,
+                    // PR H: the account scopes holding this strategy (sorted;
+                    // empty = registered but assigned to no account).
+                    "accounts": accounts,
                     "openPositions": opens.len(),
                     "openNotionalUsd": dec_json(open_notional),
                     // ── E2-a quota + effective sizing ──
@@ -6140,6 +6291,50 @@ impl Core {
                 })
             })
             .collect()
+    }
+
+    /// PR H: per-STRATEGY accounting for ONE account — the same counters as
+    /// `strategy_stats`, folded over a single account's scopes only. The
+    /// strategy page slices with this so a strategy that trades on two
+    /// accounts does not print account B's PnL on account A's page.
+    pub fn strategy_stats_for_account(&self, account: &str) -> Vec<serde_json::Value> {
+        let mut rows = self.strategy_stats();
+        // Per-scope counters of just this account, folded back over the row's
+        // name — the shape stays identical to `strategy_stats` (the panel's
+        // table code renders one shape), only the counter values differ.
+        for row in &mut rows {
+            let Some(name) = row.get("name").and_then(|v| v.as_str()).map(String::from) else {
+                continue;
+            };
+            let one = self
+                .strategy_accounting
+                .get(&strategy_acc_key(&name, account))
+                .cloned()
+                .unwrap_or_default();
+            row["ordersPlaced"] = serde_json::json!(one.placed);
+            row["ordersRejected"] = serde_json::json!(one.rejected);
+            row["limitRejected"] = serde_json::json!(one.limit_rejected);
+            row["rejectionCauses"] = if one.rejection_causes.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(one.rejection_causes)
+            };
+            row["closedTrades"] = serde_json::json!(one.closed_trades);
+            row["wins"] = serde_json::json!(one.wins);
+            row["losses"] = serde_json::json!(one.losses);
+            row["feesUsd"] = dec_json(one.fees_usd);
+            row["netPnlUsd"] = dec_json(one.net_pnl_usd);
+            // Open exposure: THIS account's slice of the strategy.
+            let opens: Vec<&crate::position::OpenPosition> = self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| p.strategy == name && p.account_id.as_str() == account)
+                .collect();
+            row["openPositions"] = serde_json::json!(opens.len());
+            row["openNotionalUsd"] = dec_json(opens.iter().map(|p| p.cost_usd).sum());
+        }
+        rows
     }
 
     /// Diagnostic snapshot: feed counters + engine trend/confirmed state.
@@ -6852,7 +7047,13 @@ impl Core {
                     }
                 }
             }
-            self.note_venue_rejection(&o.internal_key, o.strategy.clone(), &e, now_ms);
+            self.note_venue_rejection(
+                &o.internal_key,
+                o.strategy.clone(),
+                o.account_id.as_str(),
+                &e,
+                now_ms,
+            );
         }
         Ok(())
     }
@@ -6865,6 +7066,7 @@ impl Core {
         &mut self,
         internal_key: &str,
         strategy: String,
+        account_id: &str,
         err: &crate::model::CoreError,
         now_ms: i64,
     ) {
@@ -6872,7 +7074,10 @@ impl Core {
         self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
         self.note_error(err, now_ms);
         {
-            let acc = self.strategy_accounting.entry(strategy).or_default();
+            let acc = self
+                .strategy_accounting
+                .entry(strategy_acc_key(&strategy, account_id))
+                .or_default();
             acc.rejected += 1;
             *acc.rejection_causes
                 .entry(format!("venue.{:?}", err.code))
@@ -7760,7 +7965,9 @@ impl Core {
             let rec = crate::trade_db::TradeRecord::from_closed(closed);
             db.record(&rec, now_ms);
         }
-        // Per-strategy accounting (P-1.1): session realized PnL + fee totals.
+        // Per-strategy accounting (P-1.1): session realized PnL + fee totals,
+        // keyed (strategy, account) so the panel's per-account slice sums ONLY
+        // the active account's closes (PR H).
         {
             let entry_fee =
                 (closed.entry_fee_pct / Decimal::ONE_HUNDRED) * closed.entry_price * closed.shares;
@@ -7768,7 +7975,10 @@ impl Core {
                 (closed.exit_fee_pct / Decimal::ONE_HUNDRED) * closed.exit_price * closed.shares;
             let acc = self
                 .strategy_accounting
-                .entry(closed.strategy.clone())
+                .entry(strategy_acc_key(
+                    &closed.strategy,
+                    closed.account_id.as_str(),
+                ))
                 .or_default();
             acc.closed_trades += 1;
             if closed.net_pnl_usd >= Decimal::ZERO {
@@ -8079,7 +8289,10 @@ impl Core {
                 (closed.exit_fee_pct / Decimal::ONE_HUNDRED) * closed.exit_price * closed.shares;
             let acc = self
                 .strategy_accounting
-                .entry(closed.strategy.clone())
+                .entry(strategy_acc_key(
+                    &closed.strategy,
+                    closed.account_id.as_str(),
+                ))
                 .or_default();
             acc.closed_trades = acc.closed_trades.saturating_sub(1);
             if closed.net_pnl_usd >= Decimal::ZERO {
@@ -12883,7 +13096,8 @@ fn escalation_delay_ms(explicit_ms: i64, default_ms: i64) -> Option<i64> {
     (delay > 0).then_some(delay)
 }
 
-/// Session-scoped per-strategy aggregates (P-1.1 accounting).
+/// Session-scoped per-strategy aggregates (P-1.1 accounting), keyed
+/// (strategy, account) since PR H — see `strategy_acc_key`.
 #[derive(Debug, Default, Clone)]
 struct StrategyAccounting {
     placed: u64,
@@ -12899,6 +13113,16 @@ struct StrategyAccounting {
     losses: u64,
     fees_usd: Decimal,
     net_pnl_usd: Decimal,
+}
+
+/// The `strategy_accounting` map key for one (strategy, account) scope. The
+/// `\u{1}` separator cannot appear in a strategy name (manifest names are
+/// identifier-like), so the pair is unambiguous; the default account keeps
+/// the same shape as every other account — `strategy_stats` folds the
+/// account dimension out for single-name reads, so no legacy spelling is
+/// preserved anywhere.
+fn strategy_acc_key(strategy: &str, account: &str) -> String {
+    format!("{strategy}\u{1}{account}")
 }
 
 /// E9-c: classify a rejection message into a stable bucket label. Messages
@@ -14551,7 +14775,7 @@ mod tests {
             r.balances,
             vec![("default".to_string(), Decimal::from(5_000))]
         );
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(0));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(0));
         let text = std::fs::read_to_string(&audit).unwrap();
         let rec: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(rec["op"], serde_json::json!("reset_trading"));
@@ -16867,11 +17091,11 @@ mod strategy_dispatch_tests {
         assert_eq!(
             plain.strategy_names(),
             vec![
+                "mean_reversion".to_string(),
                 "spread_arb".to_string(),
-                "trend_follow".to_string(),
-                "mean_reversion".to_string()
+                "trend_follow".to_string()
             ],
-            "registered but disabled"
+            "registered but disabled (sorted: the per-NAME projection dedupes across account scopes)"
         );
 
         // Opt in by flag: same result as toggling it at runtime.
@@ -16906,9 +17130,9 @@ mod strategy_dispatch_tests {
         assert_eq!(
             both.strategy_names(),
             vec![
+                "mean_reversion".to_string(),
                 "spread_arb".to_string(),
-                "trend_follow".to_string(),
-                "mean_reversion".to_string()
+                "trend_follow".to_string()
             ],
             "an unknown name must not register anything"
         );
@@ -20950,7 +21174,7 @@ mod settlement_service_tests {
         c.on_market_resolution(winning_resolution(), 2_003);
 
         assert_eq!(c.positions().closed_positions().len(), 1, "one close only");
-        let trades = c.trade_summary();
+        let trades = c.trade_summary(None);
         assert_eq!(trades["totalTrades"], serde_json::json!(1));
         assert_eq!(trades["totalNetPnl"], serde_json::json!(2.964));
         let stats = settlement_json(&c);
@@ -20977,7 +21201,7 @@ mod settlement_service_tests {
         );
         c.on_market_resolution(winning_resolution(), 2_007);
         assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036) + dec!(5));
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -21334,7 +21558,7 @@ mod settlement_service_tests {
         // Nothing settles twice on later ticks.
         c.tick(2_500).unwrap();
         assert_eq!(c.ledger().balance(), balance_before + dec!(5));
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -21856,8 +22080,11 @@ mod settlement_service_tests {
             c.positions().closed_positions()[0].exit_reason,
             ExitReason::Settlement
         );
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
-        assert_eq!(c.trade_summary()["totalNetPnl"], serde_json::json!(2.964));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
+        assert_eq!(
+            c.trade_summary(None)["totalNetPnl"],
+            serde_json::json!(2.964)
+        );
         let stats = settlement_json(&c);
         assert_eq!(stats["receivableUsd"], serde_json::json!(5.0));
         let report = c.run_accounting_audit(3_001);
@@ -21866,10 +22093,10 @@ mod settlement_service_tests {
         // A second restart must not close or record it again.
         let mut c = settling_core(&dir, balance - dec!(2.036));
         assert_eq!(c.restore_positions(), 0, "the position log is empty now");
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
         assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(5.0));
         c.on_market_resolution(winning_resolution(), 3_002);
-        assert_eq!(c.trade_summary()["totalTrades"], serde_json::json!(1));
+        assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
         assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(5.0));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -22392,7 +22619,10 @@ mod audit_fix_tests {
         );
         assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
         // Strategy accounting: a flat close is NOT a +36 win.
-        let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+        let acc = c
+            .strategy_accounting
+            .get(&strategy_acc_key(STRATEGY, "default"))
+            .expect("accounting row");
         assert_eq!(acc.net_pnl_usd, Decimal::ZERO);
         assert_eq!(acc.wins, 1);
         assert_eq!(acc.losses, 0);
@@ -22435,7 +22665,10 @@ mod audit_fix_tests {
         assert_eq!(c.ledger().balance(), SEED + dec!(4));
         assert_eq!(c.positions().daily_pnl(), dec!(4));
         {
-            let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+            let acc = c
+                .strategy_accounting
+                .get(&strategy_acc_key(STRATEGY, "default"))
+                .expect("accounting row");
             assert_eq!(acc.closed_trades, 1);
             assert_eq!(acc.wins, 1);
             assert_eq!(acc.net_pnl_usd, dec!(4));
@@ -22476,7 +22709,10 @@ mod audit_fix_tests {
         assert_eq!(c.ledger().balance(), SEED - dec!(4));
         assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
         {
-            let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+            let acc = c
+                .strategy_accounting
+                .get(&strategy_acc_key(STRATEGY, "default"))
+                .expect("accounting row");
             assert_eq!(acc.closed_trades, 0);
             assert_eq!(acc.wins, 0);
             assert_eq!(acc.fees_usd, Decimal::ZERO);
@@ -22533,7 +22769,10 @@ mod audit_fix_tests {
         assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, -2.0);
 
         // Strategy accounting: the loss IS in the strategy's net PnL.
-        let acc = c.strategy_accounting.get(STRATEGY).expect("accounting row");
+        let acc = c
+            .strategy_accounting
+            .get(&strategy_acc_key(STRATEGY, "default"))
+            .expect("accounting row");
         assert_eq!(acc.closed_trades, 1);
         assert_eq!(acc.losses, 1);
         assert_eq!(acc.wins, 0);
@@ -22602,6 +22841,11 @@ mod audit_fix_tests {
             },
             dry_seed_balance: SEED,
             auto_exits_enabled: false,
+            // The cwd-relative default would silently read a REAL data/trades
+            // log if one happens to sit beside the crate (the summary tests
+            // must count their own closes, not history) — same discipline as
+            // `core_with_trade_log`.
+            trade_log_path: None,
             ..Default::default()
         };
         Core::with_account_book(cfg, book)
@@ -23060,6 +23304,278 @@ mod audit_fix_tests {
         assert!(lines >= 3, "push, push, tombstone all landed: {lines}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── PR H (账户筛选修复): per-(strategy, account) accounting ──────────────
+
+    /// The audit `req` helper, retargeted at an account. Everything else
+    /// (token, strategy, slot) stays shared — the exact shape that used to
+    /// merge two accounts into one accounting row.
+    fn req_for(
+        side: Side,
+        mode: FillPolicy,
+        price: Decimal,
+        size: Decimal,
+        key: &str,
+        account: &str,
+    ) -> OrderRequest {
+        let mut r = req(side, mode, price, size, key);
+        r.account_id = crate::account::AccountId::from(account);
+        r
+    }
+
+    /// Both accounts trade the SAME strategy on the SAME token. Before PR H
+    /// the accounting key was the bare strategy name, so the second account's
+    /// fills landed on the FIRST account's counters (merged PnL, doubled
+    /// closed_trades) and `strategy_stats` could not tell the accounts apart.
+    /// The fix keys the map by (strategy, \u{1}, account); each slice must
+    /// carry only its own account's activity.
+    #[test]
+    fn two_accounts_same_strategy_keep_separate_accounting_rows() {
+        let mut c = two_book_core();
+
+        // default opens at 0.40 and closes at 0.50 (+1.00 gross before fees).
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1);
+        c.book_snapshot("tok", vec![(dec!(0.50), dec!(500))], vec![], 3);
+        c.place(
+            req_for(
+                Side::Sell,
+                FillPolicy::Taker,
+                dec!(0.50),
+                dec!(10),
+                "exit:d1",
+                "default",
+            ),
+            0,
+            4,
+        )
+        .unwrap();
+        assert!(c.positions().open_positions().is_empty());
+
+        // paper opens the same token at 0.60 and closes at 0.40 (−2.00 gross).
+        let mut paper_open = req_for(
+            Side::Buy,
+            FillPolicy::Maker,
+            dec!(0.60),
+            dec!(10),
+            "entry:p1",
+            "paper",
+        );
+        paper_open.internal_key = "entry:p1:paper".into(); // distinct slot key
+        let (pid, _) = c.place_pending(paper_open, 10).unwrap();
+        c.confirm_live(&pid, 10).unwrap();
+        c.ingest_fill(
+            fill(
+                &pid,
+                "e-p1",
+                Side::Buy,
+                dec!(0.60),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
+            11,
+        )
+        .unwrap();
+        c.book_snapshot("tok", vec![(dec!(0.40), dec!(500))], vec![], 13);
+        c.place(
+            req_for(
+                Side::Sell,
+                FillPolicy::Taker,
+                dec!(0.40),
+                dec!(10),
+                "exit:p1",
+                "paper",
+            ),
+            0,
+            14,
+        )
+        .unwrap();
+
+        // Each account's slice: exactly its own trade, its own net.
+        let dflt = c
+            .strategy_accounting
+            .get(&strategy_acc_key(STRATEGY, "default"))
+            .expect("default's accounting row");
+        assert_eq!(dflt.closed_trades, 1, "default sees only its own close");
+        assert_eq!(dflt.wins, 1);
+        assert!(
+            dflt.net_pnl_usd > Decimal::ZERO,
+            "default won: {}",
+            dflt.net_pnl_usd
+        );
+
+        let paper = c
+            .strategy_accounting
+            .get(&strategy_acc_key(STRATEGY, "paper"))
+            .expect("paper's accounting row");
+        assert_eq!(paper.closed_trades, 1, "paper sees only its own close");
+        assert_eq!(paper.losses, 1);
+        assert!(
+            paper.net_pnl_usd < Decimal::ZERO,
+            "paper lost: {}",
+            paper.net_pnl_usd
+        );
+
+        // THE TOOTH: with a bare-name key this lookup returned default's row
+        // (first writer) and paper's activity was invisible/doubled. The two
+        // slices must never be the same row, and the folded strategy_stats
+        // row must name BOTH accounts.
+        assert_ne!(
+            strategy_acc_key(STRATEGY, "default"),
+            strategy_acc_key(STRATEGY, "paper")
+        );
+        let rows = c.strategy_stats();
+        let row = rows
+            .iter()
+            .find(|r| r["name"] == STRATEGY)
+            .expect("one folded row per strategy name");
+        let accounts: Vec<String> = serde_json::from_value(row["accounts"].clone()).unwrap();
+        assert_eq!(accounts, vec!["default".to_string(), "paper".to_string()]);
+        assert_eq!(row["closedTrades"], 2, "the fold sums both slices");
+        assert_eq!(row["wins"], 1);
+        assert_eq!(row["losses"], 1);
+
+        // The per-account view: paper's page shows paper's slice only.
+        let for_paper = c.strategy_stats_for_account("paper");
+        let prow = for_paper
+            .iter()
+            .find(|r| r["name"] == STRATEGY)
+            .expect("the strategy row on paper's page");
+        assert_eq!(prow["closedTrades"], 1);
+        assert_eq!(prow["losses"], 1);
+        assert_eq!(prow["wins"], 0);
+    }
+
+    /// `trades.summary` with an `accountId` filters the row set before
+    /// aggregating — the wallet page's headline must belong to the active
+    /// account, not to every account at once. The no-arg call keeps the
+    /// persisted global headline byte-for-byte.
+    #[test]
+    fn trade_summary_scopes_to_one_account() {
+        let mut c = two_book_core();
+
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1);
+        c.book_snapshot("tok", vec![(dec!(0.50), dec!(500))], vec![], 3);
+        c.place(
+            req_for(
+                Side::Sell,
+                FillPolicy::Taker,
+                dec!(0.50),
+                dec!(10),
+                "exit:d1",
+                "default",
+            ),
+            0,
+            4,
+        )
+        .unwrap();
+
+        let mut paper_open = req_for(
+            Side::Buy,
+            FillPolicy::Maker,
+            dec!(0.60),
+            dec!(10),
+            "entry:p1",
+            "paper",
+        );
+        paper_open.internal_key = "entry:p1:paper".into();
+        let (pid, _) = c.place_pending(paper_open, 10).unwrap();
+        c.confirm_live(&pid, 10).unwrap();
+        c.ingest_fill(
+            fill(
+                &pid,
+                "e-p1",
+                Side::Buy,
+                dec!(0.60),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
+            11,
+        )
+        .unwrap();
+        c.book_snapshot("tok", vec![(dec!(0.40), dec!(500))], vec![], 13);
+        c.place(
+            req_for(
+                Side::Sell,
+                FillPolicy::Taker,
+                dec!(0.40),
+                dec!(10),
+                "exit:p1",
+                "paper",
+            ),
+            0,
+            14,
+        )
+        .unwrap();
+
+        // Global: two closed trades (the persisted headline keeps folding
+        // everything — the snapshot's `tradeSummary` shape is unchanged).
+        assert_eq!(c.trade_summary(None)["totalTrades"], 2);
+
+        // Scoped: one trade each, opposite signs.
+        let d = c.trade_summary(Some("default"));
+        assert_eq!(d["totalTrades"], 1);
+        assert_eq!(d["wins"], 1);
+        let p = c.trade_summary(Some("paper"));
+        assert_eq!(p["totalTrades"], 1);
+        assert_eq!(p["losses"], 1);
+        assert!(
+            p["totalNetPnl"].as_f64().unwrap() < 0.0,
+            "paper's slice is the losing one: {}",
+            p["totalNetPnl"]
+        );
+
+        // An unknown account answers an EMPTY summary, not the global one.
+        let ghost = c.trade_summary(Some("ghost"));
+        assert_eq!(ghost["totalTrades"], 0);
+    }
+
+    /// PR H: two scopes of the SAME strategy name (default + paper) must not
+    /// duplicate the `strategy.list` row — the panel table is per-NAME, and
+    /// the pre-fix kernel listed the name once per scope (the 伪影 bug). The
+    /// engine's raw list keeps both (registration order is a tie-break
+    /// elsewhere); the service layer is where the per-NAME projection lives.
+    #[test]
+    fn strategy_names_dedupe_across_account_scopes() {
+        let mut c = two_book_core();
+        let cfg = c.config.clone();
+        cfg.install_engine(&mut c)
+            .expect("test engine (no strategy_dir: registers nothing itself)");
+        let engine = c.engine.as_mut().expect("test engine");
+        crate::strategies::test_support::host_disabled(
+            engine,
+            Default::default(),
+            Default::default(),
+        );
+        // The SAME name again, into the paper scope: the raw engine list now
+        // repeats every name.
+        let dup = crate::strategies::test_support::TestSpreadArb::new(
+            crate::signal::TrendConfig::default(),
+            crate::signal::SpreadArbConfig::default(),
+        );
+        engine
+            .register_scoped_strategy(Box::new(dup), "test".into(), "paper")
+            .expect("second scope of the same package");
+
+        let raw = engine.supported_strategies();
+        assert!(
+            raw.len() > raw.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            "the raw engine list must repeat names across scopes for this test to have a tooth"
+        );
+        let names = c.strategy_names();
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            names, sorted,
+            "strategy_names must answer each name exactly once: {names:?}"
+        );
+        // And the stats surface — same projection — shows one row per name.
+        assert_eq!(
+            c.strategy_stats().len(),
+            names.len(),
+            "one stats row per distinct strategy"
+        );
     }
 }
 

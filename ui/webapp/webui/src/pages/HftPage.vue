@@ -216,7 +216,14 @@ const historyRows = computed<TradeRow[]>(() =>
   filterByVenue(accountFilter.value.rows, activeVenue.value).rows,
 )
 const cumStats = computed(() => {
-  const s = snap.value?.tradeSummary
+  // PR H (账户筛选修复): the kernel's per-account summary
+  // (`/api/trades-summary` with the active account) is the FIRST choice —
+  // the log headline was global all-time and printed every account's PnL
+  // under this page's account filter. The account-scoped read is
+  // kernel-filtered, so it agrees with the rows on screen; the row-sum
+  // fallback stays for older cores.
+  const scoped = store.accountTradeSummary
+  const s = scoped ?? snap.value?.tradeSummary
   const rows = historyRows.value
   if (s && (s.totalTrades ?? 0) > 0) {
     return {

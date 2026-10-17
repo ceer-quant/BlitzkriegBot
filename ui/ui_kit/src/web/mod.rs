@@ -2391,6 +2391,29 @@ impl WebServer {
                 // 内核整体拒绝。网关零加工。
                 self.proxy_backtest_body("account.trading.set", &req.body)
             }
+            ("GET", "/api/trades-summary") => {
+                // PR H (账户筛选修复)：钱包页的闭环统计 —— `trades.summary`
+                // 的薄代理（只读）。`?accountId=` 带上时内核按行过滤重算
+                // 该账户的 summary（TradeDb 持久 headline 仍是全局）；缺席
+                // = 全局 headline，老面板行为逐字节不变。
+                let mut params = serde_json::Map::new();
+                if let Some(v) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(v));
+                }
+                self.proxy_backtest("trades.summary", serde_json::Value::Object(params))
+            }
+            ("GET", "/api/strategy-stats") => {
+                // PR H (账户筛选修复)：策略页的 per-NAME 计数 ——
+                // `engine.stats` 的薄代理换成按账户切片的读数。
+                // `?accountId=` 带上时内核答 `strategy_stats_for_account`
+                // （同形状，counters 只读该账户 slice）；缺席 = 全局
+                // fold（行带 `accounts` 数组）。网关零加工。
+                let mut params = serde_json::Map::new();
+                if let Some(v) = req.query_param("accountId") {
+                    params.insert("accountId".into(), serde_json::json!(v));
+                }
+                self.proxy_backtest("engine.stats", serde_json::Value::Object(params))
+            }
             ("POST", "/api/account-strategies/set") => {
                 // 多账户扇出（PR B of #518）：策略分配写 —— body 即
                 // `account.strategies.set` 的 params 对象
