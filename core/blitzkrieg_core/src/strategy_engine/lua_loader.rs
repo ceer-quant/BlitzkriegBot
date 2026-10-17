@@ -483,7 +483,11 @@ impl LuaEngineAdapter {
     }
 
     /// `OrderbookSnapshot` → the §6.5 decimal-STRING book row. Empty sides →
-    /// `None` fields, never "0".
+    /// `None` fields, never "0". The top [`LADDER_LEVELS`] levels ride along
+    /// best-first (the depth-aware cost surface, `bk.vwap_for_size` walks
+    /// them): the kernel's `LocalBook` already keeps the full depth, so this
+    /// is a pure projection — capped at 10 to bound the per-tick render cost,
+    /// while the depth SUMS below stay full-depth as before.
     fn book_update(&self, token_id: &str, snap: &OrderbookSnapshot) -> BookUpdate {
         let side = |levels: &[(Decimal, Decimal)]| {
             if levels.is_empty() {
@@ -491,6 +495,13 @@ impl LuaEngineAdapter {
             } else {
                 Some(levels[0].0.to_string())
             }
+        };
+        let ladder = |levels: &[(Decimal, Decimal)]| {
+            levels
+                .iter()
+                .take(blitzkrieg_strategy_api::LADDER_LEVELS)
+                .map(|(p, s)| (p.to_string(), s.to_string()))
+                .collect()
         };
         BookUpdate {
             symbol: token_id.to_string(),
@@ -506,6 +517,8 @@ impl LuaEngineAdapter {
             timestamp_ms: snap.timestamp,
             bid_levels: snap.bids.len(),
             ask_levels: snap.asks.len(),
+            bid_ladder: ladder(&snap.bids),
+            ask_ladder: ladder(&snap.asks),
         }
     }
 }
@@ -812,6 +825,18 @@ impl EngineStrategy for LuaEngineAdapter {
     /// raised as a single RISK_ALERT naming this strategy.
     fn poison_alert(&mut self) -> Option<String> {
         self.inner.take_poison_alert()
+    }
+}
+
+impl LuaEngineAdapter {
+    /// The inner sandbox's observable health (call/error counters + the last
+    /// deterministic Lua error). The SAME record `diagnostics()` serializes —
+    /// exposed as data so a host (or a test driving the adapter directly)
+    /// can assert on what a Lua callback did instead of guessing from the
+    /// intents it happened to emit. A silent adapter-side swallow shows up
+    /// here as `last_error: Some(..)`.
+    pub fn lua_health(&self) -> blitzkrieg_lua_runtime::LuaHealth {
+        self.inner.health_view().unwrap_or_default()
     }
 }
 

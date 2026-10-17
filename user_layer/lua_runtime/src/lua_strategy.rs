@@ -119,6 +119,14 @@ impl LuaStrategy {
         Arc::clone(&self.state)
     }
 
+    /// A snapshot of the observable health (call/error counters, the last
+    /// deterministic Lua error, the poison flag) — the same record
+    /// `diagnostics()` serializes, as plain data. `None` only when the health
+    /// mutex is poisoned, which requires a panic in this module itself.
+    pub fn health_view(&self) -> Option<LuaHealth> {
+        self.health.lock().ok().map(|h| h.clone())
+    }
+
     fn note_ok(&self) {
         if let Ok(mut h) = self.health.lock() {
             h.calls += 1;

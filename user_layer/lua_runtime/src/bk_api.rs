@@ -38,6 +38,7 @@ use blitzkrieg_strategy_api::{
     BookUpdate, HoldingView, Kline, KlineInterval, MarketInfo, RoundInfo,
 };
 use mlua::{Function, Lua, Table, Value};
+use rust_decimal::Decimal;
 
 /// §11.1: the public display fields of the account a strategy is authorized
 /// to act for. `balance/available/reserved` are exact decimal STRINGS; there
@@ -62,6 +63,83 @@ pub struct FeeScheduleView {
     pub name: String,
     pub rate: String,
     pub exponent: u32,
+}
+
+/// What walking the ladder for a target size yields.
+///
+/// `vwap` is the size-weighted average price across the levels actually
+/// consumed, `filled` the size actually available (== target when `complete`,
+/// less when the book ran out). Exact `rust_decimal` arithmetic host-side:
+/// checked mul/add (a malicious or corrupt ladder can name huge mantissas —
+/// the 2026-09-30 28-digit incident's domain), one final division, and the
+/// result rounded to 10 decimal places so the STRING that crosses into Lua
+/// parses back inside the safe 18-significant-digit domain of
+/// `common/decimal.lua` (never the 28-digit float-mantissa trap).
+#[derive(Debug, Clone)]
+pub struct VwapWalk {
+    pub vwap: Decimal,
+    pub filled: Decimal,
+    pub complete: bool,
+}
+
+/// Walk `ladder` (best-first `(price, size)` pairs) consuming `target` size.
+/// `None` = a level failed to parse, sits outside the Lua-safe decimal domain,
+/// or the arithmetic overflowed — an ERROR class the caller must surface
+/// loudly, never a "treat as empty" (a corrupt ladder silently priced at best
+/// is exactly the optimistic-fill bug).
+///
+/// The SAFE-DOMAIN gate (the 2026-09-30 28-digit incident's structural fix):
+/// a row whose price/size carries more than 18 significant digits or a scale
+/// above 18 is refused (`SAFE_MANTISSA_DIGITS`/`SAFE_SCALE`). Real books quote
+/// ≤ 4 dp prices and ≤ 2 dp sizes, so the gate never fires on live data; it
+/// exists so a host-derived or corrupt 28-digit mantissa can NEVER cross into
+/// the arithmetic — the same domain `common/decimal.lua`'s `dec_parse` caps
+/// at, enforced one layer earlier, in exact arithmetic instead of Lua floats.
+pub fn vwap_for_size(ladder: &[(String, String)], target: Decimal) -> Option<VwapWalk> {
+    const SAFE_MANTISSA_LIMIT: i128 = 10_000_000_000_000_000_000; // 10^19 exclusive
+    const SAFE_SCALE: u32 = 18;
+    let in_safe_domain =
+        |d: Decimal| d.scale() <= SAFE_SCALE && d.mantissa().abs() < SAFE_MANTISSA_LIMIT;
+    let mut filled = Decimal::ZERO;
+    let mut notional = Decimal::ZERO;
+    for (price_s, size_s) in ladder {
+        let price = Decimal::from_str_exact(price_s.trim()).ok()?;
+        let size = Decimal::from_str_exact(size_s.trim()).ok()?;
+        if !in_safe_domain(price) || !in_safe_domain(size) {
+            return None;
+        }
+        if price <= Decimal::ZERO || size <= Decimal::ZERO {
+            // A book never quotes a non-positive level; treat a corrupt row as
+            // a parse failure (loud), not as skippable (silent).
+            return None;
+        }
+        let take = if filled + size >= target {
+            target - filled
+        } else {
+            size
+        };
+        // checked: price*take overflows the 96-bit mantissa on absurd input
+        // (second net under the domain gate above).
+        let row = price.checked_mul(take)?;
+        notional = notional.checked_add(row)?;
+        filled = filled.checked_add(take)?;
+        if filled >= target {
+            break;
+        }
+    }
+    if filled <= Decimal::ZERO {
+        return None;
+    }
+    // Truncating division (checked_div): an under-deep ladder stops early with
+    // filled < target — the VWAP is over what IS there, then `complete=false`
+    // tells the caller the walk came up short. Scale capped at 10 dp so the
+    // emitted string re-parses inside the Lua-side 18-digit safe domain.
+    let vwap = notional.checked_div(filled)?;
+    Some(VwapWalk {
+        vwap: vwap.round_dp(10),
+        filled,
+        complete: filled >= target,
+    })
 }
 
 /// Host-side snapshot the adapter refreshes before every sandbox call. One
@@ -294,8 +372,10 @@ pub fn round_to_lua(lua: &Lua, round: &RoundInfo) -> mlua::Result<Table> {
 
 /// One book as decimal STRINGS (`None` fields → nil). Field set is the §6.5
 /// wire exactly: `symbol/best_bid/best_ask/mid/obi/spread/bid_depth/
-/// ask_depth/ts_ms/fresh`. `fresh` stamps the host's freshness verdict when
-/// the caller has one (the eval gate); absent otherwise.
+/// ask_depth/ts_ms/fresh` plus the top-N ladders `bid_ladder/ask_ladder`
+/// (arrays of `{price=, size=}` decimal STRINGS, best-first; empty when the
+/// side is empty or the host predates the ladders). `fresh` stamps the host's
+/// freshness verdict when the caller has one (the eval gate); absent otherwise.
 pub fn book_to_lua(lua: &Lua, u: &BookUpdate, fresh: Option<bool>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.raw_set("symbol", u.symbol.as_str())?;
@@ -317,6 +397,16 @@ pub fn book_to_lua(lua: &Lua, u: &BookUpdate, fresh: Option<bool>) -> mlua::Resu
     match fresh {
         Some(f) => t.raw_set("fresh", f)?,
         None => t.raw_set("fresh", Value::Nil)?,
+    }
+    for (key, ladder) in [("bid_ladder", &u.bid_ladder), ("ask_ladder", &u.ask_ladder)] {
+        let arr = lua.create_table()?;
+        for (i, (price, size)) in ladder.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.raw_set("price", price.as_str())?;
+            row.raw_set("size", size.as_str())?;
+            arr.raw_set(i as i64 + 1, row)?;
+        }
+        t.raw_set(key, arr)?;
     }
     Ok(t)
 }
@@ -815,6 +905,76 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
         )?;
     }
 
+    // -- bk.vwap_for_size(symbol, side, size) ---------------------------------
+    // The depth-aware cost model: walk the top-N ladder of ONE side consuming
+    // `size`, answer `{ vwap=, filled=, complete= }` (decimal STRINGS +
+    // boolean) — or `nil` when the ladder cannot fill the target. NIL IS THE
+    // CONTRACT for "not fillable here": a caller that ignores it must not
+    // fall back to the best price (that IS the optimistic-fill bug this
+    // surface exists to kill). Fail-loud errors:
+    //   * unknown symbol  → nil (same answer `bk.book` gives);
+    //   * non-numeric size / side not "bid"/"ask" → LOUD error (a strategy
+    //     bug, deterministic);
+    //   * a corrupt ladder row (unparseable / non-positive) or a checked
+    //     arithmetic overflow → LOUD error naming the symbol — never a silent
+    //     nil, never a best-price fallback (the 2026-09-30 28-digit incident's
+    //     failure mode, killed at the surface this time).
+    {
+        let st = Arc::clone(&state);
+        bk.raw_set(
+            "vwap_for_size",
+            lua.create_function(
+                move |lua, (symbol, side, size_s): (String, String, String)| {
+                    let side_l = side.trim().to_ascii_lowercase();
+                    if side_l != "bid" && side_l != "ask" {
+                        return Err(mlua::Error::runtime(format!(
+                            "bk.vwap_for_size: side must be 'bid' or 'ask', got '{side}'"
+                        )));
+                    }
+                    let Ok(target) = Decimal::from_str_exact(size_s.trim()) else {
+                        return Err(mlua::Error::runtime(format!(
+                            "bk.vwap_for_size: size must be a decimal string, got '{size_s}'"
+                        )));
+                    };
+                    if target <= Decimal::ZERO {
+                        return Err(mlua::Error::runtime(format!(
+                            "bk.vwap_for_size: size must be positive, got '{size_s}'"
+                        )));
+                    }
+                    let st = st.lock().expect("bk state mutex");
+                    let Some(u) = st.books.get(&symbol) else {
+                        return Ok(Value::Nil);
+                    };
+                    let ladder = if side_l == "bid" {
+                        &u.bid_ladder
+                    } else {
+                        &u.ask_ladder
+                    };
+                    // Empty ladder / zero book: nothing to fill from — nil.
+                    if ladder.is_empty() {
+                        return Ok(Value::Nil);
+                    }
+                    let Some(walk) = vwap_for_size(ladder, target) else {
+                        return Err(mlua::Error::runtime(format!(
+                            "bk.vwap_for_size: corrupt ladder row or arithmetic overflow on {symbol} ({side_l}) — refusing to price silently"
+                        )));
+                    };
+                    if !walk.complete {
+                        // Deep-shortage: nil, per the contract — the caller
+                        // decides to shrink the target or skip, never to
+                        // assume the best price fills the difference.
+                        return Ok(Value::Nil);
+                    }
+                    let t = lua.create_table()?;
+                    t.raw_set("vwap", walk.vwap.to_string())?;
+                    t.raw_set("filled", walk.filled.to_string())?;
+                    t.raw_set("complete", walk.complete)?;
+                    Ok(Value::Table(t))
+                },
+            )?,
+        )?;
+    }
+
     let globals = lua.globals();
     globals.raw_set("bk", bk)?;
     Ok(())
@@ -853,6 +1013,31 @@ mod tests {
             timestamp_ms: 1_234,
             bid_levels: 5,
             ask_levels: 4,
+            bid_ladder: vec![
+                ("0.55".into(), "20".into()),
+                ("0.54".into(), "30".into()),
+                ("0.53".into(), "50".into()),
+                ("0.52".into(), "10".into()),
+                ("0.51".into(), "10".into()),
+            ],
+            ask_ladder: vec![
+                ("0.57".into(), "10".into()),
+                ("0.58".into(), "20".into()),
+                ("0.59".into(), "30".into()),
+                ("0.60".into(), "20".into()),
+            ],
+        }
+    }
+
+    /// A 3-level synthetic ask ladder for the VWAP byte-exact assertions.
+    fn three_level_book(symbol: &str) -> BookUpdate {
+        BookUpdate {
+            ask_ladder: vec![
+                ("0.50".into(), "10".into()),
+                ("0.52".into(), "10".into()),
+                ("0.56".into(), "10".into()),
+            ],
+            ..book(symbol)
         }
     }
 
@@ -1129,5 +1314,271 @@ mod tests {
         let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
         sb.invoke("evaluate", |_| f.call::<Value>(()))
             .expect("guard contract holds");
+    }
+
+    // ── ladder exposure + vwap_for_size (书视图前 10 档 / 深度感知成本面) ────────
+
+    /// `bk.book` 暴露 `bid_ladder`/`ask_ladder`：top-N、best-first、decimal
+    /// STRING。空侧 → 空表，从不造数据。
+    #[test]
+    fn book_exposes_top_ladders_as_decimal_strings() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(three_level_book("0xup"), Some(true));
+        }
+        sb.load(
+        "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local b = bk.book('0xup') \
+            if b == nil then fail('book') end \
+            local bl, al = b.bid_ladder, b.ask_ladder \
+            if type(bl) ~= 'table' or type(al) ~= 'table' then fail('ladders missing') end \
+            if #al ~= 3 then fail('ask ladder depth: ' .. tostring(#al)) end \
+            if al[1].price ~= '0.50' or al[1].size ~= '10' then fail('ask lvl1') end \
+            if al[2].price ~= '0.52' or al[3].price ~= '0.56' then fail('ask order') end \
+            if type(al[1].price) ~= 'string' or type(al[1].size) ~= 'string' then fail('strings only') end \
+            return {} \
+         end",
+        "ladder",
+    )
+    .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("ladder reads cleanly");
+    }
+
+    /// 空 book：ladder 是空表（不是 nil，不是造出来的档位）。
+    #[test]
+    fn empty_book_ladders_are_empty_tables() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(
+                blitzkrieg_strategy_api::BookUpdate {
+                    symbol: "x".into(),
+                    ..Default::default()
+                },
+                None,
+            );
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local b = bk.book('x') \
+            if b == nil then fail('book missing') end \
+            if type(b.bid_ladder) ~= 'table' or #b.bid_ladder ~= 0 then fail('bid ladder') end \
+            if type(b.ask_ladder) ~= 'table' or #b.ask_ladder ~= 0 then fail('ask ladder') end \
+            return {} \
+         end",
+            "empty-ladder",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("empty ladders benign");
+    }
+
+    /// 三档合成书的加权均价：0.50×10 + 0.52×10 + 0.56×10 / 30 = 0.52666…，
+    /// round_dp(10) → "0.5266666667"。逐字节断言。
+    #[test]
+    fn vwap_walks_three_levels_byte_exact() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(three_level_book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local r = bk.vwap_for_size('0xup', 'ask', '30') \
+            if r == nil then fail('must fill 30') end \
+            if r.complete ~= true then fail('complete') end \
+            if r.filled ~= '30' then fail('filled: ' .. tostring(r.filled)) end \
+            if r.vwap ~= '0.5266666667' then fail('vwap: ' .. tostring(r.vwap)) end \
+            return {} \
+         end",
+            "vwap3",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("vwap walks cleanly");
+    }
+
+    /// 部分跨档消耗：目标 15 → 全吃第一档 + 半吃第二档。
+    /// (0.50×10 + 0.52×5)/15 = 7.6/15 = 0.50666…  → "0.5066666667"。
+    #[test]
+    fn vwap_partial_level_consumption_is_exact() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(three_level_book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local r = bk.vwap_for_size('0xup', 'ask', '15') \
+            if r == nil or r.complete ~= true then fail('must fill 15') end \
+            if r.vwap ~= '0.5066666667' then fail('vwap: ' .. tostring(r.vwap)) end \
+            return {} \
+         end",
+            "vwap-partial",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("partial consumption clean");
+    }
+
+    /// 红（核心契约）：第 3 档就断深度 —— 目标 40 > 全侧深度 30，必须返回 nil，
+    /// 绝不许按 best ask 全量价假装可成交。
+    #[test]
+    fn vwap_returns_nil_when_depth_runs_out_at_third_level() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(three_level_book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local r = bk.vwap_for_size('0xup', 'ask', '40') \
+            if r ~= nil then fail('must be nil when depth runs out, got ' .. tostring(r)) end \
+            return {} \
+         end",
+            "vwap-short",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("depth shortage answers nil");
+    }
+
+    /// 空 ladder（空侧/未知 symbol）→ nil，不是错误、不是 0。
+    #[test]
+    fn vwap_returns_nil_for_empty_ladder_and_unknown_symbol() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(BookUpdate::default(), None);
+        }
+        sb.load(
+        "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            if bk.vwap_for_size('x', 'ask', '10') ~= nil then fail('empty ladder must be nil') end \
+            if bk.vwap_for_size('nope', 'ask', '10') ~= nil then fail('unknown symbol must be nil') end \
+            return {} \
+         end",
+        "vwap-empty",
+    )
+    .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("empty/unknown answers nil");
+    }
+
+    /// 策略 bug（side 拼错 / size 非数 / size 非正）→ LOUD Lua error，
+    /// 绝不静默 nil。
+    #[test]
+    fn vwap_caller_bugs_error_loudly() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            s.put_book(three_level_book("0xup"), Some(true));
+        }
+        sb.load(
+            "function fail(msg) error(msg, 0) end \
+         function try(side, size) \
+            local ok, err = pcall(bk.vwap_for_size, '0xup', side, size) \
+            if ok then fail('must error for ' .. tostring(side) .. '/' .. tostring(size)) end \
+            return err \
+         end \
+         function bk_evaluate() \
+            local e1 = try('middle', '10') \
+            if not tostring(e1):find('bid') then fail('side error: ' .. tostring(e1)) end \
+            local e2 = try('ask', 'abc') \
+            if not tostring(e2):find('decimal') then fail('size error: ' .. tostring(e2)) end \
+            local e3 = try('ask', '0') \
+            if not tostring(e3):find('positive') then fail('zero error: ' .. tostring(e3)) end \
+            return {} \
+         end",
+            "vwap-bugs",
+        )
+        .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("caller bugs fail loudly");
+    }
+
+    /// 死穴守卫（2026-09-30 28 位小数事故的重演面）：档位里塞一个 mantissa
+    /// 会溢出 rust_decimal 的坏行 → 必须显式 Lua error 指名 symbol，绝不静默
+    /// nil 崩溃、绝不按 best 价回退。
+    #[test]
+    fn vwap_corrupt_ladder_row_errors_loudly_not_silently() {
+        let (sb, st) = with_state();
+        {
+            let mut s = st.lock().expect("lock");
+            let mut b = three_level_book("0xup");
+            // 第二档是坏的：28 位小数（rust_decimal 解析直接拒绝的域外输入）。
+            b.ask_ladder[1] = ("0.5200000000000000000000000000".into(), "10".into());
+            s.put_book(b, Some(true));
+        }
+        sb.load(
+        "function fail(msg) error(msg, 0) end \
+         function bk_evaluate() \
+            local ok, err = pcall(bk.vwap_for_size, '0xup', 'ask', '30') \
+            if ok then fail('corrupt row must error, got a price') end \
+            if not tostring(err):find('0xup') then fail('error must name the symbol: ' .. tostring(err)) end \
+            return {} \
+         end",
+        "vwap-corrupt",
+    )
+    .expect("loads");
+        let f: mlua::Function = sb.lua().globals().get("bk_evaluate").expect("entry");
+        sb.invoke("evaluate", |_| f.call::<Value>(()))
+            .expect("corrupt ladder errors loudly");
+    }
+
+    /// Rust 侧直接验证 vwap_for_size 的算术域：checked 乘加 + round_dp(10)，
+    /// 并确认坏行（无法解析）返回 None（供宿主转 LOUD error）。
+    #[test]
+    fn vwap_for_size_rust_unit_contract() {
+        let d = |s: &str| Decimal::from_str_exact(s).expect("decimal literal");
+        let ladder = vec![
+            ("0.50".into(), "10".into()),
+            ("0.52".into(), "10".into()),
+            ("0.56".into(), "10".into()),
+        ];
+        let walk = vwap_for_size(&ladder, d("30")).expect("fills");
+        assert_eq!(walk.vwap.to_string(), "0.5266666667");
+        assert_eq!(walk.filled.to_string(), "30");
+        assert!(walk.complete);
+
+        let short = vwap_for_size(&ladder, d("40")).expect("parses");
+        assert!(!short.complete, "depth shortage is reported, not faked");
+        assert_eq!(short.filled.to_string(), "30");
+
+        let bad = vec![("0.5".into(), "1e5".into())];
+        assert!(
+            vwap_for_size(&bad, d("1")).is_none(),
+            "bad row = None (loud upstream)"
+        );
+
+        // 28 位小数档位（2026-09-30 事故的域）：合法 rust_decimal，但超出
+        // Lua 侧 18 位有效数字安全域 —— 域闸拒绝，绝不进入算术。
+        let wide = vec![("0.5200000000000000000000000000".into(), "10".into())];
+        assert!(
+            vwap_for_size(&wide, d("5")).is_none(),
+            "28-dp level = outside the safe domain = None (loud upstream)"
+        );
+
+        // checked 算术的第二道网：域内的两个档位，名义额 5e18 × 2e10 = 1e29
+        // 越过 rust_decimal 96 位 mantissa 上限（~7.9e28）→ checked_mul 拒绝。
+        let huge = vec![("5000000000000000000".into(), "20000000000".into())];
+        assert!(
+            vwap_for_size(&huge, d("10000000000000")).is_none(),
+            "overflow = None (loud upstream), never a wrapped price"
+        );
     }
 }
