@@ -6325,8 +6325,9 @@ mod tests {
         assert_eq!(created["venue"], serde_json::json!("polysimulator"));
         assert_eq!(
             created["balance"].as_f64(),
-            Some(0.0),
-            "a zero book: {}",
+            Some(10_000.0),
+            "a locally-settling mint wakes with the configured seed \
+             (the policy.skip equity-0 gap): {}",
             created
         );
         assert_eq!(accounts.len(), 3);
