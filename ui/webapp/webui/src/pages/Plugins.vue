@@ -2,7 +2,7 @@
 /**
  * 插件 — 扩展/行情两类插件的注册表状态视图（E9-g 插件治理页；E11/D-32：策略
  * 不再作为插件在此显示——策略页是策略的唯一入口，插件页只回答「核心挂了哪些
- * 外部能力」）。身份徽标、状态、活跃行情源。
+ * 外部能力」）。身份徽标、状态（行情按账户绑定自动派生，无全局活跃源）。
  *
  * 绑定即启用（2026-10-16 裁决）：插件启用由账户绑定派生，本页是纯读的状态
  * 视图 —— 启用/停用与行情源选择等写动词已移交（绑定在账户切换器里编辑）。
@@ -39,15 +39,11 @@ const sections = computed(() => {
   const p = store.plugins
   if (!p) return []
   return [
-    { key: 'extension' as Kind, rows: p.extensions, active: null },
-    { key: 'market' as Kind, rows: p.marketPlugins, active: activeMarketName.value },
+    { key: 'extension' as Kind, rows: p.extensions },
+    { key: 'market' as Kind, rows: p.marketPlugins },
   ].filter((s) => s.rows.length > 0)
 })
 
-/** The gateway's `marketActive` is a boolean flag; the name rides on the row. */
-const activeMarketName = computed(
-  () => store.plugins?.marketPlugins.find((r) => r.active)?.name ?? null,
-)
 
 /** Identity badge: 二元预测市场 / 现货市场 / 合约市场 / 期货实现；未知类型原样展示。 */
 function identity(r: PluginRow): string {
@@ -252,9 +248,9 @@ onMounted(loadUnifiedCandidates)
         </div>
         <div class="mt-2 text-[11.5px] text-faint-fg">
           <template v-if="k === 'market'">
-            活跃源：
-            <span v-if="activeMarketName" class="font-semibold text-primary">{{ activeMarketName }}</span>
-            <span v-else>未选择</span>
+            <!-- 多插件数据面（issue 502）后没有全局「活跃源」：行情按账户绑定
+                 自动派生接入，这里只报已注册的行情插件个数。 -->
+            已注册 {{ totals.market }} 个行情插件（按账户绑定自动接入）。
           </template>
           <template v-else>核心注册的扩展能力</template>
         </div>
@@ -377,8 +373,8 @@ onMounted(loadUnifiedCandidates)
     <Card v-for="s in visible" :key="s.key" class="mt-3.5" dense>
       <CardHeader :label="KIND_META[s.key].label">
         <template #action>
-          <!-- `s.active` is the active plugin's NAME, not a count: plain text. -->
-          <Badge v-if="s.active" variant="gold" dot>活跃 {{ s.active }}</Badge>
+          <!-- 绑定即启用后没有全局「活跃源」概念（行情按账户绑定派生）；
+               徽标只报个数。 -->
           <Badge variant="default"><RollingNumber :value="s.rows.length" /></Badge>
         </template>
       </CardHeader>
@@ -403,13 +399,11 @@ onMounted(loadUnifiedCandidates)
               v-for="r in s.rows"
               :key="`${s.key}-${r.name}`"
               class="border-t border-line transition-colors hover:bg-panel-2"
-              :class="s.active === r.name && 'bg-primary/[0.06]'"
             >
               <td class="px-2 py-2.5 font-semibold">
                 <span class="inline-flex items-center gap-2">
                   <Plug class="size-3.5 text-faint-fg" />
                   {{ r.name }}
-                  <Badge v-if="s.active === r.name" variant="gold" dot>活跃</Badge>
                 </span>
               </td>
               <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ identity(r) }}</td>

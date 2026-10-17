@@ -13,8 +13,8 @@
  */
 
 export interface OnboardInput {
-  /** Name of the active market feed, or null when none is active. */
-  activeMarket: string | null
+  /** Any market plugin is registered (绑定即启用：行情按账户绑定自动派生). */
+  anyMarketPlugin: boolean
   /** Whether any registered strategy is enabled. */
   anyStrategyEnabled: boolean
 }
@@ -32,13 +32,13 @@ export interface OnboardStep {
 
 /** The three fixed steps with live completion flags folded in. */
 export function onboardSteps(input: OnboardInput): OnboardStep[] {
-  const marketDone = input.activeMarket !== null
+  const marketDone = input.anyMarketPlugin
   const strategyDone = input.anyStrategyEnabled
   return [
     {
       id: 'market', index: 0, done: marketDone, target: 'plugins', cta: '去插件页',
-      title: '① 选定行情源',
-      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 任选其一；PolySimulator 是第三方模拟盘，只用于演练）。到插件页确认一个行情源已设为活跃。',
+      title: '① 绑定账户交易所',
+      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 等；PolySimulator 是第三方模拟盘，只用于演练）。绑定即启用：在右上角账户切换器里给账户绑定交易所，对应行情插件即自动接入——没有全局「活跃源」开关。',
     },
     {
       id: 'strategy', index: 1, done: strategyDone, target: 'strategies', cta: '去策略页',

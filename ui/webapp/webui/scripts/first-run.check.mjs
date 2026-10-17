@@ -36,43 +36,43 @@ const {
 console.log('step machine — exactly the two things a new operator must do')
 
 check('three steps, fixed ids and order', () => {
-  const steps = onboardSteps({ activeMarket: null, anyStrategyEnabled: false })
+  const steps = onboardSteps({ anyMarketPlugin: false, anyStrategyEnabled: false })
   assert.deepEqual(steps.map((s) => s.id), ['market', 'strategy', 'wrap'])
   assert.deepEqual(steps.map((s) => s.index), [0, 1, 2])
 })
 
-check('nothing done → the tour opens on 选定行情源', () => {
-  const cur = currentStep(onboardSteps({ activeMarket: null, anyStrategyEnabled: false }))
+check('nothing done → the tour opens on 绑定账户交易所', () => {
+  const cur = currentStep(onboardSteps({ anyMarketPlugin: false, anyStrategyEnabled: false }))
   assert.equal(cur?.id, 'market')
   assert.equal(cur?.target, 'plugins')
   assert.equal(cur?.cta, '去插件页')
 })
 
 check('market active → next undone step is 启用策略', () => {
-  const cur = currentStep(onboardSteps({ activeMarket: 'polymarket', anyStrategyEnabled: false }))
+  const cur = currentStep(onboardSteps({ anyMarketPlugin: true, anyStrategyEnabled: false }))
   assert.equal(cur?.id, 'strategy')
   assert.equal(cur?.target, 'strategies')
 })
 
-check('a feed that merely EXISTS but is not active is not done', () => {
-  // The completion condition is an active flag, not a non-empty registry —
-  // a stalled gateway listing its feed must not complete the step for the user.
-  const steps = onboardSteps({ activeMarket: null, anyStrategyEnabled: false })
+check('no market plugin registered leaves the binding step undone', () => {
+  // 绑定即启用: the step completes when a market plugin EXISTS to bind to —
+  // an empty registry means there is nothing to bind, so the step stays open.
+  const steps = onboardSteps({ anyMarketPlugin: false, anyStrategyEnabled: false })
   assert.equal(steps[0].done, false)
 })
 
 check('both real steps done → no current step (tour retires itself)', () => {
-  const cur = currentStep(onboardSteps({ activeMarket: 'polymarket', anyStrategyEnabled: true }))
+  const cur = currentStep(onboardSteps({ anyMarketPlugin: true, anyStrategyEnabled: true }))
   assert.equal(cur, null)
 })
 
 check('strategy-only done still opens on the market step', () => {
-  const cur = currentStep(onboardSteps({ activeMarket: null, anyStrategyEnabled: true }))
+  const cur = currentStep(onboardSteps({ anyMarketPlugin: false, anyStrategyEnabled: true }))
   assert.equal(cur?.id, 'market')
 })
 
 check('wrap step is always done and carries no CTA', () => {
-  const wrap = onboardSteps({ activeMarket: null, anyStrategyEnabled: false }).at(-1)
+  const wrap = onboardSteps({ anyMarketPlugin: false, anyStrategyEnabled: false }).at(-1)
   assert.equal(wrap?.done, true)
   assert.equal(wrap?.cta, null)
   assert.equal(wrap?.target, null)
@@ -80,9 +80,9 @@ check('wrap step is always done and carries no CTA', () => {
 
 check('every undone step has a CTA that lands on its target tab', () => {
   for (const state of [
-    { activeMarket: null, anyStrategyEnabled: false },
-    { activeMarket: null, anyStrategyEnabled: true },
-    { activeMarket: 'x', anyStrategyEnabled: false },
+    { anyMarketPlugin: false, anyStrategyEnabled: false },
+    { anyMarketPlugin: false, anyStrategyEnabled: true },
+    { anyMarketPlugin: true, anyStrategyEnabled: false },
   ]) {
     for (const s of onboardSteps(state).filter((s) => !s.done)) {
       assert.ok(s.cta, `step ${s.id} has no CTA`)

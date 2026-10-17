@@ -21,7 +21,7 @@ const retired = ref(onboardDone())
 
 const steps = computed(() =>
   onboardSteps({
-    activeMarket: store.plugins?.marketPlugins.find((r) => r.active)?.name ?? null,
+    anyMarketPlugin: (store.plugins?.marketPlugins.length ?? 0) > 0,
     anyStrategyEnabled: store.strategyRows.some((r) => r.enabled),
   }),
 )
