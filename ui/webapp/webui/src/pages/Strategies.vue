@@ -37,7 +37,34 @@ import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 const store = usePanelStore()
-const rows = computed<StrategyStatsRow[]>(() => store.strategyRows)
+// PR H (账户筛选修复): the counters are account-scoped when an account is
+// active — `store.strategyRows` already prefers the account-sliced
+// engine.stats read (`accountStrategyStats`), so the same per-NAME rows now
+// show THIS account's orders/PnL, not every account's. What this page adds
+// is the ROW filter: a strategy the active account has no assignment for
+// (`accounts` names no slice) does not trade on its behalf and must not sit
+// in the fleet table. With no account picked (老面板/单账户), every row
+// shows exactly as before.
+const rows = computed<StrategyStatsRow[]>(() => {
+  const id = store.activeAccount
+  if (!id) return store.strategyRows
+  return store.strategyRows.filter(
+    (r) => !Array.isArray(r.accounts) || r.accounts.includes(id) || hasActivity(r),
+  )
+})
+/**
+ * A strategy with no account slice but nonzero session activity keeps its
+ * row: the counters were JUST moved under this account (assignment change)
+ * and hiding a row that owns PnL would look like data loss. Zero-and-absent
+ * rows are the only ones a scoped page drops.
+ */
+function hasActivity(r: StrategyStatsRow): boolean {
+  return (
+    Number(r.ordersPlaced) > 0 ||
+    Number(r.ordersRejected) > 0 ||
+    Number(r.closedTrades) > 0
+  )
+}
 
 const busy = ref<string | null>(null)
 const flash = ref<{ name: string; ok: boolean; msg: string } | null>(null)

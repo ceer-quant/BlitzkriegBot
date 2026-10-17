@@ -6,6 +6,7 @@ import { ref, computed } from 'vue'
 import {
   api, clearToken, hasToken,
   type Snapshot, type PluginsDoc, type StrategyStatsRow, type TradeRow,
+  type CumulativeTradeSummary,
 } from '../api/client'
 import { dedupeTrades } from '../lib/trades'
 import { registryStrategyRows } from '../lib/strategy-source'
@@ -133,9 +134,26 @@ export const usePanelStore = defineStore('panel', () => {
    */
   const tradeRows = computed<TradeRow[]>(() => dedupeTrades(snapshot.value?.tradeRows ?? []))
 
+  /**
+   * PR H (账户筛选修复): the account-scoped aggregates, refreshed beside the
+   * snapshot on every poll. `activeAccount` is this panel's session default
+   * (AccountSwitcher mirrors it), so the reads and the snapshot describe the
+   * SAME account; `null`/'' active = global headline and both stay empty so
+   * pages fall back to the snapshot values (老面板行为不变).
+   */
+  const accountTradeSummary = ref<CumulativeTradeSummary | null>(null)
+  const accountStrategyStats = ref<StrategyStatsRow[]>([])
+
   // Prefer engine snapshot strategyStats (richer); fall back to /api/plugins.
+  // PR H (账户筛选修复): when an account is active, the counters come from
+  // the account-scoped engine.stats read (`accountStrategyStats`) — the same
+  // per-NAME rows with THIS account's slice only. The merge keeps the mode/
+  // compat verdicts from the registry either way; a strategy the account has
+  // no slice for still shows (zero counters, `accounts` empty) because the
+  // assignment editor on the account switcher reads the same list.
   const strategyRows = computed<StrategyStatsRow[]>(() => {
-    const st = snapshot.value?.strategyStats
+    const acc = accountStrategyStats.value
+    const st = acc.length ? acc : snapshot.value?.strategyStats
     const fromStats = (snapshot.value as unknown as { stats?: { strategies?: StrategyStatsRow[] } } | undefined)?.stats?.strategies
     const plug = plugins.value?.strategies
     if ((st && st.length) || (fromStats && fromStats.length)) {
@@ -191,9 +209,15 @@ export const usePanelStore = defineStore('panel', () => {
     if (!hasToken()) return
     loading.value = true
     try {
-      const [snap, plug] = await Promise.allSettled([
+      // PR H: the account-scoped aggregates ride their own proxy routes
+      // beside the snapshot. `acct` absent = 全局面板 —— 两条读数置空，页面
+      // 回落 snapshot 值（单账户部署与老面板逐字节一致）。
+      const acct = activeAccount.value ?? undefined
+      const [snap, plug, accSummary, accStats] = await Promise.allSettled([
         api.snapshot(),
         api.plugins(),
+        api.tradesSummary({ accountId: acct }),
+        api.engineStatsFor({ accountId: acct }),
       ])
       if (snap.status === 'fulfilled') {
         snapshot.value = snap.value
@@ -204,7 +228,11 @@ export const usePanelStore = defineStore('panel', () => {
         }
       }
       if (plug.status === 'fulfilled') plugins.value = plug.value
-      noteOutcome([snap, plug])
+      accountTradeSummary.value =
+        acct && accSummary.status === 'fulfilled' ? accSummary.value.summary ?? null : null
+      accountStrategyStats.value =
+        acct && accStats.status === 'fulfilled' ? accStats.value.strategies ?? [] : []
+      noteOutcome([snap, plug, accSummary, accStats])
       lastUpdated.value = Date.now()
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
@@ -223,6 +251,7 @@ export const usePanelStore = defineStore('panel', () => {
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
     activeAccount, accounts, setAccounts, activeAccountVenue, activeAccountRow,
+    accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
   }

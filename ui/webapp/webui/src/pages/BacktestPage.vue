@@ -11,6 +11,7 @@ import type { EChartsOption } from 'echarts'
 import { Download, HardDriveDownload, Play, RefreshCw, Trash2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/api/client'
 import type { BacktestDataset, BacktestJobStatusDoc, BacktestResultDoc } from '@/api/client'
+import { usePanelStore } from '@/stores/panel'
 import { backtestLabel, loadBacktest, saveBacktest, clearBacktest } from '@/composables/backtestStore'
 import type { BacktestReport } from '@/backtest'
 import { useChart, areaFade, palette, tooltipStyle, axisX, axisY } from '@/lib/chart'
@@ -36,6 +37,20 @@ function failMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message
   return e instanceof Error ? e.message : String(e)
 }
+
+// PR H (账户筛选修复): 回测读数跟随账户绑定 —— 账户切换器就是交易所切换器，
+// active 账户绑定了 venue X 时，拉数据/数据集口径标注 X 的链上钱包域（未绑定
+// = 任意 venue，与旧行为一致）。回测本身仍是内核 CLI 旋钮面（archive 无
+// venue 概念），这里只做「这屏属于哪个账户/venue」的诚实标注与提示。
+const store = usePanelStore()
+const activeVenueNote = computed(() => {
+  const id = store.activeAccount
+  if (!id) return ''
+  const venue = store.activeAccountVenue
+  return venue
+    ? `当前账户「${id}」绑定 ${venue} —— 拉取该 venue 的链上数据请用其钱包地址；数据集不区分 venue，回放按数据集自身的 archive 口径。`
+    : `当前账户「${id}」未绑定 venue —— 可拉任意 venue 的链上数据。`
+})
 
 /** UTC 日历日（内核接受 `YYYY-MM-DD`，含尾日）。 */
 function isoDay(d: Date): string {
@@ -477,6 +492,7 @@ onMounted(() => {
           <label class="md:col-span-2">
             <span class="label-micro">钱包地址</span>
             <Input v-model="wallet" placeholder="0x…（要回测的钱包）" size="sm" />
+            <span v-if="activeVenueNote" class="mt-1 block text-[11px] text-faint-fg">{{ activeVenueNote }}</span>
           </label>
           <label>
             <span class="label-micro">开始日期 (UTC)</span>

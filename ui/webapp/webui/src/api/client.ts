@@ -907,6 +907,25 @@ export const api = {
       accountId: params?.accountId,
       limit: params?.limit,
     }),
+  // ── 账户级聚合读数（PR H 账户筛选修复）─────────────────────────────────────
+  // 专用代理路由（同 account-journal 的纪律：JSON-RPC 信封不走 /command
+  // 文本动词通道）。accountId 缺省 = 全局口径（与旧面板逐字节一致）。
+
+  /**
+   * 闭环统计（`trades.summary` 薄代理）。带 accountId 时内核按行过滤
+   * 重算该账户的 summary；缺席 = 全局持久 headline。
+   */
+  tradesSummary: (params?: { accountId?: string }) =>
+    request<{ summary?: CumulativeTradeSummary | null; error?: string }>(
+      '/trades-summary', {}, { accountId: params?.accountId },
+    ),
+  /**
+   * 引擎统计（`engine.stats` 薄代理）。带 accountId 时内核把
+   * `strategies` 行切到该账户（strategy_stats_for_account，同形状）；
+   * 缺席 = 全局 fold（每行带 `accounts` 数组）。
+   */
+  engineStatsFor: (params?: { accountId?: string }) =>
+    request<EngineStats>('/strategy-stats', {}, { accountId: params?.accountId }),
   // ── 账户↔交易所绑定（account.venue.get / account.venue.set）────────────────
   // 专用代理路由（#508 的教训：JSON-RPC 信封走 /command 文本动词通道会被
   // 网关当 unknown command 拒掉 —— 绑定面必须走自己的 proxy 路由，同
@@ -1546,6 +1565,12 @@ export interface StrategyStatsRow {
   compatible?: boolean
   /** §8.3: when `compatible === false`, the handshake's rendered refusal reason. */
   incompatibleReason?: string | null
+  /**
+   * PR H: the account scopes hosting this strategy (sorted). 全局口径下用来
+   * 把策略页过滤到当前账户；账户口径（engineStatsFor）下行同一形状但行
+   * 集合不变，仅 counters 是该账户的 slice。
+   */
+  accounts?: string[]
 }
 
 export interface EngineStats {
