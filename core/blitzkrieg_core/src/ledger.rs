@@ -149,6 +149,15 @@ impl Ledger {
         self.apply(JournalKind::Seed, target - self.balance, "boot");
     }
 
+    /// Fund a runtime-minted account (`account.create` on a locally-settling
+    /// core). kind = `Seed` — a boot fact at heart — but the journal ref
+    /// spells the minting verb, so the trail distinguishes "boot funded this"
+    /// from "the operator minted the account later and it got the same seed".
+    /// A zero amount records nothing (a zero seed on a zero book is a no-op).
+    pub fn fund(&mut self, amount: Decimal, ref_: &str) {
+        self.apply(JournalKind::Seed, amount.max(Decimal::ZERO), ref_);
+    }
+
     pub fn balance(&self) -> Decimal {
         self.balance
     }

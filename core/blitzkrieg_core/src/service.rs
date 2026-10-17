@@ -3179,6 +3179,23 @@ impl Core {
             strategies: Vec::new(),
             updated_at_ms: now_ms,
         })?;
+        // A runtime mint on a locally-settling core gets the same seed a boot
+        // account would have woken up with. Without this the strategy sizing
+        // reads equity 0 and the scope never trades (`policy.skip: equity 0
+        // below min_equity_usd`) — and no boot will ever repair it: the boot
+        // seed (`seed_all`) is skipped wholesale once ANY account has a
+        // journal, which an established deployment always does. LIVE is not
+        // seeded: the venue's real cash is the balance, realigned from the
+        // venue report. The journal row (kind Seed, ref `account.create`)
+        // makes the funding a replayable boot fact for the NEXT boot.
+        if self.config.mode.settles_locally()
+            && self.config.dry_seed_balance > rust_decimal::Decimal::ZERO
+        {
+            self.accounts
+                .get_mut(&id)
+                .expect("the minted account has a ledger (insert ran above)")
+                .fund(self.config.dry_seed_balance, "account.create");
+        }
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -16066,6 +16083,93 @@ mod strategy_dispatch_tests {
     }
 
     /// 生产 16:29 形状的端到端牙（多账户 PR A 缺陷）：
+    /// `account.create` on a locally-settling core seeds the minted account
+    /// with `dry_seed_balance` — the same waking balance a boot account gets.
+    /// The gap this closes (生产 probe2 实锤): a runtime mint used to start at
+    /// zero, strategy sizing read `equity 0 below min_equity_usd` and the
+    /// scope never traded — and no boot repaired it, because the boot seed is
+    /// skipped wholesale once ANY account has a journal (an established
+    /// deployment always does). LIVE mints stay at zero: the venue's real
+    /// cash is the balance there.
+    #[test]
+    fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
+        let dir = std::env::temp_dir().join(format!("bk-mint-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        )
+        .expect("fixture");
+        // Dry settles locally: the mint gets the seed.
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Dry,
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        let probe = crate::account::AccountId::from("probe2");
+        c.create_account_persisting(
+            &probe,
+            Some("probe two"),
+            Some("polymarket"),
+            "test",
+            "mint",
+            5,
+        )
+        .expect("the mint lands");
+        assert_eq!(
+            c.accounts
+                .ledger_of(&probe)
+                .expect("minted account addressable")
+                .balance(),
+            c.config.dry_seed_balance,
+            "the mint wakes with the configured seed, not zero"
+        );
+
+        // The journal row rides the funded ledger's durable path… — actually
+        // the ledger is memory-only until a journal is attached; the row is in
+        // the in-memory trail. What matters for the NEXT boot is the ledger
+        // file the boot attach reads: assert the in-memory journal spelled it.
+        let trail = c.accounts.ledger_of(&probe).unwrap().journal_snapshot();
+        let seed_row = trail
+            .iter()
+            .find(|r| r.ref_ == "account.create")
+            .expect("the funding row is in the trail");
+        assert_eq!(seed_row.amount, c.config.dry_seed_balance);
+
+        // LIVE: the venue owns the cash — a mint stays at zero.
+        let accounts_path_live = dir.join("accounts-live.toml");
+        std::fs::write(
+            &accounts_path_live,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        )
+        .expect("fixture");
+        let mut live = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Live,
+                accounts_config_path: Some(accounts_path_live.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path_live, 1).unwrap(),
+        );
+        let probe_live = crate::account::AccountId::from("probe3");
+        live.create_account_persisting(&probe_live, None, None, "test", "mint live", 6)
+            .expect("the live mint lands");
+        assert_eq!(
+            live.accounts
+                .ledger_of(&probe_live)
+                .expect("minted live account addressable")
+                .balance(),
+            rust_decimal::Decimal::ZERO,
+            "LIVE mints stay at zero — venue cash is the balance"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `account.strategies.set {default, []}` 的 INHERIT 语义必须把 default
     /// scope 全数保留 —— 旧代码把空列表直递 rebuild，DROP 阶段把 boot 扇出的
     /// 全部 default scope 拆掉，enabled 策略静默停摆（strategy.list 变空、
