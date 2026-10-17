@@ -59,6 +59,9 @@ pub mod order;
 pub mod order_db;
 pub mod position;
 pub mod position_db;
+/// 环境差异排查探针（任务二 1-3）：SNTP 时钟偏差 / tick 断流 / spot 失效。
+/// 只观测：日志 + 计数器；NTP 网络任务仅生产 `server::run()` 启动。
+pub mod probe;
 pub mod reconcile;
 pub mod regime_eval;
 pub mod risk;

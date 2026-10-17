@@ -98,6 +98,12 @@ const NOT_CARRIED: &[(&str, &str)] = &[
         "#388 wallet-level cash rows credited from the stream (USD); \
          the backtest report carries the number, no panel surface reads it yet",
     ),
+    (
+        "probe",
+        "任务二 1-3 环境差异排查探针（NTP 时钟偏差/tick 断流/spot 失效）； \
+         排查面，no panel surface yet — operator reads it from engine.stats \
+         directly (tests/env_probes.rs pins the field names)",
+    ),
 ];
 
 /// A dry kernel with no durable state at all: `trade_log_path`/`order_log_path`/
