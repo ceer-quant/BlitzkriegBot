@@ -8,8 +8,10 @@
 //!   blitzkrieg web [FLAGS]   Run the web gateway / browser panel
 //!   blitzkrieg stop [FLAGS]  Stop the stack attached to one socket
 //!   blitzkrieg net-check     Ask the core to probe the venue's network paths
+//!   blitzkrieg doctor        Read the environment probes off the running core
 //!   blitzkrieg help          Show help
 
+use blitzkrieg_ui_kit::core::doctor;
 use blitzkrieg_ui_kit::core::net_check::{render_json, render_text};
 use blitzkrieg_ui_kit::gateway::{
     discover_binary, Dispatcher, StartOutcome, Supervisor, SupervisorConfig,
@@ -38,6 +40,10 @@ SUBCOMMANDS:
   stop           Stop the stack (UI + core) on one socket; also an orphaned core
   net-check      Ask the core on the socket to probe every network path the venue
                  uses (read-only; no order, no ledger). --json for scripts
+  doctor         Read the environment probes (clock skew / feed health / spot
+                 staleness / K-line drops / account switches) off the running
+                 core — answers: is it the venue, the host, or us?
+                 --json for scripts; --socket to pick the core
   version        Print the build version / git hash / build date / target
                  (--json for scripts; --core to ask the running kernel)
   update         Update surface: --check asks the running kernel to check the
@@ -391,6 +397,10 @@ async fn tokio_main() -> std::process::ExitCode {
             raw_args.remove(0);
             run_net_check_subcommand(raw_args).await
         }
+        Some("doctor") => {
+            raw_args.remove(0);
+            run_doctor_subcommand(raw_args).await
+        }
         Some("run") => {
             raw_args.remove(0);
             report(run_unified(raw_args).await)
@@ -511,6 +521,115 @@ fn run_stop_subcommand(args: Vec<String>) -> std::io::Result<()> {
         Ok(())
     } else {
         std::process::exit(code)
+    }
+}
+
+/// `blitzkrieg doctor [--json] [--socket <path>]` — is it the venue, the host,
+/// or us?
+///
+/// Reads the environment probes the running core already measures (clock skew,
+/// feed health, spot staleness) plus the state surfaces that answer the other
+/// half of the question (kill switch, K-line drops, per-strategy refusals,
+/// account trading switches) and renders ONE report. Everything is read-only
+/// observation verbs — the doctor cannot place an order or flip a switch on
+/// any path.
+///
+/// Exit codes: 0 within tolerance · 1 a finding needs attention · 2 no core
+/// answered (nothing to read — that is not a health verdict, it is the
+/// absence of one).
+async fn run_doctor_subcommand(args: Vec<String>) -> std::process::ExitCode {
+    let mut json = false;
+    let mut socket = resolve_socket_path();
+    let mut iter = args.into_iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--socket" => match iter.next() {
+                Some(s) => socket = s,
+                None => {
+                    eprintln!("blitzkrieg: doctor: --socket needs a path");
+                    return std::process::ExitCode::from(2);
+                }
+            },
+            "--help" | "-h" => {
+                println!("blitzkrieg doctor [--json] [--socket <path>]");
+                println!();
+                println!("Read the environment probes off the core serving <socket>: clock");
+                println!("skew (NTP), feed health (tick windows, silent tokens), spot staleness,");
+                println!("K-line aggregator drops, per-strategy entry refusals and the account");
+                println!("trading switches. Read-only: no order, no ledger, no credential.");
+                println!();
+                println!("  --socket <path>  the core to ask (default: the resolved socket path)");
+                println!("  --json           print the report as JSON, for scripts");
+                println!();
+                println!("exit codes: 0 within tolerance · 1 findings need attention · 2 no core answered");
+                return std::process::ExitCode::SUCCESS;
+            }
+            other => {
+                eprintln!("blitzkrieg: doctor: unknown argument '{other}'");
+                eprintln!("See 'blitzkrieg doctor --help'.");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
+
+    // One connection, three observations. Each is fetched independently so a
+    // core that predates one verb degrades to a WARN line about THAT verb
+    // instead of failing the whole reading.
+    let target = socket.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut client = IpcClient::new(target);
+        let ready = client.call("core.ready", serde_json::json!({}));
+        let stats = client.call("engine.stats", serde_json::json!({}));
+        let accounts = client.account_list();
+        (ready, stats, accounts)
+    })
+    .await;
+
+    let (ready, stats, accounts) = match read {
+        Ok(tuple) => tuple,
+        Err(e) => {
+            eprintln!("blitzkrieg: doctor task failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let ready = match ready {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("blitzkrieg: no core answering on {socket} ({e})");
+            eprintln!("A doctor needs a running kernel to read — start one with 'blitzkrieg run'.");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let stats = match stats {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("blitzkrieg: core on {socket} refused engine.stats ({e})");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let accounts = accounts.map_err(|e| e.to_string());
+
+    let accounts = accounts.as_ref().map_err(|e| e.to_string());
+    let report = doctor::compose(&ready, &stats, accounts);
+
+    if json {
+        match report.render_json() {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("blitzkrieg: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    } else {
+        print!("{}", report.render_text());
+    }
+
+    if report.ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::from(1)
     }
 }
 
