@@ -865,3 +865,7 @@ mod tests {
 // exactly as before.
 pub mod limits;
 pub mod physics;
+// E-VA: strategy-level virtual accounts — a risk-layer quota book on the
+// (account, strategy) axis. Default-off: an unconfigured core never holds a
+// pot and every call site short-circuits on `governed` (byte-identical bypass).
+pub mod virtual_account;
