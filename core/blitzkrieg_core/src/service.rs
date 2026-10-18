@@ -262,6 +262,16 @@ pub struct CoreConfig {
     /// [`crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS`] — the value every
     /// deployment has always run with, so an unconfigured kernel is unchanged.
     pub max_orderbook_stale_ms: i64,
+    /// 任务二 1-3 — the NTP clock-offset probe's server host. The empty string
+    /// is the documented "off" spelling: `probe::should_spawn_ntp` refuses it,
+    /// so the production server spawns ZERO network tasks. The measurement
+    /// loop is started ONLY by `ipc::server::run` (production); a replay
+    /// never constructs a socket. Default `probe::DEFAULT_NTP_HOST`.
+    pub ntp_host: String,
+    /// 任务二 1-3 — seconds between NTP probes. 0 = the periodic loop is off.
+    /// Default `probe::DEFAULT_NTP_INTERVAL_SECS` (300). The core itself never
+    /// reads this — the server does, at the one production spawn site.
+    pub ntp_interval_secs: i64,
     /// How often the in-kernel accounting audit runs, in seconds (issue #189).
     /// 0 disables it. Default 30: the acceptance criterion is "drift is alerted,
     /// persisted and blocks new entries within 30s of appearing".
@@ -859,6 +869,11 @@ impl Default for CoreConfig {
             event_archive_min_free_mb: 0,
             // #205: the shipped freshness budget, unchanged.
             max_orderbook_stale_ms: crate::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
+            // 任务二 1-3: the shipped NTP probe posture — pool.ntp.org every
+            // 5 minutes. `should_spawn_ntp("")` = off is the deployment's
+            // documented kill switch (`--ntp-host ""`).
+            ntp_host: crate::probe::DEFAULT_NTP_HOST.to_string(),
+            ntp_interval_secs: crate::probe::DEFAULT_NTP_INTERVAL_SECS,
             audit_interval_sec: 30,
             audit_log_path: None,
             applied_log_path: None,
@@ -1364,6 +1379,27 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
+    /// 环境差异排查探针（任务二 1-3）：tick 断流 / spot 失效 / NTP 偏移的
+    /// 内核侧记账。只观测——日志 + 计数器，从不拦截数据或订单路径；所有
+    /// 时间判定吃调用方的 `now_ms`（回放里是虚拟时钟）。NTP 的网络查询
+    /// 不在这里：`probe::spawn_loop` 只由生产的 `server::run()` 启动，
+    /// 测量结果经 `note_ntp_offset` 灌回。
+    probe_ticks: crate::probe::TickHealth,
+    probe_spot: crate::probe::SpotWatch,
+    probe_ntp: crate::probe::NtpWatch,
+    /// 最近一次汇总的窗口 tick 数（stats 面直读 probe_ticks 会拿走窗口，
+    /// 汇总清零——所以汇总瞬间留档）。
+    probe_last_window_ticks: u64,
+    /// 最近一次汇总点名的零 tick token（已排序）。
+    probe_last_zero: Vec<String>,
+    /// 最近一次汇总的最长静默 ms。
+    probe_last_max_silence_ms: i64,
+    /// 最近一次汇总时 spot 的停更时长（None = 从未见 spot）。
+    probe_last_spot_stale_ms: Option<i64>,
+    /// 断流 warn 总次数与 spot 停更 warn 总次数（事件计数，独立于
+    /// probe_ticks.broken 的当前状态）。
+    stats_probe_stream_breaks: u64,
+    stats_probe_spot_stales: u64,
     /// #377 (治 #2): conditions the archive declared to carry an on-chain
     /// verdict (`RoundMarkets` markets flagged `archive_verdict`). The dry
     /// settlement ladder must not query these markets — the stream settles
@@ -2103,6 +2139,17 @@ impl Core {
             order_db,
             position_db,
             stats: CoreStats::default(),
+            // 探针从零开始：没有 tick/spot/NTP 历史（与 stats 同一生命期，
+            // 会话作用域）。
+            probe_ticks: crate::probe::TickHealth::default(),
+            probe_spot: crate::probe::SpotWatch::default(),
+            probe_ntp: crate::probe::NtpWatch::default(),
+            probe_last_window_ticks: 0,
+            probe_last_zero: Vec::new(),
+            probe_last_max_silence_ms: 0,
+            probe_last_spot_stale_ms: None,
+            stats_probe_stream_breaks: 0,
+            stats_probe_spot_stales: 0,
             archive_verdicts: HashSet::new(),
             // The session clock for the accounting identity (issue #200). Read
             // once, at construction: the ledger below is seeded at the same
@@ -4674,6 +4721,116 @@ impl Core {
         self.feeds.insert(plugin.to_string(), control);
     }
 
+    // ── 环境差异排查探针（任务二 1-3）───────────────────────────────────────
+
+    /// NTP 循环（`probe::spawn_loop`，生产 `server::run()` 专用）把一次测量
+    /// 结果灌回内核。`None` = 查询失败（静默降级，只计失败数）。偏移达到
+    /// 警告线（50ms）打一条 WARNING——这是"系统时间偏差超过 100ms 且无日志
+    /// 警告 → 测试必须红"验收的日志面；红线（100ms）在
+    /// `engine.stats.probe.ntp.skewRed` 打标。
+    pub fn note_ntp_offset(&mut self, offset_ms: Option<i64>, now_ms: i64) {
+        let warn = self.probe_ntp.apply(offset_ms, now_ms);
+        if warn {
+            let ms = self.probe_ntp.last_offset_ms.unwrap_or_default();
+            let red = self.probe_ntp.skew_red();
+            tracing::warn!(
+                offset_ms = ms,
+                red_line = red,
+                "clock offset: local clock is {}{} ms from the NTP server{}",
+                if ms >= 0 { "+" } else { "" },
+                ms,
+                if red {
+                    " (RED: at or past the 100 ms line)"
+                } else {
+                    ""
+                },
+            );
+        }
+    }
+
+    /// 探针汇总到点了吗：首个窗口从第一批数据（tick/spot/round）起算满
+    /// 10s，之后每 10s 一次。间隔判定基于调用方的时钟（间隔不等式，不是
+    /// 固定墙钟窗口——memory: wallclock-test-flake 处方）。
+    fn probe_summary_due(&self, now_ms: i64) -> bool {
+        match self.probe_ticks.last_summary_ms {
+            None => self
+                .probe_ticks
+                .first_data_ms
+                .is_some_and(|first| now_ms - first >= crate::probe::SUMMARY_INTERVAL_MS),
+            Some(last) => now_ms - last >= crate::probe::SUMMARY_INTERVAL_MS,
+        }
+    }
+
+    /// 执行一次探针 10s 汇总：窗口 tick 数、零 tick token、最长静默、
+    /// 新断流 token（warn + 计数）与 spot 停更（warn + 计数）。
+    /// 只观测——这里发出的每一个字都是日志，不改变任何交易语义。
+    fn probe_run_summary(&mut self, now_ms: i64) {
+        // 本轮已声明的 token（零 tick 点名对象）；无引擎 = 无名单。
+        let round_tokens: Vec<String> = self
+            .engine
+            .as_ref()
+            .map(|e| e.round_token_ids())
+            .unwrap_or_default();
+        let (ticks, zero, max_silence, newly_broken) =
+            self.probe_ticks
+                .summarize(now_ms, &round_tokens, crate::probe::TICK_STALE_WARN_MS);
+        // 把 venue 标签留在断流行里——排查时"哪个所的流断了"是第一问。
+        for token in &newly_broken {
+            let (venue, silence_ms) = match self.probe_ticks.per_token.get(token) {
+                Some((v, at)) => (v.clone(), now_ms - *at),
+                None => (String::new(), 0),
+            };
+            self.stats_probe_stream_break();
+            tracing::warn!(
+                token = %token,
+                venue = %venue,
+                silence_ms = silence_ms,
+                "stream break: token had ticks before but none for the budget now"
+            );
+        }
+        if !zero.is_empty() {
+            tracing::warn!(
+                tokens = %zero.join(","),
+                count = zero.len(),
+                "zero tick: round tokens with no data this window"
+            );
+        }
+        if ticks > 0 || !zero.is_empty() || !newly_broken.is_empty() {
+            tracing::debug!(
+                window_ticks = ticks,
+                zero_tick_tokens = zero.len(),
+                max_silence_ms = max_silence,
+                "tick health summary"
+            );
+        }
+        self.probe_last_window_ticks = ticks;
+        self.probe_last_zero = zero;
+        self.probe_last_max_silence_ms = max_silence;
+
+        // spot 停更（信号失效监控）。
+        let (spot_warn, stale) = self
+            .probe_spot
+            .check(now_ms, crate::probe::SPOT_STALE_WARN_MS);
+        if spot_warn {
+            self.stats_probe_spot_stale();
+            tracing::warn!(
+                stale_ms = stale.unwrap_or_default(),
+                "spot feed stale: no spot update for the budget — signals pricing off it \
+                 are unverified (signal invalidation watch)"
+            );
+        }
+        self.probe_last_spot_stale_ms = stale;
+    }
+
+    // 探针的三个曝光计数（stats 面从 probe_ticks/probe_spot 直接读，
+    // 这两个只是把 warn 事件也钉在 CoreStats 里以防未来挪动）。
+    fn stats_probe_stream_break(&mut self) {
+        self.stats_probe_stream_breaks += 1;
+    }
+    fn stats_probe_spot_stale(&mut self) {
+        self.stats_probe_spot_stales += 1;
+    }
+
     /// Subscribe the round's tokens on the NAMED plugin's orderbook feed (P4).
     /// Only that plugin's control sees the set — replacement semantics stay
     /// per-venue. Unknown name or empty token list: no-op.
@@ -4705,8 +4862,13 @@ impl Core {
             a.record_at(at, &ev);
         }
         match &ev {
-            crate::engine::DataEvent::Book { .. } => {
+            crate::engine::DataEvent::Book { token_id, .. } => {
                 self.stats.books += 1;
+                // 探针（任务二 1-3）：一次行情 tick。venue 拿得到就带，
+                // 拿不到记空标签（untagged）。纯内存 insert——回放性能
+                // 影响可忽略，且不改变任何既有语义。
+                let venue = self.venue_of_token(token_id);
+                self.probe_ticks.note_tick(token_id, &venue, now_ms);
                 if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
@@ -4715,18 +4877,30 @@ impl Core {
             // 逐事件路径同口径），一次唤醒（引擎在批次后只应评估一次）。
             crate::engine::DataEvent::Books { books, .. } => {
                 self.stats.books += books.len() as u64;
+                // 探针（任务二 1-3）：批内每本都是一次行情 tick（与逐事件
+                // 路径同口径）。
+                for (token, _, _) in books {
+                    let venue = self.venue_of_token(token);
+                    self.probe_ticks.note_tick(token, &venue, now_ms);
+                }
                 if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
             }
-            crate::engine::DataEvent::TopOfBook { .. } => {
+            crate::engine::DataEvent::TopOfBook { token_id, .. } => {
                 self.stats.tops += 1;
+                let venue = self.venue_of_token(token_id);
+                self.probe_ticks.note_tick(token_id, &venue, now_ms);
                 if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
             }
             crate::engine::DataEvent::Spot { .. } => {
                 self.stats.spots += 1;
+                // 探针：spot 源仍在更新（信号失效监控的"活着"信号）；
+                // spot 也算数据——spot-only 部署的停更监控才有起点。
+                self.probe_spot.note(now_ms);
+                self.probe_ticks.note_any_data(now_ms);
                 if self.replay_sched() {
                     self.fast_eval_wake = true;
                 }
@@ -4826,6 +5000,12 @@ impl Core {
                     });
                 if !top_up {
                     self.stats.rounds += 1;
+                    // 探针：新一轮的 token 覆盖掉上一轮的——per_token 表键随
+                    // 轮替换保持有界（旧 token 不再被汇总点名）。round 声明
+                    // 也算数据（零 tick 探针的起点）。
+                    self.probe_ticks.per_token.clear();
+                    self.probe_ticks.broken.clear();
+                    self.probe_ticks.note_any_data(now_ms);
                     // ④ 统一映射：新的一轮带来新市场 ⇒ 重新提议跨所配对候选
                     // （只提议不 confirm）。top-up 跳过：#498 增量合并不换轮，
                     // 旧候选仍然有效，重复刷只是日志噪声。
@@ -6702,6 +6882,36 @@ impl Core {
                 .kline_stats()
                 .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null),
+            // 环境差异排查探针（任务二 1-3）：时钟偏差 / 数据流断流 / spot
+            // 失效的观测面。字段名即契约（tests/env_probes.rs 钉死）：
+            // * ntp: 上次 SNTP 测量（offsetMs/skewRed/失败计数）
+            // * tickHealth: 最近 10s 汇总（窗口 tick 数/零 tick token/最长
+            //   静默/断流 warn 计数）
+            // * spot: 停更监控（最近更新时刻/停更时长/warn 计数）
+            "probe": serde_json::json!({
+                "ntp": {
+                    "synced": self.probe_ntp.last_offset_ms.is_some(),
+                    "offsetMs": self.probe_ntp.last_offset_ms,
+                    "skewRed": self.probe_ntp.skew_red(),
+                    "failures": self.probe_ntp.failures,
+                    "lastCheckMs": self.probe_ntp.last_check_ms,
+                },
+                "tickHealth": {
+                    // 进行中的窗口计数（实时）。汇总不立刻清零：值被
+                    // capture 留档，下一个非汇总 tick 才重新计数——
+                    // 汇总瞬间读 stats 必须还能看到刚结束的窗口。
+                    "windowTicks": self.probe_ticks.window_ticks,
+                    "zeroTickTokens": self.probe_last_zero,
+                    "maxSilenceMs": self.probe_last_max_silence_ms,
+                    "streamBreakWarnings": self.probe_ticks.stream_break_warnings,
+                    "lastSummaryMs": self.probe_ticks.last_summary_ms,
+                },
+                "spot": {
+                    "lastSeenMs": self.probe_spot.last_seen_ms,
+                    "staleMs": self.probe_last_spot_stale_ms,
+                    "staleWarnings": self.probe_spot.stale_warnings,
+                },
+            }),
         })
     }
 
@@ -12184,6 +12394,17 @@ impl Core {
                     "breaker cooldown elapsed — resuming new entries for strategy {strategy}"
                 ),
             });
+        }
+
+        // 探针 10s 汇总（任务二 1-3，受控时钟）：tick 断流 / spot 失效的周期
+        // 判定只由调用方传入的 `now_ms` 驱动——生产是墙钟，回放是虚拟时钟，
+        // 同一函数、同一节奏，无墙钟窗口（memory: wallclock-test-flake 处方）。
+        // 只观测：warn + 计数，不拦截任何东西。
+        if self.probe_summary_due(now_ms) {
+            self.probe_run_summary(now_ms);
+        } else {
+            // 非汇总 tick：汇总读过的窗口自此重新计数。
+            self.probe_ticks.clear_window_if_consumed();
         }
 
         // Persist finalized near-miss records (blocked signals + their paths).

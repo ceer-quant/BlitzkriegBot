@@ -348,6 +348,16 @@ struct Args {
     /// answer to "how long after the feed goes quiet does this bot stop
     /// trading?" must not depend on someone having thought to configure it.
     orderbook_stale_echo: Vec<String>,
+    /// 任务二 1-3 — NTP 时钟偏差探针的服务器主机。空串 = 探针关闭（零网络
+    /// 任务启动，回放安全）。编译默认 `probe::DEFAULT_NTP_HOST`。
+    ntp_host: String,
+    /// 任务二 1-3 — NTP 探针的查询间隔（秒）。0 = 关（不启动循环）。
+    /// 默认 `probe::DEFAULT_NTP_INTERVAL_SECS`（300）。
+    ntp_interval_secs: i64,
+    /// The startup echo for the NTP probe, printed unconditionally (same
+    /// posture as `orderbook_stale_echo`): "is this run watching the clock,
+    /// and against whom?" must be answerable from the boot log alone.
+    ntp_echo: Vec<String>,
     /// Offline replay of an archive through the same core (P-1.2).
     backtest: Option<String>,
     /// Where to write the backtest report as JSON (None = stdout only).
@@ -955,6 +965,11 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     // #205: the orderbook freshness budget, tracked as Option so CLI > env >
     // default resolution can tell "the operator spoke" from "nobody did".
     let mut max_orderbook_stale_ms: Option<i64> = None;
+    // 任务二 1-3: the NTP clock-offset probe. Host None = nobody spoke; the
+    // empty string is a DOCUMENTED "off" spelling (path_value!'s empty-is-off
+    // semantics), so a deployment can disarm the probe without a rebuild.
+    let mut ntp_host: Option<String> = None;
+    let mut ntp_interval_secs: Option<i64> = None;
     // Dry-mode redemption test hooks (#175 gate): fail the first N simulated
     // redemption attempts of each claim, optionally as a `manual` failure that
     // stops the retries for good. 0 = production behaviour.
@@ -1423,6 +1438,29 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
                     i64,
                     "want a whole number of milliseconds (0 disables the freshness check)"
                 ));
+            }
+            // 任务二 1-3: the NTP clock-offset probe. The empty string is the
+            // documented "off" spelling (zero network tasks spawned — the
+            // replay-safe posture); a NEGATIVE interval is refused, an explicit
+            // 0 disables the periodic loop (a single boot-time probe only).
+            "--ntp-host" => {
+                ntp_host = Some(path_value!(it, "--ntp-host").trim().to_string());
+            }
+            "--ntp-interval-secs" => {
+                let v = num_value!(
+                    it,
+                    "--ntp-interval-secs",
+                    i64,
+                    "want a number of seconds (0 = off)"
+                );
+                if v < 0 {
+                    bad_value(
+                        "--ntp-interval-secs",
+                        &v.to_string(),
+                        "want a non-negative number of seconds (0 = off)",
+                    );
+                }
+                ntp_interval_secs = Some(v);
             }
             "--backtest" => backtest = Some(path_value!(it, "--backtest")),
             "--backtest-report" => backtest_report = Some(path_value!(it, "--backtest-report")),
@@ -1964,6 +2002,57 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         )
     }];
 
+    // ── 任务二 1-3: the NTP clock-offset probe ──────────────────────────────
+    // CLI > env > default. The empty string is the documented "off" spelling:
+    // `probe::should_spawn_ntp` refuses it, so a configured-off probe spawns
+    // ZERO network tasks (the replay-safe posture). An explicit --ntp-host ""
+    // and an absent host are pinned apart by the snapshot test.
+    let ntp = pick(
+        ntp_host,
+        env.text("BK_NTP_HOST"),
+        None::<String>,
+        blitzkrieg_core::probe::DEFAULT_NTP_HOST.to_string(),
+    );
+    let ntp_interval = pick(
+        ntp_interval_secs,
+        env.num::<i64>("BK_NTP_INTERVAL_SECS"),
+        None::<i64>,
+        blitzkrieg_core::probe::DEFAULT_NTP_INTERVAL_SECS,
+    );
+    if ntp_interval.value < 0 {
+        // Parse arms already refuse a negative CLI value; a negative from the
+        // env layer lands here (same fail-loud posture, never a silent default).
+        eprintln!(
+            "blitzkrieg-core: BK_NTP_INTERVAL_SECS={} is negative — the NTP probe \
+             interval cannot be negative (0 = off)",
+            ntp_interval.value
+        );
+        std::process::exit(2);
+    }
+    let ntp_echo = vec![if blitzkrieg_core::probe::should_spawn_ntp(&ntp.value)
+        && ntp_interval.value > 0
+    {
+        format!(
+            "environment probes: NTP clock-offset probe ON — every {} s against \
+             {} ({}/{}); |offset| >= 50 ms warns, >= 100 ms flags probe.ntp.skewRed",
+            ntp_interval.value,
+            ntp.value,
+            ntp.source.as_str(),
+            ntp_interval.source.as_str()
+        )
+    } else {
+        format!(
+            "environment probes: NTP clock-offset probe OFF (host={}, interval={}s) — \
+             zero network tasks spawned; stats probe.ntp stays cold",
+            if ntp.value.trim().is_empty() {
+                "(empty = off)"
+            } else {
+                ntp.value.as_str()
+            },
+            ntp_interval.value
+        )
+    }];
+
     // ── E17/#264: the engine-level exit ladder ──────────────────────────────
     // Same chain as every other file-settable knob (CLI > TOML > compiled
     // default). No env layer: `--spread-arb-*`, the sibling this pipeline
@@ -2079,6 +2168,8 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         sizing_echo,
         max_orderbook_stale_ms: stale.value,
         orderbook_stale_echo,
+        ntp_host: ntp.value,
+        ntp_interval_secs: ntp_interval.value,
         markets,
         auto_exits,
         max_positions,
@@ -2145,6 +2236,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         update_check_enabled,
         update_auto,
         update_interval_secs,
+        ntp_echo,
         shadow_evolution_echo,
         strategy_limits,
         enable_strategy,
@@ -2518,6 +2610,12 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.orderbook_stale_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // 任务二 1-3: the NTP probe posture, printed unconditionally — the answer
+    // to "is this run watching the system clock, and against whom?" belongs in
+    // the boot log, not in a grep of the flags that happen to be set.
+    for line in &args.ntp_echo {
+        eprintln!("blitzkrieg-core: {line}");
+    }
     // E26 (§4): the systemic risk limits in force, resolved from the config
     // file's [risk] section — this Epic's only wired input — and echoed
     // unconditionally like every other budget above: the factory posture
@@ -2739,6 +2837,11 @@ async fn main() -> anyhow::Result<()> {
         dry_seed_balance: args.seed_balance,
         // #205: the validated freshness budget (0 = check off).
         max_orderbook_stale_ms: args.max_orderbook_stale_ms,
+        // 任务二 1-3: the NTP probe's boot configuration. The server spawns the
+        // measurement loop only for a non-empty host with a positive interval;
+        // a replay never reaches that code path (production-only by placement).
+        ntp_host: args.ntp_host.clone(),
+        ntp_interval_secs: args.ntp_interval_secs,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
         enabled_strategies,
         disabled_strategies: args.disable_strategy,
@@ -4248,6 +4351,39 @@ mod tests {
         assert_eq!(a.update_interval_secs, Some(3600));
     }
 
+    // 任务二 1-3: the NTP probe flags. The empty host string is the documented
+    // "off" spelling (zero network tasks — the replay-safe posture); an
+    // explicit 0 interval disarms the periodic loop; a negative interval is a
+    // startup error, never a silent default.
+    #[test]
+    fn the_ntp_flags_keep_their_off_spellings_and_defaults() {
+        let a = args_from(&[]);
+        assert_eq!(a.ntp_host, "pool.ntp.org");
+        assert_eq!(a.ntp_interval_secs, 300);
+        let a = args_from(&["--ntp-host", ""]);
+        assert_eq!(a.ntp_host, "", "empty host = probe off");
+        assert!(
+            !blitzkrieg_core::probe::should_spawn_ntp(&a.ntp_host),
+            "an empty host must disarm the probe entirely (replay safety)"
+        );
+        let a = args_from(&["--ntp-host", "time.apple.com"]);
+        assert_eq!(a.ntp_host, "time.apple.com");
+        let a = args_from(&["--ntp-interval-secs", "0"]);
+        assert_eq!(a.ntp_interval_secs, 0, "0 = the periodic loop is off");
+        let a = args_from(&["--ntp-interval-secs", "60"]);
+        assert_eq!(a.ntp_interval_secs, 60);
+        // Whitespace host trims to empty = off, same as the explicit "".
+        let a = args_from(&["--ntp-host", "   "]);
+        assert!(!blitzkrieg_core::probe::should_spawn_ntp(&a.ntp_host));
+    }
+
+    // The negative `--ntp-interval-secs` refusal is a `bad_value` exit(2) in
+    // the parse arm — the parser's own exit cannot be observed from an
+    // in-process test (same posture as the #441 strict knobs above): any value
+    // that REACHED Args with a negative sign would already be the defect, and
+    // the valid-value arms above prove the strictness did not eat the
+    // legitimate spellings (explicit zero = off, positives).
+
     /// Backtest mode: the three documented spellings pass through, and a bare
     /// `--backtest-mode` (no value) keeps the historic empty-mode single-run
     /// shape — that default is documented, not a fallback a typo can hit
@@ -5076,6 +5212,9 @@ mod tests {
             a.max_orderbook_stale_ms.to_string()
         );
         vec_lines(&mut s, "orderbook_stale_echo", &a.orderbook_stale_echo);
+        line!("ntp_host", format!("{:?}", a.ntp_host));
+        line!("ntp_interval_secs", a.ntp_interval_secs.to_string());
+        vec_lines(&mut s, "ntp_echo", &a.ntp_echo);
         line!("backtest", format!("{:?}", a.backtest));
         line!("backtest_report", format!("{:?}", a.backtest_report));
         line!("backtest_tick_ms", a.backtest_tick_ms.to_string());
@@ -5234,6 +5373,9 @@ event_archive_min_free_mb=None\n\
 entry_maker_timeout_ms=5000\n\
 max_orderbook_stale_ms=8000\n\
 orderbook_stale_echo[0]=orderbook freshness: the engine refuses to price off a book older than 8000 ms (default); past that it stops taking entries until the feed catches up (closing intents are never blocked by this)\n\
+ntp_host=\"pool.ntp.org\"\n\
+ntp_interval_secs=300\n\
+ntp_echo[0]=environment probes: NTP clock-offset probe ON — every 300 s against pool.ntp.org (default/default); |offset| >= 50 ms warns, >= 100 ms flags probe.ntp.skewRed\n\
 backtest=None\n\
 backtest_report=None\n\
 backtest_tick_ms=50\n\

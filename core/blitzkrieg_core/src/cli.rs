@@ -197,6 +197,19 @@ pub const FLAGS: &[FlagSpec] = &[
          A negative value, a non-number or anything past 600000 is a startup error.",
     ),
     flag(
+        "--ntp-host",
+        "<host>",
+        "任务二 1-3: NTP clock-offset probe server (default pool.ntp.org). The empty \
+         string turns the probe OFF — zero network tasks spawned (replay-safe).",
+    ),
+    flag(
+        "--ntp-interval-secs",
+        "<n>",
+        "任务二 1-3: seconds between NTP clock-offset probes (default 300); 0 = off. \
+         A negative value is a startup error. |offset| >= 50 ms warns, >= 100 ms \
+         flags engine.stats probe.ntp.skewRed.",
+    ),
+    flag(
         "--entry-maker-timeout-ms",
         "<n>",
         "How long a maker entry may rest before escalation to taker (ms). 0 uses the \

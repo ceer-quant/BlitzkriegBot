@@ -400,6 +400,38 @@ pub async fn run(
     }
     let core = Arc::new(AsyncMutex::new(core));
 
+    // 任务二 1-3: the NTP clock-offset probe. PRODUCTION-ONLY (the same
+    // structural posture as `apply_account_strategy_assignments_at_boot`):
+    // this block lives in `server::run`, which the replay/backtest driver
+    // NEVER enters — a replay touches no NTP socket. The empty host (the
+    // documented `--ntp-host ""` spelling) spawns ZERO tasks via
+    // `should_spawn_ntp`; interval 0 likewise. The measurement loop runs on
+    // its own thread (blocking UDP, 1.5 s timeout worst case) and only takes
+    // the core lock for the instant it reports one result.
+    {
+        let ntp_host = config.ntp_host.clone();
+        let ntp_interval = config.ntp_interval_secs;
+        if crate::probe::should_spawn_ntp(&ntp_host) && ntp_interval > 0 {
+            let core = core.clone();
+            // The probe thread has no reactor: capture the Handle HERE (we are
+            // inside the async runtime) and spawn through it from the closure.
+            let rt = tokio::runtime::Handle::current();
+            crate::probe::spawn_loop(
+                ntp_host,
+                ntp_interval,
+                std::sync::Arc::new(move |offset| {
+                    // Fire-and-forget: the probe never blocks trading on NTP.
+                    let core = core.clone();
+                    rt.spawn(async move {
+                        let mut c = core.lock().await;
+                        c.note_ntp_offset(offset, now_ms());
+                    });
+                }),
+            );
+            eprintln!("blitzkrieg-core: NTP clock-offset probe started (every {ntp_interval}s)");
+        }
+    }
+
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
         let h = crate::market::host::CoreHost::new(core.clone());
         // Untagged round lists (legacy corpora / Node bridge) route their
