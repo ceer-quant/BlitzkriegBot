@@ -388,6 +388,11 @@ pub struct EngineStatsView {
     /// Whether the kill switch is down. The panel's freeze banner reads this.
     #[serde(default)]
     pub trading_frozen: Option<TradingFrozenView>,
+    /// PR G: the account-scoped kill book (`account.freeze` and the automatic
+    /// venue-rejection freeze) — account id → why. Empty object when nothing
+    /// is frozen. Older cores omit the key entirely.
+    #[serde(default, deserialize_with = "de_null_default")]
+    pub account_freezes: std::collections::HashMap<String, String>,
 }
 
 // ── trades.history ───────────────────────────────────────────────────────────

@@ -465,6 +465,12 @@ pub struct Engine {
     /// Default scope is always ON: the switch is an account-book fact and
     /// `default` predates it.
     trading_by_account: HashMap<String, bool>,
+    /// Per-account freeze mirrored from the service's kill book
+    /// (`freeze_account`/`resume_account`). A frozen scope drops its entry
+    /// candidates exactly like a trading-OFF one; exits flow. Unknown
+    /// account = not frozen (the service state is the truth; this is the
+    /// read-side mirror).
+    frozen_by_account: HashMap<String, bool>,
     /// Per-account venue binding mirrored from the account book
     /// (`account.venue.set`). Empty string = unbound. Candidates emitted by
     /// a scope whose venue cannot trade the candidate's token are dropped
@@ -519,6 +525,7 @@ impl Engine {
             equity_usd: Decimal::ZERO,
             equity_by_account: HashMap::new(),
             trading_by_account: HashMap::new(),
+            frozen_by_account: HashMap::new(),
             venue_by_account: HashMap::new(),
             size_pct_skipped: 0,
             klines: crate::kline::KlineAggregator::with_default_intervals(),
@@ -574,6 +581,14 @@ impl Engine {
         self.trading_by_account.insert(account.to_string(), enabled);
     }
 
+    /// Mirror one account's freeze (account-scoped kill switch). A frozen
+    /// scope behaves exactly like a trading-OFF one — entries dropped,
+    /// exits flowing — so a venue outage that freezes account A no longer
+    /// stops account B from trading. Service-owned fact, engine only reads.
+    pub fn set_account_frozen(&mut self, account: &str, frozen: bool) {
+        self.frozen_by_account.insert(account.to_string(), frozen);
+    }
+
     /// Mirror one account's venue binding (`account.venue.set`). Empty string
     /// = unbound (may trade any venue's tokens).
     pub fn set_account_venue(&mut self, account: &str, venue: &str) {
@@ -603,6 +618,17 @@ impl Engine {
             return true;
         }
         self.trading_by_account
+            .get(account)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether a scope is account-frozen (account-scoped kill switch). The
+    /// default scope reads the same map: a manual `account.freeze default`
+    /// must stop it too, so unlike `scope_trading` there is no privileged
+    /// default arm. Unknown account = not frozen.
+    fn scope_frozen(&self, account: &str) -> bool {
+        self.frozen_by_account
             .get(account)
             .copied()
             .unwrap_or(false)
@@ -1261,6 +1287,12 @@ impl Engine {
             // contributes nothing, and a scope bound to venue V never prices
             // another venue's token. Exits bypass this entire path.
             if !self.scope_trading(&sig.account_id) {
+                continue;
+            }
+            // Account-scoped kill switch (`account.freeze`): a frozen scope is
+            // invisible to entries, exactly like a trading-OFF one. Exits
+            // bypass this whole path, so held positions stay managed.
+            if self.scope_frozen(&sig.account_id) {
                 continue;
             }
             // The exits-only demotion (`account.strategies.set` safety net):
@@ -5387,6 +5419,49 @@ mod tests {
         e.set_account_trading("paper", true);
         let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper", "tok")], now);
         assert_eq!(orders.len(), 1, "re-opened scope emits");
+    }
+
+    /// The account-scoped kill switch (PR G): a FROZEN scope contributes no
+    /// entry candidates — exactly the trading-OFF shape — while a sibling
+    /// scope on the same token keeps emitting (the isolation that makes the
+    /// per-account freeze worth having). The default scope is freezable too:
+    /// unlike `scope_trading`, there is no privileged default arm.
+    #[test]
+    fn frozen_scope_drops_entries_sibling_flows() {
+        let mut e = engine();
+        let now = 1_000_000i64;
+        e.set_account_trading("paper", true);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        e.set_account_frozen("paper", true);
+        let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper", "tok")], now);
+        assert!(orders.is_empty(), "frozen scope's entry is dropped");
+        // The sibling on the SAME token is untouched by paper's freeze.
+        e.set_account_trading("default", true);
+        let orders = e.submit_candidate_orders_for_test(
+            vec![
+                scoped_signal("paper", "tok"),
+                scoped_signal(DEFAULT_ACCT, "tok"),
+            ],
+            now,
+        );
+        assert_eq!(
+            orders.len(),
+            1,
+            "only the non-frozen scope's candidate survives: {orders:?}"
+        );
+        // Lifting the freeze re-opens the scope.
+        e.set_account_frozen("paper", false);
+        let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper", "tok")], now);
+        assert_eq!(orders.len(), 1, "resumed scope emits again");
+        // The default scope freezes like any other (manual account.freeze
+        // default must stop it too).
+        e.set_account_frozen(DEFAULT_ACCT, true);
+        let orders =
+            e.submit_candidate_orders_for_test(vec![scoped_signal(DEFAULT_ACCT, "tok")], now);
+        assert!(orders.is_empty(), "the default scope is freezable");
     }
 
     /// pending_tokens keys on (account, token): A's resting entry does not

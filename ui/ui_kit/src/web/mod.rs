@@ -2391,6 +2391,14 @@ impl WebServer {
                 // 内核整体拒绝。网关零加工。
                 self.proxy_backtest_body("account.trading.set", &req.body)
             }
+            ("POST", "/api/account-freeze/set") => {
+                // PR G：账户级急冻（account-scoped kill switch）—— body 即
+                // `account.freeze` 的 params 对象
+                // （`{accountId, frozen, reason?}`），逐字转发。冻结 = 该
+                // 账户拒一切新单（手动+策略 entry）、平仓照放；会话级不
+                // 持久化（重启即清，重新探测）。网关零加工。
+                self.proxy_backtest_body("account.freeze", &req.body)
+            }
             ("GET", "/api/trades-summary") => {
                 // PR H (账户筛选修复)：钱包页的闭环统计 —— `trades.summary`
                 // 的薄代理（只读）。`?accountId=` 带上时内核按行过滤重算

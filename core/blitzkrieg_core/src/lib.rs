@@ -13,6 +13,11 @@
 //!  - `service`  typed command layer assembling ome/ledger/risk/sim
 //!  - `ipc`      UDS JSON-RPC 2.0 schema + transport
 
+// The engine.stats view (service.rs) is one huge `serde_json::json!` literal
+// — each new key deepens the macro's expansion, and the accountFreezes key
+// (account-scoped kill switch) blew past the default 128.
+#![recursion_limit = "256"]
+
 pub mod account;
 /// v0.3 E25 (#331): the four-gate suggestion→decision pipeline (§3). The
 /// strategy advises; the kernel adjudicates; every suggestion is audited.

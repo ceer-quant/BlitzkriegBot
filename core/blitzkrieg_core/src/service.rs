@@ -1498,6 +1498,18 @@ pub struct Core {
     /// Consecutive LIVE venue rejections (a successful placement resets).
     /// Reaching the threshold trips the freeze (kill switch).
     consecutive_venue_rejects: u32,
+    /// Consecutive LIVE venue rejections PER ACCOUNT. The freeze decision
+    /// reads this map — one venue's outage freezes only the accounts bound
+    /// to it, not the whole process. Reset alongside the global counter.
+    consecutive_venue_rejects_by_account: HashMap<String, u32>,
+    /// The account-scoped kill book: account id → freeze reason. A frozen
+    /// account refuses NEW orders at the submission gate and drops entry
+    /// candidates in the engine (mirrored via `set_account_frozen`), while
+    /// its exits keep flowing — the same 「拒开仓、放平仓」 contract the
+    /// trading switch has, raised automatically instead of by hand. The
+    /// GLOBAL kill switch (`risk.kill`, `is_killed`) is unchanged and
+    /// still outranks everything.
+    account_freezes: HashMap<String, String>,
     /// Consecutive failed reconciliation sweeps (a successful sweep resets).
     /// Reaching the threshold freezes trading — a blind safety net is the
     /// failure mode that lets ghosts and orphans accumulate (E31-b).
@@ -2204,6 +2216,8 @@ impl Core {
             escalation_skips: HashSet::new(),
             pending_venue_cancels: Vec::new(),
             consecutive_venue_rejects: 0,
+            consecutive_venue_rejects_by_account: HashMap::new(),
+            account_freezes: HashMap::new(),
             consecutive_sweep_failures: 0,
             last_error: None,
             recon_watermark_ms: 0,
@@ -5535,6 +5549,7 @@ impl Core {
             engine.set_account_equity(id, equity);
             engine.set_account_trading(id, a.trading_enabled);
             engine.set_account_venue(id, &a.venue);
+            engine.set_account_frozen(id, self.account_freezes.contains_key(id));
         }
         engine.set_positions_view(held_view);
         let orders = engine.evaluate(now_ms);
@@ -6115,6 +6130,7 @@ impl Core {
                     e.set_account_equity(id, equity);
                     e.set_account_trading(id, a.trading_enabled);
                     e.set_account_venue(id, &a.venue);
+                    e.set_account_frozen(id, self.account_freezes.contains_key(id));
                 }
                 e.set_positions_view(held_view);
                 e.replay_candidates(now_ms)
@@ -7081,6 +7097,12 @@ impl Core {
             } else {
                 serde_json::json!({ "active": false })
             },
+            // The account-scoped kill book (account.freeze / auto-freeze on
+            // the venue-rejection streak): account id → why. Empty object when
+            // nothing is frozen — a client distinguishes "global freeze"
+            // (tradingFrozen.active) from "these accounts only" without
+            // parsing reasons.
+            "accountFreezes": self.account_freezes,
             // In-kernel accounting audit (issue #189): the latest verdict, so the
             // panel shows what the kernel itself concluded about the books.
             "accountingAudit": self.accounting_audit_view(),
@@ -7464,6 +7486,9 @@ impl Core {
         // is the one the request names, and its posture gates the place too.
         self.accounts
             .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // Account-scoped kill switch, same contract as in `place_gated`:
+        // frozen account → new orders refused, closes pass.
+        self.account_freeze_permits(&req)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
         self.refuse_cross_account_close(&req)?;
@@ -7503,8 +7528,12 @@ impl Core {
             self.emit_order(id);
             // The venue just accepted an order from us: capability proven for
             // this instant, so the failure streak and this intent's cooldown
-            // both end here.
+            // both end here — the global readout AND the account's own
+            // streak (its venue proved itself; a sibling venue's streak is
+            // none of its business).
             self.consecutive_venue_rejects = 0;
+            self.consecutive_venue_rejects_by_account
+                .remove(o.account_id.as_str());
             self.place_cooldowns.remove(&o.internal_key);
             // A `maker_then_taker` order rests as GTC; the escalation clock
             // starts on the venue's acceptance (the submit path cannot arm it
@@ -7685,6 +7714,14 @@ impl Core {
     ) {
         self.stats.venue_rejected += 1;
         self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
+        let account_streak = {
+            let streak = self
+                .consecutive_venue_rejects_by_account
+                .entry(account_id.to_string())
+                .or_default();
+            *streak = streak.saturating_add(1);
+            *streak
+        };
         self.note_error(err, now_ms);
         {
             let acc = self
@@ -7712,13 +7749,17 @@ impl Core {
             reject_backoff_ms(attempts),
             err.message
         );
-        if self.consecutive_venue_rejects >= FREEZE_ON_REJECTS {
-            self.freeze_trading(
+        // The freeze is per ACCOUNT: the rejections came from one venue, so
+        // only the accounts that trade it stop entering. The global counter
+        // survives for the legacy readout; the trip decision is the
+        // account-scoped one.
+        if account_streak >= FREEZE_ON_REJECTS {
+            self.freeze_account(
+                account_id,
                 format!(
-                    "{} consecutive venue rejections; last: {}",
-                    self.consecutive_venue_rejects, err.message
+                    "{account_streak} consecutive venue rejections on account {account_id}; last: {}",
+                    err.message
                 ),
-                now_ms,
             );
         } else if attempts >= MAX_PLACE_ATTEMPTS {
             // One intent keeps bouncing. Entries stop here; closing intents
@@ -7792,6 +7833,76 @@ impl Core {
         ));
     }
 
+    /// Freeze ONE account (the account-scoped kill switch). Same 「拒开仓、
+    /// 放平仓」 contract as the global kill and the trading switch: the
+    /// submission gate refuses the account's new orders, the engine mirror
+    /// drops its entry candidates, its exits keep flowing. The reason is
+    /// shown by `account.list` (`accountFreezes`) and the doctor's accounts
+    /// section. Idempotent: the first reason wins — a re-freeze while
+    /// already frozen does not overwrite the cause an operator first saw.
+    pub fn freeze_account(&mut self, account: &str, reason: String) {
+        if self.account_freezes.contains_key(account) {
+            return;
+        }
+        self.account_freezes
+            .insert(account.to_string(), reason.clone());
+        self.engine_set_account_frozen(account, true);
+        self.emit(Event::RiskAlert {
+            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
+            message: format!("account {account} frozen: {reason}"),
+        });
+        tracing::error!(account = %account, reason = %reason, "account frozen (account-scoped kill switch)");
+    }
+
+    /// Lift one account's freeze (`account.freeze` with `frozen: false`, the
+    /// reset path, or a future operator verb). Unknown account = no-op: the
+    /// freeze book only ever contains accounts the kernel knows.
+    pub fn resume_account(&mut self, account: &str) {
+        if self.account_freezes.remove(account).is_some() {
+            self.engine_set_account_frozen(account, false);
+            tracing::info!(account = %account, "account freeze lifted");
+        }
+    }
+
+    /// Why an account is frozen, when it is.
+    pub fn account_freeze_reason(&self, account: &str) -> Option<&str> {
+        self.account_freezes.get(account).map(String::as_str)
+    }
+
+    /// The whole freeze book, for the stats readout.
+    pub fn account_freezes(&self) -> &HashMap<String, String> {
+        &self.account_freezes
+    }
+
+    /// Is this account's order admitted under the account-scoped kill
+    /// switch? CLOSING intents always pass (the #174 escape hatch is per
+    /// account here, exactly as it is globally). Called from the submission
+    /// gate right beside Gate 2.
+    fn account_freeze_permits(&self, req: &OrderRequest) -> CoreResult<()> {
+        if let Some(reason) = self.account_freezes.get(req.account_id.as_str())
+            && !crate::risk::is_close_intent(&req.internal_key)
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::KillSwitchActive,
+                format!(
+                    "account `{}` is frozen (account-scoped kill switch): {reason} — \
+                     new orders refused, exits keep flowing",
+                    req.account_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Push one account's freeze fact into the engine mirror. `None` = the
+    /// engine is not installed (backtest/in-process shapes) — nothing to
+    /// mirror.
+    fn engine_set_account_frozen(&mut self, account: &str, frozen: bool) {
+        if let Some(e) = self.engine.as_mut() {
+            e.set_account_frozen(account, frozen);
+        }
+    }
+
     // ── In-kernel accounting audit (issue #189) ─────────────────────────────
     // The kernel's own three-way money check, on a timer: the ledger's books
     // against themselves, against the trade records, and against the venue's
@@ -7803,10 +7914,17 @@ impl Core {
     /// on the maintenance tick: a handful of sums over live orders, open
     /// positions and the reservation table.
     fn build_audit_input(&self, now_ms: i64) -> AuditInput {
+        // The audit's cash identity describes the ACTIVE account's book (§9.5,
+        // E28): `reserved` reads the active ledger, so the live-BUY notional it
+        // is compared against must count only the ACTIVE account's orders. A
+        // sibling account's live BUY is spoken for in ITS book — counting it
+        // here made `reservations_match_open_buys` drift by that notional
+        // whenever any other account held an open order.
+        let active_id = self.accounts.active_id().clone();
         let mut open_buy_notional = Decimal::ZERO;
         let mut open_buys = 0usize;
         for o in self.ome.live_orders() {
-            if o.side != Side::Buy {
+            if o.side != Side::Buy || o.account_id != active_id {
                 continue;
             }
             open_buys += 1;
@@ -10315,6 +10433,8 @@ impl Core {
         self.pending_venue_cancels.clear();
         self.books.clear();
         self.consecutive_venue_rejects = 0;
+        self.consecutive_venue_rejects_by_account.clear();
+        self.account_freezes.clear();
         self.consecutive_sweep_failures = 0;
         self.last_error = None;
         if let Some(l) = self.applied_log.as_ref() {
@@ -10886,6 +11006,11 @@ impl Core {
         // intents (defense in depth, one vocabulary: ACCOUNT_LIMIT).
         self.accounts
             .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
+        // Account-scoped kill switch: a frozen account refuses NEW orders at
+        // the submission gate (closes pass — the #174 hatch, per account).
+        // Manual-orders enforcement point; strategy entries were already
+        // dropped in the engine (the frozen-scope filter).
+        self.account_freeze_permits(&req)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
         self.refuse_cross_account_close(&req)?;
@@ -21678,10 +21803,10 @@ mod trading_capability_tests {
         assert_eq!(c.positions().open_positions().len(), 1);
     }
 
-    /// Consecutive venue refusals freeze trading: the risk gate goes
-    /// kill-switch, the panel sees a reason, and further placement is refused
-    /// with KillSwitchActive. One rejection short of the threshold must NOT
-    /// freeze.
+    /// Consecutive venue refusals freeze the ACCOUNT (the account-scoped kill
+    /// switch): the panel sees a reason, and further placement into that
+    /// account is refused with KillSwitchActive while the GLOBAL gate stays
+    /// untouched. One rejection short of the threshold must NOT freeze.
     #[test]
     fn consecutive_venue_rejections_freeze_trading() {
         let mut c = core();
@@ -21696,17 +21821,34 @@ mod trading_capability_tests {
             !c.is_killed(),
             "4 consecutive rejections must not freeze yet"
         );
+        assert!(
+            c.account_freeze_reason("default").is_none(),
+            "and the account is not frozen yet either"
+        );
         let (id, _) = c.place_pending(pending_req("k4", "s1"), 5_000).unwrap();
         c.reject_live_result(&id, Some(venue_err()), 5_100).unwrap();
-        assert!(c.is_killed(), "the 5th consecutive rejection must freeze");
+        // Per-account semantics (PR G): the ACCOUNT freezes, the global kill
+        // switch does not. On a single-account deployment the refusal shape
+        // is identical (KillSwitchActive at the gate) — the isolation teeth
+        // live in the multi-account tests below.
+        assert!(
+            !c.is_killed(),
+            "the venue-rejection streak freezes the ACCOUNT, never the global gate"
+        );
+        assert!(
+            c.account_freeze_reason("default")
+                .is_some_and(|r| r.contains("consecutive venue rejections")),
+            "the 5th consecutive rejection must freeze the account with the streak's reason"
+        );
         let stats = c.engine_stats();
         assert_eq!(stats["venueRejected"], 5);
-        assert_eq!(stats["tradingFrozen"]["active"], true);
+        assert_eq!(stats["tradingFrozen"]["active"], false);
         assert!(
-            stats["tradingFrozen"]["reason"]
+            stats["accountFreezes"]["default"]
                 .as_str()
-                .unwrap()
-                .contains("consecutive venue rejections")
+                .unwrap_or("")
+                .contains("consecutive venue rejections"),
+            "the freeze book carries the reason for the panel: {stats}"
         );
         assert!(
             stats["lastVenueError"]["message"]
@@ -21733,6 +21875,174 @@ mod trading_capability_tests {
             e.code,
             blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
         );
+        // The escape hatch is per account, exactly as the global #174 hatch:
+        // a CLOSING intent on the frozen account passes.
+        let mut close = pending_req("k10", "s1");
+        close.side = Side::Sell;
+        close.internal_key = "flatten:manual:tok".into();
+        c.place_pending(close, 6_100)
+            .unwrap_or_else(|e| panic!("a close must pass the account freeze: {e}"));
+    }
+
+    /// PR G teeth: a venue-rejection streak on account `paper` freezes ONLY
+    /// `paper` — `default` keeps placing, the global kill switch stays quiet,
+    /// and nothing automatic lifts the freeze. The fixture lives in
+    /// `audit_fix_tests`; re-declared here because module fixtures are
+    /// deliberately not shared.
+    #[test]
+    fn a_venue_rejection_streak_freezes_only_that_account() {
+        let mut c = two_book_fixture();
+        let paper_key = |k: &str| {
+            let mut r = pending_req(k, "s1");
+            r.account_id = crate::account::AccountId::from("paper");
+            r
+        };
+        for i in 0..5 {
+            let (id, _) = c
+                .place_pending(paper_key(&format!("p{i}")), i * 1_000 + 1)
+                .unwrap();
+            c.reject_live_result(&id, Some(venue_err()), i * 1_000 + 100)
+                .unwrap();
+        }
+        // paper is frozen with the streak's reason; default is untouched.
+        assert!(
+            c.account_freeze_reason("paper")
+                .is_some_and(|r| r.contains("consecutive venue rejections")),
+            "paper's 5-rejection streak must freeze paper"
+        );
+        assert!(c.account_freeze_reason("default").is_none());
+        assert!(!c.is_killed(), "the global gate must stay quiet");
+
+        // default trades on (its orders pass every gate).
+        c.place_pending(pending_req("d1", "s1"), 6_000)
+            .unwrap_or_else(|e| panic!("an unrelated account keeps trading: {e}"));
+
+        // paper's new orders are refused with KillSwitchActive naming the
+        // freeze.
+        let e = c.place_pending(paper_key("p9"), 6_100).unwrap_err();
+        assert_eq!(
+            e.code,
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+        );
+        assert!(e.message.contains("frozen"), "naming the freeze: {e}");
+
+        // paper's CLOSE still passes (#174 hatch, per account).
+        let mut close = paper_key("p10");
+        close.side = Side::Sell;
+        close.internal_key = "exit:strategy:tok".into();
+        c.place_pending(close, 6_200)
+            .unwrap_or_else(|e| panic!("a frozen account's close must flow: {e}"));
+
+        // Manual lift re-opens entries (session-scoped: no persistence).
+        c.resume_account("paper");
+        assert!(c.account_freeze_reason("paper").is_none());
+        c.place_pending(paper_key("p11"), 6_300)
+            .unwrap_or_else(|e| panic!("a resumed account trades again: {e}"));
+    }
+
+    /// The frozen scope's entry candidates are dropped in the ENGINE (the
+    /// mirror rides every evaluate push) while its exits bypass that path;
+    /// the submission gate independently refuses a slipped entry, so both
+    /// layers must agree before an order can open on a frozen account.
+    #[test]
+    fn frozen_account_gate_refuses_entries_closes_flow() {
+        let mut c = two_book_fixture();
+        c.freeze_account("paper", "teeth: entries refused".into());
+        let e = c.place(pending_req_for("paper", "x1"), 0, 1).unwrap_err();
+        assert_eq!(
+            e.code,
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+        );
+
+        let mut close = pending_req_for("paper", "x2");
+        close.side = Side::Sell;
+        close.internal_key = "flatten:backstop:tok".into();
+        c.place_pending(close, 1)
+            .unwrap_or_else(|e| panic!("a frozen account's flatten must flow: {e}"));
+    }
+
+    fn pending_req_for(account: &str, key: &str) -> OrderRequest {
+        let mut r = pending_req(key, "s1");
+        r.account_id = crate::account::AccountId::from(account);
+        r
+    }
+
+    /// PR G found the E28-era audit scope error: `reservations_match_open_buys`
+    /// compared the ACTIVE ledger's `reserved` against the unfilled notional of
+    /// ALL accounts' live BUYs, so a sibling account's open order read as drift
+    /// and blocked new entries on the active book. The sibling's notional is
+    /// spoken for in ITS ledger — here it must not trip the audit.
+    #[test]
+    fn audit_reservation_scope_is_per_account() {
+        let mut c = two_book_fixture();
+        // default (active) carries a live BUY; paper carries one too.
+        c.place_pending(pending_req("d1", "s1"), 1).unwrap();
+        c.place_pending(pending_req_for("paper", "p1"), 2).unwrap();
+        // The audit reads the active book: 1 live BUY, reserved == its notional.
+        let report = c.run_accounting_audit(10);
+        assert!(
+            report.ok,
+            "a sibling account's live BUY is not the active book's drift: {:?}",
+            report
+                .checks
+                .iter()
+                .filter(|c| !c.ok)
+                .map(|c| &c.name)
+                .collect::<Vec<_>>()
+        );
+        let res = report
+            .checks
+            .iter()
+            .find(|c| c.name == "reservations_match_open_buys")
+            .unwrap();
+        assert_eq!(res.actual, dec!(4), "default's own unfilled notional only");
+    }
+
+    /// The `audit_fix_tests::two_book_core` fixture, module-local: two
+    /// Active accounts (default + paper), no trade log, single config shape.
+    fn two_book_fixture() -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            trade_log_path: None,
+            // `CoreConfig::default` points the order log at the process cwd's
+            // `data/orders/orders.jsonl` — these tests must not leave live
+            // orders there for the next cwd-sharing fixture to restore.
+            order_log_path: None,
+            ..Default::default()
+        };
+        Core::with_account_book(cfg, book)
     }
 
     /// A failed capability self-check freezes trading, and the report stays
@@ -21890,6 +22200,12 @@ mod settlement_service_tests {
             position_log_path: path("positions.jsonl"),
             trade_log_path: path("trades.jsonl"),
             settlement_log_path: path("settlements.jsonl"),
+            // The order log is NOT inherited from `CoreConfig::default`'s
+            // cwd-relative `data/orders/orders.jsonl`: a test that places live
+            // orders (or one that shares this cwd and reads the residue as
+            // restored BUYs) would cross-contaminate the next `settling_core`
+            // in the same process cwd.
+            order_log_path: path("orders.jsonl"),
             ..Default::default()
         });
         c.set_balance(balance);

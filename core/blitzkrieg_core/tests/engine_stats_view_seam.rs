@@ -250,26 +250,46 @@ fn every_engine_stats_key_is_carried_or_explicitly_waived() {
 #[test]
 fn a_freeze_reaches_the_panel_through_the_view_type() {
     let mut c = dry_core();
-    // Drive refusals until the kernel's own streak threshold freezes trading
-    // (the threshold is the kernel's, so the loop is bounded, not assumed).
+    // Drive refusals until the kernel's own streak threshold freezes the
+    // account (the threshold is the kernel's, so the loop is bounded, not
+    // assumed). PR G: the freeze is account-scoped — the global kill switch
+    // stays quiet — and once frozen, new entries are refused at the gate, so
+    // the streak continues on the rejection receipts themselves.
     let mut rejections = 0u64;
-    while !c.is_killed() && rejections < 16 {
-        let (id, _) = c
-            .place_pending(intent(&format!("k{rejections}")), NOW + rejections as i64)
-            .expect("pending");
-        c.reject_live_result(&id, Some(venue_refusal()), NOW + rejections as i64 + 100)
-            .expect("reject");
+    while rejections < 16 {
+        if let Ok((id, _)) =
+            c.place_pending(intent(&format!("k{rejections}")), NOW + rejections as i64)
+        {
+            c.reject_live_result(&id, Some(venue_refusal()), NOW + rejections as i64 + 100)
+                .expect("reject");
+        }
         rejections += 1;
+        if c.account_freeze_reason(blitzkrieg_core::model::default_account_id().as_str())
+            .is_some()
+        {
+            break;
+        }
     }
     assert!(
-        c.is_killed(),
-        "fixture: {rejections} consecutive venue refusals must freeze trading"
+        c.account_freeze_reason(blitzkrieg_core::model::default_account_id().as_str())
+            .is_some(),
+        "fixture: {rejections} consecutive venue refusals must freeze the account"
+    );
+    assert!(
+        !c.is_killed(),
+        "the account-scoped freeze is not the global kill switch"
     );
 
     let raw = c.engine_stats();
     // Fixture guard, on the kernel's side of the seam: the raw payload really
     // does carry what the panel needs, so a failure below is the view's fault.
-    assert_eq!(raw["tradingFrozen"]["active"], serde_json::json!(true));
+    assert_eq!(raw["tradingFrozen"]["active"], serde_json::json!(false));
+    assert!(
+        raw["accountFreezes"][blitzkrieg_core::model::default_account_id().as_str()]
+            .as_str()
+            .is_some(),
+        "the account freeze book carries the reason"
+    );
     assert_eq!(raw["venueRejected"], serde_json::json!(rejections));
 
     let view = view_of(&c);
@@ -280,18 +300,25 @@ fn a_freeze_reaches_the_panel_through_the_view_type() {
         "venueRejected must survive the view type, not arrive as Default"
     );
 
-    // 2. The freeze banner's source.
+    // 2. The freeze banner's source. PR G: the freeze is account-scoped, so
+    //    the banner's `tradingFrozen` stays down; the reason travels in the
+    //    account freeze book instead.
     let frozen = view
         .trading_frozen
         .as_ref()
         .expect("tradingFrozen must survive the view type — the freeze banner has no other source");
     assert!(
-        frozen.active,
-        "the kernel is frozen; the view says otherwise"
+        !frozen.active,
+        "an account-scoped freeze is not the global kill switch"
     );
-    let reason = frozen
-        .reason
-        .as_deref()
+    assert!(
+        !view.account_freezes.is_empty(),
+        "the account freeze book must survive the view type — the per-account banner has no other source"
+    );
+    let reason = view
+        .account_freezes
+        .get(blitzkrieg_core::model::default_account_id().as_str())
+        .map(String::as_str)
         .expect("a freeze carries its reason");
     assert!(
         reason.contains("consecutive venue rejections"),
