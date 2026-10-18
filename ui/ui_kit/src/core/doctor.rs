@@ -274,6 +274,9 @@ pub fn compose(ready: &Value, stats: &Value, account_list: Result<&Value, String
     // ── per-strategy rejections (engine.stats.strategies) ──
     compose_strategy_rejections(stats, &mut findings);
 
+    // ── account-scoped kill book (engine.stats.accountFreezes) ──
+    compose_account_freezes(stats, &mut findings);
+
     // ── accounts (account.list) ──
     match account_list {
         Ok(v) => compose_accounts(v, &mut findings),
@@ -518,6 +521,30 @@ fn compose_accounts(list: &Value, out: &mut Vec<Finding>) {
     }
 }
 
+/// The account-scoped kill book (`engine.stats.accountFreezes`): one BAD
+/// finding per frozen account, naming the reason. BAD, not WARN — a freeze
+/// is the kernel's own verdict that something on this venue went wrong; the
+/// operator is expected to look NOW (unlike a trading switch, which is a
+/// deliberate operator act).
+fn compose_account_freezes(stats: &Value, out: &mut Vec<Finding>) {
+    let Some(book) = stats.get("accountFreezes").and_then(|v| v.as_object()) else {
+        return; // old core without the surface — silent, like other seams
+    };
+    if book.is_empty() {
+        return;
+    }
+    for (id, reason) in book {
+        out.push(Finding {
+            section: "accounts",
+            label: id.clone(),
+            detail: format!(
+                "FROZEN (account-scoped kill switch) — {reason}; new orders refused, exits flow"
+            ),
+            level: Level::Bad,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +638,35 @@ mod tests {
             .unwrap();
         assert_eq!(f.level, Level::Ok);
         assert!(f.detail.contains("+10"), "{}", f.detail);
+    }
+
+    /// A frozen account fails the doctor as BAD, naming the account and the
+    /// kernel's own reason. An empty freeze book stays quiet.
+    #[test]
+    fn a_frozen_account_is_bad_with_reason() {
+        let mut stats = quiet_stats();
+        stats["accountFreezes"] = json!({
+            "probe2": "5 consecutive venue rejections on account probe2; last: auth failed",
+        });
+        let r = compose_now(stats, accounts(json!({ "accounts": [] })));
+        assert!(!r.ok());
+        assert_eq!(r.bad_count(), 1, "{:#?}", r.findings);
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.section == "accounts" && f.label == "probe2")
+            .unwrap();
+        assert_eq!(f.level, Level::Bad);
+        assert!(f.detail.contains("FROZEN"), "{}", f.detail);
+        assert!(
+            f.detail.contains("5 consecutive venue rejections"),
+            "the kernel's reason rides along: {}",
+            f.detail
+        );
+        // An empty book (or an old core without the key) stays quiet.
+        let mut stats = quiet_stats();
+        stats["accountFreezes"] = json!({});
+        assert!(compose_now(stats, accounts(json!({ "accounts": [] }))).ok());
     }
 
     /// A silent token (zero ticks in the window) is a WARN naming the token.

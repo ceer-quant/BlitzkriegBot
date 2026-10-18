@@ -337,6 +337,13 @@ pub mod method {
     /// (positions stay strategy-managed until flat). Persisted to
     /// accounts.toml, re-read at next boot.
     pub const ACCOUNT_TRADING_SET: &str = "account.trading.set";
+    /// The per-account FREEZE (account-scoped kill switch,
+    /// `account.freeze`): `{accountId, frozen, reason}` — a frozen account
+    /// refuses NEW orders (manual AND strategy entries; the engine drops its
+    /// candidates) while its EXITS keep flowing. SESSION-scoped: an
+    /// automatic freeze (venue-rejection streak) lives in memory only, so
+    /// the lift is too — a restart starts clean and re-probes.
+    pub const ACCOUNT_FREEZE: &str = "account.freeze";
     /// The per-account strategy assignment (`account.strategies.set`): an
     /// empty list = inherit every globally-enabled strategy; non-empty =
     /// the account runs exactly those (one engine instance per (account,
@@ -2031,6 +2038,37 @@ pub struct AccountTradingSetResult {
 pub const ACCOUNT_TRADING_SET_NOTE: &str = "false = new entries refused for this account, existing \
      positions stay managed until flat (exits always flow); persisted to \
      accounts.toml, re-read at next boot";
+
+/// `account.freeze` params: the account-scoped kill switch. `frozen: true`
+/// refuses the account's NEW orders (manual and strategy entries) while its
+/// EXITS keep flowing; `frozen: false` lifts the freeze. Session-scoped —
+/// not persisted to accounts.toml (an automatic freeze must not outlive the
+/// process that observed its cause; a restart re-probes).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFreezeParams {
+    pub account_id: String,
+    pub frozen: bool,
+    /// Audit trail only — shown by `account.list` and echoed in the reply.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.freeze` result: the freeze state now in force, with the reason
+/// currently on the book (a no-op re-freeze keeps the FIRST reason).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFreezeResult {
+    pub account_id: String,
+    pub frozen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+pub const ACCOUNT_FREEZE_NOTE: &str = "true = new orders refused for this account (manual and \
+     strategy entries), existing positions stay managed until flat (exits \
+     always flow); session-scoped — a restart starts clean and re-probes";
 
 /// `account.strategies.set` params: the strategies THIS account runs. An
 /// empty list = INHERIT every globally-enabled strategy (the single-book

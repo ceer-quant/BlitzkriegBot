@@ -2704,6 +2704,35 @@ async fn handle_line(
             .await
         }
 
+        method::ACCOUNT_FREEZE => {
+            typed(params, |p: AccountFreezeParams| {
+                let core = core.clone();
+                async move {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    c.accounts_mut().require(&id)?;
+                    if p.frozen {
+                        c.freeze_account(
+                            id.as_str(),
+                            p.reason
+                                .clone()
+                                .unwrap_or_else(|| "manual freeze".to_string()),
+                        );
+                    } else {
+                        c.resume_account(id.as_str());
+                    }
+                    Ok(serde_json::to_value(AccountFreezeResult {
+                        account_id: id.as_str().to_string(),
+                        frozen: p.frozen,
+                        reason: c.account_freeze_reason(id.as_str()).map(String::from),
+                        note: ACCOUNT_FREEZE_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
         method::ACCOUNT_STRATEGIES_SET => {
             typed(params, |p: AccountStrategiesSetParams| {
                 let core = core.clone();
