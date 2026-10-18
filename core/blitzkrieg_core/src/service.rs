@@ -9496,6 +9496,160 @@ impl Core {
         }
     }
 
+    /// E-VA companion: the single-leg orphan sweep for ATOMIC pair strategies.
+    ///
+    /// The atomic batch (E-VA) guarantees pair legs leave the book together —
+    /// but only at SUBMISSION. Afterwards the legs live and die on their own:
+    /// one leg fills, the partner's resting order is cancelled (manual, the
+    /// #457 expiry sweep, a venue reject) and the strategy is left holding a
+    /// NAKED leg — exposure the pair economics never priced, earning nothing
+    /// and settling at the coin flip. This sweep is the compensation watch:
+    /// for every (account, strategy) scope that BOTH declared `atomic_batch`
+    /// AND has a governed virtual pot, a position whose partner token has no
+    /// sibling position, no live partner BUY order and no in-flight partner
+    /// taker past the grace window is the orphan — it is alerted once (the
+    /// existing `RiskAlert` event, no new wire type) and flattened through the
+    /// manual exit path (`flatten`, Taker walk out of the position's own
+    /// account).
+    ///
+    /// Scope discipline:
+    ///   - zero-config = zero behaviour: a scope with no cap in
+    ///     `virtual_limits` is ungoverned and never touched — the replay
+    ///     baseline stays byte-identical;
+    ///   - live path only (`replay_sched()` skips — the sweep is live-panel
+    ///     semantics, the nofast replay loop keeps its own shape);
+    ///   - the 5 s grace window covers the serial same-tick leg landing (both
+    ///     legs of one batch fill inside one evaluate cycle, and the partner's
+    ///     position row can lag the first leg's by that whole pass); a
+    ///     constant, not a tunable — the window is a bookkeeping race bound,
+    ///     not a policy dial;
+    ///   - debounce is structural: a flattened leg leaves the book, so the
+    ///     next tick's condition is simply false; a flatten that failed
+    ///     because a live SELL already rests for the token is skipped by
+    ///     `flatten` itself (no retry storm, no extra ledger).
+    ///
+    /// Chase compensation (re-price and re-offer the missing leg) is
+    /// deliberately NOT here — `run_escalation_sweep` already owns the
+    /// maker→taker escalation vocabulary and a chase needs its own
+    /// internal-key design; first version cancels the naked leg only.
+    fn run_pair_orphan_sweep(&mut self, now_ms: i64) {
+        if self.replay_sched() {
+            return;
+        }
+        /// Same-tick serial landing window for a pair's two legs (see the
+        /// scope discipline above). Not a tunable.
+        const PAIR_LAND_GRACE_MS: i64 = 5_000;
+        // The governed atomic scopes: every (account, strategy) pair the pot
+        // book has a cap for — the strategy's `atomic_batch` declaration is
+        // implied by the pot existing (`virtual_limits` is only wired to
+        // atomic strategies in practice; a governed scope for a non-atomic
+        // strategy is a config decision we honor the same way, since the
+        // orphan condition below is strategy-shape agnostic).
+        let governed: Vec<(String, String)> = self.virtual_accounts.scopes();
+        for (account_id, strategy) in governed {
+            // The live BUY orders this strategy rests on this account, keyed
+            // by token: a partner with a still-breathing entry order is not
+            // orphaned (its leg is arriving), and the position side of the
+            // SAME order set covers the inverse asymmetry (first leg still
+            // resting + second leg already held).
+            let live_partner_buys: std::collections::HashSet<String> = self
+                .ome
+                .live_orders()
+                .into_iter()
+                .filter(|o| {
+                    o.side == Side::Buy
+                        && o.strategy == strategy
+                        && o.account_id.as_str() == account_id.as_str()
+                })
+                .map(|o| o.token_id.clone())
+                .collect();
+            let inflight_tokens: std::collections::HashSet<String> = self
+                .inflight_takers
+                .iter()
+                .filter_map(|leg| self.ome.get(&leg.order_id))
+                .filter(|o| {
+                    o.side == Side::Buy
+                        && o.strategy == strategy
+                        && o.account_id.as_str() == account_id.as_str()
+                })
+                .map(|o| o.token_id.clone())
+                .collect();
+            let orphans: Vec<(String, String, String, String)> = self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| {
+                    p.strategy == strategy
+                        && p.account_id.as_str() == account_id
+                        && !p.partner_token_id.is_empty()
+                        // Settlement-dead positions belong to the settlement
+                        // ladder, not the unwind desk: a hold-to-settlement
+                        // pair rides PAST its round end by design (the same
+                        // live-only rule `can_open` and the systemic facts
+                        // count by). A naked leg is only unwound at market
+                        // prices while its market is still live.
+                        && p.expires_at_ms > now_ms
+                        && now_ms - p.entered_at_ms >= PAIR_LAND_GRACE_MS
+                        && !self.positions.open_positions().iter().any(|sib| {
+                            sib.token_id == p.partner_token_id
+                                && sib.strategy == strategy
+                                && sib.account_id.as_str() == account_id
+                        })
+                        // The #427 cross-venue completion set: the package's
+                        // pair lands as OPPOSITE directions on the same asset
+                        // in the same round (one leg per venue), while
+                        // `partner_token_id` only ever names the SAME-market
+                        // completion token — without this clause a fully
+                        // landed pair would read as two orphans and be
+                        // flattened whole, destroying the locked profit the
+                        // watch exists to protect. An opposite-direction
+                        // sibling in the same scope and round window (the
+                        // shared `expires_at_ms` is the round identity the
+                        // position carries) is the market-neutral set the
+                        // strategy built; it is not naked.
+                        && !self.positions.open_positions().iter().any(|sib| {
+                            sib.strategy == strategy
+                                && sib.account_id.as_str() == account_id
+                                && sib.asset == p.asset
+                                && sib.expires_at_ms == p.expires_at_ms
+                                && sib.direction != p.direction
+                        })
+                        && !live_partner_buys.contains(&p.partner_token_id)
+                        && !inflight_tokens.contains(&p.partner_token_id)
+                })
+                .map(|p| {
+                    (
+                        p.id.clone(),
+                        p.token_id.clone(),
+                        p.venue.clone(),
+                        p.partner_token_id.clone(),
+                    )
+                })
+                .collect();
+            for (id, token, venue, partner) in orphans {
+                let message = format!(
+                    "pair leg orphaned: strategy={strategy} account={account_id} \
+                     held={token}@{venue} partner_missing={partner} — \
+                     flattening the naked leg"
+                );
+                tracing::warn!(position = %id, token = %token, partner = %partner,
+                    "pair leg orphaned — flattening the naked leg");
+                self.emit(Event::RiskAlert {
+                    code: CoreErrorCode::RiskRejected,
+                    message,
+                });
+                // The manual exit path: SELL Taker walk out of the position's
+                // own account (E28 §9.2), ExitReason::Manual — no new enum
+                // value, the audit line above carries the real cause. A
+                // refusal (a live SELL already resting, a halted breaker) is
+                // the sweep's own skip posture: the position stays in the
+                // book and the next tick re-judges it, so the result is
+                // honestly dropped rather than swallowed.
+                let _ = self.flatten(Some(&id), now_ms);
+            }
+        }
+    }
+
     /// #457: close a STILL-LIVE order the kernel judges settlement-dead —
     /// mark `ForceClosed`, release its reservation, and (live mode) queue a
     /// venue cancel so the real venue state converges with the book. Refuses
@@ -12893,6 +13047,11 @@ impl Core {
         // BEFORE the escalation sweep, so a dead round is never chased.
         // Live-clock only (see the sweep's own replay note).
         self.run_expiry_sweep(now_ms);
+        // E-VA companion: a pair leg whose partner is gone (filled one way,
+        // cancelled the other) past the landing grace window is a naked leg —
+        // alert once, flatten it. Governed atomic scopes only; live path
+        // only (the nofast replay loop keeps its own shape).
+        self.run_pair_orphan_sweep(now_ms);
         // Escalate due maker_then_taker orders: cancel maker, cross as taker.
         // Replay fast path: the sweep over every live order runs only when
         // the order set changed, or when the earliest armed escalation
@@ -19714,6 +19873,406 @@ mod strategy_dispatch_tests {
             c.engine_evaluate(now + 5_000),
             1,
             "the freed pot funds the next batch"
+        );
+    }
+
+    // ── cross_venue_arb × E-VA: the REAL package through the kernel ─────────
+
+    /// The REAL cross_venue_arb Lua package, hosted the way `install_engine`
+    /// hosts one: package loaded from its worktree dir, `holds_to_settlement`
+    /// and `atomic_batch` stamped from the manifest, the kernel's ONE fee
+    /// schedule injected (the shipped legacy_quadratic — `bk.fees()` nil
+    /// would refuse everything). Registration rides
+    /// `register_user_strategy` (the `load_lua_package_inner` route minus the
+    /// engine plumbing), DISABLED — the test enables it explicitly, the same
+    /// opt-in an operator makes.
+    fn core_with_cross_venue_arb(virtual_cap: Option<Decimal>) -> Core {
+        let package_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../user_layer/strategies_lua/cross_venue_arb");
+        let mut virtual_limits = HashMap::new();
+        if let Some(cap) = virtual_cap {
+            virtual_limits.insert(
+                "cross_venue_arb".to_string(),
+                VirtualAccountLimit {
+                    max_batch_notional_usd: Some(cap),
+                    accounts: vec![blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string()],
+                },
+            );
+        }
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(10000),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(100000),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: false,
+            min_round_age_sec: 0,
+            // The pair's legs are DECLARED at the strategy's capacity (the
+            // thin leg's depth); the kernel band must never clamp below it.
+            min_shares: dec!(1),
+            max_shares: dec!(10000),
+            // The pair's two legs are TWO live positions on one asset with
+            // DIFFERENT condition ids (one per venue) — the #363 per-asset
+            // count must cover them, exactly as an operator running this
+            // package would configure it (`--max-positions-per-asset 2`).
+            max_positions_per_asset: Some(4),
+            // cwd-relative logs are the historical three-copies pollution:
+            // a test writes nothing to the process cwd.
+            order_log_path: None,
+            trade_log_path: None,
+            position_log_path: None,
+            execution_policy_path: None,
+            positions: crate::position::PositionConfig {
+                // Same shape as the per-asset count above, on the position
+                // manager itself: two legs = two open positions.
+                max_positions: 8,
+                ..Default::default()
+            },
+            virtual_limits,
+            ..Default::default()
+        });
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        crate::strategies::test_support::host_disabled(&mut eng, cfg.trend, cfg.spread_arb);
+        let loaded = crate::strategy_engine::lua_loader::load_lua_package(&package_dir)
+            .expect("cross_venue_arb package must load");
+        assert!(
+            loaded.atomic_batch,
+            "the fixture premise: the manifest declares atomic_batch"
+        );
+        let sched = crate::exit_policy::fee_schedule();
+        let adapter = crate::strategy_engine::lua_loader::LuaEngineAdapter::new(
+            loaded.strategy,
+            loaded.tunables,
+        )
+        .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
+        .declare_atomic_batch(loaded.atomic_batch);
+        adapter.set_fee_schedule(blitzkrieg_lua_runtime::FeeScheduleView {
+            name: sched.name.to_string(),
+            rate: sched.rate.to_string(),
+            exponent: sched.exponent,
+        });
+        eng.register_user_strategy(Box::new(adapter), format!("lua:{}", package_dir.display()))
+            .expect("cross_venue_arb registers");
+        assert!(eng.set_strategy_enabled("cross_venue_arb", true));
+        c.enable_engine(eng);
+        c
+    }
+
+    /// The two-venue round the package prices: pm quotes the cheaper UP ask,
+    /// kx the cheaper DOWN ask. `expires_at_ms` rides the 900 s grid (the
+    /// #354 cadence the config runs).
+    fn cross_venue_markets(now: i64) -> Vec<CryptoMarket> {
+        let slot = now / 1000 / 900;
+        let market = |venue: &str, cond: &str, up: &str, down: &str| CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: cond.into(),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.48),
+            down_price: dec!(0.45),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "BTC up or down".into(),
+        };
+        vec![
+            market("polymarket", "pm-cond", "pm-up", "pm-down"),
+            market("kalshi", "kx-cond", "kx-up", "kx-down"),
+        ]
+    }
+
+    /// The confirmed mapping binding the two listings into one bet (the human
+    /// gate: `unified_confirm`'s own ledger route — the exact path production
+    /// clicks).
+    fn confirm_cross_venue_mapping(c: &mut Core, now: i64) {
+        let listing =
+            |venue: blitzkrieg_market_api::unified::Venue, cond: &str, up: &str, down: &str| {
+                blitzkrieg_market_api::unified::PlatformListing {
+                    venue,
+                    condition_id: cond.into(),
+                    up_token_id: up.into(),
+                    down_token_id: down.into(),
+                    asset: Some("bitcoin".into()),
+                    title: "Bitcoin Up or Down".into(),
+                    settlement_rules: "Binance 1m candle".into(),
+                    settlement_source: blitzkrieg_market_api::unified::SettlementSource::Chainlink,
+                    expires_at_ms: now + 900_000,
+                    status: blitzkrieg_market_api::unified::ListingStatus::Active,
+                }
+            };
+        c.unified_confirm(
+            "Bitcoin Up or Down",
+            "uid:test",
+            vec![
+                listing(
+                    blitzkrieg_market_api::unified::Venue::Polymarket,
+                    "pm-cond",
+                    "pm-up",
+                    "pm-down",
+                ),
+                listing(
+                    blitzkrieg_market_api::unified::Venue::Kalshi,
+                    "kx-cond",
+                    "kx-up",
+                    "kx-down",
+                ),
+            ],
+            now,
+        )
+        .expect("the two-listing mapping confirms");
+    }
+
+    /// Feed the pair books: pm up ask 0.44 / depth 600, kx down ask 0.42 /
+    /// depth 250 (the thin leg), the other legs mid-priced. Cross-venue pair
+    /// cost ≈ 0.875 + fees ≤ 0.98 → the package fires both legs.
+    fn feed_cross_venue_books(c: &mut Core, now: i64) {
+        let mut book = |token: &str, ask: Decimal, depth: Decimal| {
+            c.engine_on_data(
+                DataEvent::Book {
+                    token_id: token.into(),
+                    bids: vec![(ask - dec!(0.01), depth)],
+                    asks: vec![(ask, depth)],
+                    now_ms: now,
+                },
+                now,
+            );
+        };
+        book("pm-up", dec!(0.44), dec!(600));
+        book("pm-down", dec!(0.50), dec!(600));
+        book("kx-up", dec!(0.48), dec!(9000));
+        book("kx-down", dec!(0.42), dec!(250));
+    }
+
+    #[test]
+    fn cross_venue_arb_over_pot_refuses_the_whole_pair_through_the_real_package() {
+        // Two legs at 0.44 / 0.42 × 250 declared shares ≈ 215 notional. A pot
+        // of 200 covers neither pair whole... it refuses the WHOLE batch:
+        // zero legs reach the OME, and the refusal rides the existing
+        // StrategyLimit accounting (`limit.virtualCap`, one per leg).
+        let mut c = core_with_cross_venue_arb(Some(dec!(200)));
+        let now = 1_700_000_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: cross_venue_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        confirm_cross_venue_mapping(&mut c, now);
+        feed_cross_venue_books(&mut c, now + 1_000);
+        assert_eq!(
+            c.engine_evaluate(now + 2_000),
+            0,
+            "an over-cap pot must place ZERO legs through the real package"
+        );
+        assert!(c.ome().live_orders().is_empty(), "no leg reaches the OME");
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "cross_venue_arb");
+        assert_eq!(
+            s["rejectionCauses"]["limit.virtualCap"], 2,
+            "both legs bucketed: {s}"
+        );
+        assert_eq!(
+            c.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "cross_venue_arb"),
+            Decimal::ZERO,
+            "a refused pair holds nothing"
+        );
+
+        // The same books under a pot that fits: BOTH legs place — the
+        // acceptance twin proving the refusal above was the cap, not the
+        // package. The package quotes at its own asks, so each leg's
+        // MakerThenTaker POST crosses and the leg lands inside its own place
+        // call: the pot's holds convert to position occupancy within the
+        // cycle, and the committed 215 reads off the POSITION book (the pot's
+        // own `batch_fits` arithmetic: used + committed_elsewhere).
+        let mut c2 = core_with_cross_venue_arb(Some(dec!(1000)));
+        c2.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: cross_venue_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        confirm_cross_venue_mapping(&mut c2, now);
+        feed_cross_venue_books(&mut c2, now + 1_000);
+        assert_eq!(c2.engine_evaluate(now + 2_000), 2, "both legs place");
+        let committed: Decimal = c2
+            .positions()
+            .open_positions()
+            .iter()
+            .map(|p| p.cost_usd)
+            .sum();
+        assert_eq!(
+            committed,
+            dec!(215),
+            "250 × (0.44 + 0.42) committed as ONE ticket"
+        );
+        assert_eq!(
+            c2.positions().open_positions().len(),
+            2,
+            "the pair is whole: one position per venue leg"
+        );
+    }
+
+    #[test]
+    fn pair_orphan_sweep_flattens_a_naked_leg_after_the_grace_window() {
+        // The compensation watch: leg ONE lands, leg TWO's order dies before
+        // it can (the starved ledger below is one real way — the #457 expiry
+        // sweep, a manual withdraw and a venue reject all share the same
+        // terminal shape), and after the 5 s landing grace the LIVE tick sweep
+        // alerts and flattens the naked leg.
+        //
+        // Device: the ledger runs dry between the legs. pm-up places and
+        // FILLS inside its own place call (the package prices at its own ask,
+        // so the MakerThenTaker POST crosses and escalates); kx-down's 105
+        // reserve then exceeds what the book has left and its place dies —
+        // a leg that never rested, never filled, never will.
+        let mut c = core_with_cross_venue_arb(Some(dec!(1000)));
+        {
+            // Drain the default book to 110: pm-up (0.44 × 250 = 110) just
+            // fits; kx-down (0.42 × 250 = 105) does not.
+            c.accounts_mut().active_ledger_mut().set_balance(dec!(110));
+        }
+        let now = 1_700_000_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: cross_venue_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        confirm_cross_venue_mapping(&mut c, now);
+        feed_cross_venue_books(&mut c, now + 1_000);
+        assert_eq!(c.engine_evaluate(now + 2_000), 1, "only leg one lands");
+
+        let held: Vec<String> = c
+            .positions()
+            .open_positions()
+            .iter()
+            .map(|p| p.token_id.clone())
+            .collect();
+        assert_eq!(
+            held,
+            vec!["pm-up".to_string()],
+            "pm-up filled, kx-down never placed"
+        );
+
+        // Inside the grace window the sweep holds its hand (the two legs of
+        // one batch land serially inside one evaluate cycle).
+        c.tick(now + 4_000).expect("grace-window tick");
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "the grace window protects the just-filled leg"
+        );
+
+        // Past the window, the LIVE tick sweep flattens the naked leg. The
+        // alert names the SAME-market partner token (`partner_of` stamps the
+        // condition's other outcome — the dry settlement ladder's key), not
+        // the cross-venue leg that died.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+        c.book_snapshot(
+            "pm-up",
+            vec![(dec!(0.42), dec!(600))],
+            vec![(dec!(0.42), dec!(600))],
+            now + 12_000,
+        );
+        c.tick(now + 12_000).expect("sweep tick");
+        let mut alerts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::RiskAlert { message, .. } = ev {
+                alerts.push(message);
+            }
+        }
+        assert!(
+            alerts.iter().any(|m| m.contains("pair leg orphaned")
+                && m.contains("cross_venue_arb")
+                && m.contains("partner_missing=pm-down")),
+            "the orphan alert must name the strategy and the missing leg: {alerts:?}"
+        );
+        assert!(
+            c.positions().open_positions().is_empty(),
+            "the naked leg is flattened: remaining = {:?}",
+            c.positions()
+                .open_positions()
+                .iter()
+                .map(|p| p.token_id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pair_orphan_sweep_leaves_ungoverned_strategies_alone() {
+        // The zero-config guard: the SAME naked-leg shape (one fill, the
+        // partner leg dead) under a strategy the pot book does NOT govern
+        // must see ZERO alerts and ZERO flatten orders — orphan compensation
+        // is a governed-atomic-scope posture, never a global behaviour.
+        let mut c = core_with_cross_venue_arb(None);
+        {
+            // Same starved-ledger device as the governed test: pm-up lands,
+            // kx-down's place dies on the reserve.
+            c.accounts_mut().active_ledger_mut().set_balance(dec!(110));
+        }
+        let now = 1_700_000_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: cross_venue_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        confirm_cross_venue_mapping(&mut c, now);
+        feed_cross_venue_books(&mut c, now + 1_000);
+        assert_eq!(
+            c.engine_evaluate(now + 2_000),
+            1,
+            "leg one lands the same way"
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "leg one fills the same way"
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+        c.book_snapshot(
+            "pm-up",
+            vec![(dec!(0.42), dec!(600))],
+            vec![(dec!(0.42), dec!(600))],
+            now + 12_000,
+        );
+        c.tick(now + 12_000).expect("sweep tick");
+        let mut alerts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::RiskAlert { message, .. } = ev {
+                alerts.push(message);
+            }
+        }
+        assert!(
+            alerts.iter().all(|m| !m.contains("pair leg orphaned")),
+            "an ungoverned scope is invisible to the orphan sweep: {alerts:?}"
+        );
+        assert_eq!(
+            c.positions().open_positions().len(),
+            1,
+            "the naked leg of an ungoverned strategy stays in the book"
+        );
+        assert!(
+            c.ome()
+                .live_orders()
+                .into_iter()
+                .all(|o| o.side != Side::Sell),
+            "no flatten SELL was spawned"
         );
     }
 

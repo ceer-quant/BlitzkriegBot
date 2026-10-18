@@ -17,9 +17,13 @@
  * issue 393 (⑤): 蓝图入口 —「创建策略」跳蓝图（新建模式）；Lua 策略行带
  * 「编辑策略」，跳蓝图并预载该包的蓝图文档（blueprint.load，只读 IPC）。
  * 跳转走 store 的 navRequest —— 页签是 App 壳的资产，页面只提请求。
+ *
+ * 创建套利（2026-10）：跨所配对卡从插件页迁出后，「创建套利」弹窗是本页的
+ * 第二个创建入口 —— 确认跨所映射、预设 cross_venue_arb 参数并启用该策略
+ * （组件不选账户：双腿由内核在同一账户原子执行）。
  */
 import { computed, ref } from 'vue'
-import { AlertTriangle, ChevronDown, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
+import { AlertTriangle, ChevronDown, Link2, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
 import { api, type StrategyStatsRow, type StrategyParamsReadoutDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { num, signedMoney, pct } from '@/lib/format'
@@ -35,6 +39,7 @@ import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
+import CreateArbDialog from '@/components/CreateArbDialog.vue'
 
 const store = usePanelStore()
 // PR H (账户筛选修复): the counters are account-scoped when an account is
@@ -196,6 +201,20 @@ function editStrategy(name: string): void {
   store.requestBlueprintPreload(name)
   store.requestNav('blueprint')
 }
+
+// ── 创建套利（2026-10）：确认跨所映射 + 预设参数 + 启用 cross_venue_arb ──────
+// 弹窗自取 unified 读数；这里只提供 default 账户的绑定读数（venue 守卫警告
+// 需要它）并在提交后刷新整屏（新策略行、参数、启用状态都在 store 读数里）。
+const arbOpen = ref(false)
+async function onArbCommitted(): Promise<void> {
+  arbFlash.value = {
+    ok: true,
+    msg: 'cross_venue_arb 已确认映射并启用 —— 表格里的策略行即生效读数。',
+  }
+  setTimeout(() => { arbFlash.value = null }, 6000)
+  await store.refresh()
+}
+const arbFlash = ref<{ ok: boolean; msg: string } | null>(null)
 /** Lua 策略的来源拼法（engine.stats 的 `source`）；蓝图编辑只对 Lua 包有意义。 */
 function isLua(r: StrategyStatsRow): boolean {
   return typeof r.source === 'string' && r.source.startsWith('lua:')
@@ -322,6 +341,18 @@ function onExpand(name: string): void {
       </AlertBanner>
     </div>
 
+    <!-- 创建套利的提交回执（弹窗成功关闭后出现；失败留在弹窗内转述）。 -->
+    <div v-if="arbFlash" class="mt-3.5">
+      <AlertBanner
+        :tone="arbFlash.ok ? 'info' : 'error'"
+        title="cross_venue_arb"
+        dismissible
+        @dismiss="arbFlash = null"
+      >
+        {{ arbFlash.msg }}
+      </AlertBanner>
+    </div>
+
     <Card class="mt-3.5" dense>
       <CardHeader label="策略表现">
         <template #action>
@@ -339,6 +370,11 @@ function onExpand(name: string): void {
           <!-- issue 393 (⑤): the page's create entry — jumps to the blueprint canvas. -->
           <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy">
             <Plus class="size-3.5" />创建策略
+          </Button>
+          <!-- 创建套利：确认跨所映射并启用 cross_venue_arb（映射确认自插件页
+               跨所配对卡迁入弹窗；不做账户选择 —— 双腿由内核同一账户原子执行）。 -->
+          <Button variant="outline" size="sm" title="确认跨所映射并启用 cross_venue_arb 策略" @click="arbOpen = true">
+            <Link2 class="size-3.5" />创建套利
           </Button>
         </template>
       </CardHeader>
@@ -630,6 +666,14 @@ function onExpand(name: string): void {
         </table>
       </div>
     </Card>
+
+    <!-- 创建套利弹窗：default 账户绑定读数由 store 提供（venue 守卫警告）。 -->
+    <CreateArbDialog
+      v-model:open="arbOpen"
+      :active-account-id="store.activeAccount"
+      :active-venue="store.activeAccountVenue"
+      @committed="onArbCommitted"
+    />
   </div>
 
   <Card v-else class="rise-in">
@@ -644,5 +688,12 @@ function onExpand(name: string): void {
         </Button>
       </template>
     </EmptyState>
+    <!-- 空态同样可达：创建套利不依赖已有策略行。 -->
+    <CreateArbDialog
+      v-model:open="arbOpen"
+      :active-account-id="store.activeAccount"
+      :active-venue="store.activeAccountVenue"
+      @committed="onArbCommitted"
+    />
   </Card>
 </template>

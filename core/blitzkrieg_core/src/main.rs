@@ -281,6 +281,10 @@ struct Args {
     /// Per-strategy entry caps: `name:max_open_positions:max_notional_usd`
     /// (repeatable; `-` or empty = no cap on that segment).
     strategy_limits: Vec<String>,
+    /// E-VA virtual-account pots for strategies that declare `atomic_batch`:
+    /// `name:max_batch_usd:acct1,acct2` (repeatable; `-` = no cap — the entry
+    /// is dropped with a warning). Parsed into `CoreConfig::virtual_limits`.
+    virtual_limits: Vec<String>,
     /// Strategies to switch ON at startup (repeatable, E4-a). The kernel ships
     /// ZERO enabled strategies — what starts enabled is the operator's persisted
     /// intent (`--strategy-state` file, replayed and rewritten) plus these flags.
@@ -854,6 +858,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
     let mut max_daily_loss: Option<Decimal> = None;
     let mut max_daily_loss_pct: Option<Decimal> = None;
     let mut strategy_limits: Vec<String> = Vec::new();
+    let mut virtual_limits: Vec<String> = Vec::new();
     let mut enable_strategy: Vec<String> = Vec::new();
     let mut disable_strategy: Vec<String> = Vec::new();
     let mut strategy_state: Option<String> = None;
@@ -1139,6 +1144,14 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
             "--strategy-limit" => {
                 let v = path_value!(it, "--strategy-limit");
                 strategy_limits.push(v);
+            }
+            // E-VA: the virtual-account pot for strategies that declare
+            // `atomic_batch` — `name:max_batch_usd:acct1,acct2` (repeatable;
+            // "-" = no cap, the flag is then dropped with a warning because an
+            // uncapped pot would silently disarm the whole atomic posture).
+            "--virtual-limit" => {
+                let v = path_value!(it, "--virtual-limit");
+                virtual_limits.push(v);
             }
             "--enable-strategy" => {
                 let v = path_value!(it, "--enable-strategy");
@@ -2239,6 +2252,7 @@ fn parse_args(file: &blitzkrieg_core::config::FileConfig, argv: &[String], env: 
         ntp_echo,
         shadow_evolution_echo,
         strategy_limits,
+        virtual_limits,
         enable_strategy,
         disable_strategy,
         allow_zero_strategies,
@@ -2461,6 +2475,63 @@ fn parse_strategy_limits(
                 max_shares,
                 size_weight,
                 size_pct,
+            },
+        );
+    }
+    out
+}
+
+/// E-VA: parse repeated `--virtual-limit` flags
+/// (`name:max_batch_usd:acct1,acct2`) into the virtual pots
+/// `CoreConfig::virtual_limits` holds. `-` in the cap segment = "no cap" —
+/// such an entry is DROPPED with a warning (an armed-but-uncapped pot would
+/// flip the atomic-batch posture on while enforcing nothing, which is the
+/// worst of both worlds); malformed flags are ignored with a warning so a
+/// typo cannot brick startup (the `parse_strategy_limits` posture).
+fn parse_virtual_limits(
+    args: &[String],
+) -> std::collections::HashMap<String, blitzkrieg_core::service::VirtualAccountLimit> {
+    let mut out = std::collections::HashMap::new();
+    for raw in args {
+        let parts: Vec<&str> = raw.split(':').collect();
+        if parts.len() != 3 || parts[0].trim().is_empty() {
+            eprintln!(
+                "blitzkrieg-core: ignoring malformed --virtual-limit '{raw}' \
+                 (want name:max_batch_usd:acct1,acct2)"
+            );
+            continue;
+        }
+        let cap = match parts[1].trim() {
+            "-" | "" => {
+                eprintln!(
+                    "blitzkrieg-core: ignoring --virtual-limit '{raw}' \
+                     (no cap — an uncapped pot would enforce nothing; omit the flag instead)"
+                );
+                continue;
+            }
+            v => match Decimal::from_str(v) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("blitzkrieg-core: ignoring --virtual-limit '{raw}' (bad cap)");
+                    continue;
+                }
+            },
+        };
+        let accounts: Vec<String> = parts[2]
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .collect();
+        if accounts.is_empty() {
+            eprintln!("blitzkrieg-core: ignoring --virtual-limit '{raw}' (no accounts)");
+            continue;
+        }
+        out.insert(
+            parts[0].trim().to_string(),
+            blitzkrieg_core::service::VirtualAccountLimit {
+                max_batch_notional_usd: Some(cap),
+                accounts,
             },
         );
     }
@@ -2843,6 +2914,11 @@ async fn main() -> anyhow::Result<()> {
         ntp_host: args.ntp_host.clone(),
         ntp_interval_secs: args.ntp_interval_secs,
         strategy_limits: parse_strategy_limits(&args.strategy_limits),
+        // E-VA: the virtual pots backing every strategy that declared
+        // `atomic_batch`. Malformed entries are dropped with a warning; a pot
+        // with no cap (`-`) is dropped too — an armed-but-uncapped pot would
+        // silently flip the atomic posture on while enforcing nothing.
+        virtual_limits: parse_virtual_limits(&args.virtual_limits),
         enabled_strategies,
         disabled_strategies: args.disable_strategy,
         // #265: what THIS invocation asked for by flag (the persisted set is
@@ -4043,6 +4119,67 @@ mod tests {
         assert_eq!(m["b"].min_shares, Some(dec!(1)));
     }
 
+    // ── E-VA: the --virtual-limit grammar ───────────────────────────────────
+
+    #[test]
+    fn virtual_limit_parses_name_cap_accounts() {
+        let m = parse_virtual_limits(&["cross_venue_arb:500:default,paper".to_string()]);
+        assert_eq!(m.len(), 1);
+        let pot = m.get("cross_venue_arb").expect("the named pot");
+        assert_eq!(pot.max_batch_notional_usd, Some(dec!(500)));
+        assert_eq!(
+            pot.accounts,
+            vec!["default".to_string(), "paper".to_string()],
+            "comma-separated accounts split and kept in order"
+        );
+    }
+
+    #[test]
+    fn virtual_limit_trims_and_drops_blank_segments() {
+        // Whitespace around every segment is trimmed; empty account slots
+        // (a trailing comma, doubled commas) drop out rather than become an
+        // account named "".
+        let m = parse_virtual_limits(&[" s : 12.5 : a , , b, ".to_string()]);
+        let pot = m.get("s").expect("trimmed pot");
+        assert_eq!(pot.max_batch_notional_usd, Some(dec!(12.5)));
+        assert_eq!(pot.accounts, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn malformed_virtual_limits_are_dropped_not_half_applied() {
+        for bad in [
+            "cross_venue_arb:500",           // too few segments
+            "cross_venue_arb:500:a,b:extra", // too many
+            ":500:default",                  // no name
+            "cross_venue_arb:abc:default",   // bad cap
+            "cross_venue_arb:-:default",     // no cap = disarmed pot, dropped
+            "cross_venue_arb:500:,",         // no accounts
+            "cross_venue_arb:500:",          // empty account segment
+        ] {
+            let m = parse_virtual_limits(&[bad.to_string()]);
+            assert!(m.is_empty(), "must be ignored, not half-applied: {bad}");
+        }
+        // An empty flag list parses to an empty map (the zero-config posture).
+        assert!(parse_virtual_limits(&[]).is_empty());
+    }
+
+    #[test]
+    fn repeated_virtual_limit_flags_keep_the_last_per_name() {
+        let m = parse_virtual_limits(&[
+            "a:10:default".to_string(),
+            "b:20:paper".to_string(),
+            "a:99:default,paper".to_string(),
+        ]);
+        assert_eq!(m.len(), 2, "one pot per strategy name");
+        let a = m.get("a").expect("pot a");
+        assert_eq!(a.max_batch_notional_usd, Some(dec!(99)), "last flag wins");
+        assert_eq!(a.accounts, vec!["default".to_string(), "paper".to_string()]);
+        assert_eq!(
+            m.get("b").expect("pot b").max_batch_notional_usd,
+            Some(dec!(20))
+        );
+    }
+
     #[test]
     fn engine_session_records_by_default() {
         let (path, max, rotate, min_free) =
@@ -5168,6 +5305,7 @@ mod tests {
             format!("{:?}", a.update_interval_secs)
         );
         vec_lines(&mut s, "strategy_limits", &a.strategy_limits);
+        vec_lines(&mut s, "virtual_limits", &a.virtual_limits);
         vec_lines(&mut s, "enable_strategy", &a.enable_strategy);
         vec_lines(&mut s, "disable_strategy", &a.disable_strategy);
         line!("allow_zero_strategies", a.allow_zero_strategies.to_string());
