@@ -1,5 +1,6 @@
 //! UI Kit core — the shared data model, IPC client and event bus.
 
+pub mod doctor;
 pub mod event_bus;
 #[cfg(test)]
 mod evolution_tests;
