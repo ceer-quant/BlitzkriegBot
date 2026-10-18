@@ -722,6 +722,11 @@ impl EngineStrategy for LuaEngineAdapter {
                 } else {
                     e.reason
                 },
+                // The intent closes THIS scope's row: two accounts can hold
+                // the same token, and an unaccounted close would resolve to
+                // whichever account's position a token-only lookup found
+                // first.
+                account_id: self.account_id.clone(),
             });
         }
         for b in intents.breaks {

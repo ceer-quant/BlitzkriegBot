@@ -23,8 +23,10 @@ import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
 /** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
  *  `venue` 是账户↔交易所绑定（market-plugin 名）；老内核不回该字段 →
  *  undefined，按未绑定（''）渲染。`tradingEnabled`/`strategies` 是多账户
- *  扇出面（关 = 拒开仓放平仓；空 strategies = 继承全部全局启用）——老内核
- *  不回 → undefined，开关按开启渲染、分配按继承渲染。 */
+ *  扇出面（关 = 拒开仓放平仓；strategies = 该账户的策略启用集，非空 =
+ *  逐字集合，空 = 跟随全局开关）——老内核不回 → undefined，开关按开启
+ *  渲染、启用集按「跟随全局」渲染。`strategies` 只读展示：启停唯一入口
+ *  在策略页的启用按钮（账户↔venue 解耦裁决 —— 分配编辑器退场）。 */
 interface AccountRow {
   id: string
   name: string
@@ -129,6 +131,7 @@ async function refresh(): Promise<void> {
         balance: a.balance,
         available: a.available,
         venue: a.venue ?? '',
+        strategies: Array.isArray(a.strategies) ? [...a.strategies] : undefined,
         reserved: a.reserved ?? '',
       })),
     )
@@ -217,10 +220,12 @@ async function saveVenue(a: AccountRow): Promise<void> {
 const venueLabel = (v: string | undefined): string =>
   v ? v : '未绑定（可交易任意交易所）'
 
-// ── 多账户扇出：交易开关 + 策略分配 ─────────────────────────────────────────
+// ── 多账户扇出：交易开关 ────────────────────────────────────────────────────
 // 关 = 拒开仓、平仓照放（「关=拒开仓、放平仓」裁决）——exit 照流所以持仓
 // 不会被孤儿化，卡片上以「N 笔持仓管理中」披露。走专用代理路由（body 即
 // params 逐字转发，同 account-venue/set 的纪律）。
+// （策略分配编辑器已退场，账户↔venue 解耦裁决：启停唯一入口 = 策略页的
+// 启用按钮，按「账户+策略」级别读写 —— 这里不再有第二张表。）
 
 const tradingBusy = ref<string | null>(null)
 const tradingErr = ref<string | null>(null)
@@ -276,76 +281,15 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
   }
 }
 
-/** 策略分配编辑器：一次展开一行；选项 = 已注册策略（strategy 名单）。 */
-const strategiesEditing = ref<string | null>(null)
-const strategiesDraft = ref<string[]>([])
-const strategiesBusy = ref(false)
-const strategiesErr = ref<string | null>(null)
-const strategiesMsg = ref<string | null>(null)
-const strategyOptions = ref<string[]>([])
-const strategiesLoading = ref(false)
-
+/**
+ * 该账户的策略启用集，只读一句话（账户↔venue 解耦裁决：这里不再是编辑器
+ * —— 启停唯一入口在策略页，按「账户+策略」级别的启用按钮）。空/缺字段 =
+ * 跟随全局开关。
+ */
 function strategiesLabel(a: AccountRow): string {
-  const list = a.strategies ?? []
-  return list.length ? list.join('、') : '继承全局启用'
-}
-
-async function loadStrategyOptions(): Promise<void> {
-  strategiesLoading.value = true
-  try {
-    const doc = await api.plugins()
-    strategyOptions.value = (doc.strategies ?? [])
-      .map((s: { name?: string }) => s.name ?? '')
-      .filter(Boolean)
-  } catch {
-    strategyOptions.value = []
-  } finally {
-    strategiesLoading.value = false
-  }
-}
-
-function editStrategies(a: AccountRow): void {
-  if (strategiesEditing.value === a.id) {
-    strategiesEditing.value = null
-    return
-  }
-  strategiesEditing.value = a.id
-  strategiesDraft.value = [...(a.strategies ?? [])]
-  strategiesErr.value = null
-  void loadStrategyOptions()
-}
-
-function toggleDraft(name: string): void {
-  const i = strategiesDraft.value.indexOf(name)
-  if (i >= 0) strategiesDraft.value.splice(i, 1)
-  else strategiesDraft.value.push(name)
-}
-
-async function saveStrategies(a: AccountRow): Promise<void> {
-  if (strategiesBusy.value) return
-  strategiesBusy.value = true
-  strategiesErr.value = null
-  strategiesMsg.value = null
-  try {
-    const res = await api.accountStrategiesSet({
-      accountId: a.id,
-      strategies: strategiesDraft.value,
-      reason: 'panel assign',
-    })
-    if (res.error) throw new Error(res.error)
-    const kept = res.keptExitsOnly ?? []
-    strategiesMsg.value = kept.length
-      ? `分配已保存；${kept.join('、')} 仍持仓，以只平不开保活到平完。`
-      : `分配已保存${res.persisted ? '（已落盘）' : ''}。`
-    strategiesEditing.value = null
-    await refresh()
-    store.refresh()
-  } catch (e) {
-    strategiesErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    strategiesBusy.value = false
-    setTimeout(() => { strategiesMsg.value = null }, 8000)
-  }
+  const list = a.strategies
+  if (!Array.isArray(list)) return '启停跟随全局开关（老内核无启用集读数）'
+  return list.length ? `已启用 ${list.length} 个策略：${list.join('、')}` : '跟随全局开关'
 }
 
 // ── 添加账户（#517）：弹窗（选交易所→填 API）。可选项 = 已注册的行情插件。──
@@ -502,7 +446,8 @@ onBeforeUnmount(() => {
               @click.stop="askRemove(a)"
             ><Trash2 class="size-3" /></button>
           </span>
-          <!-- 多账户扇出：交易开关 pill（关 = 拒开仓放平仓）+ 策略分配行 -->
+          <!-- 多账户扇出：交易开关 pill（关 = 拒开仓放平仓）+ 启用集只读行
+               （启停唯一入口在策略页启用按钮 —— 分配编辑器退场） -->
           <span class="mt-1 flex items-center gap-1.5 text-[11px]">
             <button
               class="shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors"
@@ -517,42 +462,12 @@ onBeforeUnmount(() => {
             >{{ tradingLabel(a) }}</button>
             <span
               class="min-w-0 flex-1 truncate"
-              :class="(a.strategies?.length ?? 0) ? 'text-fg' : 'text-faint-fg'"
-              :title="`策略分配：${strategiesLabel(a)}`"
+              :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"
+              :title="`该账户的策略启停集合（只读；启停在策略页按账户启用）：${strategiesLabel(a)}`"
             >{{ strategiesLabel(a) }}</span>
-            <button
-              class="shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-fg"
-              title="编辑该账户跑的策略组合"
-              @click.stop="editStrategies(a)"
-            >{{ strategiesEditing === a.id ? '收起' : '分配' }}</button>
-          </span>
-          <span v-if="strategiesEditing === a.id" class="mt-1.5 block" @click.stop>
-            <span class="flex flex-wrap gap-1">
-              <button
-                v-for="s in strategyOptions"
-                :key="s"
-                class="rounded-full px-1.5 py-px text-[10.5px] font-semibold transition-colors"
-                :class="strategiesDraft.includes(s)
-                  ? 'bg-primary/20 text-primary'
-                  : 'bg-panel-2 text-faint-fg hover:text-fg'"
-                :disabled="strategiesBusy || strategiesLoading"
-                @click="toggleDraft(s)"
-              >{{ s }}</button>
-            </span>
-            <span class="mt-1 flex items-center gap-1.5">
-              <button
-                class="shrink-0 rounded bg-panel-2 px-2 py-1 text-[11px] font-semibold text-fg transition-colors hover:bg-panel-2/80 disabled:opacity-50"
-                :disabled="strategiesBusy || strategiesLoading"
-                @click="saveStrategies(a)"
-              >{{ strategiesBusy ? '保存中…' : '保存分配' }}</button>
-              <span class="text-[10.5px] text-faint-fg">不勾 = 继承全部全局启用</span>
-            </span>
-            <span v-if="strategiesLoading" class="mt-0.5 block text-[10.5px] text-faint-fg">策略清单加载中…</span>
-            <span v-if="strategiesErr" class="mt-0.5 block text-[10.5px] text-down">{{ strategiesErr }}</span>
           </span>
           <span v-if="tradingErr && venueEditing !== a.id" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
           <span v-else-if="tradingMsg" class="mt-0.5 block text-[10.5px] text-up">{{ tradingMsg }}</span>
-          <span v-if="strategiesMsg && strategiesEditing !== a.id" class="mt-0.5 block text-[10.5px] text-up">{{ strategiesMsg }}</span>
           <span v-if="venueEditing === a.id" class="mt-1.5 block" @click.stop>
             <span class="flex items-center gap-1.5">
               <select
@@ -584,8 +499,8 @@ onBeforeUnmount(() => {
         账本为空（核心未就绪或账户簿未配置）。
       </p>
       <p class="mt-1 border-t border-line px-2 pt-1.5 text-[10.5px] leading-relaxed text-faint-fg">
-        切换只改变本面板连接的默认账户（§9.5 会话级）；其他连接不受影响。
-        绑定交易所的账户只能交易该交易所（插件启用将随账户派生——绑定即启用）。
+        切换只改变本面板连接的默认账户（§9.5 会话级）与行情/交易视图跟随（各账户的策略在后台持续运行，切换不启停任何东西）；
+        策略的启停在策略页按账户启用。绑定交易所的账户只能交易该交易所（插件启用随账户派生——绑定即启用）。
       </p>
     </div>
 

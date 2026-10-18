@@ -164,6 +164,14 @@ impl GateExemptions {
 pub struct StrategyExitIntent {
     pub token_id: String,
     pub reason: String,
+    /// The account whose row the close resolves to (the same second slice key
+    /// [`HeldPosition::account_id`] carries). The engine stamps it from the
+    /// emitting scope, so two accounts holding the SAME token close their own
+    /// rows — an unaccounted close would resolve to whichever account's
+    /// position a token-only lookup found first. Serde-free (an in-process
+    /// intent): the field is written by the engine at emission, never parsed,
+    /// so there is no back-compat shape to keep.
+    pub account_id: String,
 }
 
 /// A position slice the host hands a strategy for one evaluation cycle —

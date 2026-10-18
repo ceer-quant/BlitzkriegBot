@@ -64,13 +64,16 @@ struct AccountFileEntry {
     /// at Gate 2; its exits keep flowing.
     #[serde(default)]
     trading_enabled: Option<bool>,
-    /// The strategies THIS account runs. Missing/empty = the account runs NO
-    /// strategies (assignments are explicit; there is no inherit — the boot
-    /// migration materialized the one implicit default set that ever existed).
-    /// A non-empty list pins the account to exactly those strategies (the
-    /// engine hosts one instance per (account, strategy), each ENABLED).
-    /// Names are validated at write time (`account.strategies.set`), not at
-    /// parse.
+    /// THIS account's strategy ENABLEMENT set (账户↔venue 解耦语义裁决) —
+    /// the persisted state of the panel's per-(account, strategy) 启用按钮.
+    /// NOT an assignment and NOT a visibility filter: strategies are GLOBAL —
+    /// every installed package is visible to every account; this list names
+    /// the ones whose (account, strategy) scope actually RUNS. Missing/empty
+    /// = the account's scopes follow the GLOBAL strategy toggle (the 0.2
+    /// single-book shape; `single_default` produces exactly this). A
+    /// non-empty list is the enablement set verbatim (order kept for a
+    /// stable diff). Names are validated at write time (`strategy.enable` /
+    /// `account.strategies.set`), not at parse.
     #[serde(default)]
     strategies: Option<Vec<String>>,
 }
@@ -364,12 +367,16 @@ pub fn persist_account_trading(
     )
 }
 
-/// The persisted write of ONE account's strategy assignment
-/// (`account.strategies.set`). An EMPTY list REMOVES the key (the file
-/// spells "this account runs no strategies" by absence); a non-empty list
-/// is stored verbatim — the write-time validation against the registered
-/// set is the CALLER's job (it has the plugin/strategy registry; this layer
-/// only owns the file).
+/// The persisted write of ONE account's strategy ENABLEMENT set
+/// (`account.strategies.set` / the per-account half of `strategy.enable`).
+/// An EMPTY list REMOVES the key — the file spells "this account runs no
+/// strategies" by absence (per-account enablement is the ONLY truth: the
+/// old "absence = inherit the global toggle" reading is retired; an absent
+/// key on a fresh deployment still yields a silent default account, which
+/// is the zero-config shape the boot path observes). A non-empty list is
+/// the enablement set stored verbatim. The write-time validation against
+/// the registered set is the CALLER's job (it has the plugin/strategy
+/// registry; this layer only owns the file).
 pub fn persist_account_strategies(
     path: &Path,
     account_id: &str,
@@ -910,10 +917,11 @@ venue = "kalshi"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The trading switch and strategy assignment round-trip through
-    /// accounts.toml: an OFF switch and a non-empty assignment are the only
-    /// shapes that occupy file keys (absence = ON / INHERIT), sibling rows
-    /// survive, and unknown ids refuse with the file untouched.
+    /// The trading switch and strategy ENABLEMENT set round-trip through
+    /// accounts.toml: an OFF switch and a non-empty set are the only shapes
+    /// that occupy file keys (an absent strategies key is the empty set —
+    /// "this account runs nothing explicitly"), sibling
+    /// rows survive, and unknown ids refuse with the file untouched.
     #[test]
     fn persist_account_trading_and_strategies_round_trip_by_absence_and_presence() {
         let dir = std::env::temp_dir().join(format!("bk-acct-trade-{}", std::process::id()));
@@ -956,17 +964,18 @@ venue = "kalshi"
             "absence loads as ON"
         );
 
-        // A non-empty assignment rides verbatim; a fresh load reads it whole.
+        // The strategy ENABLEMENT set rides verbatim; a fresh load reads it
+        // whole (the file is the durable half of the 启用按钮).
         persist_account_strategies(&p, "paper", &["spread_arb".into(), "mad_dog".into()])
-            .expect("the assignment lands");
+            .expect("the enablement write lands");
         let book = load_account_ledgers(&p, 5).expect("re-parses");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().strategies,
             vec!["spread_arb".to_string(), "mad_dog".to_string()],
-            "the assignment is durable, verbatim and ordered"
+            "the enablement set is durable, verbatim and ordered"
         );
 
-        // The INHERIT spelling: an empty list REMOVES the key.
+        // The zero-config spelling: an empty list REMOVES the key.
         persist_account_strategies(&p, "paper", &[]).expect("the inherit lands");
         let text = std::fs::read_to_string(&p).unwrap();
         let paper_row = text.split("[[account]]").nth(2).unwrap();
@@ -986,7 +995,6 @@ venue = "kalshi"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
     #[test]
     fn persist_account_remove_drops_the_row_refuses_unknown_and_the_last_row() {
         let dir = std::env::temp_dir().join(format!("bk-acct-remove-{}", std::process::id()));

@@ -352,14 +352,16 @@ pub struct HostedStrategy {
     /// never assigns strategies per account runs exactly one instance per
     /// strategy, targeted at `default`, and every byte of the replay baseline
     /// is unchanged. Additional scopes are per-account instances the host
-    /// installs from `account.strategies.set`.
+    /// installs from the account's strategy ENABLEMENT set (the panel's
+    /// per-(account, strategy) 启用按钮; strategies are global, this records
+    /// which account×strategy pairs run).
     pub account_id: String,
-    /// EXITS-ONLY demotion (`account.strategies.set` safety net): a strategy
-    /// removed from an account's assignment that still holds OPEN positions
-    /// for it stays hosted but contributes no ENTRY candidates — its exit
-    /// intents keep flowing until the account is flat, then the next
-    /// assignment write (or boot) drops the scope. `false` on every
-    /// normally-registered instance.
+    /// EXITS-ONLY demotion (the stop-safety net): a strategy whose scope was
+    /// DISABLED (or removed from an account's enablement set) while it still
+    /// holds OPEN positions for that account stays hosted but contributes no
+    /// ENTRY candidates — its exit intents keep flowing until the account is
+    /// flat, then the next enablement write (or boot) drops the scope.
+    /// `false` on every normally-registered instance.
     pub exits_only: bool,
 }
 
@@ -1559,6 +1561,41 @@ impl Engine {
             .map(|m| m.neg_risk)
     }
 
+    /// The token's live round slot (the market that currently lists it).
+    /// The pair-chase request's round identity: a NEXT round's orphan gets a
+    /// fresh internal key, so a retried chase never collides with the OME's
+    /// duplicate-intent guard. `None` = the token belongs to no live market.
+    pub fn round_slot_of(&self, token_id: &str) -> Option<i64> {
+        self.scanner
+            .markets()
+            .iter()
+            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .map(|m| m.round_slot)
+    }
+
+    /// The token's market asset (the request's provenance echo).
+    pub fn asset_of(&self, token_id: &str) -> Option<String> {
+        self.scanner
+            .markets()
+            .iter()
+            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .map(|m| m.asset.clone())
+    }
+
+    /// The token's leg label (`"up"` / `"down"`, read off its market side —
+    /// the same wire direction the engine stamps on entry requests).
+    pub fn direction_of(&self, token_id: &str) -> Option<SignalDirection> {
+        self.scanner.markets().iter().find_map(|m| {
+            if m.up_token_id == token_id {
+                Some(SignalDirection::Up)
+            } else if m.down_token_id == token_id {
+                Some(SignalDirection::Down)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Force-finalize every pending near-miss (used on shutdown so records are
     /// not lost when the process stops before a window elapses).
     pub fn flush_near_misses(&mut self) -> Vec<crate::shadow::NearMissRecord> {
@@ -1827,10 +1864,14 @@ impl Engine {
     }
     /// Toggle a strategy; returns false if the name is unknown to the engine.
     ///
-    /// Multi-scope semantics: the switch is a GLOBAL strategy fact — every
-    /// scope instance of `name` flips together. Per-account selectivity is
-    /// the account book's `strategies` assignment (which scopes EXIST), not
-    /// this enablement (whether the strategy trades at all).
+    /// Multi-scope semantics (账户↔venue 解耦裁决): the toggle is the
+    /// GLOBAL strategy switch — the master power for every scope instance of
+    /// `name`, default scopes included (a global OFF stops the strategy
+    /// everywhere; a global ON hands the decision back to each account's
+    /// enablement set). Per-account selectivity is the account book's
+    /// `strategies` ENABLEMENT set (which per-account scopes run), not this
+    /// switch: an account that has the strategy in its set keeps running it
+    /// while the global switch is ON, regardless of other accounts' sets.
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
         let mut found = false;
         for s in &mut self.strategies {
@@ -1971,6 +2012,19 @@ impl Engine {
             .collect()
     }
 
+    /// The (account, strategy) pairs currently demoted exits-only — the
+    /// held-position safety net's live state, for diagnostics and tests.
+    pub fn exits_only_scopes(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .strategies
+            .iter()
+            .filter(|s| s.exits_only)
+            .map(|s| (s.account_id.clone(), s.strategy.name().to_string()))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// Is `name` assignable? Every package LOADED this session (live scopes
     /// included, torn-down scopes' sources retained). The assignable-set
     /// check `account.strategies.set` runs plan-first against this.
@@ -1990,22 +2044,22 @@ impl Engine {
             .collect()
     }
 
-    /// Rebuild one account's scope set after an `account.strategies.set`
-    /// write (or a boot reading the file's assignments). Three phases, in
-    /// this order:
+    /// Rebuild one account's scope set from its strategy ENABLEMENT set
+    /// (账户↔venue 解耦语义: `requested` is the account's 启用集 — the
+    /// persisted 启用按钮 state — not an assignment or a visibility filter).
+    /// Three phases, in this order:
     ///
-    /// 1. DEMOTE: a scope of this account whose strategy is no longer in
+    /// 1. DEMOTE: a scope of this account whose strategy is not in
     ///    `requested` but which still HELD open positions (`held`) flips to
     ///    exits-only — it contributes no entry candidates from the next
     ///    cycle on, its exit intents keep flowing until the account is flat.
-    /// 2. DROP: a scope whose strategy is out of the assignment and flat
-    ///    (not in `held`) is removed outright — its Lua state dies with it.
-    ///    An ENABLED scope is additionally kept (it may be mid-round).
+    /// 2. DROP: a scope whose strategy is out of the set and flat (not in
+    ///    `held`) is removed outright — its Lua state dies with it.
     /// 3. ADD: every requested strategy without a scope for this account is
     ///    instantiated through `build` (the host's Lua re-loader; `None`
     ///    means the source is not rebuildable — a dylib or vanished dir —
     ///    and the name is SKIPPED with a warning, never a panic) and arrives
-    ///    ENABLED: assignment IS enablement.
+    ///    ENABLED.
     ///
     /// Returns the names kept as exits-only (phase 1), for the reply.
     pub fn rebuild_account_scopes(
@@ -2031,14 +2085,10 @@ impl Engine {
         }
         // 2. Drop removed-and-flat.
         //
-        // The assignment write is a DECISION: a scope the request omits and
-        // no position holds is torn down outright, ENABLED or not (its
-        // resting entry orders die at round end, same as a disabled scope's).
-        // Durable exposure is covered by the DEMOTE phase above — a held
-        // strategy keeps managing its exits until the account is flat. (The
-        // old enabled-keep guard protected the INHERIT resolution against a
-        // race sweeping live scopes; with assignments explicit there is no
-        // resolution to race.)
+        // The enablement write is a DECISION: a scope the request omits and
+        // no position holds is torn down outright. Durable exposure is
+        // covered by the DEMOTE phase above — a held strategy keeps managing
+        // its exits until the account is flat.
         self.strategies.retain(|s| {
             if s.account_id != account {
                 return true;
@@ -2054,16 +2104,22 @@ impl Engine {
                 .find(|s| s.account_id == account && s.strategy.name() == *name)
             {
                 Some(existing) => {
-                    // A scope demoted exits-only that is BACK in the
-                    // assignment returns to normal (the flag flips off).
+                    // A scope BACK in the enablement set returns to normal:
+                    // the demotion clears AND the scope enables — being named
+                    // in the set IS the 启用 state (the same rule the freshly
+                    // built scope below gets). A pre-existing scope the boot
+                    // registered DISABLED (no state-file replay, a fresh
+                    // package) therefore turns on exactly when the file's
+                    // enablement set names it.
                     existing.exits_only = false;
+                    existing.enabled = true;
                 }
                 None => {
                     let Some(built) = build(name, account) else {
                         tracing::warn!(
                             strategy = %name,
                             account = %account,
-                            "account.strategies.set: source not rebuildable — scope skipped"
+                            "scope rebuild: source not rebuildable — scope skipped"
                         );
                         continue;
                     };
@@ -2076,14 +2132,14 @@ impl Engine {
                             strategy = %name,
                             account = %account,
                             %reason,
-                            "account.strategies.set: scope registration refused"
+                            "scope rebuild: scope registration refused"
                         );
                         continue;
                     }
-                    // Assignment IS enablement: being named in an account's
-                    // strategy list is the operator's intent to run it, so a
-                    // rebuilt scope arrives ENABLED. The old rule inherited
-                    // the default scope's global flag — an account assigned a
+                    // Being named in an account's enablement set is the
+                    // operator's intent to run it there, so a rebuilt scope
+                    // arrives ENABLED. The old rule inherited the default
+                    // scope's global flag — an account given a
                     // globally-disabled strategy then silently never traded,
                     // with no error anywhere (生产 probe2 实锤: market_maker
                     // /mad_dog assigned but dead while spread_arb ran).
@@ -5492,6 +5548,203 @@ mod tests {
             e3.pending_tokens
                 .contains(&(DEFAULT_ACCT.to_string(), "tok".into())),
             "default scope pending key = (default, token)"
+        );
+    }
+
+    // ── 账户↔venue 解耦：per-account ENABLEMENT 语义牙（先红后绿） ─────────
+
+    /// 双账户同策略同 token：A 停用 B 启用 → 只有 B scope 出意图。
+    ///
+    /// Scope enablement is per-INSTANCE: disabling (strategy, paper) — the
+    /// write's rebuild omitting the name — never touches (strategy, paper2).
+    /// The disable rides the rebuild: a FLAT scope drops outright; a HELD
+    /// scope is demoted exits-only (its candidates die at the submission
+    /// gate) while the sibling on the SAME strategy and token keeps
+    /// emitting, and re-adding the name restores A independently.
+    #[test]
+    fn per_account_disable_leaves_sibling_scopes_trading() {
+        let mut e = engine();
+        let now = 1_000_000i64;
+        e.set_account_trading("paper", true);
+        e.set_account_trading("paper2", true);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // Instantiate both scopes the way the boot/rebuild does, then disable
+        // A while it HOLDS (the realistic disable: the write's rebuild omits
+        // the name and hands the held set — DEMOTE, not teardown).
+        e.rebuild_account_scopes("paper", &["probe".into()], &[], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        e.rebuild_account_scopes("paper2", &["probe".into()], &[], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        e.rebuild_account_scopes("paper", &[], &["probe".into()], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        assert!(
+            e.strategies
+                .iter()
+                .any(|s| s.account_id == "paper" && s.exits_only),
+            "the disabled-and-held scope is demoted exits-only"
+        );
+
+        // A disabled scope emits nothing…
+        let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper", "tok")], now);
+        assert!(orders.is_empty(), "disabled scope's entry is dropped");
+        // …while the sibling scope of the SAME strategy+token keeps flowing.
+        let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper2", "tok")], now);
+        assert_eq!(
+            orders.len(),
+            1,
+            "the sibling scope is untouched by paper's disable"
+        );
+        // Both candidates in one cycle: only the enabled scope's lands.
+        let orders = e.submit_candidate_orders_for_test(
+            vec![
+                scoped_signal("paper", "tok"),
+                scoped_signal("paper2", "tok"),
+            ],
+            now,
+        );
+        assert_eq!(orders.len(), 1, "only B's intent survives: {orders:?}");
+        assert_eq!(orders[0].account_id.as_str(), "paper2");
+        // Re-enabling restores A independently (the ADD phase un-demotes).
+        e.rebuild_account_scopes("paper", &["probe".into()], &[], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        assert!(
+            !e.strategies
+                .iter()
+                .any(|s| s.account_id == "paper" && s.exits_only),
+            "a scope back in the enablement set returns to normal"
+        );
+        let orders = e.submit_candidate_orders_for_test(vec![scoped_signal("paper", "tok")], now);
+        assert_eq!(orders.len(), 1, "re-enabled scope emits again");
+    }
+
+    /// 停用有持仓的 scope → 无新 entry、exit intent 照常流出（exits-only
+    /// 降级）。The disable rides the rebuild's DEMOTE phase (the same
+    /// mechanism a removed-and-held strategy gets): the scope stays hosted
+    /// and `enabled`, so its exit intents KEEP being drained by evaluate —
+    /// but its entry candidates die at the submission gate. Never a
+    /// teardown, never a stuck position.
+    #[test]
+    fn disabling_a_scope_with_positions_demotes_exits_only() {
+        struct ExitEmitter {
+            name: String,
+        }
+        impl EngineStrategy for ExitEmitter {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn on_book(&mut self, _: &str, _: &OrderbookSnapshot, _: i64) {}
+            fn on_round(&mut self, _: i64, _: i64, _: i64) {}
+            fn find_candidates(&mut self, ctx: &StrategyCtx<'_>) -> Vec<TradeSignal> {
+                // Emit an entry for each held position's token — the shape a
+                // strategy that wants to (re)enter under itself produces.
+                ctx.held_positions()
+                    .iter()
+                    .map(|p| TradeSignal {
+                        strategy: self.name.clone(),
+                        account_id: "paper".into(),
+                        asset: "BTC".into(),
+                        direction: SignalDirection::Up,
+                        token_id: p.token_id.clone(),
+                        condition_id: "cond".into(),
+                        price: dec!(0.42),
+                        reason: "exit-only probe".into(),
+                        shares: None,
+                    })
+                    .collect()
+            }
+            fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
+                // One standing exit intent: the position must keep being
+                // managed even after the scope is disabled.
+                vec![StrategyExitIntent {
+                    token_id: "held_tok".into(),
+                    reason: "manual (exit-only probe)".into(),
+                    account_id: "paper".into(),
+                }]
+            }
+        }
+        let mut e = Engine::new(cfg());
+        // The paper scope hosts the emitter itself (a rebuild's build fn
+        // would stand in a bare NamedStub — this scope must EMIT).
+        e.register_scoped_strategy(
+            Box::new(ExitEmitter {
+                name: "probe".into(),
+            }),
+            "test".into(),
+            "paper",
+        )
+        .expect("exit emitter registers");
+        // Registration starts DISABLED; being in the account's enablement set
+        // is what turns it on (the write's rebuild ENABLEs what lands).
+        for s in &mut e.strategies {
+            if s.account_id == "paper" {
+                s.enabled = true;
+            }
+        }
+        // The enablement write's shape: the scope is in the set (the rebuild
+        // finds the existing scope and clears any demotion — the instance
+        // with the exit emitter survives).
+        e.rebuild_account_scopes("paper", &["probe".into()], &[], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        // The host pushes the held positions BEFORE the evaluate (the same
+        // push run_cycle does). HeldPosition's wire-facing string fields.
+        let held_view = || {
+            vec![HeldPosition {
+                strategy: "probe".into(),
+                account_id: "paper".into(),
+                condition_id: "cond".into(),
+                token_id: "held_tok".into(),
+                direction: "up".into(),
+                shares: "10".into(),
+                entry_price: "0.40".into(),
+                round_slot: 1,
+            }]
+        };
+        e.set_positions_view(held_view());
+        e.set_account_trading("paper", true);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: 1_000_000i64,
+        });
+        // Sanity while enabled: entries AND exits both flow.
+        let orders = e.evaluate(1_000_000i64);
+        assert_eq!(
+            orders.len(),
+            1,
+            "enabled scope emits the held token's re-entry"
+        );
+        assert_eq!(
+            e.drain_strategy_exits().len(),
+            1,
+            "enabled scope emits exits"
+        );
+
+        // Disable the scope WHILE HOLDING: the write's rebuild omits the
+        // name and names what is held → DEMOTE.
+        e.set_positions_view(held_view());
+        let kept = e.rebuild_account_scopes("paper", &[], &["probe".into()], &mut |n, a| {
+            Some(probe_rebuild(n, a))
+        });
+        assert_eq!(kept, vec!["probe".to_string()], "the demotion is reported");
+        let orders = e.evaluate(1_000_001i64);
+        assert!(orders.is_empty(), "disabled scope: no new entries");
+        assert_eq!(
+            e.drain_strategy_exits().len(),
+            1,
+            "exits-only demotion: exit intents keep flowing"
+        );
+        assert!(
+            e.strategies
+                .iter()
+                .any(|s| s.account_id == "paper" && s.strategy.name() == "probe"),
+            "a held scope is never torn down by the disable"
         );
     }
 

@@ -467,6 +467,7 @@ mod tests {
                 vec![StrategyExitIntent {
                     token_id: self.token.clone(),
                     reason: "stub-close".into(),
+                    account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                 }]
             } else {
                 Vec::new()

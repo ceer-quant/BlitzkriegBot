@@ -979,12 +979,27 @@ export const api = {
   /** Dispatch a gateway command verb (`status`/`start`/`stop`/…). */
   command: (cmd: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: cmd }),
-  /** Strategy enable toggle (`strategy <name> on|off` on the core). */
-  setStrategy: (name: string, enabled: boolean) =>
-    request<CommandDoc>('/command', {
+  /**
+   * Strategy enable toggle (`strategy.enable` on the core). `accountId` 缺省
+   * = default（全局开关分支，与旧面板逐字节一致）；非 default 账户走内核的
+   * assignment=enablement 分支（账户级启停 —— 启停绑定在「账户+交易所」级）。
+   * 回执带 `accountId` 回显（合同字段）。
+   */
+  setStrategy: (name: string, enabled: boolean, accountId?: string) => {
+    // 文本动词通道不认 JSON 信封的 params —— accountId 走专用 JSON-RPC 代理
+    // 路由（body 即 params 逐字转发，同 account-venue/set 的纪律）；缺省时
+    // 走原 /api/command 文本动词（老面板路径不变）。
+    if (accountId === undefined) {
+      return request<CommandDoc>('/command', {
+        method: 'POST',
+        body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
+      })
+    }
+    return request<CommandDoc>('/strategy-enable', {
       method: 'POST',
-      body: `strategy ${name} ${enabled ? 'on' : 'off'}`,
-    }),
+      body: JSON.stringify({ name, enabled, accountId }),
+    })
+  },
   /** Manual operator flatten for one stable position id. */
   flatten: (positionId: string) =>
     request<CommandDoc>('/command', { method: 'POST', body: `flatten ${positionId}` }),
@@ -1566,9 +1581,10 @@ export interface StrategyStatsRow {
   /** §8.3: when `compatible === false`, the handshake's rendered refusal reason. */
   incompatibleReason?: string | null
   /**
-   * PR H: the account scopes hosting this strategy (sorted). 全局口径下用来
-   * 把策略页过滤到当前账户；账户口径（engineStatsFor）下行同一形状但行
-   * 集合不变，仅 counters 是该账户的 slice。
+   * 账户↔venue 解耦（本轮合同）：该策略当前在哪些账户 scope 上有实例
+   * （engine 注册表读数，排序稳定）。全局口径（engine.stats fold /
+   * strategy.list）每行带出真实归属；老内核缺字段 → undefined —— 启用按钮
+   * 按「缺省降级」走全局开关语义，列表不再按账户过滤（列表恒等全部已安装）。
    */
   accounts?: string[]
 }
@@ -1646,6 +1662,12 @@ export interface MarketPrice {
   asset: string
   up: number
   down: number
+  /**
+   * 账户↔venue 解耦（本轮合同）：该行情行所属的行情插件名（小写）。老内核
+   * /网关类型化重组剥掉该字段时为 undefined —— 前端按「未分所」降级显示，
+   * 不过滤、不崩（feature-detect，永不假设字段在）。
+   */
+  venue?: string
 }
 
 /** One price level of the live book (`engine.books`, E8-c 盘口深度). */
@@ -1678,6 +1700,11 @@ export interface AssetBook {
    *  older cores — the K-line card hides rather than queries a wrong key. */
   upTokenId?: string
   downTokenId?: string
+  /**
+   * 账户↔venue 解耦（本轮合同）：该盘口行所属的行情插件名（小写）。老内核
+   * 缺字段 → undefined，前端按「未分所」降级（不过滤、不崩）。
+   */
+  venue?: string
   up: BookSide
   down: BookSide
 }
@@ -1901,6 +1928,11 @@ export interface PluginRow {
   description?: string
   enabled?: boolean
   status?: string
+  /**
+   * 账户↔venue 解耦合同（strategy.list 行）：该策略在哪些账户 scope 启用。
+   * 老内核缺字段 → undefined —— 前端按「缺省降级」走全局开关语义，不发明。
+   */
+  accounts?: string[]
   /** market.list: this source is the currently selected one. */
   active?: boolean
   /** market.list capability flags — a plugin may implement only some of them. */

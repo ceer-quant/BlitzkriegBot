@@ -1032,6 +1032,9 @@ fn adopt_eval_json(
                 exit_intents.push(StrategyExitIntent {
                     token_id: token.to_string(),
                     reason,
+                    // The intent closes THIS scope's row (the emitting scope's
+                    // account — the same second slice key the held view uses).
+                    account_id: scope.to_string(),
                 });
             }
         }

@@ -438,6 +438,15 @@ fn orphan_sweep_flattens_a_naked_leg_after_the_grace_window() {
         "the naked leg carries its partner token (pair semantics)"
     );
 
+    // Chase 合同（#531 后）：可行追腿 ⇒ 重新补腿闭合、不 flatten；不可行
+    // ⇒ 告警+flatten。本测试钉的是不可行臂，因此把对手腿盘口喂贵到追不起
+    // （0.60：pair_paid + chase > $1 的 pair-cost cap 拒追），原 flatten 钉
+    // 刺原样保留。
+    c.engine_on_data(
+        leg_book(KX_DOWN, dec!(0.60), dec!(600), now + 3_500),
+        now + 3_500,
+    );
+
     // 过 5s 宽限 + partner 无持仓/无 live BUY/不在 inflight ⇒ tick 必须动作。
     let alert_count = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>| {
         let mut n = 0;
