@@ -405,6 +405,14 @@ pub const FLAGS: &[FlagSpec] = &[
          that segment).",
     ),
     flag(
+        "--virtual-limit",
+        "<name:max_batch_usd:acct1,acct2>",
+        "Repeatable: E-VA virtual pot for strategies that declare `atomic_batch` — \
+         the whole candidate batch reserves against it as ONE ticket (over-cap \
+         cancels the pair with zero legs out). `-` = no cap (dropped with a \
+         warning).",
+    ),
+    flag(
         "--enable-strategy",
         "<name>",
         "Repeatable: switch one strategy ON at startup. A request that resolves to no \

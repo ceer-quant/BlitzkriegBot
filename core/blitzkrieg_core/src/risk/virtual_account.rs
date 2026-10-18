@@ -129,6 +129,16 @@ impl VirtualAccounts {
             .contains_key(&(account_id.to_string(), strategy.to_string()))
     }
 
+    /// Every governed (account, strategy) scope — the keys the cap book
+    /// holds, sorted so a sweep over them is deterministic. The orphan sweep
+    /// walks exactly these: a scope with no cap is transparent to every
+    /// compensating action the same way it is to the reservation layer.
+    pub fn scopes(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self.caps.keys().cloned().collect();
+        out.sort();
+        out
+    }
+
     fn pot_mut(&mut self, account_id: &str, strategy: &str) -> &mut VirtualPot {
         let key = (account_id.to_string(), strategy.to_string());
         self.pots.entry(key).or_default()
