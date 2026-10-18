@@ -344,11 +344,11 @@ pub mod method {
     /// automatic freeze (venue-rejection streak) lives in memory only, so
     /// the lift is too — a restart starts clean and re-probes.
     pub const ACCOUNT_FREEZE: &str = "account.freeze";
-    /// The per-account strategy assignment (`account.strategies.set`): an
-    /// empty list = inherit every globally-enabled strategy; non-empty =
-    /// the account runs exactly those (one engine instance per (account,
-    /// strategy)). A removed strategy with open positions keeps managing
-    /// them exits-only until flat.
+    /// The per-account strategy ENABLEMENT write (`account.strategies.set`
+    /// / the persistence half of the panel's per-account 启用按钮): the
+    /// set spells exactly which (strategy, account) scopes run; a removed
+    /// strategy with open positions keeps managing them exits-only until
+    /// flat.
     pub const ACCOUNT_STRATEGIES_SET: &str = "account.strategies.set";
     /// One account's cash-journal tail (#509's read surface): the append-only
     /// `JournalEntry` rows the ledger records for every balance change.
@@ -1906,8 +1906,11 @@ pub struct AccountView {
     /// The trading switch the panel renders as 「交易中/已停止」. `false` =
     /// Gate 2 refuses this account's new entries; its exits keep flowing.
     pub trading_enabled: bool,
-    /// The strategies this account runs. Empty = INHERIT every globally
-    /// enabled strategy; non-empty = the explicit per-account assignment.
+    /// The account's strategy ENABLEMENT set (the 启用按钮's persistence —
+    /// strategies are global, this is the per-account state). Empty = the
+    /// account runs nothing explicitly (per-account enablement is the only
+    /// truth; an absent key on a fresh deployment just leaves the account
+    /// silent — the zero-config shape).
     pub strategies: Vec<String>,
     pub open_positions: usize,
     #[serde(with = "crate::decimal")]
@@ -2070,11 +2073,10 @@ pub const ACCOUNT_FREEZE_NOTE: &str = "true = new orders refused for this accoun
      strategy entries), existing positions stay managed until flat (exits \
      always flow); session-scoped — a restart starts clean and re-probes";
 
-/// `account.strategies.set` params: the strategies THIS account runs. An
-/// empty list = INHERIT every globally-enabled strategy (the single-book
-/// shape); a non-empty list pins the account to exactly those. Names are
-/// validated against the REGISTERED strategy set plan-first (a typo must
-/// fail now, not as a silently inert assignment). `reason` is audit-only.
+/// `account.strategies.set` params: the account's strategy ENABLEMENT set
+/// (the 启用按钮's persistence). Names are validated against the REGISTERED
+/// strategy set plan-first (a typo must fail now, not as a silently inert
+/// scope). `reason` is audit-only.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStrategiesSetParams {
@@ -2101,9 +2103,10 @@ pub struct AccountStrategiesSetResult {
     pub note: &'static str,
 }
 
-pub const ACCOUNT_STRATEGIES_SET_NOTE: &str = "empty list = inherit every globally-enabled strategy; \
-     non-empty = the account runs exactly those (one engine instance per \
-     (account, strategy)); a removed strategy with open positions keeps \
+pub const ACCOUNT_STRATEGIES_SET_NOTE: &str = "the account's strategy ENABLEMENT set (the 启用 \
+     button's persistence; strategies are global, this is per-account state); \
+     a scope trades ⇔ the strategy is installed AND the account enabled AND \
+     the strategy ∈ this set; a removed strategy with open positions keeps \
      managing them exits-only until flat";
 
 // ── account.create / account.remove — 账户簿运行时增删 ──────────────────────

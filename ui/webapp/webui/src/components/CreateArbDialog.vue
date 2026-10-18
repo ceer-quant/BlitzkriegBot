@@ -16,8 +16,11 @@
  *        账户的 venue 绑定读数（绑定单一 venue 时双腿会被 venue 守卫拒绝
  *        第二腿 —— 面板必须说出这一条，而不是藏起来）。
  *
- * 确认页（提交前最后一步）汇总三段；预估利润只给公式不给数字 —— 数字要
- * L2 深度，面板没有，编一个就是撒谎。静态公式 + 原子批配额警告原样披露。
+ * 确认页（提交前最后一步）汇总三段；预估利润按 store 快照的两腿实时盘口
+ * 随 tick 更新（账户↔venue 解耦批次）：|价差| − 双腿费用（内核同一费率
+ * 曲线）− 滑点估计（1 tick × 2 腿，保守）。盘口缺失（某腿无报价/未带
+ * token）→ 显示「盘口数据不足」，不显示陈旧数字 —— 编一个就是撒谎。
+ * 静态公式说明 + 原子批配额警告原样披露。
  *
  * venue 纪律：venue 一律数据渲染（no-venue-branch 门禁）；组件不分支于任何
  * 具体交易所名。
@@ -28,7 +31,12 @@ import {
   api,
   type UnifiedEventRow,
   type UnifiedCandidateRow,
+  type UnifiedVenueRow,
+  type AssetBook,
 } from '@/api/client'
+import { cents } from '@/lib/format'
+import { usePanelStore } from '@/stores/panel'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -288,6 +296,100 @@ const patchLines = computed(() =>
   Object.entries(paramsPatch.value).map(([k, v]) => `${k}: ${v}`),
 )
 
+// ── 实时预估利润（账户↔venue 解耦批次补课）─────────────────────────────────
+// 数据源 = 既有 store 快照（snapshot.books 的 L2 盘口），随轮询 tick 自动
+// 更新 —— 不另开数据通道，不发明第二张行情表。配对规则照抄策略
+// cross_venue_arb 的 pick_pair 语义：UP 腿取 UP 卖价更便宜的那一侧 listing，
+// DOWN 腿取另一侧；每组锁定利润 = $1 − (ask_UP + ask_DOWN) − 双腿费用 − 滑点。
+//
+// 费用 = 内核唯一的费率曲线（exit_policy::FeeSchedule::fee_per_share）：
+// rate·(p·(1−p))^exponent，上线部署线 = legacy_quadratic（0.125, 2）。价格在
+// (0,1) 之外内核不收费 —— 面板按 0 计（内核同式同值）。
+// 滑点 = 保守 1 tick（0.01）× 2 腿；内核 taker_slippage_ticks 默认 0，这里
+// 往坏处估而不是往好处估。
+//
+// 盘口缺失（任一腿没有 ask、或快照未带 books）→ 显示「盘口数据不足」，
+// 绝不显示上一个数字或编造的 0 —— 陈旧数字比没有数字更危险。
+
+const store = usePanelStore()
+
+/** 两腿要价（每组一份）：无法配出完整双腿 → null。 */
+interface ArbLegQuote {
+  /** UP 腿所在 venue（数据渲染用，不分支于具体交易所名）。 */
+  upVenue: string
+  downVenue: string
+  askUp: number
+  askDown: number
+  /** 较小一侧的可见卖深（份数）—— 容量提示，非保证成交。 */
+  depth: number
+}
+
+/** 一条 UnifiedVenueRow 对应的盘口行：优先 venue 标签配对（新内核行带
+ *  venue 字段），缺标签时按 asset 名兜底（feature-detect，永不假设字段在）。 */
+function bookForVenueRow(rows: AssetBook[], r: UnifiedVenueRow): AssetBook | null {
+  const tagged = rows.filter((b) => typeof b.venue === 'string' && b.venue !== '')
+  if (tagged.length) return tagged.find((b) => b.venue === r.venue) ?? null
+  const asset = (r.asset ?? '').trim()
+  if (!asset) return null
+  return rows.find((b) => b.asset === asset) ?? null
+}
+
+const arbLegs = computed<ArbLegQuote | null>(() => {
+  const ev = selectedEvent.value
+  if (!ev || ev.venues.length !== 2) return null
+  const rows = store.snapshot?.books ?? []
+  if (!rows.length) return null
+  // 每个 venue 侧的报价：UP 卖价 = up.bestAsk，DOWN 卖价 = down.bestAsk；
+  // 任一侧没有完整双腿 ask → 该 listing 报不出价（策略同款：报不出的
+  // listing 不是折扣，是事故）。
+  const quotes = ev.venues
+    .map((r) => {
+      const b = bookForVenueRow(rows, r)
+      if (!b) return null
+      const askUp = b.up.bestAsk
+      const askDown = b.down.bestAsk
+      if (askUp == null || askDown == null) return null
+      const dUp = b.up.asks.reduce((a, l) => a + (Number(l.size) || 0), 0)
+      const dDown = b.down.asks.reduce((a, l) => a + (Number(l.size) || 0), 0)
+      return { venue: r.venue, askUp, askDown, depth: Math.min(dUp, dDown) }
+    })
+    .filter((q): q is NonNullable<typeof q> => q !== null)
+  if (quotes.length !== 2) return null
+  // pick_pair：UP 腿取 UP 卖价便宜的一侧，DOWN 腿取另一侧；同侧并列时
+  // 稳定取前者（与策略的排序语义一致，不额外发明）。
+  const [x, y] = quotes
+  const upFirst = x.askUp <= y.askUp
+  const up = upFirst ? x : y
+  const down = upFirst ? y : x
+  return {
+    upVenue: up.venue,
+    downVenue: down.venue,
+    askUp: up.askUp,
+    askDown: down.askDown,
+    depth: Math.min(up.depth, down.depth),
+  }
+})
+
+/** 内核费率曲线（legacy_quadratic 上线部署线）；(0,1) 之外 = 0，与内核
+ *  `p outside (0,1) → fee 0` 同式。 */
+const FEE_RATE = 0.125
+const FEE_EXPONENT = 2
+function feePerShare(p: number): number {
+  if (!(p > 0 && p < 1)) return 0
+  return FEE_RATE * (p * (1 - p)) ** FEE_EXPONENT
+}
+
+/** 保守滑点：1 tick = 0.01 × 2 腿（内核 tick = Decimal::new(1, 2)）。 */
+const SLIPPAGE_PER_LEG = 0.01
+
+/** 每组锁定利润（$/份·组）；盘口不足 → null（模板显示「盘口数据不足」）。 */
+const estProfitPerShare = computed<number | null>(() => {
+  const q = arbLegs.value
+  if (!q) return null
+  return 1 - q.askUp - q.askDown - feePerShare(q.askUp) - feePerShare(q.askDown)
+    - SLIPPAGE_PER_LEG * 2
+})
+
 // ── discrepancy 名称 → 操作员可读的短语；未知名原样展示（数据驱动）────────
 const DISCREPANCY_LABELS: Record<string, string> = {
   settlement_source: '结算源不一致',
@@ -493,9 +595,47 @@ function discrepancyLabel(d: string): string {
             </div>
 
             <div>
-              <span class="label-micro">预估利润（公式）</span>
+              <span class="label-micro">预估锁定利润（实时盘口）</span>
+              <!--
+                Live per-share estimate from the panel store's snapshot books:
+                $1 − (ask_UP + ask_DOWN) − both legs' fees (the kernel's one
+                curve, legacy_quadratic 0.125·(p(1−p))²) − 2 legs × 1 tick of
+                conservative slippage. It re-reads on every store tick — there
+                is no cached number to go stale. When either leg has no ask
+                (or the books field is absent) the estimate is `null` and the
+                block states the gap instead of quoting a stale figure.
+              -->
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px] leading-relaxed">
-                预估锁定利润 ≈ ($1 − 腿A卖价 − 腿B卖价 − 双腿费用) × 份数，实际入场由内核逐 tick 按 L2 深度判定。
+                <template v-if="estProfitPerShare !== null && arbLegs">
+                  <div class="flex items-baseline gap-2">
+                    <span class="stat-num text-[20px] leading-none" :class="estProfitPerShare >= 0 ? 'text-up' : 'text-down'">
+                      <RollingNumber :value="estProfitPerShare >= 0 ? `+${(estProfitPerShare * 100).toFixed(1)}¢` : `−${(Math.abs(estProfitPerShare) * 100).toFixed(1)}¢`" />
+                    </span>
+                    <span class="text-[11px] text-faint-fg">每组（1 份 UP + 1 份 DOWN）</span>
+                  </div>
+                  <div class="mt-1 space-y-0.5 text-[11.5px] text-muted-fg">
+                    <div>
+                      UP 腿 <Badge variant="outline">{{ arbLegs.upVenue }}</Badge>
+                      卖价 <span class="num"><RollingNumber :value="cents(arbLegs.askUp)" /></span>
+                      · DOWN 腿 <Badge variant="outline">{{ arbLegs.downVenue }}</Badge>
+                      卖价 <span class="num"><RollingNumber :value="cents(arbLegs.askDown)" /></span>
+                    </div>
+                    <div class="text-faint-fg">
+                      已含双腿费用（费率曲线 0.125·(p(1−p))²，随内核）与滑点估计（每腿 1 tick）；
+                      可见卖深较小侧约 <span class="num"><RollingNumber :value="arbLegs.depth.toFixed(1)" /></span> 份（容量提示，非保证成交）。
+                    </div>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="font-semibold text-muted-fg">盘口数据不足</div>
+                  <div class="mt-0.5 text-[11.5px] text-faint-fg">
+                    两个场地的卖一价尚未同时到达（行情未到 / 某侧无卖价 / 快照未带盘口）——
+                    有了实时盘口这里会立即给出数字；不显示陈旧估计。
+                  </div>
+                </template>
+                <div class="mt-1 text-[11px] text-faint-fg">
+                  公式：$1 − (腿UP卖价 + 腿DOWN卖价) − 双腿费用 − 滑点；实际入场由内核逐 tick 按 L2 深度判定。
+                </div>
                 <div class="mt-1 text-[11px] text-down">原子批受 virtual-limit 配额约束，整组放不下时零腿开出。</div>
               </div>
             </div>

@@ -132,16 +132,93 @@ const books = computed<AssetBook[]>(() => snap.value?.books ?? [])
  */
 const hasDepthData = computed(() => snap.value?.books !== undefined)
 
+// venue 层（账户绑定交易所的下游过滤）：账户切换器就是交易所切换器 ——
+// active 账户绑定了 venue X 时，页面只显示 X 的行；未绑定 = 可交易任意
+// 交易所，页面也就显示全部。这层过滤按行数据的 venue 字段（issue 427）走，
+// 与 accountId 过滤互补：pre-E28 无归属的旧行同样能被 venue 层过滤到。
+const activeVenue = computed(() => store.activeAccountVenue)
+
+// ── venue 跟随的 Loading 门（账户↔venue 解耦，2026-10 裁决）────────────────
+// 切换账户且绑定交易所变化时：旧所的行情行必须立刻消失、显示 Loading，
+// 新所首行数据到达才渲染 —— 决不允许旧所盘口残留被误读成新所报价。
+//
+// 实现是一个纯派生门：venue 变化即开（本地时间戳），此后快照里出现
+// 「带新 venue 标签的行」才关。老内核/网关剥掉 venue 标签时
+// （feature-detect：行无 venue 字段）走不了该判定 → 不显示 Loading、
+// 行全显（未分所降级）——永不因降级而卡死在加载态。
+const venueSwitchAt = ref(0)
+const venueSwitchFrom = ref('')
+watch(activeVenue, (nv, ov) => {
+  if (nv === ov) return
+  // 首帧挂载（ov===undefined）不开 Loading —— 没有旧可清。
+  if (ov === undefined) return
+  venueSwitchAt.value = Date.now()
+  venueSwitchFrom.value = ov
+})
+
+/**
+ * 「切换后新所数据已到达」的判定：本帧快照里存在 venue 标签 === 新绑定
+ * 的行情行（prices 或 books 任一）。行不带标签（降级显示全部）时该判定
+ * 恒 false —— 但那种核本就走不了 venue 过滤，Loading 门也随之不启用。
+ */
+const venueDataArrived = computed(() => {
+  const v = activeVenue.value
+  if (!v) return true
+  const tagged = (rows: { venue?: string }[]) =>
+    rows.some((r) => typeof r.venue === 'string' && r.venue !== '' && r.venue === v)
+  return tagged(snap.value?.round?.prices ?? []) || tagged(snap.value?.books ?? [])
+})
+
+/**
+ * Loading 门开着 = venue 已切换、新所数据未到、且行数据带 venue 标签
+ * （feature-detect：无标签的降级面没有「等新所数据」可言，门永不开）。
+ */
+const venueLoading = computed(() => {
+  if (!venueSwitchAt.value) return false
+  if (!activeVenue.value) return false
+  const anyTagged =
+    (snap.value?.round?.prices ?? []).some((r) => typeof r.venue === 'string' && r.venue !== '') ||
+    (snap.value?.books ?? []).some((r) => typeof r.venue === 'string' && r.venue !== '')
+  if (!anyTagged) return false
+  return !venueDataArrived.value
+})
+
+/** 行情卡的可见行：Loading 门开着 = 清空（绝不残留旧所盘口）。 */
+const visiblePrices = computed<MarketPrice[]>(() => {
+  if (venueLoading.value) return []
+  return filterByVenue(prices.value, activeVenue.value).rows
+})
+
+/** 盘口深度卡的可见行：同一 Loading 门。 */
+const visibleBooks = computed<AssetBook[]>(() => {
+  if (venueLoading.value) return []
+  return filterByVenue(books.value, activeVenue.value).rows
+})
+
+/** 未绑定态（''/undefined）：显示「该账户未绑定交易所」空态，不显示任何
+ *  行情数据（旧行清空，指引去账户切换器绑定）。老面板/单账户（无
+ *  activeAccount 读数）不算未绑定 —— 它们保持旧行为显示全部。 */
+const venueUnbound = computed(() => {
+  const id = store.activeAccount
+  if (!id) return false
+  return activeVenue.value === ''
+})
+
 const depthAsset = ref('')
-watch(books, (b) => {
-  if (!b.length) return
+// 资产选择跟随 venue 过滤后的可见行：旧所的资产不会成为新所页面的选中项
+// （切换账户清空旧所行时，选中资产随 visibleBooks 重置到新所首行）。
+watch(visibleBooks, (b) => {
+  if (!b.length) {
+    depthAsset.value = ''
+    return
+  }
   if (!b.some((x) => x.asset === depthAsset.value)) depthAsset.value = b[0].asset
 }, { immediate: true })
 
 /** UP or DOWN token of the selected asset — the two halves of the round. */
 const depthToken = ref<'up' | 'down'>('up')
 
-const activeBook = computed(() => books.value.find((b) => b.asset === depthAsset.value) ?? null)
+const activeBook = computed(() => visibleBooks.value.find((b) => b.asset === depthAsset.value) ?? null)
 const activeSide = computed<BookSide | null>(() => {
   const b = activeBook.value
   if (!b) return null
@@ -207,11 +284,8 @@ const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 // history-derived view (cumulative header, equity curve, filters, stats)
 // reads the filtered list so the page cannot mix two accounts in one number.
 const accountFilter = computed(() => filterByAccount(store.tradeRows, store.activeAccount))
-// venue 层（账户绑定交易所的下游过滤）：账户切换器就是交易所切换器 ——
-// active 账户绑定了 venue X 时，页面只显示 X 的行；未绑定 = 可交易任意
-// 交易所，页面也就显示全部。这层过滤按行数据的 venue 字段（issue 427）走，
-// 与 accountId 过滤互补：pre-E28 无归属的旧行同样能被 venue 层过滤到。
-const activeVenue = computed(() => store.activeAccountVenue)
+// （activeVenue 与 venue 跟随的 Loading 门在本文件上方定义 —— 行情/盘口/
+// 历史/持仓共用同一 venue 视图。）
 const historyRows = computed<TradeRow[]>(() =>
   filterByVenue(accountFilter.value.rows, activeVenue.value).rows,
 )
@@ -824,7 +898,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     >下面的报价是内核最后收到的行情，并非当前市场。轮次与倒计时按本地时钟推进，所以看起来仍在跳动；
       引擎也会因为行情过期而拒绝开仓。请检查行情插件与网络连接。</AlertBanner>
 
-    <div v-if="prices.length" class="mt-3.5 flex items-center gap-2">
+    <div v-if="!venueUnbound && !venueLoading && visiblePrices.length" class="mt-3.5 flex items-center gap-2">
       <Activity class="size-3.5" :class="feed.stale ? 'text-down' : 'text-faint-fg'" />
       <span
         class="text-[11px] num"
@@ -837,14 +911,39 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
       </Tooltip>
     </div>
 
-    <div v-if="prices.length" class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
+    <!-- 未绑定态：账户没绑交易所 → 不显示任何行情数据（含旧所残留），
+         指引去账户切换器绑定。老面板/单账户（无账户读数）不进这里。 -->
+    <Card v-if="venueUnbound" class="mt-3.5">
+      <EmptyState
+        text="该账户未绑定交易所"
+        hint="行情数据源跟随账户绑定的交易所 —— 到右上角账户切换器给该账户绑定交易所（绑定即启用），行情卡会立即跟随切换。"
+        compact
+      />
+    </Card>
+    <!-- venue 切换 Loading：旧所行已清空，等新所首行数据到达才渲染 ——
+         决不残留旧所盘口。 -->
+    <Card v-else-if="venueLoading" class="mt-3.5">
+      <EmptyState
+        loading
+        :text="`正在接入 ${activeVenue} 的行情…`"
+        :hint="venueSwitchFrom ? `已解除 ${venueSwitchFrom} 的订阅与盘口显示；${activeVenue} 的首行数据到达后本卡立即渲染。` : '新交易所的首行数据到达后本卡立即渲染。'"
+        compact
+      />
+    </Card>
+    <div v-else-if="visiblePrices.length" class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <div
-        v-for="m in prices"
-        :key="m.asset"
+        v-for="m in visiblePrices"
+        :key="`${m.venue ?? ''}:${m.asset}`"
         class="glass card-pad transition-transform duration-200 hover:-translate-y-0.5"
       >
         <div class="flex items-center justify-between">
-          <span class="text-[13px] font-bold tracking-wide">{{ m.asset }}</span>
+          <span class="flex min-w-0 items-center gap-1.5">
+            <span class="truncate text-[13px] font-bold tracking-wide">{{ m.asset }}</span>
+            <!-- venue 徽标：行数据带标签时显示归属所；无标签（降级显示
+                 全部）时显示「未分所」，不发明归属。 -->
+            <Badge v-if="m.venue" variant="outline" class="shrink-0">{{ m.venue }}</Badge>
+            <Badge v-else-if="activeVenue" variant="outline" class="shrink-0" title="本行数据未带交易所标签（旧内核），降级显示">未分所</Badge>
+          </span>
           <Badge :variant="spreadCents(m) <= 1 ? 'up' : 'gold'">
             {{ spreadCents(m).toFixed(1) }}¢
           </Badge>
@@ -891,12 +990,12 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
     </Card>
 
     <!-- ── 盘口深度 (E8-c) ──────────────────────────────────────────────── -->
-    <Card v-if="books.length" class="mt-3.5">
+    <Card v-if="visibleBooks.length" class="mt-3.5">
       <CardHeader label="盘口深度">
         <template #action>
           <div class="flex items-center gap-2">
             <select v-model="depthAsset" class="filter-select">
-              <option v-for="b in books" :key="b.asset" :value="b.asset">{{ b.asset }}</option>
+              <option v-for="b in visibleBooks" :key="`${b.venue ?? ''}:${b.asset}`" :value="b.asset">{{ b.asset }}</option>
             </select>
             <SegmentedControl
               v-model="depthToken"
@@ -907,6 +1006,14 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               size="sm"
             />
           </div>
+        </template>
+        <template #title>
+          <span class="flex items-center gap-1.5">
+            <!-- venue 徽标：盘口行带标签时显示归属所（同行情卡的数据驱动
+                 纪律）；未绑定账户不进本卡（未绑定空态先拦）。 -->
+            <Badge v-if="visibleBooks[0]?.venue" variant="outline">{{ visibleBooks[0].venue }}</Badge>
+            <Badge v-else-if="activeVenue" variant="outline" title="本行盘口未带交易所标签（旧内核），降级显示">未分所</Badge>
+          </span>
         </template>
       </CardHeader>
       <!--
@@ -943,7 +1050,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <template #action>
           <div class="flex items-center gap-2">
             <select v-model="depthAsset" class="filter-select">
-              <option v-for="b in books" :key="b.asset" :value="b.asset">{{ b.asset }}</option>
+              <option v-for="b in visibleBooks" :key="`${b.venue ?? ''}:${b.asset}`" :value="b.asset">{{ b.asset }}</option>
             </select>
             <SegmentedControl
               v-model="depthToken"

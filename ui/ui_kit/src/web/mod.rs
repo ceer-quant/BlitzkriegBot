@@ -354,8 +354,13 @@ pub fn render_json_full(
             "slot": r.slot, "ageSec": r.age_sec, "timeLeftSec": r.time_left_sec,
             "markets": r.markets, "canTrade": r.can_trade,
             // HFT panel needs the live UP/DOWN quotes per asset.
+            // 账户↔venue 解耦（本轮）：每行还带 `venue`（插件名小写）——
+            // 这里是 webui 披露过的「类型化重组剥字段」点之一：typed struct
+            // 逐字段重拼，不写 venue 就到不了前端（HftPage 的 venue 过滤
+            // 与 Loading 门都 feature-detect 它）。空串 = 未分所，前端降级。
             "prices": r.market_prices.iter().map(|m| serde_json::json!({
-                "asset": m.asset, "up": m.up, "down": m.down })).collect::<Vec<_>>() })),
+                "asset": m.asset, "up": m.up, "down": m.down,
+                "venue": m.venue })).collect::<Vec<_>>() })),
         "positions": s.positions.iter().map(|p| serde_json::json!({
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
@@ -504,6 +509,10 @@ pub fn render_json_full(
             "asset": a.asset,
             "upTokenId": a.up_token_id,
             "downTokenId": a.down_token_id,
+            // 账户↔venue 解耦（本轮）：盘口行的 venue（token 反查所得，
+            // 与 engine.books 的富化同源）——HftPage 的 venue Loading 门
+            // 同时盯着 prices 与 books 两路行。
+            "venue": a.venue,
             "up": book_side_json(&a.up),
             "down": book_side_json(&a.down),
         })).collect::<Vec<_>>(),
@@ -2450,6 +2459,17 @@ impl WebServer {
                 // if it was the one removed, and persists the book.
                 self.proxy_backtest_body("account.remove", &req.body)
             }
+            ("POST", "/api/strategy-enable") => {
+                // 账户↔venue 解耦（本轮）：策略启用写的账户级通道 —— body 即
+                // `strategy.enable` 的 params 对象（`{name, enabled,
+                // accountId?}`），逐字转发（同 account-create/remove 的代理
+                // 纪律：网关零加工）。`accountId` 缺省/空 = 内核的 default
+                // 分支（全局开关，回放基线字节不变）；非 default = 内核的
+                // assignment IS enablement 分支（账户级启停，回执带
+                // `accountId`/`keptExitsOnly`）。前端文本动词通道（/api/command
+                // 的 `strategy <name> on|off`）保持原样 —— 旧面板路径不变。
+                self.proxy_backtest_body("strategy.enable", &req.body)
+            }
             ("GET", "/api/plugins") => {
                 // E9-g: the registry trio the TUI Plugins page shows (strategies
                 // / extensions / market plugins) in one authenticated call.
@@ -3151,6 +3171,77 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["accountId"], serde_json::json!(""));
         assert_eq!(rows[1]["accountId"], serde_json::json!("paper"));
+    }
+
+    /// 账户↔venue 解耦（本轮）：the typed re-assembly in `render_json_full`
+    /// must NOT strip the new `venue` fields — this is exactly the
+    /// "网关类型化重组剥字段" failure the WebUI disclosed: a struct field the
+    /// json! literal omits never reaches the browser, no matter what the core
+    /// sent. Both quote paths are pinned: `round.prices` (per market row) and
+    /// `books` (per asset row). A pre-venue core deserialises into empty
+    /// strings, which the panel renders as 未分所 — never filters on.
+    #[test]
+    fn the_snapshot_carries_the_venue_tag_on_quote_rows() {
+        use crate::core::types::{AssetBooksView, BookSideView, MarketPriceView, RoundView};
+
+        let snap = UiSnapshot {
+            round: Some(RoundView {
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+                markets: 2,
+                can_trade: true,
+                market_prices: vec![
+                    MarketPriceView {
+                        asset: "BTC".into(),
+                        up: 0.61,
+                        down: 0.39,
+                        venue: "polymarket".into(),
+                    },
+                    MarketPriceView {
+                        asset: "BTC".into(),
+                        up: 0.60,
+                        down: 0.40,
+                        venue: "kalshi".into(),
+                    },
+                ],
+            }),
+            books: vec![AssetBooksView {
+                asset: "BTC".into(),
+                up_token_id: "tok-up".into(),
+                down_token_id: "tok-down".into(),
+                venue: "kalshi".into(),
+                up: BookSideView::default(),
+                down: BookSideView::default(),
+            }],
+            ..UiSnapshot::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        let prices = doc["round"]["prices"].as_array().expect("prices array");
+        assert_eq!(prices.len(), 2, "same asset, two venues → two rows");
+        assert_eq!(prices[0]["venue"], serde_json::json!("polymarket"));
+        assert_eq!(prices[1]["venue"], serde_json::json!("kalshi"));
+        assert_eq!(doc["books"][0]["venue"], serde_json::json!("kalshi"));
+
+        // Backward compatibility: a core that never wrote `venue` parses into
+        // the empty-string default and the wire still carries the key.
+        let legacy: RoundView = serde_json::from_value(serde_json::json!({
+            "slot": 1, "ageSec": 0, "timeLeftSec": 60, "markets": 1,
+            "canTrade": false,
+            "marketPrices": [{ "asset": "ETH", "up": 0.5, "down": 0.5 }]
+        }))
+        .expect("a pre-venue round row must parse without venue");
+        assert_eq!(legacy.market_prices[0].venue, "");
+        let snap = UiSnapshot {
+            round: Some(legacy),
+            ..UiSnapshot::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, None)).unwrap();
+        assert_eq!(
+            doc["round"]["prices"][0]["venue"],
+            serde_json::json!(""),
+            "untagged rows reach the panel as 未分所, never as a missing key"
+        );
     }
 
     /// #186: a supervisor that has given up must be impossible to miss.

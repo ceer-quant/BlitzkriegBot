@@ -72,6 +72,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.net_visible {
         render_net_check(f, app);
     }
+    if app.accounts_visible {
+        render_accounts(f, app);
+    }
     render_command_bar(f, chunks[3], app);
     if let Some(text) = &app.pending_confirmation {
         render_confirm(f, chunks[4], text);
@@ -179,6 +182,7 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  Enter /Esc     run / cancel"),
         Line::from("  r              refresh now"),
         Line::from("  n              network check — which path is broken, if any"),
+        Line::from("  A (shift-a)    accounts — switch this session's default account"),
         Line::from("  y / n          confirm or cancel a dangerous action"),
         Line::from("  a / x / d      Evolution: accept / reject / defer the selected proposal"),
         Line::from("  e / u          Evolution: toggle auto-evolve / rollback selected strategy"),
@@ -384,6 +388,129 @@ fn wrapped_rows(lines: &[Line], width: u16) -> usize {
             }
         })
         .sum()
+}
+
+/// 账户↔venue 解耦（本轮）：the `A` overlay — the account book the kernel
+/// answered with, one row per account, cursor on the switchable row. Rendered
+/// straight off the raw `account.list` reply (no second model — the same
+/// discipline as the policy face); the venue binding and the strategy
+/// enablement set ride the row so the operator can see WHO they are about to
+/// become before pressing Enter. Enter confirms through the same y/n bar as
+/// the other panel writes; Esc/A closes.
+fn render_accounts(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let mut lines: Vec<Line> = Vec::new();
+    let active = app
+        .accounts_doc
+        .as_ref()
+        .and_then(|d| d.get("active"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_string();
+    let rows: Vec<&serde_json::Value> = app
+        .accounts_doc
+        .as_ref()
+        .and_then(|d| d.get("accounts"))
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    match app.accounts_doc.as_ref() {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "loading the account book… (or the core refused — check the log pane)",
+                Style::default().fg(ACCENT),
+            )));
+        }
+        Some(_) if rows.is_empty() => {
+            lines.push(Line::from(Span::styled(
+                "the account book is empty (this should not happen — `default` always exists)",
+                Style::default().fg(RED),
+            )));
+        }
+        Some(_) => {
+            lines.push(Line::from(Span::styled(
+                format!("session default: {active}"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for (i, row) in rows.iter().enumerate() {
+                let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let venue = row.get("venue").and_then(|v| v.as_str()).unwrap_or("");
+                let cursor = if i == app.accounts_focus.min(rows.len().saturating_sub(1)) {
+                    Span::styled("▸ ", Style::default().fg(ACCENT))
+                } else {
+                    Span::raw("  ")
+                };
+                let is_active = id == active;
+                let mark = if is_active {
+                    Span::styled("● ", Style::default().fg(GREEN))
+                } else {
+                    Span::raw("  ")
+                };
+                let status_span = if status == "active" {
+                    Span::styled(format!("{status:<9}"), Style::default().fg(GREEN))
+                } else {
+                    Span::styled(format!("{status:<9}"), Style::default().fg(WARN))
+                };
+                let mut spans = vec![
+                    cursor,
+                    mark,
+                    Span::styled(
+                        format!("{id:<12}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("{name:<14}")),
+                    status_span,
+                ];
+                // The venue binding: 空 = 未绑定（可交易任意交易所）— rendered
+                // as the dash, never as a fake venue name.
+                spans.push(Span::styled(
+                    format!("venue: {}", if venue.is_empty() { "—" } else { venue }),
+                    Style::default().fg(DIM),
+                ));
+                let strategies: Vec<&str> = row
+                    .get("strategies")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                spans.push(Span::styled(
+                    if strategies.is_empty() {
+                        " · strategies: 全局继承".to_string()
+                    } else {
+                        format!(" · strategies: {}", strategies.join(","))
+                    },
+                    Style::default().fg(DIM),
+                ));
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter switch (asks y/n) · A or Esc closes",
+        Style::default().fg(DIM),
+    )));
+
+    let pct_x = 86u16;
+    let inner_w = (area.width * pct_x / 100).saturating_sub(2);
+    let body_rows = wrapped_rows(&lines, inner_w);
+    let rect = centered_rect(
+        area,
+        pct_x,
+        (body_rows as u16).saturating_add(2).min(area.height),
+    );
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Accounts — switch this session's default (A / Esc to close)")
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        rect,
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {

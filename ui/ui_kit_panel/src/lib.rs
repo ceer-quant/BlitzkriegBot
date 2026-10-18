@@ -71,6 +71,9 @@ pub enum Msg {
     /// #364: internal nudge — after a write, run the same refresh a keypress
     /// would have fired (one Msg round-trip, no duplicate refresh logic).
     PolicySelfRefresh,
+    /// 账户↔venue 解耦（本轮）：the `A` overlay's `account.list` answered —
+    /// raw kernel book (`Err` = the core refused / transport died).
+    AccountsLoaded(Result<serde_json::Value, String>),
     /// The process received an external termination signal.
     Shutdown,
 }
@@ -161,6 +164,7 @@ KEYS:
   q / Ctrl-C  quit          :  focus command bar
   1-6 / Tab   switch view   r  refresh now
   ↑/↓         move selection (Plugins / Evolution)
+  A (shift-a) accounts overlay: switch this session's default account
   a x d       Evolution: accept / reject / defer the selected proposal
   e u         Evolution: toggle auto-evolve / rollback selected strategy
   Enter       run command   Esc cancel command
@@ -595,6 +599,23 @@ pub async fn run_panel_with_dispatcher(
                             let _ = tx.send(Msg::PolicyEditDone(out));
                         });
                     }
+                    Action::AccountsRefresh => {
+                        // 账户↔venue 解耦（本轮）：the `A` overlay's read on a
+                        // FRESH client of its own (same reasoning as NetCheck
+                        // / PolicyRefresh — never hold the shared dispatcher).
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                client.account_list().map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("accounts task: {e}")));
+                            let _ = tx.send(Msg::AccountsLoaded(out));
+                        });
+                    }
                     Action::None => {}
                 }
             }
@@ -771,6 +792,26 @@ pub async fn run_panel_with_dispatcher(
             }
             Msg::RefreshError(e) => app.log(format!("refresh error: {e}")),
             Msg::Decisions(rows) => app.decisions = rows,
+            Msg::AccountsLoaded(result) => match result {
+                Ok(doc) => {
+                    let n = doc
+                        .get("accounts")
+                        .and_then(|a| a.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    let active = doc
+                        .get("active")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    app.accounts_doc = Some(doc);
+                    if app.accounts_focus >= n {
+                        app.accounts_focus = n.saturating_sub(1);
+                    }
+                    app.log(format!("accounts: {n} account(s), default {active}"));
+                }
+                Err(e) => app.log(format!("account list failed: {e}")),
+            },
             Msg::PolicyLoaded(result) => match result {
                 Ok((accounts, section, preview, history)) => {
                     app.policy_accounts = accounts;

@@ -137,6 +137,12 @@ pub struct MarketPriceView {
     pub up: f64,
     #[serde(deserialize_with = "de_num", default)]
     pub down: f64,
+    /// 账户↔venue 解耦（本轮合同）：该行情行所属的行情插件名（小写）。
+    /// 同一资产两个 venue 各成一行，面板据此做账户绑定 venue 的下游过滤。
+    /// 老内核 / 类型化重组剥掉该字段时缺省为空串 —— 渲染为「未分所」，
+    /// 不过滤（与 webui 的 feature-detect 降级同一纪律）。
+    #[serde(default)]
+    pub venue: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +175,11 @@ pub struct AssetBooksView {
     pub up_token_id: String,
     #[serde(default)]
     pub down_token_id: String,
+    /// 账户↔venue 解耦（本轮合同）：该盘口行所属市场的 venue（插件名小写，
+    /// 由 up/down token 的归属市场反查）。空串 = 未声明（老内核 / 单插件
+    /// 世界）——面板按「未分所」降级，不过滤。
+    #[serde(default)]
+    pub venue: String,
     #[serde(default)]
     pub up: BookSideView,
     #[serde(default)]
@@ -462,6 +473,11 @@ pub struct StrategyRow {
     /// E27 (§8.3): the refusal reason when incompatible, else null.
     #[serde(default)]
     pub incompatible_reason: Option<String>,
+    /// 账户↔venue 解耦（本轮合同）：该策略当前在哪些账户 scope 上有实例
+    /// （engine 注册表读数，排序稳定）。单 scope 部署 = `["default"]`。
+    /// 老内核不写字段 → 空列表，按缺省降级走全局开关语义。
+    #[serde(default)]
+    pub accounts: Vec<String>,
 }
 
 fn default_true() -> bool {

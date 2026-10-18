@@ -105,6 +105,10 @@ pub enum Action {
     /// panel process never replaces the kernel binary itself (P12) — it
     /// triggers the launcher-side installer and reports its output.
     UpdateInstall,
+    /// 账户↔venue 解耦（本轮）：`account.list` off the render loop — the `A`
+    /// overlay's read. A fresh client of its own (same reasoning as
+    /// NetCheck/PolicyRefresh); the reply is the kernel's own book, raw.
+    AccountsRefresh,
 }
 
 /// How far the self-check has got. Advances as snapshots finally arrive with
@@ -240,6 +244,15 @@ pub struct App {
     /// #364: confirmation state for the destructive rows (`[d]` delete,
     /// `[r]` rollback): the exact set/reset params, shown on the confirm bar.
     pub policy_pending: Option<(PolicyAction, serde_json::Value, String)>,
+    /// 账户↔venue 解耦（本轮）：the `A` overlay's state. The kernel's own
+    /// `account.list` reply, raw — same discipline as the policy face (the
+    /// gateway adds no second model of the account book).
+    pub accounts_doc: Option<serde_json::Value>,
+    /// Cursor into the overlay's account rows (`accountsDoc.accounts[i]`).
+    pub accounts_focus: usize,
+    /// The overlay is visible (`A` toggles; Esc/A close). While it is up it
+    /// takes the keys, exactly like the net-check overlay.
+    pub accounts_visible: bool,
 }
 
 /// #364: one rule mid-edit — the builder's state. Field/op move with ←/→,
@@ -516,6 +529,9 @@ impl App {
             policy_mode: false,
             policy_busy: false,
             policy_pending: None,
+            accounts_doc: None,
+            accounts_focus: 0,
+            accounts_visible: false,
         }
     }
 
@@ -547,6 +563,21 @@ impl App {
                 }
             }
         };
+    }
+
+    /// 账户↔venue 解耦（本轮）：the account id under the overlay's cursor,
+    /// read off the raw `account.list` reply (no second model). `None` when
+    /// the book has not loaded or the cursor ran past it — the Enter arm logs
+    /// instead of guessing.
+    pub fn selected_account_id(&self) -> Option<String> {
+        self.accounts_doc
+            .as_ref()?
+            .get("accounts")
+            .and_then(|a| a.as_array())
+            .and_then(|rows| rows.get(self.accounts_focus))
+            .and_then(|row| row.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
@@ -597,6 +628,47 @@ impl App {
                     self.net_busy = true;
                     Action::NetCheck
                 }
+                _ => Action::None,
+            };
+        }
+        // 账户↔venue 解耦（本轮）：the `A` account-switch overlay takes the
+        // keys while it is up — ↑/↓ move the cursor, Enter switches (through
+        // the same confirm bar as the other panel writes: switching the
+        // session default redirects every later entry decision this
+        // connection makes), Esc/A close. `q` keeps its global quit meaning.
+        if self.accounts_visible {
+            return match key.code {
+                KeyCode::Char('A') | KeyCode::Esc => {
+                    self.accounts_visible = false;
+                    Action::None
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+                KeyCode::Up => {
+                    self.accounts_focus = self.accounts_focus.saturating_sub(1);
+                    Action::None
+                }
+                KeyCode::Down => {
+                    let n = self
+                        .accounts_doc
+                        .as_ref()
+                        .map(|d| d["accounts"].as_array().map(|a| a.len()).unwrap_or(0))
+                        .unwrap_or(0);
+                    if self.accounts_focus + 1 < n {
+                        self.accounts_focus += 1;
+                    }
+                    Action::None
+                }
+                KeyCode::Enter => match self.selected_account_id() {
+                    Some(id) => {
+                        self.accounts_visible = false;
+                        Action::ConfirmToggle(format!("account {id}"))
+                    }
+                    None => {
+                        self.log("no account row selected".to_string());
+                        Action::None
+                    }
+                },
                 _ => Action::None,
             };
         }
@@ -766,6 +838,19 @@ impl App {
                 self.input.clear();
                 self.history_browse = None;
                 Action::None
+            }
+            // 账户↔venue 解耦（本轮）：`A` (shift-a) opens the account-switch
+            // overlay — the multi-account twin of `n`. Lowercase `a` stays
+            // taken (Evolution accept / Settings auto-update). First press
+            // fetches `account.list` on a worker; a list already held renders
+            // at once (the overlay's refresh key is the global `r`).
+            KeyCode::Char('A') => {
+                self.accounts_visible = true;
+                if self.accounts_doc.is_none() {
+                    Action::AccountsRefresh
+                } else {
+                    Action::None
+                }
             }
             KeyCode::Char('r') | KeyCode::Char('R') => Action::Refresh,
             KeyCode::Char('1') => {
@@ -1391,6 +1476,10 @@ impl App {
             || cmd.starts_with("rollback ")
             || cmd.starts_with("force-order ")
             || cmd.starts_with("force_order ")
+            // 账户↔venue 解耦（本轮）：switching the session default
+            // redirects every later entry decision this connection makes —
+            // a write that always asks, like the other posture moves.
+            || cmd.starts_with("account ")
     }
 }
 
@@ -1631,5 +1720,62 @@ mod tests {
         // `y` resolves the bar into the dispatch line (what the main loop runs).
         let action = app.on_key(key('y'));
         assert!(matches!(action, Action::RunCommand(c) if c == "force-order dry_7"));
+    }
+
+    /// 账户↔venue 解耦（本轮）：the `A` overlay — open, navigate, confirm
+    /// through the y/n bar, close. Switching the session default is a write
+    /// that always asks (`account <id>` starts with `account `).
+    #[test]
+    fn accounts_overlay_opens_selects_and_switches() {
+        let mut app = App::new("/tmp/x.sock".into(), false);
+
+        // First `A` opens the overlay and asks the main loop for the book.
+        assert!(matches!(app.on_key(key('A')), Action::AccountsRefresh));
+        assert!(app.accounts_visible);
+        // A held list renders at once (no second fetch on reopen).
+        assert!(matches!(app.on_key(key('A')), Action::None));
+
+        app.accounts_doc = Some(serde_json::json!({
+            "version": "1.1", "active": "default",
+            "accounts": [
+                { "id": "default", "name": "Default", "status": "active", "venue": "" },
+                { "id": "kalshi_main", "name": "Kalshi", "status": "active",
+                  "venue": "kalshi", "strategies": ["spread_arb"] },
+            ],
+        }));
+        // Esc closes; reopen keeps the held book.
+        assert!(matches!(
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::None
+        ));
+        assert!(!app.accounts_visible);
+        app.accounts_visible = true;
+
+        // Cursor starts at row 0 (the session default), moves down one row,
+        // and stops at the last row (no wrap).
+        assert_eq!(app.selected_account_id().as_deref(), Some("default"));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_account_id().as_deref(), Some("kalshi_main"));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_account_id().as_deref(), Some("kalshi_main"));
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.selected_account_id().as_deref(), Some("default"));
+
+        // Enter routes through the confirm bar: the main loop asks the
+        // predicate, the predicate arms, `y` dispatches `account <id>`.
+        assert!(
+            matches!(app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::ConfirmToggle(c) if c == "account default")
+        );
+        assert!(app.toggle_needs_confirmation("account kalshi_main"));
+        app.pending_confirmation = Some("account kalshi_main".into());
+        app.accounts_visible = false;
+        assert!(matches!(
+            app.on_key(key('y')),
+            Action::RunCommand(c) if c == "account kalshi_main"
+        ));
+
+        // `q` inside the overlay keeps its global quit meaning.
+        app.accounts_visible = true;
+        assert!(matches!(app.on_key(key('q')), Action::Quit));
     }
 }

@@ -216,13 +216,21 @@ pub struct Account {
     /// `account.create` all produce a trading account.
     #[serde(default = "default_true")]
     pub trading_enabled: bool,
-    /// The strategies THIS account runs. Empty = the account runs NO
-    /// strategies — assignments are explicit, there is no inherit (the boot
-    /// migration materialized the one implicit default set that ever
-    /// existed). Non-empty = the explicit assignment (the engine hosts one
-    /// instance per (account, strategy) pair, each ENABLED — assignment IS
-    /// enablement). Names are validated against the registered set at write
-    /// time (`account.strategies.set`), not here.
+    /// THIS account's strategy ENABLEMENT set — the per-(account, strategy)
+    /// 启用按钮 state the panel persists (账户↔venue 解耦语义裁决). NOT an
+    /// assignment and NOT a visibility filter: every installed strategy is
+    /// visible to every account; this list names the ones whose (account,
+    /// strategy) scope actually RUNS. A scope trades ⇔ the strategy is
+    /// installed AND the account is enabled (trading switch) AND the
+    /// strategy ∈ this set. Disabling a scope that still holds positions
+    /// demotes it EXITS-ONLY (no new entries; exits keep flowing to flat) —
+    /// never a teardown. Names are validated at write time
+    /// (`strategy.enable` / `account.strategies.set`), not at parse.
+    /// Absent/empty = the explicit "this account runs no strategies" set
+    /// (per-account enablement is the only truth — see
+    /// [`AccountLedgers::strategy_assignment`]); on a fresh single-default
+    /// deployment that spelling just leaves the account silent, the
+    /// historical zero-config shape.
     #[serde(default)]
     pub strategies: Vec<String>,
     pub updated_at_ms: i64,
@@ -286,8 +294,9 @@ impl AccountLedgers {
                 // active, exactly the 0.2 behaviour.
                 venue: String::new(),
                 trading_enabled: true,
-                // Inherit: the single-book deployment runs every globally
-                // enabled strategy, exactly the 0.2 behaviour.
+                // Zero-config deployment: no enablement key — the account's
+                // scopes follow the GLOBAL strategy toggle, exactly the 0.2
+                // behaviour.
                 strategies: Vec::new(),
                 updated_at_ms: now_ms,
             }],
@@ -480,11 +489,12 @@ impl AccountLedgers {
         Ok(())
     }
 
-    /// The strategy-assignment write (`account.strategies.set`): the names
-    /// are stored verbatim (the CALLER validated them against the
-    /// registered set; an empty list is the legal INHERIT). The engine's
-    /// scope-instance rebuild rides a separate path — this only moves the
-    /// book's fact.
+    /// The strategy-ENABLEMENT write (账户↔venue 解耦语义): the names are
+    /// stored verbatim (the CALLER validated them against the registered
+    /// set); an empty list is the explicit "this account runs no strategies"
+    /// set (per-account enablement is the only truth — the old "empty =
+    /// inherit the global toggle" reading is retired). The engine's scope
+    /// rebuild rides a separate path — this only moves the book's fact.
     pub fn set_strategies(
         &mut self,
         id: &AccountId,
@@ -500,11 +510,18 @@ impl AccountLedgers {
         Ok(())
     }
 
-    /// This account's strategy assignment, for the engine's scope rebuild:
-    /// `None` (missing or empty key) = this account runs NO strategies —
-    /// assignments are explicit, there is no inherit (the boot migration
-    /// materialized the one implicit set that ever existed); a `Some` is
-    /// always non-empty.
+    /// THIS account's strategy ENABLEMENT set (账户↔venue 解耦语义裁决):
+    /// the panel's per-(account, strategy) 启用按钮 state. NOT an
+    /// assignment and NOT a visibility filter — every installed strategy is
+    /// visible to every account; this list names the ones whose scope
+    /// actually RUNS. `None` (empty/missing key) = this account runs
+    /// NOTHING explicitly (per-account enablement is the only truth; the
+    /// old "absence = the GLOBAL toggle governs" reading is retired — on a
+    /// fresh deployment the absent key simply leaves the default account
+    /// silent, which is the zero-config shape). Non-empty: exactly these
+    /// (strategy, account) scopes run (the engine hosts one instance per
+    /// pair). Names are validated at write time (`strategy.enable` /
+    /// `account.strategies.set`), not here.
     pub fn strategy_assignment(&self, id: &AccountId) -> Option<&Vec<String>> {
         self.accounts
             .get(id)
@@ -874,10 +891,10 @@ mod book_tests {
         );
     }
 
-    /// The assignment write (`account.strategies.set` book half): names ride
+    /// The enablement write (`account.strategies.set` book half): names ride
     /// verbatim (the CALLER validated them against the registered set), an
-    /// empty list is the legal INHERIT, `strategy_assignment` normalizes
-    /// empty → None, and unknown ids refuse.
+    /// empty list is the explicit empty set (spelled "runs nothing" — the
+    /// reader answers None), and unknown ids refuse.
     #[test]
     fn strategy_assignment_rides_verbatim_and_normalizes_empty_to_inherit() {
         let mut book = two_accounts();
@@ -888,7 +905,9 @@ mod book_tests {
             book.strategy_assignment(&paper).unwrap(),
             &vec!["spread_arb".to_string()]
         );
-        // INHERIT: the empty list stores and reads back as None.
+        // The EMPTY SET: stores and reads back as None — the absent key is
+        // the "this account runs nothing" spelling (the zero-config shape:
+        // a fresh default account stays silent).
         book.set_strategies(&paper, Vec::new(), 4).unwrap();
         assert!(
             book.strategy_assignment(&paper).is_none(),

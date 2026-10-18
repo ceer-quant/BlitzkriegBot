@@ -1631,6 +1631,14 @@ pub struct Core {
     /// this flag covers already rides its own deadline in `tick`.
     /// `i64::MAX` = nothing scheduled.
     fast_next_exit_deadline_ms: i64,
+    /// #531 pair-chase state: the chase this scope last offered for a naked
+    /// leg, keyed (account, strategy, naked_token) → (missing_token, at_ms).
+    /// The window reader (`run_pair_orphan_sweep`) is the only consumer — a
+    /// chase placed within its window buys the leg the benefit of the doubt
+    /// before the sweep's flatten fallback fires, and the record retires
+    /// when the fallback does. Process-local (an in-memory debounce, not a
+    /// durable fact): a restart simply re-judges from the book.
+    pair_chase_attempts: HashMap<(String, String, String), (String, i64)>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -2252,6 +2260,7 @@ impl Core {
             fast_last_eval_ms: 0,
             // Issue #390 (nofast): 0 = due on the first tick.
             fast_next_exit_deadline_ms: 0,
+            pair_chase_attempts: HashMap::new(),
         }
     }
 
@@ -3041,18 +3050,12 @@ impl Core {
     /// assignment are instantiated from the SAME lua package the default
     /// scope loaded (own Lua state, own book).
     ///
-    /// INHERIT: an EMPTY assignment is NOT "remove everything". For `default`
-    /// it resolves to the set of names the default scope currently hosts
-    /// (exactly what boot installed — inherit = keep running whatever the
-    /// boot fanned out), so the restore-write a probe/panel sends after a
-    /// named assignment cannot sweep the live scopes out from under the
-    /// engine. For a non-default account the book already normalizes empty
-    /// → None (`strategy_assignment`), and boot never fans non-default
-    /// scopes out, so empty = no scopes, which is what the rebuild then
-    /// installs. (The empty-on-default shape is what 16:29 生产 probe 实锤:
-    /// the old code handed the empty list straight to the rebuild, whose
-    /// DROP phase deleted every default scope — `strategy.list` went empty
-    /// and the enabled strategy stopped trading with no error anywhere.)
+    /// 账户↔venue 解耦语义: `requested` is the account's strategy
+    /// ENABLEMENT set (the 启用按钮's persistence), not an assignment or a
+    /// visibility filter — strategies are global. The write is a whole-set
+    /// decision: memory AND accounts.toml in one transaction (persist
+    /// first), then the engine scopes rebuilt from it (removed-and-flat
+    /// drop; removed-and-held demote exits-only; added instantiate enabled).
     ///
     /// Returns the exits-only keep-list for the reply.
     pub fn set_account_strategies_persisting(
@@ -3162,10 +3165,10 @@ impl Core {
         Ok(kept_exits_only)
     }
 
-    /// The engine half of a strategy-assignment write: delegate to the
-    /// engine's own scope rebuild, handing it a closure that re-instantiates
-    /// Lua packages (the only rebuildable source) from their dir. Returns
-    /// the names kept EXITS-ONLY for this account.
+    /// The engine half of an enablement-set write: delegate to the engine's
+    /// own scope rebuild, handing it a closure that re-instantiates Lua
+    /// packages (the only rebuildable source) from their dir. Returns the
+    /// names kept EXITS-ONLY for this account.
     fn rebuild_account_scopes(
         &mut self,
         id: &crate::account::AccountId,
@@ -3186,23 +3189,24 @@ impl Core {
         engine.rebuild_account_scopes(&account, requested, held, &mut build)
     }
 
-    /// Boot application of the accounts file's strategy assignments — the
-    /// production `run()` calls this ONCE after `install_engine`. For every
-    /// account with a NON-EMPTY `strategies` key the named scopes are
-    /// instantiated and ENABLED (assignment IS enablement); the default
-    /// account with NO key and a non-empty persisted enabled-set is MIGRATED
-    /// once: today's enabled set is materialized into accounts.toml, so the
-    /// file becomes the only truth from that boot on (the INHERIT reading
-    /// empty used to carry is retired — an account assigned nothing runs
-    /// nothing, by decree).
+    /// Boot application of the accounts file's strategy ENABLEMENT sets
+    /// (账户↔venue 解耦语义) — the production `run()` calls this ONCE after
+    /// `install_engine`. For every account with a NON-EMPTY `strategies` key
+    /// the named scopes are instantiated and ENABLED; the default account
+    /// with NO key and a non-empty persisted enabled-set (strategy-state
+    /// .json — the old global toggle's durable form) is MIGRATED once: that
+    /// set is materialized as the default account's enablement set in
+    /// accounts.toml, so the upgrade keeps the production behaviour exactly
+    /// (default 账户 strategies=["pair_discount_arb","spread_arb"] 升级后
+    /// 行为不变) and the file is the only truth from that boot on.
     ///
     /// NOT part of `install_engine`: the replay/backtest boot goes through
     /// that path too and its single-default book must keep byte-identical
     /// outcomes (the exit-economics baseline). Production assembly is the
     /// only caller.
     ///
-    /// Returns the migrated default assignment (empty when nothing migrated)
-    /// so the caller can report it on stderr.
+    /// Returns the migrated default enablement set (empty when nothing
+    /// migrated) so the caller can report it on stderr.
     pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
         let Some(path) = self.config.accounts_config_path.clone() else {
             return Vec::new();
@@ -3240,15 +3244,16 @@ impl Core {
                 migrated = persisted_enabled;
                 tracing::info!(
                     strategies = ?migrated,
-                    "strategy assignment migration: the default account's implicit \
-                     enabled set is materialized into accounts.toml — the file is \
-                     the only truth from here on (empty = runs nothing)"
+                    "strategy enablement migration: the default account's persisted \
+                     enabled set is materialized as its accounts.toml enablement set — \
+                     the file is the only truth from here on"
                 );
             }
         }
-        // Apply every account's explicit assignment (the default's included —
-        // after migration it spells the old behaviour; an empty key means the
-        // account runs nothing and nothing is instantiated).
+        // Apply every account's enablement set (the default's included —
+        // after migration it spells the old behaviour; an empty key means
+        // the account's scopes follow the global toggle and nothing is
+        // fanned out here).
         let assignments: Vec<(String, Vec<String>)> = self
             .accounts
             .account_list()
@@ -3257,7 +3262,8 @@ impl Core {
             .map(|a| (a.id.as_str().to_string(), a.strategies.clone()))
             .collect();
         for (account, strategies) in assignments {
-            // Assignment IS enablement — a scope built here starts enabled.
+            // A set member's scope is built ENABLED — being in the account's
+            // enablement set IS the operator's intent to run it there.
             // Unknown names are skipped with a warning by the rebuild (the
             // registered set is what the strategy dir loaded this boot).
             self.set_account_scopes_at_boot(&account, &strategies);
@@ -3557,6 +3563,10 @@ impl Core {
     /// around the enabled set), so the manager is rewired immediately: switching a
     /// strategy on brings its parameters and variants in, switching it off drops
     /// them. No restart, and nothing is traded by a strategy that is off.
+    ///
+    /// 账户↔venue 解耦语义: this is the GLOBAL strategy switch (the master
+    /// power). The per-account 启用按钮 rides
+    /// [`Self::set_scoped_strategy_enabled`] below.
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
         let ok = self
             .engine
@@ -3576,7 +3586,181 @@ impl Core {
         }
         ok
     }
-    // ── E27: market-mode compatibility handshake (§7.5 / §8.2) ──────────────
+
+    // ── 账户↔venue 解耦：per-account strategy ENABLEMENT 语义层 ─────────────
+    //
+    // 语义裁决（本轮）：不存在「为账户分配策略」的呈现逻辑 —— 策略全局可见；
+    // accounts.toml 的 `strategies` 记录的是每账户×策略的启用状态（面板启用
+    // 按钮的持久化）。scope (strategy, account) 运行 ⇔ 策略已安装 AND 账户
+    // 已启用 AND 策略 ∈ 该账户启用集。被停用的 scope 若有持仓 → exits-only：
+    // 不再开新仓，TP/SL/挂单巡逻/退出意图照常管理到平完。以下三个原语是
+    // server.rs 的 handler 接线面（strategy.enable / strategy.disable /
+    // strategy.list 的语义半）；wire 形状由 ipc 层负责。
+
+    /// The per-account half of `strategy.enable {name, accountId?, reason?}`:
+    /// set ONE (strategy, account) scope's enablement — persist to the
+    /// account book's `strategies` set (memory first, disk after, one
+    /// transaction) and drive the engine's scope state from it.
+    ///
+    /// Enable: the strategy joins the account's enablement set; a scope that
+    /// does not exist yet is instantiated (Lua sources only — the same
+    /// rebuild the boot uses) and arrives enabled; an existing
+    /// exits-only-demoted scope returns to normal. Disable: the scope leaves
+    /// the set; a flat scope is torn down, a scope holding positions is
+    /// demoted EXITS-ONLY (no new entries, exits keep flowing to flat) —
+    /// `kept_exits_only` names what was demoted, for the reply.
+    ///
+    /// `id` MUST be a configured account (the standard unknown-account
+    /// refusal otherwise). `default` is a legal target: its scopes are the
+    /// historical global-toggle shape, and its enablement set rides the same
+    /// file. The GLOBAL toggle (`set_strategy_enabled`) is NOT touched —
+    /// this is per-account state only.
+    ///
+    /// Returns `(kept_exits_only, set_now)` — the demoted names, and the
+    /// account's enablement set as it now stands (the reply's echo).
+    pub fn set_scoped_strategy_enabled(
+        &mut self,
+        id: &crate::account::AccountId,
+        name: &str,
+        enabled: bool,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<(Vec<String>, Vec<String>)> {
+        use crate::ipc::schema::ACCOUNT_STRATEGIES_SET_NOTE;
+        // Existence first, with the standard unknown-account refusal, before
+        // anything touches disk.
+        self.accounts.require(id)?;
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "strategy.enable: an empty strategy name cannot be addressed".to_string(),
+            ));
+        }
+        // The assignable set is what `strategy.list` reports: every package
+        // LOADED this session. Enabling an uninstalled strategy is refused —
+        // a silent never-trading scope is the exact production accident the
+        // rebuilt-scopes-start-ENABLED rule exists against.
+        if self
+            .engine
+            .as_ref()
+            .is_none_or(|e| !e.strategy_registered(trimmed))
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "strategy.enable: strategy `{trimmed}` is not registered — \
+                     the assignable set is what `strategy.list` reports"
+                ),
+            ));
+        }
+        // The account's current enablement set (the book is the truth), then
+        // the toggle.
+        let mut set: Vec<String> = self
+            .accounts
+            .account(id)
+            .map(|a| a.strategies.clone())
+            .unwrap_or_default();
+        let present = set.iter().any(|s| s == trimmed);
+        if enabled && !present {
+            set.push(trimmed.to_string());
+        } else if !enabled {
+            set.retain(|s| s != trimmed);
+        }
+        // Persist FIRST (a failure leaves both stores untouched — the same
+        // memory-after-disk transaction every accounts.toml writer runs).
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "strategy.enable: no accounts config path configured — persistence \
+                 is disabled for this core (backtests and in-process tests); \
+                 nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_strategies(
+            std::path::Path::new(path),
+            id.as_str(),
+            &set,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "strategy.enable: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.accounts.set_strategies(id, set.clone(), now_ms)?;
+        // Engine rebuild over the new set: removed-and-flat scopes drop,
+        // removed-and-held scopes demote exits-only, added scopes
+        // instantiate enabled.
+        let held: Vec<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == *id)
+            .map(|p| p.strategy.clone())
+            .collect();
+        let kept_exits_only = self.rebuild_account_scopes(id, &set, &held);
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            strategy = %trimmed,
+            enabled,
+            set = ?set,
+            exits_only = ?kept_exits_only,
+            reason = %reason,
+            "per-account strategy enablement written — scope rebuilt from the \
+             account's enablement set, re-read at next boot ({ACCOUNT_STRATEGIES_SET_NOTE})",
+        );
+        Ok((kept_exits_only, set))
+    }
+
+    /// The per-account enablement readout: the accounts whose enablement set
+    /// names this strategy, sorted, plus the default scope when the global
+    /// toggle is ON and default carries no key of its own (the zero-config
+    /// shape has no enablement-set row to point at). This is the WRITE-path
+    /// truth ("which accounts does this strategy trade on"), kept for the
+    /// boot-replay teeth and any caller that wants enablement, not hosting.
+    ///
+    /// NOTE the deliberate difference from `Engine::strategy_scopes` — what
+    /// `strategy.list`'s per-row `accounts` field serves (the coordination
+    /// contract, wired in server.rs): the HOSTED scope list, exits-only
+    /// demotions included. A scope pulled out of the enablement set while
+    /// holding positions must keep showing on the matrix — the panel needs
+    /// to see "this account still manages its exits here" — while this
+    /// function answers the narrower "whose enablement button names it".
+    pub fn strategy_enabled_accounts(&self, name: &str) -> Vec<String> {
+        let mut accounts: Vec<String> = self
+            .accounts
+            .account_list()
+            .into_iter()
+            .filter(|a| a.strategies.iter().any(|s| s == name))
+            .map(|a| a.id.as_str().to_string())
+            .collect();
+        // The zero-config shape: a `default` with no enablement key whose
+        // global toggle is ON still runs the strategy — its row says so.
+        let default_id = crate::account::default_account_id();
+        let default_has_key = self
+            .accounts
+            .account(&default_id)
+            .is_some_and(|a| !a.strategies.is_empty());
+        if !default_has_key
+            && self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.enabled_strategies().iter().any(|n| n == name))
+        {
+            accounts.push(default_id.as_str().to_string());
+        }
+        accounts.sort();
+        accounts.dedup();
+        accounts
+    }
 
     /// The handshake verdict for one declaration, as an associated function so
     /// the load path can run it while the engine borrow is live (only
@@ -8489,13 +8673,21 @@ impl Core {
     }
 
     /// Keep the position book in sync with fills: BUY opens/averages-in, SELL
-    /// reduces/closes. One position per token, so token_id identifies it.
+    /// reduces/closes. One position per (ACCOUNT, token) — 账户↔venue 解耦:
+    /// two accounts running the same strategy on the same token are two
+    /// independent books, so the token alone no longer identifies the row
+    /// (the old single-key merge landed paper's fill onto default's position
+    /// and left `count_positions("paper") == 0`). The account rides the
+    /// `FillDelta` (E28: copied from the tracked order), so every legacy
+    /// caller that never named an account still keys to `default` — the
+    /// single-book behaviour is byte-identical.
     ///
     /// `fee_usd` is the cash fee the ledger just charged for this same delta, so
     /// the position's cost basis is the money actually spent (E17-d).
     fn project_fill_delta(&mut self, d: &FillDelta, fee_usd: Decimal, now_ms: i64) {
         let px = d.price;
         let token = &d.token_id;
+        let account = &d.account_id;
         // Replay fast path: a fill is the one thing that changes the position
         // set (open/close/drop) and the token's mark. #390: the nofast
         // replay's deadline-scheduled ladder reads the same marker — a fill
@@ -8510,7 +8702,7 @@ impl Core {
                     .positions
                     .open_positions()
                     .iter()
-                    .find(|p| &p.token_id == token)
+                    .find(|p| &p.token_id == token && &p.account_id == account)
                     .map(|p| p.id.clone());
                 let id = match existing {
                     Some(id) => id,
@@ -8575,7 +8767,7 @@ impl Core {
                     .positions
                     .open_positions()
                     .iter()
-                    .find(|p| &p.token_id == token)
+                    .find(|p| &p.token_id == token && &p.account_id == account)
                     .map(|p| p.id.clone());
                 match found {
                     Some(id) => {
@@ -8660,11 +8852,17 @@ impl Core {
                         // fully closed the position and booked the close
                         // (TradeDb / strategy PnL / breaker / daily PnL). Unwind
                         // all of it; only a rollback with NO credential on file
-                        // is unexplainable.
+                        // is unexplainable. The credential pool is filtered to
+                        // THIS account's positions: two accounts can hold the
+                        // same token, and a default leg's rollback must never
+                        // unwind paper's close (the (account, token) merge key
+                        // above is what makes both rows exist).
                         let consumed = self
                             .close_credentials
                             .iter()
-                            .position(|(tid, _)| *tid == d.trade_id)
+                            .position(|(tid, cred)| {
+                                *tid == d.trade_id && cred.restored.account_id == d.account_id
+                            })
                             .map(|i| self.close_credentials.remove(i).unwrap().1);
                         // #463: tombstone the consumption so a restart replay
                         // does not resurrect a credential already unwound.
@@ -9507,10 +9705,12 @@ impl Core {
     /// for every (account, strategy) scope that BOTH declared `atomic_batch`
     /// AND has a governed virtual pot, a position whose partner token has no
     /// sibling position, no live partner BUY order and no in-flight partner
-    /// taker past the grace window is the orphan — it is alerted once (the
-    /// existing `RiskAlert` event, no new wire type) and flattened through the
-    /// manual exit path (`flatten`, Taker walk out of the position's own
-    /// account).
+    /// taker past the grace window is the orphan — the sweep first tries to
+    /// CHASE the missing cross-venue leg inside the pair's budget (below),
+    /// and only when that is refused — the book too dear, a guard or a
+    /// placement refusal — alerts once (the existing `RiskAlert` event, no
+    /// new wire type) and flattens through the manual exit path (`flatten`,
+    /// Taker walk out of the position's own account).
     ///
     /// Scope discipline:
     ///   - zero-config = zero behaviour: a scope with no cap in
@@ -9528,10 +9728,21 @@ impl Core {
     ///     because a live SELL already rests for the token is skipped by
     ///     `flatten` itself (no retry storm, no extra ledger).
     ///
-    /// Chase compensation (re-price and re-offer the missing leg) is
-    /// deliberately NOT here — `run_escalation_sweep` already owns the
-    /// maker→taker escalation vocabulary and a chase needs its own
-    /// internal-key design; first version cancels the naked leg only.
+    /// Chase compensation (#531, the feasible arm): the missing leg is the
+    /// strategy's most recent BUY order on this account for a token that is
+    /// NEITHER the naked leg NOR its same-market partner (the cross-venue
+    /// counterpart — `partner_token_id` names only the same-market completion
+    /// token, and OME history is the only place the dead leg's token, venue
+    /// provenance and round identity survive). The budget is the pair's own:
+    /// the naked leg's per-share basis (`cost_usd / shares`) plus the chase
+    /// price must stay within the $1.00 a UP+DOWN share pair redeems — this
+    /// is the same arithmetic `escalation_guard`'s pair-cost cap applies,
+    /// but that cap is keyed by `condition_id` and cannot see a cross-venue
+    /// counterpart whose legs carry different condition ids, so the sweep
+    /// prices the budget ITSELF into the chase limit and hands the guard a
+    /// request that cannot trip the cap. A stale or empty book (`None`
+    /// walk) and any guard/placement refusal are the INFEASIBLE arm: the
+    /// existing alert+flatten fallback below fires unchanged.
     fn run_pair_orphan_sweep(&mut self, now_ms: i64) {
         if self.replay_sched() {
             return;
@@ -9539,6 +9750,16 @@ impl Core {
         /// Same-tick serial landing window for a pair's two legs (see the
         /// scope discipline above). Not a tunable.
         const PAIR_LAND_GRACE_MS: i64 = 5_000;
+        /// How long a placed chase has to land before the sweep stops giving
+        /// it the benefit of the doubt and falls back to alert+flatten. A
+        /// dry taker fills inside the same `place` call (zero latency dials)
+        /// so the window is really only a LIVE-path patience bound and a
+        /// debounce: while it runs, the orphan condition below keeps being
+        /// true (the partner still has no position/order) and without the
+        /// window the sweep would flatten the leg out from under its own
+        /// chase on the very next tick. A constant, not a tunable — the
+        /// flatten fallback stays the final answer either way.
+        const PAIR_CHASE_WINDOW_MS: i64 = 2_000;
         // The governed atomic scopes: every (account, strategy) pair the pot
         // book has a cap for — the strategy's `atomic_batch` declaration is
         // implied by the pot existing (`virtual_limits` is only wired to
@@ -9574,7 +9795,7 @@ impl Core {
                 })
                 .map(|o| o.token_id.clone())
                 .collect();
-            let orphans: Vec<(String, String, String, String)> = self
+            let orphans: Vec<(String, String, String, String, Decimal, Decimal)> = self
                 .positions
                 .open_positions()
                 .iter()
@@ -9623,10 +9844,61 @@ impl Core {
                         p.token_id.clone(),
                         p.venue.clone(),
                         p.partner_token_id.clone(),
+                        // The chase budget's paid half: the naked leg's
+                        // per-share basis. The entry notional spent per
+                        // share is what the missing leg's price must fit
+                        // under ($1.00 a pair redeems).
+                        p.cost_usd / p.shares,
+                        p.shares,
                     )
                 })
                 .collect();
-            for (id, token, venue, partner) in orphans {
+            for (id, token, venue, partner, basis, shares) in orphans {
+                // ── Chase arm (#531 feasible): find the dead cross-venue leg
+                // in OME history and re-offer it within the pair budget. The
+                // infeasible arm keeps the historical alert+flatten shape
+                // byte-for-byte.
+                let account = AccountId::from(account_id.as_str());
+                let chase = self.pair_chase_target(&account, &strategy, &token, &partner);
+                let chased = match chase
+                    .map(|t| {
+                        // The budget cap the chase may state: the naked leg's
+                        // basis is the paid half; the missing leg buys at the
+                        // counterparty and the PAIR must stay inside $1.00.
+                        (t, Decimal::ONE - basis)
+                    })
+                    .filter(|(_, cap)| *cap > Decimal::ZERO)
+                {
+                    Some((target, cap)) => self.pair_chase_missing_leg(
+                        &target,
+                        (&token, &account, &strategy),
+                        shares,
+                        cap,
+                        now_ms,
+                    ),
+                    None => false,
+                };
+                if chased {
+                    // The chase is out (a filled position or a resting BUY).
+                    // The naked leg is not orphaned any more — the next tick's
+                    // condition either reads the partner side (filled) or the
+                    // live-BUY clause (resting), and the chase window above
+                    // keeps this tick's re-judgment off the leg entirely.
+                    continue;
+                }
+                // Chase window debounce: a chase this scope placed within the
+                // window is still adjudicating (a live taker, a resting leg).
+                // Skip WITHOUT alerting or flattening — the window is the
+                // chase's benefit of the doubt; after it, the fallback below
+                // fires.
+                if let Some((_, at)) = self
+                    .pair_chase_attempts
+                    .get(&(account_id.clone(), strategy.clone(), token.clone()))
+                    .cloned()
+                    && now_ms - at < PAIR_CHASE_WINDOW_MS
+                {
+                    continue;
+                }
                 let message = format!(
                     "pair leg orphaned: strategy={strategy} account={account_id} \
                      held={token}@{venue} partner_missing={partner} — \
@@ -9646,6 +9918,159 @@ impl Core {
                 // book and the next tick re-judges it, so the result is
                 // honestly dropped rather than swallowed.
                 let _ = self.flatten(Some(&id), now_ms);
+                // The chase did not save the leg: retire its attempt record so
+                // the next tick can offer a fresh chase (a repriced book may
+                // have made the pair feasible again) instead of waiting out a
+                // stale window.
+                self.pair_chase_attempts.remove(&(
+                    account_id.clone(),
+                    strategy.clone(),
+                    token.clone(),
+                ));
+            }
+        }
+    }
+
+    /// The chase arm's TARGET: the missing cross-venue leg's token, read out
+    /// of the OME's order history. It is this (account, strategy) scope's
+    /// most recent BUY for a token that is neither the naked leg nor the
+    /// naked leg's same-market partner (`partner_token_id` names only the
+    /// same-market completion token; the cross-venue counterpart's token is
+    /// nowhere on the position row — the dead ORDER is the only evidence of
+    /// which token the pair attempt was completing with). `None` = no
+    /// missing-leg order ever existed (the entry died before resting — the
+    /// starved-ledger shape) → the sweep goes straight to alert+flatten.
+    fn pair_chase_target(
+        &self,
+        account_id: &AccountId,
+        strategy: &str,
+        naked_token: &str,
+        partner: &str,
+    ) -> Option<String> {
+        // The most recent attempt is the leg the strategy was completing:
+        // `by_submitted` is the insertion order, so `.all()` is oldest first
+        // — `.rfind()` reads the newest.
+        self.ome
+            .all()
+            .into_iter()
+            .filter(|o| {
+                o.side == Side::Buy
+                    && o.token_id != naked_token
+                    && o.token_id != partner
+                    && o.strategy == strategy
+                    && o.account_id == *account_id
+            })
+            .rfind(|_| true)
+            .map(|o| o.token_id.clone())
+    }
+
+    /// Re-offer the missing leg: price it off the CURRENT book (worst fill
+    /// price the walk needs, `cap` = the pair budget's chase half), state the
+    /// full naked size as a dry-FOK Taker, run the same guard every
+    /// escalation runs, and place through `place_escalated` (entry gates off —
+    /// this COMPLETES the naked position's pair, exactly the gap-fill case
+    /// the one-per-asset gate would otherwise refuse). `Ok(true)` = the leg
+    /// is out (filled into a position or resting live); `Ok(false)` or any
+    /// error = infeasible, the caller's alert+flatten fallback proceeds.
+    ///
+    /// The internal key carries the slot so a NEXT round's orphan gets a
+    /// fresh key (the OME refuses a duplicate live intent key): the round
+    /// identity comes from the historical order, the natural fingerprint of
+    /// "this pair attempt".
+    /// The naked leg's identity, borrowed: (token, account, strategy) — the
+    /// one tuple every chase bookkeeping (request provenance, attempt key,
+    /// tracing) reads.
+    fn pair_chase_missing_leg(
+        &mut self,
+        missing_token: &str,
+        naked: (&str, &AccountId, &str),
+        size: Decimal,
+        cap: Decimal,
+        now_ms: i64,
+    ) -> bool {
+        let (naked_token, account_id, strategy) = naked;
+        let Some((vwap, worst)) = self.marketable_walk(Side::Buy, missing_token, size, cap, now_ms)
+        else {
+            // The book cannot cover the naked size within the pair budget (or
+            // is stale/absent) — the infeasible arm.
+            return false;
+        };
+        let slot = self
+            .books_round_slot(missing_token)
+            .unwrap_or_else(|| now_ms / (self.config.round_duration_sec * 1000).max(1));
+        let internal_key = format!("pair-chase:{naked_token}:{missing_token}:{slot}");
+        let req = OrderRequest {
+            token_id: missing_token.to_string(),
+            // The guard's pair-cost cap keys on condition_id and the
+            // counterpart legs carry DIFFERENT condition ids (that is why the
+            // sweep prices the budget itself); the request carries the naked
+            // leg's identity so the accounting and events name the pair
+            // attempt, not a fresh condition.
+            condition_id: naked_token.to_string(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: worst,
+            size,
+            internal_key: internal_key.clone(),
+            strategy: strategy.to_string(),
+            asset: self
+                .books_asset(missing_token)
+                .unwrap_or_else(|| "BTC".to_string()),
+            direction: self
+                .books_direction(missing_token)
+                .unwrap_or_else(|| "up".to_string()),
+            round_slot: slot,
+            account_id: account_id.clone(),
+        };
+        // One attempt per window: stamp BEFORE placing — if the place dies,
+        // the stamp is what keeps this tick's fallback and the window's
+        // re-judgment from double-firing.
+        self.pair_chase_attempts.insert(
+            (
+                account_id.as_str().to_string(),
+                strategy.to_string(),
+                naked_token.to_string(),
+            ),
+            (missing_token.to_string(), now_ms),
+        );
+        if let Err(reason) = self.escalation_guard(&req, vwap) {
+            tracing::info!(
+                strategy = %strategy,
+                account = %account_id.as_str(),
+                token = %missing_token,
+                naked = %naked_token,
+                price = %worst,
+                cap = %cap,
+                reason = %reason,
+                "pair chase refused by the guard — falling back to alert+flatten"
+            );
+            return false;
+        }
+        match self.place_escalated(req, now_ms) {
+            Ok((order_id, status)) => {
+                tracing::info!(
+                    order = %order_id,
+                    ?status,
+                    strategy = %strategy,
+                    account = %account_id.as_str(),
+                    token = %missing_token,
+                    naked = %naked_token,
+                    price = %worst,
+                    size = %size,
+                    "pair chase placed — the missing leg is re-offered past the counterparty"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::info!(
+                    strategy = %strategy,
+                    account = %account_id.as_str(),
+                    token = %missing_token,
+                    naked = %naked_token,
+                    reason = %e.message,
+                    "pair chase placement failed — falling back to alert+flatten"
+                );
+                false
             }
         }
     }
@@ -11072,9 +11497,22 @@ impl Core {
     /// Refused, never re-routed: re-routing would be the implicit-ledger
     /// accident (§9.3) under a different name. Opens are unaffected (a BUY
     /// commits its own book's cash); an exit for a token with NO open
-    /// position passes here and is handled by the fill projection as before.
+    /// position anywhere passes here and is handled by the fill projection
+    /// as before. The judgment is per-account first: the REQUEST'S OWN
+    /// account holding the token is the legitimate close (the fill lands on
+    /// that account's row); the refusal fires only when the request names an
+    /// account that holds NOTHING while the token sits in a SIBLING book —
+    /// that order would settle into the wrong book.
     fn refuse_cross_account_close(&self, req: &OrderRequest) -> CoreResult<()> {
         if req.side != Side::Sell || !crate::risk::is_close_intent(&req.internal_key) {
+            return Ok(());
+        }
+        let own = self
+            .positions
+            .open_positions()
+            .iter()
+            .any(|p| p.token_id == req.token_id && p.account_id == req.account_id);
+        if own {
             return Ok(());
         }
         if let Some(p) = self
@@ -11082,7 +11520,6 @@ impl Core {
             .open_positions()
             .iter()
             .find(|p| p.token_id == req.token_id)
-            && p.account_id != req.account_id
         {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -11383,6 +11820,31 @@ impl Core {
             return None;
         }
         book.walk_marketable(side, limit, size)
+    }
+
+    /// The chase request's provenance fields, read off the token's live round
+    /// market (the same engine registry the panels' Venue column and the
+    /// cross-venue binding use): the round slot the missing leg belongs to,
+    /// its asset, and its leg label. `None` = the token belongs to no live
+    /// market right now (the engine down, a legacy corpus) — the chase caller
+    /// falls back to the sweep's own defaults instead of guessing a venue
+    /// fact it cannot see.
+    fn books_round_slot(&self, token: &str) -> Option<i64> {
+        self.engine.as_ref().and_then(|e| e.round_slot_of(token))
+    }
+
+    fn books_asset(&self, token: &str) -> Option<String> {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.asset_of(token))
+            .map(|a| a.to_string())
+    }
+
+    fn books_direction(&self, token: &str) -> Option<String> {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.direction_of(token))
+            .map(|d| d.as_str().to_string())
     }
 
     /// Why a dry/read-only taker leg could not be filled, as the structured
@@ -13363,11 +13825,14 @@ impl Core {
         let (merge_intents, sell_intents): (Vec<_>, Vec<_>) =
             intents.into_iter().partition(|i| i.reason == "merge");
         for intent in merge_intents {
+            // (account, token)-keyed: two scopes can hold the same token and a
+            // merge intent must burn the pair the intending scope's account owns.
+            let intent_account = AccountId::from(intent.account_id.as_str());
             let Some(condition_id) = self
                 .positions
                 .open_positions()
                 .iter()
-                .find(|p| p.token_id == intent.token_id)
+                .find(|p| p.token_id == intent.token_id && p.account_id == intent_account)
                 .map(|p| p.condition_id.clone())
             else {
                 continue;
@@ -13575,7 +14040,7 @@ impl Core {
                     price: req.exit_price,
                     reason: req.reason,
                     use_maker: req.use_maker,
-                    internal_key: format!("exit:{}:{:?}", pos.token_id, req.reason),
+                    internal_key: exit_intent_key("exit", &pos, &format!("{:?}", req.reason)),
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
@@ -13590,13 +14055,20 @@ impl Core {
         }
 
         // Strategy-signal exits: resolve the token to a live position and price
-        // off its latest valuation, exactly like a manual flatten.
+        // off its latest valuation, exactly like a manual flatten. The intent's
+        // OWN account is the first key (账户↔venue 解耦: two scopes can hold
+        // the same token; the close must land on the intending scope's row),
+        // and the job's internal key carries the account segment so two
+        // accounts' exit ladders never collide in the place-cooldown/dedup
+        // map. A legacy intent (no account — the pre-fanout shape) resolves
+        // to `default`, the same row it always hit.
         for intent in intents {
+            let intent_account = AccountId::from(intent.account_id.as_str());
             let Some(pos) = self
                 .positions
                 .open_positions()
                 .iter()
-                .find(|p| p.token_id == intent.token_id)
+                .find(|p| p.token_id == intent.token_id && p.account_id == intent_account)
                 .cloned()
             else {
                 continue;
@@ -13628,7 +14100,7 @@ impl Core {
                 price,
                 reason: ExitReason::StrategySignal,
                 use_maker: false,
-                internal_key: format!("exit-strategy:{}:{}", pos.token_id, tag),
+                internal_key: exit_intent_key("exit-strategy", &pos, &tag),
                 strategy: pos.strategy.clone(),
                 asset: pos.asset.clone(),
                 direction: pos.direction.as_str().to_string(),
@@ -13710,7 +14182,7 @@ impl Core {
                     price,
                     reason: ExitReason::ForceExit,
                     use_maker: false,
-                    internal_key: format!("exit-residual:{}", pos.token_id),
+                    internal_key: exit_intent_key("exit-residual", &pos, ""),
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
                     direction: pos.direction.as_str().to_string(),
@@ -14019,6 +14491,30 @@ fn f64_to_decimal(v: f64) -> Decimal {
 /// "what counts as closing" is how the escape hatch gets locked again (P0 #174).
 fn is_close_intent(internal_key: &str) -> bool {
     crate::risk::is_close_intent(internal_key)
+}
+
+/// The internal key of an automated exit job for one open position.
+///
+/// 账户↔venue 解耦: the key carries the position's ACCOUNT segment so two
+/// accounts' exit ladders on the SAME token never collide in the
+/// place-cooldown/dedup map (a default leg's close backoff must never pause
+/// paper's). An empty `suffix` (the residual backstop) keeps the trailing
+/// colon off; a `default` position's key gains no account segment at all —
+/// the historical single-book spelling is byte-identical, which the replay
+/// baseline compares.
+fn exit_intent_key(prefix: &str, pos: &crate::position::OpenPosition, suffix: &str) -> String {
+    let account = pos.account_id.as_str();
+    if account == crate::account::default_account_id().as_str() {
+        if suffix.is_empty() {
+            format!("{prefix}:{}", pos.token_id)
+        } else {
+            format!("{prefix}:{}:{suffix}", pos.token_id)
+        }
+    } else if suffix.is_empty() {
+        format!("{prefix}:{}:{account}", pos.token_id)
+    } else {
+        format!("{prefix}:{}:{suffix}:{account}", pos.token_id)
+    }
 }
 fn reject_backoff_ms(attempts: u32) -> i64 {
     // 2s, 4s, 8s, 16s, 30s, 30s… — quick escape for a transient refusal,
@@ -17708,12 +18204,346 @@ mod strategy_dispatch_tests {
         );
         let migrated2 = c2.apply_account_strategy_assignments_at_boot();
         assert!(migrated2.is_empty(), "no state file, no migration");
-        assert!(
-            c2.enabled_strategy_names().is_empty(),
-            "probe2's assignment names a strategy whose scope the test adapters \
-             cannot rebuild (non-Lua source) and default has no key — nothing enabled"
+        // probe2's assignment names spread_arb, but the test adapter is a
+        // non-Lua source: build_lua_scope declines, the ADD phase warns and
+        // skips — probe2 gains NO scope (fail-closed, never a panic). The
+        // default's own row (the migrated set) names trend_follow, whose
+        // pre-hosted default-scope instance EXISTS: the Some(existing) arm
+        // of the ADD phase enables it (in the set = the 启用 state) — the
+        // migration earlier in this test materialized the state file's set
+        // as the default's accounts.toml key, and c2 boots from that same
+        // file, so the default row is explicit (no INHERIT involved).
+        assert_eq!(
+            c2.enabled_strategy_names(),
+            vec!["spread_arb".to_string(), "trend_follow".to_string()],
+            "the file's enablement sets are what boot — the state file is out \
+             of the loop (both names resolve to the default scope's \
+             pre-hosted adapter instances)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The production upgrade shape pinned (账户↔venue 解耦 boot 兼容牙):
+    /// the shipped accounts.toml — `default` with
+    /// `strategies = ["pair_discount_arb","spread_arb"]` — boots EXACTLY the
+    /// scopes it names (spread_arb's scope lands enabled), the old global
+    /// toggle's strategy-state.json must not override an explicit key, and
+    /// unregistered names skip with a warning, never a panic.
+    #[test]
+    fn boot_keeps_the_production_default_enablement_shape_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("bk-prod-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        // The production file's exact spelling (from the deployment tree).
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\nstrategies = [\"pair_discount_arb\", \"spread_arb\"]\n",
+        )
+        .expect("fixture");
+        // The old global toggle's durable form: spread_arb off, the rest on —
+        // the file's key must WIN (the migration never overrides an explicit
+        // key, and the strategy-state.json read must not leak onto scopes).
+        let state_path = dir.join("strategy-state.json");
+        crate::strategy_state::save(&state_path, &["trend_follow".into()]);
+
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        // The migration NEVER runs: the file's default row is already explicit.
+        let migrated = c.apply_account_strategy_assignments_at_boot();
+        assert!(
+            migrated.is_empty(),
+            "an explicit key means no migration: {migrated:?}"
+        );
+        // The book + file are untouched (byte-identical behaviour on upgrade).
+        assert_eq!(
+            c.accounts
+                .strategy_assignment(&crate::account::default_account_id())
+                .expect("the key rides"),
+            &vec!["pair_discount_arb".to_string(), "spread_arb".to_string()],
+        );
+        let scopes = |name: &str| c.engine.as_ref().unwrap().strategy_scopes(name);
+        assert_eq!(
+            scopes("spread_arb"),
+            vec!["default".to_string()],
+            "the named scope lands (the test adapter is non-Lua, so only the \
+             DEFAULT scope's pre-hosted instance is here — the ADD phase's \
+             attempt at a second one warns and skips)"
+        );
+        assert!(
+            scopes("pair_discount_arb").is_empty(),
+            "an unregistered name is skipped with a warning, never a panic"
+        );
+        assert!(
+            scopes("trend_follow").is_empty(),
+            "strategy-state.json must NOT resurrect anything the file does not name"
+        );
+        // The engine's enabled set mirrors the file, not the old state file.
+        assert_eq!(
+            c.enabled_strategy_names(),
+            vec!["spread_arb".to_string()],
+            "the file's spread_arb entry is the enablement; trend_follow's \
+             persisted global toggle is dead here"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启用集持久化 boot 回放牙：per-account enable/disable 的写路径落盘
+    /// （persist FIRST，一事务），重启（新 Core + 同一文件）后 scope 集精确
+    /// 复原 —— paper 的 scope 回来了、default 的没有，启用状态逐 scope 一致。
+    #[test]
+    fn scoped_enablement_persists_and_boots_back_exactly() {
+        let dir = std::env::temp_dir().join(format!("bk-scope-enable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+        let state_path = dir.join("strategy-state.json");
+
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        let paper = crate::account::AccountId::from("paper");
+
+        // ENABLE trend_follow FOR paper: the set lands on disk.
+        let (kept, set_now) = c
+            .set_scoped_strategy_enabled(&paper, "trend_follow", true, "test", "panel on", 2)
+            .expect("the scoped enable lands");
+        assert!(kept.is_empty(), "nothing held → nothing demoted");
+        assert_eq!(set_now, vec!["trend_follow".to_string()]);
+        // The GLOBAL toggle is untouched (spread_arb's default scope state is
+        // its own; trend_follow's global row does not exist to be touched).
+        assert!(
+            !c.enabled_strategy_names()
+                .contains(&"trend_follow".to_string()),
+            "the per-account write must not flip the global switch"
+        );
+        // strategy.list's accounts column reads the book.
+        assert_eq!(
+            c.strategy_enabled_accounts("trend_follow"),
+            vec!["paper".to_string()],
+            "paper is the only account whose enablement set names it"
+        );
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let paper_row = text.split("[[account]]").nth(2).unwrap();
+        assert!(
+            paper_row.contains("strategies = [\"trend_follow\"]"),
+            "the file spells paper's enablement: {text}"
+        );
+
+        // DISABLE it again for paper (flat scope → teardown), then re-enable:
+        // the whole dance is the panel's round-trip.
+        let (kept, set_now) = c
+            .set_scoped_strategy_enabled(&paper, "trend_follow", false, "test", "panel off", 3)
+            .expect("the scoped disable lands");
+        assert!(kept.is_empty() && set_now.is_empty());
+        assert!(c.strategy_enabled_accounts("trend_follow").is_empty());
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let paper_row = text.split("[[account]]").nth(2).unwrap();
+        assert!(
+            !paper_row.contains("strategies"),
+            "the empty set is spelled by absence"
+        );
+
+        // REBOOT: a fresh Core over the same file (paper re-enabled first so
+        // the boot has something to restore), then boot-apply. The scope set
+        // comes back EXACTLY as the file left it.
+        let _ = c.set_scoped_strategy_enabled(
+            &paper,
+            "trend_follow",
+            true,
+            "test",
+            "re-armed before reboot",
+            4,
+        );
+        let mut c2 = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c2.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c2.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        let migrated = c2.apply_account_strategy_assignments_at_boot();
+        assert!(migrated.is_empty(), "paper's explicit key = no migration");
+        // The book remembers the set; the reply echo of a fresh read matches.
+        assert_eq!(
+            c2.strategy_enabled_accounts("trend_follow"),
+            vec!["paper".to_string()],
+            "the reboot restores paper's enablement exactly"
+        );
+        assert_eq!(
+            c2.strategy_enabled_accounts("spread_arb"),
+            Vec::<String>::new(),
+            "default has no key and no global toggle → nothing to report"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// account.switch 绝不动后台 scope（钉死牙）：进程级 switch 只动
+    /// `active` 指针 —— 引擎的 scope 集、启用标志、exits-only 降级与意图
+    /// 输出路径一行不碰。IPC 的 account.switch 更是会话级（另一 agent 域
+    /// 的既有牙已钉 wire 半）；这里钉的是核心侧可能被误接线的最后一环。
+    #[test]
+    fn process_level_switch_touches_nothing_but_the_active_pointer() {
+        // A two-account core with a test-hosted engine (no strategy_dir: the
+        // boot registers nothing itself), built inline — the audit mod's
+        // `two_book_core` fixture is private to that module.
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                risk: RiskConfig {
+                    max_order_notional: dec!(100),
+                    ..Default::default()
+                },
+                dry_seed_balance: 10_000.into(),
+                auto_exits_enabled: false,
+                trade_log_path: None,
+                ..Default::default()
+            },
+            book,
+        );
+        let cfg = c.config.clone();
+        cfg.install_engine(&mut c)
+            .expect("test engine (no strategy_dir: registers nothing itself)");
+        let engine = c.engine.as_mut().expect("test engine");
+        crate::strategies::test_support::host_disabled(
+            engine,
+            Default::default(),
+            Default::default(),
+        );
+        // Build a distinguishable scope landscape: paper hosts spread_arb,
+        // demoted exits-only; default hosts it ENABLED.
+        engine
+            .register_scoped_strategy(
+                Box::new(crate::strategies::test_support::TestSpreadArb::new(
+                    Default::default(),
+                    Default::default(),
+                )),
+                "test".into(),
+                "paper",
+            )
+            .expect("paper scope");
+        engine.set_strategy_enabled("spread_arb", true);
+        let held = vec!["spread_arb".to_string()];
+        engine.rebuild_account_scopes("paper", &[], &held, &mut |_n, _a| {
+            Some(Box::new(
+                crate::strategies::test_support::TestSpreadArb::new(
+                    Default::default(),
+                    Default::default(),
+                ),
+            ))
+        });
+        // The closure above must stand a real instance; rebuild keeps the
+        // existing scope anyway (the ADD phase finds it), so assert the shape.
+        assert!(
+            engine
+                .strategy_scopes("spread_arb")
+                .iter()
+                .any(|a| a == "paper"),
+            "the exits-only scope stays hosted"
+        );
+        let before_enabled = engine.enabled_strategies();
+        let before_exits_only = engine.exits_only_scopes();
+
+        // The switch: process-level (the book's own API).
+        c.accounts
+            .switch(&crate::account::AccountId::from("paper"))
+            .expect("switch to a configured account");
+        assert_eq!(
+            c.accounts.active_id().as_str(),
+            "paper",
+            "the switch moved the active pointer"
+        );
+
+        // NOTHING else moved: scope landscape, enablement, demotions.
+        assert_eq!(
+            engine.enabled_strategies(),
+            before_enabled,
+            "enablement untouched by the switch"
+        );
+        assert_eq!(
+            engine.exits_only_scopes(),
+            before_exits_only,
+            "exits-only demotions untouched by the switch"
+        );
+        assert!(
+            engine
+                .strategy_scopes("spread_arb")
+                .iter()
+                .any(|a| a == "paper"),
+            "paper's scope survived the switch"
+        );
+        // The intent output path still resolves orders to their OWN accounts:
+        // a place for paper still lands on paper after default became active.
+        let view_default = c
+            .account_views(1)
+            .into_iter()
+            .find(|v| v.id == "default")
+            .unwrap();
+        assert!(
+            view_default.strategies.is_empty(),
+            "the book's per-account enablement sets are untouched"
+        );
     }
 
     /// A test strategy that dips on an explicit asset list. Declaring the assets
@@ -23813,6 +24643,7 @@ mod settlement_service_tests {
             .push(crate::strategies::StrategyExitIntent {
                 token_id: "tok-up".into(),
                 reason: "merge".into(),
+                account_id: crate::account::default_account_id().to_string(),
             });
         c.tick(3).unwrap();
 
@@ -23882,6 +24713,7 @@ mod settlement_service_tests {
             .push(crate::strategies::StrategyExitIntent {
                 token_id: "tok-up".into(),
                 reason: "merge".into(),
+                account_id: crate::account::default_account_id().to_string(),
             });
         c.tick(3).unwrap();
 
@@ -23929,6 +24761,7 @@ mod settlement_service_tests {
             .push(crate::strategies::StrategyExitIntent {
                 token_id: "tok-up".into(),
                 reason: "merge".into(),
+                account_id: crate::account::default_account_id().to_string(),
             });
         c.tick(3).unwrap();
         assert!(c.positions().open_positions().is_empty());
@@ -24044,6 +24877,7 @@ mod settlement_service_tests {
             .push(crate::strategies::StrategyExitIntent {
                 token_id: "tok-up".into(),
                 reason: "merge".into(),
+                account_id: crate::account::default_account_id().to_string(),
             });
         c.tick(3).unwrap();
         assert_eq!(c.settlement.merge_receivable_usd(), dec!(5));
@@ -25474,6 +26308,152 @@ mod audit_fix_tests {
         assert_eq!(prow["closedTrades"], 1);
         assert_eq!(prow["losses"], 1);
         assert_eq!(prow["wins"], 0);
+    }
+
+    /// 账户↔venue 解耦（投影层牙）: two accounts hold the SAME token at the
+    /// SAME time. The fill projection keys positions by (ACCOUNT, token) —
+    /// the old token-only merge landed paper's fill onto default's row
+    /// (one merged position, paper's book empty), so this tooth holds both
+    /// legs simultaneously and demands: two rows, each with its own basis,
+    /// each paid from its own ledger, and each account's close resolving to
+    /// its OWN row while the sibling's survives untouched.
+    #[test]
+    fn two_accounts_holding_the_same_token_keep_separate_position_rows() {
+        let mut c = two_book_core();
+
+        // default holds 10 @ 0.40 (cost 4); paper holds 10 @ 0.60 (cost 6) —
+        // same token, overlapping holds. Maker fills: no fees anywhere.
+        open_maker_position(&mut c, dec!(0.40), dec!(10), 1);
+        let mut paper_open = req_for(
+            Side::Buy,
+            FillPolicy::Maker,
+            dec!(0.60),
+            dec!(10),
+            "entry:p1",
+            "paper",
+        );
+        paper_open.internal_key = "entry:p1:paper".into(); // distinct slot key
+        let (pid, _) = c.place_pending(paper_open, 2).unwrap();
+        c.confirm_live(&pid, 2).unwrap();
+        c.ingest_fill(
+            fill(
+                &pid,
+                "e-p1",
+                Side::Buy,
+                dec!(0.60),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
+            3,
+        )
+        .unwrap();
+
+        // THE TOOTH: two rows, one per account, each with its own basis.
+        let rows = c.positions().open_positions();
+        assert_eq!(
+            rows.len(),
+            2,
+            "same token, two accounts: two rows, never one merged position"
+        );
+        let dflt = rows
+            .iter()
+            .find(|p| p.account_id.as_str() == "default")
+            .expect("default's own row");
+        let paper = rows
+            .iter()
+            .find(|p| p.account_id.as_str() == "paper")
+            .expect("paper's own row");
+        assert_eq!(
+            dflt.entry_price,
+            dec!(0.40),
+            "default's basis is default's fill"
+        );
+        assert_eq!(
+            paper.entry_price,
+            dec!(0.60),
+            "paper's basis is paper's fill — a token-only merge would have stamped 0.60 onto \
+             default's (first) row and left paper with nothing"
+        );
+        // Each book paid for its own leg.
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            SEED - dec!(4),
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            SEED - dec!(6),
+        );
+
+        // The RIGHT account's close resolves to ITS row: paper closes at 0.50
+        // (−1.00 gross, no fee) and default's 0.40 row survives untouched.
+        let (sid, _) = c
+            .place_pending(
+                req_for(
+                    Side::Sell,
+                    FillPolicy::Maker,
+                    dec!(0.50),
+                    dec!(10),
+                    "exit:p1",
+                    "paper",
+                ),
+                4,
+            )
+            .unwrap();
+        c.confirm_live(&sid, 4).unwrap();
+        c.ingest_fill(
+            fill(
+                &sid,
+                "x-p1",
+                Side::Sell,
+                dec!(0.50),
+                dec!(10),
+                FillStatus::Confirmed,
+            ),
+            5,
+        )
+        .unwrap();
+        let rows = c.positions().open_positions();
+        assert_eq!(rows.len(), 1, "paper's close removed exactly paper's row");
+        assert_eq!(rows[0].account_id.as_str(), "default");
+        assert_eq!(
+            rows[0].entry_price,
+            dec!(0.40),
+            "default's row is the survivor, byte-for-byte its own basis"
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            SEED - dec!(1),
+            "paper's close settled into paper's book"
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            SEED - dec!(4),
+            "default's cash never moved for paper's trade"
+        );
+        // And the close landed on PAPER's accounting slice.
+        let acc = c
+            .strategy_accounting
+            .get(&strategy_acc_key(STRATEGY, "paper"))
+            .expect("paper's accounting row");
+        assert_eq!(acc.closed_trades, 1);
+        assert_eq!(acc.losses, 1);
+        assert!(
+            !c.strategy_accounting
+                .contains_key(&strategy_acc_key(STRATEGY, "default")),
+            "default has no closed trade yet — its slice must not exist"
+        );
     }
 
     /// `trades.summary` with an `accountId` filters the row set before

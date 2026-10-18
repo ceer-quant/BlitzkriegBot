@@ -72,5 +72,8 @@ export function registryStrategyRows(rows: readonly PluginRow[]): StrategyStatsR
     modes: r.modes ?? null,
     compatible: r.compatible ?? true,
     incompatibleReason: r.incompatibleReason ?? null,
+    // 账户↔venue 解耦合同：strategy.list 行的启停归属（哪些账户启用）。
+    // 老内核缺字段 → undefined，页面按降级走全局开关语义。
+    accounts: r.accounts,
   }))
 }

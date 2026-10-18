@@ -1738,12 +1738,27 @@ async fn handle_line(
                     // handshake would refuse it. Every 0.2 strategy reads as
                     // `modes: null, compatible: true, incompatibleReason: null`.
                     let (modes, compatible, incompatible_reason) = c.strategy_compat_view(&name);
+                    // 账户↔venue 解耦（本轮）：每行还带 `accounts` —— 该策略
+                    // 当前在哪些账户 scope 上有实例（engine 的注册表读数，
+                    // 排序稳定）。单 scope 部署 = `["default"]`；双账户都跑
+                    // spread_arb 时两行同名列各自带出真实归属，面板的策略×
+                    // 账户矩阵不再靠猜。老核不写字段 → 前端按缺省降级。
+                    let accounts = c
+                        .engine
+                        .as_ref()
+                        .map(|e| {
+                            let mut v = e.strategy_scopes(&name);
+                            v.sort();
+                            v
+                        })
+                        .unwrap_or_default();
                     serde_json::json!({
                         "name": name,
                         "enabled": is_on,
                         "modes": modes,
                         "compatible": compatible,
                         "incompatibleReason": incompatible_reason,
+                        "accounts": accounts,
                     })
                 })
                 .collect();
@@ -1753,28 +1768,104 @@ async fn handle_line(
             }))
         }
 
+        // 账户↔venue 解耦（本轮）：`accountId?` 缺省 = "default"（合同钉
+        // 死）。缺省分支保持原全局开关字节不变；非 default 分支走本架构的
+        // 账户语义 —— assignment IS enablement：把目标 scope 恢复/移出该
+        // 账户的 assignment（persist 先行，两存储一事务，exits-only 安全
+        // 网含），engine scope 随 rebuild 启用/拆除。语义层函数
+        // （service.rs 的 per-account enable 原语）由核心 agent 交付，
+        // 合流时可整体替换该分支的调用点 —— wire 形状（含 `accountId`
+        // 回显）即合同，不再变。
         method::STRATEGY_ENABLE => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let enabled = params
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            // E27 (§8.2): the enable runs through the handshake. A disabling
-            // toggle is never gated (standing down is always allowed); an
-            // enable the active plugin cannot serve is REFUSED with the §8.2
-            // diagnostic — `{ name, enabled: false, found: true, reason }` —
-            // and the dispatch keeps the strategy off.
-            let (found, applied, reason) = core
-                .lock()
-                .await
-                .set_strategy_enabled_checked(name, enabled);
-            Ok(serde_json::json!({
-                "name": name,
-                "enabled": if reason.is_some() { false } else { enabled && applied },
-                "found": found,
-                "applied": applied,
-                "reason": reason,
-            }))
+            let account_id = params
+                .get("accountId")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default");
+            if account_id == "default" {
+                // E27 (§8.2): the enable runs through the handshake. A
+                // disabling toggle is never gated (standing down is always
+                // allowed); an enable the active plugin cannot serve is
+                // REFUSED with the §8.2 diagnostic —
+                // `{ name, enabled: false, found: true, reason }` — and the
+                // dispatch keeps the strategy off.
+                let (found, applied, reason) = core
+                    .lock()
+                    .await
+                    .set_strategy_enabled_checked(name, enabled);
+                Ok(serde_json::json!({
+                    "name": name,
+                    "enabled": if reason.is_some() { false } else { enabled && applied },
+                    "found": found,
+                    "applied": applied,
+                    "reason": reason,
+                    "accountId": account_id,
+                }))
+            } else {
+                // 语义层接线（核心 agent 补丁）：本分支的 `id` 名被账户
+                // AccountId 占用，先捕获 JSON-RPC 的请求 id 供 fail() 使用。
+                let rpc_id = id.clone();
+                let id = AccountId::from(account_id);
+                let mut c = core.lock().await;
+                // Existence first: the assignment write's own refusal names
+                // unknown ids too, but a 404-shaped row on the panel should
+                // say WHICH half was wrong (the account, not the strategy).
+                if let Err(e) = c.accounts().require(&id) {
+                    Err(client_err(e))
+                } else {
+                    // Current assignment of THIS account (engine scopes are
+                    // the mirror; the book is the truth). Empty = runs
+                    // nothing yet.
+                    let mut assignment: Vec<String> = c
+                        .accounts()
+                        .account(&id)
+                        .map(|a| a.strategies.clone())
+                        .unwrap_or_default();
+                    let present = assignment.iter().any(|s| s == name);
+                    if enabled && !present {
+                        assignment.push(name.to_string());
+                    } else if !enabled {
+                        assignment.retain(|s| s != name);
+                    }
+                    let kept_exits_only = match c.set_account_strategies_persisting(
+                        &id,
+                        assignment,
+                        // Same actor posture as the other panel writes: the
+                        // KERNEL-recorded uid, never a caller's claim.
+                        match peer {
+                            PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                            _ => "uid:unknown".to_string(),
+                        }
+                        .as_str(),
+                        params
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("strategy.enable (account-scoped)"),
+                        now_ms(),
+                    ) {
+                        Ok(kept) => kept,
+                        Err(e) => {
+                            let e = client_err(e);
+                            return fail(rpc_id, e.0, e.1, e.2);
+                        }
+                    };
+                    Ok(serde_json::json!({
+                        "name": name,
+                        "enabled": enabled,
+                        "found": true,
+                        "applied": true,
+                        "reason": Value::Null,
+                        "accountId": account_id,
+                        "keptExitsOnly": kept_exits_only,
+                    }))
+                }
+            }
         }
 
         method::STRATEGY_LOAD => {
@@ -2309,17 +2400,84 @@ async fn handle_line(
             }
         },
 
+        // 账户↔venue 解耦（本轮）：每行行情数据必须带上它所属的行情插件名
+        // （`venue`，小写）——多行情插件数据面早已 per-venue 键控
+        // （scanner 时钟、feed 订阅、执行器 drain 都按 venue 路由），但
+        // `round_view` 把维度拍扁成了 asset（且按 asset 去重：同一资产
+        // 两个 venue 的市场只剩第一行），导致绑定了 Kalshi 的账户在行情
+        // 页仍然只看到一锅 polymarket 的行。view 结构体与组装在
+        // service.rs 的回放基线里，字节不能动，所以方法层从 scanner 的
+        // 市场清单逐市场重组：取价逻辑与 round_view 相同（book mid 优先，
+        // scanner 最后价兜底，非正 mid 拒用），venue 读自市场本身的
+        // `CryptoMarket.venue`（#427 的纯数据字段）。同一 asset 两个
+        // venue 各成一行；无标签（legacy 语料 / 单插件）渲染为空串，
+        // 前端对缺失字段已有降级。
         method::ENGINE_ROUND => {
-            let view = core.lock().await.round_view();
-            Ok(serde_json::to_value(view).unwrap_or(Value::Null))
+            let c = core.lock().await;
+            let mut doc = serde_json::to_value(c.round_view()).unwrap_or(Value::Null);
+            // 逐市场行（venue 维度），替代 view 里按 asset 去重的
+            // `marketPrices`。引擎缺席时市场清单为空 → 空数组，前端照旧
+            // 渲染"无行情"。
+            let now = now_ms();
+            let markets: Vec<serde_json::Value> = c
+                .engine
+                .as_ref()
+                .map(|e| {
+                    e.scanner()
+                        .round_state(now)
+                        .markets
+                        .iter()
+                        .map(|m| {
+                            let up = e
+                                .book_snapshot(&m.up_token_id)
+                                .map(|b| b.mid_price)
+                                .filter(|p| *p > Decimal::ZERO)
+                                .unwrap_or(m.up_price);
+                            let down = e
+                                .book_snapshot(&m.down_token_id)
+                                .map(|b| b.mid_price)
+                                .filter(|p| *p > Decimal::ZERO)
+                                .unwrap_or(m.down_price);
+                            serde_json::json!({
+                                "asset": m.asset,
+                                "up": up,
+                                "down": down,
+                                "venue": m.venue,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            doc["marketPrices"] = serde_json::json!(markets);
+            Ok(doc)
         }
 
         // Read-only depth view for the UI's 盘口深度 chart (E8-c). Bounded on
         // both axes: one entry per round asset, 15 levels per token side — the
         // ladder the chart draws, not the whole book.
+        //
+        // 账户↔venue 解耦（本轮）：与 engine.round 同一富化——每行按
+        // up_token_id 读出该 token 所属市场的 venue（`venue_of_token` 的
+        // 语义，方法层直接查 scanner 市场清单），盘口深度行不再无源。
         method::ENGINE_BOOKS => {
-            let view = core.lock().await.books_view(15);
-            Ok(serde_json::to_value(view).unwrap_or(Value::Null))
+            let c = core.lock().await;
+            let mut view = serde_json::to_value(c.books_view(15)).unwrap_or(Value::Null);
+            if let Some(rows) = view.as_array_mut() {
+                for row in rows.iter_mut() {
+                    let venue = row
+                        .get("upTokenId")
+                        .and_then(Value::as_str)
+                        .map(|tok| {
+                            c.engine
+                                .as_ref()
+                                .and_then(|e| e.venue_of(tok))
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    row["venue"] = serde_json::json!(venue);
+                }
+            }
+            Ok(view)
         }
 
         method::ENGINE_MARKETS => {

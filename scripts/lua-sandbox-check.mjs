@@ -74,15 +74,21 @@ const SHA_ANCHOR = 'sha256 mismatch not raised';
  * Pure functions over observed wire shapes. The real run, the self-test and
  * the teeth feed the SAME judges — that is what gives the teeth meaning. */
 
-const ROW_KEYS = ['name', 'enabled', 'modes', 'compatible', 'incompatibleReason'];
+const ROW_KEYS = ['name', 'enabled', 'modes', 'compatible', 'incompatibleReason', 'accounts'];
 
-/** §8.3 row shape: both stacks surface the SAME five fields, nothing else. */
+/** §8.3 row shape: both stacks surface the SAME six fields, nothing else.
+ * `accounts` joined with the account-decouple wire (per-account enablement:
+ * which accounts' enablement sets carry this strategy). */
 export function judgeRowShape(row) {
   const problems = [];
   const keys = Object.keys(row ?? {}).sort();
   const want = [...ROW_KEYS].sort();
   if (keys.length !== want.length || keys.some((k, i) => k !== want[i])) {
     problems.push(`strategy.list row shape drifted: got [${keys.join(',')}] want [${want.join(',')}]`);
+  }
+  const acc = row?.accounts;
+  if (!Array.isArray(acc) || acc.some((a) => typeof a !== 'string')) {
+    problems.push(`strategy.list row accounts is not a string array: ${JSON.stringify(acc)}`);
   }
   return problems;
 }
@@ -401,7 +407,7 @@ async function main() {
       check('strategy.list carries the lua row and the dylib row', !!official && !!reference,
         rowsAll.map((r) => r.name).join(','));
       if (official && reference) {
-        check('§8.3: both stacks surface the SAME five-field row shape',
+        check('§8.3: both stacks surface the SAME six-field row shape',
           judgeRowShape(official).length === 0 && judgeRowShape(reference).length === 0,
           [...judgeRowShape(official), ...judgeRowShape(reference)].join(' | '));
         check('§6.4: the unsigned-past lua row reads compatible (undeclared modes)',

@@ -1227,7 +1227,7 @@ fn an_unauthenticated_panel_refuses_every_write_route() {
     // policy, blueprint/Lua source writes, backtest runs, update switches.
     // Every one of them must now be refused AT THE GATE with 403.
     let addr = start(None);
-    let writes: [(&str, &str); 9] = [
+    let writes: [(&str, &str); 10] = [
         ("/api/risk/set-systemic", r#"{"maxSingleLossUsd":99999}"#),
         ("/api/risk/set-exit", r#"{"stopLossPct":50}"#),
         ("/api/execution-policy/set", r#"{"accountId":"default"}"#),
@@ -1240,6 +1240,13 @@ fn an_unauthenticated_panel_refuses_every_write_route() {
         ("/api/backtest/run", r#"{}"#),
         ("/api/backtest/onchain-pull", r#"{}"#),
         ("/api/version/configure", r#"{"autoUpdate":true}"#),
+        (
+            // 账户↔venue 解耦（本轮）：the account-scoped strategy-enable
+            // proxy is a WRITE route like its siblings — the gate must eat it
+            // on an unauthenticated panel too.
+            "/api/strategy-enable",
+            r#"{"name":"spread_arb","enabled":true,"accountId":"paper"}"#,
+        ),
     ];
     for (route, body) in writes {
         let (code, _) = request_body(

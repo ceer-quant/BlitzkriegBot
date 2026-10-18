@@ -42,49 +42,67 @@ import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import CreateArbDialog from '@/components/CreateArbDialog.vue'
 
 const store = usePanelStore()
-// PR H (账户筛选修复): the counters are account-scoped when an account is
-// active — `store.strategyRows` already prefers the account-sliced
-// engine.stats read (`accountStrategyStats`), so the same per-NAME rows now
-// show THIS account's orders/PnL, not every account's. What this page adds
-// is the ROW filter: a strategy the active account has no assignment for
-// (`accounts` names no slice) does not trade on its behalf and must not sit
-// in the fleet table. With no account picked (老面板/单账户), every row
-// shows exactly as before.
-const rows = computed<StrategyStatsRow[]>(() => {
-  const id = store.activeAccount
-  if (!id) return store.strategyRows
-  return store.strategyRows.filter(
-    (r) => !Array.isArray(r.accounts) || r.accounts.includes(id) || hasActivity(r),
-  )
-})
-/**
- * A strategy with no account slice but nonzero session activity keeps its
- * row: the counters were JUST moved under this account (assignment change)
- * and hiding a row that owns PnL would look like data loss. Zero-and-absent
- * rows are the only ones a scoped page drops.
- */
-function hasActivity(r: StrategyStatsRow): boolean {
-  return (
-    Number(r.ordersPlaced) > 0 ||
-    Number(r.ordersRejected) > 0 ||
-    Number(r.closedTrades) > 0
-  )
-}
+// 账户↔venue 解耦（2026-10 操作者裁决）：策略列表恒等全部已安装策略
+// （strategy.list 读数），不再按当前账户过滤 —— 「因选中 B 就看不到未在 B
+// 启用的策略」必须不可能。账户维度只活在启用按钮上：按钮语义 = 该策略在
+// 当前选中账户的启用状态，见 `isAccountEnabled` / `toggle`。
+const rows = computed<StrategyStatsRow[]>(() => store.strategyRows)
 
 const busy = ref<string | null>(null)
 const flash = ref<{ name: string; ok: boolean; msg: string } | null>(null)
+
+/**
+ * 该策略在**当前选中账户**的启用状态（启停绑定在「账户+策略」级别）。
+ *
+ * 数据源两路，都照合同 feature-detect、缺字段降级：
+ *  - 首选 `account.list` 行的 `strategies`（该账户的启用集；老内核不回该
+ *    字段 → undefined = 无读数）；
+ *  - 次选 `strategy.list` 行的 `accounts`（该策略在哪些账户启用）。
+ *
+ * 两路都缺（老核）→ null = 读数缺失：按钮退回旧的全局 `enabled` 语义
+ * （列表恒显全部，不再按账户过滤），且控制台 warn 一次。
+ */
+const accountsFieldWarned = { warned: false }
+function isAccountEnabled(r: StrategyStatsRow): boolean | null {
+  const id = store.activeAccount
+  const row = id ? store.accounts.find((a) => a.id === id) : null
+  const set = row?.strategies
+  if (Array.isArray(set)) {
+    // 启用集语义：非空 = 逐字集合；空 = 跟随全局开关（0.2 单簿形状）。
+    return set.length ? set.includes(r.name) : r.enabled
+  }
+  if (Array.isArray(r.accounts)) return r.accounts.includes(id ?? 'default')
+  if (!accountsFieldWarned.warned) {
+    accountsFieldWarned.warned = true
+    console.warn(
+      '[Strategies] account.list 行缺 strategies 且 strategy.list 行缺 accounts —— ' +
+        '启用按钮降级为全局开关语义（旧内核，需升级内核获得账户级启停读数）。',
+    )
+  }
+  return null
+}
+
+/** 行上的「N 个账户启用中」徽标读数（缺 accounts 字段 = null，不渲染）。 */
+function enabledAccountCount(r: StrategyStatsRow): number | null {
+  return Array.isArray(r.accounts) ? r.accounts.length : null
+}
 
 async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
   busy.value = r.name
   flash.value = null
   try {
-    const res = await api.setStrategy(r.name, next)
+    // 启停带当前选中账户（合同：strategy.enable/disable 接受 accountId，
+    // 缺省 = default）。无选中账户（老面板/单账户）走原全局动词，逐字节
+    // 不变。按钮显示的是账户级读数时，写也必须是账户级 —— 否则读到的是
+    // 一套、改的是另一套。
+    const scoped = isAccountEnabled(r) !== null
+    const res = await api.setStrategy(r.name, next, scoped ? store.activeAccount ?? undefined : undefined)
     flash.value = {
       name: r.name,
       ok: res.ok !== false && !res.reason,
       // §8.2: an enable refused by the mode handshake speaks BOTH sides —
       // surface the core's reason verbatim instead of the generic "已启用".
-      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}`,
+      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}${scoped && store.activeAccount ? `（账户 ${store.activeAccount}）` : ''}`,
     }
     await store.refresh()
   } catch (e) {
@@ -102,7 +120,7 @@ const totals = computed(() => {
   const losses = sum((r) => r.losses)
   return {
     count: rs.length,
-    enabled: rs.filter((r) => r.enabled).length,
+    enabled: rs.filter((r) => (isAccountEnabled(r) ?? r.enabled)).length,
     /** Refusal attribution — two disjoint families, see `lib/rejections.ts`. */
     refusal: refusalTotals(rs),
     closed: sum((r) => r.closedTrades),
@@ -494,11 +512,23 @@ function onExpand(name: string): void {
                     </span>
                   </td>
                   <td class="px-2 py-2.5">
-                    <Switch
-                      :model-value="r.enabled"
-                      :disabled="busy === r.name"
-                      @update:model-value="toggle(r, $event)"
-                    />
+                    <span class="flex items-center justify-end gap-1.5">
+                      <!-- 启用按钮语义 = 该策略在当前选中账户的启用状态。
+                           读数缺失（老内核）退回全局 enabled —— 列表不过滤。 -->
+                      <Switch
+                        :model-value="isAccountEnabled(r) ?? r.enabled"
+                        :disabled="busy === r.name"
+                        :title="store.activeAccount
+                          ? `${r.name} 在账户 ${store.activeAccount} 的启停（只影响该账户）`
+                          : `${r.name} 的全局启停（老面板/单账户）`"
+                        @update:model-value="toggle(r, $event)"
+                      />
+                      <!-- 「N 个账户启用中」徽标：strategy.list 行带 accounts
+                           时显示真实归属数；缺字段不渲染（不发明数字）。 -->
+                      <Tooltip v-if="enabledAccountCount(r) !== null" :content="`${r.name} 当前在 ${enabledAccountCount(r)} 个账户上启用：${(r.accounts ?? []).join('、') || '无'}`">
+                        <Badge variant="outline" class="num shrink-0">×<RollingNumber :value="enabledAccountCount(r) ?? 0" /></Badge>
+                      </Tooltip>
+                    </span>
                   </td>
                   <td class="px-2 py-2.5">
                     <span class="block truncate text-[12px] text-muted-fg" :title="r.source">{{ r.source }}</span>

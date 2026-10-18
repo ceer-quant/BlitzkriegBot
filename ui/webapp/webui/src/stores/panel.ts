@@ -27,6 +27,12 @@ export interface PanelAccountRow {
   available: string | number
   /** 只读：老内核回读缺该字段时以 '' 渲染（未绑定，可交易任意交易所）。 */
   venue?: string
+  /**
+   * 该账户的策略启用集（启停绑定在「账户+策略」级别 —— 账户↔venue 解耦
+   * 裁决）。非空 = 逐字集合；空数组 = 跟随全局开关；undefined = 老内核
+   * 缺字段（启用按钮降级为全局语义）。可见性与它无关：策略列表恒显全部。
+   */
+  strategies?: string[]
   /** 账户自有账本的预留/可用（账户级余额瓦片走这里，进程级 ledger 不再是
    *  余额来源 —— E28 §9.5：一个账户一套账本）。 */
   reserved?: string | number
@@ -147,10 +153,10 @@ export const usePanelStore = defineStore('panel', () => {
   // Prefer engine snapshot strategyStats (richer); fall back to /api/plugins.
   // PR H (账户筛选修复): when an account is active, the counters come from
   // the account-scoped engine.stats read (`accountStrategyStats`) — the same
-  // per-NAME rows with THIS account's slice only. The merge keeps the mode/
-  // compat verdicts from the registry either way; a strategy the account has
-  // no slice for still shows (zero counters, `accounts` empty) because the
-  // assignment editor on the account switcher reads the same list.
+  // per-NAME rows with THIS account's counter slice. The row SET never
+  // shrinks (the kernel folds the full registry either way), and pages must
+  // not filter it again (账户↔venue 解耦裁决: 策略列表恒显全部已安装).
+  // The merge keeps the mode/compat verdicts from the registry either way.
   const strategyRows = computed<StrategyStatsRow[]>(() => {
     const acc = accountStrategyStats.value
     const st = acc.length ? acc : snapshot.value?.strategyStats
@@ -172,6 +178,11 @@ export const usePanelStore = defineStore('panel', () => {
             modes: match.modes ?? null,
             compatible: match.compatible ?? true,
             incompatibleReason: match.incompatibleReason ?? null,
+            // 启停归属（账户↔venue 解耦合同）：registry 行带 accounts
+            // 时把它带过 —— 策略页的「N 个账户启用中」徽标与账户级启停
+            // 降级判定都读它。engine.stats 的 fold 行自己也带 accounts，
+            // registry 缺席时保留 stats 行的。
+            accounts: (match as { accounts?: string[] }).accounts ?? row.accounts,
           }
         })
       }
