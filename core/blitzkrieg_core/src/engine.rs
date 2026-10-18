@@ -1604,6 +1604,17 @@ impl Engine {
             .is_some_and(|s| s.strategy.holds_to_settlement())
     }
 
+    /// E-VA: whether the named strategy declared ATOMIC-BATCH semantics — its
+    /// candidates in one evaluation cycle reserve the virtual quota as ONE
+    /// batch before the first leg goes out. `false` for an unknown strategy
+    /// and for every strategy that did not declare it (the per-order path).
+    pub fn strategy_atomic_batch(&self, name: &str) -> bool {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .is_some_and(|s| s.strategy.atomic_batch())
+    }
+
     /// True when EVERY ENABLED strategy holds to settlement — the replay
     /// fast path's precondition for skipping the exit ladder between dirty
     /// ticks (a ladder verdict against a holder is discarded by the host

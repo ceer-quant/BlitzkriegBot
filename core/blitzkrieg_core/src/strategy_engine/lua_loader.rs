@@ -81,6 +81,14 @@ pub struct LuaManifest {
     /// pair). Default false — existing packages keep today's behaviour.
     #[serde(default)]
     pub holds_to_settlement: bool,
+    /// E-VA atomic-batch declaration: the strategy's entry candidates in one
+    /// evaluation cycle are ONE economic ticket (a pair's two legs) and must
+    /// reserve their virtual quota as a whole — an over-cap pot cancels the
+    /// batch with zero legs out. Arms nothing by itself: the pot comes from
+    /// `CoreConfig::virtual_limits`. Default false — existing packages keep
+    /// the per-order path byte-identically.
+    #[serde(default)]
+    pub atomic_batch: bool,
     /// Entry-gate exemptions (E2-b, the dylib declaration surface's Lua
     /// mirror). Default: nothing declared = fully gated.
     #[serde(default)]
@@ -209,6 +217,8 @@ pub struct LoadedLua {
     /// The manifest's hold-to-settlement declaration (collection semantics:
     /// redeem or MERGE, never ladder-sell). `false` when absent.
     pub holds_to_settlement: bool,
+    /// The manifest's E-VA atomic-batch declaration (`false` when absent).
+    pub atomic_batch: bool,
     /// The manifest's entry-gate exemptions. `none()` when absent — every
     /// existing package keeps today's fully-gated behaviour.
     pub gate_exemptions: GateExemptions,
@@ -337,6 +347,7 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
         declared_modes,
         tunables: manifest.tunables.defaults(),
         holds_to_settlement: manifest.holds_to_settlement,
+        atomic_batch: manifest.atomic_batch,
         gate_exemptions: GateExemptions {
             timing: manifest.gate_exemptions.timing,
             momentum: manifest.gate_exemptions.momentum,
@@ -366,6 +377,10 @@ pub struct LuaEngineAdapter {
     /// neither.
     holds_to_settlement: bool,
     gate_exemptions: GateExemptions,
+    /// E-VA: the manifest's atomic-batch declaration (the batch pre-
+    /// reservation posture). Armed only when `CoreConfig::virtual_limits`
+    /// also configures the strategy's pot.
+    atomic_batch: bool,
     /// The strategy's cell of the shared ParamRegistry, when one is attached
     /// (E2-c plumbing; a cell exists only for strategies that declared
     /// evolvable knobs).
@@ -419,6 +434,7 @@ impl LuaEngineAdapter {
             breaks: Vec::new(),
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
+            atomic_batch: false,
             params_cell: None,
             defaults: tunables,
             specs,
@@ -448,6 +464,7 @@ impl LuaEngineAdapter {
             breaks: Vec::new(),
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
+            atomic_batch: false,
             params_cell: None,
             defaults: tunables,
             specs: Vec::new(),
@@ -463,6 +480,13 @@ impl LuaEngineAdapter {
     pub fn declare(mut self, holds_to_settlement: bool, gate_exemptions: GateExemptions) -> Self {
         self.holds_to_settlement = holds_to_settlement;
         self.gate_exemptions = gate_exemptions;
+        self
+    }
+
+    /// E-VA: stamp the manifest's atomic-batch declaration (the loaded-package
+    /// path; the same route `declare` rides).
+    pub fn declare_atomic_batch(mut self, atomic_batch: bool) -> Self {
+        self.atomic_batch = atomic_batch;
         self
     }
 
@@ -748,6 +772,10 @@ impl EngineStrategy for LuaEngineAdapter {
         self.holds_to_settlement
     }
 
+    fn atomic_batch(&self) -> bool {
+        self.atomic_batch
+    }
+
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {
         std::mem::take(&mut self.exit_intents)
     }
@@ -787,6 +815,7 @@ impl EngineStrategy for LuaEngineAdapter {
             specs: self.specs.clone(),
             source,
             holds_to_settlement: self.holds_to_settlement,
+            atomic_batch: self.atomic_batch,
             gate_exemptions: self.gate_exemptions,
             fee_cell: Arc::clone(&self.fee_cell),
         }))
@@ -828,6 +857,7 @@ struct LuaShadowFactory {
     specs: Vec<KnobSpec>,
     source: PackageSource,
     holds_to_settlement: bool,
+    atomic_batch: bool,
     gate_exemptions: GateExemptions,
     fee_cell: Arc<Mutex<Option<FeeScheduleView>>>,
 }
@@ -858,7 +888,8 @@ impl ShadowFactory for LuaShadowFactory {
             bag.insert(k.to_string(), v.to_string());
         }
         let twin = LuaEngineAdapter::new_with_fee(twin, bag, Arc::clone(&self.fee_cell))
-            .declare(self.holds_to_settlement, self.gate_exemptions);
+            .declare(self.holds_to_settlement, self.gate_exemptions)
+            .declare_atomic_batch(self.atomic_batch);
         Some(Box::new(twin))
     }
 }

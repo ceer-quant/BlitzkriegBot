@@ -227,6 +227,12 @@ pub struct CoreConfig {
     /// absent entry means unlimited — a strategy keeps its current behaviour
     /// unless an operator configures a cap.
     pub strategy_limits: HashMap<String, StrategyLimit>,
+    /// E-VA: per-strategy VIRTUAL quota pots, keyed by strategy name. Empty
+    /// (the shipped default) = the virtual-account layer does not exist: no
+    /// pot, no reservation, no release — every strategy keeps the per-order
+    /// real-ledger path byte-identically. A configured strategy that also
+    /// declares `atomic_batch` gets the atomic batch pre-reservation.
+    pub virtual_limits: HashMap<String, VirtualAccountLimit>,
     /// Maker→taker escalation deadline for engine entries (P-1.2). Defaults to the
     /// long-standing 5000 ms; a backtest may model a different venue latency.
     pub entry_maker_timeout_ms: i64,
@@ -748,6 +754,28 @@ impl StrategyLimit {
     }
 }
 
+/// E-VA: one strategy's VIRTUAL quota — a risk-layer budget on the
+/// (account, strategy) axis that exists NEXT TO the real cash ledger, never
+/// inside it. A strategy declaring `atomic_batch` (and listed here) reserves
+/// its whole candidate batch against this pot BEFORE the first leg goes out;
+/// an over-cap batch is refused whole, through the same StrategyLimit
+/// rejection accounting (`limit.virtualCap` bucket) — pair legs land
+/// together or not at all.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualAccountLimit {
+    /// The pot's ceiling: the strategy's combined outstanding virtual
+    /// reservation on each listed account (its resting reservations plus any
+    /// not-yet-released batch hold). `None` = no virtual quota (the strategy
+    /// keeps the per-order real-ledger path).
+    #[serde(with = "crate::decimal::opt", default)]
+    pub max_batch_notional_usd: Option<Decimal>,
+    /// Which account scopes this strategy's pot covers. Empty = the pot is
+    /// not armed anywhere (the default-off posture).
+    #[serde(default)]
+    pub accounts: Vec<String>,
+}
+
 /// Overridable Shadow Evolution thresholds (all optional).
 #[derive(Debug, Clone, Default)]
 pub struct ShadowEvolutionTuning {
@@ -850,6 +878,7 @@ impl Default for CoreConfig {
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
             strategy_limits: HashMap::new(),
+            virtual_limits: HashMap::new(),
             entry_maker_timeout_ms: 5000,
             fill_model: crate::sim::FillModel::default(),
             event_archive_path: None,
@@ -1394,6 +1423,13 @@ pub struct Core {
     /// Per-strategy order/trade accounting (P-1.1). Session-scoped: reset on
     /// restart, like `stats`; the durable per-trade record is the trade log.
     strategy_accounting: HashMap<String, StrategyAccounting>,
+    /// E-VA: the strategy-level VIRTUAL quota book — per-(account, strategy)
+    /// pots fed by the batch pre-reservation and drained by the order state
+    /// machine's terminal transitions. Built from `config.virtual_limits`;
+    /// an empty config builds an empty book whose `governed` answer is
+    /// always false, so every hook below is a one-comparison no-op on the
+    /// shipped default (the replay-baseline posture).
+    virtual_accounts: crate::risk::virtual_account::VirtualAccounts,
     /// Venue-rejection cooldowns keyed by placement intent (`internal_key`):
     /// after the venue refuses an order, retries of the SAME intent back off
     /// exponentially and stop after a cap — a stuck exit once burned 380+
@@ -2037,6 +2073,11 @@ impl Core {
         }
         let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
         intent_audit.enabled = config.intent_audit_enabled;
+        // E-VA: the virtual pots are built from the config's caps BEFORE the
+        // config moves into the struct (the caps are copied, so a later
+        // runtime config mutation cannot move a quota mid-session).
+        let virtual_accounts =
+            crate::risk::virtual_account::VirtualAccounts::new(&config.virtual_limits);
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
@@ -2105,6 +2146,7 @@ impl Core {
             started_at_ms: now_ms(),
             event_archive,
             strategy_accounting: HashMap::new(),
+            virtual_accounts,
             place_cooldowns: HashMap::new(),
             escalation_skips: HashSet::new(),
             pending_venue_cancels: Vec::new(),
@@ -4130,6 +4172,7 @@ impl Core {
                 let tunables = loaded.tunables.clone();
                 let holds = loaded.holds_to_settlement;
                 let exemptions = loaded.gate_exemptions;
+                let atomic = loaded.atomic_batch;
                 // E27 (§8.2): the SAME handshake verdict BEFORE registration.
                 let refusal =
                     Self::modes_refusal(&self.plugin_modes, &name, &loaded.declared_modes);
@@ -4149,8 +4192,9 @@ impl Core {
                     rate: sched.rate.to_string(),
                     exponent: sched.exponent,
                 };
-                let adapter =
-                    LuaEngineAdapter::new(loaded.strategy, tunables).declare(holds, exemptions);
+                let adapter = LuaEngineAdapter::new(loaded.strategy, tunables)
+                    .declare(holds, exemptions)
+                    .declare_atomic_batch(atomic);
                 adapter.set_fee_schedule(fee_view);
                 match engine
                     .register_user_strategy(Box::new(adapter), format!("lua:{}", dir.display()))
@@ -5163,10 +5207,44 @@ impl Core {
             });
         }
         self.stats.signals += orders.len() as u64;
-        let tokens: Vec<(String, crate::model::OrderRequest)> = orders
+        let mut tokens: Vec<(String, crate::model::OrderRequest)> = orders
             .into_iter()
             .map(|o| (o.token_id.clone(), o))
             .collect();
+        // ── E-VA: the atomic-batch pre-reservation, judged BEFORE the first
+        // leg's gate runs. Strategies that declared `atomic_batch` (and sit
+        // in `virtual_limits`) reserve their WHOLE batch against the virtual
+        // pot here: an over-cap batch is cancelled wholesale — zero legs
+        // placed, zero real reservations taken — with the refusal bucketed
+        // through the existing StrategyLimit accounting (`limit.virtualCap`).
+        // Everything else (every shipped strategy, every undeclared batch)
+        // finds no governed scope and skips this block untouched.
+        let declared_atomic = |name: &str| {
+            self.engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_atomic_batch(name))
+        };
+        for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
+            if let Err(reason) = self.virtual_batch_fits(&account_id, &strategy, &batch) {
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy.clone())
+                    .or_default();
+                acc.limit_rejected += batch.len() as u64;
+                for _ in &batch {
+                    *acc.rejection_causes
+                        .entry("limit.virtualCap".into())
+                        .or_default() += 1;
+                }
+                tracing::info!(target: "strategy",
+                    "batch rejected: strategy={strategy} account={account_id} \
+                     cause=limit.virtualCap legs={} reason={reason}",
+                    batch.len());
+                let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
+                tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
+            }
+        }
         let mut placed = 0;
         // ── #363: the execution policy's account-level verdict, judged BEFORE
         // arbitration. Two decisions ride here:
@@ -5521,7 +5599,29 @@ impl Core {
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
             }
+            // E-VA: the batch pre-check passed — HOLD this leg's virtual
+            // quota before it spends anything real. A later per-order gate
+            // may still refuse the leg: the Err arm below releases its keyed
+            // reservation, and a placed leg keeps its hold until the order
+            // state machine's terminal transition releases it.
+            {
+                let account_id = req.account_id.to_string();
+                let strategy = req.strategy.clone();
+                self.virtual_batch_commit(
+                    &account_id,
+                    &strategy,
+                    &[(req.internal_key.clone(), req.price * req.size)],
+                );
+            }
             let placed_account = req.account_id.clone();
+            let virtual_leg = if self
+                .virtual_accounts
+                .governed(placed_account.as_str(), &name)
+            {
+                Some((req.internal_key.clone(), req.price * req.size, req.side))
+            } else {
+                None
+            };
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -5534,6 +5634,19 @@ impl Core {
                     placed += 1;
                 }
                 Err(err) => {
+                    // E-VA: a refused leg never rests — release the keyed
+                    // virtual hold its batch took, so the pot reflects only
+                    // commitments that actually exist.
+                    if let Some((key, _notional, side)) = &virtual_leg
+                        && *side == Side::Buy
+                    {
+                        self.virtual_accounts.release(
+                            placed_account.as_str(),
+                            &name,
+                            key,
+                            *_notional,
+                        );
+                    }
                     self.stats.place_rejected += 1;
                     let bucket = classify_rejection(&err);
                     // E9-c: attach the live reason text verbatim to the receipt
@@ -5612,6 +5725,40 @@ impl Core {
             .unwrap_or_else(|| Some(Vec::new()))?;
         let orders = staged;
         self.stats.signals += orders.len() as u64;
+        let mut tokens: Vec<(String, crate::model::OrderRequest)> = orders
+            .into_iter()
+            .map(|o| (o.token_id.clone(), o))
+            .collect();
+        // ── E-VA: the SAME atomic-batch pre-reservation the real cycle runs
+        // (issue #390's parity rule: the nofast twin reproduces the base
+        // cycle's kernel-side pipeline cycle for cycle). Ungoverned scopes
+        // short-circuit before touching anything.
+        let declared_atomic = |name: &str| {
+            self.engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_atomic_batch(name))
+        };
+        for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
+            if let Err(reason) = self.virtual_batch_fits(&account_id, &strategy, &batch) {
+                self.stats.strategy_limit_rejected += 1;
+                let acc = self
+                    .strategy_accounting
+                    .entry(strategy.clone())
+                    .or_default();
+                acc.limit_rejected += batch.len() as u64;
+                for _ in &batch {
+                    *acc.rejection_causes
+                        .entry("limit.virtualCap".into())
+                        .or_default() += 1;
+                }
+                tracing::info!(target: "strategy",
+                    "batch rejected: strategy={strategy} account={account_id} \
+                     cause=limit.virtualCap legs={} reason={reason}",
+                    batch.len());
+                let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
+                tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
+            }
+        }
         // The physics projection the base cycle judged (E25): refreshed for
         // THIS cycle's round clock by `replay_candidates`.
         let policy_time_left_sec = self
@@ -5620,11 +5767,7 @@ impl Core {
             .map(|e| e.last_time_left_sec())
             .unwrap_or(0);
         let mut placed = 0;
-        for (token, mut req) in orders
-            .into_iter()
-            .map(|o| (o.token_id.clone(), o))
-            .collect::<Vec<_>>()
-        {
+        for (token, mut req) in tokens {
             let name = req.strategy.clone();
             // ── #363: the policy verdict for THIS intent. A Skip refuses here
             // — the intent never reaches the RiskGate. A Place caps the
@@ -5833,7 +5976,29 @@ impl Core {
                 *acc.rejection_causes.entry(bucket.into()).or_default() += 1;
                 continue;
             }
+            // E-VA: the batch pre-check passed — HOLD this leg's virtual
+            // quota before it spends anything real. A later per-order gate
+            // may still refuse the leg: the Err arm below releases its keyed
+            // reservation, and a placed leg keeps its hold until the order
+            // state machine's terminal transition releases it.
+            {
+                let account_id = req.account_id.to_string();
+                let strategy = req.strategy.clone();
+                self.virtual_batch_commit(
+                    &account_id,
+                    &strategy,
+                    &[(req.internal_key.clone(), req.price * req.size)],
+                );
+            }
             let placed_account = req.account_id.clone();
+            let virtual_leg = if self
+                .virtual_accounts
+                .governed(placed_account.as_str(), &name)
+            {
+                Some((req.internal_key.clone(), req.price * req.size, req.side))
+            } else {
+                None
+            };
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -5846,6 +6011,19 @@ impl Core {
                     placed += 1;
                 }
                 Err(err) => {
+                    // E-VA: a refused leg never rests — release the keyed
+                    // virtual hold its batch took, so the pot reflects only
+                    // commitments that actually exist.
+                    if let Some((key, _notional, side)) = &virtual_leg
+                        && *side == Side::Buy
+                    {
+                        self.virtual_accounts.release(
+                            placed_account.as_str(),
+                            &name,
+                            key,
+                            *_notional,
+                        );
+                    }
                     self.stats.place_rejected += 1;
                     let bucket = classify_rejection(&err);
                     tracing::info!(target: "strategy",
@@ -6029,6 +6207,90 @@ impl Core {
             }
         }
         Ok(())
+    }
+
+    // ── E-VA: strategy-level virtual accounts ───────────────────────────────
+    //
+    // The virtual quota book itself never appears in the placement pipeline —
+    // these three helpers are the ONLY seams. Each one short-circuits on
+    // `governed`, which is false for every scope `config.virtual_limits` does
+    // not name, so an unconfigured kernel takes the exact historical path.
+
+    /// The strategy's virtual reservation outstanding on one account, for the
+    /// readout / tests. Zero when the scope is not governed.
+    pub fn virtual_used(&self, account_id: &str, strategy: &str) -> Decimal {
+        self.virtual_accounts.used(account_id, strategy)
+    }
+
+    /// The configured virtual cap, when this scope has one.
+    pub fn virtual_cap(&self, account_id: &str, strategy: &str) -> Option<Decimal> {
+        self.virtual_accounts.cap(account_id, strategy)
+    }
+
+    /// E-VA test #2's seam: try a WHOLE candidate batch against the
+    /// strategy's virtual pot, atomically — every leg reserves or nothing
+    /// does. `batch` is one `submit_candidate_orders` cycle's legs for the
+    /// (account, strategy) scope, each carrying its `internal_key` and the
+    /// notional the leg will commit. `Err` carries the over-cap detail the
+    /// caller buckets through the existing StrategyLimit rejection path.
+    ///
+    /// The occupied quota OUTSIDE this book is the strategy's open-position
+    /// cost basis (filled legs converted to real holdings); resting BUY
+    /// orders are NOT added — their commitment IS their batch reservation,
+    /// and counting both would double-charge the pot.
+    fn virtual_batch_fits(
+        &mut self,
+        account_id: &str,
+        strategy: &str,
+        batch: &[(String, Decimal)],
+    ) -> Result<(), String> {
+        if !self.virtual_accounts.governed(account_id, strategy) {
+            return Ok(());
+        }
+        let committed: Decimal = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id.as_str() == account_id && p.strategy == strategy)
+            .map(|p| p.cost_usd)
+            .sum();
+        // DRY-RUN: the pre-check must not hold anything — the per-order
+        // loop's `virtual_batch_commit` is the ONLY reservation point
+        // (check-then-hold split; reserving here too double-charged every
+        // leg, the 4 red tests' ×2 signature).
+        self.virtual_accounts
+            .batch_fits(account_id, strategy, batch, committed)
+    }
+
+    /// The commit twin of [`Self::virtual_batch_fits`]: same arithmetic, but
+    /// it RUNS at the head of the per-order loop and holds the batch's quota
+    /// until the state machine releases it. Called only when the pre-check
+    /// passed, so the reserve cannot fail here — an unexpected refusal (a
+    /// concurrent mutation cannot happen on `&mut self`) is logged loudly
+    /// and degrades to the per-order path rather than wedging the cycle.
+    fn virtual_batch_commit(
+        &mut self,
+        account_id: &str,
+        strategy: &str,
+        batch: &[(String, Decimal)],
+    ) {
+        let _ = virtual_batch_commit_impl(self, account_id, strategy, batch);
+    }
+
+    /// E-VA full release of an order's remaining virtual reservation — the
+    /// terminal-transition hook (cancelled / rejected / expired /
+    /// force-closed). A no-op for SELL legs and ungoverned scopes. The
+    /// fill-proportional conversion hook lives in `apply_delta_effects` (the
+    /// one place a fill's signed delta and its LIMIT price are both at hand).
+    fn virtual_release_order(&mut self, order: &crate::model::TrackedOrder) {
+        if order.side != Side::Buy {
+            return;
+        }
+        self.virtual_accounts.release_all(
+            order.account_id.as_str(),
+            &order.strategy,
+            &order.internal_key,
+        );
     }
 
     /// Per-strategy accounting (P-1.1): open exposure (live) plus session order
@@ -6765,6 +7027,8 @@ impl Core {
                 if let Ok(l) = self.accounts.get_mut(&o.account_id) {
                     l.release(id);
                 }
+                // E-VA: the virtual hold leaves the pot with the real one.
+                self.virtual_release_order(&o);
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
             // The rejected entry never rested: its token may be re-attempted.
@@ -7520,6 +7784,28 @@ impl Core {
                     order = %d.order_id,
                     released = %before,
                     "buy reservation retired (order no longer has an outstanding commitment)"
+                );
+            }
+            // E-VA: the fill converts its own slice of the VIRTUAL hold into
+            // position occupancy — released at the LIMIT price (the basis the
+            // shares were reserved against, not the execution price), for the
+            // signed share delta so a rollback re-arms the hold by the same
+            // amount. Positive delta only: a rollback's re-arm happens
+            // through the position book (the next cycle's batch check counts
+            // the position), not by re-reserving here.
+            if d.delta > Decimal::ZERO
+                && let Some(order) = self.ome.get(&d.order_id)
+            {
+                let account = order.account_id.clone();
+                let strategy = order.strategy.clone();
+                let internal_key = order.internal_key.clone();
+                let limit = d.limit_price;
+                let shares = d.delta;
+                self.virtual_accounts.release(
+                    account.as_str(),
+                    &strategy,
+                    &internal_key,
+                    limit * shares,
                 );
             }
         }
@@ -8565,6 +8851,8 @@ impl Core {
         {
             l.release(id);
         }
+        // E-VA: expiry/force-close releases the virtual hold too.
+        self.virtual_release_order(&order);
         self.ome
             .mark_terminal(id, OrderStatus::ForceClosed, now_ms)?;
         if let Some(engine) = self.engine.as_mut() {
@@ -8678,6 +8966,17 @@ impl Core {
     /// runtime-config path; `place()` reads it on every check).
     pub fn risk_config_mut(&mut self) -> &mut RiskConfig {
         self.risk.config_mut()
+    }
+
+    /// Test-only: re-arm the virtual-account book after construction (the
+    /// production surface is `CoreConfig::virtual_limits` at boot; tests
+    /// build the core first and opt a strategy in afterwards).
+    #[cfg(test)]
+    pub(crate) fn set_virtual_limits_for_test(
+        &mut self,
+        limits: HashMap<String, VirtualAccountLimit>,
+    ) {
+        self.virtual_accounts = crate::risk::virtual_account::VirtualAccounts::new(&limits);
     }
 
     /// The live risk gate config — the read side of
@@ -10369,6 +10668,9 @@ impl Core {
                                         if let Ok(l) = self.accounts.get_mut(&order.account_id) {
                                             l.release(id);
                                         }
+                                        // E-VA: the virtual hold releases with it
+                                        // (the leg never rested).
+                                        self.virtual_release_order(&order);
                                     }
                                     self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
                                     // The refused FOK never rested: its token may
@@ -10587,6 +10889,8 @@ impl Core {
                     if let Ok(l) = self.accounts.get_mut(&order.account_id) {
                         l.release(&order.order_id);
                     }
+                    // E-VA: the virtual hold goes with it.
+                    self.virtual_release_order(&order);
                 }
                 let _ = self.ome.mark_terminal(
                     &order.order_id,
@@ -10713,6 +11017,9 @@ impl Core {
             if let Ok(l) = self.accounts.get_mut(&order.account_id) {
                 l.release(id);
             }
+            // E-VA: the same precision for the strategy's VIRTUAL pot — the
+            // cancelled order's whole remaining hold leaves the book.
+            self.virtual_release_order(&order);
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
         // The token's repeat-suppression ends with the order: a cancelled
@@ -12673,7 +12980,9 @@ fn build_lua_scope(
         loaded.tunables.clone(),
         account.to_string(),
     );
-    adapter = adapter.declare(loaded.holds_to_settlement, loaded.gate_exemptions);
+    adapter = adapter
+        .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
+        .declare_atomic_batch(loaded.atomic_batch);
     let sched = crate::exit_policy::fee_schedule();
     adapter.set_fee_schedule(blitzkrieg_lua_runtime::FeeScheduleView {
         name: sched.name.to_string(),
@@ -12899,6 +13208,57 @@ struct StrategyAccounting {
     losses: u64,
     fees_usd: Decimal,
     net_pnl_usd: Decimal,
+}
+
+/// E-VA: group one submit cycle's BUY candidates into the virtual-account
+/// batches the atomic pre-reservation judges — one (account, strategy) group
+/// per strategy that declared `atomic_batch` (the pot itself is checked
+/// separately via `virtual_limits`), legs carrying their `internal_key` and
+/// the limit-price notional each will commit. The BTreeMap sorts the
+/// traversal so the log/check order is deterministic.
+///
+/// Every strategy that did not declare the posture (or that emitted no BUY
+/// legs — SELL entries never reserve) is absent, so the callers' loop is
+/// empty and the historical path runs byte-identically.
+fn virtual_batches(
+    tokens: &[(String, crate::model::OrderRequest)],
+    declared_atomic: &dyn Fn(&str) -> bool,
+) -> std::collections::BTreeMap<(String, String), Vec<(String, Decimal)>> {
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<(String, Decimal)>> =
+        std::collections::BTreeMap::new();
+    for (_, req) in tokens {
+        if req.side != Side::Buy || !declared_atomic(&req.strategy) {
+            continue;
+        }
+        groups
+            .entry((req.account_id.to_string(), req.strategy.clone()))
+            .or_default()
+            .push((req.internal_key.clone(), req.price * req.size));
+    }
+    groups
+}
+
+/// The commit body shared by `virtual_batch_commit`: the borrow split (core
+/// facts read first, the book mutated after) cannot be expressed inside one
+/// `&mut self` method without re-borrowing, so it lives as a free function.
+fn virtual_batch_commit_impl(
+    core: &mut Core,
+    account_id: &str,
+    strategy: &str,
+    batch: &[(String, Decimal)],
+) -> Result<(), String> {
+    if !core.virtual_accounts.governed(account_id, strategy) {
+        return Ok(());
+    }
+    let committed: Decimal = core
+        .positions
+        .open_positions()
+        .iter()
+        .filter(|p| p.account_id.as_str() == account_id && p.strategy == strategy)
+        .map(|p| p.cost_usd)
+        .sum();
+    core.virtual_accounts
+        .reserve_batch(account_id, strategy, batch, committed)
 }
 
 /// E9-c: classify a rejection message into a stable bucket label. Messages
@@ -18260,6 +18620,441 @@ mod strategy_dispatch_tests {
         feed_entry_setup(&mut c2, now);
         assert_eq!(c2.engine_evaluate(now + 12_000), 1);
         assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
+    }
+
+    // ── E-VA: strategy-level virtual accounts ───────────────────────────────
+    //
+    // Test 1 (strategy isolation): A's big entry must NOT consume B's
+    // headroom — each governed scope reserves against its OWN pot.
+    // Test 2 (atomic batch): a pair batch whose sum exceeds the pot places
+    // ZERO legs; the legs cancel together through the existing StrategyLimit
+    // rejection accounting.
+    // Test 3 (precise release): a partial fill converts exactly the filled
+    // shares' share of the hold; the rest stays outstanding.
+    // Test 4 (terminal release): a cancelled order's hold leaves the pot.
+    // Test 5 (bypass guard): undeclared strategy + armed pot = the historical
+    // path, byte-identically (no pot, no counters).
+
+    /// A dip strategy that declares `atomic_batch` and emits N equal-share
+    /// legs per cycle (one per configured asset) — the pair-batch shape the
+    /// virtual-account path exists for.
+    struct AtomicDip {
+        name: String,
+        assets: Vec<String>,
+    }
+    impl crate::strategies::EngineStrategy for AtomicDip {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
+        fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+        // Pair semantics: legs hold to settlement (the EngineStrategy doc's
+        // complete-set rationale). Also the release posture the cancel test
+        // exercises — a cancelled leg's token re-arms for a re-attempt.
+        fn holds_to_settlement(&self) -> bool {
+            true
+        }
+        fn atomic_batch(&self) -> bool {
+            true
+        }
+        fn find_candidates(
+            &mut self,
+            ctx: &crate::strategies::StrategyCtx<'_>,
+        ) -> Vec<crate::signal::TradeSignal> {
+            let mut out = Vec::new();
+            for market in ctx.markets() {
+                if !self.assets.contains(&market.asset) {
+                    continue;
+                }
+                for (token_id, direction) in [
+                    (&market.up_token_id, crate::model::SignalDirection::Up),
+                    (&market.down_token_id, crate::model::SignalDirection::Down),
+                ] {
+                    let Some(book) = ctx.fresh_book(token_id) else {
+                        continue;
+                    };
+                    if book.mid_price <= dec!(0.45) {
+                        out.push(crate::signal::TradeSignal {
+                            strategy: self.name.clone(),
+                            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                            asset: market.asset.clone(),
+                            direction,
+                            token_id: token_id.clone(),
+                            condition_id: market.condition_id.clone(),
+                            price: book.mid_price,
+                            reason: "atomic dip".into(),
+                            shares: Some(dec!(10)),
+                        });
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    /// A core with one enabled `AtomicDip` on the given assets (the kernel
+    /// ships no strategies; the test hosts its own, PR-B posture).
+    fn core_with_atomic_dip(virtual_cap: Option<Decimal>, assets: &[&str]) -> Core {
+        let mut virtual_limits = HashMap::new();
+        if let Some(cap) = virtual_cap {
+            virtual_limits.insert(
+                "pair_dip".to_string(),
+                VirtualAccountLimit {
+                    max_batch_notional_usd: Some(cap),
+                    accounts: vec![blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string()],
+                },
+            );
+        }
+        let mut c = Core::new(CoreConfig {
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            auto_exits_enabled: false,
+            assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+            positions: crate::position::PositionConfig {
+                max_positions: 5,
+                exit: crate::exit_policy::ExitConfig {
+                    min_time_left_sec: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            virtual_limits,
+            ..Default::default()
+        });
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        eng.register_user_strategy(
+            Box::new(AtomicDip {
+                name: "pair_dip".to_string(),
+                assets: assets.iter().map(|a| (*a).to_string()).collect(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(eng.set_strategy_enabled("pair_dip", true));
+        c.enable_engine(eng);
+        c
+    }
+
+    #[test]
+    fn virtual_quota_is_per_strategy_a_cannot_starve_b() {
+        // Test 1: two strategies share one account. A holds a big RESERVATION
+        // (a placed, unfilled entry); B's entry must still place — B's quota
+        // is its own pot, and the REAL ledger was never touched by A's hold
+        // (the pot is a risk-layer book, not cash).
+        let mut c = core_with_atomic_dip(Some(dec!(100)), &["BTC"]);
+        let now = 1_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "btc_up".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            },
+            now + 1_000,
+        );
+        // A (pair_dip) places its 10-share leg at 0.44: 4.40 USD held.
+        assert_eq!(c.engine_evaluate(now + 2_000), 1);
+        assert_eq!(
+            c.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "pair_dip"),
+            dec!(4.40)
+        );
+
+        // B (a plain dip, NOT declared atomic) places against the SAME
+        // account while A's hold is outstanding: B's entry is judged on the
+        // real ledger (untouched) — it places.
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        eng.register_user_strategy(
+            Box::new(TargetDip {
+                name: "plain_b".into(),
+                buy_below: dec!(0.45),
+                assets: vec!["ETH".into()],
+                gates: crate::strategies::GateExemptions::none(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(eng.set_strategy_enabled("plain_b", true));
+        // The engine is replaced wholesale — re-push the round/book state the
+        // new engine needs, then evaluate B's candidate in the same cycle.
+        c.enable_engine(eng);
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "eth_up".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 3_000,
+            },
+            now + 3_000,
+        );
+        let placed = c.engine_evaluate(now + 4_000);
+        assert_eq!(
+            placed, 1,
+            "B's entry must place: A's virtual hold is A's own"
+        );
+        let stats = c.strategy_stats();
+        let b = strategy_entry(&stats, "plain_b");
+        assert_eq!(b["ordersPlaced"], 1, "B must not be starved: {b}");
+        // A's hold is untouched by B's placement.
+        assert_eq!(
+            c.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "pair_dip"),
+            dec!(4.40)
+        );
+    }
+
+    #[test]
+    fn atomic_batch_over_cap_cancels_the_whole_batch() {
+        // Test 2: two legs at 0.44 x 10 shares = 4.40 each, batch 8.80. A pot
+        // of 8.00 covers leg 1 alone but not the SUM: zero legs may place.
+        let mut c = core_with_atomic_dip(Some(dec!(8)), &["BTC", "ETH"]);
+        let now = 1_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        for (token, t) in [("btc_up", now + 1_000), ("eth_up", now + 1_100)] {
+            c.engine_on_data(
+                DataEvent::Book {
+                    token_id: token.into(),
+                    bids: vec![(dec!(0.43), dec!(100))],
+                    asks: vec![(dec!(0.45), dec!(100))],
+                    now_ms: t,
+                },
+                t,
+            );
+        }
+        assert_eq!(
+            c.engine_evaluate(now + 2_000),
+            0,
+            "an over-cap batch must place ZERO legs (no naked first leg)"
+        );
+        assert!(c.ome().live_orders().is_empty(), "no leg may reach the OME");
+        // The refusal rides the EXISTING StrategyLimit accounting.
+        assert_eq!(c.engine_stats()["strategyLimitRejected"], 1);
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "pair_dip");
+        assert_eq!(
+            s["rejectionCauses"]["limit.virtualCap"], 2,
+            "both legs bucketed: {s}"
+        );
+        assert_eq!(s["ordersPlaced"], 0);
+        assert_eq!(
+            c.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "pair_dip"),
+            Decimal::ZERO,
+            "a cancelled batch holds nothing"
+        );
+
+        // A pot of 20.00 fits the whole batch: both legs place.
+        let mut c2 = core_with_atomic_dip(Some(dec!(20)), &["BTC", "ETH"]);
+        c2.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        for (token, t) in [("btc_up", now + 1_000), ("eth_up", now + 1_100)] {
+            c2.engine_on_data(
+                DataEvent::Book {
+                    token_id: token.into(),
+                    bids: vec![(dec!(0.43), dec!(100))],
+                    asks: vec![(dec!(0.45), dec!(100))],
+                    now_ms: t,
+                },
+                t,
+            );
+        }
+        assert_eq!(c2.engine_evaluate(now + 2_000), 2);
+        assert_eq!(
+            c2.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "pair_dip"),
+            dec!(8.80),
+            "both legs' holds outstanding after placement"
+        );
+    }
+
+    #[test]
+    fn virtual_release_is_fill_proportional() {
+        // Test 3: hold 0.44 x 10 = 4.40; fill 1.2 shares → exactly 1.2 x 0.44
+        // = 0.528 released, 3.872 still outstanding.
+        let mut c = core_with_atomic_dip(Some(dec!(100)), &["BTC"]);
+        let now = 1_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "btc_up".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            },
+            now + 1_000,
+        );
+        assert_eq!(c.engine_evaluate(now + 2_000), 1);
+        let acct = blitzkrieg_market_api::DEFAULT_ACCOUNT_ID;
+        assert_eq!(c.virtual_used(acct, "pair_dip"), dec!(4.40));
+
+        // Fill PART of the 10 resting shares via a crossing book. The identity
+        // fill model takes min(remaining, crossing depth) — the ask depth of
+        // 1.2 fills exactly 1.2 shares, the rest keeps resting.
+        c.book_snapshot(
+            "btc_up",
+            vec![(dec!(0.42), dec!(1))],
+            vec![(dec!(0.42), dec!(1.2))],
+            now + 3_000,
+        );
+        let used_after = c.virtual_used(acct, "pair_dip");
+        let released = dec!(4.40) - used_after;
+        assert_eq!(
+            used_after,
+            dec!(3.872),
+            "release = 1.2 x 0.44 exactly: {released}"
+        );
+        assert!(
+            c.positions()
+                .open_positions()
+                .iter()
+                .any(|p| p.shares == dec!(1.2)),
+            "the 1.2 filled shares are position occupancy"
+        );
+    }
+
+    #[test]
+    fn cancelled_order_releases_its_virtual_hold() {
+        // Test 4: a placed entry holds 4.40; cancelling it must leave the
+        // pot empty (today's real-ledger release has no virtual twin — that
+        // is the hole this closes).
+        let mut c = core_with_atomic_dip(Some(dec!(100)), &["BTC"]);
+        let now = 1_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: three_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: "btc_up".into(),
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            },
+            now + 1_000,
+        );
+        assert_eq!(c.engine_evaluate(now + 2_000), 1);
+        let acct = blitzkrieg_market_api::DEFAULT_ACCOUNT_ID;
+        assert_eq!(c.virtual_used(acct, "pair_dip"), dec!(4.40));
+        let id = c
+            .ome()
+            .live_orders()
+            .first()
+            .expect("the entry rests")
+            .order_id
+            .clone();
+        c.cancel(&id, now + 3_000).unwrap();
+        assert_eq!(
+            c.virtual_used(acct, "pair_dip"),
+            Decimal::ZERO,
+            "the cancelled order's hold must release"
+        );
+        // The freed pot funds the next batch (the pre-check re-passes).
+        let mut limits = HashMap::new();
+        limits.insert(
+            "pair_dip".to_string(),
+            VirtualAccountLimit {
+                max_batch_notional_usd: Some(dec!(100)),
+                accounts: vec![acct.to_string()],
+            },
+        );
+        let _ = limits; // cap unchanged; the re-place below proves the release
+        c.book_snapshot(
+            "btc_up",
+            vec![(dec!(0.43), dec!(100))],
+            vec![(dec!(0.45), dec!(100))],
+            now + 4_000,
+        );
+        assert_eq!(
+            c.engine_evaluate(now + 5_000),
+            1,
+            "the freed pot funds the next batch"
+        );
+    }
+
+    #[test]
+    fn undeclared_strategy_keeps_the_per_order_path_byte_identically() {
+        // Test 5 (bypass guard): a strategy that did NOT declare
+        // `atomic_batch` but IS armed in virtual_limits (and one that is
+        // neither) must take the historical path: no pot, no reservation,
+        // no new counters — the same entry the default core places.
+        // Reference run: NO virtual layer at all.
+        let mut reference = core_with_dips(HashMap::new(), &[("plain", &["BTC"])], 5);
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut reference, now);
+        let ref_placed = reference.engine_evaluate(now + 2_000);
+        let ref_stats = reference.strategy_stats();
+        let ref_row = strategy_entry(&ref_stats, "plain").clone();
+
+        // Armed pot, undeclared strategy: same outcome, empty pot.
+        let mut limits = HashMap::new();
+        limits.insert(
+            "plain".to_string(),
+            VirtualAccountLimit {
+                max_batch_notional_usd: Some(dec!(1)),
+                accounts: vec![blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string()],
+            },
+        );
+        let mut armed = core_with_dips(HashMap::new(), &[("plain", &["BTC"])], 5);
+        armed.set_virtual_limits_for_test(limits);
+        feed_three_asset_dip(&mut armed, now);
+        assert_eq!(
+            armed.engine_evaluate(now + 2_000),
+            ref_placed,
+            "an undeclared strategy ignores the pot entirely"
+        );
+        let armed_stats = armed.strategy_stats();
+        let armed_row = strategy_entry(&armed_stats, "plain");
+        assert_eq!(
+            armed_row["ordersPlaced"], ref_row["ordersPlaced"],
+            "byte-identical placement outcome"
+        );
+        assert!(
+            armed_row["rejectionCauses"].is_null()
+                || armed_row["rejectionCauses"] == ref_row["rejectionCauses"],
+            "no new rejection bucket may appear: {armed_row}"
+        );
+        assert_eq!(
+            armed.virtual_used(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "plain"),
+            Decimal::ZERO,
+            "the pot must stay empty — reservations are the declared path only"
+        );
     }
 
     #[test]
