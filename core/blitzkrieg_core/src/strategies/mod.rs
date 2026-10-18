@@ -349,6 +349,21 @@ pub trait EngineStrategy: Send + Sync {
         false
     }
 
+    /// E-VA: whether this strategy's entry candidates form an ATOMIC BATCH —
+    /// the host must reserve the WHOLE batch's virtual quota (the
+    /// `virtual_limits` pot) BEFORE the first leg is placed, and a pot that
+    /// cannot cover every leg cancels the batch with zero legs out (a pair
+    /// with one naked leg is a different, worse trade than no trade).
+    ///
+    /// Read by the submission loops in `Core` before the per-order gates; it
+    /// changes nothing unless the strategy ALSO sits in
+    /// `CoreConfig::virtual_limits` (the pot arming). Default: false — every
+    /// existing strategy keeps the per-order path, and a single-leg batch
+    /// from an undeclared strategy is byte-identical to today.
+    fn atomic_batch(&self) -> bool {
+        false
+    }
+
     /// Close intents accumulated since the last drain. The host resolves each
     /// token to a live position and routes it through the SAME exit submission
     /// path as an automated/policy exit (live-sell dedup, `sell_shares`, risk +
