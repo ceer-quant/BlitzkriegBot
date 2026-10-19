@@ -213,17 +213,6 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
   }
 }
 
-/**
- * 该账户的策略启用集，只读一句话（账户↔venue 解耦裁决：这里不再是编辑器
- * —— 启停唯一入口在策略页，按「账户+策略」级别的启用按钮）。空/缺字段 =
- * 跟随全局开关。
- */
-function strategiesLabel(a: AccountRow): string {
-  const list = a.strategies
-  if (!Array.isArray(list)) return '启停跟随全局开关（老内核无启用集读数）'
-  return list.length ? `已启用 ${list.length} 个策略：${list.join('、')}` : '跟随全局开关'
-}
-
 // ── 添加账户（#517）：弹窗（选交易所→填 API）。可选项 = 已注册的行情插件。──
 const addOpen = ref(false)
 const registeredVenues = computed<string[]>(() => {
@@ -390,8 +379,8 @@ onBeforeUnmount(() => {
             <span
               class="min-w-0 flex-1 truncate"
               :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"
-              :title="`该账户的策略启停集合（只读；启停在策略页按账户启用）：${strategiesLabel(a)}`"
-            >{{ strategiesLabel(a) }}</span>
+              :title="Array.isArray(a.strategies) && a.strategies.length ? `已启用 ${a.strategies.length} 个策略（启停在策略页按账户启用）` : '该账户暂无启用中的策略（启停在策略页按账户启用）'"
+            >{{ Array.isArray(a.strategies) && a.strategies.length ? `已启用 ${a.strategies.length} 个策略` : '未启用策略' }}</span>
           </span>
           <span v-if="tradingErr" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
           <span v-else-if="tradingMsg" class="mt-0.5 block text-[10.5px] text-up">{{ tradingMsg }}</span>
