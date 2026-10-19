@@ -1007,3 +1007,66 @@ fn account_removal_is_delete_all_but_the_last_account() {
         "the last account survives every refusal"
     );
 }
+
+/// 工厂 `user_layer/configs/accounts.toml` 的形状牙：随仓库走的那份文件必须
+/// 永远保持「三账户 + venue 绑定 + 全文不带 strategies 键」。字段面（§9.5
+/// 扩展轮）把 strategies 加进解析器后，这个不变量没有任何东西替我们看着 ——
+/// 而文件里写死的启用集正是「面板策略开关每次重启被改回」（策略永远无法被
+/// 关闭）的根源。解析失败 / 形状漂移都从这里红。
+#[test]
+fn the_factory_accounts_file_binds_venues_and_never_pins_strategies() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs/accounts.toml");
+    let book = load_account_ledgers(&path, NOW).expect("the factory file parses");
+
+    let rows = book.account_list();
+    let mut ids: Vec<String> = rows.iter().map(|a| a.id.to_string()).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "default".to_string(),
+            "kalshi".to_string(),
+            "paper".to_string()
+        ],
+        "the factory book ships exactly these three accounts"
+    );
+
+    let default = rows
+        .iter()
+        .find(|a| a.id.as_str() == "default")
+        .expect("default exists");
+    assert_eq!(default.venue, "polymarket", "default binds polymarket");
+    assert_eq!(
+        default.status,
+        blitzkrieg_core::account::AccountStatus::Active
+    );
+    assert!(
+        default.strategies.is_empty(),
+        "default must NOT pin a strategy set — a pinned set resurrects on every boot"
+    );
+
+    let paper = rows
+        .iter()
+        .find(|a| a.id.as_str() == "paper")
+        .expect("paper exists");
+    assert_eq!(
+        paper.status,
+        blitzkrieg_core::account::AccountStatus::ReadOnly,
+        "paper stays the read-only practice account"
+    );
+    assert!(
+        paper.venue.is_empty(),
+        "paper is unbound (trades any venue)"
+    );
+
+    let kalshi = rows
+        .iter()
+        .find(|a| a.id.as_str() == "kalshi")
+        .expect("kalshi exists");
+    assert_eq!(kalshi.venue, "kalshi", "kalshi binds its own venue");
+    assert!(
+        kalshi.strategies.is_empty(),
+        "no account ships a pinned set"
+    );
+}

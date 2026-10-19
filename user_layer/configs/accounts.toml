@@ -1,4 +1,4 @@
-# E28 多账户账本（DEV_V0_3 §9.5）—— 账户簿配置示例（双账户）。
+# E28 多账户账本（DEV_V0_3 §9.5）—— 工厂账户簿。
 #
 # 本文件是 OPTIONAL：删掉/改名它，内核按单一 `default` 账户启动，
 # 与 0.2 部署行为完全一致。文件存在但解析失败 / 无账户 / id 重复
@@ -11,9 +11,15 @@
 #   market_type     缺省 prediction（0.3 唯一有插件的市场类型）
 #   status          缺省 active；wire 词表 active / read_only / frozen /
 #                   suspended —— 文件只携带限制，开箱永远从最保守写起
+#   venue           账户↔交易所绑定（空/缺省 = 未绑定，可交易任意所）；
+#                   运行时 account.venue.set 可改，绑定即启用行情跟随
 #   api_key_env / secret_env / passphrase_env / private_key_env
 #                   【只写环境变量的名字，绝不写值】（§9.4：值只在内核
 #                   进程环境；wire 只回 credentialsLoaded 布尔）
+#   strategies      本账户的策略启用集（非空 = 逐字生效）；⚠️ 缺省（不写
+#                   该键）= 跟随全局开关——写死一个集合会让面板开关变成
+#                   每次重启被文件改回（策略「永远无法被关闭」），工厂簿
+#                   因此刻意不带 strategies 字段
 #
 # 姿态（Gate 2 permits_order）：只有 active 能开新仓；平仓豁免除
 # read_only 外全部姿态（冻结绝不困住持仓）。运行时 account.status
@@ -22,6 +28,7 @@
 [[account]]
 id = "default"
 name = "主账户"
+venue = "polymarket"
 
 # 不命名凭证环境变量 = 插件自己的环境变量处理原样保留（0.2 语义）。
 # 要显式接管时示例：
@@ -32,3 +39,8 @@ name = "主账户"
 id = "paper"
 name = "纸面练习"
 status = "read_only"
+
+[[account]]
+id = "kalshi"
+name = "kalshi"
+venue = "kalshi"
