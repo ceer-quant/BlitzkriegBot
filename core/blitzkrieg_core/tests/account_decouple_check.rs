@@ -943,7 +943,7 @@ fn account_removal_is_delete_all_but_the_last_account() {
         .expect_err("an account holding open positions is refused");
     assert_eq!(err.code, CoreErrorCode::InvalidParams);
     assert!(
-        err.message.contains("1 open position"),
+        err.message.contains("1 笔未平持仓"),
         "the refusal names the count: {}",
         err.message
     );
@@ -997,7 +997,7 @@ fn account_removal_is_delete_all_but_the_last_account() {
         .expect_err("the LAST account is never removable");
     assert_eq!(err.code, CoreErrorCode::InvalidParams);
     assert!(
-        err.message.contains("the last account") && err.message.contains("at least one account"),
+        err.message.contains("最后一个账户") && err.message.contains("至少要保留一个账户"),
         "the refusal says a deployment keeps at least one account: {}",
         err.message
     );
