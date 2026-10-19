@@ -910,8 +910,6 @@ fn pair_cost_cap_still_blocks_the_counterpart_leg_within_one_account() {
 // 唯一出口 ⇒ 所有账户都支持删除（default 不再保留名），唯一硬线 = 「不允许
 // 删除最后一个账户」。有持仓拒删与删后 active 回切一并钉住。
 
-use blitzkrieg_core::model::{CoreError, CoreErrorCode};
-
 /// 删除语义牙：default 可删、最后一个账户不可删、删后 active 回切剩余账户、
 /// 有持仓拒删不变。走 `remove_account_persisting`（IPC 动词的运行时臂），
 /// accounts.toml 真文件落盘（worktree target/ 下）。
