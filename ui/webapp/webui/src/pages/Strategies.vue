@@ -102,7 +102,7 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
       ok: res.ok !== false && !res.reason,
       // §8.2: an enable refused by the mode handshake speaks BOTH sides —
       // surface the core's reason verbatim instead of the generic "已启用".
-      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}${scoped && store.activeAccount ? `（账户 ${store.activeAccount}）` : ''}`,
+      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}`,
     }
     await store.refresh()
   } catch (e) {
@@ -518,14 +518,12 @@ function onExpand(name: string): void {
                       <Switch
                         :model-value="isAccountEnabled(r) ?? r.enabled"
                         :disabled="busy === r.name"
-                        :title="store.activeAccount
-                          ? `${r.name} 在账户 ${store.activeAccount} 的启停（只影响该账户）`
-                          : `${r.name} 的全局启停（老面板/单账户）`"
+                        :title="`${r.name} 的启停（只影响当前选中账户）`"
                         @update:model-value="toggle(r, $event)"
                       />
                       <!-- 「N 个账户启用中」徽标：strategy.list 行带 accounts
                            时显示真实归属数；缺字段不渲染（不发明数字）。 -->
-                      <Tooltip v-if="enabledAccountCount(r) !== null" :content="`${r.name} 当前在 ${enabledAccountCount(r)} 个账户上启用：${(r.accounts ?? []).join('、') || '无'}`">
+                      <Tooltip v-if="enabledAccountCount(r) !== null" :content="`${r.name} 当前在 ${enabledAccountCount(r)} 个账户上启用`">
                         <Badge variant="outline" class="num shrink-0">×<RollingNumber :value="enabledAccountCount(r) ?? 0" /></Badge>
                       </Tooltip>
                     </span>

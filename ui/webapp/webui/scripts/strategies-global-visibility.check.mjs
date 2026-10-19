@@ -126,17 +126,28 @@ check('账户切换器不再有策略分配编辑器（分配/草稿/保存分�
   assert.doesNotMatch(switcher, /保存分配/, '「保存分配」按钮复活 —— 唯一启停入口是策略页按钮')
 })
 
-check('账户切换器的 strategies 读数是只读启用集（缺读数如实降级，不发明语义）', () => {
-  assert.match(
+check('账户切换器的 strategies 读数是只读计数（逐名列表已退役）', () => {
+  // 2026-10 操作者裁决：删「某账号启用某策略」的提示功能。切换器行内只剩
+  // 只读计数（已启用 N 个策略 / 未启用策略），逐名列举与 strategiesLabel
+  // helper 一并退役；启用状态本身（account.list strategies 集合）照旧记录。
+  assert.doesNotMatch(
     switcher,
-    /strategiesLabel/,
-    '缺 strategiesLabel —— 启用集必须如实展示（N 个已启用 / 跟随全局开关）',
+    /\bstrategiesLabel\b/,
+    'strategiesLabel 复活 —— 逐名提示已退役，行内只许只读计数',
   )
+  assert.doesNotMatch(switcher, /已启用 \$\{list\.length\} 个策略：/, '逐名列举复活 —— 只许计数，不许点名')
   assert.match(
     switcher,
     /Array\.isArray\(a\.strategies\)/,
     'store.setAccounts 镜像未带 strategies 字段（feature-detect 缺失）',
   )
+})
+
+check('策略页不点名账户（flash 与 tooltip 无「账户 <id>」强调）', () => {
+  // flash 后缀 `（账户 X）` 与 switch title `在账户 X 的启停` 都是逐账户
+  // 提示的呈现面；启用按钮的账户定标语义（toggle 传 accountId）不受影响。
+  assert.doesNotMatch(page, /账户 \$\{store\.activeAccount\}/, 'flash/title 点名当前账户 —— 提示面必须保持账户无关')
+  assert.doesNotMatch(page, /个账户上启用：/, 'tooltip 逐名列举账户 —— 只许计数')
 })
 
 process.exit(failures ? 1 : 0)
