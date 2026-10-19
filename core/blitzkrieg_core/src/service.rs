@@ -6718,11 +6718,18 @@ impl Core {
     /// per-share: `counterpart_basis/share + this leg's price ≤ 1.00`. The
     /// WORST (highest-basis) leg prices the cap — a blend would let one
     /// expensive leg hide behind a cheap one.
+    ///
+    /// 跨账户双腿裁决（多账户解耦收口，docs/acceptance-account-decouple.md
+    /// 披露 1）：pair 的经济单位 = (账户, 条件, 资产) —— 一个 UP share +
+    /// 一个 DOWN share 在**同一账户的账本里**赎回 $1；每账户独立账本独立
+    /// 赎回，跨账户的对手腿在结算时永不合并。所以分母只看本账户的对手腿：
+    /// A 的 0.90 持仓不得把 B 的 0.05 新腿顶过 $1。
     fn counterpart_pair_basis(
         &self,
         condition_id: &str,
         asset: &str,
         direction: &SignalDirection,
+        account_id: &AccountId,
     ) -> Option<Decimal> {
         self.positions
             .open_positions()
@@ -6732,6 +6739,7 @@ impl Core {
                     && p.asset == asset
                     && p.direction != *direction
                     && p.shares > Decimal::ZERO
+                    && &p.account_id == account_id
             })
             .map(|p| p.cost_usd / p.shares)
             .max()
@@ -11667,10 +11675,13 @@ impl Core {
             // top-up/chase paths). The worst held leg prices the pair: a
             // position's per-share basis is `cost_usd / shares`, and one
             // share of UP plus one share of DOWN redeems exactly $1.
+            // 跨账户双腿：分母只看本账户的对手腿（同一账本内赎回 $1，
+            // 见 counterpart_pair_basis 的裁决注释）。
             if let Some(paid) = self.counterpart_pair_basis(
                 &req.condition_id,
                 &req.asset,
                 &parse_direction(&req.direction),
+                &req.account_id,
             ) {
                 let total = paid + req.price;
                 if total > Decimal::ONE {
@@ -13614,12 +13625,14 @@ impl Core {
         // 3. The pair-cost cap. Only entries (BUY) chase; a condition with no
         //    counterpart position has nothing to sum against (a fresh pair is
         //    the strategy's own <1.00 decision). Per-share: one UP share plus
-        //    one DOWN share redeems exactly $1.00.
+        //    one DOWN share redeems exactly $1.00. 跨账户双腿：分母只看本
+        //    账户的对手腿（同一账本内赎回 $1）。
         if req.side == Side::Buy
             && let Some(paid) = self.counterpart_pair_basis(
                 &req.condition_id,
                 &req.asset,
                 &parse_direction(&req.direction),
+                &req.account_id,
             )
         {
             let total = paid + chase_price;
