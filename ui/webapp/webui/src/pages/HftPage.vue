@@ -145,7 +145,7 @@ const activeVenue = computed(() => store.activeAccountVenue)
 // 实现是一个纯派生门：venue 变化即开（本地时间戳），此后快照里出现
 // 「带新 venue 标签的行」才关。老内核/网关剥掉 venue 标签时
 // （feature-detect：行无 venue 字段）走不了该判定 → 不显示 Loading、
-// 行全显（未分所降级）——永不因降级而卡死在加载态。
+// 行全显（无标签行不归属任何所）——永不因降级而卡死在加载态。
 const venueSwitchAt = ref(0)
 const venueSwitchFrom = ref('')
 watch(activeVenue, (nv, ov) => {
@@ -939,10 +939,6 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <div class="flex items-center justify-between">
           <span class="flex min-w-0 items-center gap-1.5">
             <span class="truncate text-[13px] font-bold tracking-wide">{{ m.asset }}</span>
-            <!-- venue 徽标：行数据带标签时显示归属所；无标签（降级显示
-                 全部）时显示「未分所」，不发明归属。 -->
-            <Badge v-if="m.venue" variant="outline" class="shrink-0">{{ m.venue }}</Badge>
-            <Badge v-else-if="activeVenue" variant="outline" class="shrink-0" title="本行数据未带交易所标签（旧内核），降级显示">未分所</Badge>
           </span>
           <Badge :variant="spreadCents(m) <= 1 ? 'up' : 'gold'">
             {{ spreadCents(m).toFixed(1) }}¢
@@ -1009,10 +1005,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </template>
         <template #title>
           <span class="flex items-center gap-1.5">
-            <!-- venue 徽标：盘口行带标签时显示归属所（同行情卡的数据驱动
-                 纪律）；未绑定账户不进本卡（未绑定空态先拦）。 -->
-            <Badge v-if="visibleBooks[0]?.venue" variant="outline">{{ visibleBooks[0].venue }}</Badge>
-            <Badge v-else-if="activeVenue" variant="outline" title="本行盘口未带交易所标签（旧内核），降级显示">未分所</Badge>
+            <span class="truncate text-[13px] font-bold tracking-wide">{{ depthAsset }}</span>
           </span>
         </template>
       </CardHeader>
