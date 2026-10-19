@@ -3424,10 +3424,13 @@ impl Core {
     }
 
     /// `account.remove`（账户簿运行时增删的删半）：账户离开内存 AND
-    /// accounts.toml，同一事务姿态。拒绝面：保留名 `default`（簿层也拒，
-    /// 双保险）；仍有 open position 的账户（钱不能变成不可寻址的）；未知 id
-    /// 标准拒绝。被删的是进程级 active 账户时自动回切 `default`（会话级
-    /// 切换器在下次读时照簿解析，无需此处操心）。
+    /// accounts.toml，同一事务姿态。拒绝面：账簿的最后一个账户（空簿会让
+    /// 下一次 boot 拒载，删掉它是删库式脚枪）；仍有 open position 的账户
+    /// （钱不能变成不可寻址的）；未知 id 标准拒绝。`default` 只是普通账户
+    /// —— 所有账户都可删（用户裁决：绑定只在建户时绑定、编辑面已收，
+    /// 删户重建是绑定变更的唯一出口；零配置的 default 由下一次 boot 的
+    /// 缺文件/缺行路径重新派生）。被删的是进程级 active 账户时自动回切
+    /// 剩余账户的第一个（会话级切换器在下次读时照簿解析）。
     pub fn remove_account_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -3435,17 +3438,24 @@ impl Core {
         reason: &str,
     ) -> CoreResult<()> {
         use crate::ipc::schema::ACCOUNT_REMOVE_NOTE;
-        // Reserved name first (the book layer refuses too — belt and braces).
-        if *id == crate::account::default_account_id() {
+        // The LAST account stays: an empty book fails the next boot's parse,
+        // so retiring it would be a delete-the-deployment footgun. Every id
+        // is otherwise fair game — `default` included (the zero-config
+        // fallback re-derives on the next boot when the file lacks a
+        // `default` row). Existence refuses first, with the standard
+        // unknown-account error.
+        self.accounts.require(id)?;
+        if self.accounts.account_list().len() <= 1 {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "account.remove: id `default` is reserved — every deployment \
-                 falls back to it, so it is never removable"
-                    .to_string(),
+                format!(
+                    "account.remove: `{id}` is the last account in the book — \
+                     a deployment keeps at least one account (the next boot \
+                     refuses an empty accounts.toml; delete the file itself \
+                     instead)"
+                ),
             ));
         }
-        // Existence, with the standard unknown-account refusal, before disk.
-        self.accounts.require(id)?;
         // Open positions pin the account: retiring it would leave inventory
         // with no book, no ledger and no close path — money must not become
         // unaddressable.
@@ -3492,8 +3502,8 @@ impl Core {
             account = %id,
             reason = %reason,
             "account removed — identity and ledger retired, the active cell \
-             re-activates `default` when it named the removed account \
-             ({ACCOUNT_REMOVE_NOTE})",
+             re-activates the first surviving account when it named the \
+             removed account ({ACCOUNT_REMOVE_NOTE})",
         );
         Ok(())
     }

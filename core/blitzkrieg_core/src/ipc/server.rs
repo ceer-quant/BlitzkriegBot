@@ -6711,11 +6711,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
-    /// `account.remove` 的闭环：删掉 → list 消失 → 文件读回没有 → 保留名
-    /// default 拒 → 有 open position 的账户拒（报持仓数）→ 未知 id 拒 →
-    /// 文件在拒绝下逐字节不动。删进程级 active 账户回切 default 也钉在
-    /// 这里（fixture 把 paper 换成 active 的场景在簿层测试已覆盖，线上走
-    /// default active 的常规路径）。
+    /// `account.remove` 的闭环：删掉 → list 消失 → 文件读回没有 → 有 open
+    /// position 的账户拒（报持仓数）→ 最后一个账户拒（至少保留一个）→
+    /// 未知 id 拒 → 文件在拒绝下逐字节不动。删进程级 active 账户回切剩余
+    /// 账户也钉在这里（簿层的 default 回切/首账户回切场景在簿层测试已
+    /// 覆盖，线上走 default active 的常规路径）。default 不再保留名：
+    /// 所有账户都可删（用户裁决 —— 绑定只在建户时绑定，删户重建是唯一
+    /// 变更出口），但最后一格绝不放空。
     #[tokio::test]
     async fn account_remove_round_trips_list_and_the_persisted_file() {
         let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
@@ -6755,7 +6757,9 @@ mod tests {
         assert!(book.account(&AccountId::from("paper")).is_none());
         assert!(book.account(&AccountId::from("default")).is_some());
 
-        // The reserved `default`: refused.
+        // The LAST account: refused — a deployment keeps at least one
+        // account (the empty book fails the next boot). Paper is already
+        // gone, so `default` is the last one standing.
         let reply = rpc(
             &core,
             &registry,
@@ -6767,12 +6771,28 @@ mod tests {
         assert_eq!(
             reply["error"]["code"],
             serde_json::json!(Failure::APPLICATION),
-            "reserved id: {reply}"
+            "last account: {reply}"
         );
         assert_eq!(
             reply["error"]["data"]["coreCode"],
             serde_json::json!("INVALID_PARAMS"),
             "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("the last account"),
+            "{}",
+            reply["error"]["message"]
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("at least one account"),
+            "{}",
+            reply["error"]["message"]
         );
         // An unknown id: the standard refusal.
         let reply = rpc(
@@ -6803,8 +6823,7 @@ mod tests {
         );
 
         // An account with an OPEN position: refused, with the count named.
-        // `default` is refused on reserved grounds before the position check;
-        // the position pin needs a non-reserved id, so create one. The
+        // The position pin needs a live sibling id, so create one. The
         // byte-identity snapshot is taken AFTER that create (the create is
         // expected to write) and before the refusals it guards.
         let reply = rpc(
@@ -6902,6 +6921,66 @@ mod tests {
             accounts.iter().any(|a| a["id"] == "pinned"),
             "the pinned account is still listed: {reply}"
         );
+
+        // `default` is an ORDINARY account now: removable while a sibling
+        // exists. Its probe position from the position-pin arm above is
+        // closed first (flat accounts only), `pinned` is the survivor, so
+        // removing the active `default` lands and the active cell
+        // re-activates the first surviving account. The row leaves
+        // accounts.toml too — the next boot re-derives the zero-config
+        // default from the missing row.
+        {
+            let mut c = core.lock().await;
+            let ids: Vec<String> = c
+                .positions_mut()
+                .open_positions()
+                .iter()
+                .filter(|p| p.account_id == AccountId::from("default"))
+                .map(|p| p.id.clone())
+                .collect();
+            for pid in ids {
+                c.positions_mut()
+                    .close(
+                        &pid,
+                        rust_decimal_macros::dec!(0.5),
+                        crate::model::ExitReason::Manual,
+                        false,
+                        now_ms(),
+                    )
+                    .expect("the probe position closes");
+            }
+        }
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":9,"method":"account.remove","params":{"id":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "`default` must be removable while a sibling remains: {reply}"
+        );
+        assert_eq!(reply["result"]["persisted"], serde_json::json!(true));
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":10,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert_eq!(accounts.len(), 1, "only the survivor remains: {reply}");
+        assert_eq!(accounts[0]["id"], serde_json::json!("pinned"));
+        assert_eq!(
+            reply["result"]["active"], "pinned",
+            "the active cell never dangles: it re-activates the first survivor"
+        );
+        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
+            .expect("the written file re-parses");
+        assert!(book.account(&AccountId::from("default")).is_none());
+        assert!(book.account(&AccountId::from("pinned")).is_some());
         let scratch = accounts_path
             .parent()
             .expect("the fixture file has a parent")

@@ -3,11 +3,15 @@
  *
  * The user's ruling (2026-10-16): a market plugin's enabled-set is DERIVED
  * from the accounts that hold a venue binding — adding an exchange's API
- * IS enabling its plugin. On the panel this surfaces as two contracts:
+ * IS enabling its plugin. The user's follow-up ruling (2026-10-19): the
+ * binding is CREATE-ONLY — an existing account never edits its venue
+ * (rebinding mid-life scrambles the data); delete-and-recreate is the only
+ * exit. On the panel this surfaces as these contracts:
  *
- *   1. AccountSwitcher edits the binding through the kernel verb
- *      `account.venue.set`, empty string unbinds, and the control degrades
- *      honestly on a pre-#506 core (unknown-method → upgrade hint).
+ *   1. AccountSwitcher shows the binding READ-ONLY and offers delete; the
+ *      per-row binding editor is gone, and no panel entry may call the
+ *      `account.venue.set` proxy (the verb and its route stay at the
+ *      gateway — the UI door is what closed).
  *   2. The 行情 page never grows its own exchange switcher: its venue view
  *      is derived from the ACTIVE ACCOUNT's binding (filterByVenue), the
  *      same philosophy as filterByAccount — unattributed rows stay.
@@ -38,42 +42,38 @@ const check = (label, fn) => {
 
 console.log('绑定即启用 — the account↔venue pairing contract')
 
-// ── 1. the switcher is the binding editor ────────────────────────────────
+// ── 1. the binding is create-only: the switcher is a read-only face ──────
 const switcher = read('src/components/AccountSwitcher.vue')
 
-check('AccountSwitcher edits bindings via account.venue.set', () => {
-  assert.match(switcher, /account\.venue\.set/, 'binding verb not wired')
-  assert.match(switcher, /venueDraft/, 'no draft state for the venue editor')
-  assert.match(switcher, /editVenue/, 'no per-row edit entry')
+check('AccountSwitcher has NO per-row binding editor (create-only ruling)', () => {
+  // The edit state machine and its entry points are deleted.
+  for (const gone of ['venueEditing', 'venueDraft', 'editVenue', 'saveVenue', 'loadVenueOptions']) {
+    assert.doesNotMatch(switcher, new RegExp(gone), `${gone} must stay deleted`)
+  }
+  assert.doesNotMatch(switcher, /accountVenueSet\(/, 'no panel entry may call the account.venue.set proxy')
+  // The read-only display survives (venue 只读显示保留).
+  assert.match(switcher, /venueLabel\(/, 'the read-only venue display must survive')
 })
 
-check('empty string unbinds (option present + save path sends it)', () => {
-  // The unbind choice is a <option> whose value is '', and saveVenue sends
-  // the trimmed draft verbatim through the /api/account-venue/set proxy —
-  // so the wire can carry the empty string.
-  assert.match(switcher, /<option value=""/, 'no empty-string unbind option')
-  assert.match(
-    switcher,
-    /accountVenueSet\(\{\s*accountId:\s*a\.id,\s*venue:\s*next/,
-    'saveVenue must send the (trimmed) draft verbatim via the accountVenueSet proxy: empty string = unbind',
-  )
-})
-
-check('binding write goes through the dedicated proxy route, not the text command channel', () => {
-  // The /api/command channel speaks TEXT verbs; a JSON-RPC envelope sent
-  // there comes back "unknown command" (which used to masquerade as an
-  // old-core hint). The binding editor must use its own proxy route.
+check('the binding verb stays out of the text command channel too', () => {
   assert.doesNotMatch(switcher, /method:\s*'account\.venue\.set'/, 'JSON-RPC envelope via api.command must not return')
+  assert.doesNotMatch(switcher, /account\.venue\.set\s*$/, 'no text-verb call either')
+})
+
+check('the binding write path still exists for the CREATE dialog (client level)', () => {
+  // The gateway route and client helper stay: AddAccountDialog-era creates
+  // bind at creation. Only the per-row edit surface is gone.
   const client = read('src/api/client.ts')
   assert.match(
     client,
     /accountVenueSet[^`]*'\/account-venue\/set'/,
-    'client must post to /account-venue/set',
+    'client must keep the /account-venue/set proxy route',
   )
 })
 
-check('the pairing rationale is stated in prose (绑定即启用)', () => {
+check('the pairing rationale is stated in prose (绑定即启用 + 删户重建)', () => {
   assert.match(switcher, /绑定即启用/, 'footer must state the derivation rule')
+  assert.match(switcher, /删户重建/, 'footer must name delete-and-recreate as the only rebinding exit')
 })
 
 // ── 1b. the add-account dialog (#517): 选交易所 → 填 API → account.create ──
@@ -100,12 +100,28 @@ check('the venue picker is mandatory before anything can be submitted', () => {
   assert.match(dialog, /canSubmit[^=]*=[^>]*=>[^>]*venue\.value\.trim\(\) !== ''/, 'empty venue must disable the submit button')
 })
 
-// ── 1c. account removal (#517): 只删不改，确认词 = 账户 id ──────────────────
+// ── 1c. account removal (#517 / #535): 只删不改，所有账户都可删 ─────────────
 check('account removal is delete-only behind a confirm-word gate', () => {
   assert.match(switcher, /accountRemove\(\{[^}]*id:\s*a\.id/, 'the remove path must name the row account')
   assert.match(switcher, /ConfirmWordDialog/, 'removal must go through the confirm-word dialog')
   assert.match(switcher, /word="removeTarget\?\.id/, 'the confirm word must be the account id itself')
   assert.doesNotMatch(switcher, /editAccount|renameAccount/, 'accounts are delete-only: no edit/rename surface may exist')
+})
+
+check('every account is removable — no default interception anywhere', () => {
+  // The 2026-10-19 ruling: the last account (not `default`) is what the
+  // kernel refuses. No UI-side interception of the default id may remain.
+  assert.doesNotMatch(switcher, /id\s*===\s*'default'/, "the askRemove default-id interception must stay deleted")
+  assert.doesNotMatch(switcher, /!==\s*'default'/, "no v-if !== 'default' may gate the remove button")
+  assert.match(
+    switcher,
+    /最后一个账户内核会拒绝/,
+    'the confirm dialog must name the real refusal face (positions + last account)',
+  )
+  // The remove button is unconditional (every row gets it).
+  const btn = switcher.match(/<button[^>]*@click\.stop="askRemove\(a\)"[^>]*>/)?.[0] ?? ''
+  assert.ok(btn.length > 0, 'the per-row remove button must exist')
+  assert.doesNotMatch(btn, /v-if/, 'the remove button must not be conditionally gated per row')
 })
 
 // ── 2. the 行情 page derives its venue view from the active account ──────
@@ -192,4 +208,4 @@ if (failures > 0) {
   console.log(`\nRESULT: FAIL — ${failures} check(s) red`)
   process.exit(1)
 }
-console.log('\nRESULT: PASS — binding edits go through account.venue.set, the 行情 page derives its venue view, the balance tile is honestly labeled, strategy rows are fixed-grid')
+console.log('\nRESULT: PASS — bindings are create-only (read-only face + delete), every account is removable but the last, the 行情 page derives its venue view, the balance tile is honestly labeled, strategy rows are fixed-grid')
