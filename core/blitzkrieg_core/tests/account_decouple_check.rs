@@ -40,7 +40,10 @@ use std::path::{Path, PathBuf};
 use blitzkrieg_core::account::config::load_account_ledgers;
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::ipc::schema::Event;
-use blitzkrieg_core::model::{AccountId, CryptoMarket, Mode, Side, default_account_id};
+use blitzkrieg_core::model::{
+    AccountId, CoreErrorCode, CryptoMarket, FillPolicy, Mode, OrderRequest, OrderStatus, Side,
+    default_account_id,
+};
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_lua_runtime::FeeScheduleView;
@@ -769,5 +772,135 @@ fn an_infeasible_chase_alerts_and_flattens_the_naked_leg() {
             .iter()
             .any(|p| p.token_id == PM_UP),
         "the naked leg is flattened — exposure the pair economics never priced leaves the book"
+    );
+}
+
+// ── pair-cost cap 的账户隔离（裁决：pair 的经济单位 = (账户, 条件, 资产)）────
+// 一个 UP share + 一个 DOWN share 在**同一账户的账本里**赎回 $1；跨账户的
+// 对手腿在结算时不合并（每账户独立账本、独立赎回）。所以 pair-cost cap 的
+// 分母只该看本账户的对手腿——A 账户的持仓不得把 B 账户的加仓顶过 $1。
+
+/// 牙 7（跨账户污染）：A（default）持有 PM condition 的 DOWN 对手腿
+/// （0.90/share 的昂贵基准），B（paper）的 cross_venue_arb 开自己的
+/// PM_UP + KX_DOWN pair。cap 不按 account 过滤时，B 的 PM_UP 腿（Up, PM）
+/// 的分母会读到 A 的 pm-down（Down, PM）——0.90 + 0.44 = 1.34 > 1.00，
+/// atomic_batch 整对取消。本牙钉死该污染：B 必须正常成交整对。
+#[test]
+fn pair_cost_cap_ignores_counterpart_legs_held_by_other_accounts() {
+    let path = accounts_toml_path("pair-cap-cross", None);
+    let mut c = decouple_core(Some(&path), Some(dec!(1000)), false);
+    let now = NOW;
+
+    // paper 指派 cross_venue_arb（paper 的 scope 是 B 账户的新腿来源）。
+    c.set_account_strategies_persisting(
+        &paper_id(),
+        vec!["cross_venue_arb".into()],
+        "test",
+        "acceptance: paper runs the pair",
+        now,
+    )
+    .expect("paper assignment lands");
+
+    // A（default）手工持上 PM condition 的 DOWN 腿：0.90/share 的昂贵基准。
+    // condition=PM、direction=Down 与 B 即将开的 PM_UP 腿（Up, PM）恰好互为
+    // 对手（cap 的查询面：同 condition + 对手方向）——shares > 0 且 basis
+    // 0.90 ⇒ 污染读数 = 0.90 + 0.44 = 1.34 > $1.00。
+    c.book_snapshot(PM_DOWN, vec![], vec![(dec!(0.90), dec!(600))], now);
+    let a_leg = OrderRequest {
+        token_id: PM_DOWN.into(),
+        condition_id: PM.into(),
+        side: Side::Buy,
+        mode: FillPolicy::Taker,
+        price: dec!(0.90),
+        size: dec!(100),
+        internal_key: "k-a-down".into(),
+        strategy: "manual".into(),
+        asset: "BTC".into(),
+        direction: "down".into(),
+        round_slot: now / 1000 / 900,
+        account_id: default_account_id(),
+    };
+    let (_a_id, a_st) = c.place(a_leg, 0, now).unwrap();
+    assert_eq!(a_st, OrderStatus::Filled, "A's counterpart leg fills");
+    assert_eq!(count_positions(&c, "default"), 1);
+    assert_eq!(count_positions(&c, "paper"), 0);
+
+    // B（paper）的新 pair：折价盘口 PM_UP@0.44 + KX_DOWN@0.42。A 的账本
+    // （pm-down basis 0.90）不进 B 的分母 ⇒ 两腿照常下单成交；污染未修时
+    // PM_UP 腿被 cap 拒、atomic_batch 整对取消。
+    pair_market_data(&mut c, now + 1_000);
+    let placed = c.engine_evaluate(now + 3_000);
+    assert_eq!(
+        placed, 2,
+        "B(paper)'s scope places BOTH legs of its own pair — A's 0.90 counterpart \
+         basis (0.90 + 0.44 = 1.34 > 1.00) must never veto B's fresh leg"
+    );
+    assert_eq!(
+        count_positions(&c, "paper"),
+        2,
+        "paper's pair fills whole — the pair-cost cap saw only paper's own ledger"
+    );
+    assert_eq!(
+        count_positions(&c, "default"),
+        1,
+        "A's book is untouched by B's entries"
+    );
+}
+
+/// 牙 7 的另一面（防矫枉过正）：同一账户内，对手腿基准仍然定价 cap。
+/// default 持 0.90/share 的 DOWN 对手腿后，同账户再追 UP @0.42
+/// （0.90 + 0.42 = 1.32 > 1.00）必须被拒，错误点名 pair-cost cap。
+#[test]
+fn pair_cost_cap_still_blocks_the_counterpart_leg_within_one_account() {
+    let path = accounts_toml_path("pair-cap-same", None);
+    let mut c = decouple_core(Some(&path), Some(dec!(1000)), false);
+    let now = NOW;
+
+    // default 持 DOWN 对手腿：0.90/share。
+    c.book_snapshot("kx-down", vec![], vec![(dec!(0.90), dec!(600))], now);
+    let down = OrderRequest {
+        token_id: "kx-down".into(),
+        condition_id: KX.into(),
+        side: Side::Buy,
+        mode: FillPolicy::Taker,
+        price: dec!(0.90),
+        size: dec!(100),
+        internal_key: "k-down".into(),
+        strategy: "manual".into(),
+        asset: "BTC".into(),
+        direction: "down".into(),
+        round_slot: now / 1000 / 900,
+        account_id: default_account_id(),
+    };
+    let (_id, st) = c.place(down, 0, now).unwrap();
+    assert_eq!(st, OrderStatus::Filled, "the DOWN counterpart fills");
+
+    // 同账户再买 UP @0.42：0.90 + 0.42 = 1.32 > 1.00 ⇒ pair-cost cap 拒绝。
+    c.book_snapshot("kx-up", vec![], vec![(dec!(0.42), dec!(600))], now + 1_000);
+    let up = OrderRequest {
+        token_id: "kx-up".into(),
+        condition_id: KX.into(),
+        side: Side::Buy,
+        mode: FillPolicy::Taker,
+        price: dec!(0.42),
+        size: dec!(100),
+        internal_key: "k-up".into(),
+        strategy: "manual".into(),
+        asset: "BTC".into(),
+        direction: "up".into(),
+        round_slot: now / 1000 / 900,
+        account_id: default_account_id(),
+    };
+    let err = c.place(up, 0, now + 1_000).unwrap_err();
+    assert_eq!(err.code, CoreErrorCode::RiskRejected);
+    assert!(
+        err.message.contains("pair-cost cap"),
+        "the same-account counterpart still prices the cap: {}",
+        err.message
+    );
+    assert_eq!(
+        count_positions(&c, "default"),
+        1,
+        "the over-$1 merge never lands on A's own ledger"
     );
 }
