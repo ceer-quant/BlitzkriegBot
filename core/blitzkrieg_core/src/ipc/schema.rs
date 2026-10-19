@@ -2185,8 +2185,10 @@ pub struct AccountRemoveResult {
 /// [`AccountRemoveResult::note`] — one spelling, used by the reply and the
 /// log line.
 pub const ACCOUNT_REMOVE_NOTE: &str = "removes the account from the book (memory AND accounts.toml, \
-     re-read at next boot); refused while the account still holds open \
-     positions; removing the process-active account re-activates `default`";
+     re-read at next boot); every account is removable — `default` included — \
+     but the LAST account and an account still holding open positions are \
+     refused; removing the process-active account re-activates the first \
+     surviving account";
 
 // ── #509 的读面 — account.journal（钱包流水的面板可读面）─────────────────────
 

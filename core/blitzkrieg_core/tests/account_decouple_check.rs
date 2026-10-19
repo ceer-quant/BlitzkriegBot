@@ -771,3 +771,108 @@ fn an_infeasible_chase_alerts_and_flattens_the_naked_leg() {
         "the naked leg is flattened — exposure the pair economics never priced leaves the book"
     );
 }
+
+// ── 账户删除语义（绑定只在建户时绑定 —— 删户重建是绑定变更的唯一出口）────────
+// 用户裁决（2026-10-19）：已有账户不支持编辑交易所（会出现数据混乱），删除是
+// 唯一出口 ⇒ 所有账户都支持删除（default 不再保留名），唯一硬线 = 「不允许
+// 删除最后一个账户」。有持仓拒删与删后 active 回切一并钉住。
+
+use blitzkrieg_core::model::{CoreError, CoreErrorCode};
+
+/// 删除语义牙：default 可删、最后一个账户不可删、删后 active 回切剩余账户、
+/// 有持仓拒删不变。走 `remove_account_persisting`（IPC 动词的运行时臂），
+/// accounts.toml 真文件落盘（worktree target/ 下）。
+#[test]
+fn account_removal_is_delete_all_but_the_last_account() {
+    let path = accounts_toml_path("removal-semantics", None);
+    let mut c = decouple_core(Some(&path), None, false);
+    let now = NOW;
+
+    // 有持仓的账户拒删：既有守卫不变 —— 钱不能变成不可寻址的。双账户都在，
+    // 所以先于 last-account 守卫到达持仓守卫（两条拒绝各自可见）。
+    c.positions_mut().open(
+        blitzkrieg_core::position::OpenParams {
+            strategy: "cross_venue_arb".into(),
+            asset: "BTC".into(),
+            direction: blitzkrieg_core::model::SignalDirection::Up,
+            token_id: PM_UP.into(),
+            condition_id: PM.into(),
+            account_id: paper_id(),
+            venue: String::new(),
+            partner_token_id: String::new(),
+            entry_price: dec!(0.48),
+            expires_at_ms: now + 900_000,
+            was_maker: true,
+            target_exit_price: None,
+        },
+        now,
+    );
+    let err: CoreError = c
+        .remove_account_persisting(&paper_id(), "test", "pin attempt")
+        .expect_err("an account holding open positions is refused");
+    assert_eq!(err.code, CoreErrorCode::InvalidParams);
+    assert!(
+        err.message.contains("1 open position"),
+        "the refusal names the count: {}",
+        err.message
+    );
+
+    // 删 active 的 default：不再是保留名拒绝 —— 落地，文件行离开，active
+    // 回切剩余账户的第一个（paper；簿内无 default 行时的 boot 同款解析）。
+    c.accounts_mut()
+        .switch(&default_account_id())
+        .expect("default is active");
+    c.remove_account_persisting(&default_account_id(), "test", "removal semantics")
+        .expect("default is an ordinary account — removable");
+    let survivors: Vec<String> = c
+        .accounts()
+        .account_list()
+        .iter()
+        .map(|a| a.id.as_str().to_string())
+        .collect();
+    assert_eq!(survivors, vec!["paper"], "only paper survives");
+    assert_eq!(
+        c.accounts().active_id().as_str(),
+        "paper",
+        "the active cell never dangles: it re-activates the first survivor"
+    );
+    let book = load_account_ledgers(&path, now).expect("the written file re-parses");
+    assert!(
+        book.account(&default_account_id()).is_none(),
+        "the `default` row leaves accounts.toml (the next boot re-derives it)"
+    );
+    assert!(book.account(&paper_id()).is_some());
+
+    // 平掉持仓后，paper 成为最后一个账户 ⇒ 拒删（空簿让下一次 boot 拒载）。
+    let ids: Vec<String> = c
+        .positions_mut()
+        .open_positions()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    for pid in ids {
+        c.positions_mut()
+            .close(
+                &pid,
+                dec!(0.5),
+                blitzkrieg_core::model::ExitReason::Manual,
+                false,
+                now,
+            )
+            .expect("the probe position closes");
+    }
+    let err: CoreError = c
+        .remove_account_persisting(&paper_id(), "test", "last account attempt")
+        .expect_err("the LAST account is never removable");
+    assert_eq!(err.code, CoreErrorCode::InvalidParams);
+    assert!(
+        err.message.contains("the last account") && err.message.contains("at least one account"),
+        "the refusal says a deployment keeps at least one account: {}",
+        err.message
+    );
+    assert_eq!(
+        c.accounts().account_list().len(),
+        1,
+        "the last account survives every refusal"
+    );
+}

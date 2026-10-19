@@ -21,12 +21,14 @@ import AddAccountDialog from './AddAccountDialog.vue'
 import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
 
 /** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
- *  `venue` 是账户↔交易所绑定（market-plugin 名）；老内核不回该字段 →
- *  undefined，按未绑定（''）渲染。`tradingEnabled`/`strategies` 是多账户
- *  扇出面（关 = 拒开仓放平仓；strategies = 该账户的策略启用集，非空 =
- *  逐字集合，空 = 跟随全局开关）——老内核不回 → undefined，开关按开启
- *  渲染、启用集按「跟随全局」渲染。`strategies` 只读展示：启停唯一入口
- *  在策略页的启用按钮（账户↔venue 解耦裁决 —— 分配编辑器退场）。 */
+ *  `venue` 是账户↔交易所绑定（market-plugin 名），只在建户时设定（绑定
+ *  即启用）——已有账户不改绑（改绑面已收，数据不混乱），要换交易所 =
+ *  删户重建。老内核不回该字段 → undefined，按未绑定（''）渲染。
+ *  `tradingEnabled`/`strategies` 是多账户扇出面（关 = 拒开仓放平仓；
+ *  strategies = 该账户的策略启用集，非空 = 逐字集合，空 = 跟随全局开关）
+ *  ——老内核不回 → undefined，开关按开启渲染、启用集按「跟随全局」渲染。
+ *  `strategies` 只读展示：启停唯一入口在策略页的启用按钮（账户↔venue
+ *  解耦裁决 —— 分配编辑器退场）。 */
 interface AccountRow {
   id: string
   name: string
@@ -147,76 +149,6 @@ function toggle(): void {
   if (open.value) void refresh()
 }
 
-// ── 账户↔交易所绑定（account.venue.get / account.venue.set，§9.1）────────────
-// 一个交易所 + 一套 API = 一个账户；绑定后该账户只能交易该 venue 的 token
-// （内核拒单守卫 refuse_cross_venue_order）。未绑定（''）= 可交易任意交易所，
-// 历史行为。这是插件启用的主控制面：下一批内核把「启用集合」改为 boot 时
-// 从账户派生 —— 绑定了某 venue 的账户即启用该 venue 插件。
-const venueOptions = ref<string[]>([])
-const venueLoading = ref(false)
-/** 正在编辑绑定的账户 id（一次展开一行）。 */
-const venueEditing = ref<string | null>(null)
-const venueDraft = ref('')
-const venueBusy = ref(false)
-const venueErr = ref<string | null>(null)
-const venueMsg = ref<string | null>(null)
-
-/** 已注册插件名 = 可绑定的交易所集合（market.plugin.get 的 registered）。 */
-async function loadVenueOptions(): Promise<void> {
-  venueLoading.value = true
-  try {
-    const doc = await api.marketPlugin()
-    venueOptions.value = (doc.registered ?? []).map((p) => p.name).filter(Boolean)
-  } catch {
-    venueOptions.value = []
-  } finally {
-    venueLoading.value = false
-  }
-}
-
-function editVenue(a: AccountRow): void {
-  if (venueEditing.value === a.id) {
-    venueEditing.value = null
-    return
-  }
-  venueEditing.value = a.id
-  venueDraft.value = a.venue ?? ''
-  venueErr.value = null
-  void loadVenueOptions()
-}
-
-/**
- * 保存绑定：`account.venue.set` params `{accountId, venue, reason}`，
- * venue 空 = 解绑。走 /api/account-venue/set 专用代理路由（body 即 params，
- * 逐字转发）—— /api/command 是文本动词通道，不认 JSON-RPC 信封。
- */
-async function saveVenue(a: AccountRow): Promise<void> {
-  if (venueBusy.value) return
-  venueBusy.value = true
-  venueErr.value = null
-  venueMsg.value = null
-  const next = venueDraft.value.trim()
-  try {
-    const res = await api.accountVenueSet({
-      accountId: a.id,
-      venue: next,
-      reason: 'panel',
-    })
-    if (res.error) throw new Error(res.error)
-    venueMsg.value = next
-      ? `已绑定：账户 ${a.id} → ${next}${res.persisted ? '（已落盘）' : ''}。`
-      : `已解绑：账户 ${a.id} 可交易任意交易所${res.persisted ? '（已落盘）' : ''}。`
-    venueEditing.value = null
-    await refresh()
-    store.refresh()
-  } catch (e) {
-    venueErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    venueBusy.value = false
-    setTimeout(() => { venueMsg.value = null }, 6000)
-  }
-}
-
 const venueLabel = (v: string | undefined): string =>
   v ? v : '未绑定（可交易任意交易所）'
 
@@ -304,15 +236,16 @@ function onCreated(id: string): void {
   store.refresh()
 }
 
-// ── 删除账户（#517）：只删不改。default 与有持仓的账户由内核拒绝；
-//    确认词 = 账户 id（自由文本门，误触不可能被归咎于双击）。
+// ── 删除账户（#517 / #535）：只删不改。所有账户都可删 —— default 不再
+//    拦截（绑定只在建户时绑定，删户重建是绑定变更的唯一出口）；内核拒绝
+//    面 = 有持仓的账户 + 最后一个账户。确认词 = 账户 id（自由文本门，
+//    误触不可能被归咎于双击）。
 const removeTarget = ref<AccountRow | null>(null)
 const removeOpen = ref(false)
 const removeBusy = ref(false)
 const removeErr = ref<string | null>(null)
 
 function askRemove(a: AccountRow): void {
-  if (a.id === 'default') return
   removeErr.value = null
   removeTarget.value = a
   removeOpen.value = true
@@ -430,19 +363,13 @@ onBeforeUnmount(() => {
           <span class="mt-0.5 flex items-center gap-1.5 text-[11px]">
             <Link2 class="size-3 shrink-0 text-faint-fg" />
             <span
-              class="truncate"
+              class="min-w-0 flex-1 truncate"
               :class="a.venue ? 'text-fg' : 'text-faint-fg'"
-              :title="a.venue ? `绑定交易所：${a.venue}（只能交易该 venue 的 token）` : '未绑定（可交易任意交易所）'"
+              :title="a.venue ? `绑定交易所：${a.venue}（只能交易该 venue 的 token；绑定只在建户时设定）` : '未绑定（可交易任意交易所）'"
             >{{ venueLabel(a.venue) }}</span>
             <button
-              class="ml-auto shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-fg"
-              :title="'编辑账户绑定的交易所'"
-              @click.stop="editVenue(a)"
-            >{{ venueEditing === a.id ? '收起' : '绑定' }}</button>
-            <button
-              v-if="a.id !== 'default'"
               class="shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-down"
-              :title="`删除账户 ${a.id}（不可撤销；有持仓时内核拒绝）`"
+              :title="`删除账户 ${a.id}（不可撤销；有持仓或最后一个账户时内核拒绝）`"
               @click.stop="askRemove(a)"
             ><Trash2 class="size-3" /></button>
           </span>
@@ -466,28 +393,8 @@ onBeforeUnmount(() => {
               :title="`该账户的策略启停集合（只读；启停在策略页按账户启用）：${strategiesLabel(a)}`"
             >{{ strategiesLabel(a) }}</span>
           </span>
-          <span v-if="tradingErr && venueEditing !== a.id" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
+          <span v-if="tradingErr" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
           <span v-else-if="tradingMsg" class="mt-0.5 block text-[10.5px] text-up">{{ tradingMsg }}</span>
-          <span v-if="venueEditing === a.id" class="mt-1.5 block" @click.stop>
-            <span class="flex items-center gap-1.5">
-              <select
-                v-model="venueDraft"
-                class="min-w-0 flex-1 rounded border border-line bg-panel-2 px-1.5 py-1 text-[11.5px] text-fg"
-                :disabled="venueLoading || venueBusy"
-              >
-                <option value="">未绑定（可交易任意交易所）</option>
-                <option v-for="v in venueOptions" :key="v" :value="v">{{ v }}</option>
-              </select>
-              <button
-                class="shrink-0 rounded bg-panel-2 px-2 py-1 text-[11px] font-semibold text-fg transition-colors hover:bg-panel-2/80 disabled:opacity-50"
-                :disabled="venueBusy || venueLoading"
-                @click="saveVenue(a)"
-              >{{ venueBusy ? '保存中…' : '保存' }}</button>
-            </span>
-            <span v-if="venueLoading" class="mt-0.5 block text-[10.5px] text-faint-fg">交易所清单加载中…</span>
-            <span v-if="venueErr" class="mt-0.5 block text-[10.5px] text-down">{{ venueErr }}</span>
-            <span v-else-if="venueMsg" class="mt-0.5 block text-[10.5px] text-up">{{ venueMsg }}</span>
-          </span>
           <span v-if="a.statusReason" class="mt-0.5 block truncate text-[11px] text-down">
             {{ a.statusReason }}
           </span>
@@ -500,7 +407,7 @@ onBeforeUnmount(() => {
       </p>
       <p class="mt-1 border-t border-line px-2 pt-1.5 text-[10.5px] leading-relaxed text-faint-fg">
         切换只改变本面板连接的默认账户（§9.5 会话级）与行情/交易视图跟随（各账户的策略在后台持续运行，切换不启停任何东西）；
-        策略的启停在策略页按账户启用。绑定交易所的账户只能交易该交易所（插件启用随账户派生——绑定即启用）。
+        策略的启停在策略页按账户启用。绑定只在建户时设定（绑定即启用），已有账户不改绑——需要换交易所就删户重建；绑定了交易所的账户只能交易该交易所。
       </p>
     </div>
 
@@ -515,8 +422,8 @@ onBeforeUnmount(() => {
       title="删除账户"
       :lines="[
         `账户 ${removeTarget?.id ?? ''} 将从账户簿删除（accounts.toml 落盘）——不可撤销。`,
-        '该账户的现金流水历史保留在账本日志里；default 账户与有持仓的账户内核会拒绝。',
-        '删除的是当前默认账户时，面板默认账户自动回切 default。',
+        '该账户的现金流水历史保留在账本日志里；有持仓的账户与最后一个账户内核会拒绝。',
+        '删除的是当前默认账户时，面板默认账户自动回切剩余账户的第一个。',
       ]"
       action-label="确认删除"
       :busy="removeBusy"
