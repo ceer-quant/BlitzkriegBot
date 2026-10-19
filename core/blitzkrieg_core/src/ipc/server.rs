@@ -7382,7 +7382,7 @@ mod tests {
             reply["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("the last account"),
+                .contains("最后一个账户"),
             "{}",
             reply["error"]["message"]
         );
@@ -7390,7 +7390,7 @@ mod tests {
             reply["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("at least one account"),
+                .contains("至少要保留一个账户"),
             "{}",
             reply["error"]["message"]
         );
@@ -7499,7 +7499,7 @@ mod tests {
             reply["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("1 open position"),
+                .contains("1 笔未平持仓"),
             "{}",
             reply["error"]["message"]
         );

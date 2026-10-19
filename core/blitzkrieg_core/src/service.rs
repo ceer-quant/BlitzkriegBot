@@ -3449,10 +3449,8 @@ impl Core {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "account.remove: `{id}` is the last account in the book — \
-                     a deployment keeps at least one account (the next boot \
-                     refuses an empty accounts.toml; delete the file itself \
-                     instead)"
+                    "account.remove：`{id}` 是账户簿里最后一个账户——至少要保留一个账户 \
+                     （下一次启动会拒绝空账户簿；确要清空部署请直接删除 accounts.toml）"
                 ),
             ));
         }
@@ -3469,9 +3467,8 @@ impl Core {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "account.remove: `{id}` still holds {open} open position(s) — \
-                     close them first (an account whose book leaves the kernel \
-                     takes no inventory with it)"
+                    "account.remove：`{id}` 还有 {open} 笔未平持仓——请先平仓 \
+                     （删掉的账户不带走任何库存，钱必须始终有簿可归）"
                 ),
             ));
         }
@@ -3489,7 +3486,7 @@ impl Core {
                 CoreError::new(
                     CoreErrorCode::InvalidParams,
                     format!(
-                        "account.remove: persist failed, nothing changed: {}",
+                        "account.remove：账户簿落盘失败，两个存储都没有改动：{}",
                         e.message
                     ),
                 )
