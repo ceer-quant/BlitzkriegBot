@@ -232,6 +232,16 @@ fn claim_socket_path(socket_path: &str) -> anyhow::Result<()> {
 struct DataPlaneRuntime {
     feed_ws_enabled: bool,
     discovery_enabled: bool,
+    /// The boot's discovery parameters, snapshotted so a runtime mount can
+    /// hand the plugin the SAME config boot would. Polymarket's discovery
+    /// derives everything from the host on its own; kalshi's picks its
+    /// series from (`asset`, `round_duration_sec`) — with the zero/empty
+    /// values a mount used to pass, `series_ticker_for(_, 0)` is None and
+    /// the venue discovers nothing forever (the feed then starves for want
+    /// of subscription tokens). #535 production replay proved it: the mount
+    /// reported `runtimeEnabled: true` while zero kalshi events ever landed.
+    discovery_assets: Vec<String>,
+    discovery_round_duration_sec: i64,
     mounted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 }
 
@@ -245,6 +255,8 @@ impl DataPlaneRuntime {
         Self {
             feed_ws_enabled: config.feed_ws_enabled,
             discovery_enabled: config.engine_enabled && config.discovery_enabled,
+            discovery_assets: config.assets.clone(),
+            discovery_round_duration_sec: config.round_duration_sec,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
         }
     }
@@ -268,11 +280,15 @@ impl DataPlaneRuntime {
 /// mounts `run` performs for every boot-selected plugin, reused verbatim so
 /// a runtime enablement is byte-for-byte the boot shape (no second mechanism).
 ///
-/// The caller decides WHICH flags gate the mounts (this function does not
-/// re-read them): boot passes `config.feed_ws_enabled` /
-/// `config.engine_enabled && config.discovery_enabled`; the venue.set write
-/// passes the session's same resolved flags, so a runtime binding follows the
-/// boot's data-plane posture exactly.
+/// The caller decides WHICH flags gate the mounts and WHAT discovery config
+/// the plugin gets (this function does not re-read them): boot passes
+/// `config.feed_ws_enabled` / `config.engine_enabled && config.discovery_enabled`;
+/// the venue.set/create writes pass the session's same resolved flags plus the
+/// boot's snapshotted assets/round length, so a runtime binding follows the
+/// boot's data-plane posture exactly. Passing an empty/zero discovery config
+/// here is NOT an option: polymarket tolerates it (it derives everything from
+/// the host), kalshi selects its series from (`asset`, `round_duration_sec`)
+/// and would silently discover nothing forever.
 ///
 /// Executor: NOT mounted here. `mode.may_trade()` is a boot-frozen promise —
 /// Dry/ReadOnly never construct egress, and a Live core's executor set is
@@ -286,6 +302,8 @@ async fn enable_venue_at_runtime(
     host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
     feed_ws_enabled: bool,
     discovery_enabled: bool,
+    discovery_assets: &[String],
+    discovery_round_duration_sec: i64,
 ) {
     let name = plugin.name();
     if feed_ws_enabled {
@@ -305,8 +323,8 @@ async fn enable_venue_at_runtime(
         match plugin.discovery() {
             Some(disc) => {
                 let cfg = blitzkrieg_market_api::DiscoveryConfig {
-                    assets: Vec::new(),
-                    round_duration_sec: 0,
+                    assets: discovery_assets.to_vec(),
+                    round_duration_sec: discovery_round_duration_sec,
                     poll_sec: 5,
                 };
                 if let Err(e) = disc.start(host.clone(), cfg).await {
@@ -2953,6 +2971,8 @@ async fn handle_line(
                             host.clone(),
                             data_plane.feed_ws_enabled,
                             data_plane.discovery_enabled,
+                            &data_plane.discovery_assets,
+                            data_plane.discovery_round_duration_sec,
                         )
                         .await;
                         data_plane.mark_mounted(venue);
@@ -3138,6 +3158,8 @@ async fn handle_line(
                             host.clone(),
                             data_plane.feed_ws_enabled,
                             data_plane.discovery_enabled,
+                            &data_plane.discovery_assets,
+                            data_plane.discovery_round_duration_sec,
                         )
                         .await;
                         data_plane.mark_mounted(v);
@@ -4185,8 +4207,15 @@ mod tests {
     }
 
     /// On start, registers one round market tagged with the plugin's venue —
-    /// exactly what a real discovery does at its first poll.
+    /// exactly what a real discovery does at its first poll. The received
+    /// config is recorded so tests can pin the boot-shape contract: a runtime
+    /// mount must hand the plugin the boot's assets/round length, not zeroes
+    /// (kalshi selects its series from exactly those two fields — #535).
     struct VenueLiveDiscovery;
+    /// The DiscoveryConfig of the LAST start call (each test drives one mount).
+    static VENUE_LIVE_DISCOVERY_CFG: std::sync::Mutex<
+        Option<blitzkrieg_market_api::DiscoveryConfig>,
+    > = std::sync::Mutex::new(None);
     impl blitzkrieg_market_api::MarketDiscovery for VenueLiveDiscovery {
         fn name(&self) -> &str {
             "venue-live-discovery"
@@ -4194,10 +4223,13 @@ mod tests {
         fn start<'a>(
             &'a self,
             host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
-            _config: blitzkrieg_market_api::DiscoveryConfig,
+            config: blitzkrieg_market_api::DiscoveryConfig,
         ) -> blitzkrieg_market_api::BoxFuture<'a, Result<(), blitzkrieg_market_api::CoreError>>
         {
             Box::pin(async move {
+                *VENUE_LIVE_DISCOVERY_CFG
+                    .lock()
+                    .expect("venue live discovery cfg poisoned") = Some(config);
                 use rust_decimal_macros::dec;
                 host.on_round_markets(vec![blitzkrieg_market_api::MarketDescriptor {
                     asset: "BTC".to_string(),
@@ -4467,6 +4499,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: false,
             discovery_enabled: false,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 0,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         let mut session = SessionState::default();
@@ -4505,6 +4539,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: false,
             discovery_enabled: false,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 0,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         serde_json::from_str(
@@ -4639,6 +4675,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: false,
             discovery_enabled: false,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 0,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         let mut session = SessionState::default();
@@ -5624,6 +5662,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: false,
             discovery_enabled: false,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 0,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         serde_json::from_str(
@@ -6585,6 +6625,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: true,
             discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
+            discovery_round_duration_sec: 900,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
         };
 
@@ -6636,6 +6678,26 @@ mod tests {
         assert!(
             venues.iter().any(|v| v == "venuelive"),
             "the runtime-mounted venue's market must appear in the scanner: {venues:?}"
+        );
+
+        // Boot-shape config: the runtime mount must hand the plugin the
+        // boot's discovery parameters, NOT zeroes — kalshi picks its series
+        // from (asset, round_duration_sec) and a zero/empty config discovers
+        // nothing forever (the #535 production replay defect). The stub's
+        // data_plane carries BTC/ETH + 900s; that is exactly what must arrive.
+        let seen = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .clone();
+        let seen = seen.expect("the runtime mount must have started the discovery");
+        assert_eq!(
+            seen.assets,
+            vec!["BTC".to_string(), "ETH".to_string()],
+            "runtime discovery must receive the boot's asset set: {seen:?}"
+        );
+        assert_eq!(
+            seen.round_duration_sec, 900,
+            "runtime discovery must receive the boot's round length: {seen:?}"
         );
 
         // Idempotence: a SECOND account bound to the SAME venue must not
@@ -6730,6 +6792,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: true,
             discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
+            discovery_round_duration_sec: 900,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
         };
 
@@ -6900,6 +6964,8 @@ mod tests {
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: true,
             discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
+            discovery_round_duration_sec: 900,
             mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
 
