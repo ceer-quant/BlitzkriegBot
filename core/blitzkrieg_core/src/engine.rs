@@ -652,14 +652,20 @@ impl Engine {
     /// Whether a scope's venue binding admits a token: unbound admits
     /// everything; bound scopes only their own venue's tokens (an unknown
     /// token venue = not admitted — the token must belong to a market this
-    /// deployment trades).
+    /// deployment trades). A market with NO venue tag (`m.venue` empty —
+    /// corpora from the single-plugin world, where the venue was implicit)
+    /// admits every bound scope: the archive predates #427's tagging, and
+    /// there is nothing to disagree with the binding about — refusing those
+    /// made any venue-bound account go silent on every pre-tag corpus (the
+    /// exit-economics fixture first tripped it: signals 89975→0, closes 13→0).
     fn scope_admits_token(&self, account: &str, token: &str) -> bool {
         let Some(bound) = self.venue_by_account.get(account).filter(|v| !v.is_empty()) else {
             return true;
         };
-        self.scanner
-            .market_for_token(token)
-            .is_some_and(|m| m.venue == *bound)
+        match self.scanner.market_for_token(token) {
+            None => false,
+            Some(m) => m.venue.is_empty() || m.venue == *bound,
+        }
     }
 
     /// The open-position snapshot the NEXT evaluation's ctx carries (the pair
@@ -2909,6 +2915,46 @@ mod tests {
         assert!(
             s.can_trade_reason(now).is_err(),
             "the global window keeps the earliest-expiry semantics"
+        );
+    }
+
+    #[test]
+    fn a_venue_bound_scope_admits_untagged_markets() {
+        // The exit-economics regression: a factory account book binds default
+        // to a venue, the corpus predates #427's venue tagging (serde default
+        // = empty), and `scope_admits_token` refused EVERY token — signals
+        // 89975 → 0, closes 13 → 0 across all four windows. An untagged
+        // market says nothing the binding could disagree with (the single-
+        // plugin world's venue was implicit), so it admits every scope; the
+        // WRONG tagged venue still refuses, which is the gate's actual job.
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000i64;
+        e.scanner.set_markets(vec![
+            venue_market(end, "polymarket"),
+            venue_market(end, "kalshi"),
+            eth_market(end), // untagged (serde default), like old corpora
+        ]);
+        e.set_account_venue("default", "polymarket");
+
+        assert!(
+            e.scope_admits_token("default", "polymarket-up"),
+            "the bound venue's own tagged market admits"
+        );
+        assert!(
+            e.scope_admits_token("default", "eth-up"),
+            "an UNTAGGED market admits a bound scope — the pre-tag corpus case"
+        );
+        assert!(
+            !e.scope_admits_token("default", "kalshi-up"),
+            "another venue's tagged market still refuses — the gate keeps its teeth"
+        );
+        assert!(
+            !e.scope_admits_token("default", "no-such-token"),
+            "an unknown token (no market) refuses, as before"
+        );
+        assert!(
+            e.scope_admits_token("unbound", "kalshi-up"),
+            "an unbound scope admits everything, as before"
         );
     }
 

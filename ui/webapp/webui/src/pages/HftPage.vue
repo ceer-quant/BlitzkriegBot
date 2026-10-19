@@ -503,9 +503,9 @@ const engineUp = computed(() => snap.value?.connected ?? false)
 
 // ── 空行情的判因（issue 488 空态的轮次分支）────────────────────────────────
 // 行情卡空 + 插件已接入 + 引擎在跑时，有两条互斥的真相：网络/代理拦了数据源
-// （issue 488 的原判读），或者交易所连得上但当前轮次档位根本没有市场——kalshi
-// 只有 15m/daily 两个 crypto 轮次系列，5m/1h/4h 档 discovery 拿到的是空集
-// （`series_ticker_for` 返回 None，discovery「找不到」是诚实行为）。
+// （issue 488 的原判读），或者交易所连得上但当前轮次档位根本没有市场——某些
+// 所只带 15m/daily 两个轮次系列，其余档位 discovery 拿到的是空集（插件侧
+// 「找不到」是诚实行为）。
 //
 // 判据用插件自己的 `net.check` 探针（缓存于网关，TTL 20s）：探针全通过 =
 // 连接正常，空卡的原因指向轮次档位。不在前端硬编码任何交易所的支持表——
@@ -1028,8 +1028,8 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         一个已经接入的插件 —— 那条提示是误导。
 
         轮次分支：探针全通过（连接正常）时，空卡的真因不再是网络，而是当前
-        轮次档位在该所没有市场（例如 kalshi 只有 15m/daily 两个轮次系列，
-        5m/1h/4h 档 discovery 拿到空集）——此时指向「切换轮次」才对。
+        轮次档位在该所没有市场（有的所只带 15m/daily 两个轮次系列，其余档位
+        discovery 拿到空集）——此时指向「切换轮次」才对。
       -->
       <EmptyState
         v-if="venueRoundUnsupported"

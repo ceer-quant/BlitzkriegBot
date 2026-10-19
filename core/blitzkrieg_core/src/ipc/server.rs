@@ -1941,7 +1941,18 @@ async fn handle_line(
                 // exact legacy bytes.
                 let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
                 let mut kept_exits_only: Vec<String> = Vec::new();
-                let mirror_persistence = core.lock().await.config().accounts_config_path.is_some();
+                // Gate-sandboxes run with no accounts.toml on disk at all —
+                // there "no file = persistence disabled" (the boot rule this
+                // mirror inherits) and the toggle must keep its legacy
+                // engine-only success. Only a path that EXISTS but refuses
+                // the write is an error.
+                let mirror_persistence = core
+                    .lock()
+                    .await
+                    .config()
+                    .accounts_config_path
+                    .as_deref()
+                    .is_some_and(|p| std::path::Path::new(p).exists());
                 if reason.is_none() && applied && mirror_persistence {
                     let default_id = crate::account::default_account_id();
                     let mut c = core.lock().await;
