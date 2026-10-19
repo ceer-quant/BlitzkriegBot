@@ -1930,6 +1930,48 @@ async fn handle_line(
                     .lock()
                     .await
                     .set_strategy_enabled_checked(name, enabled);
+                // #537: on a successful toggle the default account's
+                // enablement set must move WITH it — the boot applies the
+                // accounts file AFTER the state file and turns every scope
+                // the file names back ON unconditionally, so a toggle that
+                // moved only the engine flag resurrected at the next boot
+                // and a strategy the file named could never be turned off
+                // for good. Same persisting write the non-default branch
+                // runs; the not-found and refusal replies below keep their
+                // exact legacy bytes.
+                let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
+                let mut kept_exits_only: Vec<String> = Vec::new();
+                let mirror_persistence = core.lock().await.config().accounts_config_path.is_some();
+                if reason.is_none() && applied && mirror_persistence {
+                    let default_id = crate::account::default_account_id();
+                    let mut c = core.lock().await;
+                    match c.set_scoped_strategy_enabled(
+                        &default_id,
+                        name,
+                        enabled,
+                        // Same actor posture as the other panel writes: the
+                        // KERNEL-recorded uid, never a caller's claim.
+                        match peer {
+                            PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                            _ => "uid:unknown".to_string(),
+                        }
+                        .as_str(),
+                        if enabled {
+                            "strategy.enable (default account)"
+                        } else {
+                            "strategy.disable (default account)"
+                        },
+                        now_ms(),
+                    ) {
+                        Ok((kept, _set_now)) => kept_exits_only = kept,
+                        Err(e) => {
+                            mirror_error = Some(client_err(e));
+                        }
+                    }
+                }
+                if let Some(e) = mirror_error {
+                    return fail(id, e.0, e.1, e.2);
+                }
                 Ok(serde_json::json!({
                     "name": name,
                     "enabled": if reason.is_some() { false } else { enabled && applied },
@@ -1937,6 +1979,7 @@ async fn handle_line(
                     "applied": applied,
                     "reason": reason,
                     "accountId": account_id,
+                    "keptExitsOnly": kept_exits_only,
                 }))
             } else {
                 // 语义层接线（核心 agent 补丁）：本分支的 `id` 名被账户

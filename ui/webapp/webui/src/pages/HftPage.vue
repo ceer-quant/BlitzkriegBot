@@ -7,7 +7,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info, ChevronDown } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow, type AccountJournalDoc, type AccountJournalRowDoc } from '@/api/client'
+import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow, type AccountJournalDoc, type AccountJournalRowDoc, type NetCheckDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
@@ -501,6 +501,57 @@ const cmdMsg = ref<string | null>(null)
  */
 const engineUp = computed(() => snap.value?.connected ?? false)
 
+// ── 空行情的判因（issue 488 空态的轮次分支）────────────────────────────────
+// 行情卡空 + 插件已接入 + 引擎在跑时，有两条互斥的真相：网络/代理拦了数据源
+// （issue 488 的原判读），或者交易所连得上但当前轮次档位根本没有市场——kalshi
+// 只有 15m/daily 两个 crypto 轮次系列，5m/1h/4h 档 discovery 拿到的是空集
+// （`series_ticker_for` 返回 None，discovery「找不到」是诚实行为）。
+//
+// 判据用插件自己的 `net.check` 探针（缓存于网关，TTL 20s）：探针全通过 =
+// 连接正常，空卡的原因指向轮次档位。不在前端硬编码任何交易所的支持表——
+// 档位支持面是插件边界内的知识，面板只读探针的结论。
+const roundHintDoc = ref<NetCheckDoc | null>(null)
+const roundHintAsked = ref(false)
+async function askRoundHint(): Promise<void> {
+  if (roundHintAsked.value) return
+  roundHintAsked.value = true
+  try {
+    roundHintDoc.value = await api.netCheck()
+  } catch {
+    roundHintDoc.value = null // 探针拿不到 → 维持 issue 488 的网络判读
+  }
+}
+/** 空行情且判因已回答时是否走「轮次档位」文案。 */
+const venueRoundUnsupported = computed(() => {
+  if (!visiblePrices.value.length || venueLoading.value) return false
+  if (!marketName.value || !engineUp.value) return false
+  const rep = roundHintDoc.value?.report
+  if (!rep) return false
+  return rep.ok === true
+})
+
+// 空行情卡出现时问一次探针；离开空态（数据到了）就复位 one-shot，让下一次
+// 空态重新判因。探针缓存在网关侧（TTL 20s），重复触发不放大真实拨测。
+watch([venueUnbound, venueLoading, visiblePrices, engineUp], () => {
+  if (venueUnbound.value || venueLoading.value || visiblePrices.value.length || !engineUp.value) {
+    roundHintAsked.value = false
+    return
+  }
+  if (!marketName.value) return
+  void askRoundHint()
+}, { immediate: true })
+
+/** 空态文案里的当前轮次档位名（5m/15m/1h/…）；非标档位回退秒数。
+ *  读 `round_duration.get` 的生效值（config 驱动），不拿 age+left 反推。 */
+const roundDurHintSec = ref<number | null>(null)
+void api.roundDuration().then((d) => { roundDurHintSec.value = d.effectiveSec }).catch(() => {})
+const roundDurLabel = computed(() => {
+  const sec = roundDurHintSec.value
+  if (!sec) return '当前档位'
+  const labels: Record<number, string> = { 300: '5m', 900: '15m', 3600: '1h', 14400: '4h', 86400: 'daily' }
+  return labels[sec] ?? `${sec}s`
+})
+
 /**
  * What the two controls can actually do here.
  *
@@ -975,8 +1026,19 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         issue 488: 连不上 ≠ 未接入。插件已接入（marketName 有值）但行情卡空 =
         数据源拉不到（网络/代理/对端），指向网络自检而不是叫操作员去绑定
         一个已经接入的插件 —— 那条提示是误导。
+
+        轮次分支：探针全通过（连接正常）时，空卡的真因不再是网络，而是当前
+        轮次档位在该所没有市场（例如 kalshi 只有 15m/daily 两个轮次系列，
+        5m/1h/4h 档 discovery 拿到空集）——此时指向「切换轮次」才对。
       -->
       <EmptyState
+        v-if="venueRoundUnsupported"
+        :text="`交易所连接正常，但是无法获取对应轮次（${roundDurLabel}），请尝试切换轮次`"
+        hint="该交易所未必提供当前轮次长度的市场 —— 到「设置 · 通用」的轮次时间周期卡切换档位（下次会话生效），或换绑定其它交易所的账户。"
+        compact
+      />
+      <EmptyState
+        v-else
         :text="marketName ? `行情插件 ${marketName} 已接入，但暂无行情到达` : '暂无行情数据（等待报价插件）'"
         :hint="marketName
           ? '通常是网络/代理拦住了数据源域名。运行网关命令 netcheck 做网络自检，或检查本机代理是否放行该插件的 API 域名。'
