@@ -89,9 +89,18 @@ pub fn derived_venue_set(core: &crate::service::Core) -> Vec<String> {
 ///    `active_market_plugins`.
 ///
 /// `cell` is the already-loaded persisted cell (the boot only reaches the cell
-/// when no flag spoke). Returns the flag/cell value for `active_market_plugins`
-/// plus WHERE the enablement came from, so the readout can disclose it and the
+/// when no flag spoke). Returns the SPEC for `active_market_plugins` plus
+/// WHERE the enablement came from, so the readout can disclose it and the
 /// `market.plugin.set` guard can arm.
+///
+/// The Accounts layer (绑定即启用) returns the DERIVED SET as a
+/// comma-joined spec — `active_market_plugins` mounts feed/discovery for
+/// EVERY name in it. An earlier revision returned `None` here and left the
+/// fallback resolution to re-derive: that fell to first-registered, so a
+/// multi-venue binding {polymarket, kalshi} mounted only polymarket's data
+/// plane and every other venue starved — the exact「切账户后非 polymarket
+/// 永远加载中」defect. The spec keeps single-venue boots byte-identical
+/// (`parse_plugin_list("polymarket") == ["polymarket"]`).
 pub fn boot_enablement(
     core: &crate::service::Core,
     registry: &registry::MarketPluginRegistry,
@@ -148,7 +157,10 @@ pub fn boot_enablement(
                 }
             }
         }
-        return (None, PluginEnableSource::Accounts);
+        // The spec IS the derived set: every bound venue's plugin mounts at
+        // boot (feed/discovery per name in `active_market_plugins`). Returning
+        // `None` here once made a multi-venue book boot half its data plane.
+        return (Some(derived.join(",")), PluginEnableSource::Accounts);
     }
     // Layer 3: the persisted cell, only when no binding spoke.
     if let Some(c) = cell {
@@ -1056,9 +1068,14 @@ mod derive_tests {
 
         let (resolved, source) = boot_enablement(&core, &reg, None, loaded.as_ref());
         assert_eq!(source, PluginEnableSource::Accounts);
+        // The resolution RETURNS the derived set as the spec: the boot hands
+        // it straight to `active_market_plugins` — no second derivation, no
+        // fallback. (An earlier revision returned None and fell to
+        // first-registered, mounting half a data plane.)
         assert_eq!(
-            resolved, None,
-            "the derived set routes through the fallback resolution"
+            resolved.as_deref(),
+            Some("beta,gamma"),
+            "the derived set IS the spec active_market_plugins mounts"
         );
         // 迁移：旧格已清 —— 下次会话不会再从旧格解析。
         assert!(

@@ -2000,6 +2000,13 @@ pub struct AccountVenueSetResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub note: &'static str,
+    /// The runtime half of 绑定即启用: whether THIS venue's data plane was
+    /// mounted into the running session (feed + discovery) by the write —
+    /// false when the venue was already live (boot enabled it) or the write
+    /// is an unbind (empty venue). Older panels ignore the field; a newer
+    /// one can say「已接入行情」instead of telling the operator to restart.
+    #[serde(default)]
+    pub runtime_enabled: bool,
 }
 
 /// [`AccountVenueSetResult::note`] — one spelling, used by the reply and the
