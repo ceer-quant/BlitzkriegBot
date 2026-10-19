@@ -2143,7 +2143,8 @@ pub struct AccountCreateParams {
 
 /// `account.create` result: the created id, whether the accounts.toml write
 /// landed (`false` is impossible today — a persist failure refuses the whole
-/// call, the field is the contract's honesty disclosure), and one fixed note.
+/// call, the field is the contract's honesty disclosure), one fixed note, and
+/// whether the named venue's data plane was mounted into the running session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCreateResult {
@@ -2154,6 +2155,14 @@ pub struct AccountCreateResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub note: &'static str,
+    /// The runtime half of 绑定即启用, on the CREATE face: a request that
+    /// names a venue mounts that venue's data plane (feed + discovery) into
+    /// the running session — creating a bound account IS binding, and the
+    /// 行情 page must light up without a restart. False when the venue was
+    /// already live (boot enabled it, or an earlier runtime mount), the
+    /// venue is empty (unbound), or the boot's data-plane flags are off.
+    #[serde(default)]
+    pub runtime_enabled: bool,
 }
 
 /// [`AccountCreateResult::note`] — one spelling, used by the reply and the

@@ -3112,6 +3112,37 @@ async fn handle_line(
                         p.reason.as_deref().unwrap_or(""),
                         now_ms(),
                     )?;
+                    // The lock guard is dropped BEFORE the runtime mount
+                    // below — the same re-entry shape as account.venue.set:
+                    // mounting re-enters the core THROUGH the host (the feed
+                    // start installs its subscription control, the discovery
+                    // feeds its round markets), and holding the guard across
+                    // that await would deadlock the session against itself.
+                    drop(c);
+                    // 运行时半边（绑定即启用 at runtime）：建户即绑定 —— 一个
+                    // 带着非空 venue 的建户请求与「建户 + venue.set」是同一个
+                    // 语义，必须同样把该 venue 的 feed/discovery 挂进本会话，
+                    // 否则新建账户的行情永远停在「首行数据到达后渲染」
+                    // （#535 用户实录）。挂载条件与 venue.set 逐字相同：
+                    // boot 解析的旗标门 + 幂等（已挂载跳过）+ 注册表组件在。
+                    // executor 同样不在运行时挂（may_trade 是 boot 冻结的
+                    // 承诺，见 enable_venue_at_runtime 的文档）。
+                    let mut runtime_enabled = false;
+                    if let Some(v) = venue
+                        && (data_plane.feed_ws_enabled || data_plane.discovery_enabled)
+                        && !data_plane.venue_mounted(v)
+                        && let Some(plugin) = registry.get(v)
+                    {
+                        enable_venue_at_runtime(
+                            plugin.as_ref(),
+                            host.clone(),
+                            data_plane.feed_ws_enabled,
+                            data_plane.discovery_enabled,
+                        )
+                        .await;
+                        data_plane.mark_mounted(v);
+                        runtime_enabled = true;
+                    }
                     Ok(serde_json::to_value(AccountCreateResult {
                         id: id.as_str().to_string(),
                         persisted: true,
@@ -3119,6 +3150,7 @@ async fn handle_line(
                         actor,
                         reason: p.reason,
                         note: ACCOUNT_CREATE_NOTE,
+                        runtime_enabled,
                     })
                     .unwrap_or(Value::Null))
                 }
@@ -6628,6 +6660,174 @@ mod tests {
             reply["result"]["runtimeEnabled"],
             serde_json::json!(false),
             "an already-mounted venue must not be re-mounted: {reply}"
+        );
+    }
+
+    /// 建户即绑定（#535 用户实录的内核半边）：一个带 venue 的 `account.create`
+    /// 必须把该 venue 的 feed/discovery 挂进本会话 —— 否则新建账户的行情永远
+    /// 停在「首行数据到达后渲染」。三条 observable 断言：回执 runtimeEnabled
+    /// =true、订阅控制落在 venue 键下（subscribe_feed_tokens 可达）、venue
+    /// 标签的市场进 scanner。幂等面：同一 venue 的第二次建户（或其后的
+    /// venue.set）不重启在跑的 feed（runtimeEnabled=false）。未带 venue 的
+    /// 建户是纯身份铸造 —— runtimeEnabled=false 且什么也不挂。
+    #[tokio::test]
+    async fn account_create_mounts_a_never_booted_venues_data_plane_at_runtime() {
+        // Same private-persist posture as the venue.set mount test: create
+        // persists, and the fixture's scratch accounts.toml is where.
+        let dir = std::env::temp_dir().join(format!("bk-create-mount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("default"),
+                    name: "main".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: now,
+                }],
+                AccountId::from("default"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                name: "venuelive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        // Boot shape: engine + data plane ON, boot actives = {polymarket} —
+        // venuelive never mounted at boot.
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert("polymarket".to_string());
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+        };
+
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.create","params":{"id":"kalshi","venue":"venuelive","actor":"panel","reason":"add account dialog"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the create must land: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "creating a venue-bound account must mount that venue's data plane: {reply}"
+        );
+
+        // Feed: the subscription control landed under the venue's key — the
+        // same observable the venue.set test pins.
+        core.lock()
+            .await
+            .subscribe_feed_tokens("venuelive", vec!["tok-a".to_string()])
+            .await;
+        assert!(
+            data_plane.venue_mounted("venuelive"),
+            "the mount is recorded — a later venue.set on the same venue must not restart the feed"
+        );
+
+        // Discovery: the venue-tagged market row is in the scanner.
+        {
+            let c = core.lock().await;
+            let venues: Vec<String> = c
+                .engine
+                .as_ref()
+                .map(|e| {
+                    e.scanner()
+                        .round_state(now_ms())
+                        .markets
+                        .iter()
+                        .map(|m| m.venue.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                venues.iter().any(|v| v == "venuelive"),
+                "the create-mounted venue's market must appear in the scanner: {venues:?}"
+            );
+        }
+
+        // Idempotence: a SECOND create on the same venue (another account,
+        // same binding) must not re-mount — the mounted-set guard fires and
+        // the reply says the venue was already live.
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.create","params":{"id":"kalshi-2","venue":"venuelive","actor":"panel","reason":"second account same venue"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the re-create must land: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "an already-mounted venue must not be re-mounted by a second create: {reply}"
+        );
+
+        // A venue-less create is a pure identity mint: nothing to mount, the
+        // reply says so.
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.create","params":{"id":"unbound","actor":"panel","reason":"no venue"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the bare create must land: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "a venue-less create mounts nothing: {reply}"
         );
     }
 

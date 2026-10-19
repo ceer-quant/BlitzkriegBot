@@ -82,11 +82,6 @@ function isAccountEnabled(r: StrategyStatsRow): boolean | null {
   return null
 }
 
-/** 行上的「N 个账户启用中」徽标读数（缺 accounts 字段 = null，不渲染）。 */
-function enabledAccountCount(r: StrategyStatsRow): number | null {
-  return Array.isArray(r.accounts) ? r.accounts.length : null
-}
-
 async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
   busy.value = r.name
   flash.value = null
@@ -521,11 +516,6 @@ function onExpand(name: string): void {
                         :title="`${r.name} 的启停（只影响当前选中账户）`"
                         @update:model-value="toggle(r, $event)"
                       />
-                      <!-- 「N 个账户启用中」徽标：strategy.list 行带 accounts
-                           时显示真实归属数；缺字段不渲染（不发明数字）。 -->
-                      <Tooltip v-if="enabledAccountCount(r) !== null" :content="`${r.name} 当前在 ${enabledAccountCount(r)} 个账户上启用`">
-                        <Badge variant="outline" class="num shrink-0">×<RollingNumber :value="enabledAccountCount(r) ?? 0" /></Badge>
-                      </Tooltip>
                     </span>
                   </td>
                   <td class="px-2 py-2.5">
