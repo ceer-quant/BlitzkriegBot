@@ -2000,6 +2000,13 @@ pub struct AccountVenueSetResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub note: &'static str,
+    /// The runtime half of 绑定即启用: whether THIS venue's data plane was
+    /// mounted into the running session (feed + discovery) by the write —
+    /// false when the venue was already live (boot enabled it) or the write
+    /// is an unbind (empty venue). Older panels ignore the field; a newer
+    /// one can say「已接入行情」instead of telling the operator to restart.
+    #[serde(default)]
+    pub runtime_enabled: bool,
 }
 
 /// [`AccountVenueSetResult::note`] — one spelling, used by the reply and the
@@ -2185,8 +2192,10 @@ pub struct AccountRemoveResult {
 /// [`AccountRemoveResult::note`] — one spelling, used by the reply and the
 /// log line.
 pub const ACCOUNT_REMOVE_NOTE: &str = "removes the account from the book (memory AND accounts.toml, \
-     re-read at next boot); refused while the account still holds open \
-     positions; removing the process-active account re-activates `default`";
+     re-read at next boot); every account is removable — `default` included — \
+     but the LAST account and an account still holding open positions are \
+     refused; removing the process-active account re-activates the first \
+     surviving account";
 
 // ── #509 的读面 — account.journal（钱包流水的面板可读面）─────────────────────
 

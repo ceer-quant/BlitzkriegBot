@@ -555,22 +555,14 @@ impl AccountLedgers {
     }
 
     /// The retirement half of `account.remove`: drop the account AND its
-    /// ledger. `default` is refused here (the reserved identity every
-    /// deployment falls back to — the contract says the runtime never removes
-    /// it, whatever the caller's arm checks first). An unknown id is the
-    /// standard refusal; removing the ACTIVE account is legal at this layer —
-    /// the caller re-activates `default` beside it (the session switchers
-    /// resolve against the book on their next read).
+    /// ledger. Every id is removable here — `default` included (the runtime
+    /// keeps at least ONE account via the caller's last-account refusal; the
+    /// zero-config fallback re-derives on the next boot when the file lacks
+    /// the row). An unknown id is the standard refusal; removing the ACTIVE
+    /// account is legal at this layer — the caller repairs the active cell
+    /// beside it (the session switchers resolve against the book on their
+    /// next read).
     pub fn remove(&mut self, id: &AccountId) -> CoreResult<()> {
-        if *id == default_account_id() {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                "account `default` is reserved — every deployment falls back \
-                 to it (the active-cell repair, the zero-config book), so it \
-                 is never removable"
-                    .to_string(),
-            ));
-        }
         if self.accounts.remove(id).is_none() {
             return Err(unknown_account(id));
         }
@@ -579,10 +571,9 @@ impl AccountLedgers {
     }
 
     /// Repair the process-level active cell after a removal: when the retired
-    /// id WAS active, fall back to `default` (which exists — `remove` refuses
-    /// the reserved id, and the boot guarantees the active names a configured
-    /// account; when the book never configured `default` the first surviving
-    /// entry takes the cell, the same resolution the file loader runs).
+    /// id WAS active, fall back to `default` (when the surviving book still
+    /// configures it — the same resolution the file loader runs); when it
+    /// does not, the first surviving entry takes the cell.
     pub fn repair_active_after_removal(&mut self, removed: &AccountId) {
         if self.active == *removed && !self.accounts.contains_key(&self.active) {
             self.active = if self.accounts.contains_key(&default_account_id()) {
@@ -975,7 +966,7 @@ mod book_tests {
     }
 
     #[test]
-    fn remove_drops_account_and_ledger_but_never_default() {
+    fn remove_drops_account_and_ledger_including_default() {
         let mut book = two_accounts();
         book.get_mut(&AccountId("paper".into()))
             .unwrap()
@@ -986,11 +977,12 @@ mod book_tests {
             book.ledger_of(&AccountId("paper".into())).is_err(),
             "the ledger goes with the account — no orphan book"
         );
-        // `default` is the reserved identity: refused at the storage layer too.
-        let err = book.remove(&default_account_id()).expect_err("reserved");
-        assert_eq!(err.code, CoreErrorCode::InvalidParams);
-        assert!(err.message.contains("reserved"), "{}", err.message);
+        // `default` is an ordinary account now: removable like any other
+        // (the last-account refusal lives in the runtime caller, not here).
+        book.remove(&default_account_id()).expect("default retires");
+        assert!(book.account(&default_account_id()).is_none());
         // An unknown id is the standard refusal.
+        book.insert(fresh_account("other", 1)).unwrap();
         let err = book
             .remove(&AccountId("ghost".into()))
             .expect_err("unknown");
@@ -1013,13 +1005,41 @@ mod book_tests {
         book.switch(&AccountId("paper".into())).ok(); // unknown now — refused
         book.insert(fresh_account("other", 1)).unwrap();
         book.switch(&AccountId("other".into())).unwrap();
-        book.remove(&AccountId("default".into()))
-            .expect_err("default stays");
-        book.repair_active_after_removal(&AccountId("default".into()));
+        // Removing a NON-active account (default here) leaves the cell alone.
+        book.remove(&default_account_id()).expect("default retires");
+        book.repair_active_after_removal(&default_account_id());
         assert_eq!(
             book.active_id().as_str(),
             "other",
             "an unrelated removal leaves the active cell alone"
+        );
+    }
+
+    #[test]
+    fn removing_default_repairs_the_cell_to_the_first_survivor() {
+        // default active + default removed: the cell re-activates the first
+        // surviving entry (lowest id) — the file loader's resolution for a
+        // book whose `default` row left.
+        let mut book = two_accounts();
+        assert_eq!(book.active_id().as_str(), DEFAULT_ACCOUNT_ID);
+        book.remove(&default_account_id()).unwrap();
+        book.repair_active_after_removal(&default_account_id());
+        assert_eq!(
+            book.active_id().as_str(),
+            "paper",
+            "the active cell never dangles: first survivor takes it"
+        );
+        // When a surviving `default` exists it wins over the lowest id.
+        let mut book2 = two_accounts();
+        book2.remove(&AccountId("paper".into())).unwrap();
+        book2.insert(fresh_account("aaa", 1)).unwrap();
+        book2.switch(&AccountId("aaa".into())).unwrap();
+        book2.remove(&AccountId("aaa".into())).unwrap();
+        book2.repair_active_after_removal(&AccountId("aaa".into()));
+        assert_eq!(
+            book2.active_id().as_str(),
+            DEFAULT_ACCOUNT_ID,
+            "a surviving default is preferred over the lowest id"
         );
     }
 }

@@ -28,7 +28,9 @@
  *   5. The template renders the Loading card and the 未绑定 empty state, and
  *      every market display surface (prices grid, books card, kline select)
  *      reads the venue-filtered visible rows, not the raw ones.
- *   6. Venue stays data: no branch on a concrete exchange name.
+ *   6. Venue stays data: no branch on a concrete exchange name, and the
+ *      price/book surfaces render NO venue badges (the countdown card already
+ *      names the exchange; the 2026-10 ruling removed the per-row labels).
  *
  *   cd ui/webapp/webui && npm run check:hft-venue
  */
@@ -138,8 +140,16 @@ check('行情面全部读 venue 过滤后的可见行（prices 网格 / 盘口�
   assert.match(template, /in visibleBooks/, '盘口/K线选项未消费 visibleBooks')
 })
 
-check('venue 徽标数据渲染：行带 venue 显示徽标，不带显示「未分所」，不分支具体交易所名', () => {
-  assert.match(page, /未分所/, '缺「未分所」降级徽标（feature-detect 的另一半）')
+check('行情面不渲染 venue 徽标（倒计时卡已写交易所，其他卡不再标注）', () => {
+  // 2026-10 裁决：行情页不到处强调交易所。倒计时卡已显示交易所，行情网格
+  // 与盘口卡的 per-row/per-card venue 徽标（含「未分所」降级徽标）已删除；
+  // venue 仍是纯数据（行内字段照常流动），页面不渲染它。
+  assert.doesNotMatch(page, /未分所/, '行情面仍渲染「未分所」徽标 —— 去交易所强调的裁决被回退')
+  assert.doesNotMatch(
+    page,
+    /<Badge[^>]*>\{\{[^}]*(m\.venue|visibleBooks\[0\]\?\.venue)/,
+    '行情网格/盘口卡仍渲染 venue 徽标 —— 去交易所强调的裁决被回退',
+  )
   const banned = ['polymarket', 'kalshi', 'binance', 'okx']
   for (const name of banned) {
     assert.doesNotMatch(

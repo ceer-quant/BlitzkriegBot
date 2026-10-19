@@ -3424,10 +3424,13 @@ impl Core {
     }
 
     /// `account.remove`（账户簿运行时增删的删半）：账户离开内存 AND
-    /// accounts.toml，同一事务姿态。拒绝面：保留名 `default`（簿层也拒，
-    /// 双保险）；仍有 open position 的账户（钱不能变成不可寻址的）；未知 id
-    /// 标准拒绝。被删的是进程级 active 账户时自动回切 `default`（会话级
-    /// 切换器在下次读时照簿解析，无需此处操心）。
+    /// accounts.toml，同一事务姿态。拒绝面：账簿的最后一个账户（空簿会让
+    /// 下一次 boot 拒载，删掉它是删库式脚枪）；仍有 open position 的账户
+    /// （钱不能变成不可寻址的）；未知 id 标准拒绝。`default` 只是普通账户
+    /// —— 所有账户都可删（用户裁决：绑定只在建户时绑定、编辑面已收，
+    /// 删户重建是绑定变更的唯一出口；零配置的 default 由下一次 boot 的
+    /// 缺文件/缺行路径重新派生）。被删的是进程级 active 账户时自动回切
+    /// 剩余账户的第一个（会话级切换器在下次读时照簿解析）。
     pub fn remove_account_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -3435,17 +3438,24 @@ impl Core {
         reason: &str,
     ) -> CoreResult<()> {
         use crate::ipc::schema::ACCOUNT_REMOVE_NOTE;
-        // Reserved name first (the book layer refuses too — belt and braces).
-        if *id == crate::account::default_account_id() {
+        // The LAST account stays: an empty book fails the next boot's parse,
+        // so retiring it would be a delete-the-deployment footgun. Every id
+        // is otherwise fair game — `default` included (the zero-config
+        // fallback re-derives on the next boot when the file lacks a
+        // `default` row). Existence refuses first, with the standard
+        // unknown-account error.
+        self.accounts.require(id)?;
+        if self.accounts.account_list().len() <= 1 {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "account.remove: id `default` is reserved — every deployment \
-                 falls back to it, so it is never removable"
-                    .to_string(),
+                format!(
+                    "account.remove: `{id}` is the last account in the book — \
+                     a deployment keeps at least one account (the next boot \
+                     refuses an empty accounts.toml; delete the file itself \
+                     instead)"
+                ),
             ));
         }
-        // Existence, with the standard unknown-account refusal, before disk.
-        self.accounts.require(id)?;
         // Open positions pin the account: retiring it would leave inventory
         // with no book, no ledger and no close path — money must not become
         // unaddressable.
@@ -3492,8 +3502,8 @@ impl Core {
             account = %id,
             reason = %reason,
             "account removed — identity and ledger retired, the active cell \
-             re-activates `default` when it named the removed account \
-             ({ACCOUNT_REMOVE_NOTE})",
+             re-activates the first surviving account when it named the \
+             removed account ({ACCOUNT_REMOVE_NOTE})",
         );
         Ok(())
     }
@@ -3539,12 +3549,30 @@ impl Core {
     /// NAME tables and must see each name exactly once (PR H). Sorted, not
     /// run-length deduped: the second scope of a name registers AFTER every
     /// first-scope name, so duplicates are never adjacent.
+    ///
+    /// 策略全局可见（2026-10 操作者裁决）：the row set is the INSTALLED set
+    /// (`package_sources` — sticky provenance, one entry per package LOADED
+    /// this session, surviving scope teardowns) UNION the live scopes. Boot
+    /// scans every package disabled, then the account enablement sets tear
+    /// the unassigned scopes down — a registry read of live scopes alone
+    /// would shrink the strategies page to the enabled few and lock every
+    /// other strategy out of the panel's enable buttons (its assignable set
+    /// is `strategy.list`). Torn-down names carry no live scope, so their
+    /// row reads `accounts: []`, sizing/gate views fall back to the globals,
+    /// and enabling one re-instantiates the scope from the sticky source.
     pub fn strategy_names(&self) -> Vec<String> {
         let mut names = self
             .engine
             .as_ref()
             .map(|e| e.supported_strategies())
             .unwrap_or_default();
+        if let Some(e) = self.engine.as_ref() {
+            for (name, _) in e.scope_sources() {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
         names.sort();
         names.dedup();
         names
@@ -6718,11 +6746,18 @@ impl Core {
     /// per-share: `counterpart_basis/share + this leg's price ≤ 1.00`. The
     /// WORST (highest-basis) leg prices the cap — a blend would let one
     /// expensive leg hide behind a cheap one.
+    ///
+    /// 跨账户双腿裁决（多账户解耦收口，docs/acceptance-account-decouple.md
+    /// 披露 1）：pair 的经济单位 = (账户, 条件, 资产) —— 一个 UP share +
+    /// 一个 DOWN share 在**同一账户的账本里**赎回 $1；每账户独立账本独立
+    /// 赎回，跨账户的对手腿在结算时永不合并。所以分母只看本账户的对手腿：
+    /// A 的 0.90 持仓不得把 B 的 0.05 新腿顶过 $1。
     fn counterpart_pair_basis(
         &self,
         condition_id: &str,
         asset: &str,
         direction: &SignalDirection,
+        account_id: &AccountId,
     ) -> Option<Decimal> {
         self.positions
             .open_positions()
@@ -6732,6 +6767,7 @@ impl Core {
                     && p.asset == asset
                     && p.direction != *direction
                     && p.shares > Decimal::ZERO
+                    && &p.account_id == account_id
             })
             .map(|p| p.cost_usd / p.shares)
             .max()
@@ -6947,14 +6983,24 @@ impl Core {
                 // Fold the (strategy, account) map across every scope of this
                 // strategy: the row's counters are the strategy's TOTALS, and
                 // `accounts` names the slices a per-account view can pick.
+                // The set is the LIVE SCOPES (engine registry, the same
+                // read `strategy.list` rows carry) UNION the accounting keys
+                // (a torn-down scope's closed-trade history must keep its
+                // attribution even after its scope is gone).
                 let mut acc = StrategyAccounting::default();
                 let prefix = format!("{name}\u{1}");
                 let mut accounts: Vec<String> = self
-                    .strategy_accounting
-                    .keys()
-                    .filter_map(|k| k.strip_prefix(&prefix))
-                    .map(str::to_string)
-                    .collect();
+                    .engine
+                    .as_ref()
+                    .map(|e| e.strategy_scopes(&name))
+                    .unwrap_or_default();
+                for k in self.strategy_accounting.keys() {
+                    if let Some(a) = k.strip_prefix(&prefix)
+                        && !accounts.iter().any(|v| v == a)
+                    {
+                        accounts.push(a.to_string());
+                    }
+                }
                 accounts.sort();
                 accounts.dedup();
                 for a in &accounts {
@@ -6979,12 +7025,23 @@ impl Core {
                     .filter(|p| p.strategy == name)
                     .collect();
                 let open_notional: Decimal = opens.iter().map(|p| p.cost_usd).sum();
+                // Source: the live scope's provenance when one exists, else the
+                // sticky package_sources entry (a torn-down scope's row keeps
+                // naming where the package lives — the strategies page shows
+                // every INSTALLED strategy, enabled or not).
                 let source = self
                     .engine
                     .as_ref()
-                    .and_then(|e| e.strategy_source(&name))
-                    .unwrap_or("")
-                    .to_string();
+                    .map(|e| {
+                        e.strategy_source(&name).map(|s| s.to_string()).or_else(|| {
+                            e.scope_sources()
+                                .into_iter()
+                                .find(|(n, _)| n == &name)
+                                .map(|(_, s)| s)
+                        })
+                    })
+                    .unwrap_or_default()
+                    .unwrap_or_default();
                 // E2-a: the sizing actually in force for this strategy (its own
                 // override clamped by the globals, else the globals) plus the
                 // configured caps, so the report shows both quota and occupancy.
@@ -11667,10 +11724,13 @@ impl Core {
             // top-up/chase paths). The worst held leg prices the pair: a
             // position's per-share basis is `cost_usd / shares`, and one
             // share of UP plus one share of DOWN redeems exactly $1.
+            // 跨账户双腿：分母只看本账户的对手腿（同一账本内赎回 $1，
+            // 见 counterpart_pair_basis 的裁决注释）。
             if let Some(paid) = self.counterpart_pair_basis(
                 &req.condition_id,
                 &req.asset,
                 &parse_direction(&req.direction),
+                &req.account_id,
             ) {
                 let total = paid + req.price;
                 if total > Decimal::ONE {
@@ -13614,12 +13674,14 @@ impl Core {
         // 3. The pair-cost cap. Only entries (BUY) chase; a condition with no
         //    counterpart position has nothing to sum against (a fresh pair is
         //    the strategy's own <1.00 decision). Per-share: one UP share plus
-        //    one DOWN share redeems exactly $1.00.
+        //    one DOWN share redeems exactly $1.00. 跨账户双腿：分母只看本
+        //    账户的对手腿（同一账本内赎回 $1）。
         if req.side == Side::Buy
             && let Some(paid) = self.counterpart_pair_basis(
                 &req.condition_id,
                 &req.asset,
                 &parse_direction(&req.direction),
+                &req.account_id,
             )
         {
             let total = paid + chase_price;
@@ -26585,6 +26647,83 @@ mod audit_fix_tests {
             c.strategy_stats().len(),
             names.len(),
             "one stats row per distinct strategy"
+        );
+    }
+
+    /// 策略全局可见（2026-10 操作者裁决）：boot 把每个包注册 DISABLED，随后
+    /// 账户启用集把未指派的 scope 整拆（rebuild DROP）。行集合若只读活
+    /// scope，策略页就缩成「被启用的那几个」——面板的启用按钮（assignable
+    /// 集合 = `strategy.list`）再也无法点亮其余策略：死锁。本牙钉死：拆除后
+    /// `strategy_names` / `strategy_stats` 仍报**安装面**全量，拆掉的名字行
+    /// `accounts` 为空、source 保留 sticky 溯源；enable 集合照旧只数活 scope。
+    #[test]
+    fn torn_down_scopes_stay_visible_on_the_strategies_surface() {
+        let mut c = two_book_core();
+        let cfg = c.config.clone();
+        cfg.install_engine(&mut c)
+            .expect("test engine (no strategy_dir: registers nothing itself)");
+        let engine = c.engine.as_mut().expect("test engine");
+        // Three packages installed DISABLED (the boot scan's landing state).
+        crate::strategies::test_support::host_disabled(
+            engine,
+            Default::default(),
+            Default::default(),
+        );
+        assert_eq!(c.strategy_names().len(), 3, "installed = visible");
+        assert_eq!(c.strategy_stats().len(), 3);
+
+        // The account enablement set keeps ONE strategy: the rebuild's DROP
+        // phase tears the other two flat scopes down (the boot fan-out's
+        // exact move; held = [] — nothing is demoted). In-process core has no
+        // accounts_config_path, so the persisting half is skipped — the book
+        // write + the engine rebuild are the semantic body the persisting
+        // wrapper shares (persistence has its own teeth in the config tests).
+        let default_id = crate::account::AccountId::from("default");
+        let held: Vec<String> = Vec::new();
+        c.accounts
+            .set_strategies(&default_id, vec!["spread_arb".into()], 1)
+            .expect("the book write lands");
+        let kept = c.rebuild_account_scopes(&default_id, &["spread_arb".to_string()], &held);
+        assert!(kept.is_empty(), "nothing held ⇒ no exits-only promotion");
+
+        // The visibility contract: every INSTALLED strategy stays on the
+        // surface, enabled or not.
+        let names = c.strategy_names();
+        assert_eq!(
+            names.len(),
+            3,
+            "torn-down scopes must stay visible (package_sources is the installed set): {names:?}"
+        );
+        assert_eq!(c.strategy_stats().len(), 3, "same projection for the stats");
+        for row in c.strategy_stats() {
+            let name = row["name"].as_str().expect("row name");
+            let accounts: Vec<&str> = row["accounts"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            if name == "spread_arb" {
+                assert_eq!(
+                    accounts,
+                    vec!["default"],
+                    "the enabled strategy names its scope"
+                );
+            } else {
+                assert!(
+                    accounts.is_empty(),
+                    "torn-down {name} has no live scope ⇒ empty accounts, still visible"
+                );
+                let source = row["source"].as_str().unwrap_or("");
+                assert_eq!(
+                    source, "test",
+                    "torn-down {name} keeps its sticky provenance, not a blank source"
+                );
+            }
+        }
+        // The engine's own enablement read is untouched: one live scope, on.
+        assert_eq!(
+            c.enabled_strategy_names(),
+            vec!["spread_arb".to_string()],
+            "visibility must not resurrect the torn-down scopes as running"
         );
     }
 }

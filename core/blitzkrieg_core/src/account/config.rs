@@ -424,11 +424,12 @@ pub fn persist_account_strategies(
 /// The persisted removal of ONE account (`account.remove`): drop the named
 /// `[[account]]` from the book — read-modify-write, the same fail-closed
 /// posture as every accounts.toml writer above. The CALLER owns the
-/// refusals that need runtime facts (open positions, the reserved `default`);
-/// this layer refuses only what the file itself decides (an unknown id, a
-/// file that does not parse) and never leaves the last row removable-broken:
-/// an empty book would fail the next boot's parse, so removing the FINAL
-/// account is refused here with the honest diagnostic.
+/// refusals that need runtime facts (open positions, the last-account
+/// guard); this layer refuses only what the file itself decides (an unknown
+/// id, a file that does not parse) and never leaves the last row
+/// removable-broken: an empty book would fail the next boot's parse, so
+/// removing the FINAL row is refused here with the honest diagnostic.
+/// `default` is not special-cased — every account is removable.
 pub fn persist_account_remove(path: &Path, account_id: &str) -> Result<(), CoreError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         CoreError::new(

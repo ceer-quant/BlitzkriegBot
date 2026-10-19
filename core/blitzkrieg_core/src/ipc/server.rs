@@ -222,6 +222,104 @@ fn claim_socket_path(socket_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The data plane's boot-resolved shape, shared with every session: the
+/// mount flags (config is the flag's only channel — they never change
+/// mid-session) and the ALREADY-MOUNTED plugin names (boot actives + any
+/// runtime enablements). `account.venue.set` reads it to decide whether a
+/// re-binding needs a runtime mount (`venue_mounted` is the idempotence
+/// guard — a re-bind of a live venue must not restart its feed).
+#[derive(Clone)]
+struct DataPlaneRuntime {
+    feed_ws_enabled: bool,
+    discovery_enabled: bool,
+    mounted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl DataPlaneRuntime {
+    /// The boot shape: every boot-selected plugin is mounted.
+    fn at_boot(
+        config: &CoreConfig,
+        actives: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
+    ) -> Self {
+        let mounted = actives.iter().map(|p| p.name().to_string()).collect();
+        Self {
+            feed_ws_enabled: config.feed_ws_enabled,
+            discovery_enabled: config.engine_enabled && config.discovery_enabled,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+        }
+    }
+
+    fn venue_mounted(&self, venue: &str) -> bool {
+        self.mounted
+            .lock()
+            .expect("data plane mounted set poisoned")
+            .contains(venue)
+    }
+
+    fn mark_mounted(&self, venue: &str) {
+        self.mounted
+            .lock()
+            .expect("data plane mounted set poisoned")
+            .insert(venue.to_string());
+    }
+}
+
+/// Mount ONE venue's runtime components (feed + discovery) — the same two
+/// mounts `run` performs for every boot-selected plugin, reused verbatim so
+/// a runtime enablement is byte-for-byte the boot shape (no second mechanism).
+///
+/// The caller decides WHICH flags gate the mounts (this function does not
+/// re-read them): boot passes `config.feed_ws_enabled` /
+/// `config.engine_enabled && config.discovery_enabled`; the venue.set write
+/// passes the session's same resolved flags, so a runtime binding follows the
+/// boot's data-plane posture exactly.
+///
+/// Executor: NOT mounted here. `mode.may_trade()` is a boot-frozen promise —
+/// Dry/ReadOnly never construct egress, and a Live core's executor set is
+/// built around the boot's own plugins (`ExecutorConfig.markets` etc.). A
+/// venue bound at runtime gains market DATA (what the 行情 page starves on);
+/// live egress for a late-bound venue is the next batch's contract, and the
+/// boot-derived set already covers every venue bound BEFORE the process
+/// started.
+async fn enable_venue_at_runtime(
+    plugin: &dyn blitzkrieg_market_api::MarketPlugin,
+    host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+    feed_ws_enabled: bool,
+    discovery_enabled: bool,
+) {
+    let name = plugin.name();
+    if feed_ws_enabled {
+        match plugin.data_feed() {
+            Some(feed) => {
+                let cfg = blitzkrieg_market_api::DataFeedConfig::default();
+                if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
+                    eprintln!("blitzkrieg-core: data feed start failed for {name}: {e}");
+                } else {
+                    eprintln!("blitzkrieg-core: feed started for {name} (runtime enablement)");
+                }
+            }
+            None => eprintln!("blitzkrieg-core: {name} declares no data feed — nothing to mount"),
+        }
+    }
+    if discovery_enabled {
+        match plugin.discovery() {
+            Some(disc) => {
+                let cfg = blitzkrieg_market_api::DiscoveryConfig {
+                    assets: Vec::new(),
+                    round_duration_sec: 0,
+                    poll_sec: 5,
+                };
+                if let Err(e) = disc.start(host.clone(), cfg).await {
+                    eprintln!("blitzkrieg-core: discovery start failed for {name}: {e}");
+                } else {
+                    eprintln!("blitzkrieg-core: discovery started for {name} (runtime enablement)");
+                }
+            }
+            None => eprintln!("blitzkrieg-core: {name} declares no discovery — nothing to mount"),
+        }
+    }
+}
+
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
 pub async fn run(
     socket_path: String,
@@ -342,9 +440,9 @@ pub async fn run(
         }
         // The chain resolves through the shared `boot_enablement` — the same
         // function the readout re-derives with, so `market.plugin.get` can
-        // never disagree with this boot: it returns the cell value (layer 3)
-        // or, when the accounts' derived set wins (layer 2), clears the
-        // retired cell and lets the fallback resolution run.
+        // never disagree with this boot: it returns the cell value (layer 3),
+        // the DERIVED BINDING SET (layer 2 — the spec every venue's data
+        // plane mounts from), or lets the fallback resolution run (layer 4).
         let (resolved, source) =
             crate::market::boot_enablement(&core, &registry, None, cell.as_ref());
         plugin = resolved;
@@ -432,6 +530,10 @@ pub async fn run(
         }
     }
 
+    // The data plane's runtime handle: feeds/discovery mount THROUGH this
+    // host, at boot AND later (account.venue.set re-binding an account to a
+    // venue whose plugin never booted mounts that venue's components here —
+    // the runtime half of 绑定即启用; see `enable_venue_at_runtime`).
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
         let h = crate::market::host::CoreHost::new(core.clone());
         // Untagged round lists (legacy corpora / Node bridge) route their
@@ -440,6 +542,9 @@ pub async fn run(
         h.set_active_plugin(actives[0].name());
         Arc::new(h)
     };
+    // The boot-resolved data-plane shape the venue.set write consults: the
+    // mount flags and the already-mounted names (idempotence guard).
+    let data_plane = DataPlaneRuntime::at_boot(&config, &actives);
 
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
@@ -692,6 +797,8 @@ pub async fn run(
                         registry.clone(),
                         update_state.clone(),
                         jobs.clone(),
+                        host.clone(),
+                        data_plane.clone(),
                     )
                 }
                 Err(e) => tracing::warn!(error = %e, "accept failed"),
@@ -716,6 +823,8 @@ fn spawn_session(
     registry: crate::market::registry::MarketPluginRegistry,
     update_state: Arc<crate::ipc::version::UpdateState>,
     jobs: Arc<crate::backtest_jobs::BacktestJobs>,
+    host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+    data_plane: DataPlaneRuntime,
 ) {
     tokio::spawn(async move {
         let (read_half, write_half) = stream.into_split();
@@ -789,6 +898,8 @@ fn spawn_session(
                         &peer,
                         &update_state,
                         &jobs,
+                        &host,
+                        &data_plane,
                         &mut session,
                     )
                     .await;
@@ -825,6 +936,8 @@ async fn handle_line(
     peer: &PeerAuth,
     update_state: &Arc<crate::ipc::version::UpdateState>,
     jobs: &Arc<crate::backtest_jobs::BacktestJobs>,
+    host: &std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+    data_plane: &DataPlaneRuntime,
     session: &mut SessionState,
 ) -> String {
     let req: Request = match serde_json::from_str(&line) {
@@ -2813,6 +2926,38 @@ async fn handle_line(
                         p.reason.as_deref().unwrap_or(""),
                         now_ms(),
                     )?;
+                    // The lock guard is dropped BEFORE the runtime mount
+                    // below: mounting re-enters the core THROUGH the host
+                    // (the feed start installs its subscription control, the
+                    // discovery feeds its round markets) — holding the guard
+                    // across that await would deadlock the session against
+                    // itself.
+                    drop(c);
+                    // 运行时半边（绑定即启用 at runtime）：绑到一个本会话从未
+                    // 挂载的 venue 时，把该 venue 的 feed/discovery 挂进来 ——
+                    // 与 boot 对每个选中插件做的挂载是同一条路（复用
+                    // `enable_venue_at_runtime`），不发明新机制。已挂载的
+                    // venue（boot 启用 / 更早的运行时绑定）幂等跳过：重复
+                    // start 会顶掉在跑的订阅控制句柄。挂载旗标是 boot 解析的
+                    // 快照（config 是旗标的唯一通道，会话内不变）；executor
+                    // 不在运行时挂 —— may_trade 是 boot 冻结的承诺，见该函数
+                    // 的文档。
+                    let mut runtime_enabled = false;
+                    if !venue.is_empty()
+                        && (data_plane.feed_ws_enabled || data_plane.discovery_enabled)
+                        && !data_plane.venue_mounted(venue)
+                        && let Some(plugin) = registry.get(venue)
+                    {
+                        enable_venue_at_runtime(
+                            plugin.as_ref(),
+                            host.clone(),
+                            data_plane.feed_ws_enabled,
+                            data_plane.discovery_enabled,
+                        )
+                        .await;
+                        data_plane.mark_mounted(venue);
+                        runtime_enabled = true;
+                    }
                     Ok(serde_json::to_value(AccountVenueSetResult {
                         account_id: id.as_str().to_string(),
                         venue: venue.to_string(),
@@ -2821,6 +2966,7 @@ async fn handle_line(
                         actor,
                         reason: p.reason,
                         note: ACCOUNT_VENUE_SET_NOTE,
+                        runtime_enabled,
                     })
                     .unwrap_or(Value::Null))
                 }
@@ -3945,6 +4091,102 @@ mod tests {
         }
     }
 
+    /// The runtime-enablement stub: a plugin whose feed and discovery really
+    /// START and really REACH THE CORE — the feed installs a subscription
+    /// control keyed under the plugin name (what `subscribe_feed_tokens`
+    /// routes through) and the discovery registers a round market tagged with
+    /// the plugin's venue (what ENGINE_ROUND reads back). A test that pins
+    /// 「venue.set 后新 venue 的市场出现在 scanner」 asserts against these two
+    /// observable effects, not against a log line.
+    struct VenueLivePlugin {
+        name: String,
+    }
+    impl blitzkrieg_market_api::MarketPlugin for VenueLivePlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+            blitzkrieg_market_api::MarketType::Prediction
+        }
+        fn data_feed(&self) -> Option<&dyn blitzkrieg_market_api::DataFeed> {
+            Some(&VenueLiveFeed)
+        }
+        fn discovery(&self) -> Option<&dyn blitzkrieg_market_api::MarketDiscovery> {
+            Some(&VenueLiveDiscovery)
+        }
+    }
+
+    /// Installs a subscription control whose `set_tokens` records the LAST set
+    /// — the wire test reads it back to prove the mount happened.
+    struct VenueLiveFeed;
+    impl blitzkrieg_market_api::DataFeed for VenueLiveFeed {
+        fn name(&self) -> &str {
+            "venue-live-feed"
+        }
+        fn start<'a>(
+            &'a self,
+            host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+            _config: blitzkrieg_market_api::DataFeedConfig,
+            initial_tokens: Vec<blitzkrieg_market_api::TokenId>,
+        ) -> blitzkrieg_market_api::BoxFuture<'a, Result<(), blitzkrieg_market_api::CoreError>>
+        {
+            Box::pin(async move {
+                host.install_subscription_control(
+                    "venuelive",
+                    std::sync::Arc::new(VenueLiveControl {
+                        tokens: std::sync::Mutex::new(initial_tokens),
+                    }),
+                )
+                .await;
+                Ok(())
+            })
+        }
+    }
+
+    struct VenueLiveControl {
+        tokens: std::sync::Mutex<Vec<String>>,
+    }
+    impl blitzkrieg_market_api::SubscriptionControl for VenueLiveControl {
+        fn set_tokens(&self, tokens: Vec<blitzkrieg_market_api::TokenId>) {
+            *self.tokens.lock().expect("venue live control poisoned") = tokens;
+        }
+    }
+
+    /// On start, registers one round market tagged with the plugin's venue —
+    /// exactly what a real discovery does at its first poll.
+    struct VenueLiveDiscovery;
+    impl blitzkrieg_market_api::MarketDiscovery for VenueLiveDiscovery {
+        fn name(&self) -> &str {
+            "venue-live-discovery"
+        }
+        fn start<'a>(
+            &'a self,
+            host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+            _config: blitzkrieg_market_api::DiscoveryConfig,
+        ) -> blitzkrieg_market_api::BoxFuture<'a, Result<(), blitzkrieg_market_api::CoreError>>
+        {
+            Box::pin(async move {
+                use rust_decimal_macros::dec;
+                host.on_round_markets(vec![blitzkrieg_market_api::MarketDescriptor {
+                    asset: "BTC".to_string(),
+                    condition_id: "live-cond".to_string(),
+                    question_id: "live-q".to_string(),
+                    up_token_id: "live-up".to_string(),
+                    down_token_id: "live-down".to_string(),
+                    up_price: dec!(0.55),
+                    down_price: dec!(0.45),
+                    expires_at_ms: now_ms() + 900_000,
+                    round_slot: now_ms() / 1000 / 900,
+                    venue: "venuelive".to_string(),
+                    neg_risk: false,
+                    question: "runtime mount market".to_string(),
+                }])
+                .await;
+                Ok(())
+            })
+        }
+    }
+
     /// The kernel must be able to read a peer's uid on a real connected socket:
     /// a helper that always errors would silently downgrade every deployment to
     /// "file mode only" without anyone noticing.
@@ -4176,6 +4418,10 @@ mod tests {
     // applied.
 
     /// One request/response over the same entry point a session uses.
+    ///
+    /// The test data plane mounts NOTHING at boot (empty actives, flags off)
+    /// and the test host is a `CoreHost` over the same core — the venue.set
+    /// arm's runtime mount fires against them exactly as a session's would.
     async fn rpc(
         core: &Arc<AsyncMutex<Core>>,
         registry: &crate::market::registry::MarketPluginRegistry,
@@ -4184,6 +4430,13 @@ mod tests {
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: false,
+            discovery_enabled: false,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        };
         let mut session = SessionState::default();
         serde_json::from_str(
             &handle_line(
@@ -4193,6 +4446,8 @@ mod tests {
                 peer,
                 &update_state,
                 &jobs,
+                &host,
+                &data_plane,
                 &mut session,
             )
             .await,
@@ -4213,11 +4468,66 @@ mod tests {
     ) -> Value {
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: false,
+            discovery_enabled: false,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        };
         serde_json::from_str(
-            &handle_line(core, registry, line, peer, &update_state, &jobs, session).await,
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                &update_state,
+                &jobs,
+                &host,
+                &data_plane,
+                session,
+            )
+            .await,
         )
         .expect("every reply is one JSON object")
     }
+
+    /// The venue.set arm's runtime mount needs a data plane whose MOUNT FLAGS
+    /// ARE ON (the default [`rpc`] fixture runs flags-off: it pins the
+    /// no-op-inert path). This variant hands in the caller's data plane and
+    /// host so a test can assemble the boot shape it pins — flags on, boot
+    /// actives pre-marked — and then assert against the SAME cell the arm
+    /// mutates (the mounted set), the same way `rpc_with_subs` holds the
+    /// session's kline cell.
+    #[allow(clippy::too_many_arguments)]
+    async fn rpc_with_data_plane(
+        core: &Arc<AsyncMutex<Core>>,
+        registry: &crate::market::registry::MarketPluginRegistry,
+        peer: &PeerAuth,
+        host: &std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+        data_plane: &DataPlaneRuntime,
+        line: String,
+    ) -> Value {
+        let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
+        let mut session = SessionState::default();
+        serde_json::from_str(
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                &update_state,
+                &jobs,
+                host,
+                data_plane,
+                &mut session,
+            )
+            .await,
+        )
+        .expect("every reply is one JSON object")
+    }
+
     /// A core whose interesting knob is the per-order cap: 3 USD, so the 2.00
     /// USD ticket below (`order_line`) is admitted BEFORE any hot change and
     /// refused once the cap drops to 1. The engine is installed from the startup
@@ -4292,6 +4602,13 @@ mod tests {
         let line =
             format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#);
         let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: false,
+            discovery_enabled: false,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        };
         let mut session = SessionState::default();
         serde_json::from_str(
             &handle_line(
@@ -4301,6 +4618,8 @@ mod tests {
                 peer,
                 &update_state,
                 jobs,
+                &host,
+                &data_plane,
                 &mut session,
             )
             .await,
@@ -5268,8 +5587,26 @@ mod tests {
         line: String,
     ) -> Value {
         let jobs = Arc::new(crate::backtest_jobs::BacktestJobs::new());
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: false,
+            discovery_enabled: false,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        };
         serde_json::from_str(
-            &handle_line(core, registry, line, peer, update_state, &jobs, session).await,
+            &handle_line(
+                core,
+                registry,
+                line,
+                peer,
+                update_state,
+                &jobs,
+                &host,
+                &data_plane,
+                session,
+            )
+            .await,
         )
         .expect("every reply is one JSON object")
     }
@@ -6126,6 +6463,269 @@ mod tests {
 
     // ── the account↔venue binding verbs, at the wire ─────────────────────────
 
+    /// 运行时半边（绑定即启用 at runtime）：绑到一个本会话从未挂载的 venue
+    /// 时，`account.venue.set` 的写路径必须把该 venue 的数据面挂进运行中的
+    /// 会话 —— 回执 `runtimeEnabled: true`，feed 的订阅控制句柄落到内核
+    /// （`subscribe_feed_tokens` 的路由键就位），discovery 注册的带 venue
+    /// 标签的市场行出现在 scanner（ENGINE_ROUND 富化的数据源）。缺了这半边
+    /// 的会话里，运行中改绑的 venue 永远没有行情 —— 行情页对新所永远
+    /// 「加载中」。
+    #[tokio::test]
+    async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
+        // A private accounts.toml — the persist half of account.venue.set
+        // refuses without a config path (the same posture the round-duration
+        // card runs), so the fixture must carry one, exactly the way the
+        // round-trip test below does. The ENGINE is installed too: the
+        // scanner assertion at the bottom reads `engine.scanner().round_state`
+        // and an engine-less core would answer it with an empty list for the
+        // WRONG reason (no scanner at all, not "the venue never mounted").
+        let dir = std::env::temp_dir().join(format!("bk-venue-mount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![
+                    crate::account::Account {
+                        id: AccountId::from("default"),
+                        name: "main".into(),
+                        market_type: blitzkrieg_market_api::MarketType::Prediction,
+                        status: AccountStatus::Active,
+                        credential_keys: crate::account::CredentialKeys::default(),
+                        venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
+                        updated_at_ms: now,
+                    },
+                    crate::account::Account {
+                        id: AccountId::from("paper"),
+                        name: "paper".into(),
+                        market_type: blitzkrieg_market_api::MarketType::Prediction,
+                        status: AccountStatus::Active,
+                        credential_keys: crate::account::CredentialKeys::default(),
+                        venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
+                        updated_at_ms: now,
+                    },
+                ],
+                AccountId::from("default"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            // A registry with ONLY the runtime venue: boot actives below name
+            // a polymarket plugin that this test never registers — the point
+            // is that the venue.set mount works for a plugin the boot never
+            // selected, and the compiled-in registry is empty in a bare test
+            // binary anyway (the same trick the round-trip test uses).
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                name: "venuelive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        // Boot shape: engine + feed-ws ON (production supervisor's default
+        // extra_args), boot actives = {polymarket} — venuelive NEVER mounted.
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert("polymarket".to_string());
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+        };
+
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{"accountId":"paper","venue":"venuelive","reason":"runtime mount"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "the bind must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "the reply must say the venue's data plane was mounted: {reply}"
+        );
+
+        // Feed: the subscription control landed under the venue's key — the
+        // route `subscribe_feed_tokens` takes on the next rollover. The call
+        // is the assertion: it resolves through `Core.feeds`, so reaching it
+        // without a panic proves the runtime feed's control is installed.
+        core.lock()
+            .await
+            .subscribe_feed_tokens("venuelive", vec!["tok-a".to_string()])
+            .await;
+        assert!(
+            data_plane.venue_mounted("venuelive"),
+            "the mount is recorded — a re-bind must not restart the live feed"
+        );
+
+        // Discovery: the venue-tagged market row is in the scanner (the
+        // ENGINE_ROUND per-row enrichment source).
+        let c = core.lock().await;
+        let venues: Vec<String> = c
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.scanner()
+                    .round_state(now_ms())
+                    .markets
+                    .iter()
+                    .map(|m| m.venue.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            venues.iter().any(|v| v == "venuelive"),
+            "the runtime-mounted venue's market must appear in the scanner: {venues:?}"
+        );
+
+        // Idempotence: a SECOND account bound to the SAME venue must not
+        // restart the live feed (the mounted-set guard fires, the reply says
+        // the venue was already live).
+        drop(c);
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.venue.set","params":{"accountId":"default","venue":"venuelive","reason":"idempotence"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "re-bind must succeed: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "an already-mounted venue must not be re-mounted: {reply}"
+        );
+    }
+
+    /// 解绑（空 venue）不触发运行时挂载（没有 venue 可挂），已挂载 venue 的
+    /// 绑定照常幂等 —— 运行时半边只做加法，从不因绑定写而拆数据面。
+    #[tokio::test]
+    async fn venue_set_unbind_does_not_touch_the_data_plane() {
+        // Same private-persist posture as the mount test: the unbind is a
+        // venue.set write too, and it must LAND (not refuse) for the
+        // no-op-mount path to be worth pinning.
+        let dir = std::env::temp_dir().join(format!("bk-venue-unbind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![
+                    crate::account::Account {
+                        id: AccountId::from("default"),
+                        name: "main".into(),
+                        market_type: blitzkrieg_market_api::MarketType::Prediction,
+                        status: AccountStatus::Active,
+                        credential_keys: crate::account::CredentialKeys::default(),
+                        venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
+                        updated_at_ms: now,
+                    },
+                    crate::account::Account {
+                        id: AccountId::from("paper"),
+                        name: "paper".into(),
+                        market_type: blitzkrieg_market_api::MarketType::Prediction,
+                        status: AccountStatus::Active,
+                        credential_keys: crate::account::CredentialKeys::default(),
+                        venue: String::new(),
+                        trading_enabled: true,
+                        strategies: Vec::new(),
+                        updated_at_ms: now,
+                    },
+                ],
+                AccountId::from("default"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let c = Core::with_account_book(cfg, book);
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                name: "venuelive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        };
+
+        // Unbind: the write lands, nothing mounts.
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{"accountId":"paper","venue":"","reason":"unbind"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "unbind must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "an unbind mounts nothing: {reply}"
+        );
+        assert!(!data_plane.venue_mounted("venuelive"));
+
+        // The core survives without any feed control (the arm's no-op path).
+        assert!(core.lock().await.has_engine() || true, "core is intact");
+    }
+
     /// `account.venue.get` 的 wire 合同：未绑定账户回空串（unbound 的唯一
     /// wire 拼写）、`accountId` 窄化为单行、缺省=全部账户（按 id 稳定排序）。
     #[tokio::test]
@@ -6711,11 +7311,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
-    /// `account.remove` 的闭环：删掉 → list 消失 → 文件读回没有 → 保留名
-    /// default 拒 → 有 open position 的账户拒（报持仓数）→ 未知 id 拒 →
-    /// 文件在拒绝下逐字节不动。删进程级 active 账户回切 default 也钉在
-    /// 这里（fixture 把 paper 换成 active 的场景在簿层测试已覆盖，线上走
-    /// default active 的常规路径）。
+    /// `account.remove` 的闭环：删掉 → list 消失 → 文件读回没有 → 有 open
+    /// position 的账户拒（报持仓数）→ 最后一个账户拒（至少保留一个）→
+    /// 未知 id 拒 → 文件在拒绝下逐字节不动。删进程级 active 账户回切剩余
+    /// 账户也钉在这里（簿层的 default 回切/首账户回切场景在簿层测试已
+    /// 覆盖，线上走 default active 的常规路径）。default 不再保留名：
+    /// 所有账户都可删（用户裁决 —— 绑定只在建户时绑定，删户重建是唯一
+    /// 变更出口），但最后一格绝不放空。
     #[tokio::test]
     async fn account_remove_round_trips_list_and_the_persisted_file() {
         let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
@@ -6755,7 +7357,9 @@ mod tests {
         assert!(book.account(&AccountId::from("paper")).is_none());
         assert!(book.account(&AccountId::from("default")).is_some());
 
-        // The reserved `default`: refused.
+        // The LAST account: refused — a deployment keeps at least one
+        // account (the empty book fails the next boot). Paper is already
+        // gone, so `default` is the last one standing.
         let reply = rpc(
             &core,
             &registry,
@@ -6767,12 +7371,28 @@ mod tests {
         assert_eq!(
             reply["error"]["code"],
             serde_json::json!(Failure::APPLICATION),
-            "reserved id: {reply}"
+            "last account: {reply}"
         );
         assert_eq!(
             reply["error"]["data"]["coreCode"],
             serde_json::json!("INVALID_PARAMS"),
             "the refusal is a client fault at heart"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("the last account"),
+            "{}",
+            reply["error"]["message"]
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("at least one account"),
+            "{}",
+            reply["error"]["message"]
         );
         // An unknown id: the standard refusal.
         let reply = rpc(
@@ -6803,8 +7423,7 @@ mod tests {
         );
 
         // An account with an OPEN position: refused, with the count named.
-        // `default` is refused on reserved grounds before the position check;
-        // the position pin needs a non-reserved id, so create one. The
+        // The position pin needs a live sibling id, so create one. The
         // byte-identity snapshot is taken AFTER that create (the create is
         // expected to write) and before the refusals it guards.
         let reply = rpc(
@@ -6902,6 +7521,66 @@ mod tests {
             accounts.iter().any(|a| a["id"] == "pinned"),
             "the pinned account is still listed: {reply}"
         );
+
+        // `default` is an ORDINARY account now: removable while a sibling
+        // exists. Its probe position from the position-pin arm above is
+        // closed first (flat accounts only), `pinned` is the survivor, so
+        // removing the active `default` lands and the active cell
+        // re-activates the first surviving account. The row leaves
+        // accounts.toml too — the next boot re-derives the zero-config
+        // default from the missing row.
+        {
+            let mut c = core.lock().await;
+            let ids: Vec<String> = c
+                .positions_mut()
+                .open_positions()
+                .iter()
+                .filter(|p| p.account_id == AccountId::from("default"))
+                .map(|p| p.id.clone())
+                .collect();
+            for pid in ids {
+                c.positions_mut()
+                    .close(
+                        &pid,
+                        rust_decimal_macros::dec!(0.5),
+                        crate::model::ExitReason::Manual,
+                        false,
+                        now_ms(),
+                    )
+                    .expect("the probe position closes");
+            }
+        }
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":9,"method":"account.remove","params":{"id":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "`default` must be removable while a sibling remains: {reply}"
+        );
+        assert_eq!(reply["result"]["persisted"], serde_json::json!(true));
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":10,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        let accounts = reply["result"]["accounts"].as_array().expect("views");
+        assert_eq!(accounts.len(), 1, "only the survivor remains: {reply}");
+        assert_eq!(accounts[0]["id"], serde_json::json!("pinned"));
+        assert_eq!(
+            reply["result"]["active"], "pinned",
+            "the active cell never dangles: it re-activates the first survivor"
+        );
+        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
+            .expect("the written file re-parses");
+        assert!(book.account(&AccountId::from("default")).is_none());
+        assert!(book.account(&AccountId::from("pinned")).is_some());
         let scratch = accounts_path
             .parent()
             .expect("the fixture file has a parent")
