@@ -109,12 +109,21 @@ check('toggle 按账户定标：setStrategy 传 accountId（scoped），无账�
   )
 })
 
-check('「N 个账户启用中」徽标存在（enabledAccountCount + ×N Badge）', () => {
-  assert.match(page, /function enabledAccountCount\(/, '缺 enabledAccountCount')
-  assert.match(
+check('「N 个账户启用中」徽标不渲染（2026-10-19 操作者裁决：删除 ×N 提示徽章）', () => {
+  assert.doesNotMatch(
+    page,
+    /\benabledAccountCount\b/,
+    'enabledAccountCount 复活 —— ×N 徽章已按操作者裁决删除，行内只剩启用开关',
+  )
+  assert.doesNotMatch(
     page,
     /<Badge[^>]*>×<RollingNumber/,
-    '策略行缺 ×N 徽标（数字必须走 RollingNumber，round-header 门禁同款）',
+    '策略行 ×N 徽章复活 —— 账户归属读数已退役',
+  )
+  assert.doesNotMatch(
+    page,
+    /个账户上启用/,
+    '「当前在 N 个账户上启用」tooltip 复活 —— 点名归属提示已退役',
   )
 })
 
