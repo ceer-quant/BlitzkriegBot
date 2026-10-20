@@ -155,6 +155,25 @@ pub struct RoundView {
     pub can_trade: bool,
     #[serde(default)]
     pub market_prices: Vec<MarketPriceView>,
+    /// #550（症状②）：per-venue 轮次钟行 —— 每个已开口（有过 in-band 到期
+    /// 声明）的 venue 一行自己的 slot/age/timeLeft，与 trading 侧
+    /// `round_timing_for_venue` 同一口径。老内核不带该键 → serde default
+    /// 空表，面板走现行为（全局 `round` 标量块），永不因缺字段卡死。
+    #[serde(default)]
+    pub venue_rounds: Vec<VenueRoundView>,
+}
+
+/// One venue's own round clock, for the panel's countdown re-binding
+/// (账户切换器就是交易所切换器：倒计时必须跟随 active venue 的钟).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VenueRoundView {
+    /// The venue tag (empty = legacy bucket).
+    #[serde(default)]
+    pub venue: String,
+    pub slot: i64,
+    pub age_sec: i64,
+    pub time_left_sec: i64,
 }
 
 // ── engine.books ─────────────────────────────────────────────────────────────

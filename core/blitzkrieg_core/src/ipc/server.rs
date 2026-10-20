@@ -2597,6 +2597,14 @@ async fn handle_line(
         // `CryptoMarket.venue`（#427 的纯数据字段）。同一 asset 两个
         // venue 各成一行；无标签（legacy 语料 / 单插件）渲染为空串，
         // 前端对缺失字段已有降级。
+        //
+        // #550（症状②）：`round` 标量块是全局保守钟（各 venue observed
+        // expiry 的最小值），无 venue 维度 —— 绑定了 Kalshi 的账户切过来
+        // 后，倒计时卡仍走 Polymarket 的到期（甚至停喂 venue 的残留钟）。
+        // 这里补 `venueRounds`：每个已开口的 venue 一行自己的轮次钟
+        //（slot/age/timeLeft 与 trading 侧 `round_timing_for_venue` 同源，
+        // 不另造第三种口径），前端按 active venue 选行渲染倒计时；
+        // 无该 venue 行（老内核/venue 未开口）时前端保持现行为。
         method::ENGINE_ROUND => {
             let c = core.lock().await;
             let mut doc = serde_json::to_value(c.round_view()).unwrap_or(Value::Null);
@@ -2634,6 +2642,30 @@ async fn handle_line(
                 })
                 .unwrap_or_default();
             doc["marketPrices"] = serde_json::json!(markets);
+            // per-venue 轮次钟行（#550 症状②）。来源 = `observed_venue_keys`
+            // （已经开口的 venue + legacy bucket）× `round_timing_for_venue`
+            // —— 与 trading 侧的 per-candidate 门同一个口径，显示链不自立
+            // 尺度。老内核没有该键 → 前端 feature-detect 缺失时走现行为。
+            let venue_rounds: Vec<serde_json::Value> = c
+                .engine
+                .as_ref()
+                .map(|e| {
+                    e.scanner()
+                        .observed_venue_keys()
+                        .into_iter()
+                        .map(|venue| {
+                            let t = e.scanner().round_timing_for_venue(&venue, now);
+                            serde_json::json!({
+                                "venue": venue,
+                                "slot": t.slot,
+                                "ageSec": t.age_sec,
+                                "timeLeftSec": t.time_left_sec,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            doc["venueRounds"] = serde_json::json!(venue_rounds);
             Ok(doc)
         }
 

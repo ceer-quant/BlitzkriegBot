@@ -1774,6 +1774,16 @@ export interface CumulativeTradeSummary {
   worst?: number
 }
 
+/** One venue's own round clock (`round.venueRounds` row, #550 症状②)：
+ * 与 trading 侧 per-candidate 门同一口径的 per-venue slot/age/timeLeft。 */
+export interface VenueRound {
+  /** The venue tag (empty = legacy bucket). */
+  venue: string
+  slot: number
+  ageSec: number
+  timeLeftSec: number
+}
+
 export interface Round {
   slot: number
   ageSec: number
@@ -1781,6 +1791,12 @@ export interface Round {
   canTrade: boolean
   markets?: number
   prices?: MarketPrice[]
+  /**
+   * Per-venue 轮次钟行（#550 症状②）：每个已开口的 venue 一行自己的钟。
+   * 老内核没有该键 → undefined，倒计时 feature-detect 降级回全局标量块
+   * （现行为）。
+   */
+  venueRounds?: VenueRound[]
 }
 
 export interface Snapshot {

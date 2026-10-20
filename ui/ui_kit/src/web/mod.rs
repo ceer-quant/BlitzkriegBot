@@ -360,7 +360,14 @@ pub fn render_json_full(
             // 与 Loading 门都 feature-detect 它）。空串 = 未分所，前端降级。
             "prices": r.market_prices.iter().map(|m| serde_json::json!({
                 "asset": m.asset, "up": m.up, "down": m.down,
-                "venue": m.venue })).collect::<Vec<_>>() })),
+                "venue": m.venue })).collect::<Vec<_>>(),
+            // #550（症状②）：per-venue 轮次钟行 —— 倒计时卡按 active venue
+            // 选行重绑（账户切换器就是交易所切换器），不再读全局保守钟的
+            // 标量块。老内核没有该键 → 空表，面板走现行为（feature-detect
+            // 降级同一纪律）。
+            "venueRounds": r.venue_rounds.iter().map(|v| serde_json::json!({
+                "venue": v.venue, "slot": v.slot, "ageSec": v.age_sec,
+                "timeLeftSec": v.time_left_sec })).collect::<Vec<_>>() })),
         "positions": s.positions.iter().map(|p| serde_json::json!({
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
@@ -3182,7 +3189,9 @@ mod tests {
     /// strings, which the panel renders as 未分所 — never filters on.
     #[test]
     fn the_snapshot_carries_the_venue_tag_on_quote_rows() {
-        use crate::core::types::{AssetBooksView, BookSideView, MarketPriceView, RoundView};
+        use crate::core::types::{
+            AssetBooksView, BookSideView, MarketPriceView, RoundView, VenueRoundView,
+        };
 
         let snap = UiSnapshot {
             round: Some(RoundView {
@@ -3205,6 +3214,22 @@ mod tests {
                         venue: "kalshi".into(),
                     },
                 ],
+                // #550（症状②）：the per-venue round clock rows travel the
+                // same wire — one row per venue that has spoken.
+                venue_rounds: vec![
+                    VenueRoundView {
+                        venue: "polymarket".into(),
+                        slot: 7,
+                        age_sec: 1,
+                        time_left_sec: 299,
+                    },
+                    VenueRoundView {
+                        venue: "kalshi".into(),
+                        slot: 7,
+                        age_sec: 5,
+                        time_left_sec: 295,
+                    },
+                ],
             }),
             books: vec![AssetBooksView {
                 asset: "BTC".into(),
@@ -3222,6 +3247,14 @@ mod tests {
         assert_eq!(prices[0]["venue"], serde_json::json!("polymarket"));
         assert_eq!(prices[1]["venue"], serde_json::json!("kalshi"));
         assert_eq!(doc["books"][0]["venue"], serde_json::json!("kalshi"));
+        // The per-venue clock rows reach the panel verbatim (the countdown
+        // re-binds to the active venue's own row).
+        let vr = doc["round"]["venueRounds"]
+            .as_array()
+            .expect("venueRounds array");
+        assert_eq!(vr.len(), 2, "one row per venue that has spoken");
+        assert_eq!(vr[0]["venue"], serde_json::json!("polymarket"));
+        assert_eq!(vr[1]["timeLeftSec"], serde_json::json!(295));
 
         // Backward compatibility: a core that never wrote `venue` parses into
         // the empty-string default and the wire still carries the key.
@@ -3241,6 +3274,13 @@ mod tests {
             doc["round"]["prices"][0]["venue"],
             serde_json::json!(""),
             "untagged rows reach the panel as 未分所, never as a missing key"
+        );
+        // An old core that never wrote venueRounds degrades to an EMPTY array
+        // on the wire (the panel's feature-detect keeps the legacy countdown).
+        assert_eq!(
+            doc["round"]["venueRounds"],
+            serde_json::json!([]),
+            "pre-#550 cores degrade to an empty venueRounds, never a missing key"
         );
     }
 

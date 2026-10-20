@@ -92,10 +92,55 @@ const marketTypeText = computed(() => marketTypeLabel(snap.value?.marketActiveTy
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
 // ── countdown: interpolate locally between server answers ────────────────────
+// #550（症状②）根因修复（显示链半边）：轮次钟必须随账户切换重绑定 ——
+// 账户切换器就是交易所切换器，active 账户绑定 venue X 时，倒计时读 X 自己
+// 的钟（快照 `round.venueRounds` 行，trading 侧 per-candidate 门同一口径），
+// 不再永远读全局保守钟标量块（各 venue 到期最小值 = 通常是先接入的那个所）。
+// 老内核没有 venueRounds（空表）→ feature-detect 降级回全局标量块，现行为。
+// venue 变化时旧钟的本地插值残值必须清掉（serverLeft/serverAt/leftSec 归零
+// 再等新钟首帧），否则切到无行情的新所时旧倒计时被本地时钟永远续跳。
+// （本块引用 activeVenue —— 声明在其下方，init 惰性、watch 回调运行时才
+// 解引用，vue-tsc 与运行时均安全。）
 const serverLeft = ref(0)
 const serverAt = ref(0)
+const countForVenue = ref('')
+
+/**
+ * The round clock row of the ACTIVE venue, if this core speaks venueRounds
+ * and the venue has an observed clock. Empty binding (unbound account) → no
+ * row: the countdown follows the global scalar block like it always did.
+ */
+const venueRound = computed(() => {
+  const v = activeVenue.value
+  if (!v) return null
+  const rows = snap.value?.round?.venueRounds
+  if (!Array.isArray(rows) || rows.length === 0) return null
+  return rows.find((r) => r.venue === v) ?? null
+})
+
 watch(snap, (s) => {
-  if (s?.round && s.round.timeLeftSec >= 0) {
+  const vr = venueRound.value
+  if (vr) {
+    // The active venue has its own clock row: bind to it. The venue key
+    // guards re-binding — a row for a DIFFERENT venue never refreshes this
+    // countdown (the #550 residual-value leak).
+    if (countForVenue.value !== activeVenue.value) {
+      countForVenue.value = activeVenue.value
+      serverLeft.value = 0
+      serverAt.value = 0
+      leftSec.value = 0
+    }
+    if (vr.timeLeftSec >= 0) {
+      serverLeft.value = vr.timeLeftSec
+      serverAt.value = Date.now()
+    }
+    return
+  }
+  // No venue row (old core, or no observed clock for this venue): the global
+  // scalar block, but only while the venue key is unset — after a switch the
+  // countdown stays blank until the NEW venue's own row arrives, never
+  // re-arming on the old venue's scalar.
+  if (!countForVenue.value && s?.round && s.round.timeLeftSec >= 0) {
     serverLeft.value = s.round.timeLeftSec
     serverAt.value = Date.now()
   }
@@ -154,6 +199,19 @@ watch(activeVenue, (nv, ov) => {
   if (ov === undefined) return
   venueSwitchAt.value = Date.now()
   venueSwitchFrom.value = ov
+  // #550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，切 venue
+  // 即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己的钟行，
+  // 从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次快照间
+  // 会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
+  const hasRows =
+    Array.isArray(snap.value?.round?.venueRounds) &&
+    (snap.value?.round?.venueRounds?.length ?? 0) > 0
+  if (hasRows) {
+    countForVenue.value = ''
+    serverLeft.value = 0
+    serverAt.value = 0
+    leftSec.value = 0
+  }
 })
 
 /**

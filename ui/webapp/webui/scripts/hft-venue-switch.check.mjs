@@ -160,4 +160,53 @@ check('行情面不渲染 venue 徽标（倒计时卡已写交易所，其他卡
   }
 })
 
+// ── 7. #550（症状②）the countdown re-binds to the active venue's own clock ──
+check('倒计时优先读 active venue 自己的钟行（round.venueRounds，#550 症状②）', () => {
+  // The wire contract: the snapshot type declares the per-venue rows.
+  const client = read('src', 'api', 'client.ts')
+  assert.match(client, /interface VenueRound\b/, 'client.ts 缺 VenueRound 行类型 —— venueRounds 没有进合同')
+  assert.match(
+    client,
+    /venueRounds\?: VenueRound\[\]/,
+    'Round 合同缺 venueRounds 字段 —— 老内核降级路径无从判定',
+  )
+  // The page binds the countdown to the ACTIVE venue's row, keyed by venue.
+  const vr = page.match(/const venueRound = computed\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(vr, '缺 venueRound computed —— 倒计时没有 per-venue 选行逻辑')
+  assert.match(vr[0], /venueRounds/, '选行逻辑没读 venueRounds')
+  assert.match(vr[0], /activeVenue\.value/, '选行逻辑没按 active venue 过滤')
+  // The snap watcher must consume the venue row BEFORE falling back to the
+  // global scalar block, and the fallback must be gated on the venue key.
+  const snapWatch = page.match(/watch\(snap, \(s\) => \{[\s\S]*?\n\}, \{ immediate: true \}\)/)
+  assert.ok(snapWatch, '缺 watch(snap) 倒计时喂入')
+  assert.match(
+    snapWatch[0],
+    /countForVenue\.value !== activeVenue\.value/,
+    '倒计时没有 venue 键卫兵 —— 不同 venue 的钟行会刷新同一个倒计时（残值泄漏）',
+  )
+  assert.match(
+    snapWatch[0],
+    /if \(!countForVenue\.value && s\?\.round/,
+    '全局标量块回退没有按 venue 键门控 —— 切换后旧钟仍会续跳',
+  )
+})
+
+check('venue 切换时倒计时残值清零（serverLeft/serverAt/leftSec 归零再等新钟首帧）', () => {
+  // The switch watcher must clear the residual local-interpolation state —
+  // otherwise the old venue's countdown is kept alive by the local 500ms
+  // ticker across the switch gap (the exact #550 symptom ② reproduction).
+  const body = page.match(/watch\(activeVenue,[\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 watch(activeVenue)')
+  assert.match(body[0], /serverLeft\.value = 0/, '切换未清 serverLeft —— 旧倒计时残值跨 venue 存活')
+  assert.match(body[0], /serverAt\.value = 0/, '切换未清 serverAt —— 本地插值基点跨 venue 存活')
+  assert.match(body[0], /leftSec\.value = 0/, '切换未清 leftSec —— 渲染值跨 venue 存活')
+  // The clearing is conditional on the core speaking venueRounds — an old
+  // core keeps the legacy behaviour (the gate must not blank its countdown).
+  assert.match(
+    body[0],
+    /venueRounds/,
+    '清残值没有 feature-detect venueRounds —— 老内核的倒计时会被误清空',
+  )
+})
+
 process.exit(failures ? 1 : 0)
