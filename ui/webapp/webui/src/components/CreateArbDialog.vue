@@ -685,7 +685,7 @@ function discrepancyLabel(d: string): string {
               </div>
               <div class="mt-1.5 flex items-center gap-2">
                 <Switch v-model="enable" label="启用 cross_venue_arb" />
-                <span class="text-[12px] text-muted-fg">双腿由内核在选中账户上原子执行（见「执行账户」）。</span>
+                <span class="text-[12px] text-muted-fg">双腿由内核在选中记账账户下原子提交（见「执行账户」）；各腿以该腿 venue 的全局凭证（env）签名，交易所由映射决定。</span>
               </div>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] leading-relaxed text-muted-fg">
                 <template v-if="!execAccountId">
@@ -781,7 +781,7 @@ function discrepancyLabel(d: string): string {
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
                 {{ enable ? '提交后启用 cross_venue_arb（strategy cross_venue_arb on）。' : '提交后保持停用 —— 只确认映射与参数（可稍后在策略表手动启用）。' }}
                 <div class="mt-1 text-[11px] text-faint-fg">
-                  执行账户 = <template v-if="execAccountId">「{{ execAccount?.name ?? execAccountId }}」{{ execAccountId === 'default' ? '（default：全局开关 + 账户镜像）' : '（assignment 即启用）' }}</template><template v-else>内核配置的初始账户</template>；双腿在同一账户原子执行。
+                  执行账户 = <template v-if="execAccountId">「{{ execAccount?.name ?? execAccountId }}」{{ execAccountId === 'default' ? '（default：全局开关 + 账户镜像）' : '（assignment 即启用）' }}</template><template v-else>内核配置的初始账户</template>；双腿在同一记账账户下原子提交，各腿以该腿 venue 的全局凭证（env）签名。
                 </div>
               </div>
             </div>
