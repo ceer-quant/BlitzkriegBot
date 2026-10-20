@@ -908,6 +908,43 @@ impl Engine {
                     self.scanner.set_markets(merged);
                     return Vec::new();
                 }
+                // ── #550 复现缺陷（症状①）的根因之一：无界 sibling 存活 ──
+                // 换轮臂（下方）只替换 FEEDING venue 的行，兄弟行「存活到
+                // 自己的 feed 来换」是 staggered 上架的桥接语义（兄弟在轮
+                // 界刚过、还没重报的几秒里不能丢行），但没有边界：兄弟停喂
+                // 后它的行带着已过期的 expiry 永久留在表里 —— 行情页渲染
+                // 已结束轮次的行，它的 observed expiry 还通过全局轮钟的
+                // `earliest_observed` 把 time_left 钉死 0（全体 Timing 门
+                // 拦死新开仓）。
+                //
+                // 处置：错满一整轮（round_slot 距本批 slot ≥ 2）的兄弟行
+                // 清出表；只差一格的照旧桥接（下方 per-venue 替换照常处置
+                // feeding venue 自己的行，这里不重复动它）。venue-blind 的
+                // merge 判定按 slot 相等匹配，落后行永不命中 merge 路径，
+                // 所以这不改变 merge/rollover 的判定本身 —— 只给「存活」
+                // 加一条可退出的边界。
+                let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
+                let feeding_venue = markets.first().map(|m| m.venue.clone()).unwrap_or_default();
+                if slot != 0 {
+                    let mut kept: Vec<CryptoMarket> = self
+                        .scanner
+                        .markets()
+                        .iter()
+                        .filter(|m| slot - m.round_slot < 2 || m.venue == feeding_venue)
+                        .cloned()
+                        .collect();
+                    if kept.len() != self.scanner.markets().len() {
+                        let dropped = self.scanner.markets().len() - kept.len();
+                        tracing::info!(
+                            target: "engine",
+                            "round rollover: dropping {dropped} stale market row(s) from \
+                             venue(s) that missed a full round (slot < {}), feeding venue \
+                             {feeding_venue} excluded",
+                            slot - 1
+                        );
+                        self.scanner.set_markets(std::mem::take(&mut kept));
+                    }
+                }
                 // The venue's own round declaration beats the local slot grid:
                 // `expires_at_ms` is the exchange's actual round end, and
                 // `time_left_sec` (the exit policy's and the D-31 floor's
@@ -926,13 +963,10 @@ impl Engine {
                 // same-batch venue's own clock (a rollover REPLACES that
                 // venue's markets — its old expiry is gone with them; the
                 // conservative global window still covers the siblings).
-                let venue = markets
-                    .first()
-                    .map(|m| m.venue.as_str())
-                    .unwrap_or_default();
+                let venue = feeding_venue.clone();
                 let time_left_sec = self
                     .scanner
-                    .round_timing_for_venue(venue, now_ms)
+                    .round_timing_for_venue(&venue, now_ms)
                     .time_left_sec;
                 for s in &mut self.strategies {
                     s.strategy.on_round(slot, time_left_sec, now_ms);
@@ -2933,6 +2967,66 @@ mod tests {
                 .expires_at_ms
                 > 0,
             "the sibling venue's clock slot survives the kalshi rollover"
+        );
+    }
+
+    #[test]
+    fn a_venue_that_missed_a_full_round_loses_its_stale_rows_at_the_next_rollover() {
+        // #550 复现缺陷（症状①）的根因之一：换轮臂只替换 FEEDING venue 的
+        // 行，兄弟行「存活到自己的 feed 来换」。存活是 staggered 上架的
+        // 桥接语义（兄弟在轮界刚过、自己还没重报的几秒里不能丢行），
+        // 但没有边界 —— 兄弟停喂（插件死/凭证失效）后，它的行带着已过期
+        // 的 expiry 永久留在表里：行情页渲染已结束轮次的行，它的
+        // observed expiry 还通过全局轮钟的 earliest_observed 把
+        // time_left 钉死 0（全体新开仓被 Timing 门拦死）。
+        //
+        // 裁决语义：错满一整轮（slot 距离 ≥ 2）的兄弟行在下一次换轮时
+        // 清出表；只差一格（刚过轮界还没重报）的兄弟行照旧桥接 ——
+        // `two_venues_same_slot_merge_and_rollover_per_venue` 钉死的
+        // 「sibling survives」在它的时序（slot 距离 1）下原样成立。
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000; // slot 2
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(end, "kalshi")],
+            now_ms: 61_000,
+        });
+        assert_eq!(e.scanner.markets().len(), 2);
+
+        // kalshi rolls to slot 3 at the exact slot boundary: polymarket has
+        // NOT re-fed yet — one slot behind, the bridge window. Its row must
+        // SURVIVE (the pinned staggered semantics).
+        let next_end = 2_700_000; // slot 3
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(next_end, "kalshi")],
+            now_ms: 1_800_000,
+        });
+        assert!(
+            e.scanner.markets().iter().any(|m| m.venue == "polymarket"),
+            "a sibling one slot behind is inside the staggered bridge and survives"
+        );
+
+        // kalshi rolls again and polymarket still has not spoken (dead feed):
+        // two slots behind = it missed a full round. Its finished-round row
+        // must now leave the table.
+        let end4 = 3_600_000; // slot 4
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(end4, "kalshi")],
+            now_ms: 2_700_000,
+        });
+        let venues: Vec<&str> = e
+            .scanner
+            .markets()
+            .iter()
+            .map(|m| m.venue.as_str())
+            .collect();
+        assert_eq!(
+            venues,
+            vec!["kalshi"],
+            "a venue that missed a full round must not keep its finished-round row: {venues:?}"
         );
     }
 
