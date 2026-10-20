@@ -111,6 +111,18 @@ impl<'de> Deserialize<'de> for AccountStatus {
 /// (from its own environment); IPC answers `credentialsLoaded: bool` and
 /// nothing else, and the `account:credential-check` gate greps every response
 /// for a planted sentinel value.
+///
+/// **Declaration-only.** This struct records the *names* of credential
+/// environment variables and a `loaded` boolean. It is **not consumed on
+/// the order path** — no code in `place_pending` / `place_gated` /
+/// `OrderExecutor` reads this struct. Signing is performed per-venue by
+/// the executor of that venue, reading its own env vars (see
+/// `crate::market::plugin_credential_vars`).
+///
+/// `credentialsLoaded == true` does **not** imply "this account can place
+/// orders on every venue"; it only means the declared env vars were
+/// observed at load time. For the actual cross-venue signing model see
+/// the engine's `set_account_venue` docs and `run_pair_orphan_sweep`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialKeys {
