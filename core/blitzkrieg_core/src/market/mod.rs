@@ -594,6 +594,25 @@ pub fn credentials_status(
     CredentialsStatus { rows }
 }
 
+/// RFC #541 方案 2a-i 挂钩 B（原型）的凭证谓词：`plugin` 的全部必需凭证变量
+/// 是否都能解析——与 [`credentials_status`] 逐变量同一谓词（env `var_os`
+/// 非空，或 `cell` 里该插件该变量非空），同一持久格（`runtime_config_path`
+/// load 的产物直接传入，避免本函数再读一次盘）。需要的插件变量表为空 ⇒
+/// 视为就绪（数据面无凭证的插件没有可失败的维度——`credentials_status` 的
+/// `ready = !required.is_empty()` 语义只属于面板行，这里不能把一个无凭证
+/// 插件的 venue 判成永远未就绪）。
+pub fn venue_credentials_ready(
+    plugin: &str,
+    cell: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+) -> bool {
+    plugin_credential_vars(plugin).iter().all(|v| {
+        std::env::var_os(v).is_some_and(|s| !s.is_empty())
+            || cell
+                .get(plugin)
+                .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty()))
+    })
+}
+
 /// `market.credentials.set`: validate every var name against the plugin's
 /// requirement table (a typo must fail now, not as a silently inert
 /// executor), then persist atomically. next_session only — the executor

@@ -1289,7 +1289,68 @@ impl Engine {
         // registration order) wins, matching the one-live-entry-per-token rule
         // the caller enforces across cycles via `pending_tokens`.
         let mut emitted: HashSet<(String, String)> = HashSet::new();
+        // ── RFC #541 方案 2a-i 挂钩 A（原型）：declared_atomic 策略的 scope
+        // 判定先整组化。逐条路径里四个 scope 门（trading/frozen/exits_only/
+        // admits_token）任一拒绝是「静默丢腿」——pair 的两条腿会在这里断开，
+        // 第一腿照常进 OME（失败模式②）。对声明了 atomic_batch 的策略，先对
+        // 本周期该策略的全部 candidates 做整组判定：任一条被 scope 门拒 ⇒
+        // 该策略本周期全部 candidates 丢弃（0 腿到 OME），拒绝计数/审计保持
+        // 逐条形状（见 atomic_scope_refusals 的用途），只加一条汇总 INFO。
+        // 未声明 atomic_batch 的策略（spread_arb 等单所策略）不进这个分支，
+        // 走下面的历史逐条路径，行为逐字节不变。pending_tokens 去重与
+        // emitted 去重不是「拒绝」而是「已处理」，不参与整组判定。
+        let mut atomic_scope_refusals: std::collections::BTreeMap<
+            String,
+            Vec<(&'static str, String)>,
+        > = std::collections::BTreeMap::new();
+        for sig in &candidates {
+            if !self.strategy_atomic_batch(&sig.strategy) {
+                continue;
+            }
+            // A candidate the scope gates refuse: record (gate, leg) — the
+            // strategy's WHOLE cycle is then dropped below.
+            let gate = if !self.scope_trading(&sig.account_id) {
+                "scope_trading"
+            } else if self.scope_frozen(&sig.account_id) {
+                "scope_frozen"
+            } else if self.scope_exits_only(&sig.strategy, &sig.account_id) {
+                "scope_exits_only"
+            } else if !self.scope_admits_token(&sig.account_id, &sig.token_id) {
+                "scope_admits_token"
+            } else {
+                continue;
+            };
+            atomic_scope_refusals
+                .entry(sig.strategy.clone())
+                .or_default()
+                .push((
+                    gate,
+                    format!(
+                        "{}@{} (token {})",
+                        sig.strategy, sig.account_id, sig.token_id
+                    ),
+                ));
+        }
+        // Any refused candidate ⇒ the strategy's WHOLE cycle is dropped:
+        // zero legs out. Audited as one INFO line naming the gate(s) and the
+        // refused legs (the per-strategy atomic batch is judged as a unit —
+        // RFC #541's hook A).
+        let dropped_atomic: HashSet<String> = atomic_scope_refusals.keys().cloned().collect();
+        for (strategy, refusals) in &atomic_scope_refusals {
+            let gates: Vec<&str> = refusals.iter().map(|(g, _)| *g).collect();
+            tracing::info!(
+                target: "strategy",
+                "atomic batch dropped by scope filter: strategy={strategy} legs={} \
+                 refused_legs={:?} gates={:?} — zero legs emitted this cycle",
+                candidates.iter().filter(|s| &s.strategy == strategy).count(),
+                refusals.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
+                gates,
+            );
+        }
         for sig in candidates {
+            if dropped_atomic.contains(&sig.strategy) {
+                continue;
+            }
             // Account-book facts FIRST (before any gate can record a near-miss
             // or burn a cooldown): a scope whose trading switch is OFF
             // contributes nothing, and a scope bound to venue V never prices
