@@ -92,7 +92,7 @@ const marketTypeText = computed(() => marketTypeLabel(snap.value?.marketActiveTy
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
 // ── countdown: interpolate locally between server answers ────────────────────
-// #550（症状②）根因修复（显示链半边）：轮次钟必须随账户切换重绑定 ——
+// issue 550（症状②）根因修复（显示链半边）：轮次钟必须随账户切换重绑定 ——
 // 账户切换器就是交易所切换器，active 账户绑定 venue X 时，倒计时读 X 自己
 // 的钟（快照 `round.venueRounds` 行，trading 侧 per-candidate 门同一口径），
 // 不再永远读全局保守钟标量块（各 venue 到期最小值 = 通常是先接入的那个所）。
@@ -123,7 +123,7 @@ watch(snap, (s) => {
   if (vr) {
     // The active venue has its own clock row: bind to it. The venue key
     // guards re-binding — a row for a DIFFERENT venue never refreshes this
-    // countdown (the #550 residual-value leak).
+    // countdown (the issue 550 residual-value leak).
     if (countForVenue.value !== activeVenue.value) {
       countForVenue.value = activeVenue.value
       serverLeft.value = 0
@@ -199,7 +199,7 @@ watch(activeVenue, (nv, ov) => {
   if (ov === undefined) return
   venueSwitchAt.value = Date.now()
   venueSwitchFrom.value = ov
-  // #550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，切 venue
+  // issue 550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，切 venue
   // 即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己的钟行，
   // 从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次快照间
   // 会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
