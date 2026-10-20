@@ -2801,45 +2801,54 @@ async fn handle_line(
 
         method::INTENT_AUDIT_TAIL => {
             typed(params, |p: IntentAuditTailParams| async move {
-                let all = crate::jsonl::load::<Value>(
-                    std::path::Path::new("data/audit/intents.jsonl"),
-                    "intent audit log: skipped unparseable lines",
-                );
-                let keep = |rec: &Value| {
-                    if let Some(f) = p.account_id.as_deref()
-                        && rec.get("accountId").and_then(Value::as_str) != Some(f)
-                    {
-                        return false;
-                    }
-                    if let Some(f) = p.strategy.as_deref()
-                        && rec.get("strategy").and_then(Value::as_str) != Some(f)
-                    {
-                        return false;
-                    }
-                    if let Some(f) = p.decision.as_deref()
-                        && !rec
-                            .get("decision")
-                            .and_then(|d| d.get("status"))
-                            .and_then(Value::as_str)
-                            .is_some_and(|s| s.eq_ignore_ascii_case(f))
-                    {
-                        return false;
-                    }
-                    true
-                };
-                let matched: Vec<Value> = all.into_iter().filter(keep).collect();
-                let total = matched.len();
+                // §12.3: 「返回最新的 N 条（读尾部，不读全文件）」—— the
+                // backward tail scan, not the full `read_to_string` this arm
+                // once ran: a long-lived panel polls this every 4 s, and on a
+                // multi-hundred-MB audit log that read blew the gateway's IPC
+                // read budget (`request timed out` on the decisions page) and
+                // pinned a tokio worker each time. Filters run on the scanned
+                // span; `total` names the span's matches and is omitted when
+                // the span is not the whole file (no fake full counts).
                 let limit = p.limit.unwrap_or(50);
-                let records: Vec<Value> = matched
-                    .into_iter()
-                    .skip(total.saturating_sub(limit))
-                    .collect();
+                let account_id = p.account_id.clone();
+                let strategy = p.strategy.clone();
+                let decision = p.decision.clone();
+                let (mut records, matched, whole_file) = tokio::task::spawn_blocking(move || {
+                    crate::jsonl::tail_filtered::<Value>(
+                        std::path::Path::new("data/audit/intents.jsonl"),
+                        "intent audit log: skipped unparseable lines",
+                        limit,
+                        |rec: &Value| {
+                            if let Some(f) = account_id.as_deref()
+                                && rec.get("accountId").and_then(Value::as_str) != Some(f)
+                            {
+                                return false;
+                            }
+                            if let Some(f) = strategy.as_deref()
+                                && rec.get("strategy").and_then(Value::as_str) != Some(f)
+                            {
+                                return false;
+                            }
+                            if let Some(f) = decision.as_deref()
+                                && !rec
+                                    .get("decision")
+                                    .and_then(|d| d.get("status"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|s| s.eq_ignore_ascii_case(f))
+                            {
+                                return false;
+                            }
+                            true
+                        },
+                    )
+                })
+                .await
+                .unwrap_or((Vec::new(), 0, false));
+                let total = whole_file.then_some(matched);
+                records.truncate(limit);
                 Ok::<_, CoreError>(
-                    serde_json::to_value(IntentAuditTailResult {
-                        records,
-                        total: Some(total),
-                    })
-                    .unwrap_or(Value::Null),
+                    serde_json::to_value(IntentAuditTailResult { records, total })
+                        .unwrap_or(Value::Null),
                 )
             })
             .await
@@ -6114,6 +6123,10 @@ mod tests {
     /// with rows present it answers the NEWEST window in file order, and
     /// `accountId` / `decision` filter BEFORE the window is taken (`decision`
     /// case-insensitively against `decision.status`, the §3.4 wire shape).
+    /// The read is a BACKWARD tail scan (§12.3: 读尾部，不读全文件): `total`
+    /// reports the matches within the scanned span and is OMITTED when the
+    /// window filled before the file head (earlier rows were never counted —
+    /// a fake full count is worse than no count).
     #[tokio::test]
     async fn intent_audit_tail_reads_the_tail_and_filters() {
         let dir = std::path::Path::new("data/audit");
@@ -6178,6 +6191,9 @@ mod tests {
             reply["result"]["records"][0]["intentId"],
             serde_json::json!("i3")
         );
+        // The window filled (= limit reached) and the scan still covered the
+        // whole (tiny) file, so `total` names every match: 3, not 1 — the
+        // count is the scan's, independent of how many rows the window keeps.
         assert_eq!(reply["result"]["total"], serde_json::json!(3));
 
         // `decision` matches case-insensitively against `decision.status` …
