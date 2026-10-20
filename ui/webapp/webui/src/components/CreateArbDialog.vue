@@ -4,17 +4,21 @@
  * 新落点，2026-10）。
  *
  * 内核执行面实情决定面板形状：cross_venue_arb 的双腿由**同一策略实例、同一
- * 账户**发出（引擎 scope 模型），不存在「选两个账户分别跑两腿」的执行面 ——
- * 所以这里没有账户选择器。面板的全部真实功能收缩为三段 + 确认页：
+ * 账户**发出（引擎 scope 模型），「选两个账户分别跑两腿」在执行面上不存在。
+ * 所以段0 是唯一一个「执行账户」选择器：选中的账户在映射两侧的交易所各发
+ * 一腿，两个交易所由映射决定、不由账户决定。四段 + 确认页：
  *
+ *   段0 执行账户 —— store.accounts 数据渲染（venue 纪律同样适用）；
+ *        account.venue.get 复核选中账户的绑定读数；提交走
+ *        setStrategy('cross_venue_arb', true, accountId)（default=全局开关
+ *        + assignment 镜像，其余账户=assignment 即启用，#532/#537 语义）。
  *   段1 跨所映射 —— 待确认候选（unified.candidates，确认=unified.confirm /
  *        撤销=unified.revoke）+ 目标映射单选（unified.list 里 status=paired
  *        且无 discrepancy 的事件）。
  *   段2 参数预设 —— 只发改动项提交 strategy.params.set（内核 plan-first：
  *        一个非法值整体拒，错误原样转述、值不动）。
- *   段3 启用 —— setStrategy('cross_venue_arb', true)，并如实展示当前 default
- *        账户的 venue 绑定读数（绑定单一 venue 时双腿会被 venue 守卫拒绝
- *        第二腿 —— 面板必须说出这一条，而不是藏起来）。
+ *   段3 启用 —— 如实展示选中账户的 venue 绑定读数（绑定单一 venue 时第二腿
+ *        会被 venue 守卫拒绝 —— 面板必须说出这一条，而不是藏起来）。
  *
  * 确认页（提交前最后一步）汇总三段；预估利润按 store 快照的两腿实时盘口
  * 随 tick 更新（账户↔venue 解耦批次）：|价差| − 双腿费用（内核同一费率
@@ -26,7 +30,7 @@
  * 具体交易所名。
  */
 import { computed, ref, watch } from 'vue'
-import { Link2, SlidersHorizontal, Zap } from 'lucide-vue-next'
+import { Link2, SlidersHorizontal, Wallet, Zap } from 'lucide-vue-next'
 import {
   api,
   type UnifiedEventRow,
@@ -46,12 +50,13 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const props = defineProps<{
   open: boolean
-  /** 当前面板的 default 账户 id（store.activeAccount；null = 老面板/单账户）。 */
+  /** 当前面板的 default 账户 id（store.activeAccount；null = 老面板/单账户）。
+   *  段0 选择器的初始值——没有更高的事实源，操作员可改选。 */
   activeAccountId: string | null
   /**
    * default 账户的绑定 venue（''/undefined = 未绑定）。会话事实已由
-   * store.activeAccountVenue 派生；弹窗另走 account.venue.get 复核同一账户
-   * 的绑定读数 —— 两处不一致时以内核读数（account.venue.get）为准。
+   * store.activeAccountVenue 派生；弹窗对**选中**的执行账户另走
+   * account.venue.get 复核绑定读数 —— 两处不一致时以内核读数为准。
    */
   activeVenue: string
 }>()
@@ -76,6 +81,23 @@ const PARAM_HINTS: Record<string, string> = {
   min_pair_shares: '一组双腿的最小份数。',
   min_time_left_sec: '事件剩余时间低于该秒数不再开新仓。',
 }
+
+// ── 段0 执行账户 ─────────────────────────────────────────────────────────────
+const store = usePanelStore()
+
+/** 选中的执行账户 id；null = 面板没有账户读数（单账户/老面板），内核按其
+ *  配置的初始账户执行——此时段0 退化为一句说明，不发明选择器。 */
+const execAccountId = ref<string | null>(null)
+
+/** 选择器选项 = store.accounts 原样（id/name/venue 都是会话事实）。 */
+const execAccountOptions = computed(() =>
+  store.accounts.map((a) => ({ id: a.id, name: a.name, venue: a.venue ?? '' })),
+)
+
+/** 选中账户的行（段3 文案与确认页汇总用）。 */
+const execAccount = computed(
+  () => store.accounts.find((a) => a.id === execAccountId.value) ?? null,
+)
 
 // ── 段1 读数：候选 + 已确认映射 ─────────────────────────────────────────────
 const candidates = ref<UnifiedCandidateRow[]>([])
@@ -190,16 +212,16 @@ const paramsPatch = computed<Record<string, string>>(() => {
   return patch
 })
 
-// ── 段3 启用 + default 账户绑定读数 ─────────────────────────────────────────
+// ── 段3 启用 + 选中执行账户的绑定读数 ────────────────────────────────────────
 const enable = ref(true)
-/** default 账户的 venue 绑定读数（account.venue.get 的行；读失败 = null）。 */
+/** 选中执行账户的 venue 绑定读数（account.venue.get 的行；读失败 = null）。 */
 const venueRow = ref<{ venue: string; actor: string } | null>(null)
 const venueReadFailed = ref(false)
 
 async function loadVenueBinding(): Promise<void> {
   venueReadFailed.value = false
   venueRow.value = null
-  const id = props.activeAccountId
+  const id = execAccountId.value
   if (!id) return
   try {
     const doc = await api.accountVenue({ accountId: id })
@@ -210,17 +232,23 @@ async function loadVenueBinding(): Promise<void> {
   }
 }
 
+/** 选中账户换人：绑定读数必须跟着重读 —— 上一账户的读数对新账户是陈旧
+ *  事实，段3 的警告文案按它渲染。 */
+watch(execAccountId, () => {
+  void loadVenueBinding()
+})
+
 /** 绑定了单一 venue = 双腿会被 venue 守卫拒绝第二腿 —— 这条警告必须出现。
- *  判据取 account.venue.get 的行读数；store 侧的 activeVenue 只在行读数缺失
+ *  判据取 account.venue.get 的行读数；store 侧的账户行 venue 只在行读数缺失
  *  （读失败/老读数）时兜底 —— 两处都如实渲染，不发明第二张表。 */
 const venueGuardWarning = computed(() => {
-  const v = venueRow.value?.venue ?? props.activeVenue ?? ''
+  const v = venueRow.value?.venue ?? execAccount.value?.venue ?? ''
   return v.trim() !== ''
 })
 
-/** default 账户的 venue 绑定显示值：account.venue.get 行读数优先，缺失时
- *  回落 store 派生的 activeVenue（都是会话事实，不是第二张表）。 */
-const venueDisplay = computed(() => venueRow.value?.venue ?? props.activeVenue ?? '')
+/** 选中账户的 venue 绑定显示值：account.venue.get 行读数优先，缺失时
+ *  回落 store 账户行的 venue（都是会话事实，不是第二张表）。 */
+const venueDisplay = computed(() => venueRow.value?.venue ?? execAccount.value?.venue ?? '')
 
 // ── 确认页 + 提交 ────────────────────────────────────────────────────────────
 const step = ref<'edit' | 'confirm'>('edit')
@@ -247,6 +275,7 @@ watch(
     paramsError.value = null
     selectedEventId.value = ''
     enable.value = true
+    execAccountId.value = props.activeAccountId
     void loadMappings()
     void loadCurrentParams()
     void loadVenueBinding()
@@ -264,7 +293,9 @@ function back(): void {
   }
 }
 
-/** 提交序：strategy.params.set（失败即停，值不动）→ setStrategy on。 */
+/** 提交序：strategy.params.set（失败即停，值不动）→ setStrategy on。执行
+ *  账户的启用语义按账户分叉（default=全局开关+assignment 镜像；其余账户=
+ *  assignment 即启用）——选择器给哪个 id 就走哪条，面板不预判结果。 */
 async function commit(): Promise<void> {
   if (!canReview.value || busy.value) return
   busy.value = true
@@ -277,7 +308,11 @@ async function commit(): Promise<void> {
         reason: 'panel create-arb',
       })
     }
-    const res = await api.setStrategy('cross_venue_arb', true)
+    const res = await api.setStrategy(
+      'cross_venue_arb',
+      true,
+      execAccountId.value ?? undefined,
+    )
     if (res.ok === false || res.reason) {
       // 内核拒绝（模式握手/已启用等）：如实转述 reason，值不动。
       throw new Error(res.reason ?? res.message ?? '启用被内核拒绝')
@@ -310,8 +345,6 @@ const patchLines = computed(() =>
 //
 // 盘口缺失（任一腿没有 ask、或快照未带 books）→ 显示「盘口数据不足」，
 // 绝不显示上一个数字或编造的 0 —— 陈旧数字比没有数字更危险。
-
-const store = usePanelStore()
 
 /** 两腿要价（每组一份）：无法配出完整双腿 → null。 */
 interface ArbLegQuote {
@@ -416,8 +449,40 @@ function discrepancyLabel(d: string): string {
         </div>
 
         <div class="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-3">
-          <!-- ═══ 编辑页：三段 ═══ -->
+          <!-- ═══ 编辑页：四段 ═══ -->
           <template v-if="step === 'edit'">
+            <!-- 段0 执行账户：双腿由这一账户在映射两侧的交易所各发一腿。
+                 选项 = store.accounts 原样；没有读数时只说明、不发明控件。 -->
+            <div>
+              <div class="flex items-center gap-1.5">
+                <Wallet class="size-3 text-faint-fg" />
+                <span class="label-micro">执行账户</span>
+                <span class="text-[11px] text-faint-fg">—— 双腿由同一账户在两个交易所执行；交易所由下方映射决定。</span>
+              </div>
+              <div v-if="!execAccountOptions.length" class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] leading-relaxed text-muted-fg">
+                当前面板没有账户读数（单账户/老面板）—— 内核按其配置的初始账户执行双腿。
+              </div>
+              <div v-else class="mt-1.5 grid gap-1.5 sm:grid-cols-2">
+                <label
+                  v-for="a in execAccountOptions"
+                  :key="a.id"
+                  class="flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-2 text-[12px]"
+                  :class="execAccountId === a.id ? 'border-primary/55 bg-primary/8' : 'border-line bg-panel-2/40'"
+                >
+                  <input
+                    v-model="execAccountId"
+                    type="radio"
+                    name="arb-exec-account"
+                    :value="a.id"
+                    class="accent-[var(--primary)]"
+                  />
+                  <span class="min-w-0 flex-1 truncate" :title="a.id">{{ a.name }}</span>
+                  <Badge v-if="a.venue" variant="outline">{{ a.venue }}</Badge>
+                  <Badge v-else variant="info">任意所</Badge>
+                </label>
+              </div>
+            </div>
+
             <!-- 段1 跨所映射 -->
             <div>
               <div class="flex items-center gap-1.5">
@@ -539,22 +604,22 @@ function discrepancyLabel(d: string): string {
               </div>
               <div class="mt-1.5 flex items-center gap-2">
                 <Switch v-model="enable" label="启用 cross_venue_arb" />
-                <span class="text-[12px] text-muted-fg">双腿由内核在同一账户原子执行；执行账户 = 当前 default。</span>
+                <span class="text-[12px] text-muted-fg">双腿由内核在选中账户上原子执行（见「执行账户」）。</span>
               </div>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] leading-relaxed text-muted-fg">
-                <template v-if="!activeAccountId">
-                  当前面板没有 default 账户读数（单账户/老面板）—— 内核按其配置的初始账户执行双腿。
+                <template v-if="!execAccountId">
+                  当前面板没有账户读数 —— 段3 的 venue 绑定警告不可得，内核按其配置的初始账户执行双腿。
                 </template>
                 <template v-else-if="venueReadFailed">
-                  default 账户「{{ activeAccountId }}」的 venue 绑定读数读取失败 —— 无法如实展示，请稍后重试。
+                  执行账户「{{ execAccountId }}」的 venue 绑定读数读取失败 —— 无法如实展示，请稍后重试。
                 </template>
                 <template v-else-if="venueGuardWarning">
-                  default 账户「{{ activeAccountId }}」绑定在
+                  执行账户「{{ execAccount?.name ?? execAccountId }}」绑定在
                   <Badge variant="gold">{{ venueDisplay }}</Badge>
                   —— 双腿会被 venue 守卫拒绝第二腿：绑定需留空（任意交易所）或覆盖两侧交易所，否则原子批开不出完整双腿。
                 </template>
                 <template v-else>
-                  default 账户「{{ activeAccountId }}」未绑定单一 venue（venue 绑定：留空 = 可交易任意交易所）—— 双腿可正常发出。
+                  执行账户「{{ execAccount?.name ?? execAccountId }}」未绑定单一 venue（venue 绑定：留空 = 可交易任意交易所）—— 双腿可正常发出。
                 </template>
               </div>
             </div>
@@ -574,6 +639,22 @@ function discrepancyLabel(d: string): string {
             </div>
 
             <div>
+              <span class="label-micro">执行账户</span>
+              <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
+                <template v-if="execAccountId">
+                  <span class="font-semibold">{{ execAccount?.name ?? execAccountId }}</span>
+                  <span class="ml-1 text-[11px] text-faint-fg">{{ execAccountId }}</span>
+                  <Badge v-if="venueDisplay" variant="gold" class="ml-1.5">绑定 {{ venueDisplay }}</Badge>
+                  <Badge v-else variant="info" class="ml-1.5">任意所</Badge>
+                  <div class="mt-1 text-[11px] text-faint-fg">双腿由该账户在映射两侧的交易所各发一腿。</div>
+                </template>
+                <template v-else>
+                  <span class="text-faint-fg">内核配置的初始账户（面板无账户读数）。</span>
+                </template>
+              </div>
+            </div>
+
+            <div>
               <span class="label-micro">参数改动（只发改动项）</span>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
                 <div v-if="patchLines.length" class="space-y-0.5">
@@ -589,7 +670,7 @@ function discrepancyLabel(d: string): string {
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
                 {{ enable ? '提交后启用 cross_venue_arb（strategy cross_venue_arb on）。' : '提交后保持停用 —— 只确认映射与参数（可稍后在策略表手动启用）。' }}
                 <div class="mt-1 text-[11px] text-faint-fg">
-                  执行账户 = 当前 default{{ activeAccountId ? `「${activeAccountId}」` : '' }}；双腿在同一账户原子执行。
+                  执行账户 = <template v-if="execAccountId">「{{ execAccount?.name ?? execAccountId }}」{{ execAccountId === 'default' ? '（default：全局开关 + 账户镜像）' : '（assignment 即启用）' }}</template><template v-else>内核配置的初始账户</template>；双腿在同一账户原子执行。
                 </div>
               </div>
             </div>
