@@ -5,6 +5,7 @@
 use crate::engine::BatchBook;
 use crate::ipc::schema::Event;
 use crate::ledger::Ledger;
+use crate::market::venue_credentials_ready;
 use crate::model::*;
 use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
 use crate::position::{EquityBasis, OpenParams, PositionConfig, PositionManager};
@@ -5847,21 +5848,35 @@ impl Core {
                 .is_some_and(|e| e.strategy_atomic_batch(name))
         };
         for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
-            if let Err(reason) = self.virtual_batch_fits(&account_id, &strategy, &batch) {
+            // internal_key → token_id: the batch tuples carry only key +
+            // notional; the venue/scope pre-check needs the leg's token.
+            let leg_tokens: HashMap<String, String> = tokens
+                .iter()
+                .map(|(_, req)| (req.internal_key.clone(), req.token_id.to_string()))
+                .collect();
+            let batch_fits = self.virtual_batch_fits(&account_id, &strategy, &batch, &leg_tokens);
+            if let Err(reason) = batch_fits {
                 self.stats.strategy_limit_rejected += 1;
                 let acc = self
                     .strategy_accounting
                     .entry(strategy_acc_key(&strategy, &account_id))
                     .or_default();
                 acc.limit_rejected += batch.len() as u64;
+                // RFC #541 挂钩 B：凭证/scope 维度的拒绝分桶进各自的 cause
+                // key；pot 维度保持 `limit.virtualCap`（历史语义不动）。
+                let cause = if reason.starts_with("credentials.notReady") {
+                    "credentials.notReady"
+                } else if reason.starts_with("scope.legRefused") {
+                    "scope.legRefused"
+                } else {
+                    "limit.virtualCap"
+                };
                 for _ in &batch {
-                    *acc.rejection_causes
-                        .entry("limit.virtualCap".into())
-                        .or_default() += 1;
+                    *acc.rejection_causes.entry(cause.into()).or_default() += 1;
                 }
                 tracing::info!(target: "strategy",
                     "batch rejected: strategy={strategy} account={account_id} \
-                     cause=limit.virtualCap legs={} reason={reason}",
+                     cause={cause} legs={} reason={reason}",
                     batch.len());
                 let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
                 tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
@@ -6392,21 +6407,34 @@ impl Core {
                 .is_some_and(|e| e.strategy_atomic_batch(name))
         };
         for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
-            if let Err(reason) = self.virtual_batch_fits(&account_id, &strategy, &batch) {
+            // The SAME three-dimension pre-check the real cycle runs (issue
+            // #390's parity rule; RFC #541 hook B's twin leg).
+            let leg_tokens: HashMap<String, String> = tokens
+                .iter()
+                .map(|(_, req)| (req.internal_key.clone(), req.token_id.to_string()))
+                .collect();
+            let batch_fits = self.virtual_batch_fits(&account_id, &strategy, &batch, &leg_tokens);
+            if let Err(reason) = batch_fits {
                 self.stats.strategy_limit_rejected += 1;
                 let acc = self
                     .strategy_accounting
                     .entry(strategy_acc_key(&strategy, &account_id))
                     .or_default();
                 acc.limit_rejected += batch.len() as u64;
+                // Same cause buckets as the real cycle's loop above.
+                let cause = if reason.starts_with("credentials.notReady") {
+                    "credentials.notReady"
+                } else if reason.starts_with("scope.legRefused") {
+                    "scope.legRefused"
+                } else {
+                    "limit.virtualCap"
+                };
                 for _ in &batch {
-                    *acc.rejection_causes
-                        .entry("limit.virtualCap".into())
-                        .or_default() += 1;
+                    *acc.rejection_causes.entry(cause.into()).or_default() += 1;
                 }
                 tracing::info!(target: "strategy",
                     "batch rejected: strategy={strategy} account={account_id} \
-                     cause=limit.virtualCap legs={} reason={reason}",
+                     cause={cause} legs={} reason={reason}",
                     batch.len());
                 let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
                 tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
@@ -6923,14 +6951,91 @@ impl Core {
     /// cost basis (filled legs converted to real holdings); resting BUY
     /// orders are NOT added — their commitment IS their batch reservation,
     /// and counting both would double-charge the pot.
+    ///
+    /// RFC #541 方案 2a-i 挂钩 B（原型）：对 declared_atomic 策略的批，pot
+    /// 之前先做三维提交时校验——
+    /// (a) 凭证就绪（仅 `Mode::may_trade()`，即 Live：凭证是 venue egress
+    ///     的前置，Dry/ReadOnly 无 egress 亦无凭证语义）：批内每条腿 token
+    ///     的 `venue_of_token` 非空 ⇒ 该 venue 插件的全部必需凭证变量必须
+    ///     可解析（env 优先、持久格次之，与 `market::credentials_status`
+    ///     同一谓词与同一持久格）。untagged token（venue 空，前 #427 语料）
+    ///     不阻断——与 scope 门的 untagged 语义一致。任一腿凭证未就绪 ⇒
+    ///     整批拒（`credentials.notReady`）。
+    /// (b) scope（全模式）：批内任一腿 token 与所在 scope 的 venue 绑定冲突
+    ///     ⇒ 整批拒（`scope.legRefused`）——批循环能看见的最后一条防线
+    ///     （引擎挂钩 A 在其上游已经把 declared_atomic 策略整组丢了；这里
+    ///     兜住不经引擎过滤进圈的批）。
+    /// 两个 call site（实周期与 nofast 孪生）共用本函数，对等规则天然成立；
+    /// 未声明 atomic_batch 的策略在 `virtual_batches` 就不分组，行为不变。
+    /// `leg_tokens` maps each batch's internal_key to its token id (the
+    /// request facts the caller already holds — the batch tuples carry only
+    /// key + notional).
     fn virtual_batch_fits(
         &mut self,
         account_id: &str,
         strategy: &str,
         batch: &[(String, Decimal)],
+        leg_tokens: &HashMap<String, String>,
     ) -> Result<(), String> {
         if !self.virtual_accounts.governed(account_id, strategy) {
             return Ok(());
+        }
+        let declared_atomic = self
+            .engine
+            .as_ref()
+            .is_some_and(|e| e.strategy_atomic_batch(strategy));
+        if declared_atomic {
+            // (a) 凭证就绪是 Live-only 危害（RFC 失败模式①：place 时才发现
+            // 凭证缺 ⇒ 单腿 egress 失败留裸腿）。Dry/ReadOnly 没有 venue
+            // egress——`Mode::may_trade` 是每个 egress 站点必经的同一谓词，
+            // 且 Dry 明确「has no credentials story」——回放/回测语料不因
+            // shell 恰好无凭证 env 被整批拒。pot (b) 与 scope (c) 两维照常。
+            if self.config.mode.may_trade() {
+                // Same persisted cell `credentials_status` reads (env outranks
+                // it), loaded once per batch here.
+                let cell = self
+                    .config
+                    .runtime_config_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .map(|p| crate::ipc::runtime_config::load_credentials_from(p, None))
+                    .unwrap_or_default();
+                for (key, _notional) in batch {
+                    let Some(token) = leg_tokens.get(key) else {
+                        continue; // no token fact — nothing venue-shaped to judge
+                    };
+                    let venue = self.venue_of_token(token);
+                    // tag 腿的 venue 插件必需凭证必须全部可解析（env 非空或
+                    // 持久格非空，与 market::credentials_status 同一谓词）。
+                    // untagged 腿不阻断——scope 门对无标签语料同样放行。
+                    if !venue.is_empty() && !venue_credentials_ready(&venue, &cell) {
+                        return Err(format!(
+                            "credentials.notReady: leg {key} (token {token}) venue `{venue}` has \
+                             unresolved executor credentials"
+                        ));
+                    }
+                }
+            }
+            for (key, _notional) in batch {
+                let Some(token) = leg_tokens.get(key) else {
+                    continue; // no token fact — nothing venue-shaped to judge
+                };
+                let venue = self.venue_of_token(token);
+                // (b) scope：批循环里的 scope 半边（引擎挂钩 A 的下游兜底）。
+                // 绑定账户不出所外——refuse_cross_venue_order 的同一裁决，
+                // 读同一账户簿；untagged/未绑定账户照旧放行。
+                let bound = self
+                    .accounts
+                    .account(&AccountId::from(account_id))
+                    .map(|a| a.venue.as_str())
+                    .unwrap_or_default();
+                if !bound.is_empty() && !venue.is_empty() && venue != bound {
+                    return Err(format!(
+                        "scope.legRefused: leg {key} (token {token}) belongs to venue `{venue}` \
+                         but account `{account_id}` is bound to venue `{bound}`"
+                    ));
+                }
+            }
         }
         let committed: Decimal = self
             .positions
