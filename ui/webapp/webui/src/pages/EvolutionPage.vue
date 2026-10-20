@@ -51,18 +51,6 @@ const cycleSecs = computed(() => evo.value?.status?.cycleSecs ?? 0)
  */
 const switchConflicts = computed(() => evo.value?.status?.switchConflicts ?? [])
 
-/** 冲突开关的显示名与后果（一句话，带方向：文件说什么、实际是什么）。 */
-const conflictText = computed(() =>
-  switchConflicts.value
-    .map((c) => {
-      const name = c.switch === 'autoEvolve' ? '自动进化（auto_evolve）' : '进化引擎（enabled）'
-      const file = c.fileValue ? '开' : '关'
-      const runtime = c.runtimeValue ? '开' : '关'
-      return `${name}：配置文件说「${file}」，但 state.json 记的是「${runtime}」，实际以「${runtime}」运行`
-    })
-    .join('；'),
-)
-
 /** 当前真实行为，一句话（三种组合分开说，不留含糊）。 */
 const modeSummary = computed(() => {
   if (!evo.value) return '内核未上报状态'
@@ -149,6 +137,18 @@ async function setEngine(next: boolean): Promise<void> {
   showFlash('info', next
     ? `进化引擎已启用：开始评估影子变异体${autoEvolve.value ? '，并按自动模式自行采纳' : '，达标的变异挂到待决区等你拍板'}。深度轮首次计时从此刻开始。`
     : '进化引擎已关闭：不再评估、不再采纳，已挂起的提案保留但不会推进。')
+}
+
+/** #269 冲突横幅的出口按钮：把开关拨回文件值。内核在翻转落到文件值时同步
+ *  清掉对应的冲突条目（switch_conflicts 只在 boot 重建，运行期没有第二条路），
+ *  act 里的 store.refresh 拉回已清除的列表，横幅随之消失。 */
+function conflictName(c: { switch: string }): string {
+  return c.switch === 'autoEvolve' ? '自动进化（auto_evolve）' : '进化引擎（enabled）'
+}
+
+function resolveConflict(c: { switch: string; fileValue: boolean }): void {
+  if (c.switch === 'autoEvolve') void setAuto(c.fileValue)
+  else void setEngine(c.fileValue)
 }
 
 async function decide(p: EvolutionProposalRow, decision: 'accept' | 'reject' | 'defer'): Promise<void> {
@@ -421,14 +421,25 @@ const cycleAgo = (ms: number): string => {
     </div>
 
     <!-- #269：文件与运行期开关打架 —— 先说清楚「谁在说话」，否则下面所有
-         「引擎未启用 / 自动已开」的文案都可能被读成文件说了算 -->
+         「引擎未启用 / 自动已开」的文案都可能被读成文件说了算。每条冲突
+         带出口按钮：拨回文件值后内核清掉该条目，横幅随 refresh 消失。 -->
     <div v-if="switchConflicts.length" class="mt-3.5">
       <AlertBanner
         tone="warn"
         title="配置文件与运行期开关不一致"
-        hint="以面板开关为准（或删掉 data/evolution/state.json），否则改配置文件不会生效"
+        hint="点「拨回文件值」让面板开关与文件重新一致；或删掉 data/evolution/state.json 让文件重新说了算"
       >
-        {{ conflictText }}
+        <div class="space-y-1.5">
+          <div v-for="c in switchConflicts" :key="c.switch" class="flex flex-wrap items-center gap-2">
+            <span class="break-words opacity-90">{{ conflictName(c) }}：配置文件说「{{ c.fileValue ? '开' : '关' }}」，但 state.json 记的是「{{ c.runtimeValue ? '开' : '关' }}」，实际以「{{ c.runtimeValue ? '开' : '关' }}」运行</span>
+            <Button
+              size="sm"
+              variant="outline"
+              :disabled="busy !== null"
+              @click="resolveConflict(c)"
+            >拨回文件值（{{ c.fileValue ? '开' : '关' }}）</Button>
+          </div>
+        </div>
       </AlertBanner>
     </div>
 
