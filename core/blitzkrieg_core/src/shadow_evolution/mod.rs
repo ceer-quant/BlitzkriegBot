@@ -579,6 +579,7 @@ impl ShadowEvolution {
         for i in 0..self.units.len() {
             self.units[i].scaffold(&self.cfg, now_ms);
         }
+        self.resolve_switch_conflict(SwitchName::Engine, true);
         self.persist_state();
     }
 
@@ -589,7 +590,20 @@ impl ShadowEvolution {
         for u in self.units.iter_mut() {
             u.set = VariantSet::empty(&u.strategy);
         }
+        self.resolve_switch_conflict(SwitchName::Engine, false);
         self.persist_state();
+    }
+
+    /// A switch flipped back onto the file's value resolves its boot-time
+    /// conflict (#269): the entry said "the file says X but the runtime says
+    /// Y", and now the runtime agrees with the file again — keeping the entry
+    /// would leave the panel's banner announcing a disagreement that no longer
+    /// exists, and there is no other path back (the list was rebuilt only at
+    /// construction). Removing the entry is the honest readout, and a future
+    /// file edit that re-disagrees re-arms the warning at the next boot.
+    fn resolve_switch_conflict(&mut self, switch: SwitchName, new_value: bool) {
+        self.switch_conflicts
+            .retain(|c| !(c.switch == switch && c.file_value == new_value));
     }
 
     /// Record the current round: token expiries for the tick context, and the
@@ -1201,6 +1215,7 @@ impl ShadowEvolution {
         self.auto_evolve = on;
         self.cfg.auto_evolve = on;
         tracing::info!(auto_evolve = on, "shadow evolution auto-evolve switched");
+        self.resolve_switch_conflict(SwitchName::AutoEvolve, on);
         self.persist_state();
     }
 
@@ -2294,6 +2309,54 @@ mod tests {
         assert!(
             clean.switch_conflicts().is_empty(),
             "the file and the runtime agree"
+        );
+    }
+
+    /// #269 follow-up: a conflict entry dies when the switch is flipped back
+    /// onto the file's value. The panel's exit button routes through
+    /// enable/disable/set_auto_evolve, and the entry must be gone from the
+    /// NEXT status read (there is no boot between the flip and the read) —
+    /// and it must NOT take the *other* switch's conflict down with it.
+    #[test]
+    fn flipping_a_switch_back_to_the_file_value_resolves_its_conflict() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let cfg = fast_cfg(false, "conflict-resolve");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        proposal::ProposalStore::new(&dir).save_state(proposal::PersistedState {
+            enabled: Some(true),
+            auto_evolve: Some(true),
+            last_cycle_ms: 0,
+            cycle_seq: 0,
+        });
+        let mut m = ShadowEvolution::new(cfg, &refs);
+        assert_eq!(m.switch_conflicts().len(), 2, "both switches disagree");
+
+        // Auto first: only the auto entry leaves; the engine conflict stays.
+        m.set_auto_evolve(false);
+        assert_eq!(
+            m.switch_conflicts(),
+            [SwitchConflict {
+                switch: SwitchName::Engine,
+                file_value: false,
+                runtime_value: true,
+            }],
+            "the auto entry is resolved, the engine entry is untouched"
+        );
+
+        // Then the engine: disabling lands it on the file's OFF, and the list
+        // empties. A persisted state is also rewritten with the agreed values,
+        // so the next boot starts clean.
+        m.disable();
+        assert!(
+            m.switch_conflicts().is_empty(),
+            "the engine entry is resolved too"
+        );
+        let m2 = ShadowEvolution::new(fast_cfg(false, "conflict-resolve"), &refs);
+        assert!(
+            m2.switch_conflicts().is_empty(),
+            "the next boot re-arms nothing: state.json now agrees with the file"
         );
     }
 
