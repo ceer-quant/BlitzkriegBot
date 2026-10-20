@@ -725,3 +725,51 @@ fn a_stranded_reservation_halts_immediately() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── #537 · a submit refusal must not strand the notional it reserved ────────
+
+/// The production failure (2026-10-19: 247 stranded reservations, audit halted
+/// new entries): the place path reserves BUY notional BEFORE `ome.submit`, and
+/// a submit refusal (`duplicate internal key` — the engine re-fired an intent
+/// whose first leg was still resting) returned via `?` with the reservation
+/// still on the books. Every repeat widened the phantom-hold pool until
+/// `reservations_match_open_buys` failed and the audit blocked ALL new
+/// entries. The contract: a refused submit leaves `reserved` exactly where it
+/// was — the cash goes back before the error surfaces.
+#[test]
+fn a_refused_submit_rolls_back_its_reservation() {
+    let mut c = core();
+    let first = buy(dec!(10), dec!(0.5), "dup-key");
+    let (first_id, _) = c.place_pending(first, 1_000).unwrap();
+    c.confirm_live(&first_id, 1_000).unwrap();
+    let reserved_after_first = c.ledger().reserved();
+
+    // Same internal key: `ome.submit` refuses AFTER the second place path has
+    // already reserved. The reservation must not survive the refusal.
+    let refused = c.place_pending(buy(dec!(10), dec!(0.5), "dup-key"), 1_001);
+    assert!(
+        refused.is_err(),
+        "the duplicate key must refuse: {refused:?}"
+    );
+    assert_eq!(
+        c.ledger().reserved(),
+        reserved_after_first,
+        "a refused submit must roll back the notional it reserved"
+    );
+    assert_eq!(c.ledger().reserved(), dec!(5.0));
+
+    // The audit agrees: no phantom hold, entries stay open.
+    let report = c.run_accounting_audit(2_003);
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "reservations_match_open_buys")
+        .expect("the reservation check runs");
+    assert!(check.ok, "{check:?}");
+
+    // And the engine's next attempt with the SAME key is still refused (the
+    // dedup guard never weakened) — but this time without an accounting scar.
+    let again = c.place_pending(buy(dec!(10), dec!(0.5), "dup-key"), 1_002);
+    assert!(again.is_err());
+    assert_eq!(c.ledger().reserved(), dec!(5.0));
+}

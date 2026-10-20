@@ -1930,6 +1930,59 @@ async fn handle_line(
                     .lock()
                     .await
                     .set_strategy_enabled_checked(name, enabled);
+                // #537: on a successful toggle the default account's
+                // enablement set must move WITH it — the boot applies the
+                // accounts file AFTER the state file and turns every scope
+                // the file names back ON unconditionally, so a toggle that
+                // moved only the engine flag resurrected at the next boot
+                // and a strategy the file named could never be turned off
+                // for good. Same persisting write the non-default branch
+                // runs; the not-found and refusal replies below keep their
+                // exact legacy bytes.
+                let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
+                let mut kept_exits_only: Vec<String> = Vec::new();
+                // Gate-sandboxes run with no accounts.toml on disk at all —
+                // there "no file = persistence disabled" (the boot rule this
+                // mirror inherits) and the toggle must keep its legacy
+                // engine-only success. Only a path that EXISTS but refuses
+                // the write is an error.
+                let mirror_persistence = core
+                    .lock()
+                    .await
+                    .config()
+                    .accounts_config_path
+                    .as_deref()
+                    .is_some_and(|p| std::path::Path::new(p).exists());
+                if reason.is_none() && applied && mirror_persistence {
+                    let default_id = crate::account::default_account_id();
+                    let mut c = core.lock().await;
+                    match c.set_scoped_strategy_enabled(
+                        &default_id,
+                        name,
+                        enabled,
+                        // Same actor posture as the other panel writes: the
+                        // KERNEL-recorded uid, never a caller's claim.
+                        match peer {
+                            PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                            _ => "uid:unknown".to_string(),
+                        }
+                        .as_str(),
+                        if enabled {
+                            "strategy.enable (default account)"
+                        } else {
+                            "strategy.disable (default account)"
+                        },
+                        now_ms(),
+                    ) {
+                        Ok((kept, _set_now)) => kept_exits_only = kept,
+                        Err(e) => {
+                            mirror_error = Some(client_err(e));
+                        }
+                    }
+                }
+                if let Some(e) = mirror_error {
+                    return fail(id, e.0, e.1, e.2);
+                }
                 Ok(serde_json::json!({
                     "name": name,
                     "enabled": if reason.is_some() { false } else { enabled && applied },
@@ -1937,6 +1990,7 @@ async fn handle_line(
                     "applied": applied,
                     "reason": reason,
                     "accountId": account_id,
+                    "keptExitsOnly": kept_exits_only,
                 }))
             } else {
                 // 语义层接线（核心 agent 补丁）：本分支的 `id` 名被账户
@@ -2747,45 +2801,54 @@ async fn handle_line(
 
         method::INTENT_AUDIT_TAIL => {
             typed(params, |p: IntentAuditTailParams| async move {
-                let all = crate::jsonl::load::<Value>(
-                    std::path::Path::new("data/audit/intents.jsonl"),
-                    "intent audit log: skipped unparseable lines",
-                );
-                let keep = |rec: &Value| {
-                    if let Some(f) = p.account_id.as_deref()
-                        && rec.get("accountId").and_then(Value::as_str) != Some(f)
-                    {
-                        return false;
-                    }
-                    if let Some(f) = p.strategy.as_deref()
-                        && rec.get("strategy").and_then(Value::as_str) != Some(f)
-                    {
-                        return false;
-                    }
-                    if let Some(f) = p.decision.as_deref()
-                        && !rec
-                            .get("decision")
-                            .and_then(|d| d.get("status"))
-                            .and_then(Value::as_str)
-                            .is_some_and(|s| s.eq_ignore_ascii_case(f))
-                    {
-                        return false;
-                    }
-                    true
-                };
-                let matched: Vec<Value> = all.into_iter().filter(keep).collect();
-                let total = matched.len();
+                // §12.3: 「返回最新的 N 条（读尾部，不读全文件）」—— the
+                // backward tail scan, not the full `read_to_string` this arm
+                // once ran: a long-lived panel polls this every 4 s, and on a
+                // multi-hundred-MB audit log that read blew the gateway's IPC
+                // read budget (`request timed out` on the decisions page) and
+                // pinned a tokio worker each time. Filters run on the scanned
+                // span; `total` names the span's matches and is omitted when
+                // the span is not the whole file (no fake full counts).
                 let limit = p.limit.unwrap_or(50);
-                let records: Vec<Value> = matched
-                    .into_iter()
-                    .skip(total.saturating_sub(limit))
-                    .collect();
+                let account_id = p.account_id.clone();
+                let strategy = p.strategy.clone();
+                let decision = p.decision.clone();
+                let (mut records, matched, whole_file) = tokio::task::spawn_blocking(move || {
+                    crate::jsonl::tail_filtered::<Value>(
+                        std::path::Path::new("data/audit/intents.jsonl"),
+                        "intent audit log: skipped unparseable lines",
+                        limit,
+                        |rec: &Value| {
+                            if let Some(f) = account_id.as_deref()
+                                && rec.get("accountId").and_then(Value::as_str) != Some(f)
+                            {
+                                return false;
+                            }
+                            if let Some(f) = strategy.as_deref()
+                                && rec.get("strategy").and_then(Value::as_str) != Some(f)
+                            {
+                                return false;
+                            }
+                            if let Some(f) = decision.as_deref()
+                                && !rec
+                                    .get("decision")
+                                    .and_then(|d| d.get("status"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|s| s.eq_ignore_ascii_case(f))
+                            {
+                                return false;
+                            }
+                            true
+                        },
+                    )
+                })
+                .await
+                .unwrap_or((Vec::new(), 0, false));
+                let total = whole_file.then_some(matched);
+                records.truncate(limit);
                 Ok::<_, CoreError>(
-                    serde_json::to_value(IntentAuditTailResult {
-                        records,
-                        total: Some(total),
-                    })
-                    .unwrap_or(Value::Null),
+                    serde_json::to_value(IntentAuditTailResult { records, total })
+                        .unwrap_or(Value::Null),
                 )
             })
             .await
@@ -6060,6 +6123,10 @@ mod tests {
     /// with rows present it answers the NEWEST window in file order, and
     /// `accountId` / `decision` filter BEFORE the window is taken (`decision`
     /// case-insensitively against `decision.status`, the §3.4 wire shape).
+    /// The read is a BACKWARD tail scan (§12.3: 读尾部，不读全文件): `total`
+    /// reports the matches within the scanned span and is OMITTED when the
+    /// window filled before the file head (earlier rows were never counted —
+    /// a fake full count is worse than no count).
     #[tokio::test]
     async fn intent_audit_tail_reads_the_tail_and_filters() {
         let dir = std::path::Path::new("data/audit");
@@ -6124,6 +6191,9 @@ mod tests {
             reply["result"]["records"][0]["intentId"],
             serde_json::json!("i3")
         );
+        // The window filled (= limit reached) and the scan still covered the
+        // whole (tiny) file, so `total` names every match: 3, not 1 — the
+        // count is the scan's, independent of how many rows the window keeps.
         assert_eq!(reply["result"]["total"], serde_json::json!(3));
 
         // `decision` matches case-insensitively against `decision.status` …

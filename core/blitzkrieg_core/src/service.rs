@@ -3145,6 +3145,19 @@ impl Core {
         })?;
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
+        // #537: the default account's writes keep the persisted enabled-set
+        // in lockstep. The boot migrates the state file's set into the file
+        // ONLY while the default account has no `strategies` key; without
+        // this mirror, a set the operator emptied (key removed from
+        // accounts.toml) would be re-imported from a stale state file at the
+        // next boot — the exact resurrection the default-toggle mirror above
+        // closes. Non-default accounts never migrate, so their state file is
+        // untouched (the global toggle's file stays theirs alone).
+        if *id == crate::account::default_account_id()
+            && let Some(state_path) = self.config.strategy_state_path.as_deref()
+        {
+            crate::strategy_state::save(std::path::Path::new(state_path), &requested);
+        }
         // Engine rebuild. Removed-and-flat scopes drop; removed-and-held
         // scopes are marked exits-only; added scopes instantiate. An EMPTY
         // assignment is explicit "this account runs no strategies" — the
@@ -3231,6 +3244,14 @@ impl Core {
             // (inherit the persisted enabled set) produced. The write is
             // best-effort — a read-only tree keeps the implicit shape and
             // the boot proceeds (the persisted set is re-read next boot).
+            //
+            // #537: the persisted set is also kept in lockstep from here on —
+            // the default toggle now rewrites BOTH stores, and a set the
+            // operator emptied (key removed from the file, empty state file)
+            // must not be resurrected by a stale state file left over from
+            // the pre-toggle era. This one-time gate fires only when the file
+            // never spelled an assignment; afterwards the accounts file is
+            // the sole truth, exactly as the contract above states.
             if crate::account::config::persist_account_strategies(
                 std::path::Path::new(&path),
                 default_id.as_str(),
@@ -3719,6 +3740,16 @@ impl Core {
             )
         })?;
         self.accounts.set_strategies(id, set.clone(), now_ms)?;
+        // #537: the default account's scoped write keeps the persisted
+        // enabled-set in lockstep (the same mirror `set_account_strategies_
+        // persisting` runs): the boot migrates the state file ONLY while the
+        // default account has no `strategies` key, so a stale state file
+        // would otherwise re-import a set the operator already emptied.
+        if *id == crate::account::default_account_id()
+            && let Some(state_path) = self.config.strategy_state_path.as_deref()
+        {
+            crate::strategy_state::save(std::path::Path::new(state_path), &set);
+        }
         // Engine rebuild over the new set: removed-and-flat scopes drop,
         // removed-and-held scopes demote exits-only, added scopes
         // instantiate enabled.
@@ -7736,12 +7767,14 @@ impl Core {
         self.risk
             .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
         let id = self.new_order_id();
-        if req.side == Side::Buy {
+        let buy = req.side == Side::Buy;
+        let req_account = req.account_id.clone();
+        if buy {
             self.accounts
                 .get_mut(&req.account_id)?
                 .reserve(&id, req.price * req.size)?;
         }
-        self.ome.submit(SubmitParams {
+        if let Err(e) = self.ome.submit(SubmitParams {
             // #351: the pre-submit path settles locally with zero latency
             // dials — decision, execution and report all land here.
             decision_at_ms: now_ms,
@@ -7753,7 +7786,16 @@ impl Core {
             // The pre-submit path cannot know the entry's escalation window;
             // `confirm_live` falls back to the default clock when it arms.
             maker_timeout_ms: 0,
-        })?;
+        }) {
+            // #537: a submit refusal happens AFTER the notional reservation —
+            // leaving it on the books strands cash on an order that does not
+            // exist, and the accounting audit correctly halts entries on the
+            // phantom holds. Roll the reservation back with the order.
+            if buy && let Some(l) = self.accounts.get_mut(&req_account).ok() {
+                l.release(&id);
+            }
+            return Err(e);
+        }
         self.emit_order(&id);
         Ok((id, OrderStatus::Pending))
     }
@@ -11070,6 +11112,12 @@ impl Core {
         self.account_freezes.clear();
         self.consecutive_sweep_failures = 0;
         self.last_error = None;
+        // #537: the strategy page's PnL counters are the OTHER survivor —
+        // trade_db and the cash ledger reset, but these per-(strategy,account)
+        // slices kept their closed_trades/wins/net_pnl_usd, so the panel's
+        // 「真实余额 = 本金 + 净利」 kept folding a history the reset had
+        // erased. A wiped environment reports zero for every counter.
+        self.strategy_accounting.clear();
         if let Some(l) = self.applied_log.as_ref() {
             l.compact(&[]);
         }
@@ -11810,10 +11858,12 @@ impl Core {
         }
 
         let id = self.new_order_id();
+        let buy = req.side == Side::Buy;
+        let req_account = req.account_id.clone();
 
         // Reserve BUY notional up front (prevents over-commitment). E28: the
         // reservation commits cash in the REQUEST'S OWN book.
-        if req.side == Side::Buy {
+        if buy {
             self.accounts
                 .get_mut(&req.account_id)?
                 .reserve(&id, req.price * req.size)?;
@@ -11826,7 +11876,7 @@ impl Core {
         let execute_at = now_ms.saturating_add(self.config.fill_model.taker_latency_ms.max(0));
         let report_at = execute_at.saturating_add(self.config.fill_model.taker_rtt_ms.max(0));
 
-        self.ome.submit(SubmitParams {
+        if let Err(e) = self.ome.submit(SubmitParams {
             decision_at_ms: now_ms,
             execute_at_ms: execute_at,
             report_at_ms: report_at,
@@ -11834,7 +11884,14 @@ impl Core {
             request: req,
             submitted_at_ms: now_ms,
             maker_timeout_ms,
-        })?;
+        }) {
+            // #537: same rollback contract as the pre-submit path — a submit
+            // refusal must not strand the notional it just reserved.
+            if buy && let Some(l) = self.accounts.get_mut(&req_account).ok() {
+                l.release(&id);
+            }
+            return Err(e);
+        }
         let rejection = self.place_after_submit(&id, maker_timeout_ms, now_ms)?;
 
         let status = self
@@ -16421,6 +16478,88 @@ mod tests {
         );
     }
 
+    /// #537 重置漏清牙：reset_trading 清了 trade_db/positions/OME/账本，但
+    /// 策略页盈亏的源（`strategy_accounting` 的 per-(strategy,account) 切片
+    /// —— closed_trades/wins/net_pnl_usd）留在了内存里。症状是总览的
+    /// 「真实余额 = 本金 + 净利」继续按已抹掉的历史加减（操作者 2026-10-19
+    /// 报告：reset 后余额回 1000，总览却跟着策略页旧盈亏走）。重置后每一个
+    /// 计数器必须从零开始。
+    #[test]
+    fn reset_trading_clears_the_strategy_pnl_counters() {
+        let dir = reset_audit_dir("strategy-counters");
+        // All three log paths are PRIVATE absolute paths: this reset runs its
+        // post-wipe self-check against the log files, and the default
+        // cwd-relative `data/…` spellings trade with every parallel test in
+        // the suite — a neighbour's lines read as a failed reset.
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let mut c = Core::new(CoreConfig {
+            manual_ops_audit_path: Some(
+                dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+            ),
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: log("orders.jsonl"),
+            position_log_path: log("positions.jsonl"),
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        });
+        c.set_balance(Decimal::from(1_000));
+
+        // A closed trade folds into BOTH stores: trade_db (summary) and the
+        // strategy_accounting slice the strategy page reads.
+        let closed = crate::position::ClosedPosition {
+            id: "hft-r1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            entry_price: Decimal::ONE / Decimal::from(2),
+            exit_price: Decimal::ONE,
+            shares: Decimal::from(10),
+            cost_usd: Decimal::from(5),
+            was_maker_entry: true,
+            was_maker_exit: false,
+            entry_fee_pct: Decimal::ZERO,
+            exit_fee_pct: Decimal::ZERO,
+            pnl_usd: Decimal::from(5),
+            pnl_pct: Decimal::from(100),
+            net_pnl_usd: Decimal::from(7),
+            net_pnl_pct: Decimal::from(100),
+            high_pnl_pct: Decimal::ZERO,
+            low_pnl_pct: Decimal::ZERO,
+            hold_time_sec: 0,
+            exit_reason: crate::model::ExitReason::TakeProfit,
+            entered_at_ms: 0,
+            exited_at_ms: 1,
+            entry_role: crate::model::OrderRole::Maker,
+            exit_role: crate::model::OrderRole::Taker,
+            dust_shares: Decimal::ZERO,
+            account_id: crate::model::default_account_id(),
+            venue: "polymarket".into(),
+        };
+        let rec = crate::trade_db::TradeRecord::from_closed(&closed);
+        c.trade_db
+            .as_mut()
+            .expect("trade_log_path set")
+            .record(&rec, 1);
+        c.on_position_closed(&closed, 1);
+        let pre = c.strategy_stats();
+        assert!(
+            pre.iter().any(|r| r["netPnlUsd"] == serde_json::json!(7.0)),
+            "the counter is live before the reset: {pre:?}"
+        );
+
+        c.reset_trading(&reset_params("RESET"), "uid:t", 3).unwrap();
+
+        let post = c.strategy_stats();
+        assert!(
+            post.iter().all(|r| r["netPnlUsd"] != serde_json::json!(7.0)
+                && r["closedTrades"] == serde_json::json!(0)
+                && r["wins"] == serde_json::json!(0)),
+            "no strategy counter may survive the wipe: {post:?}"
+        );
+    }
+
     fn live_core(balance: Decimal) -> Core {
         let mut c = Core::new(CoreConfig {
             mode: Mode::Live,
@@ -18472,7 +18611,109 @@ mod strategy_dispatch_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// account.switch 绝不动后台 scope（钉死牙）：进程级 switch 只动
+    /// #537 关不掉牙（操作者 2026-10-19 报告）：default 账户的启用集写在
+    /// accounts.toml 后，面板的全局开关（`strategy.enable` accountId=default
+    /// 的服务层形状）只翻引擎旗标 + 写 strategy-state.json —— boot 的
+    /// rebuild 会把文件集合里的 scope 无条件拉回 enabled，「关掉」活不过一次
+    /// 重启。合流后的合同：default 的 scoped 写与全局开关**双向同步**——
+    /// `set_scoped_strategy_enabled(default, …)` 同时落 accounts.toml 集合
+    /// 与 strategy-state.json，boot 读到的就是操作者最后一次的决定；文件
+    /// 集合里被移除的名字不再借陈旧 state 文件复活（migration 的输入与
+    /// 集合写入永远一致）。
+    #[test]
+    fn default_toggle_persists_and_boot_does_not_resurrect() {
+        let dir = std::env::temp_dir().join(format!("bk-default-toggle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        // The pre-#537 production shape: the default account's enablement set
+        // IS in the file (this is what made the toggle unable to win).
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\nstrategies = [\"trend_follow\", \"spread_arb\"]\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+        let state_path = dir.join("strategy-state.json");
+
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        // The file is explicit: no migration.
+        assert!(c.apply_account_strategy_assignments_at_boot().is_empty());
+        let default_id = crate::account::default_account_id();
+
+        // The operator turns spread_arb off (the scoped write is what the
+        // panel's toggle now rides): the file's set loses the name AND the
+        // state file follows.
+        let (kept, set_now) = c
+            .set_scoped_strategy_enabled(&default_id, "spread_arb", false, "test", "panel off", 2)
+            .expect("the default disable lands");
+        assert!(kept.is_empty(), "flat scope → nothing demoted");
+        assert_eq!(set_now, vec!["trend_follow".to_string()]);
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let default_row = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            default_row.contains("strategies = [\"trend_follow\"]"),
+            "the file lost spread_arb the moment the toggle did: {text}"
+        );
+        assert_eq!(
+            crate::strategy_state::load(&state_path),
+            vec!["trend_follow".to_string()],
+            "the state file follows the scoped write"
+        );
+
+        // REBOOT: the boot's rebuild must not resurrect spread_arb — the file
+        // is the only truth and the state file agrees with it.
+        let mut c2 = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c2.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c2.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        let migrated = c2.apply_account_strategy_assignments_at_boot();
+        assert!(migrated.is_empty(), "explicit key ⇒ no migration");
+        assert!(
+            !c2.enabled_strategy_names()
+                .contains(&"spread_arb".to_string()),
+            "a disabled scope must not come back from the file or the state file"
+        );
+        assert_eq!(
+            c2.enabled_strategy_names(),
+            vec!["trend_follow".to_string()],
+        );
+
+        // The reverse direction: re-enabling through the same write lands the
+        // name in BOTH stores again.
+        let _ =
+            c2.set_scoped_strategy_enabled(&default_id, "spread_arb", true, "test", "panel on", 3);
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        let default_row = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            default_row.contains("spread_arb"),
+            "the enable lands in the file too: {text}"
+        );
+        assert!(crate::strategy_state::load(&state_path).contains(&"spread_arb".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// `active` 指针 —— 引擎的 scope 集、启用标志、exits-only 降级与意图
     /// 输出路径一行不碰。IPC 的 account.switch 更是会话级（另一 agent 域
     /// 的既有牙已钉 wire 半）；这里钉的是核心侧可能被误接线的最后一环。
