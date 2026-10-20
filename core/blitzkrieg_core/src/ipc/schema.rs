@@ -1717,8 +1717,11 @@ pub struct IntentAuditTailResult {
     /// The newest `limit` records matching every filter, in file order
     /// (oldest → newest).
     pub records: Vec<serde_json::Value>,
-    /// How many records matched the filters in total — `records` is only the
-    /// tail window. Optional in the wire contract (§12.3).
+    /// How many records matched within the scanned span — `records` is only
+    /// the tail window. The tail read is BACKWARD (§12.3: 读尾部): when the
+    /// scan stopped early (the window filled before the file head) earlier
+    /// rows were never counted, so the field is OMITTED rather than report a
+    /// fake full count; present only when the whole file was scanned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
 }
