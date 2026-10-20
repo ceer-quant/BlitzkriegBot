@@ -5,7 +5,7 @@
 use crate::engine::BatchBook;
 use crate::ipc::schema::Event;
 use crate::ledger::Ledger;
-use crate::market::venue_credentials_ready;
+use crate::market::{venue_credentials_missing, venue_credentials_ready};
 use crate::model::*;
 use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
 use crate::position::{EquityBasis, OpenParams, PositionConfig, PositionManager};
@@ -7009,9 +7009,13 @@ impl Core {
                     // 持久格非空，与 market::credentials_status 同一谓词）。
                     // untagged 腿不阻断——scope 门对无标签语料同样放行。
                     if !venue.is_empty() && !venue_credentials_ready(&venue, &cell) {
+                        // RFC #541 边界三（拒绝可见性）：the refusal names the
+                        // leg, the venue, and the EXACT unresolved vars — the
+                        // operator fixes the batch from this line alone.
+                        let missing = venue_credentials_missing(&venue, &cell).join(",");
                         return Err(format!(
                             "credentials.notReady: leg {key} (token {token}) venue `{venue}` has \
-                             unresolved executor credentials"
+                             unresolved executor credentials: missing [{missing}]"
                         ));
                     }
                 }

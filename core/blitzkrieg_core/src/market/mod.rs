@@ -605,12 +605,28 @@ pub fn venue_credentials_ready(
     plugin: &str,
     cell: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 ) -> bool {
-    plugin_credential_vars(plugin).iter().all(|v| {
-        std::env::var_os(v).is_some_and(|s| !s.is_empty())
-            || cell
-                .get(plugin)
-                .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty()))
-    })
+    venue_credentials_missing(plugin, cell).is_empty()
+}
+
+/// The refusal-diagnosis half of [`venue_credentials_ready`]: WHICH of the
+/// plugin's required vars do not resolve (env empty/absent AND the persisted
+/// cell empty), in the plugin's declared order. RFC #541 边界三（拒绝可见性）：
+/// an operator must be able to fix a wholesale batch refusal from the log line
+/// alone — "kalshi 缺 KALSHI_RSA_PRIVATE_KEY"，不是笼统的"批校验失败"。
+pub fn venue_credentials_missing(
+    plugin: &str,
+    cell: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+) -> Vec<&'static str> {
+    plugin_credential_vars(plugin)
+        .iter()
+        .copied()
+        .filter(|v| {
+            !(std::env::var_os(v).is_some_and(|s| !s.is_empty())
+                || cell
+                    .get(plugin)
+                    .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty())))
+        })
+        .collect()
 }
 
 /// `market.credentials.set`: validate every var name against the plugin's

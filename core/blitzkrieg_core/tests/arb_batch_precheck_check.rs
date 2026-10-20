@@ -312,6 +312,32 @@ fn atomic_pair_drops_the_whole_cycle_when_one_leg_is_scope_refused() {
             c.ome().live_orders().is_empty(),
             "no pair leg may reach the OME (the UP leg would have flown alone pre-hook)"
         );
+        // RFC #541 裁决边界（拒绝可见性 + 门禁条款的路径钉死）：WHERE the
+        // batch died decides which hook caught it. Hook A (engine scope
+        // filter) drops the legs BEFORE any OrderRequest exists ⇒ signals
+        // stays 0 and hook B's batch pre-check never fires (no bucket). The
+        // engine-side INFO audit line is the operator-facing record here.
+        let stats = c.engine_stats();
+        assert_eq!(
+            stats["signals"], 0,
+            "hook A drops the legs inside the engine: no signal ever reaches Core \
+             (the RFC's 'engine scope 丢弃路径' evidence — not the batch loop)"
+        );
+        assert_eq!(
+            stats["strategyLimitRejected"], 0,
+            "hook B must NOT fire for a cycle hook A already dropped: no batch, no \
+             strategy_limit_rejected, no rejectionCauses row"
+        );
+        let stats_rows = c.strategy_stats();
+        let s = strategy_row(&stats_rows, "cross_venue_arb");
+        // Only counted buckets appear; an empty map serializes as Null. Either
+        // shape proves the same fact: hook B never bucketed a scope refusal.
+        let causes = &s["rejectionCauses"];
+        assert!(
+            causes.is_null() || causes.get("scope.legRefused") == Some(&serde_json::json!(0)),
+            "the refusal happened upstream of the batch loop: no scope.legRefused bucket \
+             may exist (hook A's INFO audit line is the record, not a counter): {s}"
+        );
     }
 
     // ── 对照组：同夹具、不绑 venue ⇒ 两腿正常进 OME（Live pending 单）。
@@ -500,6 +526,39 @@ fn credentials_not_ready_refuses_the_whole_batch_then_both_legs_pass() {
         s["rejectionCauses"]["credentials.notReady"], 2,
         "both legs bucketed under the new cause key: {s}"
     );
+    // RFC #541 边界三（拒绝可见性）：the refusal must be fixable from the log
+    // line alone — the missing VAR NAMES, not just the venue. The batch
+    // rejection's INFO line carries them via `venue_credentials_missing`
+    // (declared order); the predicate seam is unit-pinned here, and the
+    // Err-string format that interpolates it is the same surface the
+    // `batch rejected: … reason={reason}` log line renders.
+    let empty_cell = Default::default();
+    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &empty_cell);
+    assert_eq!(
+        missing,
+        vec!["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
+        "the diagnosis helper names exactly the unresolved vars, in declared order"
+    );
+    set_env("KALSHI_API_KEY_ID", "test-key");
+    let cell_one = Default::default();
+    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &cell_one);
+    assert_eq!(
+        missing_one,
+        vec!["KALSHI_RSA_PRIVATE_KEY"],
+        "a partially-set plugin reports only what is still missing"
+    );
+    // And the Err text the caller buckets carries the interpolation.
+    let reason = format!(
+        "credentials.notReady: leg {} (token {}) venue `{}` has unresolved executor \
+         credentials: missing [{}]",
+        "k",
+        KX_DOWN,
+        KALSHI,
+        missing.join(",")
+    );
+    assert!(reason.contains("missing [KALSHI_API_KEY_ID,KALSHI_RSA_PRIVATE_KEY]"));
+    // RFC #541 边界三（拒绝可见性）：the batch-rejected INFO line names the
+    // exact unresolved vars — pinned via the diagnosis predicate below.
     assert_eq!(
         s["rejectionCauses"]
             .get("limit.virtualCap")
