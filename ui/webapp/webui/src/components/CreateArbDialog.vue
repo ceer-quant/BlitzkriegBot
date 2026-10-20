@@ -36,6 +36,7 @@ import {
   type UnifiedEventRow,
   type UnifiedCandidateRow,
   type UnifiedVenueRow,
+  type PluginCredentialRowDoc,
   type AssetBook,
 } from '@/api/client'
 import { cents } from '@/lib/format'
@@ -262,8 +263,76 @@ const selectedEvent = computed(() =>
   pairable.value.find((e) => e.id === selectedEventId.value) ?? null,
 )
 
-/** 可以进确认页 = 选了目标映射（映射是套利的存在前提；参数与启用都有默认）。 */
-const canReview = computed(() => selectedEvent.value !== null)
+// ── 映射两侧 venue 的凭证就绪（issue 542，P1-a 缓解面）───────────────────────
+// 内核 `market.credentials.status` 已产出 per-plugin ready 读数（executor 缺
+// 凭证时 start 仍 Ok 但 inert —— 挂出后无人拉取，面板必须提前说出这条）。
+// 数据纪律：ready 是行数据，venue 是行键 —— 不分支于任何具体交易所名。
+
+/** 凭证读数行（挂载即读一次）；读失败 = null，如实降级为「无法验证」。 */
+const credRows = ref<PluginCredentialRowDoc[] | null>(null)
+
+async function loadCredentialRows(): Promise<void> {
+  credRows.value = null
+  try {
+    const doc = await api.marketCredentials()
+    credRows.value = doc.rows ?? []
+  } catch {
+    credRows.value = null
+  }
+}
+
+/** 每条映射 venue 一行：ready / 未解析的变量名 / 读数里查不到该行（未知）。 */
+interface LegCredStatus {
+  venue: string
+  /** rows 里有该 plugin 行且 ready=true。 */
+  ready: boolean
+  /** requiredVars − resolvedVars（ready=false 时的缺失变量名，如实列出）。 */
+  missingVars: string[]
+  /** rows 里没有该 plugin 的行 —— 读数覆盖不到，不阻断但必须披露。 */
+  unknown: boolean
+}
+
+function legCredStatus(v: UnifiedVenueRow): LegCredStatus {
+  const row = credRows.value?.find((r) => r.plugin === v.venue)
+  if (!row) return { venue: v.venue, ready: false, missingVars: [], unknown: true }
+  const resolved = new Set(row.resolvedVars)
+  return {
+    venue: v.venue,
+    ready: row.ready,
+    missingVars: row.requiredVars.filter((name) => !resolved.has(name)),
+    unknown: false,
+  }
+}
+
+/** 选中映射两侧的凭证状态行（确认页 per-leg 披露块的数据源）。 */
+const selectedLegCreds = computed<LegCredStatus[] | null>(() => {
+  const ev = selectedEvent.value
+  if (!ev) return null
+  return ev.venues.map(legCredStatus)
+})
+
+/** 读数可用且有任一腿明确 ready=false ⇒ 阻断进确认页/提交（保守方向的
+ *  一侧：明确未就绪不许过）。读数缺失或行覆盖不到 = 未知 —— 不阻断，
+ *  由确认页的「无法验证」披露兜底。 */
+const credBlocked = computed(() =>
+  (selectedLegCreds.value ?? []).some((leg) => leg.unknown === false && !leg.ready),
+)
+
+/** 可以进确认页 = 选了目标映射，且映射两侧凭证校验未明确失败。 */
+const canReview = computed(() => selectedEvent.value !== null && !credBlocked.value)
+
+/** 凭证读数读取失败（请求层）——确认页如实披露「无法验证两腿凭证就绪」。 */
+const credReadFailed = computed(() => credRows.value === null)
+
+/** 明确 ready=false 的腿（编辑页聚合警示 + 阻断判据共用）。 */
+const credUnreadyRows = computed(() =>
+  (selectedLegCreds.value ?? []).filter((leg) => leg.unknown === false && !leg.ready),
+)
+
+/** 存在读数里查不到的腿（未知）——不阻断，确认页披露「无法验证」。 */
+const credUnverifiable = computed(() =>
+  (selectedLegCreds.value ?? []).some((leg) => leg.unknown),
+)
 
 watch(
   () => props.open,
@@ -279,6 +348,7 @@ watch(
     void loadMappings()
     void loadCurrentParams()
     void loadVenueBinding()
+    void loadCredentialRows()
   },
 )
 
@@ -535,6 +605,17 @@ function discrepancyLabel(d: string): string {
                   hint="先确认候选（上方），或到插件页确认两个行情插件已在线并发现同一事件；只有已配对且无差异标记的映射才能交易。"
                 />
                 <div v-else class="mt-1.5 space-y-1.5">
+                  <!-- 凭证就绪（issue 542）：映射两侧 venue 的 credentials 读数，
+                       ready=false 明确阻断；行查不到/读数缺失 = 未知，不阻断但披露。 -->
+                  <div v-if="credReadFailed" class="rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] text-muted-fg">
+                    凭证读数读取失败，无法验证两腿凭证就绪 —— 确认页会如实披露。
+                  </div>
+                  <div v-else-if="credUnreadyRows.length" class="rounded-md border border-down/30 bg-down/10 px-2.5 py-2 text-[11.5px] text-down">
+                    <div class="font-semibold">当前选中映射的以下 venue 凭证未就绪 —— 无法进入确认页：</div>
+                    <div v-for="row in credUnreadyRows" :key="row.venue" class="mt-0.5">
+                      venue {{ row.venue }} 凭证未就绪（缺变量：{{ row.missingVars.join('、') || '读数未列出' }}）
+                    </div>
+                  </div>
                   <label
                     v-for="e in pairable"
                     :key="e.id"
@@ -638,6 +719,36 @@ function discrepancyLabel(d: string): string {
               </div>
             </div>
 
+            <!-- issue 542: per-leg credential disclosure from the kernel's
+                 market.credentials.status readout. Every leg is a data row
+                 (venue + ready state + missing variable names) — venue is the
+                 row key, never a branch. ready=false blocks submission; a leg
+                 absent from the readout is UNKNOWN: not a block, but it must
+                 be stated as unverifiable rather than silently passed. -->
+            <div>
+              <span class="label-micro">两腿凭证就绪（提交前校验）</span>
+              <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
+                <div v-if="credReadFailed" class="text-muted-fg">
+                  凭证读数读取失败，无法验证两腿凭证就绪 —— 提交不因此阻断，但执行器可能因缺凭证 inert（挂单无人拉取）。
+                </div>
+                <template v-else>
+                  <div v-for="leg in selectedLegCreds ?? []" :key="leg.venue" class="flex flex-wrap items-center gap-1.5 border-t border-line/60 py-1.5 first:border-t-0 first:pt-0">
+                    <span class="text-muted-fg">腿 venue</span>
+                    <Badge variant="outline">{{ leg.venue }}</Badge>
+                    <Badge v-if="leg.unknown" variant="gold">读数无该 venue 行 —— 无法验证</Badge>
+                    <Badge v-else-if="leg.ready" variant="up">凭证就绪</Badge>
+                    <Badge v-else variant="down">凭证未就绪</Badge>
+                    <span v-if="!leg.unknown && !leg.ready" class="num text-[11px] text-down">
+                      缺变量：{{ leg.missingVars.join('、') || '读数未列出' }}
+                    </span>
+                  </div>
+                  <div v-if="credUnverifiable" class="mt-1.5 text-[11px] text-muted-fg">
+                    存在无法验证的腿（读数无该 venue 行）—— 不阻断提交，但该腿执行器可能因缺凭证 inert。
+                  </div>
+                </template>
+              </div>
+            </div>
+
             <div>
               <span class="label-micro">执行账户</span>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
@@ -735,7 +846,8 @@ function discrepancyLabel(d: string): string {
           </Button>
           <div class="ml-auto flex items-center gap-2">
             <template v-if="step === 'edit'">
-              <span v-if="!canReview" class="text-[11px] text-faint-fg">先选择一个目标映射</span>
+              <span v-if="!canReview && credBlocked" class="text-[11px] text-down">映射 venue 凭证未就绪 —— 提交前需补齐</span>
+              <span v-else-if="!canReview" class="text-[11px] text-faint-fg">先选择一个目标映射</span>
               <Button variant="gold" size="sm" :disabled="!canReview" @click="step = 'confirm'">
                 下一步：确认
               </Button>
