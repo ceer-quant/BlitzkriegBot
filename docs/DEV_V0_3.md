@@ -841,6 +841,8 @@ status = "read_only"      # 只读：能看不能下单
 | 优先级 | CLI > env > toml > 默认（沿用既有 `default.toml` 顶部规则） |
 | 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（`accounts.toml` 落盘）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
 | 活跃账户 | `account.switch` 是**会话级**（按 UDS 连接），不是进程级全局：两个客户端可以看两个账户。切换只影响**该连接后续请求的默认 account_id**，不影响内核调度 |
+| 显示账户 | **display_account（0.4.1，#559/#561/#562）**：`accounts.toml` 顶层键 `display_account = "<账户id>"`（与 `[[account]]` 表并列），回答「**面板行情页显示哪个账户的交易所**」。缺省 = 第一个 `status = active` 的账户；命名了不存在的 id → 内核拒绝启动（fail-closed，与账户簿同姿态）。运行时动词 `display.account.set`（payload `{accountId}`）：校验存在 + active → **persist 先行** → 运行时指针 + 文件一次写齐；面板切换器在 `account.switch` 成功后顺手调用。快照顶层带 `displayAccount` / `displayVenue`（venue 空串 = 未绑定）。**纯展示指针**：不接记账/下单/策略启用语义（那些跟着会话 activeAccount 走）；`account.remove` 删掉被指账户时内核修复指针（回落第一个 active）。面板身份唯一源 = `displayVenue` 优先，回落 `activeAccountVenue`（老内核零字段 → 原回落链，#561） |
+| 升级不覆盖 | **accounts.toml 是内核运行时写目标（0.4.1，#565）**：venue 绑定 / strategies 启用集 / display_account 全部由运行时动词持久化进来。`blitzkrieg upgrade` 对它的规则是「**运行副本永远赢**」——live 存在则不覆盖、不进回滚集；live 缺失才落工厂版。见 `scripts/lib/upgrade-artifacts.sh` 的 `UA_OPERATOR_STATE_CONFIGS`（2026-10-20 三次同日升级把操作员状态静默洗回工厂簿的事故后设立） |
 
 ### 9.6 环境与插件的关系（诚实边界）
 
