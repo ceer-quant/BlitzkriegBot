@@ -67,6 +67,10 @@ const KX_DOWN: &str = "kx-down";
 const PM2: &str = "pm-cond-2";
 const PM2_UP: &str = "pm2-up";
 const PM2_DOWN: &str = "pm2-down";
+// kalshi 翻轮后的行（真实链路里 5s 轮询自然重报下一轮；夹具显式补报）。
+const KX2: &str = "kx-cond-2";
+const KX2_UP: &str = "kx2-up";
+const KX2_DOWN: &str = "kx2-down";
 
 fn paper_id() -> AccountId {
     AccountId("paper".to_string())
@@ -170,7 +174,11 @@ fn market(token_up: &str, token_down: &str, cond: &str, venue: &str, slot: i64) 
         up_price: dec!(0.48),
         down_price: dec!(0.45),
         expires_at_ms: (slot + 1) * 900 * 1000,
-        round_slot: slot,
+        // 插件语义（polymarket/kalshi discovery 同源）：round_slot = 到期
+        // 所属 slot（end_ms/1000/round_sec）。#560 后快照装配层与
+        // books_view 都按「到期 slot == 判定钟 slot+1」过滤——正在交易的
+        // 一轮。夹具的 slot 参数就是那「正在交易的 slot」。
+        round_slot: slot + 1,
         round_duration_sec: 900,
         archive_verdict: false,
         venue: venue.to_string(),
@@ -599,7 +607,12 @@ fn removing_a_held_scope_demotes_it_to_exits_only() {
 #[test]
 fn dual_venue_data_plane_keeps_both_venues_and_rolls_per_venue() {
     let mut c = decouple_core(None, Some(dec!(1000)), false);
-    let now = NOW;
+    // 固定受控钟（books_view 的判定钟由调用方传入，本测试喂入与判定同
+    // 源、零边界竞态）。#560 后的过滤判据：喂入轮 round_slot（插件语义
+    // = 到期所属格）必须等于「判定钟 slot + 1」。slot 取 NOW 所在格的中
+    // 段：喂入 expiry 未过、observe 派生的 venue 钟 offset = 0，判定钟
+    // 与喂入钟逐位一致。
+    let now = (NOW / 900_000) * 900_000 + 450_000; // mid-slot
     let slot = now / 1000 / 900;
 
     // 错峰上架：polymarket 先报、kalshi 同 slot 后报 ⇒ 合流，不是覆盖。
@@ -618,7 +631,7 @@ fn dual_venue_data_plane_keeps_both_venues_and_rolls_per_venue() {
         now + 500,
     );
 
-    let rows = c.books_view(5);
+    let rows = c.books_view(5, now);
     assert!(
         rows.iter().any(|r| r.up_token_id == PM_UP),
         "the polymarket row survives the kalshi top-up: {rows:?}"
@@ -635,17 +648,27 @@ fn dual_venue_data_plane_keeps_both_venues_and_rolls_per_venue() {
     assert_eq!(c.venue_of_token(KX_UP), "kalshi");
 
     // 单所翻轮：polymarket 的新 slot 只换 polymarket 的行；kalshi 不被撕掉。
+    // 真实链路里 kalshi 的 5s 轮询会自然重报它的下一轮——夹具两所都显式
+    // 补报，判定钟同步推进到下一格（已到期的 slot 不再出现在视图里）。
+    let rollover_ms = (slot + 1) * 900 * 1000 + 450_000; // next slot's midpoint
     c.engine_on_data(
         DataEvent::RoundMarkets {
             markets: vec![market(PM2_UP, PM2_DOWN, PM2, "polymarket", slot + 1)],
-            now_ms: (slot + 1) * 900 * 1000,
+            now_ms: rollover_ms,
         },
-        (slot + 1) * 900 * 1000,
+        rollover_ms,
     );
-    let rows2 = c.books_view(5);
+    c.engine_on_data(
+        DataEvent::RoundMarkets {
+            markets: vec![market(KX2_UP, KX2_DOWN, KX2, "kalshi", slot + 1)],
+            now_ms: rollover_ms + 500,
+        },
+        rollover_ms + 500,
+    );
+    let rows2 = c.books_view(5, rollover_ms + 500);
     assert!(
-        rows2.iter().any(|r| r.up_token_id == KX_UP),
-        "kalshi survived polymarket's rollover: {rows2:?}"
+        rows2.iter().any(|r| r.up_token_id == KX2_UP),
+        "kalshi survived polymarket's rollover (via its own next-round feed): {rows2:?}"
     );
     assert!(
         rows2.iter().any(|r| r.up_token_id == PM2_UP),
@@ -656,7 +679,7 @@ fn dual_venue_data_plane_keeps_both_venues_and_rolls_per_venue() {
         "polymarket's expired round is replaced by its own feed"
     );
     assert_eq!(
-        c.venue_of_token(KX_UP),
+        c.venue_of_token(KX2_UP),
         "kalshi",
         "kalshi attribution survives the sibling venue's rollover"
     );

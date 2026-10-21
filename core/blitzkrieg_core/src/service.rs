@@ -7847,16 +7847,30 @@ impl Core {
     /// `OrderbookSnapshot::from_levels`, the same builder the strategy layer
     /// consumes. Purely observational: no locks beyond the core's own, no side
     /// effects. An absent round or an unknown token simply yields nothing.
-    pub fn books_view(&self, max_levels: usize) -> Vec<AssetBooksView> {
+    ///
+    /// #560 的 slot 过滤 + (venue, asset) 唯一化在这里同样适用：快照装配层
+    /// 只修了 `engine.round` 面，`engine.books` 是第二个逐市场平铺的数据源
+    /// ——slot 边界附近相邻两轮（当前+1 与当前+2）并存于 scanner，盘口
+    /// 深度卡每资产出现两行、选择器按 (venue,asset) 撞重复 key。与
+    /// `engine.round` 同判据：到期 slot = 当前 slot + 1（正在交易的一轮），
+    /// round_slot == 0（老语料 serde default）照旧放行；再先到先得唯一化。
+    /// 判定钟由调用方传入（`round_state` / `current_slot` 同风格）：窗口边
+    /// 界附近「喂入轮恰好是视图当下认定的 trading slot」是真实链路里插件
+    /// 5s 轮询自带的性质，测试要精确钉住这个关系就不能赌宿主墙钟不翻格。
+    pub fn books_view(&self, max_levels: usize, now: i64) -> Vec<AssetBooksView> {
         let Some(engine) = self.engine.as_ref() else {
             return Vec::new();
         };
-        let now = now_ms();
-        engine
-            .scanner()
+        let scanner = engine.scanner();
+        let trading_slot = scanner.current_slot(now) + 1;
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        scanner
             .round_state(now)
             .markets
             .iter()
+            .filter(|m| m.round_slot == 0 || m.round_slot == trading_slot)
+            .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
             .map(|m| AssetBooksView {
                 asset: m.asset.clone(),
                 up_token_id: m.up_token_id.clone(),

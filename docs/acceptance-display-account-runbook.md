@@ -62,6 +62,25 @@ print("rows:",len(keys),"dups:",dup or "none")'
 判据：同 (venue, asset) 不得出现两行（此前 kalshi 5s 轮询把再下一档轮落表，
 ENGINE_ROUND 装配不看 slot → 8 卡里 4 对重复）。
 
+### B2. books 面（盘口深度卡，#567 补漏）
+
+`round.prices` 只是两个平铺面之一；`engine.books`（webui 快照 `books` 字段，
+盘口深度卡数据源）是第二个——#560 曾漏修此面（生产实录：books 12 行 =
+PM 4 + kalshi 相邻两轮 8，token `…211215-15` vs `…211230-30`）。
+
+```sh
+curl -s http://127.0.0.1:51888/api/snapshot -H "X-Auth-Token: $TOKEN" \
+  | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+pairs=[(b.get("venue",""),b["asset"]) for b in (d.get("books") or [])]
+dup=[k for k in set(pairs) if pairs.count(k)>1]
+print("books rows:",len(pairs),"dups:",dup or "none")'
+```
+
+判据：books 行数 = 8（4 资产 × 2 所），无 (venue,asset) 重复；且 kalshi 行
+的 `upTokenId` 带当前交易轮的到期戳（不是再下一档）。
+
 ## C. default 空集后可启停（#563）
 
 1. 面板策略页把 default 账户全部策略停用（第一次 disable 拆掉 boot 注册的
