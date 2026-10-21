@@ -2761,7 +2761,7 @@ async fn handle_line(
         // 语义，方法层直接查 scanner 市场清单），盘口深度行不再无源。
         method::ENGINE_BOOKS => {
             let c = core.lock().await;
-            let mut view = serde_json::to_value(c.books_view(15)).unwrap_or(Value::Null);
+            let mut view = serde_json::to_value(c.books_view(15, now_ms())).unwrap_or(Value::Null);
             if let Some(rows) = view.as_array_mut() {
                 for row in rows.iter_mut() {
                     let venue = row

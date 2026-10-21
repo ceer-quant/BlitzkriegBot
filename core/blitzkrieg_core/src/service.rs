@@ -7854,11 +7854,13 @@ impl Core {
     /// 深度卡每资产出现两行、选择器按 (venue,asset) 撞重复 key。与
     /// `engine.round` 同判据：到期 slot = 当前 slot + 1（正在交易的一轮），
     /// round_slot == 0（老语料 serde default）照旧放行；再先到先得唯一化。
-    pub fn books_view(&self, max_levels: usize) -> Vec<AssetBooksView> {
+    /// 判定钟由调用方传入（`round_state` / `current_slot` 同风格）：窗口边
+    /// 界附近「喂入轮恰好是视图当下认定的 trading slot」是真实链路里插件
+    /// 5s 轮询自带的性质，测试要精确钉住这个关系就不能赌宿主墙钟不翻格。
+    pub fn books_view(&self, max_levels: usize, now: i64) -> Vec<AssetBooksView> {
         let Some(engine) = self.engine.as_ref() else {
             return Vec::new();
         };
-        let now = now_ms();
         let scanner = engine.scanner();
         let trading_slot = scanner.current_slot(now) + 1;
         let mut seen: std::collections::HashSet<(String, String)> =
