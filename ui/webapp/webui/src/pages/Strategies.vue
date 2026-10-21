@@ -59,6 +59,10 @@ const flash = ref<{ name: string; ok: boolean; msg: string } | null>(null)
  *    字段 → undefined = 无读数）；
  *  - 次选 `strategy.list` 行的 `accounts`（该策略在哪些账户启用）。
  *
+ * 字段存在就按集读（issue 552）：空集 = 该账户显式不跑任何策略（INHERIT
+ * 已废除），一律显示未启用 —— 不得借道全局开关。全局 `r.enabled` 是
+ * default 总闸（master power），读它会把「全局开」误报成「该账户开」。
+ *
  * 两路都缺（老核）→ null = 读数缺失：按钮退回旧的全局 `enabled` 语义
  * （列表恒显全部，不再按账户过滤），且控制台 warn 一次。
  */
@@ -68,8 +72,8 @@ function isAccountEnabled(r: StrategyStatsRow): boolean | null {
   const row = id ? store.accounts.find((a) => a.id === id) : null
   const set = row?.strategies
   if (Array.isArray(set)) {
-    // 启用集语义：非空 = 逐字集合；空 = 跟随全局开关（0.2 单簿形状）。
-    return set.length ? set.includes(r.name) : r.enabled
+    // 启用集语义：非空 = 逐字集合；空 = 显式不跑（未启用）。
+    return set.includes(r.name)
   }
   if (Array.isArray(r.accounts)) return r.accounts.includes(id ?? 'default')
   if (!accountsFieldWarned.warned) {
@@ -190,8 +194,8 @@ const filteredRows = computed(() => {
 
 const groups = computed(() =>
   [
-    { id: 'running', label: '运行中', rows: filteredRows.value.filter((r) => r.enabled && !isAbnormal(r)) },
-    { id: 'stopped', label: '已停止', rows: filteredRows.value.filter((r) => !r.enabled && !isAbnormal(r)) },
+    { id: 'running', label: '运行中', rows: filteredRows.value.filter((r) => (isAccountEnabled(r) ?? r.enabled) && !isAbnormal(r)) },
+    { id: 'stopped', label: '已停止', rows: filteredRows.value.filter((r) => !(isAccountEnabled(r) ?? r.enabled) && !isAbnormal(r)) },
     { id: 'abnormal', label: '异常', rows: filteredRows.value.filter(isAbnormal) },
   ].filter((g) => g.rows.length > 0),
 )
@@ -479,7 +483,7 @@ function onExpand(name: string): void {
                       <span class="flex min-w-0 items-center gap-2">
                         <span
                           class="size-1.5 shrink-0 rounded-full"
-                          :style="{ background: isAbnormal(r) ? 'var(--down)' : r.enabled ? 'var(--up)' : 'var(--faint-fg)' }"
+                          :style="{ background: isAbnormal(r) ? 'var(--down)' : (isAccountEnabled(r) ?? r.enabled) ? 'var(--up)' : 'var(--faint-fg)' }"
                         />
                         <span class="truncate" :title="r.name">{{ r.name }}</span>
                       </span>

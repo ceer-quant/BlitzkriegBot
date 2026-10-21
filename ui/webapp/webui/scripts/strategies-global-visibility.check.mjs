@@ -99,6 +99,41 @@ check('isAccountEnabled 是 feature-detect 读数：strategies 启用集 / accou
   assert.match(body[0], /null/, '缺失字段时必须返回 null 降级（老核退回全局读数）')
 })
 
+// issue 552: an EMPTY strategies set is a first-class per-account state
+// (显式不跑, INHERIT retired) — the button must read the SET, never fall
+// through to the global toggle. The `set.length ? … : r.enabled` fold mixed
+// (account, strategy) state with the default master-power bit.
+check('空集账户读启用集本身（空 = 显式不跑，不借道全局 r.enabled）', () => {
+  const body = page.match(/function isAccountEnabled\([\s\S]*?\n\}/)
+  assert.ok(body, 'isAccountEnabled 函数体缺失')
+  assert.match(
+    body[0],
+    /set\.includes\(r\.name\)/,
+    '启用集存在时未按逐字集合读 —— (账户,策略) 读数被绕开',
+  )
+  assert.doesNotMatch(
+    body[0],
+    /set\.length\s*\?[\s\S]*?r\.enabled/,
+    '空集回落 r.enabled 复活 —— 把全局总闸读成了该账户的启用状态（issue 552）',
+  )
+})
+
+check('装饰读数与按钮同键：状态点/分组读 isAccountEnabled（缺字段才回落全局位）', () => {
+  // The status dot and the running/stopped grouping used to read the raw
+  // global bit, showing a green dot next to an account-scoped OFF button.
+  const dot = page.match(/<span\s+class="size-1\.5[\s\S]*?\/>/)
+  assert.ok(dot, '行首状态点缺失')
+  assert.match(dot[0], /isAccountEnabled\(r\)/, '状态点仍读裸 r.enabled —— 与按钮口径分叉（issue 552）')
+  const groups = page.match(/const groups = computed\(\(\) =>\s*\[[\s\S]*?\]\.filter\(\(g\) => g\.rows\.length > 0\)/)
+  assert.ok(groups, 'groups computed 缺失')
+  const runningRow = groups[0].match(/\{ id: 'running'[\s\S]*?\},/)
+  assert.ok(runningRow, '运行中分组缺失')
+  assert.match(runningRow[0], /isAccountEnabled\(r\)/, '运行中分组仍读裸 r.enabled —— 分组与按钮口径分叉（issue 552）')
+  const stoppedRow = groups[0].match(/\{ id: 'stopped'[\s\S]*?\},/)
+  assert.ok(stoppedRow, '已停止分组缺失')
+  assert.match(stoppedRow[0], /isAccountEnabled\(r\)/, '已停止分组仍读裸 r.enabled —— 分组与按钮口径分叉（issue 552）')
+})
+
 check('toggle 按账户定标：setStrategy 传 accountId（scoped），无账户读数退回全局开关', () => {
   const body = page.match(/async function toggle\([\s\S]*?\n\}/)
   assert.ok(body, 'toggle 函数缺失')
