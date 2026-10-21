@@ -97,6 +97,40 @@ host.rs:487-489 只报 drift **不改簿**，那类区间不构成「读数被�
 | E5 | 「place_escalated 的 {id}:escalated 命名」用于 chase 归因 | `{id}:escalated` 确属 `place_escalated` 路径（:7936/:13822），但 orphan sweep 的 chase 腿虽也经 `place_escalated`（:10145）下发，键是独立前缀 `pair-chase:…`（:10097）。归因脚本必须分别匹配 `flatten:` / `pair-chase:` / `:escalated` 三种键 |
 | E6 | host.rs:107-111 live 成交默认落 default 簿 | 精确为 :106-112（`account_id: m::default_account_id()` + E28 ABI 缺口注释），锚点成立 |
 
+## 五、凭证轮换运维语义（RFC issue 541 裁决「追加边界二」的文档落点）
+
+> 裁决原句（评论 6285852873）：「运维文档须写明：**凭证轮换后，env 改动即时生效于批校验，
+> 持久格改动生效于下一会话；两通道都动 + 重启 = 确定性就绪。**」本节把这三句话钉成
+> 可执行核对行。锚点均在生产树（main tip）验证；行号漂移按第四节惯例披露。
+
+### 5.1 两通道语义表
+
+| 通道 | 落点 | executor 读到的时点 | 批校验（2a-i 挂钩 B）读到的时点 |
+|------|------|--------------------|--------------------------------|
+| **真实 env**（`.env` 或导出） | 进程环境变量：launcher 每次启动自加载 `<cwd>/.env`（`ui/ui_kit_panel/src/bin/blitzkrieg.rs:318-338`，已导出的 env 永远赢文件） | **boot 一次**：`spawn_if_configured` 读入并固化 client（polymarket `live.rs:46-57`；kalshi `executor.rs:53-61/:173-180`，`Credentials` 被 `Arc<KalshiRest>` 固化到 executor 生命周期结束） | **每批现查**：`virtual_batch_fits` 的 `std::env::var_os`（`market/mod.rs:624`，service.rs:6993-7011）——env 改动对新批**即时生效**（但已固化的 executor client 不受影响） |
+| **持久格**（`market.credentials.set`，面板「添加账户」凭证卡） | `data/runtime/config.json` 顶层 `credentials` 键（`ipc/runtime_config.rs:52-60/:257-296`，tmp 先 `chmod 600` 再 rename；值只下行、从不回显） | **下一会话**：boot 把格注入进程 env——只补 env 里没有的名字（`main.rs:3454-3485`，"next-session by construction"） | **每批重读格**（service.rs:6999 "loaded once per batch here"）——格改动对新批即时可见，但真实 env 仍然 outrank 格（"the cell loses to the environment"，`schema.rs:1335-1338`） |
+
+**窗口错位（裁决指认的边界，2a-i 不能消除）**：批校验看到持久格已就绪 ⇒ 放行；
+但本会话 executor 的 env 仍旧（boot 固化）⇒ place 仍失败。这不是缺陷，是
+next_session 既有语义的边界。
+
+### 5.2 运维核对行
+
+| # | 运维判据 | 核对位置 / 验证命令 | 状态 |
+|---|---------|--------------------|------|
+| R-OPS① | **只动 env 轮换**（改 `.env` 后重启）：重启即确定性就绪——executor 新 client、批校验现查同源 | 重启后 `market.credentials.status` 的 `ready=true` + 首批 `credentials.notReady` 消失 | 绿（机制核对 2026-10-21） |
+| R-OPS② | **只动持久格轮换**（面板凭证卡写入）：`status.ready` 即时翻转（status 每次现读 env∪格），但**本会话 executor 仍用旧凭证**——place 失败属预期，重启后注入生效 | 写入回执「重启后注入生效」（`AddAccountDialog.vue` 成功文案）；重启日志 stderr 汇报注入的变量名（`main.rs:3479-3484`，值不进日志） | 绿（机制核对 2026-10-21） |
+| R-OPS③ | **轮换完整配方**：两通道都动 + 重启 = 确定性就绪。env 提供的名字格不覆盖（"only a name the process does not already carry is injected"，`main.rs:3470-3476`）——格补 env 缺口，二者拼出全量 `required_vars` | 重启后 `market.credentials.status`：每插件 `resolvedVars` == `requiredVars` 且 `ready=true`；需求表单一事实源 `plugin_credential_vars`（`market/mod.rs:541-548`） | 绿（机制核对 2026-10-21） |
+| R-OPS④ | **批校验拒绝可见性**（边界三衔接）：整批拒绝行点名腿/token/venue/缺失变量名，不停留笼统失败 | `credentials.notReady: leg {key} (token {token}) venue {venue} … missing [{VARS}]`（service.rs:7013-7017）；缺失名单 `venue_credentials_missing` 按声明序（`market/mod.rs:616-630`） | 绿（2a-i 挂钩 B 已随 PR issue 547 + issue 549 落地） |
+
+### 5.3 操作员速查
+
+- **面板改凭证** → 提示「重启后注入生效」→ **重启内核**后新凭证才真正进 executor。
+- **改 `.env`** → 重启（launcher 自动加载，无需 source）。
+- **两处都改** → 重启一次即可；env 优先，格补缺。
+- 判断当前会话凭证是否就绪：`market.credentials.status`（面板套利弹窗的 per-leg
+  「凭证就绪/未就绪」徽标与缺变量名单是同一读数）。
+
 ## 复现命令（锚点复核）
 
 ```sh
@@ -113,4 +147,10 @@ grep -n 'pub fn set_balance' service.rs               # ⑥  :2774
 grep -n 'check_with_equity' service.rs                # ⑥  :7768/:11725
 grep -n 'scope_admits_token' ../../blitzkrieg_core/src/engine.rs   # ②  :661/:1313
 grep -n '_ => false' ../../market_api/src/unified/ledger.rs        # ⑤  :184
+grep -n 'spawn_if_configured' ../../extensions/polymarket/src/live.rs   # R-OPS :46
+grep -n 'credentials_from_env' ../../extensions/kalshi/src/executor.rs  # R-OPS :53/:177
+grep -n 'fn venue_credentials_missing' ../market/mod.rs   # R-OPS :616
+grep -n 'loaded once per batch here' service.rs        # R-OPS :6999
+grep -n 'CREDENTIALS_SET_NOTE' ../ipc/schema.rs         # R-OPS :1383
+grep -n 'fn persist_credentials_to' ../ipc/runtime_config.rs  # R-OPS :257
 ```
