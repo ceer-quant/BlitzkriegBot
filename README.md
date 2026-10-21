@@ -47,13 +47,14 @@ BlitzkriegBot 是一个**自己盯行情、自己下模拟单**的机器人：�
 ┌────────────────────────────────────────────────────────────┐
 │ 用户层：你的策略（Lua 策略包，默认安装即关闭）              │
 │   user_layer/strategies_lua/ 里放一个带 manifest.json 的   │
-│   目录 = 安装一个策略；启用与否由你在面板里决定             │
+│   目录 = 安装一个策略；启用与否由你在面板里按账户决定       │
 ├────────────────────────────────────────────────────────────┤
 │ 交易核心 blitzkrieg-core（市场无关）：                     │
 │   撮合 · 下单 · 持仓 · 风控 · 对账 · 账本，内核 0 策略     │
 ├────────────────────────────────────────────────────────────┤
-│ 市场扩展：extensions/*（polymarket 默认挂接，其余可选）     │
-│   CLOB 下单 · WS 行情 · 轮盘发现；kalshi/predict.fun 可选  │
+│ 市场扩展：extensions/*（polymarket/kalshi/predict.fun/     │
+│   polysimulator 0.4.1 起全默认挂接；按账户绑定决定哪个所） │
+│   CLOB 下单 · WS 行情 · 轮盘发现                           │
 ├────────────────────────────────────────────────────────────┤
 │ 面板 blitzkrieg（单二进制启动器）：                        │
 │   Web 面板（127.0.0.1:51888）· TUI · run/stop 生命周期     │
@@ -233,8 +234,10 @@ blitzkrieg run
   是根本没有那条路。它压过一切 live 请求（`--mode live` 搭配 `--readonly` 不报错，
   但只会得到只读）。
 - **策略默认全部关闭**：内核出厂 **0 个启用策略**。Lua 策略包放进目录只是「安装」，
-  每个都以关闭状态启动；启用与否由持久化状态文件 `data/strategy-state.json` 和显式旗标
-  `--enable-strategy` / `--disable-strategy`（显式关闭优先）决定。策略通过 C ABI v2
+  每个都以关闭状态启动；启用真值是「账户 × 策略」复合键（`accounts.toml` 里每个账户的
+  `strategies` 启用集，面板策略页按账户启停），单账户部署等价于全局开关
+  `data/strategy-state.json` 和显式旗标 `--enable-strategy` / `--disable-strategy`
+  （显式关闭优先）。策略通过 C ABI v2
   在运行时加载，**分发时不捆绑任何策略**。
 - **面板只听本机**：默认 `127.0.0.1:51888`，只有这台电脑能访问。要局域网访问需主动把
   `BLITZKRIEG_PANEL_ADDR` 改成 `0.0.0.0:51888`，且**登录凭据在任何地址上都是必需的**，
@@ -264,12 +267,13 @@ blitzkrieg run
 | 策略蓝图 | 画布式策略编辑器 → 编译为 Lua 包，手写包也能进编辑器（#414） |
 | 影子进化 | 影子回放、近失样本、按策略参数进化（apply · rollback，生产默认关闭）；Lua 包经 manifest 声明参数域后同样可进化 |
 | 回放与回测 | `--replay` 行情回放（时间错位修正 + 三模式）、近失样本回放、面板内回测；deadline 驱动 nofast 调度 |
-| 跨平台扩展 | Kalshi / predict.fun 市场插件（opt-in feature）+ 统一事件映射 + 两腿原子对冲执行（0.3.3） |
+| 跨平台扩展 | Kalshi / predict.fun / PolySimulator 市场插件（0.4.1 起默认 feature）+ 统一事件映射 + 两腿原子对冲执行（0.3.3） |
 | Web 面板 | Vue 前端：快照 / 命令 / 插件 / 登录 API，可托管核心生命周期 |
 | TUI 终端面板 | `blitzkrieg tui` / `run --tui` |
 | 一键启停 | `blitzkrieg run` / `stop`，崩溃自动重建，只收自己拉起的进程 |
 | 自更新 | 更新检查 + 下载暂存状态机（内核永不改写正在执行的二进制，#379） |
 | 看门狗与备份 | `scripts/stack-watchdog.sh`（停机告警，不自动拉起）、数据备份与新鲜度巡检 |
+| 多账户 | 每账户独立账本/余额/绑定交易所（绑定即启用）；启停绑定「账户 × 策略」复合键，策略包全局可见；账户创建/删除在面板弹窗完成（accounts.toml 落盘） |
 | 多市场架构 | 核心市场无关，新增交易所 = 写一个扩展 crate + feature 注册 |
 
 ## 常见问题 FAQ
@@ -285,8 +289,11 @@ blitzkrieg run
 
 **Q3：我的策略为什么没生效？**
 三道门逐一检查：① 包在 `user_layer/strategies_lua/`（cdylib 在 `user_layer/strategies/`）
-里吗——放进去只是**安装**；② 启用了吗——看 `data/strategy-state.json`，或启动时
-`--enable-strategy <name>`（内核出厂 0 启用策略）；③ 请求了策略但一个都没加载成功时内核
+里吗——放进去只是**安装**；② 启用了吗——启用真值是「**账户 × 策略**」复合键：面板策略页
+按账户启用（写进 `accounts.toml` 的该账户启用集），看账户切换器里当前账户的启用数、或
+`accounts.toml` 里该账户的 `strategies` 列表；单账户/老部署等价于全局开关
+`data/strategy-state.json` 与启动旗标 `--enable-strategy <name>`（内核出厂 0 启用策略）；
+③ 请求了策略但一个都没加载成功时内核
 **拒绝启动**（exit 1），除非 `--allow-zero-strategies`。启动日志会打印每个策略的装载与
 启用状态。
 
@@ -296,13 +303,14 @@ blitzkrieg 家族进程，你启动它的 shell 永远不会被碰。
 
 **Q5：数据都存在哪里？**
 仓库根的 `data/` 下：成交台账 `data/trades/trades.jsonl`、订单 `data/orders/orders.jsonl`、
-持仓快照 `data/positions/positions.jsonl`、策略启用状态 `data/strategy-state.json`；
+持仓快照 `data/positions/positions.jsonl`、账户簿与策略启用集 `data/accounts.toml`、
+全局策略开关 `data/strategy-state.json`；
 市场数据事件归档默认也在 `data/`（`--event-archive-max-mb` 控制体积，`0` 不限）。
 完整清单跑 `./target/release/blitzkrieg-core --help` 看。
 
 **Q6：怎么升级到新版本？**
 拉最新代码重新构建即可：`git pull && cargo build --release --workspace --locked`。
-正式版本以根 `Cargo.toml` 的 `version`（当前 **0.4.0**）为准，tag 形如 `v0.4.0`，由
+正式版本以根 `Cargo.toml` 的 `version`（当前 **0.4.1**）为准，tag 形如 `v0.4.1`，由
 Release 工作流构建发布；发布与版本规则见 [`docs/VERSIONING.md`](./docs/VERSIONING.md)。
 
 **Q7：支持 Windows 吗？**
@@ -338,7 +346,7 @@ Linux x86_64 与 macOS aarch64 两个平台的产物（x86_64 macOS 已在 0.3.0
 | **cdylib 策略** | 编译成动态库（`.dylib`/`.so`）的策略，内核运行时通过 C ABI v2 加载，vtable 已冻结 |
 | **Lua 策略包** | 目录里带 `manifest.json` + `strategy.lua` 的策略（如官方 spread_arb），内核内嵌 Lua 运行时加载 |
 | **策略蓝图** | 面板里的画布式策略编辑器：图形蓝图编译成 Lua 策略包；手写包也能被它打开编辑（源码模式） |
-| **策略状态（strategy-state）** | `data/strategy-state.json`：记录「哪些策略被启用了」的持久文件，重启后仍生效 |
+| **策略状态（strategy-state）** | 「哪些策略被启用了」的持久记录。单账户部署 = `data/strategy-state.json`；多账户部署的启用真值是每个账户的启用集（`data/accounts.toml` 的 `strategies` 列表，面板按「账户 × 策略」启停），重启后仍生效 |
 | **影子进化（shadow evolution）** | 让策略变体在影子中并行试跑、按冻结语料证据优胜劣汰的机制（生产默认关闭） |
 | **近失样本（near-miss）** | 「差一点就成交/触发」的行情记录，用于复盘策略错过了什么 |
 | **dry 模拟成交** | 内核按真实盘口在本地模拟撮合与赎回，账本结构与 live 一致，但不动真钱 |
@@ -392,7 +400,7 @@ Linux x86_64 与 macOS aarch64 两个平台的产物（x86_64 macOS 已在 0.3.0
 └────────────────────────────────────────┬───────────────────────────────┘
                                  │ 依 feature 挂接
                     ┌────────────┴────────────┐
-                    │ extensions/*            │  polymarket 默认 · kalshi / predict.fun 可选
+                    │ extensions/*            │  polymarket / kalshi / predict.fun / polysimulator（0.4.1 起全默认）
                     └─────────────────────────┘
 ```
 
@@ -417,8 +425,9 @@ BlitzkriegBot/
 │   ├── blitzkrieg_core/   # 交易核心二进制 blitzkrieg-core（市场无关）
 │   └── market_api/        # 市场扩展契约：DataFeed / Discovery / Executor / MarketPlugin
 ├── extensions/
-│   ├── kalshi/            # Kalshi 扩展（0.3.3，opt-in feature）
-│   ├── predictfun/        # predict.fun 扩展（0.3.3，opt-in feature）
+│   ├── kalshi/            # Kalshi 扩展（0.4.1 起默认 feature）
+│   ├── predictfun/        # predict.fun 扩展（0.4.1 起默认 feature）
+│   ├── polysimulator/     # PolySimulator 模拟盘扩展（0.4.1 起默认 feature）
 │   └── polymarket/        # 官方 Polymarket 扩展（默认 feature 挂接）
 ├── user_layer/
 │   ├── strategy_api/      # 用户策略 trait / FFI 稳定表面
@@ -597,9 +606,11 @@ cd ui/webapp/webui && npm run check:all
 ### 策略状态与进入条件
 
 内核**出厂零策略、零默认启用**：策略来自 cdylib 投放点（`user_layer/strategies/`）与 Lua
-包目录（`user_layer/strategies_lua/`），全部以「关闭」启动；真正决定启用与否的只有操作员的
-持久意图 `data/strategy-state.json` 与显式旗标 `--enable-strategy <name>` /
-`--disable-strategy <name>`（显式关闭优先）。这条规则的原文在
+包目录（`user_layer/strategies_lua/`），全部以「关闭」启动；真正决定启用与否的是「**账户 ×
+策略**」复合键——每个账户的启用集（`accounts.toml` 的 `strategies` 列表，面板策略页按账户
+启停写入）。单账户部署下它与旧的持久意图 `data/strategy-state.json` 同形；显式旗标
+`--enable-strategy <name>` / `--disable-strategy <name>` 仍是会话级总闸（显式关闭优先）。
+这条规则的原文在
 `user_layer/configs/default.toml` 顶部，本节是**唯一的「某策略何时才允许进入默认启用清单」
 的记录处**——`dev-docs/` 不入库，不能作为引用来源。
 

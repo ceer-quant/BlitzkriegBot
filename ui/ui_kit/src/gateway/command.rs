@@ -619,6 +619,11 @@ impl Dispatcher {
     /// the switch is panel-process-scoped, exactly what a single operator's
     /// panel means by "my default"). The core validates the id; the reply's
     /// `active` is echoed so the panel re-fetches nothing to know it landed.
+    ///
+    /// 切户残留窗口（issue 552 审计）：切户成功后不重拉任何读数 —— 下一次
+    /// `status`/`positions` 前屏幕上躺着的还是旧账户的数字。切成功立即重取
+    /// 插件面（market_active_name 是 TUI 身份行的唯一来源），best-effort：
+    /// 读数失败不影响切换本身已成功的事实，回执仍带 `active`。
     fn cmd_account_switch(&mut self, raw: &str, account_id: &str) -> CommandOutcome {
         match self.client.account_switch(account_id) {
             Ok(v) => {
@@ -627,12 +632,22 @@ impl Dispatcher {
                     .and_then(|a| a.as_str())
                     .unwrap_or(account_id)
                     .to_string();
-                CommandOutcome::ok(
+                let mut out = CommandOutcome::ok(
                     raw,
                     "account",
                     format!("this connection's default account: {active}"),
-                )
-                .with_data(v)
+                );
+                // Merge the switch reply with the re-pulled plugin identity —
+                // with_data REPLACES, and the switch reply (`active` +
+                // validation facts) must survive beside the fresh readout.
+                let mut data = v;
+                if let Ok(m) = self.client.market_plugins() {
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("activePlugin".into(), serde_json::json!(m.active));
+                    }
+                }
+                out = out.with_data(data);
+                out
             }
             Err(e) => CommandOutcome::err(raw, e.to_string()),
         }

@@ -153,12 +153,19 @@ check('the age is reserved a fixed tabular digit slot', () => {
 check('the status text follows the fixed slot, not the raw number', () => {
   // The old markup interpolated the number directly into the flow, which is what
   // let its width move the status. It must now go through the component.
+  // (The bound read may be `round?.ageSec` or the venue-aware `roundDisplay` —
+  // issue 552: the identity row follows the active venue — but it must be a
+  // component render, never a raw interpolation.)
   assert.doesNotMatch(
     page,
-    /\{\{\s*round\?\.ageSec[^}]*\}\}s 已过/,
+    /\{\{\s*(?:round|roundDisplay)\?\.ageSec[^}]*\}\}s 已过/,
     'the raw age must not be interpolated into the flow any more',
   )
-  assert.match(page, /<RollingNumber[^>]*:value="round\?\.ageSec/, 'the age must render through RollingNumber')
+  assert.match(
+    page,
+    /<RollingNumber[^>]*:value="(?:round|roundDisplay)\?\.ageSec/,
+    'the age must render through RollingNumber',
+  )
 })
 
 check('the countdown also rolls, and its tracking is dropped', () => {

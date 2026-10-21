@@ -3273,9 +3273,11 @@ impl Core {
             }
         }
         // Apply every account's enablement set (the default's included —
-        // after migration it spells the old behaviour; an empty key means
-        // the account's scopes follow the global toggle and nothing is
-        // fanned out here).
+        // after migration it spells the old behaviour). An empty key is the
+        // EXPLICIT "run nothing on this account" set — it never follows the
+        // global toggle (INHERIT is retired), so nothing is fanned out here
+        // and the account's scopes stay silent until the operator enables
+        // strategies for it on the strategies page.
         let assignments: Vec<(String, Vec<String>)> = self
             .accounts
             .account_list()
@@ -3614,6 +3616,14 @@ impl Core {
     /// 账户↔venue 解耦语义: this is the GLOBAL strategy switch (the master
     /// power). The per-account 启用按钮 rides
     /// [`Self::set_scoped_strategy_enabled`] below.
+    ///
+    /// PERSISTENCE ASYMMETRY (issue 552 audit, honest wording): this toggle is
+    /// a SESSION-level fact on the default scope's enabled flag — it does not
+    /// persist. The durable per-account truth is only the accounts.toml
+    /// enablement set: a kernel restart replays it, so a scope named in an
+    /// account's set boots ENABLED even if the session toggled the global
+    /// switch off. To keep a strategy off across restarts, remove it from
+    /// every account's set (the panel's 启用按钮 / `account.strategies.set`).
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
         let ok = self
             .engine
@@ -7122,6 +7132,12 @@ impl Core {
     /// strategy, so the panel can slice to the active account. The
     /// `enabled` flag reads "any scope enabled" — a name is either globally
     /// togglable or per-scope from the assignment write, and both arrive here.
+    ///
+    /// 口径（issue 552 审计）：`enabled` 是 master-power 位（默认 scope 的
+    /// 全局开关），**不是** (账户,策略) 复合键的真值 —— 复合真值在
+    /// `accounts`（该策略有 live scope 的账户 = 启用集点名了它）。面板已
+    /// 不直接消费该位（策略页按钮按账户 feature-detect）；Overview 的
+    /// 「尚无启用策略」提示走同一复合口径。
     pub fn strategy_stats(&self) -> Vec<serde_json::Value> {
         let enabled = self.enabled_strategy_names();
         // The row set is the engine's registered names UNION every name that

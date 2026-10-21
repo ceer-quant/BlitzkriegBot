@@ -2442,9 +2442,10 @@ impl WebServer {
                 // 多账户扇出（PR B of #518）：策略分配写 —— body 即
                 // `account.strategies.set` 的 params 对象
                 // （`{accountId, strategies, reason?}`），逐字转发。空
-                // 列表 = 继承全部全局启用；非空 = 精确钉住。被移出但
-                // 持仓的策略内核以 exits-only 保活（keptExitsOnly 回执
-                // 带回）。网关零加工。
+                // 列表 = 显式不跑（INHERIT 已废除，issue 552 裁决：空集
+                // 不跟随全局开关）；非空 = 精确钉住。被移出但持仓的
+                // 策略内核以 exits-only 保活（keptExitsOnly 回执带回）。
+                // 网关零加工。
                 self.proxy_backtest_body("account.strategies.set", &req.body)
             }
             ("POST", "/api/account-create") => {

@@ -25,8 +25,9 @@ import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
  *  即启用）——已有账户不改绑（改绑面已收，数据不混乱），要换交易所 =
  *  删户重建。老内核不回该字段 → undefined，按未绑定（''）渲染。
  *  `tradingEnabled`/`strategies` 是多账户扇出面（关 = 拒开仓放平仓；
- *  strategies = 该账户的策略启用集，非空 = 逐字集合，空 = 跟随全局开关）
- *  ——老内核不回 → undefined，开关按开启渲染、启用集按「跟随全局」渲染。
+ *  strategies = 该账户的策略启用集，非空 = 逐字集合，空 = 显式不跑 ——
+ *  INHERIT 已废除，空集不跟随全局开关，issue 552 裁决）
+ *  ——老内核不回 → undefined，开关按开启渲染、启用集按「未启用」渲染。
  *  `strategies` 只读展示：启停唯一入口在策略页的启用按钮（账户↔venue
  *  解耦裁决 —— 分配编辑器退场）。 */
 interface AccountRow {
@@ -42,7 +43,7 @@ interface AccountRow {
   venue?: string
   /** 交易开关（多账户扇出）；false = 拒开仓、平仓照放。老内核缺省 = 开。 */
   tradingEnabled?: boolean
-  /** 策略分配（多账户扇出）；空 = 继承全部全局启用。老内核缺省 = 继承。 */
+  /** 策略启用集（多账户扇出）；非空 = 逐字集合，空 = 显式不跑。老内核缺省 = 未启用。 */
   strategies?: string[]
   reserved?: string | number
   openPositions: number
@@ -95,7 +96,11 @@ async function command(cmd: string): Promise<CommandOutcome> {
 
 /** The switch is session-scoped in the core (§9.5); the panel process owns one
  * IPC connection, so this is "my panel's default" — exactly the operator's
- * intent. A successful switch re-pulls every page through the store. */
+ * intent. A successful switch re-pulls every page through the store.
+ * 切户残留窗口（issue 552 审计）：翻转 active 后、refresh 落地前，store 里
+ * 还躺着旧账户的账户级读数（accountTradeSummary / accountStrategyStats），
+ * 页面此刻渲染的是旧账户的数字——切成了谁、数字还是谁的。清掉它们让
+ * 页面回落全局面读数（旧数字不渲染），新读数到达后立即恢复。 */
 async function switchTo(id: string): Promise<void> {
   if (id === active.value || switching.value) return
   switching.value = id
@@ -103,6 +108,8 @@ async function switchTo(id: string): Promise<void> {
   try {
     const out = await command(`account ${id}`)
     if (!out.ok) throw new Error(out.message ?? '切换被拒绝')
+    store.setAccounts(id, store.accounts)
+    store.clearAccountScoped()
     await refresh()
     store.refresh()
   } catch (e) {

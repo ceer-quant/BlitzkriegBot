@@ -156,10 +156,20 @@ const unrealized = computed(() =>
  * 新手线索（issue 381 产品化）：面板在跑但还没有任何启用的策略 —— 数据已经能看，
  * 机器人还不能动。一条安静的指路行，与首次引导卡同一规则：指向下一步该去
  * 的页（主导航「策略」项），不自作主张改成别的话术。
+ *
+ * 「启用」的口径 = (账户,策略) 复合键（issue 552 审计）：非 default 账户
+ * 下读 `accounts` 字段（该策略有 live scope = 启用集点名了它），行不带
+ * `accounts`（老内核/降级面）才回落 master-power 位 `enabled` —— 全局
+ * 开关关着、账户启用集点名了的策略是真在跑的，只读 `enabled` 会误报。
  */
-const needsStrategyHint = computed(() =>
-  snap.value !== null && strategyRows.value.length >= 0 && !strategyRows.value.some((r) => r.enabled),
-)
+const needsStrategyHint = computed(() => {
+  if (snap.value === null) return false
+  const rows = strategyRows.value
+  const anyOn = rows.some((r) =>
+    Array.isArray(r.accounts) ? r.accounts.length > 0 : Boolean(r.enabled),
+  )
+  return !anyOn
+})
 </script>
 
 <template>

@@ -1973,6 +1973,16 @@ impl Engine {
     /// `strategies` ENABLEMENT set (which per-account scopes run), not this
     /// switch: an account that has the strategy in its set keeps running it
     /// while the global switch is ON, regardless of other accounts' sets.
+    ///
+    /// PERSISTENCE ASYMMETRY (issue 552 audit, honest wording): a global OFF
+    /// is a session-level fact on the default scope's `enabled` flag — it is
+    /// NOT persisted anywhere, so a kernel restart hands the decision back to
+    /// the persisted enablement sets again (a fresh boot replays
+    /// accounts.toml, and a scope named in an account's set boots ENABLED —
+    /// see the scope-rebuild rule). A global ON is likewise session-level.
+    /// The DURABLE per-account truth is only the enablement set: to keep a
+    /// strategy off across restarts, remove it from every account's set
+    /// (the panel's per-account 启用按钮 / `account.strategies.set`).
     pub fn set_strategy_enabled(&mut self, name: &str, enabled: bool) -> bool {
         let mut found = false;
         for s in &mut self.strategies {
