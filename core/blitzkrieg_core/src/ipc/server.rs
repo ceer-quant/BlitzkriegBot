@@ -9572,4 +9572,111 @@ mod tests {
             "the trading round's descriptor survives, the next tier's does not"
         );
     }
+
+    /// `books_view` 是第二个逐市场平铺的数据源（E8-c 盘口深度，快照的
+    /// `books` 字段）——#560 只修了 `engine.round` 面，同一 slot 边界形状
+    /// 在这里每资产吐两行、盘口选择器按 (venue,asset) 撞重复 key（生产
+    /// 2026-10-22 实录：12 行 = PM 4 + kalshi 两轮 8）。负向契约：与
+    /// `engine.round` 同判据 —— 相邻两轮并存时 `engine.books` 每个
+    /// (venue,asset) 恰一行，且活的是正在交易的一轮（token 带交易轮的
+    /// 到期戳）。
+    #[tokio::test]
+    async fn engine_books_rows_are_unique_per_venue_asset_across_slots() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let round_sec = 900i64;
+        let now = now_ms();
+        let slot = now / 1000 / round_sec;
+        let trading_end = (slot + 2) * round_sec * 1000; // the round being traded (slot+1)
+        let next_end = (slot + 3) * round_sec * 1000; // the next tier, still "open"
+
+        let mk = |asset: &str, venue: &str, end_ms: i64| CryptoMarket {
+            asset: asset.to_string(),
+            condition_id: format!("cond-{venue}-{asset}-{end_ms}"),
+            question_id: format!("q-{venue}-{asset}-{end_ms}"),
+            up_token_id: format!("up-{venue}-{asset}-{end_ms}"),
+            down_token_id: format!("down-{venue}-{asset}-{end_ms}"),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / round_sec,
+            round_duration_sec: round_sec,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: format!("{asset} up or down"),
+        };
+        // Adversarial order, same as the price-row test: the next tier's
+        // batch lands first, then the trading round's.
+        {
+            let mut c = core.lock().await;
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("BTC", "kalshi", next_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![
+                        mk("BTC", "polymarket", trading_end),
+                        mk("BTC", "kalshi", trading_end),
+                    ],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"engine.books","params":{}}"#.to_string(),
+        )
+        .await;
+        let rows = reply["result"].as_array().expect("books array");
+        let keys: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r["venue"].as_str().unwrap_or_default().to_string(),
+                    r["asset"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            keys.len(),
+            "no (venue,asset) may repeat in the depth view: {keys:?}"
+        );
+        assert_eq!(
+            sorted,
+            vec![
+                ("kalshi".to_string(), "BTC".to_string()),
+                ("polymarket".to_string(), "BTC".to_string()),
+            ],
+            "the trading round's rows only — the next tier must not surface: {rows:?}"
+        );
+        // The surviving kalshi row carries the TRADING round's tokens, not
+        // the next tier's (the depth chart and the K-line card both query by
+        // token id — pointing at the wrong expiry would be worse than a dup).
+        let kalshi_up = rows
+            .iter()
+            .find(|r| r["venue"] == "kalshi")
+            .expect("kalshi row")["upTokenId"]
+            .as_str()
+            .expect("token id");
+        assert_eq!(
+            kalshi_up,
+            format!("up-kalshi-BTC-{trading_end}"),
+            "the depth view must expose the trading round's tokens"
+        );
+    }
 }
