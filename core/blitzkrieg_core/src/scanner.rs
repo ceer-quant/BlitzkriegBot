@@ -237,6 +237,35 @@ impl Scanner {
         }
     }
 
+    /// The venues that have SPOKEN (an in-band expiry declaration landed in
+    /// their clock slot) plus the legacy bucket when it holds a value — the
+    /// key set of `round_timing_for_venue`. Read-only views (`engine.round`
+    /// 的 per-venue 轮次行) walk this instead of guessing: a venue without a
+    /// declaration has no authoritative clock of its own, and inventing one
+    /// for the panel would contradict the conservative window the trading
+    /// side actually consumes.
+    ///
+    /// 排序确定（插入序不稳定，BTreeMap 没用上）：legacy bucket（空串）
+    /// 恒排最前，其余按 venue 名字典序 —— 门禁可逐字节断言行序。
+    pub fn observed_venue_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .actual_end_time_ms
+            .iter()
+            .filter(|(_, t)| **t > 0)
+            .map(|(v, _)| v.clone())
+            .collect();
+        keys.sort_by(|a, b| {
+            if a.is_empty() {
+                std::cmp::Ordering::Less
+            } else if b.is_empty() {
+                std::cmp::Ordering::Greater
+            } else {
+                a.cmp(b)
+            }
+        });
+        keys
+    }
+
     pub fn round_state(&self, local_now_ms: i64) -> RoundState {
         let t = self.round_timing(local_now_ms);
         RoundState {
@@ -369,6 +398,47 @@ mod tests {
         // Local expected end for slot 1 = 1_800_000; the venue says 1_800_500.
         s.observe_end_time(1_800_500, now);
         assert_eq!(s.clock_offset_ms(), 500);
+    }
+
+    #[test]
+    fn observed_venue_keys_lists_who_spoke_legacy_first_and_deterministically() {
+        // #550（症状②）的口径来源：per-venue 轮次行只列「已经开口」的
+        // venue —— legacy bucket（空串）恒排最前，其余字典序；未开口的
+        // venue（没有 in-band 声明）绝不出现，显示链不发明 trading 侧
+        // 不消费的钟。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        assert!(
+            s.observed_venue_keys().is_empty(),
+            "no declaration → no venue spoke → no rows"
+        );
+        s.observe_end_time_for_venue("kalshi", 1_800_500, now);
+        s.observe_end_time_for_venue("polymarket", 1_799_800, now);
+        assert_eq!(
+            s.observed_venue_keys(),
+            vec!["kalshi".to_string(), "polymarket".to_string()],
+            "non-legacy keys are lexicographic"
+        );
+        // The legacy bucket (empty venue) sorts FIRST when it holds a value.
+        s.observe_end_time_for_venue("", 1_800_200, now);
+        assert_eq!(
+            s.observed_venue_keys(),
+            vec![
+                String::new(),
+                "kalshi".to_string(),
+                "polymarket".to_string()
+            ],
+            "the legacy bucket leads the list"
+        );
+        // An out-of-band (refused) declaration does not make a venue "speak".
+        s.observe_end_time_for_venue("ghost", now + 10 * 365 * 86_400_000, now);
+        assert!(
+            !s.observed_venue_keys().contains(&"ghost".to_string()),
+            "a refused declaration must not open a clock slot"
+        );
     }
 
     #[test]
