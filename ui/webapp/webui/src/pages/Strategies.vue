@@ -427,7 +427,7 @@ function onExpand(name: string): void {
           <thead>
             <tr class="text-left">
               <th class="label-micro px-2 pb-2.5">策略</th>
-              <th class="label-micro px-2 pb-2.5 text-right">启用</th>
+              <th class="label-micro px-2 pb-2.5 text-center">启用</th>
               <th class="label-micro px-2 pb-2.5">来源</th>
               <th class="label-micro px-2 pb-2.5 text-right">下单</th>
               <th class="label-micro px-2 pb-2.5 text-right">
@@ -511,7 +511,7 @@ function onExpand(name: string): void {
                     </span>
                   </td>
                   <td class="px-2 py-2.5">
-                    <span class="flex items-center justify-end gap-1.5">
+                    <span class="flex items-center justify-center gap-1.5">
                       <!-- 启用按钮语义 = 该策略在当前选中账户的启用状态。
                            读数缺失（老内核）退回全局 enabled —— 列表不过滤。 -->
                       <Switch
