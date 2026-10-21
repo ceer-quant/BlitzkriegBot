@@ -142,6 +142,13 @@ check('toggle 按账户定标：setStrategy 传 accountId（scoped），无账�
     /api\.setStrategy\(\s*r\.name,\s*next,\s*[^)]*activeAccount/,
     'toggle 未把 accountId 传给 setStrategy —— 启停没有绑定到账户',
   )
+  // 代理失败信封（HTTP 200 + {"error": …}）必须被判失败 —— 缺这条判定时
+  // scoped 通道内核拒绝会弹绿色「已启用」假成功（网关只拦非 200）。
+  assert.match(
+    body[0],
+    /if\s*\(res\.error\)\s*\{\s*throw/,
+    'toggle 不读 res.error —— 代理 IPC 失败信封（HTTP 200）会被当成功闪绿',
+  )
 })
 
 check('「N 个账户启用中」徽标不渲染（2026-10-19 操作者裁决：删除 ×N 提示徽章）', () => {

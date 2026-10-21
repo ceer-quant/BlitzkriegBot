@@ -96,6 +96,13 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
     // 一套、改的是另一套。
     const scoped = isAccountEnabled(r) !== null
     const res = await api.setStrategy(r.name, next, scoped ? store.activeAccount ?? undefined : undefined)
+    // 代理通道的失败也走 HTTP 200（网关把 IPC 错误装进 `{"error": …}` 信封，
+    // request() 只拦非 200）——不查 error 字段就会弹绿色假成功（scoped
+    // 通道内核拒绝时按钮闪「已启用」而实际没写）。同 AccountSwitcher 的
+    // 判定：error 在场 = 失败，逐字透传给操作者。
+    if (res.error) {
+      throw new Error(String(res.error))
+    }
     flash.value = {
       name: r.name,
       ok: res.ok !== false && !res.reason,
