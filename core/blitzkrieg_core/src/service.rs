@@ -5619,10 +5619,35 @@ impl Core {
     /// `DataEvent` 归档/影子复用 —— 引擎应用走 [`Engine::on_data_books`]，
     /// 每本书与单事件路径同一段 apply/notify 代码。返回被趋势断裂命中的
     /// token 上的 resting 买单（已撤），供调用方记账。
+    ///
+    /// #548：批路径曾对归档与探针双盲 —— 归档永远没有 `k:"books"` 行
+    /// （编码器在 data_source.rs，无人喂）、探针记不到批内任何 tick
+    /// （zero-tick 名单全部假警、stream break 对批式 venue 永久失明）。
+    /// 两写点对齐 `engine_on_data` 的 Book/Books 臂：先归档（回放所见 =
+    /// 引擎所见），再在镜像前逐本 note_tick（与单事件路径同口径）。
     pub fn engine_on_books(&mut self, books: Vec<BatchBook>, ts_ms: i64) {
         // #351：与 engine_on_data 同序 —— 先推进在途 taker 腿，再让本批书
         // 落进引擎（腿按「事件到达时」的盘口撮合，永远不与本批同瞬）。
         self.drain_inflight_takers(ts_ms);
+
+        // #548：归档整批为一条 `k:"books"` 批行 —— doc-comment 一直这么
+        // 承诺，实现却没写。事件自己的时间戳是权威（engine_on_data 同规）。
+        if let Some(a) = self.event_archive.as_mut() {
+            a.record_at(
+                ts_ms,
+                &crate::engine::DataEvent::Books {
+                    books: books.clone(),
+                    now_ms: ts_ms,
+                },
+            );
+        }
+
+        // #548：批内每本都是一次行情 tick（与 engine_on_data 的 Books 臂
+        // 同口径）。归档/探针都只读 books 的形状，镜像写入在两者之后。
+        for (token, _, _) in &books {
+            let venue = self.venue_of_token(token);
+            self.probe_ticks.note_tick(token, &venue, ts_ms);
+        }
 
         // 镜像（exit/mark 路径）：与 Batch 事件同语义 —— 每本 received_ms
         // 统一为批次时间戳。

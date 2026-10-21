@@ -529,6 +529,101 @@ fn the_probes_are_observers_only() {
     );
 }
 
+// ────────────── #548：批路径（engine_on_books）归档/探针双盲区 ──────────────
+
+fn batch_book(token: &str) -> blitzkrieg_core::engine::BatchBook {
+    (
+        token.to_string(),
+        vec![(dec!(0.40), dec!(50))],
+        vec![(dec!(0.42), dec!(50))],
+    )
+}
+
+/// 批路径喂的每本书都必须记为一次行情 tick：此前 engine_on_books 只加
+/// stats.books，探针记不到任何 PM tick —— zero-tick 名单全假警、stream
+/// break 对批式 venue 永久失明（#548 盲区二）。
+#[test]
+fn a_batch_of_books_ticks_the_probe_per_book() {
+    let mut c = dry_core();
+    c.enable_engine(Engine::new(EngineConfig::default()));
+    c.engine_on_data(
+        DataEvent::RoundMarkets {
+            markets: vec![market("m-up", "m-down")],
+            now_ms: T0,
+        },
+        T0,
+    );
+    c.engine_on_books(vec![batch_book("m-up"), batch_book("m-down")], T0 + 1_000);
+    c.tick(T0 + 10_000).expect("tick");
+
+    let s = c.engine_stats();
+    let zero = s["probe"]["tickHealth"]["zeroTickTokens"]
+        .as_array()
+        .expect("list");
+    assert!(
+        zero.is_empty(),
+        "both round tokens arrived via the BATCH path: no zero-tick false alarm, got {zero:?}"
+    );
+    assert_eq!(
+        s["probe"]["tickHealth"]["windowTicks"]
+            .as_u64()
+            .expect("ticks"),
+        2,
+        "each book of the batch is one probe tick (same accounting as the per-event path)"
+    );
+}
+
+/// 批路径 token 曾有 tick 后静默超预算 → stream break 必须点名它：修复前
+/// 批式 venue 的 token 永远进不了 per_token，真断流零告警。
+#[test]
+fn a_batch_fed_token_warns_on_stream_break() {
+    let (_, text) = with_logs(|| {
+        let mut c = dry_core();
+        c.engine_on_books(vec![batch_book("lonely")], T0);
+        c.tick(T0 + 10_000).expect("tick");
+        c.tick(T0 + 71_000).expect("tick"); // 汇总：静默 71s > 60s 预算
+        c
+    });
+    assert!(
+        text.contains("stream break") && text.contains("lonely"),
+        "a token that only ever fed via the batch path must be visible to the stream-break probe, got:\n{text}"
+    );
+}
+
+/// 批路径必须真的归档：`engine_on_books` 此前从不写 event_archive（#548
+/// 盲区一），生产 archive 的 `k:"books"` 计数恒 0 —— 回放/审计无料。
+#[test]
+fn a_batch_of_books_lands_one_books_archive_line() {
+    let dir = std::env::temp_dir().join(format!(
+        "bk-548-batch-archive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("events.jsonl");
+
+    let mut c = Core::new(CoreConfig {
+        event_archive_path: Some(path.display().to_string()),
+        ..Default::default()
+    });
+    c.engine_on_books(vec![batch_book("arc-up"), batch_book("arc-down")], T0);
+    drop(c); // 关闭归档句柄，缓冲落盘
+
+    let text = std::fs::read_to_string(&path).expect("archive written");
+    let line = text
+        .lines()
+        .find(|l| l.contains("\"k\":\"books\""))
+        .expect("the batch must be archived as one k:\\\"books\\\" line");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(v["k"], "books");
+    assert_eq!(v["books"].as_array().expect("books[]").len(), 2);
+    assert_eq!(v["books"][0]["t"], "arc-up");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ────────────────────── CLI 旗标 ─────────────────────────────────────────────
 
 #[test]
