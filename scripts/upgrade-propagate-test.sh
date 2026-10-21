@@ -86,6 +86,12 @@ printf 'round_sec = 900\n' > "$REPO_ROOT/$CONFIG_DIR/default.toml"
 printf 'auto_evolve = true\n' > "$BUILD_WT/$CONFIG_DIR/shadow_evolution.toml"
 printf 'auto_evolve = false  # hand-edited locally\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
 cp "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml" "$tmp/operator-copy.toml"
+# An operator-state config (UA_OPERATOR_STATE_CONFIGS, 2026-10-20): the kernel
+# persists runtime writes INTO accounts.toml, so the running copy is live state
+# — the upgrade must keep it as-is, never ship the factory copy over it.
+printf '[[account]]\nid = "default"\nstrategies = ["spread_arb"]\n' > "$BUILD_WT/$CONFIG_DIR/accounts.toml"
+printf '[[account]]\nid = "default"\nstrategies = ["flash_arb"]\n' > "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+cp "$REPO_ROOT/$CONFIG_DIR/accounts.toml" "$tmp/operator-accounts.toml"
 cp "$REPO_ROOT/target/release/blitzkrieg" "$tmp/old-blitzkrieg"
 
 . "$lib"
@@ -95,11 +101,11 @@ printf '\nstaging\n'
 ua_stage
 check "binaries staged" "4" "$(ls "$STAGE/bin" | wc -l | tr -d ' ')"
 check "cdylibs staged (1 rebuilt + 1 new)" "2" "$(wc -l < "$STAGE/dylibs.list" | tr -d ' ')"
-check "configs staged" "2" "$(ls "$STAGE/configs" | wc -l | tr -d ' ')"
+check "configs staged" "3" "$(ls "$STAGE/configs" | wc -l | tr -d ' ')"
 check_same "bundle staged" "$BUILD_WT/$DIST_DIR/index.html" "$STAGE/dist/index.html"
 check_same "nested bundle file staged" "$BUILD_WT/$DIST_DIR/bundle.js" "$STAGE/dist/bundle.js"
-# 4 binaries + 2 cdylibs + dylibs.list + 2 configs + 2 bundle files.
-check "checksums written" "11" "$(wc -l < "$STAGE/SHA256SUMS" | tr -d ' ')"
+# 4 binaries + 2 cdylibs + dylibs.list + 3 configs + 2 bundle files.
+check "checksums written" "12" "$(wc -l < "$STAGE/SHA256SUMS" | tr -d ' ')"
 if ( BUILD_WT="$tmp/empty-build" ua_stage ) >/dev/null 2>&1; then
   no "an empty build is refused" "non-zero exit" "exit 0"
 else
@@ -111,6 +117,8 @@ printf '\ndrift report\n'
 ua_drift > "$tmp/drift.txt"
 check "drift: unchanged config marked =" "1" "$(grep -c '= default.toml' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: edited config marked ~" "1" "$(grep -c '~ shadow_evolution.toml' "$tmp/drift.txt" | tr -d ' ')"
+check "drift: operator-state config kept, running copy wins" "1" \
+  "$(grep -c '= accounts.toml (operator state kept' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: rebuilt cdylib marked ~" "1" "$(grep -c '~ lib.*_strategy.dylib' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: new cdylib marked +" "1" "$(grep -c '+ libfresh_strategy.dylib' "$tmp/drift.txt" | tr -d ' ')"
 
@@ -127,6 +135,8 @@ check_same "bundle replaced" "$STAGE/dist/index.html" "$REPO_ROOT/$DIST_DIR/inde
 check "bundle holds exactly the staged set" "2" "$(ls "$REPO_ROOT/$DIST_DIR" | wc -l | tr -d ' ')"
 check_same "config replaced by the shipped value" "$STAGE/configs/shadow_evolution.toml" \
   "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+check_same "operator-state config NOT overwritten (the running copy wins)" "$tmp/operator-accounts.toml" \
+  "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
 check_same "the operator's edited config is kept for rollback" "$tmp/operator-copy.toml" \
   "$ROLLBACK/configs/shadow_evolution.toml"
 check_same "the previous binary is kept for rollback" "$tmp/old-blitzkrieg" "$ROLLBACK/bin/blitzkrieg"
@@ -152,6 +162,29 @@ check "the cdylib the install ADDED is taken away again" "0" \
 check "bundle index restored" "<html>OLD</html>" "$(cat "$REPO_ROOT/$DIST_DIR/index.html")"
 check_same "the operator's edited config is restored" "$tmp/operator-copy.toml" \
   "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+# The operator-state config was never installed over, so it never entered the
+# rollback set — a rollback must leave the running copy exactly as it was.
+check_same "operator-state config untouched by rollback too" "$tmp/operator-accounts.toml" \
+  "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+
+# ── 5b. a MISSING operator-state config is installed (factory seed) ──────────
+# The keep rule is "the running copy wins", not "never install": a checkout
+# without the file (first install, or the operator deleted it) must gain the
+# factory copy, and a rollback of that install must take it away again.
+printf '\ninstall with no live accounts.toml\n'
+rm "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+ua_install
+ua_verify
+check_same "missing operator-state config seeded from the factory copy" \
+  "$BUILD_WT/$CONFIG_DIR/accounts.toml" "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+if grep -q "^$CONFIG_DIR/accounts.toml$" "$ROLLBACK/added.list"; then
+  ok "the seeded config is recorded in added.list"
+else
+  no "the seeded config is recorded in added.list" "listed" "missing from added.list"
+fi
+ua_rollback
+check "the seeded config is taken away again by rollback" "0" \
+  "$(ls "$REPO_ROOT/$CONFIG_DIR" | grep -c accounts.toml || true)"
 
 # ── 6. the rollback pruner keeps the three newest ────────────────────────────
 printf '\nrollback pruner\n'
