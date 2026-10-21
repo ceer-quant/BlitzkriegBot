@@ -1874,6 +1874,13 @@ async fn handle_line(
                     // 排序稳定）。单 scope 部署 = `["default"]`；双账户都跑
                     // spread_arb 时两行同名列各自带出真实归属，面板的策略×
                     // 账户矩阵不再靠猜。老核不写字段 → 前端按缺省降级。
+                    //
+                    // `enabled` 口径（issue 552 审计）：这是 master-power 位
+                    // —— 默认 scope 的全局开关，**不是** (账户,策略) 复合键
+                    // 的真值。复合真值在 `accounts`（有 scope = 该账户的启
+                    // 用集点名了它）∪ accounts.toml 启用集；面板的策略页启
+                    // 用按钮按「账户+策略」读写（feature-detect），不直接
+                    // 消费这个位。is_on 只在单账户/老面板降级面上近似正确。
                     let accounts = c
                         .engine
                         .as_ref()

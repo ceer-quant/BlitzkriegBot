@@ -427,7 +427,7 @@ function onExpand(name: string): void {
           <thead>
             <tr class="text-left">
               <th class="label-micro px-2 pb-2.5">策略</th>
-              <th class="label-micro px-2 pb-2.5">启用</th>
+              <th class="label-micro px-2 pb-2.5 text-right">启用</th>
               <th class="label-micro px-2 pb-2.5">来源</th>
               <th class="label-micro px-2 pb-2.5 text-right">下单</th>
               <th class="label-micro px-2 pb-2.5 text-right">

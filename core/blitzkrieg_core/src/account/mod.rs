@@ -306,9 +306,10 @@ impl AccountLedgers {
                 // active, exactly the 0.2 behaviour.
                 venue: String::new(),
                 trading_enabled: true,
-                // Zero-config deployment: no enablement key — the account's
-                // scopes follow the GLOBAL strategy toggle, exactly the 0.2
-                // behaviour.
+                // Zero-config deployment: no enablement key — an EMPTY set,
+                // which is the explicit "run nothing here" reading (per-account
+                // enablement is the only truth; the old 0.2 "empty follows the
+                // GLOBAL toggle" behaviour is retired).
                 strategies: Vec::new(),
                 updated_at_ms: now_ms,
             }],
@@ -899,7 +900,7 @@ mod book_tests {
     /// empty list is the explicit empty set (spelled "runs nothing" — the
     /// reader answers None), and unknown ids refuse.
     #[test]
-    fn strategy_assignment_rides_verbatim_and_normalizes_empty_to_inherit() {
+    fn strategy_set_rides_verbatim_and_normalizes_empty_to_nothing() {
         let mut book = two_accounts();
         let paper = AccountId("paper".into());
         book.set_strategies(&paper, vec!["spread_arb".into()], 3)
@@ -909,12 +910,12 @@ mod book_tests {
             &vec!["spread_arb".to_string()]
         );
         // The EMPTY SET: stores and reads back as None — the absent key is
-        // the "this account runs nothing" spelling (the zero-config shape:
-        // a fresh default account stays silent).
+        // the "this account runs nothing" spelling (per-account enablement is
+        // the only truth: an empty set never follows the global toggle).
         book.set_strategies(&paper, Vec::new(), 4).unwrap();
         assert!(
             book.strategy_assignment(&paper).is_none(),
-            "empty assignment = inherit-all (None)"
+            "empty assignment = runs nothing (None)"
         );
         // Unknown id refuses.
         assert!(

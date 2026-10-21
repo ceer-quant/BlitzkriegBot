@@ -87,8 +87,26 @@ watch(snap, (s) => {
 })
 
 // ── market identity ─────────────────────────────────────────────────────────
-const marketName = computed(() => snap.value?.marketActiveName ?? null)
-const marketTypeText = computed(() => marketTypeLabel(snap.value?.marketActiveType ?? null))
+// 倒计时卡的身份行（徽章/名字/slot/已过秒数）必须跟随 active 账户绑定的
+// venue —— 与倒计时数字同一跟随规则（issue 550 症状②的收尾）。旧实现读
+// `marketActiveName`（registry active = boot 第一个插件，多插件数据面下
+// 恒为启动序首位），切到别的账户后徽章仍写旧所名、slot/已过秒仍读全局
+// 标量块（各 venue 最早到期的保守钟 = 通常是先接入的所）。这里从快照已
+// 有的两类行派生 active venue 的身份：行情行带 venue+asset（类型标签从
+// 插件表按名查），venueRounds 行带该 venue 自己的 slot/ageSec。行缺席
+// （降级面/未开口）回落全局读数 —— 老行为，不发明。
+const marketName = computed(() => {
+  if (!activeVenue.value) return snap.value?.marketActiveName ?? null
+  const row = (snap.value?.round?.prices ?? []).find(
+    (r) => typeof r.venue === 'string' && r.venue !== '' && r.venue === activeVenue.value,
+  )
+  return row ? row.venue : (snap.value?.marketActiveName ?? null)
+})
+const marketTypeText = computed(() => {
+  if (!activeVenue.value) return marketTypeLabel(snap.value?.marketActiveType ?? null)
+  const row = snap.value?.marketPlugins?.find((p) => p.name === activeVenue.value)
+  return row ? marketTypeLabel(row.type ?? row.kind ?? null) : marketTypeLabel(snap.value?.marketActiveType ?? null)
+})
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
 // ── countdown: interpolate locally between server answers ────────────────────
@@ -153,6 +171,17 @@ onUnmounted(() => { stopTick() })
 const leftSec = ref(0)
 
 const round = computed(() => snap.value?.round ?? null)
+/**
+ * 倒计时卡身份行读的轮次块：active venue 有自己的 venueRounds 行时读它
+ * （slot/已过秒随该所的钟），否则回落全局标量块（老行为）。与倒计时数字
+ * 同一跟随规则 —— 全局块是各 venue 最早到期的保守钟，多插件下通常是先
+ * 接入那个所的，直接显示会把新所轮次标成旧所的 slot。
+ */
+const roundDisplay = computed(() => {
+  const vr = venueRound.value
+  if (vr) return { slot: vr.slot, ageSec: vr.ageSec }
+  return round.value
+})
 const leftText = computed(() => mmss(leftSec.value))
 /** Fraction of the round still to run — drives the progress ring/bar. */
 const leftFraction = computed(() => {
@@ -203,11 +232,15 @@ watch(activeVenue, (nv, ov) => {
   // 即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己的钟行，
   // 从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次快照间
   // 会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
+  // 键写成新 venue 名而不是 ''：'' 会让快照 watch 的 fallback 分支把全局
+  // 标量钟（= 旧所的保守钟）重新灌进倒计时 —— 恰好把要清的残值请回来。
+  // 钉住新 venue 名 = fallback 只在「从未绑定过」时可达，切走后新所的
+  // 钟行到达前倒计时显示 00:00（Loading 门也开着），不跳旧钟。
   const hasRows =
     Array.isArray(snap.value?.round?.venueRounds) &&
     (snap.value?.round?.venueRounds?.length ?? 0) > 0
   if (hasRows) {
-    countForVenue.value = ''
+    countForVenue.value = nv
     serverLeft.value = 0
     serverAt.value = 0
     leftSec.value = 0
@@ -871,7 +904,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           <div class="flex items-center gap-2">
             <Badge variant="gold">{{ marketTypeText || '市场' }}</Badge>
             <span class="truncate text-[13px] font-semibold">{{ marketName ?? '等待行情接入' }}</span>
-            <span class="label-micro">#{{ round?.slot ?? '—' }}</span>
+            <span class="label-micro">#{{ roundDisplay?.slot ?? '—' }}</span>
           </div>
           <div class="mt-1.5 flex items-center gap-2 text-[11.5px] text-faint-fg">
             <Clock class="size-3.5" />
@@ -893,7 +926,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 place from the tabular cells it is reserving for.
               -->
               <span class="inline-block w-[4ch] text-right tabular-nums">
-                <RollingNumber :value="round?.ageSec ?? '—'" :duration="320" />
+                <RollingNumber :value="roundDisplay?.ageSec ?? '—'" :duration="320" />
               </span>
               <span class="ml-0.5">s 已过</span>
             </span>

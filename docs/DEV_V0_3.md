@@ -532,7 +532,7 @@ end
 | 发现 | `--strategy-dir` 扫描 dylib | `--lua-strategy-dir` 扫描 `manifest.json` |
 | 校验 | `bk_strategy_abi_version() == 2` + 可选符号 | `manifest.sha256` 匹配 + 必需函数存在 |
 | 注册 | `strategy.load` 回执含 API 1.0 | `strategy.load` 回执含 `(lua)` 标记 |
-| 启用 | `strategy.enable` | 同左（同一个开关，同一条状态持久化 `data/strategy-state.json`） |
+| 启用 | `strategy.enable` | 同左（0.3：同一个开关，同一条状态持久化 `data/strategy-state.json`。**0.4.1 起语义已变**：`strategy.enable` 是默认 scope 的全局总闸（master power）；启用真值是「账户 × 策略」复合键——每个账户的启用集（`accounts.toml` 的 `strategies` 列表，`account.strategies.set` / 面板按账户启停写入），空集 = 显式不跑（INHERIT 已废除）。见 README「策略状态与进入条件」） |
 | 隔离 | `catch_unwind` 兜策略 panic（既有） | 投毒 + 错误捕获兜 Lua 异常（新） |
 | 影子进化 | 既有 `bk_strategy_evolvable_knobs` | `manifest.tunables` + 热参（复用同一 `ParamRegistry`） |
 
@@ -839,12 +839,12 @@ status = "read_only"      # 只读：能看不能下单
 |:---|:---|
 | 默认 | 文件不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量）→ **0.2 部署零改动** |
 | 优先级 | CLI > env > toml > 默认（沿用既有 `default.toml` 顶部规则） |
-| 新增/删除账户 | **不做运行期增删**（账户是部署事实，不是运行时状态）。改账户 = 改配置 + 重启 |
+| 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（`accounts.toml` 落盘）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
 | 活跃账户 | `account.switch` 是**会话级**（按 UDS 连接），不是进程级全局：两个客户端可以看两个账户。切换只影响**该连接后续请求的默认 account_id**，不影响内核调度 |
 
 ### 9.6 环境与插件的关系（诚实边界）
 
-**0.3 的插件实例与账户是 1:1**：一个 `MarketPlugin` 驱动一个账户。两个账户意味着两个插件实例（同一 `market_type`）。这是「多账户」在 0.3 的真实边界，写在这里以免被读成「一个插件并发服务多账户」（那是 0.4+ 的课题，见 §17）。
+**0.3 的插件实例与账户是 1:1**：一个 `MarketPlugin` 驱动一个账户。两个账户意味着两个插件实例（同一 `market_type`）。这是「多账户」在 0.3 的真实边界，写在这里以免被读成「一个插件并发服务多账户」（那是 0.4+ 的课题，见 §17）。**0.4.1 起不再是 1:1**：多插件数据面（#502）+ 绑定即启用（#510-512）后，一个进程同时挂多个插件（每个账户的绑定 venue 各挂一个），账户与 venue 的绑定关系是每个账户一行（`Account.venue`），不再是「一个插件实例 = 一个账户」。
 
 ---
 

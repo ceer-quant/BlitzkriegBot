@@ -68,9 +68,11 @@ struct AccountFileEntry {
     /// the persisted state of the panel's per-(account, strategy) 启用按钮.
     /// NOT an assignment and NOT a visibility filter: strategies are GLOBAL —
     /// every installed package is visible to every account; this list names
-    /// the ones whose (account, strategy) scope actually RUNS. Missing/empty
-    /// = the account's scopes follow the GLOBAL strategy toggle (the 0.2
-    /// single-book shape; `single_default` produces exactly this). A
+    /// the ones whose (account, strategy) scope actually RUNS. Missing = the
+    /// legacy pre-#552 shape (kept parse-compatible); EMPTY is the explicit
+    /// "run nothing on this account" set — INHERIT is retired (#552), an
+    /// empty list never follows the global toggle (`single_default` produces
+    /// an empty list = zero-config accounts run nothing until enabled). A
     /// non-empty list is the enablement set verbatim (order kept for a
     /// stable diff). Names are validated at write time (`strategy.enable` /
     /// `account.strategies.set`), not at parse.

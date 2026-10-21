@@ -10,6 +10,13 @@ PR 验收章素材。正向 3 条 + 反向 5 条，每条给：判据、对应�
 
 状态基线：2026-10-18，工作树仅含验收官新增的两个文件（`tests/cross_arb_reverse_check.rs`、本文档）；manifest 尚无 `atomic_batch` 字段，`run_pair_orphan_sweep` 尚未出现在 `core/blitzkrieg_core/src/`。
 
+> **2026-10 收口补记**：本矩阵的所有「待收口」项均已随后续 PR 落地并合入 main——
+> R2 的 manifest `"atomic_batch": true`（#531 两腿原子批）、R3 的裸腿看护
+> `run_pair_orphan_sweep`（#531）、R5 的 `CreateArbDialog.vue`（#482 创建套利入口）与
+> `--virtual-limit` CLI（#531 首通道）；R2/R3 的 ignore 已摘除转绿。本文档自 2026-10 起
+> 是**已收口的验收记录**，不再描述在途状态；feat/cross-arb-atomic 分支的原始语境见
+> PR #432 的正文。
+
 ## 正向（机制应当工作）
 
 | # | 判据 | 测试 / 核对位置 | 状态 |

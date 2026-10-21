@@ -29,8 +29,9 @@ export interface PanelAccountRow {
   venue?: string
   /**
    * 该账户的策略启用集（启停绑定在「账户+策略」级别 —— 账户↔venue 解耦
-   * 裁决）。非空 = 逐字集合；空数组 = 跟随全局开关；undefined = 老内核
-   * 缺字段（启用按钮降级为全局语义）。可见性与它无关：策略列表恒显全部。
+   * 裁决）。非空 = 逐字集合；空数组 = 显式不跑（INHERIT 已废除，空集不跟
+   * 随全局开关 —— issue 552 裁决）；undefined = 老内核缺字段（启用按钮降
+   * 级为全局语义）。可见性与它无关：策略列表恒显全部。
    */
   strategies?: string[]
   /** 账户自有账本的预留/可用（账户级余额瓦片走这里，进程级 ledger 不再是
@@ -150,6 +151,17 @@ export const usePanelStore = defineStore('panel', () => {
   const accountTradeSummary = ref<CumulativeTradeSummary | null>(null)
   const accountStrategyStats = ref<StrategyStatsRow[]>([])
 
+  /**
+   * 切户残留窗口（issue 552 审计）：成功切换默认账户后、下一次 refresh 落
+   * 地前，账户级读数（trade summary / strategy stats 切片）还是旧账户的。
+   * 置空让页面回落全局面读数（单账户部署与老面板的既有行为），而不是把
+   * 旧账户的数字渲染成新账户的。snapshot 全局块不清 —— 它本来就无归属。
+   */
+  function clearAccountScoped(): void {
+    accountTradeSummary.value = null
+    accountStrategyStats.value = []
+  }
+
   // Prefer engine snapshot strategyStats (richer); fall back to /api/plugins.
   // PR H (账户筛选修复): when an account is active, the counters come from
   // the account-scoped engine.stats read (`accountStrategyStats`) — the same
@@ -261,7 +273,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
-    activeAccount, accounts, setAccounts, activeAccountVenue, activeAccountRow,
+    activeAccount, accounts, setAccounts, clearAccountScoped, activeAccountVenue, activeAccountRow,
     accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
