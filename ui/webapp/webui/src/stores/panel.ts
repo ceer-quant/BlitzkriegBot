@@ -228,6 +228,56 @@ export const usePanelStore = defineStore('panel', () => {
     error.value = verdict.kind === 'unreachable' ? verdict.message : null
   }
 
+  /**
+   * 重拉账户列表（`accounts` 命令，与 AccountSwitcher.refresh 同一面）并把
+   * 行镜像进 store。**启用按钮的首选读数就在这里**（account.list 行的
+   * `strategies` 集合）：启停写回（strategy.enable / account.strategies.set）
+   * 只动内核与这行镜像 —— 不重拉它，按钮翻转后读的仍是内存旧集，要等
+   * 手动刷新才见变化（stale-readout 缺陷，2026-10 操作者报告）。
+   *
+   * 失败不抛：账户列表读不到时保留现有行（比清空好 —— 旧集只是陈旧，
+   * 清空会把按钮读数打到降级面）。AccountSwitcher 的 setAccounts 调用方
+   * 语义不变（active id 由该组件的切换流写）。
+   */
+  async function refreshAccounts(): Promise<void> {
+    try {
+      const out = await api.command('accounts')
+      if (!out.ok || !out.data) return
+      const doc = out.data as {
+        active?: string
+        accounts?: Array<{
+          id: string
+          name: string
+          marketType: string
+          status: string
+          balance: string | number
+          available: string | number
+          venue?: string
+          strategies?: unknown
+          reserved?: string
+        }>
+      }
+      if (!Array.isArray(doc.accounts) || !doc.accounts.length) return
+      const rows: PanelAccountRow[] = doc.accounts.map((a) => ({
+        id: a.id,
+        name: a.name,
+        marketType: a.marketType,
+        status: a.status,
+        balance: a.balance,
+        available: a.available,
+        venue: a.venue ?? '',
+        strategies: Array.isArray(a.strategies) ? [...(a.strategies as string[])] : undefined,
+        reserved: a.reserved ?? '',
+      }))
+      // active id：回执带就用回执的；没带（老内核）保留现值 —— 活跃账户
+      // 是会话事实，读数缺失时不发明。
+      const active = typeof doc.active === 'string' && doc.active ? doc.active : activeAccount.value
+      setAccounts(active ?? '', rows)
+    } catch {
+      // 静默：与 noteOutcome 的降级纪律一致 —— 读数失败不退登录态、不清行。
+    }
+  }
+
   async function refresh(): Promise<void> {
     if (!hasToken()) return
     loading.value = true
@@ -236,11 +286,12 @@ export const usePanelStore = defineStore('panel', () => {
       // beside the snapshot. `acct` absent = 全局面板 —— 两条读数置空，页面
       // 回落 snapshot 值（单账户部署与老面板逐字节一致）。
       const acct = activeAccount.value ?? undefined
-      const [snap, plug, accSummary, accStats] = await Promise.allSettled([
+      const [snap, plug, accSummary, accStats, acctList] = await Promise.allSettled([
         api.snapshot(),
         api.plugins(),
         api.tradesSummary({ accountId: acct }),
         api.engineStatsFor({ accountId: acct }),
+        refreshAccounts(),
       ])
       if (snap.status === 'fulfilled') {
         snapshot.value = snap.value
@@ -257,6 +308,7 @@ export const usePanelStore = defineStore('panel', () => {
         acct && accStats.status === 'fulfilled' ? accStats.value.strategies ?? [] : []
       noteOutcome([snap, plug, accSummary, accStats])
       lastUpdated.value = Date.now()
+      void acctList
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
     } finally {
@@ -273,7 +325,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
-    activeAccount, accounts, setAccounts, clearAccountScoped, activeAccountVenue, activeAccountRow,
+    activeAccount, accounts, setAccounts, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow,
     accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
