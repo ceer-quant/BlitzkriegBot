@@ -993,6 +993,7 @@ async fn handle_line(
         method::ACCOUNT_VENUE_SET,
         method::ACCOUNT_CREATE,
         method::ACCOUNT_REMOVE,
+        method::DISPLAY_ACCOUNT_SET,
         method::SYSTEM_RESET_TRADING,
         method::STRATEGY_PARAMS_SET,
         method::UNIFIED_CONFIRM,
@@ -2305,9 +2306,23 @@ async fn handle_line(
                     })
                 })
                 .collect();
+            // 显示账户配置化: the display pointer rides on market.list so
+            // the panel's 行情页 can name the account (and its venue
+            // binding) it mirrors WITHOUT a second round-trip — the
+            // 「账户交易所 ≠ 行情页交易所」 fix. Pure presentation: an
+            // older client that ignores these keys loses nothing.
+            let (display_account, display_venue) = {
+                let c = core.lock().await;
+                (
+                    c.accounts().display_id().to_string(),
+                    c.accounts().display_venue().to_string(),
+                )
+            };
             Ok(serde_json::json!({
                 "version": PROTOCOL_VERSION,
                 "active": registry.active(),
+                "displayAccount": display_account,
+                "displayVenue": display_venue,
                 "plugins": plugins,
             }))
         }
@@ -2923,12 +2938,30 @@ async fn handle_line(
                 .session_active
                 .clone()
                 .unwrap_or_else(|| c.accounts().active_id().clone());
-            Ok(serde_json::to_value(AccountListResult {
+            let mut body = serde_json::to_value(AccountListResult {
                 version: PROTOCOL_VERSION.to_string(),
                 active: active.as_str().to_string(),
                 accounts: c.account_views(now_ms()),
             })
-            .unwrap_or(Value::Null))
+            .unwrap_or(Value::Null);
+            // 显示账户配置化: the DISPLAY pointer rides the same answer
+            // (`displayAccount` + the pointed-at account's venue binding,
+            // `displayVenue` — empty string = unbound, the binding's own
+            // absence spelling). Top-level keys beside `active`, so every
+            // snapshot consumer (webui's account switcher, the TUI identity
+            // row) reads them from the one account.list round-trip it
+            // already makes; older clients ignore the extra keys.
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "displayAccount".to_string(),
+                    serde_json::json!(c.accounts().display_id()),
+                );
+                obj.insert(
+                    "displayVenue".to_string(),
+                    serde_json::json!(c.accounts().display_venue()),
+                );
+            }
+            Ok(body)
         }
 
         method::ACCOUNT_SWITCH => {
@@ -3204,6 +3237,38 @@ async fn handle_line(
                         at_ms: now_ms(),
                         reason: p.reason,
                         note: ACCOUNT_STRATEGIES_SET_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
+        // ── 显示账户配置化：display.account.set ─────────────────────────────
+        // 快照 displayAccount/displayVenue 的指针写。纯展示指针：不接
+        // active 账户/记账/策略启用语义 —— 内核计划先行校验（id 必须已配置
+        // 且 status=active，显示一本不能交易的账户 = 撒谎的快照；未知 id
+        // 是客户端错），persist 先行（失败两个存储都不动），内存随后。经
+        // typed 的 CoreError 尾部落成 wire 的 INVALID_PARAMS。
+        method::DISPLAY_ACCOUNT_SET => {
+            typed(params, |p: DisplayAccountSetParams| {
+                let core = core.clone();
+                async move {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    c.set_display_account_persisting(
+                        &id,
+                        "panel",
+                        p.reason.as_deref().unwrap_or(""),
+                    )?;
+                    let display_venue = c.accounts().display_venue().to_string();
+                    Ok(serde_json::to_value(DisplayAccountSetResult {
+                        account_id: id.as_str().to_string(),
+                        display_venue,
+                        persisted: true,
+                        at_ms: now_ms(),
+                        reason: p.reason,
+                        note: DISPLAY_ACCOUNT_SET_NOTE,
                     })
                     .unwrap_or(Value::Null))
                 }
@@ -7406,6 +7471,141 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显示账户配置化: `display.account.set` 是写动词 —— 只读模式照
+    /// READONLY_REFUSED 名单整体拒绝（config 写不该从只读面溜进去）。
+    #[tokio::test]
+    async fn display_account_set_is_refused_in_read_only_mode() {
+        let (core, registry, peer) = two_account_fixture().await;
+        core.lock().await.config_mut().mode = Mode::ReadOnly;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"display.account.set","params":{"accountId":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "read-only refuses the configuration verb: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only mode"),
+            "the refusal names the mode: {reply}"
+        );
+    }
+
+    /// 显示账户配置化: the DISPLAY pointer rides the account.list answer —
+    /// `displayAccount` + the pointed-at account's venue binding
+    /// (`displayVenue`, empty = unbound) as TOP-LEVEL keys beside `active`,
+    /// so the panel reads them from the round-trip it already makes. Here
+    /// the pointer defaults to `default` (the file loader's first-ACTIVE
+    /// rule; this fixture book has no explicit key), and the venue is the
+    /// unbound empty string.
+    #[tokio::test]
+    async fn account_list_carries_the_display_pointer_and_its_venue() {
+        let (core, registry, peer) = two_account_fixture().await;
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.list","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "list must answer: {reply}");
+        assert_eq!(
+            reply["result"]["displayAccount"],
+            serde_json::json!("default"),
+            "no explicit key = the first ACTIVE account displays"
+        );
+        assert_eq!(
+            reply["result"]["displayVenue"],
+            serde_json::json!(""),
+            "the fixture accounts are unbound: the venue spells absence"
+        );
+    }
+
+    /// 显示账户配置化: `display.account.set` 的拒绝面（wire 层）——
+    /// 非 active 账户与未知 id 都是计划先行的 INVALID_PARAMS，文件与内存
+    /// 不动。两账户夹具没有 persist 路径，所以合法切位在持久化关上被整体
+    /// 拒绝（同一姿态，service 层测试已钉住「路径存在时指针落位」的半边）。
+    #[tokio::test]
+    async fn display_account_set_refuses_non_active_and_unknown_plan_first() {
+        let (core, registry, peer) = two_account_fixture().await;
+        // Freeze `paper` first: the fixture mints both accounts active.
+        core.lock()
+            .await
+            .tighten_account_status(&AccountId::from("paper"), AccountStatus::Frozen, now_ms())
+            .expect("the freeze lands");
+
+        // Negative FIRST: a frozen account may not wear the display face.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"display.account.set","params":{"accountId":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "a non-active account refuses plan-first: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not an active account"),
+            "the refusal names the posture: {reply}"
+        );
+
+        // Unknown id: the standard unknown-account refusal.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"display.account.set","params":{"accountId":"ghost"}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "{reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown account `ghost`"),
+            "{reply}"
+        );
+
+        // The legal shape itself: with no persist path the core refuses the
+        // write WHOLE (nothing was applied) — the same posture the service
+        // layer test pins on the happy path with a path configured.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"display.account.set","params":{"accountId":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no accounts config path"),
+            "a core without a persist path refuses the write whole: {reply}"
+        );
     }
 
     /// venue.set 是写动词：只读模式的内核拒绝（READONLY_REFUSED 名单），

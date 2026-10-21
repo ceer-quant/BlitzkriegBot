@@ -366,6 +366,9 @@ impl Dispatcher {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
             s.market_active_name = m.active;
+            // 显示账户配置化: same ride-along as `IpcClient::snapshot`.
+            s.display_account = m.display_account;
+            s.display_venue = m.display_venue;
         }
         // E9-g: the plugins tab also shows per-strategy counters + rejection
         // causes (engine.stats), not just the enabled/disabled registry list.

@@ -268,6 +268,15 @@ pub struct AccountLedgers {
     accounts: HashMap<AccountId, Account>,
     ledgers: HashMap<AccountId, Ledger>,
     active: AccountId,
+    /// The DISPLAY pointer (显示账户配置化): which account the snapshot's
+    /// `displayAccount`/`displayVenue` name. A pure presentation pointer —
+    /// it does NOT feed the active/accounting/strategy-enablement axes and
+    /// no trading semantics attach to it. Invariant (same discipline as
+    /// `active`): it ALWAYS names a configured account — the file loader
+    /// derives it (explicit key > first active > first row), `set_display`
+    /// refuses unknown ids, and `repair_display_after_removal` re-derives
+    /// when a removal takes the pointed-at account away.
+    display: AccountId,
 }
 
 impl AccountLedgers {
@@ -277,6 +286,18 @@ impl AccountLedgers {
     /// (§9.5: `default` when configured, else the file's first entry; the
     /// SESSION-level switch lives at the IPC layer and never mutates this).
     pub fn new(accounts: Vec<Account>, active: AccountId) -> Self {
+        // The display pointer defaults to the same account the active cell
+        // gets (显示账户配置化's zero-config shape: display what the process
+        // acts as, until the file or `display.account.set` says otherwise).
+        let display = active.clone();
+        Self::new_with_display(accounts, active, display)
+    }
+
+    /// [`Self::new`] with the display pointer SUPPLIED — the accounts.toml
+    /// loader's constructor (the file is the display pointer's only config
+    /// source). `display` MUST name a configured account; enforcing that is
+    /// the caller's job (the loader validates before calling, fail-closed).
+    pub fn new_with_display(accounts: Vec<Account>, active: AccountId, display: AccountId) -> Self {
         let mut by_id = HashMap::new();
         let mut ledgers = HashMap::new();
         for a in accounts {
@@ -287,6 +308,7 @@ impl AccountLedgers {
             accounts: by_id,
             ledgers,
             active,
+            display,
         }
     }
 
@@ -347,6 +369,35 @@ impl AccountLedgers {
     /// at the IPC layer per connection and NEVER mutate this.
     pub fn active_id(&self) -> &AccountId {
         &self.active
+    }
+
+    /// The DISPLAY pointer's id (显示账户配置化): the account the snapshot's
+    /// `displayAccount` names. Pure presentation — nothing here feeds the
+    /// active/accounting/strategy axes.
+    pub fn display_id(&self) -> &str {
+        self.display.as_str()
+    }
+
+    /// The pointed-at account's venue binding (the snapshot's `displayVenue`).
+    /// An empty string = the account is unbound (trades any venue) — the
+    /// snapshot renders absence, the same spelling the binding itself uses.
+    pub fn display_venue(&self) -> &str {
+        self.accounts
+            .get(&self.display)
+            .map(|a| a.venue.as_str())
+            .unwrap_or("")
+    }
+
+    /// Re-point the display pointer (`display.account.set`'s memory half).
+    /// The id must name a CONFIGURED account — the pointer's invariant; the
+    /// ACTIVE-status check and the persistence are the CALLER's job (the
+    /// service layer owns the plan-first refusals and the file write).
+    pub fn set_display(&mut self, id: &AccountId) -> CoreResult<()> {
+        if !self.accounts.contains_key(id) {
+            return Err(unknown_account(id));
+        }
+        self.display = id.clone();
+        Ok(())
     }
 
     /// Attach the durable cash-journal file to every account's ledger
@@ -602,6 +653,31 @@ impl AccountLedgers {
                     .cloned()
                     .unwrap_or_else(default_account_id)
             };
+        }
+    }
+
+    /// The display pointer's removal companion: when the removed account is
+    /// the one being displayed, re-derive the pointer the boot loader's own
+    /// order (first `active` entry, else lowest id — the file can no longer
+    /// answer, so memory spells the same default the next boot would read).
+    /// The PERSISTED file is the CALLER's concern: the service layer rewrites
+    /// the top-level `display_account` key beside the removal so the next
+    /// boot never reads a dangling id (which the loader refuses, fail-closed).
+    pub fn repair_display_after_removal(&mut self, removed: &AccountId) {
+        if self.display == *removed && !self.accounts.contains_key(&self.display) {
+            self.display = self
+                .accounts
+                .values()
+                .filter(|a| matches!(a.status, AccountStatus::Active))
+                .map(|a| a.id.clone())
+                .min()
+                .unwrap_or_else(|| {
+                    self.accounts
+                        .keys()
+                        .min()
+                        .cloned()
+                        .unwrap_or_else(default_account_id)
+                });
         }
     }
 
@@ -1054,5 +1130,37 @@ mod book_tests {
             DEFAULT_ACCOUNT_ID,
             "a surviving default is preferred over the lowest id"
         );
+    }
+
+    #[test]
+    fn removing_the_displayed_account_repairs_the_pointer_and_set_display_validates() {
+        // The pointer follows the SAME discipline as the active cell: a
+        // removal that takes the displayed account away re-derives it (first
+        // ACTIVE survivor, else lowest id) — the snapshot must never name a
+        // removed account.
+        let mut book = two_accounts();
+        book.set_display(&AccountId("paper".into())).unwrap();
+        assert_eq!(book.display_id(), "paper");
+        book.remove(&AccountId("paper".into())).unwrap();
+        book.repair_display_after_removal(&AccountId("paper".into()));
+        assert_eq!(
+            book.display_id(),
+            DEFAULT_ACCOUNT_ID,
+            "the retired display falls back to the first active survivor"
+        );
+        // display_venue follows the pointed-at account (empty = unbound).
+        let mut bound = two_accounts();
+        bound
+            .set_venue(&AccountId("paper".into()), "kalshi", 1)
+            .unwrap();
+        bound.set_display(&AccountId("paper".into())).unwrap();
+        assert_eq!(bound.display_venue(), "kalshi");
+        // An unknown id never moves the pointer (set_display validates).
+        assert!(bound.set_display(&AccountId("ghost".into())).is_err());
+        assert_eq!(bound.display_id(), "paper");
+        // A removal of a NON-displayed account leaves the pointer alone.
+        bound.remove(&default_account_id()).unwrap();
+        bound.repair_display_after_removal(&default_account_id());
+        assert_eq!(bound.display_id(), "paper");
     }
 }

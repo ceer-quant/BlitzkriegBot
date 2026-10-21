@@ -84,6 +84,18 @@ struct AccountFileEntry {
 #[serde(deny_unknown_fields)]
 struct AccountsFile {
     account: Vec<AccountFileEntry>,
+    /// The DISPLAY account (显示账户配置化): which account the snapshot's
+    /// `displayAccount`/`displayVenue` point at. A pure presentation pointer —
+    /// it is NOT the active/accounting/strategy-enablement axis, and no
+    /// trading semantics attach to it. A top-level key (sibling of
+    /// `[[account]]`, never a field inside one). Missing = the file's FIRST
+    /// `status=active` account (falling back to the first entry when no entry
+    /// is active); an id the file does not declare REFUSES the boot
+    /// (fail-closed: a dangling pointer would otherwise silently fall back to
+    /// some account, which is exactly the 「账户≠行情页交易所」 accident this
+    /// key exists to make explicit).
+    #[serde(default)]
+    display_account: Option<String>,
 }
 
 impl AccountFileEntry {
@@ -184,7 +196,39 @@ pub fn from_str(text: &str, now_ms: i64) -> Result<AccountLedgers, CoreError> {
     } else {
         accounts[0].id.clone()
     };
-    Ok(AccountLedgers::new(accounts, active))
+    // The display pointer (显示账户配置化): explicit key > first
+    // `status=active` entry > first entry. An explicit id that names no
+    // configured account refuses here — the boot's fail-closed posture, the
+    // same one a malformed file already gets (a dangling display pointer must
+    // never silently fall back to some other account: the snapshot would show
+    // an exchange the operator never chose, the exact accident the key
+    // exists to make explicit).
+    let display = match file.display_account.as_deref() {
+        Some(id) => {
+            if !accounts.iter().any(|a| a.id.as_str() == id) {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "accounts.toml: `display_account = \"{id}\"` names no \
+                         `[[account]]` — the display pointer must name a \
+                         configured account (fail-closed: fix the id or delete \
+                         the key)"
+                    ),
+                ));
+            }
+            id.to_string()
+        }
+        None => accounts
+            .iter()
+            .find(|a| matches!(a.status, AccountStatus::Active))
+            .map(|a| a.id.as_str().to_string())
+            .unwrap_or_else(|| accounts[0].id.as_str().to_string()),
+    };
+    Ok(AccountLedgers::new_with_display(
+        accounts,
+        active,
+        AccountId::from(display.as_str()),
+    ))
 }
 
 /// The persisted write-back of ONE account's venue binding
@@ -463,6 +507,20 @@ pub fn persist_account_remove(path: &Path, account_id: &str) -> Result<(), CoreE
             ),
         ));
     }
+    // The display pointer must not survive the removal as a dangling id —
+    // the next boot's loader refuses an unknown `display_account`
+    // (fail-closed), so a removal that takes the displayed account away
+    // re-derives the key IN THE SAME ATOMIC WRITE (explicit > first active >
+    // first row, the loader's own order). Removing a non-displayed account
+    // leaves the pointer untouched.
+    if file.display_account.as_deref() == Some(account_id) {
+        file.display_account = file
+            .account
+            .iter()
+            .find(|a| matches!(a.status, Some(AccountStatus::Active) | None))
+            .map(|a| a.id.clone())
+            .or_else(|| file.account.first().map(|a| a.id.clone()));
+    }
     let out = toml::to_string(&file).map_err(|e| {
         CoreError::new(
             CoreErrorCode::InvalidParams,
@@ -470,6 +528,41 @@ pub fn persist_account_remove(path: &Path, account_id: &str) -> Result<(), CoreE
         )
     })?;
     write_accounts_file_atomic(path, &out, "remove")
+}
+
+/// The persisted write-back of the DISPLAY pointer (`display.account.set`):
+/// set the top-level `display_account` key of accounts.toml — read-modify-write
+/// over the whole file, the exact fail-closed posture every accounts.toml
+/// writer above runs (a non-parsing file is REFUSED, never flattened;
+/// same-directory temp + rename via [`write_accounts_file_atomic`]; the toml
+/// re-render does not carry the operator's comments — the same accepted
+/// trade-off, every FIELD round-trips because the parse is
+/// `deny_unknown_fields`). The CALLER owns the runtime validations (the id
+/// must exist and be `active`); this layer only owns the file.
+pub fn persist_display_account(path: &Path, account_id: &str) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the display write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the display write: {e}"),
+        )
+    })?;
+    file.display_account = Some(account_id.to_string());
+    write_accounts_file_atomic(
+        path,
+        &toml::to_string(&file).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml does not render: {e}"),
+            )
+        })?,
+        "display",
+    )
 }
 
 /// The atomic tail both accounts.toml writers share: write the sibling temp
@@ -853,6 +946,130 @@ venue = "kalshi"
         // A file that cannot even be read: refused with the same posture.
         let err = persist_account_venue(&dir.join("nope.toml"), "x", "polymarket")
             .expect_err("unreadable file");
+        assert!(err.message.contains("unreadable"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── display_account（显示账户配置化）：解析 / 缺省 / fail-closed ─────────
+
+    #[test]
+    fn display_account_parses_and_defaults_to_the_first_active_entry() {
+        // Explicit: the key rides through as the display id verbatim. NOTE
+        // the TOML spelling: a top-level key must sit BEFORE the first
+        // [[account]] (TOML binds anything after an array-of-tables header
+        // to that table) — the writers re-render it at the top, a hand edit
+        // below the last block is refused by the entry's own
+        // `deny_unknown_fields` (fail-closed, with the field list named).
+        let explicit = from_str(
+            "display_account = \"b\"\n\n[[account]]\nid = \"a\"\n\n[[account]]\nid = \"b\"\n",
+            1,
+        )
+        .expect("an explicit display_account parses");
+        assert_eq!(explicit.display_id(), "b");
+
+        // …missing: the FIRST status=active entry — `b` here, `a`'s read_only
+        // posture must not win the pointer just by file order.
+        let defaulted = from_str(
+            "[[account]]\nid = \"a\"\nstatus = \"read_only\"\n\n[[account]]\nid = \"b\"\n",
+            1,
+        )
+        .expect("a file without the key parses");
+        assert_eq!(
+            defaulted.display_id(),
+            "b",
+            "absence = the first ACTIVE account, not the first row"
+        );
+
+        // No active entry at all: fall back to the first row (the book still
+        // boots — the pointer is presentation-only, so the zero-active shape
+        // is not a boot refusal, it is an honest "nothing to show").
+        let no_active = from_str(
+            "[[account]]\nid = \"a\"\nstatus = \"read_only\"\n\n[[account]]\nid = \"b\"\nstatus = \"frozen\"\n",
+            1,
+        )
+        .expect("a book with no active entry parses");
+        assert_eq!(no_active.display_id(), "a");
+
+        // Zero-config deployment (file missing): the single default account
+        // displays itself.
+        assert_eq!(
+            AccountLedgers::single_default(1).display_id(),
+            default_account_id().as_str()
+        );
+    }
+
+    #[test]
+    fn display_account_names_an_unknown_id_refuses_the_boot() {
+        // Fail-closed: a dangling display pointer refuses the parse — a
+        // silent fallback to "some account" is the exact 「账户交易所 ≠
+        // 行情页交易所」 accident the key exists to make explicit.
+        let err = from_str(
+            "display_account = \"ghost\"\n\n[[account]]\nid = \"a\"\n",
+            1,
+        )
+        .expect_err("unknown display id");
+        assert!(
+            err.message.contains("display_account") && err.message.contains("ghost"),
+            "{}",
+            err.message
+        );
+        // An EMPTY id names no configured account either — the same
+        // fail-closed refusal (the file spells "follow the default" by
+        // deleting the key, never by an empty string).
+        assert!(from_str("display_account = \"\"\n\n[[account]]\nid = \"a\"\n", 1).is_err());
+    }
+
+    #[test]
+    fn persist_display_account_writes_back_top_level_and_siblings_survive() {
+        let dir = std::env::temp_dir().join(format!("bk-display-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // The write lands as a TOP-LEVEL key — never inside an [[account]]
+        // block — and a FRESH load (the boot's call) reads it back with every
+        // sibling field of BOTH accounts intact.
+        persist_display_account(&p, "paper").expect("the write lands");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let first_row = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            !first_row.contains("display_account = \"paper\""),
+            "the key is top-level, not inside the first [[account]] block: {text}"
+        );
+        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        assert_eq!(book.display_id(), "paper", "the new pointer is durable");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "kalshi",
+            "a sibling account's binding survives the display write"
+        );
+        let d = book.account(&AccountId("default".into())).unwrap();
+        assert_eq!(d.name, "Poly Main");
+        assert_eq!(
+            d.credential_keys.api_key_env.as_deref(),
+            Some("POLY_API_KEY"),
+            "every sibling field round-trips"
+        );
+
+        // Re-point at the OTHER account: the read-modify-write cycle holds
+        // round two, the first write survives.
+        persist_display_account(&p, "default").expect("the re-point lands");
+        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        assert_eq!(book.display_id(), "default");
+
+        // A file that does not parse: refused fail-closed, never flattened.
+        std::fs::write(&p, "[[account]]\nid = \"x\"\nbogus = 1\n").unwrap();
+        let err = persist_display_account(&p, "x").expect_err("does not parse");
+        assert!(
+            err.message.contains("does not parse; refusing"),
+            "{}",
+            err.message
+        );
+
+        // A file that cannot even be read: refused with the same posture.
+        let err =
+            persist_display_account(&dir.join("nope.toml"), "x").expect_err("unreadable file");
         assert!(err.message.contains("unreadable"), "{}", err.message);
         let _ = std::fs::remove_dir_all(&dir);
     }

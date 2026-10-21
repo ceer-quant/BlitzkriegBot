@@ -531,6 +531,13 @@ pub fn render_json_full(
             .as_ref()
             .and_then(|n| s.market_plugins.iter().find(|p| &p.name == n))
             .map(|p| p.kind.clone()),
+        // 显示账户配置化: the display pointer the snapshot mirrors — the
+        // panel's 行情页 shows THIS account (and its venue binding, empty =
+        // unbound), decoupled from the connection's active account. Older
+        // cores omit the fields → "" (the UI reads absence as "no pointer
+        // surfaced"; a same-revision stack always carries both).
+        "displayAccount": s.display_account,
+        "displayVenue": s.display_venue,
         "lastError": s.last_error,
     });
 
@@ -2400,20 +2407,17 @@ impl WebServer {
                 self.proxy_backtest_body("account.venue.set", &req.body)
             }
             ("POST", "/api/display-account/set") => {
-                // issue 559: the display-account write — the body IS the
-                // `display.account.set` params object (`{accountId,
-                // reason?}`), forwarded verbatim (same proxy discipline as
-                // account-venue/set: the gateway shapes nothing). This is
-                // the "which account's market does the panel SHOW" fact —
-                // persisted into the accounts.toml top-level
-                // `display_account` key and applied at runtime by the
-                // kernel; the snapshot carries `displayAccount`/
-                // `displayVenue` beside it. Deliberately separate from the
-                // session-default switch (`account <id>`): the panel's
-                // switcher fires both on a successful switch, but they stay
-                // independent facts. Old cores answer with the JSON-RPC
-                // unknown-method error and the panel falls back to the
-                // account-binding chain (existing behaviour).
+                // issue 559 显示账户配置化: the DISPLAY pointer write — the
+                // body IS the `display.account.set` params object
+                // (`{accountId, reason?}`), forwarded verbatim (same proxy
+                // discipline as account-venue/set: the gateway shapes
+                // nothing). The kernel validates the plan first (账户存在 +
+                // status=active), updates the runtime pointer AND persists
+                // the accounts.toml top-level `display_account` key; the
+                // session-default switch (`account <id>`) is untouched —
+                // a PURE presentation pointer, no ledger/strategy semantics.
+                // Old cores answer with the JSON-RPC unknown-method error
+                // and the panel falls back to the account-binding chain.
                 self.proxy_backtest_body("display.account.set", &req.body)
             }
             ("POST", "/api/account-trading/set") => {

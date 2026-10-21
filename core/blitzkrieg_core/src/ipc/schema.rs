@@ -350,6 +350,15 @@ pub mod method {
     /// strategy with open positions keeps managing them exits-only until
     /// flat.
     pub const ACCOUNT_STRATEGIES_SET: &str = "account.strategies.set";
+    /// The DISPLAY pointer write (显示账户配置化): point the snapshot's
+    /// `displayAccount`/`displayVenue` at the named account. A pure
+    /// presentation pointer — it does NOT touch the active/accounting/
+    /// strategy-enablement axes and no trading semantics attach to it.
+    /// The kernel validates the account exists AND is `active` (plan-first),
+    /// updates the in-memory pointer AND persists the accounts.toml
+    /// top-level `display_account` key in one transaction; the next boot
+    /// re-reads the file (fail-closed on a dangling id).
+    pub const DISPLAY_ACCOUNT_SET: &str = "display.account.set";
     /// One account's cash-journal tail (#509's read surface): the append-only
     /// `JournalEntry` rows the ledger records for every balance change.
     /// Read-only — answers from the in-memory window
@@ -2118,6 +2127,42 @@ pub const ACCOUNT_STRATEGIES_SET_NOTE: &str = "the account's strategy ENABLEMENT
      a scope trades ⇔ the strategy is installed AND the account enabled AND \
      the strategy ∈ this set; a removed strategy with open positions keeps \
      managing them exits-only until flat";
+
+// ── 显示账户配置化 — display.account.set ─────────────────────────────────────
+
+/// `display.account.set` params: the account the snapshot's
+/// `displayAccount`/`displayVenue` should point at. The kernel validates the
+/// account EXISTS and is `active` (plan-first), then updates the runtime
+/// pointer AND the accounts.toml top-level `display_account` key in one
+/// transaction. `reason` is audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayAccountSetParams {
+    pub account_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `display.account.set` result: the pointer now in force (memory AND
+/// accounts.toml; a persist failure refuses the whole write). `displayVenue`
+/// is the pointed-at account's venue binding — empty = unbound.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayAccountSetResult {
+    pub account_id: String,
+    pub display_venue: String,
+    pub persisted: bool,
+    pub at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+}
+
+pub const DISPLAY_ACCOUNT_SET_NOTE: &str = "points the snapshot's displayAccount/displayVenue at \
+     the named account — a pure presentation pointer (NOT the active/ \
+     accounting/strategy-enablement axis; no trading semantics attach); \
+     persisted to accounts.toml's top-level display_account key, re-read at \
+     next boot (fail-closed on a dangling id)";
 
 // ── account.create / account.remove — 账户簿运行时增删 ──────────────────────
 
