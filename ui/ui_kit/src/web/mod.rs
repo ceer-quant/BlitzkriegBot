@@ -2399,6 +2399,23 @@ impl WebServer {
                 // accounts.toml; the gateway shapes nothing.
                 self.proxy_backtest_body("account.venue.set", &req.body)
             }
+            ("POST", "/api/display-account/set") => {
+                // issue 559: the display-account write — the body IS the
+                // `display.account.set` params object (`{accountId,
+                // reason?}`), forwarded verbatim (same proxy discipline as
+                // account-venue/set: the gateway shapes nothing). This is
+                // the "which account's market does the panel SHOW" fact —
+                // persisted into the accounts.toml top-level
+                // `display_account` key and applied at runtime by the
+                // kernel; the snapshot carries `displayAccount`/
+                // `displayVenue` beside it. Deliberately separate from the
+                // session-default switch (`account <id>`): the panel's
+                // switcher fires both on a successful switch, but they stay
+                // independent facts. Old cores answer with the JSON-RPC
+                // unknown-method error and the panel falls back to the
+                // account-binding chain (existing behaviour).
+                self.proxy_backtest_body("display.account.set", &req.body)
+            }
             ("POST", "/api/account-trading/set") => {
                 // 多账户扇出（PR B of #518）：交易开关写 —— body 即
                 // `account.trading.set` 的 params 对象

@@ -100,7 +100,20 @@ async function command(cmd: string): Promise<CommandOutcome> {
  * 切户残留窗口（issue 552 审计）：翻转 active 后、refresh 落地前，store 里
  * 还躺着旧账户的账户级读数（accountTradeSummary / accountStrategyStats），
  * 页面此刻渲染的是旧账户的数字——切成了谁、数字还是谁的。清掉它们让
- * 页面回落全局面读数（旧数字不渲染），新读数到达后立即恢复。 */
+ * 页面回落全局面读数（旧数字不渲染），新读数到达后立即恢复。
+ *
+ * 显示账户（issue 559）：切换成功后同一账户写进 display.account.set ——
+ * 「行情页显示谁的市场」跟随本面板的会话账户（徽章/名/slot/钟与切换器选
+ * 中的账户不再错位）。fire-and-forget：失败静默不打断切换本身（账户切换
+ * 是主事实，已成功；显示面下一拍快照带回 displayVenue，老内核缺该动词则
+ * 永远回落账户绑定链 —— 现行为）。仍属纯视图上下文：不发任何启停/冻结/
+ * 平仓动词，切换不启停任何东西的合同原样成立。 */
+function setDisplayAccount(id: string): void {
+  void api
+    .displayAccountSet({ accountId: id, reason: 'panel account switch' })
+    .catch(() => { /* 静默：快照回落链兜底，issue 559 */ })
+}
+
 async function switchTo(id: string): Promise<void> {
   if (id === active.value || switching.value) return
   switching.value = id
@@ -112,6 +125,7 @@ async function switchTo(id: string): Promise<void> {
     store.clearAccountScoped()
     await refresh()
     store.refresh()
+    setDisplayAccount(id)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {

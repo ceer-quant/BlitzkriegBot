@@ -87,49 +87,64 @@ watch(snap, (s) => {
 })
 
 // ── market identity ─────────────────────────────────────────────────────────
-// 倒计时卡的身份行（徽章/名字/slot/已过秒数）必须跟随 active 账户绑定的
-// venue —— 与倒计时数字同一跟随规则（issue 550 症状②的收尾）。旧实现读
-// `marketActiveName`（registry active = boot 第一个插件，多插件数据面下
-// 恒为启动序首位），切到别的账户后徽章仍写旧所名、slot/已过秒仍读全局
-// 标量块（各 venue 最早到期的保守钟 = 通常是先接入的所）。这里从快照已
-// 有的两类行派生 active venue 的身份：行情行带 venue+asset（类型标签从
-// 插件表按名查），venueRounds 行带该 venue 自己的 slot/ageSec。行缺席
-// （降级面/未开口）回落全局读数 —— 老行为，不发明。
+// 倒计时卡的身份行（徽章/名字/slot/已过秒数）的身份唯一源（issue 559）：
+// 显示账户 —— 内核快照顶层的 displayAccount/displayVenue（accounts.toml
+// 顶层持久化 + 运行时生效的独立事实），不再随本面板会话账户的绑定 venue
+// 派生。旧实现跟着 active 账户的绑定走（issue 550 症状②的收尾），切换器
+// 选了绑新所的账户而内核显示面还停在旧所时，徽章先跳成新所、下面的行情
+// 与钟仍是旧所 —— 卡的身份与数据各说各话。现在卡与内核显示面同源：快照
+// 缺该事实（老内核）回落账户绑定链 —— 老行为，不发明。行情行带
+// venue+asset（类型标签从插件表按名查），venueRounds 行带该 venue 自己的
+// slot/ageSec；行缺席（降级面/未开口）回落全局读数 —— 同样老行为。
+// 回落判定按「字段缺省」而不是「值为空」：内核说了话（字段在场）就全听
+// 它的 —— 包括 displayVenue 为空串（显示账户未绑定 = 可交易任意交易所，
+// 回落全局读数）；字段没来（老内核）才退回账户绑定派生。
+const identityVenue = computed<string>(() => {
+  const s = snap.value
+  if (s?.displayAccount !== undefined || s?.displayVenue !== undefined) {
+    return s?.displayVenue ?? ''
+  }
+  return store.activeAccountVenue
+})
 const marketName = computed(() => {
-  if (!activeVenue.value) return snap.value?.marketActiveName ?? null
+  if (!identityVenue.value) return snap.value?.marketActiveName ?? null
   const row = (snap.value?.round?.prices ?? []).find(
-    (r) => typeof r.venue === 'string' && r.venue !== '' && r.venue === activeVenue.value,
+    (r) => typeof r.venue === 'string' && r.venue !== '' && r.venue === identityVenue.value,
   )
   return row ? row.venue : (snap.value?.marketActiveName ?? null)
 })
 const marketTypeText = computed(() => {
-  if (!activeVenue.value) return marketTypeLabel(snap.value?.marketActiveType ?? null)
-  const row = snap.value?.marketPlugins?.find((p) => p.name === activeVenue.value)
+  if (!identityVenue.value) return marketTypeLabel(snap.value?.marketActiveType ?? null)
+  const row = snap.value?.marketPlugins?.find((p) => p.name === identityVenue.value)
   return row ? marketTypeLabel(row.type ?? row.kind ?? null) : marketTypeLabel(snap.value?.marketActiveType ?? null)
 })
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
 // ── countdown: interpolate locally between server answers ────────────────────
-// issue 550（症状②）根因修复（显示链半边）：轮次钟必须随账户切换重绑定 ——
-// 账户切换器就是交易所切换器，active 账户绑定 venue X 时，倒计时读 X 自己
-// 的钟（快照 `round.venueRounds` 行，trading 侧 per-candidate 门同一口径），
-// 不再永远读全局保守钟标量块（各 venue 到期最小值 = 通常是先接入的那个所）。
-// 老内核没有 venueRounds（空表）→ feature-detect 降级回全局标量块，现行为。
-// venue 变化时旧钟的本地插值残值必须清掉（serverLeft/serverAt/leftSec 归零
-// 再等新钟首帧），否则切到无行情的新所时旧倒计时被本地时钟永远续跳。
-// （本块引用 activeVenue —— 声明在其下方，init 惰性、watch 回调运行时才
-// 解引用，vue-tsc 与运行时均安全。）
+// issue 550（症状②）根因修复（显示链半边）：轮次钟必须随「行情身份」重绑
+// 定 —— 显示账户绑定 venue X 时，倒计时读 X 自己的钟（快照
+// `round.venueRounds` 行，trading 侧 per-candidate 门同一口径），不再永远
+// 读全局保守钟标量块（各 venue 到期最小值 = 通常是先接入的那个所）。
+// issue 559 起「行情身份」的源是显示账户（identityVenue：displayVenue
+// 优先，老内核回落账户绑定链）—— 卡的身份行与钟同一跟随规则，永远指向
+// 内核显示面真正在跑的那个所。老内核没有 venueRounds（空表）→
+// feature-detect 降级回全局标量块，现行为。venue 变化时旧钟的本地插值
+// 残值必须清掉（serverLeft/serverAt/leftSec 归零再等新钟首帧），否则切到
+// 无行情的新所时旧倒计时被本地时钟永远续跳。
+// （本块引用 identityVenue —— 声明在其上方，快照字段缺省时回落
+// activeVenue；init 惰性、watch 回调运行时才解引用，安全。）
 const serverLeft = ref(0)
 const serverAt = ref(0)
 const countForVenue = ref('')
 
 /**
- * The round clock row of the ACTIVE venue, if this core speaks venueRounds
- * and the venue has an observed clock. Empty binding (unbound account) → no
- * row: the countdown follows the global scalar block like it always did.
+ * The round clock row of the identity venue (显示账户的 venue，老内核回落
+ * active 账户绑定), if this core speaks venueRounds and the venue has an
+ * observed clock. Empty binding (unbound display account) → no row: the
+ * countdown follows the global scalar block like it always did.
  */
 const venueRound = computed(() => {
-  const v = activeVenue.value
+  const v = identityVenue.value
   if (!v) return null
   const rows = snap.value?.round?.venueRounds
   if (!Array.isArray(rows) || rows.length === 0) return null
@@ -139,11 +154,11 @@ const venueRound = computed(() => {
 watch(snap, (s) => {
   const vr = venueRound.value
   if (vr) {
-    // The active venue has its own clock row: bind to it. The venue key
+    // The identity venue has its own clock row: bind to it. The venue key
     // guards re-binding — a row for a DIFFERENT venue never refreshes this
     // countdown (the issue 550 residual-value leak).
-    if (countForVenue.value !== activeVenue.value) {
-      countForVenue.value = activeVenue.value
+    if (countForVenue.value !== identityVenue.value) {
+      countForVenue.value = identityVenue.value
       serverLeft.value = 0
       serverAt.value = 0
       leftSec.value = 0
@@ -172,10 +187,11 @@ const leftSec = ref(0)
 
 const round = computed(() => snap.value?.round ?? null)
 /**
- * 倒计时卡身份行读的轮次块：active venue 有自己的 venueRounds 行时读它
- * （slot/已过秒随该所的钟），否则回落全局标量块（老行为）。与倒计时数字
- * 同一跟随规则 —— 全局块是各 venue 最早到期的保守钟，多插件下通常是先
- * 接入那个所的，直接显示会把新所轮次标成旧所的 slot。
+ * 倒计时卡身份行读的轮次块：身份 venue（显示账户，老内核回落账户绑定）
+ * 有自己的 venueRounds 行时读它（slot/已过秒随该所的钟），否则回落全局
+ * 标量块（老行为）。与倒计时数字同一跟随规则 —— 全局块是各 venue 最早
+ * 到期的保守钟，多插件下通常是先接入那个所的，直接显示会把新所轮次标成
+ * 旧所的 slot。
  */
 const roundDisplay = computed(() => {
   const vr = venueRound.value
@@ -222,16 +238,21 @@ const activeVenue = computed(() => store.activeAccountVenue)
 // 行全显（无标签行不归属任何所）——永不因降级而卡死在加载态。
 const venueSwitchAt = ref(0)
 const venueSwitchFrom = ref('')
-watch(activeVenue, (nv, ov) => {
+// 残值清理的统一扳机是「行情身份变化」而不是「账户切换」（issue 559）：
+// 显示账户被面板切换器改写（display.account.set）或内核侧改了显示账户，
+// 快照下一拍带来新 displayVenue —— identityVenue 变化即清键与本地插值
+// 残值，等新所自己的钟行首帧重新起跳。账户绑定变化（老内核回落链）同样
+// 流经这条 watch：两源合一，行为对老内核与 issue 550 完全保持。
+watch(identityVenue, (nv, ov) => {
   if (nv === ov) return
   // 首帧挂载（ov===undefined）不开 Loading —— 没有旧可清。
   if (ov === undefined) return
   venueSwitchAt.value = Date.now()
   venueSwitchFrom.value = ov
-  // issue 550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，切 venue
-  // 即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己的钟行，
-  // 从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次快照间
-  // 会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
+  // issue 550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，身份
+  // venue 变化即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己
+  // 的钟行，从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次
+  // 快照间会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
   // 键写成新 venue 名而不是 ''：'' 会让快照 watch 的 fallback 分支把全局
   // 标量钟（= 旧所的保守钟）重新灌进倒计时 —— 恰好把要清的残值请回来。
   // 钉住新 venue 名 = fallback 只在「从未绑定过」时可达，切走后新所的

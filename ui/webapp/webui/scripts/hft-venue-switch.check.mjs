@@ -68,10 +68,47 @@ check('activeVenue 派生自账户绑定（store.activeAccountVenue）——行�
   )
 })
 
+// ── 1b. the identity single source (issue 559) ───────────────────────────────
+// 「行情显示谁的市场」的 UNIQUE source：内核快照顶层的 displayVenue（显示
+// 账户的 venue，accounts.toml 顶层 display_account 持久化 + 运行时生效），
+// 老内核缺字段回落账户绑定链。回落按「字段缺省」判定 —— 内核在场即全听
+// 它的（含空串 = 未绑定 = 回落全局读数）。
+check('身份唯一源 identityVenue：displayVenue 优先，快照缺字段回落账户绑定链（issue 559）', () => {
+  const client = read('src', 'api', 'client.ts')
+  // The wire contract: the snapshot type declares BOTH display fields.
+  assert.match(client, /displayAccount\?: string \| null/, 'Snapshot 合同缺 displayAccount —— 显示账户没进合同')
+  assert.match(client, /displayVenue\?: string \| null/, 'Snapshot 合同缺 displayVenue —— 显示 venue 没进合同')
+  // The page derives ONE identity venue with the documented fallback chain.
+  const m = page.match(/const identityVenue = computed<string>\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(m, '缺 identityVenue computed —— 身份行没有唯一源')
+  assert.match(m[0], /displayVenue/, 'identityVenue 没读快照 displayVenue —— 回落链断了')
+  assert.match(
+    m[0],
+    /store\.activeAccountVenue/,
+    'identityVenue 缺账户绑定回落 —— 老内核的身份行会悬空',
+  )
+  assert.match(
+    m[0],
+    /displayAccount !== undefined \|\| s\?\.displayVenue !== undefined/,
+    '回落判定不是「字段缺省」—— 内核显式空串会被误判成缺字段',
+  )
+  // The countdown card's identity line reads ONLY the identity venue.
+  assert.match(page, /const marketName = computed\(\(\) => \{[\s\S]*?identityVenue\.value/, '倒计时卡徽章名未接 identityVenue')
+  assert.match(page, /const marketTypeText = computed\(\(\) => \{[\s\S]*?identityVenue\.value/, '倒计时卡类型徽章未接 identityVenue')
+  assert.doesNotMatch(
+    page,
+    /const marketName = computed\(\(\) => \{[\s\S]{0,600}activeVenue\.value/,
+    '倒计时卡身份仍读账户绑定的 activeVenue —— 唯一源被旁路（issue 559 的错位会回来）',
+  )
+  // The countdown's clock selection follows the same identity venue (the
+  // identity line and the clock must never disagree about whose round it is).
+  assert.match(page, /watch\(identityVenue/, '倒计时重绑没有挂 identityVenue —— 身份变了钟不清')
+})
+
 // ── 2. the switch watcher stamps the event ───────────────────────────────────
 check('venue 切换被 watch 捕获并落时间戳（清旧 + 开 Loading 的事件起点）', () => {
-  const body = page.match(/watch\(activeVenue,[\s\S]*?\n\}\)/)
-  assert.ok(body, '缺 watch(activeVenue) —— 切换事件无人捕获，旧所行会原地残留')
+  const body = page.match(/watch\(identityVenue,[\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 watch(identityVenue) —— 切换事件无人捕获，旧所行会原地残留')
   assert.match(body[0], /venueSwitchAt/, '切换未记录时间戳')
   assert.match(body[0], /venueSwitchFrom/, '切换未记录来源 venue（Loading 文案要如实说出清掉了谁）')
 })
@@ -160,8 +197,8 @@ check('行情面不渲染 venue 徽标（倒计时卡已写交易所，其他卡
   }
 })
 
-// ── 7. #550（症状②）the countdown re-binds to the active venue's own clock ──
-check('倒计时优先读 active venue 自己的钟行（round.venueRounds，#550 症状②）', () => {
+// ── 7. #550（症状②）the countdown re-binds to the identity venue's own clock ──
+check('倒计时优先读身份 venue 自己的钟行（round.venueRounds，#550 症状②）', () => {
   // The wire contract: the snapshot type declares the per-venue rows.
   const client = read('src', 'api', 'client.ts')
   assert.match(client, /interface VenueRound\b/, 'client.ts 缺 VenueRound 行类型 —— venueRounds 没有进合同')
@@ -170,18 +207,18 @@ check('倒计时优先读 active venue 自己的钟行（round.venueRounds，#55
     /venueRounds\?: VenueRound\[\]/,
     'Round 合同缺 venueRounds 字段 —— 老内核降级路径无从判定',
   )
-  // The page binds the countdown to the ACTIVE venue's row, keyed by venue.
+  // The page binds the countdown to the identity venue's row, keyed by venue.
   const vr = page.match(/const venueRound = computed\(\(\) => \{[\s\S]*?\n\}\)/)
   assert.ok(vr, '缺 venueRound computed —— 倒计时没有 per-venue 选行逻辑')
   assert.match(vr[0], /venueRounds/, '选行逻辑没读 venueRounds')
-  assert.match(vr[0], /activeVenue\.value/, '选行逻辑没按 active venue 过滤')
+  assert.match(vr[0], /identityVenue\.value/, '选行逻辑没按身份 venue 过滤')
   // The snap watcher must consume the venue row BEFORE falling back to the
   // global scalar block, and the fallback must be gated on the venue key.
   const snapWatch = page.match(/watch\(snap, \(s\) => \{[\s\S]*?\n\}, \{ immediate: true \}\)/)
   assert.ok(snapWatch, '缺 watch(snap) 倒计时喂入')
   assert.match(
     snapWatch[0],
-    /countForVenue\.value !== activeVenue\.value/,
+    /countForVenue\.value !== identityVenue\.value/,
     '倒计时没有 venue 键卫兵 —— 不同 venue 的钟行会刷新同一个倒计时（残值泄漏）',
   )
   assert.match(
@@ -195,8 +232,8 @@ check('venue 切换时倒计时残值清零（serverLeft/serverAt/leftSec 归零
   // The switch watcher must clear the residual local-interpolation state —
   // otherwise the old venue's countdown is kept alive by the local 500ms
   // ticker across the switch gap (the exact #550 symptom ② reproduction).
-  const body = page.match(/watch\(activeVenue,[\s\S]*?\n\}\)/)
-  assert.ok(body, '缺 watch(activeVenue)')
+  const body = page.match(/watch\(identityVenue,[\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 watch(identityVenue)')
   assert.match(body[0], /serverLeft\.value = 0/, '切换未清 serverLeft —— 旧倒计时残值跨 venue 存活')
   assert.match(body[0], /serverAt\.value = 0/, '切换未清 serverAt —— 本地插值基点跨 venue 存活')
   assert.match(body[0], /leftSec\.value = 0/, '切换未清 leftSec —— 渲染值跨 venue 存活')
