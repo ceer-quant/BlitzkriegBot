@@ -3037,6 +3037,77 @@ impl Core {
         Ok(())
     }
 
+    /// The display-pointer write (显示账户配置化 / `display.account.set`):
+    /// memory AND accounts.toml in one transaction — persist FIRST (a failure
+    /// leaves both stores untouched), memory after. The refusals are ALL
+    /// plan-first: the id must name a CONFIGURED account and its status must
+    /// be `Active` (a display pointer aimed at a read-only/frozen account
+    /// would show a book that cannot trade — the operator believes the
+    /// 行情页 mirrors a live venue; showing a frozen one is the same
+    /// lie-by-snapshot a dangling id would be).
+    ///
+    /// 语义边界：this pointer is PURE PRESENTATION. It never touches the
+    /// process-level active account, no ledger, and no strategy enablement —
+    /// the snapshot's `displayAccount`/`displayVenue` are the only readers.
+    pub fn set_display_account_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        actor: &str,
+        reason: &str,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::DISPLAY_ACCOUNT_SET_NOTE;
+        self.accounts.require(id)?;
+        // Active-only: see the doc above (a display of an untradeable book is
+        // a lie-by-snapshot). `matches!` keeps the check permissive of future
+        // postures the way the boot default (`first status=active`) is.
+        if !self
+            .accounts
+            .account(id)
+            .is_some_and(|a| matches!(a.status, crate::account::AccountStatus::Active))
+        {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "display.account.set: `{}` is not an active account — the \
+                     display pointer only follows a `status = active` book \
+                     (fail-closed: showing a frozen/read-only account would \
+                     present a venue that cannot trade)",
+                    id.as_str()
+                ),
+            ));
+        }
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "display.account.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_display_account(std::path::Path::new(path), id.as_str())
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "display.account.set: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
+        self.accounts.set_display(id)?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            reason = %reason,
+            "display pointer written — the snapshot's displayAccount/ \
+             displayVenue follow this account; re-reads at next boot \
+             ({DISPLAY_ACCOUNT_SET_NOTE})",
+        );
+        Ok(())
+    }
+
     /// The strategy-assignment write (`account.strategies.set`): memory AND
     /// accounts.toml in one transaction, plus the engine scope rebuild.
     ///
@@ -3517,6 +3588,12 @@ impl Core {
             })?;
         self.accounts.remove(id)?;
         self.accounts.repair_active_after_removal(id);
+        // 显示账户配置化: the removal must not orphan the display pointer —
+        // the file was rewritten WITHOUT the row above, and the same render
+        // re-derived its top-level `display_account` key when it pointed here
+        // (persist_account_remove's own edit); the memory cell re-derives the
+        // same way so the snapshot never names a removed account.
+        self.accounts.repair_display_after_removal(id);
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -3524,7 +3601,8 @@ impl Core {
             reason = %reason,
             "account removed — identity and ledger retired, the active cell \
              re-activates the first surviving account when it named the \
-             removed account ({ACCOUNT_REMOVE_NOTE})",
+             removed account; the display pointer re-derives the same way \
+             when the displayed account left ({ACCOUNT_REMOVE_NOTE})",
         );
         Ok(())
     }
@@ -18355,6 +18433,95 @@ mod strategy_dispatch_tests {
         assert!(
             !journal_dir_live.join("probe3.journal.jsonl").exists(),
             "a zero funding records no journal row, so no file is created"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显示账户配置化（display.account.set 的事务半）：合法切位把内存指针
+    /// 与 accounts.toml 顶层 `display_account` 键一次写齐（persist 先行，
+    /// 失败两个存储都不动）；未知 id 与非 active 账户被计划先行拒绝且文件
+    /// 字节不动；持久化关（无 config 路径）整体拒绝。纯展示指针：active
+    /// 账户/记账不受任何影响 —— 内存的 display 单元独立于 active 单元。
+    #[test]
+    fn display_account_set_persists_and_validates_plan_first() {
+        let dir = std::env::temp_dir().join(format!("bk-display-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        // Boot default: the loader's first-ACTIVE rule points at `default`.
+        assert_eq!(c.accounts.display_id(), "default");
+
+        // The legal re-point: memory AND file move together; a FRESH load
+        // (the next boot's call) reads `paper` back.
+        c.set_display_account_persisting(&crate::account::AccountId::from("paper"), "test", "")
+            .expect("the re-point lands");
+        assert_eq!(c.accounts.display_id(), "paper");
+        let reloaded = crate::account::config::load_account_ledgers(&accounts_path, 2).unwrap();
+        assert_eq!(reloaded.display_id(), "paper", "the pointer is durable");
+        // The top-level key survived the render next to both rows' fields.
+        let text = std::fs::read_to_string(&accounts_path).unwrap();
+        assert!(text.contains("display_account = \"paper\""), "{text}");
+
+        // UNKNOWN id: refused plan-first, memory and file untouched.
+        let before = std::fs::read_to_string(&accounts_path).unwrap();
+        let err = c
+            .set_display_account_persisting(&crate::account::AccountId::from("ghost"), "test", "")
+            .expect_err("unknown id");
+        assert!(err.message.contains("unknown account"), "{}", err.message);
+        assert_eq!(c.accounts.display_id(), "paper");
+        assert_eq!(
+            std::fs::read_to_string(&accounts_path).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
+
+        // NON-active account (frozen): the display pointer only follows a
+        // book that can trade — showing a frozen one would present a venue
+        // that cannot.
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"frozen1\"\nname = \"f\"\nstatus = \"frozen\"\n",
+        )
+        .expect("fixture two");
+        let mut c2 = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        let err = c2
+            .set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
+            .expect_err("non-active account");
+        assert!(
+            err.message.contains("not an active account"),
+            "{}",
+            err.message
+        );
+        assert_eq!(c2.accounts.display_id(), "default", "memory untouched");
+
+        // 持久化关（无 accounts_config_path 的内核 — 回测/进程内测试）：整体
+        // 拒绝，内存指针也不动（与 account.trading.set 同一姿态）。
+        let mut c3 = Core::new(CoreConfig::default());
+        let err = c3
+            .set_display_account_persisting(&crate::account::AccountId::from("default"), "test", "")
+            .expect_err("no persist path");
+        assert!(
+            err.message.contains("no accounts config path"),
+            "{}",
+            err.message
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

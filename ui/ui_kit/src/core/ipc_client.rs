@@ -87,6 +87,18 @@ pub(crate) mod method {
     pub const ACCOUNT_LIST: &str = "account.list";
     /// E28: switch THIS connection's session-default account (§9.5).
     pub const ACCOUNT_SWITCH: &str = "account.switch";
+    /// 显示账户配置化: point the snapshot's displayAccount/displayVenue at
+    /// another account (a pure presentation pointer; persisted). Must mirror
+    /// the core's `ipc::schema::method::DISPLAY_ACCOUNT_SET`.
+    ///
+    // TODO(主会话/webui): the client-side surface ends HERE by design —
+    // this round ships the KERNEL + gateway transport only. The panel's
+    // 行情页 wiring (a `/api/display-account/set` proxy route mirroring
+    // `/api/account-venue/set`, the renderer reading the snapshot's
+    // `displayAccount`/`displayVenue`, the account switcher UX) is the
+    // main session's next move; `IpcClient::display_account_set` is the
+    // ready-made call.
+    pub const DISPLAY_ACCOUNT_SET: &str = "display.account.set";
     /// #363/#364: the execution policy surface the settings faces read/write.
     /// The TUI and the webui BOTH go through these methods — neither reads the
     /// TOML file itself (the file is the kernel's, written only by its `set`).
@@ -484,6 +496,21 @@ impl IpcClient {
         )
     }
 
+    /// `display.account.set` — point the snapshot's `displayAccount`/
+    /// `displayVenue` at another account (显示账户配置化). A pure
+    /// presentation pointer: the kernel validates the account exists AND is
+    /// `active`, updates the runtime pointer AND persists accounts.toml's
+    /// top-level `display_account` key; the connection's own default account
+    /// is untouched. Returns the kernel's result verbatim (raw JSON on
+    /// purpose — the panel renders the kernel's own answer; a second view
+    /// struct here would be one more wire shape to keep field-identical).
+    pub fn display_account_set(&mut self, account_id: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::DISPLAY_ACCOUNT_SET,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
     // ── Execution policy (#363/#364): the settings page's 生效风控 section ────
 
     /// `execution_policy.list` — which accounts the loaded policy names with
@@ -627,6 +654,10 @@ impl IpcClient {
             s.market_plugins = m.plugins;
             s.market_active = m.active.is_some();
             s.market_active_name = m.active;
+            // 显示账户配置化: the pointer rides on market.list; older cores
+            // omit the keys → serde defaults keep "" (render as before).
+            s.display_account = m.display_account;
+            s.display_venue = m.display_venue;
         }
         // E13: the proposal workflow. Older cores refuse the methods and the
         // snapshot keeps its shape — empty pending list means "nothing held",

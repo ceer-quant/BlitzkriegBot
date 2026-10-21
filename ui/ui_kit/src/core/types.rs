@@ -560,6 +560,14 @@ pub struct MarketListView {
     pub active: Option<String>,
     #[serde(default)]
     pub plugins: Vec<MarketPluginRow>,
+    /// 显示账户配置化: the display pointer rides on market.list — the account
+    /// the snapshot's 行情页 mirrors and its venue binding (empty = unbound).
+    /// Older cores omit both → default "". A pure presentation pointer: it is
+    /// NOT the connection's active/accounting account.
+    #[serde(default)]
+    pub display_account: String,
+    #[serde(default)]
+    pub display_venue: String,
 }
 
 // ── net.check ────────────────────────────────────────────────────────────────
@@ -1058,6 +1066,13 @@ pub struct UiSnapshot {
     pub trade_summary: Option<serde_json::Value>,
     /// Name of the active market plugin (identity label for the panel).
     pub market_active_name: Option<String>,
+    /// 显示账户配置化: the account the 行情页 mirrors (its venue binding in
+    /// `display_venue`, empty = unbound). A pure presentation pointer sourced
+    /// from accounts.toml's top-level `display_account` key /
+    /// `display.account.set` — NOT the connection's active account. Older
+    /// cores omit the fields → both empty, the adapters render as before.
+    pub display_account: String,
+    pub display_venue: String,
     /// E9-g: per-strategy engine.stats rows (orders/gates/rejection causes).
     pub strategy_stats: Vec<StrategyStatsRow>,
     /// E8-c 盘口深度: per-asset L2 depth (older cores omit → empty).
