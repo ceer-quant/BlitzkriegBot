@@ -666,6 +666,26 @@ export interface AccountVenueSetDoc {
   error?: string
 }
 
+// ── 显示账户（issue 559）───────────────────────────────────────────────────
+// 身份唯一源改造：行情页倒计时卡的「这是谁的市场」不再从账户绑定派生，而
+// 是内核的 display_account 独立事实（accounts.toml 顶层持久化 + 运行时生
+// 效）。写动词 `display.account.set`（payload {accountId}）——内核回执里
+// 的 displayVenue 是该显示账户绑定 venue 的读数（空串 = 未绑定，可交易任
+// 意交易所），与本面板会话默认账户彻底解耦：切换器选新账户 ≠ 行情身份
+// 跟着跳。老内核没有该事实 → 快照缺字段，页面回落账户绑定链（现行为）。
+
+/** `display.account.set` 回执：persisted=false = 内存生效但未落盘。 */
+export interface DisplayAccountSetDoc {
+  /** 内核收下的显示账户 id。 */
+  accountId: string
+  /** 该显示账户绑定的 venue 读数（空串 = 未绑定）。 */
+  displayVenue: string
+  persisted: boolean
+  atMs: number
+  note: string
+  error?: string
+}
+
 // ── 多账户扇出（account.trading.set / account.strategies.set）───────────────
 // 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
 
@@ -939,6 +959,17 @@ export const api = {
   /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
   accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
     request<AccountVenueSetDoc>('/account-venue/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // ── 显示账户（issue 559）─────────────────────────────────────────────────
+  // 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
+  // 写的是「行情页显示谁的市场」——与 `account <id>`（本面板会话默认账户）
+  // 是两个独立事实：切换器成功路径两者都写，本动词 fire-and-forget，失败
+  // 静默（快照下一拍带回新 displayVenue，页面回落链兜底）。
+  /** 显示账户写：内核校验账户存在并持久化进 accounts.toml 顶层 display_account。 */
+  displayAccountSet: (body: { accountId: string; reason?: string }) =>
+    request<DisplayAccountSetDoc>('/display-account/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1827,6 +1858,16 @@ export interface Snapshot {
   marketPlugins?: PluginRow[]
   marketActiveName?: string | null
   marketActiveType?: MarketType | null
+  /**
+   * 显示账户（issue 559）——行情页身份行（倒计时卡的徽章/名/slot/已过秒）
+   * 的唯一事实源，与「本面板会话默认账户」解耦：账户切换器切的是交易视
+   * 图，行情显示的是谁由内核的 display_account 决定（accounts.toml 顶层
+   * 持久化 + 运行时生效，写动词 display.account.set）。快照缺该字段（老
+   * 内核）= 回落账户绑定链派生，现行为不变。
+   */
+  displayAccount?: string | null
+  /** displayAccount 绑定的 venue 读数；空串 = 未绑定（可交易任意交易所）。 */
+  displayVenue?: string | null
   /** Venue wallet identity — null in dry mode (local seed cash, not venue funds). */
   wallet?: { signer: string | null; funder: string | null }
   /**

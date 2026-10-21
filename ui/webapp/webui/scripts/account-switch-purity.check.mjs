@@ -97,8 +97,32 @@ check('switchTo 无 api.* 命令面调用（切换时刻只读 + 切账户，不
   assert.doesNotMatch(
     body,
     /\bapi\.[A-Za-z]/,
-    'switchTo 直接调用了 api.* —— 切换时刻不应触碰命令面（读数走 refresh/store.refresh）',
+    'switchTo 直接调用了 api.* —— 切换时刻不应触碰命令面（读数走 refresh/store.refresh；显示账户写走 setDisplayAccount helper，issue 559）',
   )
+})
+
+check('switchTo 的 display-account 写是纯视图事实（issue 559 裁决：写完不启停任何东西）', () => {
+  // issue 559: a successful switch also fires `display.account.set`
+  // (fire-and-forget) so the 行情页 identity follows the session account.
+  // The exemption is SCOPED: the verb may appear only through the named
+  // helper, and the helper must stay a pure display write — no trading /
+  // freeze / strategy surface may ride along with it.
+  const body = switchToBody(switcher)
+  assert.match(body, /setDisplayAccount\(/, '切换成功路径缺显示账户写 —— 行情身份与切换器会错位（issue 559）')
+  assert.doesNotMatch(
+    body,
+    /api\.displayAccountSet/,
+    'switchTo 内联调 api.displayAccountSet —— 显示账户写必须走独立 helper（保持切换路径可审计）',
+  )
+  const helper = switcher.match(/function setDisplayAccount\(\)\s*: void \{[\s\S]*?\.catch[\s\S]*?\n\}/)
+    ?? switcher.match(/function setDisplayAccount\([^)]*\)\s*(?:: void)? \{[\s\S]*?\n\}/)
+  assert.ok(helper, '缺 setDisplayAccount helper')
+  assert.match(helper[0], /displayAccountSet/, 'helper 未走专用代理方法（/api/display-account/set 的前端面）')
+  assert.match(helper[0], /catch/, '显示账户写不是 fire-and-forget（失败会打断切换本身）')
+  // The helper is display-only: the trading/strategy surfaces stay banned.
+  for (const re of [/trading/i, /freeze/i, /flatten/i, /strategies/i, /setStrategy/]) {
+    assert.doesNotMatch(helper[0], re, `setDisplayAccount 里混进了非显示写动词（匹配 ${re}）—— issue 559 的豁免被滥用`)
+  }
 })
 
 check('switchTo 的写路径只有切账户命令；其余是读数（refresh + store.refresh）', () => {

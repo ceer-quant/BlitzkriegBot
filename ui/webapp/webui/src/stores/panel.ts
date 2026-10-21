@@ -115,6 +115,15 @@ export const usePanelStore = defineStore('panel', () => {
     return accounts.value.find((a) => a.id === id) ?? null
   })
 
+  // ── 显示账户（issue 559）──────────────────────────────────────────────────
+  // 「行情页显示谁的市场」的唯一事实源：内核快照顶层的 displayAccount /
+  // displayVenue（display_account 持久化 + 运行时生效的读数）。这里只是
+  // 快照的读取视图 —— 没有任何写方，也没有额外拉取（快照每拍已带上
+  // displayVenue，AccountSwitcher 写完 display.account.set 后下一拍自然
+  // 到达）。缺字段（老内核 / 未设置过）= '' ，页面回落账户绑定链。
+  const displayAccount = computed(() => snapshot.value?.displayAccount ?? '')
+  const displayVenue = computed(() => snapshot.value?.displayVenue ?? '')
+
   function requestNav(tab: string): void {
     navRequest.value = { tab }
   }
@@ -326,6 +335,7 @@ export const usePanelStore = defineStore('panel', () => {
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
     activeAccount, accounts, setAccounts, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow,
+    displayAccount, displayVenue,
     accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
