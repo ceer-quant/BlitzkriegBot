@@ -30,6 +30,25 @@
 #
 # STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/, configs/
 
+# Configs the KERNEL WRITES AT RUNTIME (account.venue.set / account.trading.set
+# / strategies.set / account.create/remove / display.account.set all persist
+# into accounts.toml). Unlike the other *.toml files these carry the operator's
+# live state, not factory defaults — an upgrade that overwrites them silently
+# reverts account bindings, per-account strategy sets and the display pointer
+# (2026-10-20: three same-day upgrades each wiped the operator's strategies
+# keys out of accounts.toml this way). A file in this list is installed only
+# when the running checkout has none; an existing copy is left untouched and
+# the shipped one stays in STAGE + ROLLBACK for reference.
+UA_OPERATOR_STATE_CONFIGS="accounts.toml"
+
+# Is this shipped config operator state? Matched by name, one entry per line.
+ua_config_is_operator_state() {
+  for known in $UA_OPERATOR_STATE_CONFIGS; do
+    [ "$1" = "$known" ] && return 0
+  done
+  return 1
+}
+
 # Stage everything the release carries. Fails loudly on an empty set: "the build
 # produced nothing here" must never be read as "nothing to ship".
 ua_stage() {
@@ -82,6 +101,12 @@ ua_drift() {
     live="$REPO_ROOT/$CONFIG_DIR/$name"
     if [ ! -f "$live" ]; then
       printf '    + %s (new)\n' "$name"
+    elif ua_config_is_operator_state "$name"; then
+      # Operator state the kernel rewrites at runtime: the running copy WINS,
+      # the shipped copy is never installed over it. Naming the winner here is
+      # the point — "the deploy is green" must not silently mean "your account
+      # bindings were reverted to factory".
+      printf '    = %s (operator state kept — the running copy wins)\n' "$name"
     elif cmp -s "$f" "$live"; then
       printf '    = %s\n' "$name"
     else
@@ -160,6 +185,13 @@ ua_install() {
     [ -f "$f" ] || continue
     name=$(basename "$f")
     live="$REPO_ROOT/$CONFIG_DIR/$name"
+    if ua_config_is_operator_state "$name" && [ -f "$live" ]; then
+      # Kernel-persisted operator state (see UA_OPERATOR_STATE_CONFIGS): the
+      # running copy wins. Backing it up into ROLLBACK would be wrong too —
+      # ua_rollback then "restores" the pre-upgrade copy over a NEWER runtime
+      # write from the post-upgrade kernel. Leave it exactly where it is.
+      continue
+    fi
     if [ -f "$live" ]; then
       cp -a "$live" "$ROLLBACK/configs/$name"
     else
@@ -190,8 +222,12 @@ ua_verify() {
 
   for f in "$STAGE/configs"/*.toml; do
     [ -f "$f" ] || continue
-    cmp -s "$f" "$REPO_ROOT/$CONFIG_DIR/$(basename "$f")" ||
-      ua_die "$(basename "$f") did not land intact"
+    name=$(basename "$f")
+    if ua_config_is_operator_state "$name" && [ -f "$REPO_ROOT/$CONFIG_DIR/$name" ]; then
+      continue # the running copy won in ua_install; there is nothing to verify
+    fi
+    cmp -s "$f" "$REPO_ROOT/$CONFIG_DIR/$name" ||
+      ua_die "$name did not land intact"
   done
 }
 

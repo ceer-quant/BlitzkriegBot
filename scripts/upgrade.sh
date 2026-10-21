@@ -37,7 +37,11 @@
 #     enabled / auto_evolve). These are shipped defaults, not the operator's
 #     surface: the runtime switches persist in data/evolution/state.json and
 #     outrank the file. A locally edited copy is backed up under the rollback
-#     directory and named in the log before it is replaced.
+#     directory and named in the log before it is replaced. EXCEPTION: configs
+#     the KERNEL rewrites at runtime (accounts.toml — venue bindings, per-account
+#     strategy sets, the display pointer all persist there) are operator STATE,
+#     not factory defaults: an existing copy always wins and is never replaced
+#     (2026-10-20; `UA_OPERATOR_STATE_CONFIGS` in the lib owns the list).
 #   * user_layer/*/target/release/*.dylib — strategy code the kernel `dlopen`s
 #     out of the running checkout. It is code, not build residue: a stale cdylib
 #     makes the running kernel execute a previous build.
