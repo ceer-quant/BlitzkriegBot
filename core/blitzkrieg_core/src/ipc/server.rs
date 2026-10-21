@@ -2618,15 +2618,34 @@ async fn handle_line(
             // 逐市场行（venue 维度），替代 view 里按 asset 去重的
             // `marketPrices`。引擎缺席时市场清单为空 → 空数组，前端照旧
             // 渲染"无行情"。
+            //
+            // 行情页重复行（同一 (venue,asset) 两行、价格不同）的根因：
+            // descriptor 的 `round_slot` 是「到期所属 slot」（end_ms/1000/
+            // round_sec），正在交易的一轮其行永远标当前 slot+1；两所
+            // discovery 都按「现在还开着」列市场，slot 边界附近再下一档
+            // （当前+2）与当前轮（当前+1）并存于 scanner，而这里的逐市场
+            // 行从不看 slot —— 边界窗口内同一 (venue,asset) 两行同页。
+            // 修在快照装配层（本方法是行情行的唯一数据源）：按「到期
+            // slot = 当前 slot + 1」过滤，只留正在交易的一轮；
+            // round_slot == 0 是老语料/老插件的缺省（serde default），永不
+            // 命中 +1，照旧放行桥接。再按 (venue,asset) 唯一化（先到先得，
+            // 行序稳定）：任何上游组合再送进同一 (venue,asset) 的重复行也
+            // 只成一行。
             let now = now_ms();
             let markets: Vec<serde_json::Value> = c
                 .engine
                 .as_ref()
                 .map(|e| {
-                    e.scanner()
+                    let scanner = e.scanner();
+                    let trading_slot = scanner.current_slot(now) + 1;
+                    let mut seen: std::collections::HashSet<(String, String)> =
+                        std::collections::HashSet::new();
+                    scanner
                         .round_state(now)
                         .markets
                         .iter()
+                        .filter(|m| m.round_slot == 0 || m.round_slot == trading_slot)
+                        .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
                         .map(|m| {
                             let up = e
                                 .book_snapshot(&m.up_token_id)
@@ -9191,5 +9210,124 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── 行情页重复行：快照装配层的 slot 过滤 + (venue,asset) 唯一化 ─────────
+
+    /// 复现一次生产 12 行事故的输入形状：descriptor 的 `round_slot` 是
+    /// 「到期所属 slot」（正在交易的一轮 = 当前 slot+1），venue discovery
+    /// 按「现在还开着」列市场，slot 边界附近再下一档（当前+2）与当前轮
+    /// 并存于 scanner，逐市场行情行不看 slot 时同一 (venue,asset) 两行
+    /// 同页。负向契约：快照 `marketPrices` 每个 (venue,asset) 恰一行 ——
+    /// 下一档到期（当前+2）的行不出现，正在交易的一轮（当前+1）才出现。
+    #[tokio::test]
+    async fn engine_round_prices_are_unique_per_venue_asset_across_slots() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let round_sec = 900i64;
+        let now = now_ms();
+        let slot = now / 1000 / round_sec;
+        let trading_end = (slot + 2) * round_sec * 1000; // the round being traded (slot+1)
+        let next_end = (slot + 3) * round_sec * 1000; // the next tier, still "open"
+
+        // One (venue, asset) per row: BTC on polymarket/kalshi for the
+        // trading round, plus the same kalshi asset on the NEXT tier's
+        // expiry — the shape the venue's "still open" discovery puts on the
+        // wire at a slot boundary. Feeds land in the adversarial order the
+        // boundary produces (kalshi's 5s poll can put the next tier's batch
+        // on the wire BEFORE the trading batch): next tier first, then the
+        // trading batch. All through the feed entry (`engine_on_data`), the
+        // same path a real plugin's RoundMarkets lands in.
+        let mk = |asset: &str, venue: &str, end_ms: i64, up: &str| CryptoMarket {
+            asset: asset.to_string(),
+            condition_id: format!("cond-{venue}-{asset}-{end_ms}"),
+            question_id: format!("q-{venue}-{asset}-{end_ms}"),
+            up_token_id: format!("up-{venue}-{asset}-{end_ms}"),
+            down_token_id: format!("down-{venue}-{asset}-{end_ms}"),
+            up_price: up.parse().unwrap(),
+            down_price: dec!(1) - up.parse::<rust_decimal::Decimal>().unwrap(),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / round_sec,
+            round_duration_sec: round_sec,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: format!("{asset} up or down"),
+        };
+        let feed =
+            |core: &std::sync::Arc<AsyncMutex<Core>>, markets: Vec<CryptoMarket>, at: i64| {
+                let core = core.clone();
+                async move {
+                    core.lock().await.engine_on_data(
+                        crate::engine::DataEvent::RoundMarkets {
+                            markets,
+                            now_ms: at,
+                        },
+                        at,
+                    );
+                }
+            };
+        feed(&core, vec![mk("BTC", "kalshi", next_end, "0.55")], now).await;
+        feed(
+            &core,
+            vec![
+                mk("BTC", "polymarket", trading_end, "0.30"),
+                mk("BTC", "kalshi", trading_end, "0.40"),
+            ],
+            now,
+        )
+        .await;
+
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"engine.round","params":{}}"#.to_string(),
+        )
+        .await;
+        let prices = reply["result"]["marketPrices"]
+            .as_array()
+            .expect("marketPrices array")
+            .clone();
+        let keys: Vec<(String, String)> = prices
+            .iter()
+            .map(|p| {
+                (
+                    p["venue"].as_str().unwrap_or_default().to_string(),
+                    p["asset"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            keys.len(),
+            "no (venue,asset) may repeat in the snapshot's price rows: {keys:?}"
+        );
+        assert_eq!(
+            sorted,
+            vec![
+                ("kalshi".to_string(), "BTC".to_string()),
+                ("polymarket".to_string(), "BTC".to_string()),
+            ],
+            "the trading round's rows only — the next tier must not surface: {prices:?}"
+        );
+        // The surviving kalshi row is the trading round's quote (0.40), not
+        // the next tier's (0.55).
+        let kalshi_up = prices
+            .iter()
+            .find(|p| p["venue"] == "kalshi")
+            .expect("kalshi row")["up"]
+            .as_str()
+            .expect("decimal renders as a string")
+            .to_string();
+        assert_eq!(
+            kalshi_up, "0.40",
+            "the trading round's descriptor survives, the next tier's does not"
+        );
     }
 }
