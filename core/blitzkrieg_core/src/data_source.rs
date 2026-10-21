@@ -1273,6 +1273,19 @@ mod tests {
                 event: unified_event_fixture(),
                 now_ms: now + 7,
             },
+            // #548：批路径归档恢复后 `k:"books"` 行开始出现 —— 往返必须有
+            // 覆盖（此前 all_events 不含它，eq() 落 kind-mismatch panic）。
+            DataEvent::Books {
+                books: vec![
+                    (
+                        "batch-up".into(),
+                        vec![(dec!(0.43), dec!(4.444444444444444444))],
+                        vec![(dec!(0.45), dec!(12.5))],
+                    ),
+                    ("batch-down".into(), vec![], vec![]),
+                ],
+                now_ms: now + 8,
+            },
         ]
     }
 
@@ -1402,6 +1415,16 @@ mod tests {
                     now_ms: n2,
                 },
             ) => assert_eq!((e1, n1), (e2, n2)),
+            (
+                DataEvent::Books {
+                    books: b1,
+                    now_ms: n1,
+                },
+                DataEvent::Books {
+                    books: b2,
+                    now_ms: n2,
+                },
+            ) => assert_eq!((b1, n1), (b2, n2)),
             _ => panic!("kind mismatch: {a:?} vs {b:?}"),
         }
     }

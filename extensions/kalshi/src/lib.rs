@@ -38,3 +38,6 @@ pub use plugin::KalshiPlugin;
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use rest::{KalshiRest, RestConfig};
 pub use types::{KalshiBalance, KalshiBidLevel, KalshiMarket, KalshiOrder, KalshiOrderBook};
+
+#[doc(hidden)]
+pub use discovery::discovery_tests_only_spawn;

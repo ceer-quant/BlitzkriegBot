@@ -39,15 +39,17 @@ pub fn spawn(
             return;
         }
 
-        let mut last_slot = i64::MIN;
+        // #548：最近一次实际喂入的 (slot, 批签名)。顶部逐 poll 重查 + 这个
+        // 闸替代了旧「slot == last_slot → continue」守卫（它曾让 #498 轮内
+        // 补查门永不可达）：同 slot 批未变跳过重喂；Gamma 补上架/换发 token
+        // 改变签名 → 重喂（engine 同 slot merge 按 token 去重，只增不炸）。
+        let mut last_fed_slot = i64::MIN;
+        let mut last_fed_signature = String::new();
         let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
         loop {
             tick.tick().await;
             let now = now_ms();
             let slot = now / 1000 / round_sec;
-            if slot == last_slot {
-                continue; // same round already fed
-            }
 
             let mut markets: Vec<MarketDescriptor> = Vec::new();
             // #498: which configured assets actually landed a market THIS poll —
@@ -139,12 +141,20 @@ pub fn spawn(
                         && slug_for(a, round_sec, now / 1000).is_some()
                 })
                 .collect();
-            if slot == last_slot {
-                if !missing.is_empty() {
-                    continue; // still hoping Gamma lists the stragglers
-                }
-            } else {
-                last_slot = slot;
+
+            // #548：批未增长且 slot 已喂过 → 跳过重喂。已集齐的 slot 之后每
+            // poll 仍会重查（换发检测靠它），但喂过同一批就不必再打扰引擎。
+            // 顶部守卫删掉后这里是防止 5s 一条的重复 RoundMarkets/日志的闸。
+            // 披露：这是「集合相等」比较，Gamma 同轮换发 token 时集合不同、
+            // 会重喂——engine 同 slot merge 以 token 去重，旧 token 行保留
+            // （partner/持仓键控在旧 token 上，行内替换是方向 C 的雷，不做）。
+            let signature = markets
+                .iter()
+                .map(|m| format!("{}:{}|{}", m.asset, m.up_token_id, m.down_token_id))
+                .collect::<Vec<_>>()
+                .join(",");
+            if slot == last_fed_slot && signature == last_fed_signature {
+                continue;
             }
 
             let count = markets.len();
@@ -172,6 +182,8 @@ pub fn spawn(
             eprintln!(
                 "polymarket-extension: discovered round slot={slot} ({count} markets: {label_summary}){note}"
             );
+            last_fed_slot = slot;
+            last_fed_signature = signature;
         }
     })
 }

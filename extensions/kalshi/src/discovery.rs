@@ -163,16 +163,43 @@ pub(crate) fn spawn(
     round_sec: i64,
     poll_sec: u64,
 ) -> tokio::task::JoinHandle<()> {
+    discovery_loop(host, client, assets, round_sec, poll_sec)
+}
+
+/// Test-only entry for the #548 gate: drive the real discovery loop against a
+/// mock server with an explicit cadence. Not part of the public surface —
+/// it exists so the reverse-acceptance gate exercises the production loop,
+/// not a copy of it (same pattern as `feed_tests_only_spawn`).
+#[doc(hidden)]
+pub fn discovery_tests_only_spawn(
+    host: Arc<dyn MarketHost>,
+    client: Arc<KalshiRest>,
+    assets: Vec<String>,
+    round_sec: i64,
+    poll_sec: u64,
+) -> tokio::task::JoinHandle<()> {
+    discovery_loop(host, client, assets, round_sec, poll_sec)
+}
+
+fn discovery_loop(
+    host: Arc<dyn MarketHost>,
+    client: Arc<KalshiRest>,
+    assets: Vec<String>,
+    round_sec: i64,
+    poll_sec: u64,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_slot = i64::MIN;
+        // #548：最近一次实际喂入的 (slot, 批签名)。顶部逐 poll 重查 + 这个
+        // 闸替代了旧「slot == last_slot → continue」守卫（它让 #498 轮内补
+        // 查门永不可达）：同 slot 批未变跳过重喂；venue 补上架/换发 token
+        // 改变签名 → 重喂（engine 同 slot merge 按 token 去重，只增不炸）。
+        let mut last_fed_slot = i64::MIN;
+        let mut last_fed_signature = String::new();
         let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
         loop {
             tick.tick().await;
             let now = now_ms();
             let slot = now / 1000 / round_sec;
-            if slot == last_slot {
-                continue; // same round already fed
-            }
 
             // One series query per configured asset. A series that does not
             // exist for this round length (e.g. 5m) is skipped silently —
@@ -277,12 +304,16 @@ pub(crate) fn spawn(
                     !found_assets.contains(a.as_str()) && series_ticker_for(a, round_sec).is_some()
                 })
                 .collect();
-            if slot == last_slot {
-                if !missing.is_empty() {
-                    continue; // still hoping the venue lists the stragglers
-                }
-            } else {
-                last_slot = slot;
+
+            // #548：批未增长且 slot 已喂过 → 跳过重喂（防 5s 一条的重复
+            // RoundMarkets/日志）。partial 披露沿用 #498 的 note 通道。
+            let signature = markets
+                .iter()
+                .map(|m| format!("{}:{}|{}", m.asset, m.up_token_id, m.down_token_id))
+                .collect::<Vec<_>>()
+                .join(",");
+            if slot == last_fed_slot && signature == last_fed_signature {
+                continue;
             }
 
             let count = markets.len();
@@ -310,6 +341,8 @@ pub(crate) fn spawn(
             eprintln!(
                 "kalshi-extension: discovered slot={slot} ({count} markets: {summary}){note}"
             );
+            last_fed_slot = slot;
+            last_fed_signature = signature;
         }
     })
 }

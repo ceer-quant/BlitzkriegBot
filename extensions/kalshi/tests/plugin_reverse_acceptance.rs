@@ -49,6 +49,182 @@ impl BookSink {
     }
 }
 
+/// Rounds pushed through the host (#548 gate: the discovery loop must re-feed
+/// when the venue's batch grows mid-round, and NOT re-feed an unchanged batch).
+#[derive(Clone, Default)]
+struct DiscoverySink {
+    rounds: Arc<Mutex<Vec<Vec<blitzkrieg_market_api::MarketDescriptor>>>>,
+}
+
+impl DiscoverySink {
+    async fn round_count(&self) -> usize {
+        self.rounds.lock().await.len()
+    }
+
+    async fn last_round_tickers(&self) -> Vec<String> {
+        self.rounds
+            .lock()
+            .await
+            .last()
+            .map(|ms| ms.iter().map(|m| m.up_token_id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    async fn wait_for_rounds(&self, want: usize, budget: Duration) -> usize {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let n = self.round_count().await;
+            if n >= want || std::time::Instant::now() >= deadline {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+impl MarketHost for DiscoverySink {
+    fn on_book(&self, _: BookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_top_of_book(
+        &self,
+        _: blitzkrieg_market_api::TopOfBookUpdate,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_spot(
+        &self,
+        _: blitzkrieg_market_api::SpotUpdate,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_round_markets(
+        &self,
+        markets: Vec<blitzkrieg_market_api::MarketDescriptor>,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.rounds.lock().await.push(markets);
+        })
+    }
+    fn subscribe_tokens(
+        &self,
+        _: &str,
+        _: Vec<TokenId>,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn install_subscription_control(
+        &self,
+        _: &str,
+        _: Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn take_pending_orders(
+        &self,
+        _: &str,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::PendingOrder>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_order_rejected(
+        &self,
+        _: &str,
+        _: Option<blitzkrieg_market_api::CoreError>,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_place_timeout(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_fill(
+        &self,
+        _: blitzkrieg_market_api::MarketFill,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_order_live(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_reconcile(
+        &self,
+        _: blitzkrieg_market_api::ReconcileSnapshot,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_reconcile_failed(
+        &self,
+        _: blitzkrieg_market_api::CoreError,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn on_self_check(
+        &self,
+        _: blitzkrieg_market_api::SelfCheckReport,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn seed_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn venue_free_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn note_orphan_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn report_error(
+        &self,
+        _: blitzkrieg_market_api::CoreError,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn take_settlement_queries(
+        &self,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::SettlementQuery>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_market_resolution(
+        &self,
+        _: blitzkrieg_market_api::MarketResolution,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn take_pending_redemptions(
+        &self,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::RedemptionRequest>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_redemption_result(
+        &self,
+        _: blitzkrieg_market_api::RedemptionResult,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn take_pending_merges(
+        &self,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::MergeRequest>> {
+        Box::pin(async { Vec::new() })
+    }
+    fn on_merge_result(
+        &self,
+        _: blitzkrieg_market_api::MergeResult,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
 impl MarketHost for BookSink {
     fn on_book(&self, update: BookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async move {
@@ -486,3 +662,129 @@ trait Pipe: Sized {
     }
 }
 impl<T> Pipe for T {}
+
+// ═══ 4. #548: discovery must re-feed when the venue's batch grows mid-round ═
+
+/// One events response body for the discovery series query: `markets` carries
+/// ONE active 15m round for `asset`, closing ~14 min out (inside the 2×
+/// round-length guard) so its slot is the current slot.
+fn discovery_events_body(ticker: &str, asset: &str, mid: &str) -> String {
+    let close = chrono_like_close();
+    format!(
+        r#"{{"events":[{{"event_ticker":"EVT-{asset}","markets":[{{"ticker":"{ticker}","event_ticker":"EVT-{asset}","market_type":"binary","title":"{asset} price up in next 15 mins?","subtitle":null,"close_time":"{close}","expiration_time":null,"status":"active","yes_bid_dollars":"{mid}","yes_ask_dollars":"0.66","no_bid_dollars":"0.34","no_ask_dollars":"0.35","volume_fp":null}}]}}]}}"#
+    )
+}
+
+/// `close_time` ~14 min out: ISO YYYY-MM-DDTHH:MM:SSZ from the local clock
+/// (civil-from-days, Howard Hinnant — the inverse of `close_time_to_ms`).
+fn chrono_like_close() -> String {
+    let now = blitzkrieg_market_api::net::now_ms();
+    let secs = (now + 14 * 60 * 1000) / 1000;
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// A same-slot discovery poll whose batch GREW must reach the host again:
+/// the old top guard (`slot == last_slot → continue`) made the #498 in-slot
+/// top-up gate unreachable, freezing the round at the first poll's subset
+/// ("只剩一个币对"). The #548 fix replaces it with a batch-signature gate,
+/// so a grown batch re-feeds within the next poll.
+#[tokio::test]
+async fn reverse_d_discovery_refeeds_when_the_round_batch_grows() {
+    // Script (discovery queries per-asset in config order; one canned response
+    // per accepted connection). Poll 1: BTC→BTC market, ETH→empty events
+    // (straggler not yet listed). Poll 2: BTC→same BTC market, ETH→ETH market
+    // — the batch grew, so poll 2 must re-feed. body order matters: responses
+    // are consumed strictly in poll order.
+    let btc1 = discovery_events_body("KXBTC15M-251020", "BTC", "0.43");
+    let btc2 = discovery_events_body("KXBTC15M-251020", "BTC", "0.43");
+    let eth = discovery_events_body("KXETH15M-251020", "ETH", "0.55");
+    let empty = r#"{"events":[]}"#;
+    let base = scripted_server(vec![
+        Some(http_ok(&btc1)),
+        Some(http_ok(empty)),
+        Some(http_ok(&btc2)),
+        Some(http_ok(&eth)),
+    ]);
+    let client = Arc::new(
+        blitzkrieg_kalshi::RestConfig {
+            base_url: base,
+            no_proxy: true,
+            timeout: Duration::from_secs(2),
+            max_retries: 0,
+            ..blitzkrieg_kalshi::RestConfig::default()
+        }
+        .pipe(|c| blitzkrieg_kalshi::KalshiRest::new(c, None).expect("client")),
+    );
+    let host = Arc::new(DiscoverySink::default());
+    let _handle = blitzkrieg_kalshi::discovery_tests_only_spawn(
+        host.clone(),
+        client,
+        vec![String::from("BTC"), String::from("ETH")],
+        900,
+        0, // minimum cadence (the loop floors at 3s)
+    );
+
+    // The production loop floors its cadence at 3s; two polls fit in ~7s.
+    let n = host.wait_for_rounds(2, Duration::from_secs(20)).await;
+    assert!(
+        n >= 2,
+        "a batch that grows mid-round (BTC listed first, ETH later) must be \
+         re-fed: got {n} round feed(s)"
+    );
+    let tickers = host.last_round_tickers().await;
+    assert!(
+        tickers.len() >= 2,
+        "the re-fed round must carry BOTH assets' markets; got {tickers:?}"
+    );
+}
+
+/// …and the SAME batch must NOT be re-fed: an unchanged signature skips the
+/// host push (no duplicate RoundMarkets every 3s for a settled round).
+#[tokio::test]
+async fn reverse_d2_discovery_does_not_refeed_an_unchanged_batch() {
+    // Two identical polls; the batch does not change between them.
+    let body = discovery_events_body("KXBTC15M-251020", "BTC", "0.43");
+    let base = scripted_server(vec![Some(http_ok(&body)), Some(http_ok(&body))]);
+    let client = Arc::new(
+        blitzkrieg_kalshi::RestConfig {
+            base_url: base,
+            no_proxy: true,
+            timeout: Duration::from_secs(2),
+            max_retries: 0,
+            ..blitzkrieg_kalshi::RestConfig::default()
+        }
+        .pipe(|c| blitzkrieg_kalshi::KalshiRest::new(c, None).expect("client")),
+    );
+    let host = Arc::new(DiscoverySink::default());
+    let _handle = blitzkrieg_kalshi::discovery_tests_only_spawn(
+        host.clone(),
+        client,
+        vec![String::from("BTC")],
+        900,
+        0,
+    );
+
+    let n = host.wait_for_rounds(1, Duration::from_secs(20)).await;
+    assert!(n >= 1, "the first poll must feed the round");
+    // Give the second poll time to happen (3s floor + margin), then assert
+    // no duplicate push arrived.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let n2 = host.round_count().await;
+    assert_eq!(
+        n2, 1,
+        "an unchanged batch must not be re-fed to the host; got {n2} feeds"
+    );
+}
