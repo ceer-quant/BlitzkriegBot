@@ -22345,6 +22345,85 @@ then = { action = "skip" }
             "thawed: the entry places"
         );
     }
+
+    /// The production deadlock sequence (default-enable bugfix, 2026-10):
+    /// a boot whose accounts.toml gives every account an EMPTY enablement
+    /// set hosts no live scopes; the operator's first disable tears down the
+    /// boot-registered default scopes, and every later global toggle reports
+    /// `applied == false` forever (the reply bytes lied: `found: true,
+    /// applied: false, reason: null`). The handler's fix trusts the SCOPED
+    /// write as the default account's enablement owner — this test pins the
+    /// exact readouts that decision consumes: after the teardown, the
+    /// scoped enable still lands `Ok` (the package is registered) while the
+    /// legacy toggle's `applied` stays false. The handler turns that Ok
+    /// into the honest `found/applied = true` reply.
+    #[test]
+    fn empty_set_teardown_then_enable_scoped_write_still_lands_ok() {
+        let dir = std::env::temp_dir().join(format!("bk-default-enable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        )
+        .expect("fixture");
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+        );
+        c.enable_engine(Engine::new(EngineConfig::default()));
+        crate::strategies::test_support::host_disabled(
+            c.engine.as_mut().unwrap(),
+            EngineConfig::default().trend,
+            EngineConfig::default().spread_arb,
+        );
+        // Boot shape: the default scope hosts the package DISABLED (the
+        // kernel enables nothing by itself).
+        let default_id = crate::account::default_account_id();
+        assert!(
+            c.strategy_names().iter().any(|n| n == "spread_arb"),
+            "the package is registered even with zero enabled scopes"
+        );
+        // First disable tears the flat default scope down (the production
+        // first toggle).
+        let (kept, set_now) = c
+            .set_scoped_strategy_enabled(&default_id, "spread_arb", false, "test", "off", 1)
+            .expect("the disable lands");
+        assert!(kept.is_empty() && set_now.is_empty());
+        // Deadlock readout: the legacy toggle now finds NO live instance —
+        // `applied == false` is exactly what gated the old mirror write.
+        let (found, applied, reason) = c.set_strategy_enabled_checked("spread_arb", true);
+        assert!(found, "the package registry still names it");
+        assert!(
+            !applied && reason.is_none(),
+            "the live dispatch hosts no instance — the old gate starved here"
+        );
+        // The fix's authority: the scoped write still lands Ok (persist +
+        // rebuild; a Lua source rebuilds ENABLED — the test adapter is a
+        // non-Lua source, so the ADD phase skips the instance exactly like
+        // the #537 probe2 note: the PERSIST is what survives to the next
+        // boot, and that persistence is what the handler reports as the
+        // honest applied=true).
+        let (kept2, set_now2) = c
+            .set_scoped_strategy_enabled(&default_id, "spread_arb", true, "test", "on", 2)
+            .expect("the scoped enable lands even after the teardown");
+        assert_eq!(set_now2, vec!["spread_arb".to_string()]);
+        assert!(kept2.is_empty());
+        assert!(
+            c.accounts
+                .account(&default_id)
+                .expect("default configured")
+                .strategies
+                .contains(&"spread_arb".to_string()),
+            "the durable enablement set names it — the operator's intent \
+             stuck and the next boot re-derives the scope from it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// P-1.2: the dry matcher honours the configured [`crate::sim::FillModel`]. The

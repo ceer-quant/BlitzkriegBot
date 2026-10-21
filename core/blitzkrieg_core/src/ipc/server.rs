@@ -1934,7 +1934,7 @@ async fn handle_line(
                 // REFUSED with the §8.2 diagnostic —
                 // `{ name, enabled: false, found: true, reason }` — and the
                 // dispatch keeps the strategy off.
-                let (found, applied, reason) = core
+                let (mut found, mut applied, reason) = core
                     .lock()
                     .await
                     .set_strategy_enabled_checked(name, enabled);
@@ -1947,6 +1947,24 @@ async fn handle_line(
                 // for good. Same persisting write the non-default branch
                 // runs; the not-found and refusal replies below keep their
                 // exact legacy bytes.
+                //
+                // Bugfix (2026-10, 0.4.1): the legacy global toggle reads the
+                // engine's LIVE dispatch. A boot whose accounts.toml gives
+                // every account an empty (or absent) enablement set
+                // instantiates NO scopes — `apply_account_strategy_assignments_
+                // at_boot` only builds scopes for non-empty sets — so the
+                // toggle finds no instance (`applied == false`) even though
+                // the package is registered, and gating the mirror on
+                // `applied` left the default account unable to enable
+                // anything from that shape: the first enable worked (the boot
+                // had registered 11 disabled default scopes), its own disable
+                // then tore the scope down, and every later enable in that
+                // process silently no-oped (`found: true, applied: false,
+                // reason: null`, nothing persisted, nothing rebuilt). The
+                // scoped write below owns the enablement semantics now, so it
+                // runs whenever the toggle did not REFUSE — and its success
+                // is the honest `applied: true` for a name the live dispatch
+                // had simply never hosted.
                 let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
                 let mut kept_exits_only: Vec<String> = Vec::new();
                 // Gate-sandboxes run with no accounts.toml on disk at all —
@@ -1961,7 +1979,7 @@ async fn handle_line(
                     .accounts_config_path
                     .as_deref()
                     .is_some_and(|p| std::path::Path::new(p).exists());
-                if reason.is_none() && applied && mirror_persistence {
+                if reason.is_none() && mirror_persistence {
                     let default_id = crate::account::default_account_id();
                     let mut c = core.lock().await;
                     match c.set_scoped_strategy_enabled(
@@ -1982,9 +2000,33 @@ async fn handle_line(
                         },
                         now_ms(),
                     ) {
-                        Ok((kept, _set_now)) => kept_exits_only = kept,
+                        Ok((kept, _set_now)) => {
+                            kept_exits_only = kept;
+                            // The scoped write IS the default account's
+                            // enablement now (see the bugfix note above): a
+                            // success means the name was registered and the
+                            // toggle took — the legacy global flag that
+                            // reported `applied == false` was answering
+                            // against a dispatch that simply hosted no
+                            // instance. Correct the reply so the panel's
+                            // 找不到/没生效 families stay honest; the
+                            // handshake refusal above keeps its bytes.
+                            if reason.is_none() {
+                                found = true;
+                                applied = true;
+                            }
+                        }
                         Err(e) => {
-                            mirror_error = Some(client_err(e));
+                            // A persist/refusal failure while the legacy
+                            // toggle ALSO found nothing keeps the not-found
+                            // legacy bytes (`ui-plugin-check`: found=false,
+                            // 200); a toggle that found the name surfaces
+                            // the real error instead of a lying success.
+                            if !found {
+                                mirror_error = None;
+                            } else {
+                                mirror_error = Some(client_err(e));
+                            }
                         }
                     }
                 }
