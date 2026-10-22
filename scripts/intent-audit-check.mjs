@@ -205,6 +205,7 @@ function patchProbe() {
                 price: "1.5".into(),
                 reason: "${AUDIT_LINE}".into(),
                 shares: None,
+                pair: None,
             });
         }`;
   writeFileSync(librs, src.replace(anchor, patch));
