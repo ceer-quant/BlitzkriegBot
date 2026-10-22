@@ -147,6 +147,9 @@ impl SafeStrategy for ${camel}Strategy {
                         // count instead (clamped to the kernel's risk band) —
                         // that is how the legs of a pair are made to match.
                         shares: None,
+                        // RFC 568 阶段一：可选配对声明（跨所套利腿）。
+                        // \`None\` = 不参与配对，旧行为。
+                        pair: None,
                     });
                     buys += 1;
                 }

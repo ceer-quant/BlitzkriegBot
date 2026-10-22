@@ -75,6 +75,8 @@ impl SafeStrategy for MomentumAlpha {
                 reason: "momentum_alpha: mid in momentum band, round has time left".into(),
                 // 不给绝对股数 → 内核按账户净值与风控上限定寸。
                 shares: None,
+                // RFC 568 阶段一：可选配对声明；本策略不参与跨所配对。
+                pair: None,
             });
         }
         out

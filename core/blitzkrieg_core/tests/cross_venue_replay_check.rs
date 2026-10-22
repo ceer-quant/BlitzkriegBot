@@ -209,6 +209,13 @@ fn release_corpus() -> Vec<TimedEvent> {
 }
 
 fn replay(events: Vec<TimedEvent>) -> blitzkrieg_core::backtest::BacktestReport {
+    replay_with_config(events, true)
+}
+
+fn replay_with_config(
+    events: Vec<TimedEvent>,
+    configure: bool,
+) -> blitzkrieg_core::backtest::BacktestReport {
     let core = CoreConfig {
         mode: blitzkrieg_core::model::Mode::Dry,
         risk: blitzkrieg_core::risk::RiskConfig {
@@ -265,6 +272,49 @@ fn replay(events: Vec<TimedEvent>) -> blitzkrieg_core::backtest::BacktestReport 
         b.core_mut().set_strategy_enabled("cross_venue_arb", true),
         "the hosted adapter registers under its package name"
     );
+    // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
+    // adapter's params bag); unconfigured ⇒ the strategy pairs nothing
+    // (fail-closed). issue 568 阶段一（补钉 5）：A≠B 校验要两腿落不同账户
+    // —— the replay mints the factory book's `kalshi` account (bound to the
+    // kalshi venue) and wires leg A → `default`（polymarket）、leg B →
+    // `kalshi`，比 default/default 的单账户退化位更贴近 v2 部署。The
+    // negative control runs UNCONFIGURED: the same corpus places nothing,
+    // pinning "no configuration ⇒ no pairing" through the FULL engine/replay
+    // path.
+    if configure {
+        use blitzkrieg_core::account::{Account, AccountStatus};
+        use blitzkrieg_market_api::types::MarketType;
+        b.core_mut()
+            .accounts_mut()
+            .insert(Account {
+                id: blitzkrieg_market_api::AccountId::from("kalshi"),
+                name: "kalshi".into(),
+                market_type: MarketType::Prediction,
+                status: AccountStatus::Active,
+                credential_keys: Default::default(),
+                venue: "kalshi".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                updated_at_ms: NOW,
+            })
+            .expect("the kalshi account mints (unique id)");
+        // LIVE cash is a per-account fact: the B leg's book must hold its own
+        // seed too (the equity gate reads the REQUEST'S OWN account).
+        b.core_mut()
+            .accounts_mut()
+            .get_mut(&blitzkrieg_market_api::AccountId::from("kalshi"))
+            .expect("kalshi just inserted")
+            .set_balance(dec!(100_000));
+        b.core_mut()
+            .arb_config_set(&blitzkrieg_core::account::CrossVenueArbConfig {
+                leg_a_venue: "polymarket".into(),
+                leg_a_account: "default".into(),
+                leg_b_venue: "kalshi".into(),
+                leg_b_account: "kalshi".into(),
+                pairs: vec!["BTC".into()],
+            })
+            .expect("the leg configuration lands (memory-only core)");
+    }
     b.run().expect("replay runs")
 }
 
@@ -324,16 +374,19 @@ fn replayed_release_flattens_the_pair() {
 }
 
 #[test]
-fn replay_without_the_unified_mapping_row_never_trades() {
-    let events: Vec<TimedEvent> = corpus()
-        .into_iter()
-        .filter(|te| !matches!(te.event, DataEvent::UnifiedMapping { .. }))
-        .collect();
-    let r = replay(events);
+fn replay_without_the_leg_configuration_never_trades() {
+    // 跨所套利弹窗 v2's pairing authority is the OPERATOR'S LEG
+    // CONFIGURATION, not the confirmed-mapping handshake: the v1 negative
+    // control (strip the UnifiedMapping row) does not bite a pairing that
+    // reads `bk.markets()` directly. The v2 fail-closed arm is the
+    // configuration itself: the SAME corpus through the FULL replay engine,
+    // never configured ⇒ zero orders (the unconfigured-strategy contract,
+    // engine-side).
+    let r = replay_with_config(corpus(), false);
     assert_eq!(
         r.orders.orders,
         0,
-        "no mapping → no cross-venue pair → no orders:\n{}",
+        "unconfigured ⇒ no cross-venue pair ⇒ no orders:\n{}",
         r.render()
     );
 }

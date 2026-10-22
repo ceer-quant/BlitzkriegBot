@@ -445,6 +445,12 @@ pub struct Engine {
     /// own book. Empty until the host pushes — every diagnostic path keeps
     /// today's shape.
     positions_view: Vec<HeldPosition>,
+    /// RFC 568 阶段一：本周期的配对簿视图快照（`set_pair_views_snapshot`
+    /// 的 host push，形状同 `positions_view`）。一条平铺所有策略的列表：
+    /// `evaluate` 按 owner 策略切片进各自的 ctx，跨策略/跨账户不可见已由
+    /// Core 侧 `views_for` 的 owner 过滤做完。Empty until the host pushes
+    /// —— 诊断路径与影子孪生保持旧形状（读不到按「无登记」处理）。
+    pair_views_snapshot: Vec<crate::pair::PairView>,
     /// The account's cash equity, pushed by the host before each evaluation
     /// (#202). ZERO = not (yet) supplied. Only the equity-relative sizing reads
     /// it: with `size_pct = 0` the engine's tickets do not depend on this at
@@ -497,6 +503,37 @@ pub struct Engine {
     /// one listing).
     unified_mappings:
         std::collections::BTreeMap<String, blitzkrieg_market_api::unified::UnifiedEvent>,
+    /// 跨所套利弹窗 v2: the arb leg configuration in force (the host's hot
+    /// push, mirroring accounts.toml's `[cross_venue_arb]`). `None` =
+    /// unconfigured — every stamp falls back to the instance account and no
+    /// arb params are merged. Read by `evaluate`'s strategy loop (each
+    /// adapter re-resolves the leg map per candidate) and by the params
+    /// merge; written by `set_arb_leg_config`.
+    arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
+    /// RFC 568 阶段一：带 pair 声明且过了 scope 门（含 A≠B 账户校验）的
+    /// 腿声明 —— Core 在 arb_precheck 过闸后消费（declare 落 PairBook）。
+    /// 每次 evaluate 前清空；replay 静默周期不产出（staged 集合重放的是
+    /// 无 pair 上下文的 OrderRequest —— 声明是真实评估的伴生事实）。
+    pair_declarations: Vec<PairDeclaration>,
+    /// RFC 568 阶段一：A≠B 校验的拒绝回执（补钉 5 权威位 —— 同 pair 两腿
+    /// effective account_id 相同 ⇒ 拒绝声明）。Core 转 APPLICATION 错误
+    /// 事件（点名字段）；被拒声明对应的腿声明不产出（订单路径照旧）。
+    pair_refusals: Vec<String>,
+}
+
+/// RFC 568 阶段一：一条过了 scope 门的配对声明（engine → Core 的提交伴生
+/// 事实）。owner_account 是实例主账户（PairBook 的实例隔离维度）；腿的
+/// 落账账户（stamp 结果）单独携带，A≠B 校验在 engine 侧判它。
+#[derive(Debug, Clone)]
+pub struct PairDeclaration {
+    pub owner_strategy: String,
+    pub owner_account: String,
+    pub leg_account: String,
+    pub decl: crate::signal::TradePairDecl,
+    pub token_id: String,
+    /// 策略侧声明的股数（None = 内核 sizing —— declare 记 0，PairBook 的
+    /// 股数字段只作读数，不参与防重/状态机）。
+    pub shares: Option<Decimal>,
 }
 
 impl Engine {
@@ -523,6 +560,7 @@ impl Engine {
             package_sources: std::collections::BTreeMap::new(),
             strategy_exits: Vec::new(),
             positions_view: Vec::new(),
+            pair_views_snapshot: Vec::new(),
             cfg,
             equity_usd: Decimal::ZERO,
             equity_by_account: HashMap::new(),
@@ -532,7 +570,64 @@ impl Engine {
             size_pct_skipped: 0,
             klines: crate::kline::KlineAggregator::with_default_intervals(),
             unified_mappings: std::collections::BTreeMap::new(),
+            arb_leg_config: None,
+            pair_declarations: Vec::new(),
+            pair_refusals: Vec::new(),
         }
+    }
+
+    /// RFC 568 阶段一：排空本周期收集的配对声明（Core 在 arb_precheck 过闸
+    /// 后消费；每次真实评估前由 evaluate 清空）。
+    pub fn take_pair_declarations(&mut self) -> Vec<PairDeclaration> {
+        std::mem::take(&mut self.pair_declarations)
+    }
+
+    /// RFC 568 阶段一：排空本周期 A≠B 校验的拒绝回执（补钉 5；Core 转
+    /// APPLICATION 错误事件）。
+    pub fn take_pair_refusals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pair_refusals)
+    }
+
+    /// 跨所套利弹窗 v2: hot-push the arb leg configuration (the host calls it
+    /// on `arb.config.set`/`clear` and at registration). Fanned to every
+    /// hosted strategy's adapter — the stamp source AND the params bag update
+    /// in the same call, so a set is fully in force on the next evaluation.
+    ///
+    /// The fan-out is a PER-SCOPE PROJECTION, not a verbatim broadcast: a
+    /// scope whose instance account IS one of the configured leg accounts
+    /// receives the map as the user spelled it — its legs stamp per venue.
+    /// Any other scope of the same package is a SEPARATE deployment (a
+    /// second account running the package independently, the account-decouple
+    /// posture): it keeps its own book whole — its projection rewrites BOTH
+    /// leg accounts onto its own instance id, so its pair fills under its
+    /// scope account exactly as the pre-v2 shape did, and it can never
+    /// double-place legs onto the first deployment's accounts. Unconfigured
+    /// (= None) fans out as None everywhere.
+    pub fn set_arb_leg_config(&mut self, cfg: Option<crate::account::CrossVenueArbConfig>) {
+        self.arb_leg_config = cfg.clone();
+        for s in &mut self.strategies {
+            let scope_cfg = match (&cfg, s.account_id.as_str()) {
+                (Some(c), acct)
+                    if acct == c.leg_a_account.trim() || acct == c.leg_b_account.trim() =>
+                {
+                    Some(c.clone())
+                }
+                (Some(c), acct) => {
+                    let mut projected = c.clone();
+                    projected.leg_a_account = acct.to_string();
+                    projected.leg_b_account = acct.to_string();
+                    Some(projected)
+                }
+                (None, _) => None,
+            };
+            s.strategy.set_arb_leg_config(scope_cfg);
+        }
+    }
+
+    /// The arb leg configuration in force (diagnostics/tests read the engine
+    /// mirror; the Core cell remains the wire truth).
+    pub fn arb_leg_config(&self) -> Option<&crate::account::CrossVenueArbConfig> {
+        self.arb_leg_config.as_ref()
     }
 
     /// #427: record one confirmed cross-venue mapping (last write wins per
@@ -676,6 +771,15 @@ impl Engine {
     /// same consistency the books and equity in that ctx have.
     pub fn set_positions_view(&mut self, positions: Vec<HeldPosition>) {
         self.positions_view = positions;
+    }
+
+    /// RFC 568 阶段一：push this cycle's pair-book views（`bk.arb.pairs()`
+    /// 的数据源）。The host pushes the full list — Core 已按策略×账户白名单
+    /// 过滤——`evaluate` 再按 owner 策略切片进各自的 ctx。Stale between
+    /// pushes by design（最终一致，附注 2）：a cycle's view is the book as
+    /// of its own start.
+    pub fn set_pair_views_snapshot(&mut self, views: Vec<crate::pair::PairView>) {
+        self.pair_views_snapshot = views;
     }
 
     pub fn equity_usd(&self) -> Decimal {
@@ -1180,6 +1284,11 @@ impl Engine {
     pub fn evaluate(&mut self, now_ms: i64) -> Vec<crate::model::OrderRequest> {
         self.last_blocked.clear();
         self.last_exemptions.clear();
+        // RFC 568 阶段一：配对声明与拒绝回执都是「本周期」的伴生事实 ——
+        // 每次真实评估重开（Core 在 precheck 过闸后消费 take_pair_declarations，
+        // 拒绝回执经 take_pair_refusals 转 APPLICATION 事件）。
+        self.pair_declarations.clear();
+        self.pair_refusals.clear();
 
         let round = self.scanner.round_timing(now_ms);
         // E25: the arbitration pipeline's physics projection reads the SAME
@@ -1203,12 +1312,37 @@ impl Engine {
             // loop: each scope's ctx carries ONLY its own positions — same
             // strategy on two accounts is two independent books, and neither
             // package may read the other's holdings through `bk.holdings()`.
+            // 跨所套利弹窗 v2 exception: a strategy that trades under the arb
+            // leg configuration STAMPS each leg to ITS OWN venue's account
+            // (entries and exits alike), so one instance's book legitimately
+            // spans the configured leg accounts — the release decision prices
+            // the WHOLE pair and must see both legs' held rows, or a B-leg
+            // exit would be suggested against a holding the instance cannot
+            // see (the leg would be trapped until settlement). The widening
+            // is bounded by the configuration itself: only rows whose account
+            // is one of the two leg accounts join the view, so unrelated
+            // scopes' books stay sealed.
             for s in self.strategies.iter_mut() {
+                let leg_accounts = s.strategy.arb_leg_accounts();
                 if s.enabled {
                     let held: Vec<HeldPosition> = self
                         .positions_view
                         .iter()
-                        .filter(|p| p.strategy == s.strategy.name() && p.account_id == s.account_id)
+                        .filter(|p| {
+                            p.strategy == s.strategy.name()
+                                && (p.account_id == s.account_id
+                                    || leg_accounts
+                                        .as_ref()
+                                        .is_some_and(|ls| ls.contains(&p.account_id)))
+                        })
+                        .cloned()
+                        .collect();
+                    // RFC 568 阶段一：同样的 per-scope 切片，配对簿视图 ——
+                    // 只按 owner 策略切（账户白名单过滤 Core 侧已做完）。
+                    let pair_views: Vec<crate::pair::PairView> = self
+                        .pair_views_snapshot
+                        .iter()
+                        .filter(|p| p.owner_strategy == s.strategy.name())
                         .cloned()
                         .collect();
                     let ctx = StrategyCtx::new(
@@ -1219,7 +1353,8 @@ impl Engine {
                         &fresh,
                     )
                     .with_positions(&held)
-                    .with_unified_events(&unified_snapshot);
+                    .with_unified_events(&unified_snapshot)
+                    .with_pair_views(&pair_views);
                     candidates.extend(s.strategy.find_candidates(&ctx));
                     // Close intents accumulate regardless of the entry timing
                     // gate: an open position's exit is never round-timing-gated.
@@ -1380,6 +1515,67 @@ impl Engine {
                 refusals.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
                 gates,
             );
+        }
+        // ── RFC 568 阶段一（补钉 5 的权威位）：A≠B 账户校验 —— 同一个自报
+        // pair_key 下，两条腿盖出的 effective account_id 相同 ⇒ 拒绝该声明
+        // （APPLICATION 错误，点名字段）。双腿落同账户的「配对」不是跨所
+        // 套利（一笔单所双腿单 —— 配对簿的审批对象不存在），fail-closed 拒
+        // 声明而非放行裸腿。只对带 pair 声明且未被 scope 门整组丢弃的腿判
+        // 定；凭证不在这里校验（补钉 3 —— declare 在 arb_precheck 过闸之后）。
+        // 校验通过 ⇒ 收进 pair_declarations，等 Core 在 precheck 过闸后 declare。
+        {
+            // 自报 pair_key → 该 key 下各腿的 effective account（本轮候选里）。
+            let mut pair_accounts: std::collections::BTreeMap<&str, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            for sig in &candidates {
+                let Some(p) = &sig.pair else { continue };
+                if dropped_atomic.contains(&sig.strategy) {
+                    continue; // 整组已丢：无 effective 账户可言
+                }
+                pair_accounts
+                    .entry(p.key.as_str())
+                    .or_default()
+                    .push(sig.account_id.as_str());
+            }
+            for sig in &candidates {
+                let Some(p) = &sig.pair else { continue };
+                if dropped_atomic.contains(&sig.strategy) {
+                    continue;
+                }
+                let accounts = pair_accounts.get(p.key.as_str()).expect("seeded above");
+                if accounts.len() >= 2 && accounts.iter().all(|a| *a == accounts[0]) {
+                    let reason = format!(
+                        "pair.declRefused: pair `{}` legs share effective account `{}` — \
+                         both legs must stamp DIFFERENT accounts (a cross-venue pair, not a \
+                         single-venue two-leg order); field: pair.key",
+                        p.key, accounts[0]
+                    );
+                    tracing::info!(target: "strategy", "{reason}");
+                    self.pair_refusals.push(reason);
+                    continue;
+                }
+                self.pair_declarations.push(PairDeclaration {
+                    owner_strategy: sig.strategy.clone(),
+                    // 实例主账户：该策略实例自己的 scope（注册时的
+                    // account_id，trait 访问器 `instance_account`），不是腿
+                    // 的盖章结果 —— 实例隔离维度（跨实例同名 pair_key 不串
+                    // 账）；跨同名多实例的歧义按第一实例落（与下游以
+                    // (strategy, 腿账户) 寻址的判定链同口径）。
+                    owner_account: self
+                        .strategies
+                        .iter()
+                        .find(|s| s.strategy.name() == sig.strategy)
+                        .map(|s| s.strategy.instance_account())
+                        .unwrap_or_else(|| sig.account_id.clone()),
+                    leg_account: sig.account_id.clone(),
+                    decl: crate::signal::TradePairDecl {
+                        key: p.key.clone(),
+                        leg: p.leg.clone(),
+                    },
+                    token_id: sig.token_id.clone(),
+                    shares: sig.shares,
+                });
+            }
         }
         for sig in candidates {
             if dropped_atomic.contains(&sig.strategy) {
@@ -1963,6 +2159,14 @@ impl Engine {
         v.sort();
         v
     }
+
+    /// RFC 568 阶段一：borrow every hosted scope (name/enabled/account per
+    /// instance) —— Core 侧构建 per-owner 的配对簿视图快照用（views_for 的
+    /// owner 过滤要实例主账户 + arb 腿账户白名单，两者都在 HostedStrategy
+    /// 上）。crate 内可见：host 内部接线，非公开 API 面。
+    pub(crate) fn hosted(&self) -> &[HostedStrategy] {
+        &self.strategies
+    }
     /// Toggle a strategy; returns false if the name is unknown to the engine.
     ///
     /// Multi-scope semantics (账户↔venue 解耦裁决): the toggle is the
@@ -2050,6 +2254,28 @@ impl Engine {
         if let Some(h) = &self.hot_params {
             hosted.strategy.set_hot_params(Some(h.clone()));
         }
+        // 跨所套利弹窗 v2: a scope registered while an arb configuration is
+        // already in force receives ITS PROJECTION at birth (the same
+        // "later joiner" pattern the hot_params forward runs) — otherwise a
+        // scope added after an `arb.config.set` would stamp instance
+        // accounts until the next set. `set_arb_leg_config` owns the
+        // per-scope projection (the wired scope gets the map, a separate
+        // deployment keeps its own book).
+        let joiner_cfg = self.arb_leg_config.clone();
+        let joiner_account = account_id.to_string();
+        let scope_cfg = match (&joiner_cfg, joiner_account.as_str()) {
+            (Some(c), acct) if acct == c.leg_a_account.trim() || acct == c.leg_b_account.trim() => {
+                Some(c.clone())
+            }
+            (Some(c), acct) => {
+                let mut projected = c.clone();
+                projected.leg_a_account = acct.to_string();
+                projected.leg_b_account = acct.to_string();
+                Some(projected)
+            }
+            (None, _) => None,
+        };
+        hosted.strategy.set_arb_leg_config(scope_cfg);
         self.strategies.push(hosted);
         Ok(name)
     }
@@ -3423,6 +3649,7 @@ mod tests {
             price: dec!(0.42),
             reason: "test".into(),
             shares: None,
+            pair: None,
         }
     }
 
@@ -4214,6 +4441,7 @@ mod tests {
                         price: book.mid_price,
                         reason: format!("{} depth dip", self.name),
                         shares: Some(self.declared),
+                        pair: None,
                     });
                 }
             }
@@ -4391,6 +4619,7 @@ mod tests {
                             price: book.mid_price,
                             reason: format!("{} dip", self.name),
                             shares: None,
+                            pair: None,
                         });
                     }
                 }
@@ -5627,6 +5856,7 @@ mod tests {
             price: dec!(0.42),
             reason: "multi-account test".into(),
             shares: None,
+            pair: None,
         }
     }
 
@@ -5867,6 +6097,7 @@ mod tests {
                         price: dec!(0.42),
                         reason: "exit-only probe".into(),
                         shares: None,
+                        pair: None,
                     })
                     .collect()
             }

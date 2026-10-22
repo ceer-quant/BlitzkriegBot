@@ -1102,6 +1102,7 @@ fn adopt_eval_json(
                     price,
                     reason: reason.clone(),
                     shares,
+                    pair: None,
                 });
                 break;
             }
@@ -1116,6 +1117,7 @@ fn adopt_eval_json(
                     price,
                     reason: reason.clone(),
                     shares,
+                    pair: None,
                 });
                 break;
             }

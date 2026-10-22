@@ -139,6 +139,8 @@ pub struct CredentialKeys {
 
 pub mod config;
 
+pub use config::CrossVenueArbConfig;
+
 use crate::ledger::Ledger;
 use crate::model::{CoreError, CoreErrorCode, CoreResult};
 use blitzkrieg_market_api::MarketType;

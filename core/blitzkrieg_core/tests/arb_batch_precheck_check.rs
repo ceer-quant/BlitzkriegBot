@@ -28,12 +28,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use blitzkrieg_core::account::{Account, AccountStatus, CredentialKeys};
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::model::{Mode, default_account_id};
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_lua_runtime::FeeScheduleView;
+use blitzkrieg_market_api::account::AccountId;
+use blitzkrieg_market_api::types::MarketType;
 use blitzkrieg_market_api::unified::{
     EventStatus, ListingStatus, PlatformListing, SettlementSource, UnifiedEvent, Venue,
 };
@@ -186,7 +189,11 @@ fn arb_core_live(pot: Decimal, default_venue: Option<&str>, nofast: bool) -> Cor
         "cross_venue_arb".to_string(),
         VirtualAccountLimit {
             max_batch_notional_usd: Some(pot),
-            accounts: vec![default_account_id().to_string()],
+            // 跨所套利弹窗 v2: the kx leg stamps `arb-b`, so the B leg's pot
+            // is the (arb-b, strategy) scope — the deployment wires BOTH leg
+            // accounts into the pot list, and the batch pre-check judges each
+            // leg's notional against the pot of the account it spends.
+            accounts: vec![default_account_id().to_string(), "arb-b".to_string()],
         },
     );
     let mut c = Core::new(CoreConfig {
@@ -222,12 +229,55 @@ fn arb_core_live(pot: Decimal, default_venue: Option<&str>, nofast: bool) -> Cor
             .set_venue(&default_account_id(), v, NOW)
             .expect("the default account exists — the fixture binding writes");
     }
+    // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
+    // adapter's params bag); a leg account BOUND to the OTHER leg's venue is
+    // refused by the set validation itself, so the fixture carries a second
+    // UNBOUND account for the kalshi leg. The batch pre-check dimensions
+    // (scope binding on the DEFAULT account, credentials, pot) are what these
+    // teeth judge — the scope arm still binds polymarket onto `default` and
+    // refuses its leg through the engine gates.
+    c.accounts_mut()
+        .insert(Account {
+            id: AccountId::from("arb-b"),
+            name: "arb-b".into(),
+            market_type: MarketType::Prediction,
+            status: AccountStatus::Active,
+            credential_keys: CredentialKeys::default(),
+            venue: String::new(),
+            trading_enabled: true,
+            strategies: Vec::new(),
+            updated_at_ms: NOW,
+        })
+        .expect("arb-b does not exist yet — the fixture account inserts");
+    // LIVE cash is a per-account fact: the B leg's book must hold the pot too
+    // (the equity gate reads the REQUEST'S OWN account).
+    c.accounts_mut()
+        .get_mut(&AccountId::from("arb-b"))
+        .expect("arb-b just inserted")
+        .set_balance(pot);
     let cfg = c.config().engine_config();
     let mut eng = blitzkrieg_core::engine::Engine::new(cfg.clone());
     eng.register_user_strategy(Box::new(arb_adapter()), "test".into())
         .expect("cross_venue_arb registers under its package name");
     assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     c.enable_engine(eng);
+    c.arb_config_set(&blitzkrieg_core::account::CrossVenueArbConfig {
+        leg_a_venue: "polymarket".into(),
+        leg_a_account: default_account_id().to_string(),
+        leg_b_venue: "kalshi".into(),
+        leg_b_account: "arb-b".into(),
+        pairs: vec!["BTC".into()],
+    })
+    .expect("the leg configuration lands (memory-only core)");
+    c
+}
+
+/// Pin the `arb-b` account (the kalshi leg's stamp target) to a venue — the
+/// scope-refusal input the engine gates judge under the v2 stamp.
+fn bind_venue_arb_b(mut c: Core, venue: &str) -> Core {
+    c.accounts_mut()
+        .set_venue(&AccountId::from("arb-b"), venue, NOW)
+        .expect("the fixture account exists — the binding writes");
     c
 }
 
@@ -299,7 +349,12 @@ fn atomic_pair_drops_the_whole_cycle_when_one_leg_is_scope_refused() {
         set_env("KALSHI_API_KEY_ID", "test-key");
         set_env("KALSHI_RSA_PRIVATE_KEY", "test-rsa");
 
-        let mut c = arb_core_live(dec!(1000), Some(POLYMARKET), false);
+        // 跨所套利弹窗 v2: the kx leg stamps its OWN venue's account
+        // (`arb-b`), so the scope refusal that hook A judges is the binding
+        // on THAT account — `arb-b` pinned to polymarket refuses the kalshi
+        // token (the pre-v2 shape refused the same token through the shared
+        // default binding).
+        let mut c = bind_venue_arb_b(arb_core_live(dec!(1000), None, false), POLYMARKET);
         let now = NOW;
         pair_market_data(&mut c, now);
 
@@ -423,6 +478,7 @@ fn undeclared_strategy_keeps_the_per_leg_path() {
                             price: book.mid_price,
                             reason: "stub leg".into(),
                             shares: None,
+                            pair: None,
                         });
                     }
                 }
@@ -590,11 +646,18 @@ fn credentials_not_ready_refuses_the_whole_batch_then_both_legs_pass() {
         2,
         "both legs rest (Live pending)"
     );
-    let expected: Decimal = dec!(0.44) * dec!(600) + dec!(0.42) * dec!(600);
+    let expected_a: Decimal = dec!(0.44) * dec!(600);
+    let expected_b: Decimal = dec!(0.42) * dec!(600);
     assert_eq!(
         c2.virtual_used(&default_account_id().to_string(), "cross_venue_arb"),
-        expected,
-        "0.44×600 + 0.42×600 committed as ONE ticket (the pair reservation)"
+        expected_a,
+        "the pm leg's 0.44×600 commits against the A account's pot"
+    );
+    assert_eq!(
+        c2.virtual_used("arb-b", "cross_venue_arb"),
+        expected_b,
+        "the kx leg's 0.42×600 commits against the B account's pot — ONE ticket, \
+         stamped across the two leg accounts (the v2 dual-account shape)"
     );
 }
 
