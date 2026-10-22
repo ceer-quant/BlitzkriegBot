@@ -110,3 +110,19 @@ sh scripts/upgrade.sh --check                            # 漂移报告应含：
 `data/strategy-state.json` 与文件一致。 propagation 门禁
 （`sh scripts/upgrade-propagate-test.sh`，38 passed）已钉运行副本赢 /
 drift 标注 / 回滚不碰 / 缺失种子四条路径。
+
+## F. 跨所套利配置回滚约束（#568 决议附注 3）
+
+`accounts.toml` 的 `[cross_venue_arb]` 节由**新内核**解析（PR #569 落地的
+`arb.config.set` 写入）；策略包 `cross_venue_arb` 的 manifest 声明
+`pair` 字段（RFC 阶段一 wire 契约）。两者版本耦合：
+
+- **内核先行升级**（升级脚本默认顺序）：旧策略包在新内核上照常加载
+  （不声明 pair = 旧行为逐位不变，PairBook 零登记）。
+- **内核回滚时策略包须同步回滚**：新策略包在旧内核上被忽略 pair 键
+  （旧内核按未知字段拒绝加载，fail-closed），套利策略直接消失。
+  回滚 `blitzkrieg-core` 二进制时，一并回滚
+  `user_layer/strategies_lua/cross_venue_arb/`。
+- 校验：`blitzkrieg-core --version` 与
+  `manifest.json` 的 `min_kernel`（如声明）同看；boot 日志
+  `cross-venue arb legs configured` 行出现 = 配置节被读入。
