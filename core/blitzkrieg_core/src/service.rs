@@ -3040,15 +3040,20 @@ impl Core {
     /// The display-pointer write (显示账户配置化 / `display.account.set`):
     /// memory AND accounts.toml in one transaction — persist FIRST (a failure
     /// leaves both stores untouched), memory after. The refusals are ALL
-    /// plan-first: the id must name a CONFIGURED account and its status must
-    /// be `Active` (a display pointer aimed at a read-only/frozen account
-    /// would show a book that cannot trade — the operator believes the
-    /// 行情页 mirrors a live venue; showing a frozen one is the same
-    /// lie-by-snapshot a dangling id would be).
+    /// plan-first: the id must name a CONFIGURED account.
     ///
-    /// 语义边界：this pointer is PURE PRESENTATION. It never touches the
-    /// process-level active account, no ledger, and no strategy enablement —
-    /// the snapshot's `displayAccount`/`displayVenue` are the only readers.
+    /// 2026-10-20 操作者裁决（issue 561）：display 是面板的唯一可信账户
+    /// 事实源，切户动作 = 写 display。校验据此放宽为「账户存在即可」，
+    /// 不再要求 `status = Active`。display 是显示焦点而非交易授权面：
+    /// 把指针指向 frozen / read_only 账户去看它的账本与流水是合法操作
+    /// （与 `account.switch` 的 existence-only 姿态同一逻辑 —— posture
+    /// 管下单，不管看）。消费侧（行情过滤、策略归属、风控、下单）各自
+    /// 按账户自身 posture 做门禁，display 指针不放行任何交易语义。
+    ///
+    /// 语义边界：this pointer never touches the process-level active
+    /// account, no ledger, and no strategy enablement — the snapshot's
+    /// `displayAccount`/`displayVenue` (and the issue-561 default chain)
+    /// are the only readers.
     pub fn set_display_account_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -3057,25 +3062,6 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::ipc::schema::DISPLAY_ACCOUNT_SET_NOTE;
         self.accounts.require(id)?;
-        // Active-only: see the doc above (a display of an untradeable book is
-        // a lie-by-snapshot). `matches!` keeps the check permissive of future
-        // postures the way the boot default (`first status=active`) is.
-        if !self
-            .accounts
-            .account(id)
-            .is_some_and(|a| matches!(a.status, crate::account::AccountStatus::Active))
-        {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "display.account.set: `{}` is not an active account — the \
-                     display pointer only follows a `status = active` book \
-                     (fail-closed: showing a frozen/read-only account would \
-                     present a venue that cannot trade)",
-                    id.as_str()
-                ),
-            ));
-        }
         let Some(path) = self.config.accounts_config_path.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -18453,9 +18439,11 @@ mod strategy_dispatch_tests {
 
     /// 显示账户配置化（display.account.set 的事务半）：合法切位把内存指针
     /// 与 accounts.toml 顶层 `display_account` 键一次写齐（persist 先行，
-    /// 失败两个存储都不动）；未知 id 与非 active 账户被计划先行拒绝且文件
-    /// 字节不动；持久化关（无 config 路径）整体拒绝。纯展示指针：active
-    /// 账户/记账不受任何影响 —— 内存的 display 单元独立于 active 单元。
+    /// 失败两个存储都不动）；未知 id 被计划先行拒绝且文件字节不动；持久
+    /// 化关（无 config 路径）整体拒绝。纯展示指针：active 账户/记账不受
+    /// 任何影响 —— 内存的 display 单元独立于 active 单元。
+    /// issue 561（2026-10-20 裁决）：校验放宽为「账户存在即可」，frozen
+    /// 账户也是合法 display 目标（旧断言钉住的 Active-only 已随裁决废除）。
     #[test]
     fn display_account_set_persists_and_validates_plan_first() {
         let dir = std::env::temp_dir().join(format!("bk-display-set-{}", std::process::id()));
@@ -18501,9 +18489,9 @@ mod strategy_dispatch_tests {
             "a refused write leaves the file byte-identical"
         );
 
-        // NON-active account (frozen): the display pointer only follows a
-        // book that can trade — showing a frozen one would present a venue
-        // that cannot.
+        // issue 561（2026-10-20 裁决）改写旧断言：frozen 账户此前被
+        // Active-only 校验拒绝，现在 display 是面板唯一可信账户源、切观察
+        // 户必须生效 —— 「存在即可」，frozen1 合法落位，内存与文件同步。
         std::fs::write(
             &accounts_path,
             "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"frozen1\"\nname = \"f\"\nstatus = \"frozen\"\n",
@@ -18516,15 +18504,15 @@ mod strategy_dispatch_tests {
             },
             crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
         );
-        let err = c2
-            .set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
-            .expect_err("non-active account");
-        assert!(
-            err.message.contains("not an active account"),
-            "{}",
-            err.message
+        c2.set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
+            .expect("a frozen account is a legal display target (issue 561)");
+        assert_eq!(
+            c2.accounts.display_id(),
+            "frozen1",
+            "display follows a frozen book — view-only, posture gates the orders"
         );
-        assert_eq!(c2.accounts.display_id(), "default", "memory untouched");
+        let reloaded2 = crate::account::config::load_account_ledgers(&accounts_path, 2).unwrap();
+        assert_eq!(reloaded2.display_id(), "frozen1", "durable across boot");
 
         // 持久化关（无 accounts_config_path 的内核 — 回测/进程内测试）：整体
         // 拒绝，内存指针也不动（与 account.trading.set 同一姿态）。

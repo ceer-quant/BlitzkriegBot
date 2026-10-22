@@ -38,18 +38,19 @@ function failMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-// PR H (账户筛选修复): 回测读数跟随账户绑定 —— 账户切换器就是交易所切换器，
-// active 账户绑定了 venue X 时，拉数据/数据集口径标注 X 的链上钱包域（未绑定
-// = 任意 venue，与旧行为一致）。回测本身仍是内核 CLI 旋钮面（archive 无
-// venue 概念），这里只做「这屏属于哪个账户/venue」的诚实标注与提示。
+// PR H (账户筛选修复) + issue 561: 回测读数跟随显示账户的绑定 —— 账户切换
+// 器就是交易所切换器（切换动作 = 写 display 账户），display 账户绑定了
+// venue X 时，拉数据/数据集口径标注 X 的链上钱包域（未绑定 = 任意 venue，
+// 与旧行为一致）。回测本身仍是内核 CLI 旋钮面（archive 无 venue 概念），
+// 这里只做「这屏属于哪个账户/venue」的诚实标注与提示。
 const store = usePanelStore()
 const activeVenueNote = computed(() => {
   const id = store.activeAccount
   if (!id) return ''
   const venue = store.activeAccountVenue
   return venue
-    ? `当前账户「${id}」绑定 ${venue} —— 拉取该 venue 的链上数据请用其钱包地址；数据集不区分 venue，回测按数据集自身的 archive 口径。`
-    : `当前账户「${id}」未绑定 venue —— 可拉任意 venue 的链上数据。`
+    ? `当前显示账户「${id}」绑定 ${venue} —— 拉取该 venue 的链上数据请用其钱包地址；数据集不区分 venue，回测按数据集自身的 archive 口径。`
+    : `当前显示账户「${id}」未绑定 venue —— 可拉任意 venue 的链上数据。`
 })
 
 /** UTC 日历日（内核接受 `YYYY-MM-DD`，含尾日）。 */

@@ -1,5 +1,5 @@
 /**
- * 显示账户 — the display-account identity gate (issue 559).
+ * 显示账户 — the display-account identity gate (issue 559, amended issue 561).
  *
  * The contract (主会话钉死的合同，内核侧并行实现): the snapshot carries a
  * top-level `displayAccount` (account id) + `displayVenue` (that account's
@@ -7,24 +7,27 @@
  * payload `{accountId}` persists the accounts.toml top-level
  * `display_account` key and applies it at runtime.
  *
- * What changed on the panel side and why: the 行情页 countdown card used to
- * derive its identity (badge/name/slot/age) from the SESSION account's
- * bound venue. With the display account becoming an independent kernel
- * fact, that derivation is wrong at exactly one moment — the operator
- * switches the session account while the kernel's display face still runs
- * the old venue: the badge would jump to the new venue while the rows and
- * the round clock below still speak the old one. The identity line now has
- * a UNIQUE source: displayVenue first, account-binding fallback only when
- * the snapshot lacks the field (old cores).
+ * issue 561 amendment (operator ruling 2026-10-20, verbatim:
+ * 「账户切换只保留唯一可信源 display account，行情 策略 风控 账户切换全部
+ * 跟随 display account」): the display account is PROMOTED from the 行情页
+ * identity fact to the PANEL-WIDE single trusted account source — the
+ * switch action IS the display write, and every consumer (Header, 行情
+ * 过滤, 策略归属, 流水卡) reads it. Two issue-559-era assertions are
+ * REWRITTEN accordingly (each names the ruling inline):
+ *   · the store's displayAccount/displayVenue are now a writable ref pair
+ *     (snapshot mirror + optimistic write on switch) instead of a
+ *     read-only computed;
+ *   · the switcher's display write is no longer fire-and-forget-silent —
+ *     a failed display write IS a failed switch, rolled back and reported
+ *     inline (可见提示，不再静默 catch).
  *
  * Reverse acceptance — the following must be impossible on the UI:
- *   · the countdown card's identity line reading the account-binding chain
- *     while the snapshot speaks displayVenue (the misalignment returns);
+ *   · a consumer reading the SESSION account (the switcher's private
+ *     doc.active) while the display source is in force — the double-state
+ *     double-clock defect returns;
  *   · a switch that mutates trading/strategy state because of the display
  *     write (切换不启停任何东西 still holds — see account-switch-purity);
- *   · a display write that blocks or fails the account switch itself
- *     (fire-and-forget: the next snapshot brings the new displayVenue, the
- *     fallback chain covers old cores);
+ *   · a failed switch silently swallowed (the operator must SEE it);
  *   · a fallback decided on an EMPTY displayVenue string — the kernel
  *     speaking (fields present) must always be followed verbatim; only
  *     field ABSENCE (old core) may fall back.
@@ -76,11 +79,14 @@ check('display.account.set 有专用代理方法（/display-account/set，body �
   assert.match(m[0], /JSON\.stringify\(body\)/, '方法未把 body 逐字 JSON 转发 —— 网关侧零加工的前提')
 })
 
-// ── 2. the store: read-only view, no extra fetch ─────────────────────────────
-check('store 暴露 displayAccount/displayVenue 纯派生（无写方、无额外拉取）', () => {
-  assert.match(store, /const displayAccount = computed\(/, 'store 缺 displayAccount 派生')
-  const dv = store.match(/const displayVenue = computed\(\(\) => snapshot\.value\?\.displayVenue \?\? ''\)/)
-  assert.ok(dv, 'store 缺 displayVenue 派生（或未直接读快照）')
+// ── 2. the store: issue 561 可写唯一源（快照镜像 + 切户乐观写）─────────────
+check('store 持有可写 displayAccount/displayVenue（快照镜像 + setDisplayAccount 乐观写）', () => {
+  // issue 561 裁决改写 issue 559 的「只读 computed」断言：display 升格为
+  // 面板唯一可信账户源后，store 必须能被切换动作乐观写（先写内核成功才
+  // 写 store），轮询每拍镜像内核读数。
+  assert.match(store, /const displayAccount = ref<string>\(''\)/, 'store 缺可写 displayAccount ref')
+  assert.match(store, /const displayVenue = ref<string>\(''\)/, 'store 缺可写 displayVenue ref')
+  assert.match(store, /function setDisplayAccount\(id: string\): void/, 'store 缺 setDisplayAccount 乐观写入口')
   // The exports carry both.
   assert.match(store, /displayAccount, displayVenue,/, 'store 导出缺显示账户字段')
 })
@@ -114,15 +120,22 @@ check('重绑扳机挂 identityVenue（身份变化 = 清残值，两源合一�
   assert.match(page, /watch\(identityVenue,/, '倒计时/Loading 重绑未挂 identityVenue')
 })
 
-// ── 4. the switcher write ────────────────────────────────────────────────────
-check('切换器成功路径写 display.account.set（fire-and-forget，失败静默）', () => {
+// ── 4. the switcher write (issue 561: 切换 = 写 display，先内核后乐观) ──────
+check('switchTo 先写 display.account.set，成功才乐观写 store（失败回滚可见）', () => {
   const body = switcher.match(/async function switchTo\([\s\S]*?\n\}\)/)
   assert.ok(body, '缺 switchTo')
-  assert.match(body[0], /setDisplayAccount\(/, '切换成功路径缺显示账户写')
-  const helper = switcher.match(/function setDisplayAccount\([^)]*\)[\s\S]*?\n\}/)
-  assert.ok(helper, '缺 setDisplayAccount helper')
-  assert.match(helper[0], /api\s*\n?\s*\.displayAccountSet/, 'helper 未走专用代理方法')
-  assert.match(helper[0], /\.catch\(\(\) =>/, '显示账户写失败未静默 —— 会打断切换本身')
+  // issue 561：切换动作就是 display 写 —— api.displayAccountSet 必须在
+  // switchTo 主路径上 await（不再 fire-and-forget），成功才 setDisplayAccount。
+  assert.match(body[0], /await api\s*\n?\s*\.displayAccountSet|await api\.displayAccountSet/, '切换主路径缺 await 的 display 写')
+  assert.match(body[0], /store\.setDisplayAccount\(/, '切换成功路径缺乐观写 store.setDisplayAccount')
+  // 失败可见：inline 错误 + 回滚，静默 catch 即 FAIL。
+  assert.match(body[0], /switchErr\.value =/, '切换失败未落 inline 错误（静默吞掉 = 操作员看不见拒绝）')
+  assert.doesNotMatch(body[0], /catch \(\) => \{[^}]*\}\s*\)\s*$/, '静默 catch 复活 —— issue 561 要求可见提示')
+  // Header 与选中勾读 store 的 display 源，不再读私有 doc.active。
+  assert.doesNotMatch(switcher, /const active = computed\(\(\) => doc\.value\?\.active/, 'Header 仍读私有 doc.active —— 双状态双节拍回归')
+  assert.match(switcher, /const active = computed\(\(\) => store\.displayAccount/, 'Header 未接 store.displayAccount（唯一可信源）')
+  // 旧 account <id> 文本动词不再被面板调用（内核保留该动词，CLI/门禁兼容面）。
+  assert.doesNotMatch(body[0], /command\(`account \$\{id\}`\)|command\('account '/, 'switchTo 仍调用 account.switch 文本动词 —— issue 561 移除（会话格不再被面板触碰）')
 })
 
 // ── 5. the gateway proxy route ───────────────────────────────────────────────

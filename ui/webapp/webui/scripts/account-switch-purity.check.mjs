@@ -7,6 +7,19 @@
  *   「即使 UI 当前选中账户 B，账户 A 的策略 1 也必须在后台持续接收 Tick
  *     并交易」
  *
+ * issue 561 amendment (operator ruling 2026-10-20, verbatim:
+ * 「账户切换只保留唯一可信源 display account，行情 策略 风控 账户切换全部
+ * 跟随 display account」): the switch action IS the display write. The
+ * purity contract is UNCHANGED in spirit — the switch moment still touches
+ * NO trading/strategy surface — but its grammar moved: the one kernel write
+ * the switch path may speak is now `display.account.set` (via
+ * /api/display-account/set), replacing the old `account <id>` session-verb
+ * (the session cell is no longer touched by the panel at all; the kernel
+ * keeps the verb for CLI/gate compatibility). The old assertions pinning
+ * `account <id>`-as-the-only-verb and api.*-free are REWRITTEN to pin the
+ * new grammar; the purity teeth (no stop/disable/freeze/flatten/trading/
+ * strategies writes) survive verbatim.
+ *
  * Reverse acceptance — the following must be impossible on the UI:
  *   · switching the selected account pauses, disables, freezes or flattens
  *     the OTHER account's running strategies (切换 = 只换视图，不是急停钮).
@@ -14,12 +27,11 @@
  * What this gate pins (source-level, following the repo's .check.mjs teeth
  * pattern):
  *   1. AccountSwitcher's switchTo handler body is PURE view-context: the
- *      only kernel verb it speaks is `account <id>` (+ reads: accounts
+ *      only kernel write it speaks is the display write (+ reads: accounts
  *      refresh, store refresh). No stop / disable / freeze / flatten /
  *      trading-off / strategies-set call may appear anywhere in it.
- *   2. The switch path contains no api.* command calls at all — commands
- *      other than the bare `account <id>` switch belong to explicit user
- *      actions on rows, never to the switch moment.
+ *   2. No `account <id>` session verb on the switch path (issue 561: the
+ *      session cell is not the panel's business any more).
  *   3. The switcher's copy states the contract (切换不启停任何东西) so the
  *      operator reads the guarantee the code enforces.
  *
@@ -69,12 +81,22 @@ function switchToBody(src) {
   return src.slice(start, i + 1)
 }
 
-check('switchTo 只切视图上下文：唯一内核命令是 account <id> 本身', () => {
+check('switchTo 只切视图上下文：唯一内核写是 display 写（issue 561 语法）', () => {
+  // issue 561 改写旧断言（旧语法钉 `account <id>` 会话动词）：切换动作 =
+  // 写 display（api.displayAccountSet），不再触碰会话格。本断言继续挡
+  // /api/command 文本命令混进切换路径（trading/freeze 等都走 command）。
   const body = switchToBody(switcher)
   const commands = [...body.matchAll(/command\(([^)]*)\)/g)].map((m) => m[1])
-  assert.ok(
-    commands.length >= 1 && commands.every((c) => c.includes('`account ${id}`') || c.includes("'account '")),
-    `switchTo 里出现了 account 切换以外的内核命令：${commands.join(' | ')}`,
+  assert.equal(
+    commands.length, 0,
+    `switchTo 里出现了文本命令调用（切换只写 display，不走 /api/command）：${commands.join(' | ')}`,
+  )
+  // The one legal kernel write: the display write, awaited (a failed write
+  // is a failed switch — see display-account.check.mjs).
+  assert.match(
+    body,
+    /await api\.displayAccountSet/,
+    'switchTo 缺 display 写 —— issue 561 下切换动作就是写 display',
   )
 })
 
@@ -92,40 +114,37 @@ check('switchTo 不含任何启停/冻结/平仓/分配调用（reverse acceptan
   }
 })
 
-check('switchTo 无 api.* 命令面调用（切换时刻只读 + 切账户，不碰任何写动词）', () => {
+check('switchTo 不碰会话格（account <id> 会话动词已被 issue 561 移除）', () => {
   const body = switchToBody(switcher)
   assert.doesNotMatch(
     body,
-    /\bapi\.[A-Za-z]/,
-    'switchTo 直接调用了 api.* —— 切换时刻不应触碰命令面（读数走 refresh/store.refresh；显示账户写走 setDisplayAccount helper，issue 559）',
+    /command\(\s*[`'"]account[\s`'"]/,
+    'switchTo 仍调用 account.switch 文本动词 —— 会话格不再是面板的账户事实源（issue 561）',
   )
 })
 
-check('switchTo 的 display-account 写是纯视图事实（issue 559 裁决：写完不启停任何东西）', () => {
-  // issue 559: a successful switch also fires `display.account.set`
-  // (fire-and-forget) so the 行情页 identity follows the session account.
-  // The exemption is SCOPED: the verb may appear only through the named
-  // helper, and the helper must stay a pure display write — no trading /
+check('switchTo 的 display 写是纯视图事实（issue 561：写成功才乐观写 store）', () => {
+  // issue 561: the display write IS the switch. It stays scoped to the
+  // dedicated proxy method and remains display-only — no trading /
   // freeze / strategy surface may ride along with it.
   const body = switchToBody(switcher)
-  assert.match(body, /setDisplayAccount\(/, '切换成功路径缺显示账户写 —— 行情身份与切换器会错位（issue 559）')
+  assert.match(body, /await api\.displayAccountSet/, '切换主路径缺 display 写')
   assert.doesNotMatch(
     body,
-    /api\.displayAccountSet/,
-    'switchTo 内联调 api.displayAccountSet —— 显示账户写必须走独立 helper（保持切换路径可审计）',
+    /api\.displayAccountSet\s*\(\s*\{[\s\S]*?\}\s*\)\s*;?\s*\n\s*void/,
+    'display 写退回 fire-and-forget —— 失败必须可见（issue 561）',
   )
-  const helper = switcher.match(/function setDisplayAccount\(\)\s*: void \{[\s\S]*?\.catch[\s\S]*?\n\}/)
-    ?? switcher.match(/function setDisplayAccount\([^)]*\)\s*(?:: void)? \{[\s\S]*?\n\}/)
-  assert.ok(helper, '缺 setDisplayAccount helper')
-  assert.match(helper[0], /displayAccountSet/, 'helper 未走专用代理方法（/api/display-account/set 的前端面）')
-  assert.match(helper[0], /catch/, '显示账户写不是 fire-and-forget（失败会打断切换本身）')
-  // The helper is display-only: the trading/strategy surfaces stay banned.
+  assert.match(body, /store\.setDisplayAccount\(/, '切换成功路径缺乐观写 store.setDisplayAccount')
+  assert.match(body, /switchErr\.value\s*=/, '切换失败未落 inline 错误（静默吞掉）')
+  // display 写是纯显示事实：交易/冻结/策略面不得顺路。
   for (const re of [/trading/i, /freeze/i, /flatten/i, /strategies/i, /setStrategy/]) {
-    assert.doesNotMatch(helper[0], re, `setDisplayAccount 里混进了非显示写动词（匹配 ${re}）—— issue 559 的豁免被滥用`)
+    const line = body.split('\n').find((l) => l.includes('displayAccountSet'))
+    assert.ok(line, '缺 display 写行')
+    assert.doesNotMatch(line, re, `display 写行混进了非显示写动词（匹配 ${re}）—— 纯视图合同被滥用`)
   }
 })
 
-check('switchTo 的写路径只有切账户命令；其余是读数（refresh + store.refresh）', () => {
+check('switchTo 的写路径只有 display 写；其余是读数（refresh + store.refresh）', () => {
   const body = switchToBody(switcher)
   assert.match(body, /await refresh\(\)/, '切换后未刷新账户读数')
   assert.match(body, /store\.refresh\(\)/, '切换后未刷新 store（视图上下文不完整）')
