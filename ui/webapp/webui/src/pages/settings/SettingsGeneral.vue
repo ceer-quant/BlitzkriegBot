@@ -209,6 +209,8 @@ async function resetRound(): Promise<void> {
 onMounted(loadRound)
 
 // ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
+// issue 561（裁决 2）：重置按账户隔离 —— 显式携带面板 display 账户（唯一可
+// 信源），重置只清洗该账户的账簿/挂单/持仓/记录，其他账户分文不动。
 const resetOpen = ref(false)
 const resetBusy = ref(false)
 const resetErr = ref<string | null>(null)
@@ -222,13 +224,14 @@ async function doResetTrading(): Promise<void> {
     const res = await api.systemResetTrading({
       confirm: 'RESET',
       reason: 'webui 面板（交易环境重置卡）',
+      accountId: usePanelStore().activeAccount ?? undefined,
     })
     if (res.error) {
       resetErr.value = res.error
     } else {
       resetResult.value = res
       const b = res.balances[0]?.[1] ?? '?'
-      resetMsg.value = `已重置：停用 ${res.disabledStrategies.length} 个策略、撤销 ${res.cancelledOrders} 张挂单、清空 ${res.clearedClosedTrades} 条成交记录，现金已复原到 ${b}。动作已写入 manual-ops 审计。`
+      resetMsg.value = `已重置账户 ${res.accountId}：停用 ${res.disabledStrategies.length} 个策略、撤销 ${res.cancelledOrders} 张挂单、清空 ${res.clearedClosedTrades} 条成交记录，现金已复原到 ${b}。其他账户不受影响。动作已写入 manual-ops 审计。`
     }
   } catch (e) {
     resetErr.value = e instanceof Error ? e.message : String(e)
@@ -396,10 +399,10 @@ async function doResetTrading(): Promise<void> {
 
       <div class="flex items-start justify-between gap-3">
         <div>
-          <div class="text-[12.5px] font-semibold">清空本地交易历史并复原虚拟资金</div>
+          <div class="text-[12.5px] font-semibold">清空当前账户的交易历史并复原虚拟资金</div>
           <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
-            停用全部已启用策略 → 撤销全部挂单 → 清空订单/成交/持仓记录 → 按配置 seed 复原现金。
-            配置、策略文件、审计流与策略启用状态保留；动作写入 manual-ops 审计（含重置前快照）。
+            对当前显示账户：停用其已启用策略 → 撤销其挂单 → 清空其订单/成交/持仓记录 → 按配置 seed 复原其现金。
+            其他账户与配置、策略文件、审计流、策略启用状态一律保留；动作写入 manual-ops 审计（含重置前快照与账户范围）。
             仅 DRY/模拟盘可用 —— 实盘模式下内核拒绝。
           </p>
         </div>
@@ -417,9 +420,9 @@ async function doResetTrading(): Promise<void> {
       word="RESET"
       title="交易环境重置"
       :lines="[
-        '停用全部已启用策略（重启后不会自动恢复）',
-        '撤销全部 resting 挂单，清空订单/成交/持仓记录（不可恢复）',
-        '每个账户的现金复原到配置 seed 值',
+        '只重置当前显示账户：停用其已启用策略（重启后不会自动恢复）',
+        '撤销该账户全部 resting 挂单，清空其订单/成交/持仓记录（不可恢复）',
+        '该账户的现金复原到配置 seed 值；其他账户分文不动',
         '保留：配置、策略文件、全部审计流；动作写入 manual-ops 审计',
         '实盘模式下内核会拒绝执行',
       ]"

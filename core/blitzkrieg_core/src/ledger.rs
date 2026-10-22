@@ -381,6 +381,62 @@ impl Ledger {
         let target = seed.max(Decimal::ZERO);
         self.apply(JournalKind::Reset, target - self.balance, "reset");
     }
+
+    /// issue 561 账户维重置原语：把这本账簿「翻新」为一次刚落地的重置 ——
+    /// 余额回种子、BUY 预留表清空、cash journal 收缩为恰好一行 `Reset` 行
+    /// （balanceAfter = 种子）。三条理由钉死这个语义（缺一不可）：
+    ///
+    /// 1. boot 回放以「末行 balance_after」恢复开局余额，且任意账户有
+    ///    journal 就整表跳过 seed_all —— 留下旧流水（即使末行是 Reset 行）
+    ///    意味着每次重启都把 pre-reset 的全部成交流水带回内存 trail，操作
+    ///    者在 account.journal 里还能读到已被重置抹掉的交易；重写成单行后
+    ///    回放 == 种子，与 ResetTradingResult 自检断言逐字一致。
+    /// 2. 不能截成空文件：同簿多账户部署里其他账户仍有 journal，
+    ///    `any_journal_on_disk` 依旧为真，被清账户重启时既不回放也不
+    ///    seed，余额落到 0。单行 Reset 行让该账户在任何 boot 组合下都
+    ///    自恢复到种子。
+    /// 3. Reset 行（不是无行）保留「环境被重置」这一审计事实：append-only
+    ///    语义在账户维收缩为「重写为重置时刻的单行快照」，而非抹除痕迹。
+    ///
+    /// 返回 false 仅当磁盘重写失败（内存态照常翻新 —— 内存是权威，调用方
+    /// 决定是否告警），与 `jsonl::rewrite_atomic` 的契约一致。
+    pub fn reset_account_to_seed(&mut self, seed: Decimal) -> bool {
+        let target = seed.max(Decimal::ZERO);
+        self.reservations.clear();
+        self.balance = target;
+        self.journal.clear();
+        let entry = JournalEntry {
+            at_ms: now_ms(),
+            kind: JournalKind::Reset,
+            amount: target,
+            balance_after: target,
+            ref_: "reset".to_string(),
+        };
+        if let Some(path) = self.journal_path.clone() {
+            match serde_json::to_vec(&entry) {
+                Ok(mut bytes) => {
+                    bytes.push(b'\n');
+                    if !crate::jsonl::rewrite_atomic(&path, &bytes) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "issue 561: account journal rewrite failed — \
+                             the on-disk trail keeps pre-reset rows; the next \
+                             boot replay would restore them"
+                        );
+                        self.journal.push_back(entry);
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "issue 561: account journal row serialize failed");
+                    self.journal.push_back(entry);
+                    return false;
+                }
+            }
+        }
+        self.journal.push_back(entry);
+        true
+    }
 }
 
 /// Market-agnostic reservation lifecycle (see `ledger_api`). The core pipeline
@@ -712,6 +768,49 @@ mod tests {
         restored.credit_cashflow(dec!(3), "rebate");
         let tail = restored.journal_snapshot().pop().unwrap();
         assert_eq!(tail.balance_after, dec!(79));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// issue 561: 账户维重置原语的三条不变量 —— 余额/预留归位、内存 trail
+    /// 恰一行 Reset、磁盘重写后一次全新回放恢复的 balance == 种子（重置
+    /// 自检的同一断言，跨 boot 成立）。
+    #[test]
+    fn account_reset_rewrites_the_journal_to_one_reset_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-ledger-acct-reset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("default.journal.jsonl");
+        let mut l = Ledger::new();
+        l.set_journal_path(path.clone());
+        l.seed(dec!(1000));
+        l.reserve("o1", dec!(40)).unwrap();
+        l.settle_buy_fill("o1", dec!(30), dec!(40));
+        l.settle_sell_fill(dec!(21), dec!(1));
+        assert_eq!(l.balance(), dec!(990));
+        assert!(l.reset_account_to_seed(dec!(1000)));
+        assert_eq!(l.balance(), dec!(1000), "balance back on the seed");
+        assert_eq!(l.reserved(), Decimal::ZERO, "reservations cleared");
+        let rows = l.journal_snapshot();
+        assert_eq!(rows.len(), 1, "the trail is exactly the reset row");
+        assert_eq!(rows[0].kind, JournalKind::Reset);
+        assert_eq!(rows[0].balance_after, dec!(1000));
+        assert!(l.is_balanced());
+
+        // Boot replay over the rewritten file: opening balance == seed, the
+        // same invariant the reset self-check asserts in-process.
+        let mut restored = Ledger::new();
+        restored.replay_journal(crate::jsonl::load::<JournalEntry>(
+            &path,
+            "ledger journal: skipped unparseable lines",
+        ));
+        assert_eq!(restored.balance(), dec!(1000), "replay == seed");
+        assert_eq!(restored.journal_snapshot().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

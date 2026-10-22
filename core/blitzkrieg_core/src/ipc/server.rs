@@ -1488,7 +1488,12 @@ async fn handle_line(
 
         // #458 交易环境重置：三道门（Live / 确认词 / 审计路径）都在内核
         // 方法里，派发层只做 actor 归因。回执携带自检后的余额与清理计数。
+        // issue 561: 缺省账户在 RAW params 上判定（与 ORDER_PLACE 同一
+        // 纪律）—— 省略 accountId = 本连接缺省（session → display → 进程
+        // default，经 effective_default_account 链）；显式 id 照字面执行，
+        // 永不被会话格改写。重置按账户隔离，不再整簿抹除。
         method::SYSTEM_RESET_TRADING => {
+            let explicit_account = params.get("accountId").is_some();
             typed(params, |p: ResetTradingParams| {
                 let core = core.clone();
                 async move {
@@ -1496,6 +1501,15 @@ async fn handle_line(
                         PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                         _ => "uid:unknown".to_string(),
                     };
+                    let mut p = p;
+                    if !explicit_account {
+                        let c = core.lock().await;
+                        p.account_id = Some(
+                            effective_default_account(session, c.accounts())
+                                .as_str()
+                                .to_string(),
+                        );
+                    }
                     let result = core.lock().await.reset_trading(&p, &actor, now_ms())?;
                     Ok(serde_json::to_value(result).unwrap_or(Value::Null))
                 }
@@ -5736,6 +5750,14 @@ mod tests {
             serde_json::json!("10000"),
             "the cash is re-seeded to the configured seed: {reset}"
         );
+        // issue 561: the reply names the reset scope — an omitted accountId
+        // resolves through the connection default (this peer has no session
+        // cell, so the display account `default`).
+        assert_eq!(
+            reset["result"]["accountId"],
+            serde_json::json!("default"),
+            "the reply names the account the reset wiped: {reset}"
+        );
         assert!(
             reset["result"]["clearedOpenPositions"]
                 .as_i64()
@@ -5793,6 +5815,13 @@ mod tests {
                 .unwrap_or_default()
                 .starts_with("uid:"),
             "the audit line carries the peer actor: {rec}"
+        );
+        // issue 561: the audit line records WHICH account the wipe hit — the
+        // only trace left once the records are gone must scope itself.
+        assert_eq!(
+            rec["account"],
+            serde_json::json!("default"),
+            "the audit line names the reset scope: {rec}"
         );
         assert!(
             rec["pre"].is_object(),
