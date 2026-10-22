@@ -340,10 +340,22 @@ const legBCred = computed<LegCredStatus | null>(() =>
   legBVenue.value ? legCredStatus(legBVenue.value) : null,
 )
 
+/** 运行模式（快照顶层 mode；缺省读 dry —— 与各页面 isDry 同一谓词）。
+ *  凭证门是 LIVE 语义：内核 arb_precheck 的凭证门包在 `mode.may_trade()`
+ *  里（dry 模式不拦、策略照跑模拟成交），面板无条件拦是超owner ——
+ *  dry 下创建不得被「腿凭证未就绪」挡（dry run 不需要账户凭证），
+ *  live 下维持原门。 */
+const isDry = computed(() => (store.snapshot?.mode ?? 'dry') === 'dry')
+
+/** dry 模式的凭证门豁免（有名字的独立谓词）：两腿凭证本就绪时豁免无感；
+ *  未就绪时确认页照列缺失变量（切 live 前操作员仍需读到），只是不再阻断。 */
+const dryCredExempt = computed(() => isDry.value)
+
 /** 明确 ready=false 的腿（创建按钮禁用判据 —— 保守方向：明确未就绪不许过）。
  *  行查不到（unknown）= 未知 —— 不阻断，确认页的「凭证按交易所全局环境
- *  变量」披露兜底。 */
+ *  变量」披露兜底。dry 模式豁免（见 isDry 注释）——内核同门只对 live 生效。 */
 const credBlocked = computed(() =>
+  !dryCredExempt.value &&
   [legACred.value, legBCred.value].some((leg) => leg && !leg.unknown && !leg.ready),
 )
 
@@ -730,7 +742,10 @@ function credLabel(leg: LegCredStatus | null): string {
             <div>
               <span class="label-micro">凭证就绪（提交前校验）</span>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px] leading-relaxed">
-                <div v-if="credReadFailed" class="text-muted-fg">
+                <div v-if="isDry && !credReadFailed && credRows?.some((r) => !r.ready)" class="text-muted-fg">
+                  Dry 模式：凭证门不生效（内核同门只对 live 拦）—— 两腿凭证未就绪照实列出（{{ credRows.filter((r) => !r.ready).map((r) => r.plugin).join('、') }}），切 Live 前需补齐。
+                </div>
+                <div v-else-if="credReadFailed" class="text-muted-fg">
                   凭证读数读取失败，无法验证两腿凭证就绪 —— 提交不因此阻断，但执行器可能因缺凭证 inert（挂单无人拉取）。
                 </div>
                 <div v-else-if="credBlocked" class="text-down">

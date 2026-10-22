@@ -169,6 +169,34 @@ check('老内核降级面：只读提示 + 禁用创建，不降级为单账户�
   )
 })
 
+// ── dry 模式凭证豁免 ─────────────────────────────────────────────────────────
+// 凭证门是 LIVE 语义（执行器拉单要凭据）；内核 arb_precheck 的凭证门本就
+// 包在 `mode.may_trade()` 里（dry 模式不拦），前端无条件拦是面板超owner。
+// dry 模式下创建不得被「腿凭证未就绪」阻断 —— 但披露保留（切 live 前还
+// 是要看）。
+check('dry 模式豁免：凭证门判据必须先看运行模式（may_trade 同形）', () => {
+  assert.match(
+    dialog,
+    /isDry/,
+    '弹窗缺 isDry 派生 —— 凭证门无从感知运行模式',
+  )
+  assert.match(
+    dialog,
+    /dryCredExempt/,
+    '缺 dryCredExempt 判据 —— dry 豁免必须是有名字的独立谓词，不许内联进 credBlocked',
+  )
+  assert.match(
+    dialog,
+    /credBlocked[\s\S]*?dryCredExempt|dryCredExempt[\s\S]*?credBlocked/,
+    'credBlocked 判据未消费 dryCredExempt',
+  )
+  assert.match(
+    dialog,
+    /Dry 模式|dry 模式/,
+    '缺 dry 模式下的门语义披露（确认页必须说明门只对 live 生效）',
+  )
+})
+
 // ── wire 面 ─────────────────────────────────────────────────────────────────
 check('client.ts 提供 arbConfigGet / arbConfigSet 专用代理封装', () => {
   assert.match(client, /arbConfigGet:\s*\(\)\s*=>\s*request<ArbConfigDoc>\('\/arb-config'\)/, '缺 arbConfigGet')
