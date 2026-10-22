@@ -83,46 +83,74 @@ export const usePanelStore = defineStore('panel', () => {
   const blueprintPreload = ref<string | null>(null)
 
   /**
-   * E28 (§9.5) 镜像：本面板连接的默认账户（id）与账户簿（account.list 的行）。
-   * 唯一写入方是 AccountSwitcher（`accounts` / `account <id>` 走 /api/command，
-   * 与 TUI 命令条同一命令面）——这里只是读取视图，页面据此标注「这屏数字属于
-   * 哪个账户」。切账户不持久：进程重启回到内核配置的初始账户，所以 readback
-   * 为 null 时渲染「未知」而不是猜 `default`。
+   * issue 561（2026-10-20 操作者裁决）：display account 升格为面板唯一
+   * 账户事实源 —— 切换动作 = 写 display；一切消费点（Header、行情过滤、
+   * 策略归属、流水卡）读 display。内核侧缺省解析链同步改为
+   * session → display → 进程 default（ipc/server.rs 的
+   * effective_default_account），因此账户级聚合读数（trades.summary /
+   * engine.stats 带 accountId）也按 display 走。
+   *
+   * 事实来源按优先级：快照顶层的 displayAccount/displayVenue（内核的
+   * display_account 独立事实，2s/15s 轮询每拍带回）> refreshAccounts 镜像
+   * （account.list 回执的 displayAccount，快照未到前先有一拍）> null
+   * （两者都没到，渲染「未知」而不是猜 `default`）。
    */
-  const activeAccount = ref<string | null>(null)
+  const displayAccount = ref<string>('')
+  const displayVenue = ref<string>('')
   const accounts = ref<PanelAccountRow[]>([])
 
-  function setAccounts(active: string, rows: PanelAccountRow[]): void {
-    activeAccount.value = active
+  /**
+   * setAccounts：AccountSwitcher 与 refreshAccounts 的镜像入口。行数据
+   * （账户簿）始终镜像更新；display id 只在快照尚未说话时兜底采纳
+   * （快照在场 = 内核说了话，镜像不得降格覆盖它）。写动作本身只经
+   * `setDisplayAccount`。
+   */
+  function setAccounts(active: string, rows: PanelAccountRow[], mirrorDisplay?: string): void {
+    const snapshotInForce = snapshot.value?.displayAccount !== undefined
+    if (!snapshotInForce) {
+      if (mirrorDisplay) displayAccount.value = mirrorDisplay
+      else if (active && !displayAccount.value) displayAccount.value = active
+    }
     accounts.value = rows
   }
 
   /**
-   * active 账户的绑定 venue（''/undefined = 未绑定，可交易任意交易所）。
-   * 行情页的 venue 过滤是这里的纯派生 —— 账户切换器就是交易所切换器，
-   * 页面不另设 venue 控件（账户↔venue 配对卡的下游跟随者）。
+   * issue 561：切户的乐观写（唯一写方 AccountSwitcher.switchTo，且只在
+   * display.account.set 成功后调用）。venue 由 account.list 行派生（行未
+   * 到时空串占位，下一拍快照带回内核读数）。
+   */
+  function setDisplayAccount(id: string): void {
+    displayAccount.value = id
+    displayVenue.value = accounts.value.find((a) => a.id === id)?.venue ?? ''
+  }
+
+  /**
+   * issue 561：display 账户的绑定 venue（''/undefined = 未绑定，可交易任
+   * 意交易所）。行情页的 venue 过滤是这里的纯派生 —— 账户切换器就是交易
+   * 所切换器，页面不另设 venue 控件（账户↔venue 配对卡的下游跟随者）。
+   * 源：快照 displayVenue（内核读数，优先）→ account.list 行派生。
    */
   const activeAccountVenue = computed(() => {
-    const id = activeAccount.value
+    if (snapshot.value?.displayVenue !== undefined) {
+      return snapshot.value?.displayVenue ?? ''
+    }
+    const id = displayAccount.value
     if (!id) return ''
     return accounts.value.find((a) => a.id === id)?.venue ?? ''
   })
 
-  /** active 账户的行（账户级余额瓦片读它的 balance/available/reserved）。 */
+  /** display 账户的行（账户级余额瓦片读它的 balance/available/reserved）。 */
   const activeAccountRow = computed(() => {
-    const id = activeAccount.value
+    const id = displayAccount.value
     if (!id) return null
     return accounts.value.find((a) => a.id === id) ?? null
   })
 
-  // ── 显示账户（issue 559）──────────────────────────────────────────────────
-  // 「行情页显示谁的市场」的唯一事实源：内核快照顶层的 displayAccount /
-  // displayVenue（display_account 持久化 + 运行时生效的读数）。这里只是
-  // 快照的读取视图 —— 没有任何写方，也没有额外拉取（快照每拍已带上
-  // displayVenue，AccountSwitcher 写完 display.account.set 后下一拍自然
-  // 到达）。缺字段（老内核 / 未设置过）= '' ，页面回落账户绑定链。
-  const displayAccount = computed(() => snapshot.value?.displayAccount ?? '')
-  const displayVenue = computed(() => snapshot.value?.displayVenue ?? '')
+  // ── 兼容读数（issue 561 迁移期）──────────────────────────────────────────
+  // activeAccount/displayAccount 曾是两套事实（会话格 vs 显示指针）；
+  // display 升格唯一可信源后二者同指一格，统一从 displayAccount 出。保留
+  // activeAccount 名字让既有消费点逐字不动（页面渐进迁移，不留双源双节拍）。
+  const activeAccount = computed<string | null>(() => displayAccount.value || null)
 
   function requestNav(tab: string): void {
     navRequest.value = { tab }
@@ -254,6 +282,7 @@ export const usePanelStore = defineStore('panel', () => {
       if (!out.ok || !out.data) return
       const doc = out.data as {
         active?: string
+        displayAccount?: string
         accounts?: Array<{
           id: string
           name: string
@@ -278,10 +307,14 @@ export const usePanelStore = defineStore('panel', () => {
         strategies: Array.isArray(a.strategies) ? [...(a.strategies as string[])] : undefined,
         reserved: a.reserved ?? '',
       }))
-      // active id：回执带就用回执的；没带（老内核）保留现值 —— 活跃账户
-      // 是会话事实，读数缺失时不发明。
-      const active = typeof doc.active === 'string' && doc.active ? doc.active : activeAccount.value
-      setAccounts(active ?? '', rows)
+      // issue 561：镜像只供行数据与显示兜底 —— display 账户优先读快照
+      // （内核事实），报文的 displayAccount 在场也采纳（快照未到的一拍）；
+      // 旧报文的 `active`（会话格语义）不再作为显示源。
+      const mirrorDisplay =
+        typeof doc.displayAccount === 'string' && doc.displayAccount
+          ? doc.displayAccount
+          : displayAccount.value
+      setAccounts(mirrorDisplay ?? '', rows, mirrorDisplay || undefined)
     } catch {
       // 静默：与 noteOutcome 的降级纪律一致 —— 读数失败不退登录态、不清行。
     }
@@ -294,7 +327,9 @@ export const usePanelStore = defineStore('panel', () => {
       // PR H: the account-scoped aggregates ride their own proxy routes
       // beside the snapshot. `acct` absent = 全局面板 —— 两条读数置空，页面
       // 回落 snapshot 值（单账户部署与老面板逐字节一致）。
-      const acct = activeAccount.value ?? undefined
+      // issue 561: `acct` 跟随 display 账户（唯一可信源）——聚合读数与页
+      // 面过滤同源，不再有「Header 一样、数字两套」的双节拍。
+      const acct = displayAccount.value || undefined
       const [snap, plug, accSummary, accStats, acctList] = await Promise.allSettled([
         api.snapshot(),
         api.plugins(),
@@ -304,6 +339,17 @@ export const usePanelStore = defineStore('panel', () => {
       ])
       if (snap.status === 'fulfilled') {
         snapshot.value = snap.value
+        // issue 561: 快照顶层的 displayAccount/displayVenue 是内核的账户
+        // 事实 —— 轮询每拍镜像（乐观写在两拍之间由 setDisplayAccount 维
+        // 持，快照到达后以内核读数为准）。缺字段（老内核）保留现值。
+        const snapDisplay = snap.value.displayAccount
+        if (typeof snapDisplay === 'string' && snapDisplay) {
+          displayAccount.value = snapDisplay
+          displayVenue.value =
+            snap.value.displayVenue ??
+            accounts.value.find((a) => a.id === snapDisplay)?.venue ??
+            ''
+        }
         const progress = feedProgress(snap.value.stats?.books, snap.value.stats?.tops)
         if (progress !== lastProgress) {
           lastProgress = progress
@@ -334,7 +380,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
-    activeAccount, accounts, setAccounts, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow,
+    activeAccount, accounts, setAccounts, setDisplayAccount, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow,
     displayAccount, displayVenue,
     accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,

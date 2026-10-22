@@ -51,13 +51,14 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const props = defineProps<{
   open: boolean
-  /** 当前面板的 default 账户 id（store.activeAccount；null = 老面板/单账户）。
-   *  段0 选择器的初始值——没有更高的事实源，操作员可改选。 */
+  /** 当前显示账户 id（issue 561：面板唯一可信账户源；store.activeAccount
+   *  是它的兼容读数；null = 老面板/单账户）。段0 选择器的初始值——没有
+   *  更高的事实源，操作员可改选。 */
   activeAccountId: string | null
   /**
-   * default 账户的绑定 venue（''/undefined = 未绑定）。会话事实已由
-   * store.activeAccountVenue 派生；弹窗对**选中**的执行账户另走
-   * account.venue.get 复核绑定读数 —— 两处不一致时以内核读数为准。
+   * 显示账户的绑定 venue（''/undefined = 未绑定）。store.activeAccountVenue
+   * 已 display 优先派生；弹窗对**选中**的执行账户另走 account.venue.get
+   * 复核绑定读数 —— 两处不一致时以内核读数为准。
    */
   activeVenue: string
 }>()

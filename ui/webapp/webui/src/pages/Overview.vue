@@ -99,10 +99,12 @@ const balanceTitle = computed(() => {
 })
 
 /**
- * E28 (§9.5): WHICH account this tile's figures belong to. The switcher's
- * `accounts` fetch mirrors the book into the store; the name comes along so
- * the tile can read 「default · 实盘主账户」 instead of a bare id. Unfetched
- * (or a pre-switcher mount race) renders nothing — never a guessed `default`.
+ * E28 (§9.5) + issue 561: WHICH account this tile's figures belong to — the
+ * DISPLAY account (面板唯一可信源；store.activeAccount 是它的兼容读数).
+ * The switcher's `accounts` fetch mirrors the book into the store; the name
+ * comes along so the tile can read 「default · 实盘主账户」 instead of a bare
+ * id. Unfetched (or a pre-switcher mount race) renders nothing — never a
+ * guessed `default`.
  */
 const accountBadge = computed(() => {
   const id = store.activeAccount
@@ -112,7 +114,7 @@ const accountBadge = computed(() => {
 })
 
 const round = computed(() => snap.value?.round ?? null)
-// E28 (§9.5): the 当前持仓 table is scoped to the session's default account
+// E28 (§9.5) + issue 561: the 当前持仓 table is scoped to the display account
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
 // The balance tile above is deliberately NOT account-filtered — the kernel's
 // `ledger.balance` reads the process-level active book, and pretending
