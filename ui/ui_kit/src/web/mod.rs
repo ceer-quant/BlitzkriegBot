@@ -2420,6 +2420,23 @@ impl WebServer {
                 // and the panel falls back to the account-binding chain.
                 self.proxy_backtest_body("display.account.set", &req.body)
             }
+            ("GET", "/api/arb-config") => {
+                // 跨所套利创建（合同 v1）：双腿配置读 —— `arb.config.get`
+                // 的薄代理（只读，无参数）。configured=false = 未配置；
+                // 老内核不认识该动词时错误照包（`error` 带 rpc -32601 字样）
+                // —— 面板据此 feature-detect 降级，网关不代答、不shape。
+                self.proxy_backtest("arb.config.get", serde_json::json!({}))
+            }
+            ("POST", "/api/arb-config/set") => {
+                // 跨所套利创建（合同 v1）：双腿配置写 —— body 即
+                // `arb.config.set` 的 params 对象（`{version, legAVenue,
+                // legAAccount, legBVenue, legBAccount, pairs}`），逐字转发
+                // （同 account-venue/set 的纪律：网关零加工）。B≠A（venue 与
+                // 账户两个维度）的校验在内核是 APPLICATION 错误，消息点名
+                // 非法字段 —— 原样过线给弹窗转述。持久化（accounts.toml）
+                // 在内核侧，网关零持久化职责。
+                self.proxy_backtest_body("arb.config.set", &req.body)
+            }
             ("POST", "/api/account-trading/set") => {
                 // 多账户扇出（PR B of #518）：交易开关写 —— body 即
                 // `account.trading.set` 的 params 对象

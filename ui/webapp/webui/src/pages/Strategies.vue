@@ -19,8 +19,8 @@
  * 跳转走 store 的 navRequest —— 页签是 App 壳的资产，页面只提请求。
  *
  * 创建套利（2026-10）：跨所配对卡从插件页迁出后，「创建套利」弹窗是本页的
- * 第二个创建入口 —— 确认跨所映射、预设 cross_venue_arb 参数并启用该策略
- * （组件不选账户：双腿由内核在同一账户原子执行）。
+ * 第二个创建入口 —— 配置双腿意图（A 腿 + B 腿 + 币对多选）、预设
+ * cross_venue_arb 参数并启用该策略（配置意图模型，创建即持久化）。
  */
 import { computed, ref } from 'vue'
 import { AlertTriangle, ChevronDown, Link2, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
@@ -226,14 +226,14 @@ function editStrategy(name: string): void {
   store.requestNav('blueprint')
 }
 
-// ── 创建套利（2026-10）：确认跨所映射 + 预设参数 + 启用 cross_venue_arb ──────
-// 弹窗自取 unified 读数；这里只提供 default 账户的绑定读数（venue 守卫警告
-// 需要它）并在提交后刷新整屏（新策略行、参数、启用状态都在 store 读数里）。
+// ── 创建套利（2026-10）：配置双腿意图 + 预设参数 + 启用 cross_venue_arb ──────
+// 弹窗自取 arb.config.get / 凭证读数；这里提供 default 账户的绑定读数（弹窗
+// 段0 的预填提示）并在提交后刷新整屏（配置读数、参数、启用状态都在 store）。
 const arbOpen = ref(false)
 async function onArbCommitted(): Promise<void> {
   arbFlash.value = {
     ok: true,
-    msg: 'cross_venue_arb 已确认映射并启用 —— 表格里的策略行即生效读数。',
+    msg: 'cross_venue_arb 双腿配置已写入并启用 —— 表格里的策略行即生效读数。',
   }
   setTimeout(() => { arbFlash.value = null }, 6000)
   await store.refresh()
@@ -395,9 +395,9 @@ function onExpand(name: string): void {
           <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy">
             <Plus class="size-3.5" />创建策略
           </Button>
-          <!-- 创建套利：确认跨所映射并启用 cross_venue_arb（映射确认自插件页
-               跨所配对卡迁入弹窗；不做账户选择 —— 双腿由内核同一账户原子执行）。 -->
-          <Button variant="outline" size="sm" title="确认跨所映射并启用 cross_venue_arb 策略" @click="arbOpen = true">
+          <!-- 创建套利：配置双腿意图（A 腿 + B 腿 + 币对）并启用 cross_venue_arb
+               （配置意图模型，创建即持久化；弹窗内自取配置与凭证读数）。 -->
+          <Button variant="outline" size="sm" title="配置双腿套利并启用 cross_venue_arb 策略" @click="arbOpen = true">
             <Link2 class="size-3.5" />创建套利
           </Button>
         </template>
@@ -696,7 +696,8 @@ function onExpand(name: string): void {
       </div>
     </Card>
 
-    <!-- 创建套利弹窗：default 账户绑定读数由 store 提供（venue 守卫警告）。 -->
+    <!-- 创建套利弹窗：default 账户绑定读数由 store 提供（段0 账户下拉的
+         预填提示；裁决与校验都在弹窗与内核，页面不复制）。 -->
     <CreateArbDialog
       v-model:open="arbOpen"
       :active-account-id="store.activeAccount"
