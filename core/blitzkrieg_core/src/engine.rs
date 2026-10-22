@@ -2349,6 +2349,16 @@ impl Engine {
             .collect()
     }
 
+    /// issue 561 账户维重置：全部 (account, strategy) scope 对，注册序。
+    /// 重置分支据此枚举目标账户的 scopes（停用其已启用者），不需要预先
+    /// 知道策略名 —— 全量对先拿到再说。
+    pub fn strategy_scopes_all(&self) -> Vec<(String, String)> {
+        self.strategies
+            .iter()
+            .map(|s| (s.account_id.clone(), s.strategy.name().to_string()))
+            .collect()
+    }
+
     /// The (account, strategy) pairs currently demoted exits-only — the
     /// held-position safety net's live state, for diagnostics and tests.
     pub fn exits_only_scopes(&self) -> Vec<(String, String)> {

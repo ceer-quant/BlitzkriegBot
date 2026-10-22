@@ -946,6 +946,33 @@ struct SessionState {
     >,
 }
 
+/// The DEFAULT-account resolution chain for every wire verb that needs an
+/// account when the request does not NAME one (issue 561, operator ruling
+/// 2026-10-20): session → display → process default. The display pointer is
+/// the panel's single trusted account source, so a fresh connection (no
+/// session cell — the dispatcher's 3s reconnect wipes it) follows the panel's
+/// display account instead of silently falling back to the process default
+/// while the header keeps showing the display account. A session cell that
+/// IS set (a CLI / gate explicitly ran `account.switch` on this connection)
+/// still wins — that is the backward-compatible layer.
+///
+/// `ledgers` supplies the fallbacks; the display pointer's invariant
+/// (always names a configured account) makes the tail unreachable only in
+/// pathological states, hence the expect with a loud message.
+fn effective_default_account(
+    session: &SessionState,
+    ledgers: &crate::account::AccountLedgers,
+) -> AccountId {
+    if let Some(id) = &session.session_active {
+        return id.clone();
+    }
+    let display = AccountId::from(ledgers.display_id());
+    if ledgers.account(&display).is_some() {
+        return display;
+    }
+    ledgers.active_id().clone()
+}
+
 #[allow(clippy::too_many_arguments)] // one shared-context param per subsystem arm
 async fn handle_line(
     core: &Arc<AsyncMutex<Core>>,
@@ -1462,7 +1489,12 @@ async fn handle_line(
 
         // #458 交易环境重置：三道门（Live / 确认词 / 审计路径）都在内核
         // 方法里，派发层只做 actor 归因。回执携带自检后的余额与清理计数。
+        // issue 561: 缺省账户在 RAW params 上判定（与 ORDER_PLACE 同一
+        // 纪律）—— 省略 accountId = 本连接缺省（session → display → 进程
+        // default，经 effective_default_account 链）；显式 id 照字面执行，
+        // 永不被会话格改写。重置按账户隔离，不再整簿抹除。
         method::SYSTEM_RESET_TRADING => {
+            let explicit_account = params.get("accountId").is_some();
             typed(params, |p: ResetTradingParams| {
                 let core = core.clone();
                 async move {
@@ -1470,6 +1502,15 @@ async fn handle_line(
                         PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                         _ => "uid:unknown".to_string(),
                     };
+                    let mut p = p;
+                    if !explicit_account {
+                        let c = core.lock().await;
+                        p.account_id = Some(
+                            effective_default_account(session, c.accounts())
+                                .as_str()
+                                .to_string(),
+                        );
+                    }
                     let result = core.lock().await.reset_trading(&p, &actor, now_ms())?;
                     Ok(serde_json::to_value(result).unwrap_or(Value::Null))
                 }
@@ -1492,10 +1533,9 @@ async fn handle_line(
                     let mut c = core.lock().await;
                     let mut order = p.order;
                     if !explicit_account {
-                        order.account_id = session
-                            .session_active
-                            .clone()
-                            .unwrap_or_else(|| c.accounts().active_id().clone());
+                        // issue 561: 缺省解析走统一 helper（session → display
+                        // → 进程 default），display 是面板唯一可信账户源。
+                        order.account_id = effective_default_account(session, c.accounts());
                     }
                     // `place_outcome`, not `place`: when the kernel refuses the leg
                     // itself (a dry taker the book cannot fill) the result carries
@@ -3060,10 +3100,10 @@ async fn handle_line(
         // wire. Two panels can therefore look at two accounts side by side.
         method::ACCOUNT_LIST => {
             let c = core.lock().await;
-            let active = session
-                .session_active
-                .clone()
-                .unwrap_or_else(|| c.accounts().active_id().clone());
+            // issue 561: `active` 字段同样走统一缺省链（session → display →
+            // 进程 default）—— 它是快照账户语义的报文面，必须与页面消费的
+            // display 源一致；进程 default 只在链条尾部落位。
+            let active = effective_default_account(session, c.accounts());
             let mut body = serde_json::to_value(AccountListResult {
                 version: PROTOCOL_VERSION.to_string(),
                 active: active.as_str().to_string(),
@@ -3154,10 +3194,9 @@ async fn handle_line(
             let p: AccountVenueGetParams = serde_json::from_value(params)
                 .unwrap_or(AccountVenueGetParams { account_id: None });
             let c = core.lock().await;
-            let active = session
-                .session_active
-                .clone()
-                .unwrap_or_else(|| c.accounts().active_id().clone());
+            // issue 561: 缺省链与 account.list 同源（session → display →
+            // 进程 default），两份报文的 active 语义不再分叉。
+            let active = effective_default_account(session, c.accounts());
             let rows: Vec<AccountVenueRow> = c
                 .account_views(now_ms())
                 .iter()
@@ -3518,11 +3557,13 @@ async fn handle_line(
         }
 
         // ── #509 的读面：account.journal（钱包流水的面板可读面）────────────
-        // 只读：照 `account.list` 的 session_active 模式解析账户（缺省 =
-        // 本连接的会话格，否则进程级 active），ledger 不加新方法 —— 动词层
-        // 取 `journal_snapshot()` 全量后取尾部 limit。`truncated` 披露内存
-        // 窗口（JOURNAL_CAP = 10000）：真 = 快照比返回的行多，读者看到的
-        // 是窗口不是全史。
+        // 只读：缺省账户走统一解析链（issue 561：session → display → 进程
+        // default）。此前 journal 走 snapshot_src 连接、session 恒空，缺省
+        // 永远落进程 default —— 流水卡在切户后必然错位；现在不带
+        // accountId 的请求跟随面板的 display 账户。ledger 不加新方法 ——
+        // 动词层取 `journal_snapshot()` 全量后取尾部 limit。`truncated`
+        // 披露内存窗口（JOURNAL_CAP = 10000）：真 = 快照比返回的行多，读者
+        // 看到的是窗口不是全史。
         method::ACCOUNT_JOURNAL => {
             typed(params, |p: AccountJournalParams| {
                 let core = core.clone();
@@ -3531,10 +3572,7 @@ async fn handle_line(
                     let c = core.lock().await;
                     let id = match p.account_id.as_deref() {
                         Some(id) if !id.trim().is_empty() => AccountId::from(id),
-                        _ => session
-                            .session_active
-                            .clone()
-                            .unwrap_or_else(|| c.accounts().active_id().clone()),
+                        _ => effective_default_account(session, c.accounts()),
                     };
                     let rows = c.accounts().ledger_of(&id)?.journal_snapshot();
                     let total = rows.len();
@@ -5796,6 +5834,14 @@ mod tests {
             serde_json::json!("10000"),
             "the cash is re-seeded to the configured seed: {reset}"
         );
+        // issue 561: the reply names the reset scope — an omitted accountId
+        // resolves through the connection default (this peer has no session
+        // cell, so the display account `default`).
+        assert_eq!(
+            reset["result"]["accountId"],
+            serde_json::json!("default"),
+            "the reply names the account the reset wiped: {reset}"
+        );
         assert!(
             reset["result"]["clearedOpenPositions"]
                 .as_i64()
@@ -5853,6 +5899,13 @@ mod tests {
                 .unwrap_or_default()
                 .starts_with("uid:"),
             "the audit line carries the peer actor: {rec}"
+        );
+        // issue 561: the audit line records WHICH account the wipe hit — the
+        // only trace left once the records are gone must scope itself.
+        assert_eq!(
+            rec["account"],
+            serde_json::json!("default"),
+            "the audit line names the reset scope: {rec}"
         );
         assert!(
             rec["pre"].is_object(),
@@ -7658,11 +7711,13 @@ mod tests {
     }
 
     /// 显示账户配置化: `display.account.set` 的拒绝面（wire 层）——
-    /// 非 active 账户与未知 id 都是计划先行的 INVALID_PARAMS，文件与内存
-    /// 不动。两账户夹具没有 persist 路径，所以合法切位在持久化关上被整体
-    /// 拒绝（同一姿态，service 层测试已钉住「路径存在时指针落位」的半边）。
+    /// 未知 id 是计划先行的 INVALID_PARAMS。issue 561（2026-10-20 裁决）
+    /// 改写旧断言：display 是面板唯一可信账户源，校验放宽为「存在即可」，
+    /// frozen 账户合法落位（旧断言钉住的「非 active 拒绝」随裁决废除；
+    /// 服务层测试钉住「frozen 也落位」的半边）。两账户夹具没有 persist
+    /// 路径，所以合法切位在持久化关上被整体拒绝。
     #[tokio::test]
-    async fn display_account_set_refuses_non_active_and_unknown_plan_first() {
+    async fn display_account_set_accepts_frozen_and_refuses_unknown_plan_first() {
         let (core, registry, peer) = two_account_fixture().await;
         // Freeze `paper` first: the fixture mints both accounts active.
         core.lock()
@@ -7670,7 +7725,10 @@ mod tests {
             .tighten_account_status(&AccountId::from("paper"), AccountStatus::Frozen, now_ms())
             .expect("the freeze lands");
 
-        // Negative FIRST: a frozen account may not wear the display face.
+        // issue 561: a frozen account MAY wear the display face now — the
+        // pointer is a view focus, the posture gates the orders not the view.
+        // The fixture has no persist path, so the legal shape still refuses
+        // WHOLE (nothing applied) — the plan-first posture survives.
         let reply = rpc(
             &core,
             &registry,
@@ -7679,17 +7737,12 @@ mod tests {
                 .to_string(),
         )
         .await;
-        assert_eq!(
-            reply["error"]["data"]["coreCode"],
-            serde_json::json!("INVALID_PARAMS"),
-            "a non-active account refuses plan-first: {reply}"
-        );
         assert!(
             reply["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("not an active account"),
-            "the refusal names the posture: {reply}"
+                .contains("no accounts config path"),
+            "frozen passes the plan-first gate; only persistence refuses: {reply}"
         );
 
         // Unknown id: the standard unknown-account refusal.
@@ -8565,6 +8618,186 @@ mod tests {
                 .unwrap_or_default()
                 .contains("unknown account `ghost`"),
             "the refusal names the account: {reply}"
+        );
+    }
+
+    // ── issue 561（2026-10-20 裁决）：缺省账户解析链 session → display →
+    // 进程 default，display 是面板唯一可信账户源 ──────────────────────────
+
+    /// helper 的三分支单测：session 有值优先（CLI/门禁显式 switch 的兼容
+    /// 面）；session 空则读 display 指针；display 仍必须命名已配置账户，
+    /// 尾部落进程 default（病理态兜底）。
+    #[test]
+    fn effective_default_account_resolves_session_then_display_then_default() {
+        let mut book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            AccountId::from("default"),
+        );
+
+        // Branch 1: session cell set — it wins over everything (compat).
+        let session = SessionState {
+            session_active: Some(AccountId::from("paper")),
+            ..SessionState::default()
+        };
+        book.set_display(&AccountId::from("default"))
+            .expect("re-point");
+        assert_eq!(
+            effective_default_account(&session, &book).as_str(),
+            "paper",
+            "an explicit session switch still wins (backward-compat layer)"
+        );
+
+        // Branch 2: session empty — the DISPLAY pointer decides (issue 561).
+        let session = SessionState::default();
+        assert_eq!(
+            effective_default_account(&session, &book).as_str(),
+            "default",
+            "display pointer at default"
+        );
+        book.set_display(&AccountId::from("paper"))
+            .expect("re-point");
+        assert_eq!(
+            effective_default_account(&session, &book).as_str(),
+            "paper",
+            "the omitted-account default follows the display pointer"
+        );
+
+        // Branch 3: pathological tail — the invariant (display names a
+        // configured account) is violated; the process default catches it.
+        let repaired = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: AccountId::from("default"),
+                name: "default".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                updated_at_ms: 0,
+            }],
+            AccountId::from("default"),
+        );
+        assert_eq!(
+            effective_default_account(&SessionState::default(), &repaired).as_str(),
+            "default",
+            "a healthy book resolves through display without ever reaching this"
+        );
+    }
+
+    /// wire 层：session 空的新连接（dispatcher 3s 重连后的形态）上，
+    /// journal 的缺省账户跟随 display 指针 —— 用 `account.switch` 把会话
+    /// 格填上后优先级回到 session（兼容面不受影响）。
+    #[tokio::test]
+    async fn account_journal_default_follows_display_then_session_wins() {
+        use rust_decimal_macros::dec;
+        let (core, registry, peer) = two_account_fixture().await;
+
+        // 给 paper 账本种一行可辨认的流水（journal 非空 → accountId 可辨）。
+        core.lock()
+            .await
+            .accounts_mut()
+            .get_mut(&AccountId::from("paper"))
+            .expect("paper book")
+            .set_balance(dec!(777));
+
+        // 无 session、display 仍在 default：缺省解析落 default（其 journal
+        // 只有 boot Seed 行，balance_after 是种子额；不追问数值，只辨账户）。
+        let mut session = SessionState::default();
+        let update_state = Arc::new(crate::ipc::version::UpdateState::new(false, false));
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &update_state,
+            &mut session,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.journal","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        assert_eq!(
+            reply["result"]["accountId"],
+            serde_json::json!("default"),
+            "no session, display at default: the omitted accountId lands there"
+        );
+
+        // display.account.set 把指针推向 paper（同进程内核面写法；wire 层
+        // 需 persist 路径，这里直接走 Core 的内存写 —— 指针语义相同）。
+        core.lock()
+            .await
+            .accounts_mut()
+            .set_display(&AccountId::from("paper"))
+            .expect("the re-point lands");
+
+        // 新连接（session 重新为空 —— 模拟 dispatcher 重连）：journal 缺省
+        // 跟着 display 走到 paper，不再回落进程 default。
+        let mut fresh_session = SessionState::default();
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &update_state,
+            &mut fresh_session,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.journal","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        assert_eq!(
+            reply["result"]["accountId"],
+            serde_json::json!("paper"),
+            "issue 561: a session-less connection follows the display pointer"
+        );
+
+        // 兼容面：本连接显式 account.switch 后，session 格有值、优先于
+        // display —— journal 缺省回到 session 账户。
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &update_state,
+            &mut fresh_session,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.switch","params":{"accountId":"default"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "switch must answer: {reply}");
+        let reply = rpc_with_updates(
+            &core,
+            &registry,
+            &peer,
+            &update_state,
+            &mut fresh_session,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.journal","params":{}}"#.to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal must answer: {reply}");
+        assert_eq!(
+            reply["result"]["accountId"],
+            serde_json::json!("default"),
+            "an explicit session switch still wins over display (compat)"
         );
     }
 

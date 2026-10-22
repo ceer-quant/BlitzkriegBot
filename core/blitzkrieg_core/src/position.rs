@@ -849,6 +849,25 @@ impl PositionManager {
         &self.closed
     }
 
+    /// issue 561 账户维重置：把 `account` 的 open 与 closed 行从内存簿里
+    /// 拿掉，其他账户的行一个不动。返回 (移除的 open 数, 移除的 closed 数)。
+    ///
+    /// closed 半边是裁决 3 的根因修复之一：重置把 trade 文件清成空后，
+    /// `recent_trades` 会兜底读这个内存 closed 表——不摘除目标账户的行，
+    /// 「真实余额 = 本金 + 净利」就会把已被重置抹掉的净利重新折回余额
+    /// （$1000 → $991.31 的复活链，issue 561）。持久侧（position_db）由
+    /// 调用方用 save(剩余全部账户行) 落盘，这里只管内存权威。
+    pub fn remove_account_positions(&mut self, account: &str) -> (usize, usize) {
+        let open_before = self.open.len();
+        self.open.retain(|p| p.account_id.as_str() != account);
+        let closed_before = self.closed.len();
+        self.closed.retain(|c| c.account_id.as_str() != account);
+        (
+            open_before - self.open.len(),
+            closed_before - self.closed.len(),
+        )
+    }
+
     /// Test seam: land one CLOSED row directly in the book, bypassing
     /// open→fill→close. The #364 preview replay needs historical facts
     /// without a full fill simulation; the production path always arrives

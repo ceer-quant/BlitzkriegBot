@@ -87,18 +87,15 @@ watch(snap, (s) => {
 })
 
 // ── market identity ─────────────────────────────────────────────────────────
-// 倒计时卡的身份行（徽章/名字/slot/已过秒数）的身份唯一源（issue 559）：
-// 显示账户 —— 内核快照顶层的 displayAccount/displayVenue（accounts.toml
-// 顶层持久化 + 运行时生效的独立事实），不再随本面板会话账户的绑定 venue
-// 派生。旧实现跟着 active 账户的绑定走（issue 550 症状②的收尾），切换器
-// 选了绑新所的账户而内核显示面还停在旧所时，徽章先跳成新所、下面的行情
-// 与钟仍是旧所 —— 卡的身份与数据各说各话。现在卡与内核显示面同源：快照
-// 缺该事实（老内核）回落账户绑定链 —— 老行为，不发明。行情行带
-// venue+asset（类型标签从插件表按名查），venueRounds 行带该 venue 自己的
-// slot/ageSec；行缺席（降级面/未开口）回落全局读数 —— 同样老行为。
-// 回落判定按「字段缺省」而不是「值为空」：内核说了话（字段在场）就全听
-// 它的 —— 包括 displayVenue 为空串（显示账户未绑定 = 可交易任意交易所，
-// 回落全局读数）；字段没来（老内核）才退回账户绑定派生。
+// 倒计时卡的身份行（徽章/名字/slot/已过秒数）的身份唯一源（issue 559，随
+// issue 561 收敛）：显示账户 —— 内核快照顶层的 displayAccount/displayVenue
+// （accounts.toml 顶层持久化 + 运行时生效的独立事实）。issue 561（面板唯
+// 一可信账户源裁决）后 store.activeAccountVenue 本身就派生自快照
+// displayVenue（account.list 行派生仅作快照缺字段时的回落），回落链合流为
+// 一条：快照在场全听内核的 —— 包括 displayVenue 为空串（显示账户未绑定 =
+// 可交易任意交易所，回落全局读数）；字段没来（老内核）才退回绑定派生。
+// （该段只换账户源引用；倒计时重建逻辑本批留白 —— 并行批次在改，主会话
+// merge。）
 const identityVenue = computed<string>(() => {
   const s = snap.value
   if (s?.displayAccount !== undefined || s?.displayVenue !== undefined) {
@@ -222,10 +219,12 @@ const books = computed<AssetBook[]>(() => snap.value?.books ?? [])
  */
 const hasDepthData = computed(() => snap.value?.books !== undefined)
 
-// venue 层（账户绑定交易所的下游过滤）：账户切换器就是交易所切换器 ——
-// active 账户绑定了 venue X 时，页面只显示 X 的行；未绑定 = 可交易任意
+// venue 层（显示账户绑定交易所的下游过滤）：账户切换器就是交易所切换器 ——
+// display 账户绑定了 venue X 时，页面只显示 X 的行；未绑定 = 可交易任意
 // 交易所，页面也就显示全部。这层过滤按行数据的 venue 字段（issue 427）走，
 // 与 accountId 过滤互补：pre-E28 无归属的旧行同样能被 venue 层过滤到。
+// issue 561：venue 源 = store.activeAccountVenue，其内部已 display 优先
+// （快照 displayVenue → account.list 行派生）—— 消费点不改写法。
 const activeVenue = computed(() => store.activeAccountVenue)
 
 // ── venue 跟随的 Loading 门（账户↔venue 解耦，2026-10 裁决）────────────────
@@ -249,23 +248,21 @@ watch(identityVenue, (nv, ov) => {
   if (ov === undefined) return
   venueSwitchAt.value = Date.now()
   venueSwitchFrom.value = ov
-  // issue 550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，身份
-  // venue 变化即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己
-  // 的钟行，从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次
-  // 快照间会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
-  // 键写成新 venue 名而不是 ''：'' 会让快照 watch 的 fallback 分支把全局
-  // 标量钟（= 旧所的保守钟）重新灌进倒计时 —— 恰好把要清的残值请回来。
-  // 钉住新 venue 名 = fallback 只在「从未绑定过」时可达，切走后新所的
-  // 钟行到达前倒计时显示 00:00（Loading 门也开着），不跳旧钟。
-  const hasRows =
-    Array.isArray(snap.value?.round?.venueRounds) &&
-    (snap.value?.round?.venueRounds?.length ?? 0) > 0
-  if (hasRows) {
-    countForVenue.value = nv
-    serverLeft.value = 0
-    serverAt.value = 0
-    leftSec.value = 0
-  }
+  // issue 550（症状②）+ issue 561（裁决 4）倒计时重绑的扳机：身份 venue
+  // 变化即【无条件】清倒计时的键与本地插值残值 —— 下一帧快照带新 venue
+  // 自己的钟行，从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两
+  // 次快照间会续跳）绝不跨 venue 存活。曾以「本帧快照存在钟行」作清键前
+  // 提：切到一个「快照尚无钟行」的所时整段被跳过，countForVenue 仍钉在
+  // 旧所——其残键为真值，watch(snap) 的 fallback 门（`!countForVenue.value`）
+  // 永远进不去，倒计时愣在 00:00。清键对老内核同样安全：老内核的
+  // countForVenue 从未被赋过键，清零是幂等空操作；fallback 分支只在「从未
+  // 绑定过」时可达的语义不变（键仍是新 venue 名，不是 ''）。watch(snap) 内
+  // `countForVenue.value !== identityVenue.value` 的选行键卫兵保持原样 ——
+  // 本处只动清键窗口这一处。
+  countForVenue.value = nv
+  serverLeft.value = 0
+  serverAt.value = 0
+  leftSec.value = 0
 })
 
 /**
@@ -308,8 +305,9 @@ const visibleBooks = computed<AssetBook[]>(() => {
 })
 
 /** 未绑定态（''/undefined）：显示「该账户未绑定交易所」空态，不显示任何
- *  行情数据（旧行清空，指引去账户切换器绑定）。老面板/单账户（无
- *  activeAccount 读数）不算未绑定 —— 它们保持旧行为显示全部。 */
+ *  行情数据（旧行清空，指引去账户切换器绑定）。老面板/单账户（无账户读
+ *  数）不算未绑定 —— 它们保持旧行为显示全部。issue 561：id 读 display 源
+ *  （store.activeAccount 是 display 的兼容读数）。 */
 const venueUnbound = computed(() => {
   const id = store.activeAccount
   if (!id) return false
@@ -390,7 +388,8 @@ useIntervalFn(() => { nowMs.value = Date.now() }, 2000)
 const feed = computed(() => feedStaleness(store.feedAt, nowMs.value))
 
 // ── cumulative all-time totals (core summary preferred, rows as fallback) ────
-// E28 (§9.5): the history is scoped to the session's default account —
+// E28 (§9.5): the history is scoped to the panel's account — issue 561: that
+// account is the DISPLAY account (唯一可信源; store.activeAccount reads it).
 // `accountFilter.rows` is the account's slice of the log (unattributed rows
 // from a pre-E28 core stay visible, see lib/account-filter). Every
 // history-derived view (cumulative header, equity curve, filters, stats)
@@ -403,9 +402,9 @@ const historyRows = computed<TradeRow[]>(() =>
 )
 const cumStats = computed(() => {
   // PR H (账户筛选修复): the kernel's per-account summary
-  // (`/api/trades-summary` with the active account) is the FIRST choice —
-  // the log headline was global all-time and printed every account's PnL
-  // under this page's account filter. The account-scoped read is
+  // (`/api/trades-summary` with the display account, issue 561) is the FIRST
+  // choice — the log headline was global all-time and printed every account's
+  // PnL under this page's account filter. The account-scoped read is
   // kernel-filtered, so it agrees with the rows on screen; the row-sum
   // fallback stays for older cores.
   const scoped = store.accountTradeSummary
@@ -449,16 +448,37 @@ const cumStats = computed(() => {
 })
 
 // ── balance (本金 + 净利 is the real balance; cash is the ledger it commits against)
-const recon = computed(() => balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees))
-// E28 多账户的诚实标注：瓦片的现金/本金读数来自内核进程级活动账本（§9.5
-// gateway 走 active_ledger），不是会话切换账户的自有账本——多账户下两者可以
-// 不同，标签必须说出来而不是让两套数字冒充一套。单账户（<=1 行）不加后缀，
-// 与 0.2 部署逐字一致。账户级余额瓦片（读 account.list 行）等内核暴露
-// 会话级账本读数后再换源（wallet 重构批次）。
+// issue 561（裁决 1）：瓦片换源到显示账户自有账本 —— account.list 行
+// （内核 account_views 按 ledger_of(id) 读该账户账本），不再读快照顶层的
+// 进程级 ledger.balance。切户后下一拍 refreshAccounts 镜像带回新账户的
+// balance/available/reserved，读数随显示账户走；行未到的一拍回落快照顶层，
+// 下面的标注 computed 如实说出该兜底口径，绝不冒充账户级。
+const recon = computed(() => {
+  const row = store.activeAccountRow
+  if (row) {
+    return balanceView(
+      {
+        // account.list 行的十进制跨线是 string|number，归一成 number 再进
+        // balanceView（该函数与内核快照的 number 口径对齐）。
+        balance: Number(row.balance) || 0,
+        reserved: Number(row.reserved) || 0,
+        available: Number(row.available) || 0,
+        seed: snap.value?.balance?.seed ?? null,
+      },
+      cumStats.value.net,
+      cumStats.value.fees,
+    )
+  }
+  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
+})
+// 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级」；账户行在场
+// 时读数就是显示账户的自有账本，不再有「显示账户的名字 + 进程级的钱」的
+// 错位（issue 561 裁决 1 要消除的正是一句标注遮不住的错位本身）。
 const balanceAccountNote = computed(() => {
+  if (store.activeAccountRow) return ''
   const id = store.activeAccount
   if (!id || store.accounts.length <= 1) return ''
-  return ` 当前读数属于进程默认账户「${id}」（本面板连接的 §9.5 会话级默认）；切换账户不会改写这个账本的读数。`
+  return ` 当前读数是进程级账本的兜底显示（账户行未到）——下一拍账户簿到达后即随显示账户。`
 })
 const balanceAccountSuffix = (label: string): string => {
   const id = store.activeAccount
@@ -469,7 +489,9 @@ const balanceAccountSuffix = (label: string): string => {
 // ── 现金流水卡（account.journal，issue 509 内核 / issue 511 动词 / issue 513 面板消费面）─────
 // issue 509 给 Ledger 加的 append-only 现金流水在此可见：操作者能看见每笔钱的来去
 // （「钱包应是真实记账」的最后一公里）。折叠卡默认收起——展开时拉一次
-// account.journal（limit 100），不随 2s 快照轮询打。
+// account.journal（limit 100），不随 2s 快照轮询打。issue 561：请求不带
+// accountId，内核缺省解析链（session → display → 进程 default）让流水跟
+// 随显示账户；卡内 accountId 徽标展示内核回执的解析结果。
 /** 九个内核 JournalKind 的中文标签——固定映射表，一处消费（本卡）。 */
 const JOURNAL_KIND_LABELS: Record<string, string> = {
   seed: '注资',
@@ -762,8 +784,9 @@ const tradeStats = computed(() => {
 })
 
 const tab = ref<'positions' | 'orders' | 'history'>('positions')
-// E28 (§9.5): positions are the session account's too — same filter discipline
-// as the history rows (unattributed rows from a pre-E28 core stay visible).
+// E28 (§9.5) + issue 561: positions follow the display account — same filter
+// discipline as the history rows (unattributed rows from a pre-E28 core stay
+// visible).
 const positions = computed(() =>
   filterByVenue(
     filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
@@ -781,14 +804,14 @@ function orderExpired(o: OrderRow): boolean {
 }
 
 /**
- * E28 (§9.5): the account these 挂单/历史 rows belong to. The gateway serves
- * this panel through ONE long-lived IPC connection, so every read on this page
- * reflects the SESSION's default account — the switcher's `account <id>` moves
- * that context, the next poll re-pulls everything through it, and the rows are
- * filtered locally (lib/account-filter) to the active account. `filtered`
- * is true only when the kernel actually attributes rows (E28): on a pre-E28
- * core every row is unattributed and nothing is filtered — the label below
- * says 范围, not 已过滤, accordingly. Null id = book never fetched.
+ * E28 (§9.5): the account these 挂单/历史 rows belong to. issue 561: that
+ * account is the DISPLAY account (面板唯一可信源) — the switcher's
+ * display.account.set moves that context, the next poll re-pulls everything
+ * through it, and the rows are filtered locally (lib/account-filter) to the
+ * display account. `filtered` is true only when the kernel actually
+ * attributes rows (E28): on a pre-E28 core every row is unattributed and
+ * nothing is filtered — the label below says 范围, not 已过滤, accordingly.
+ * Null id = book never fetched.
  */
 const accountBadge = computed(() => {
   const id = store.activeAccount
@@ -801,8 +824,8 @@ const accountFiltered = computed(() =>
   (filterByAccount(snap.value?.positions ?? [], store.activeAccount).attributed ||
     filterByAccount(store.tradeRows, store.activeAccount).attributed),
 )
-// venue 层标注：active 账户绑定了 venue 且行数据带 venue 标签时，过滤真的
-// 在生效 —— 标注要说清「过滤器在哪、为什么在」（账户绑定，不是独立控件）。
+// venue 层标注：display 账户绑定了 venue 且行数据带 venue 标签时，过滤真的
+// 在生效 —— 标注要说清「过滤器在哪、为什么在」（显示账户绑定，不是独立控件）。
 const venueFiltered = computed(() =>
   activeVenue.value !== '' &&
   (filterByVenue(snap.value?.positions ?? [], activeVenue.value).attributed ||
@@ -811,7 +834,7 @@ const venueFiltered = computed(() =>
 const orderRows = computed<OrderRow[]>(() => {
   // snapshot 里已带 orders（网关从 orders.list 拉的同一份）；不在时回落
   // 到专用读路径，两边都是内核的 TrackedOrder wire 形状。
-  // E28 (§9.5): rows are scoped to the session's default account — same
+  // E28 (§9.5) + issue 561: rows are scoped to the display account — same
   // discipline as positions/history (pre-E28 unattributed rows stay visible).
   const fromSnap = (snap.value as unknown as { orders?: OrderRow[] } | null)?.orders
   return filterByVenue(
@@ -1378,7 +1401,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <span
           v-if="journalDoc?.accountId"
           class="font-mono text-[11px] text-faint-fg"
-          :title="'流水所属账户（§9.5 会话默认）'"
+          :title="'流水所属账户（内核缺省解析：跟随显示账户）'"
         >{{ journalDoc.accountId }}</span>
         <span
           v-if="journalRows.length"

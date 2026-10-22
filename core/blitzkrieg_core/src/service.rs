@@ -3384,15 +3384,20 @@ impl Core {
     /// The display-pointer write (显示账户配置化 / `display.account.set`):
     /// memory AND accounts.toml in one transaction — persist FIRST (a failure
     /// leaves both stores untouched), memory after. The refusals are ALL
-    /// plan-first: the id must name a CONFIGURED account and its status must
-    /// be `Active` (a display pointer aimed at a read-only/frozen account
-    /// would show a book that cannot trade — the operator believes the
-    /// 行情页 mirrors a live venue; showing a frozen one is the same
-    /// lie-by-snapshot a dangling id would be).
+    /// plan-first: the id must name a CONFIGURED account.
     ///
-    /// 语义边界：this pointer is PURE PRESENTATION. It never touches the
-    /// process-level active account, no ledger, and no strategy enablement —
-    /// the snapshot's `displayAccount`/`displayVenue` are the only readers.
+    /// 2026-10-20 操作者裁决（issue 561）：display 是面板的唯一可信账户
+    /// 事实源，切户动作 = 写 display。校验据此放宽为「账户存在即可」，
+    /// 不再要求 `status = Active`。display 是显示焦点而非交易授权面：
+    /// 把指针指向 frozen / read_only 账户去看它的账本与流水是合法操作
+    /// （与 `account.switch` 的 existence-only 姿态同一逻辑 —— posture
+    /// 管下单，不管看）。消费侧（行情过滤、策略归属、风控、下单）各自
+    /// 按账户自身 posture 做门禁，display 指针不放行任何交易语义。
+    ///
+    /// 语义边界：this pointer never touches the process-level active
+    /// account, no ledger, and no strategy enablement — the snapshot's
+    /// `displayAccount`/`displayVenue` (and the issue-561 default chain)
+    /// are the only readers.
     pub fn set_display_account_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -3401,25 +3406,6 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::ipc::schema::DISPLAY_ACCOUNT_SET_NOTE;
         self.accounts.require(id)?;
-        // Active-only: see the doc above (a display of an untradeable book is
-        // a lie-by-snapshot). `matches!` keeps the check permissive of future
-        // postures the way the boot default (`first status=active`) is.
-        if !self
-            .accounts
-            .account(id)
-            .is_some_and(|a| matches!(a.status, crate::account::AccountStatus::Active))
-        {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "display.account.set: `{}` is not an active account — the \
-                     display pointer only follows a `status = active` book \
-                     (fail-closed: showing a frozen/read-only account would \
-                     present a venue that cannot trade)",
-                    id.as_str()
-                ),
-            ));
-        }
         let Some(path) = self.config.accounts_config_path.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -11732,7 +11718,7 @@ impl Core {
         actor: &str,
         now_ms: i64,
     ) -> CoreResult<crate::ipc::schema::ResetTradingResult> {
-        use crate::ipc::runtime_config::{append_manual_op, count_jsonl_lines};
+        use crate::ipc::runtime_config::append_manual_op;
         use crate::ipc::schema::{RESET_TRADING_LIVE_REFUSAL, ResetPreSummary, ResetTradingResult};
 
         if self.config.mode == Mode::Live {
@@ -11749,6 +11735,26 @@ impl Core {
                     .to_string(),
             ));
         }
+        // issue 561 账户维隔离：params.account_id 在派发层已填缺省
+        // （session → display → 进程 default 链，RAW params 判定显式 id），
+        // 这里照字面执行。显式拒绝未知账户 —— 一个静默的空清洗比拒绝更糟。
+        let account_id = match params.account_id.as_deref() {
+            Some(id) => {
+                let id = crate::account::AccountId::from(id);
+                if self.accounts.account(&id).is_none() {
+                    return Err(CoreError::new(
+                        CoreErrorCode::InvalidParams,
+                        format!(
+                            "system.reset_trading: unknown account \"{id}\" — \
+                             the reset scope must name a configured account"
+                        ),
+                    ));
+                }
+                id
+            }
+            // 兜底（直连内核、不经 IPC 派发层的调用方）：进程 display 格。
+            None => crate::account::AccountId::from(self.accounts.display_id()),
+        };
         let audit_path = self
             .config
             .manual_ops_audit_path
@@ -11766,64 +11772,182 @@ impl Core {
         let audit_path = std::path::Path::new(audit_path);
 
         // 重置前快照：行数 + 余额 + 活跃集合。这是审计行与回执里唯一存活的
-        // 「删了什么」的证据 —— 记录本身不会留下。
+        // 「删了什么」的证据 —— 记录本身不会留下。issue 561: 全部行数按
+        // 账户过滤 —— 全局数会谎报清洗范围（重置 B 不删 A 的行）。
         let pre = ResetPreSummary {
             order_log_lines: self
                 .order_db
                 .as_ref()
-                .map(|db| count_jsonl_lines(db.path()))
+                .map(|db| {
+                    db.load()
+                        .iter()
+                        .filter(|o| o.account_id.as_str() == account_id.as_str())
+                        .count() as u64
+                })
                 .unwrap_or(0),
             trade_log_lines: self
                 .trade_db
                 .as_ref()
-                .map(|db| count_jsonl_lines(db.jsonl_path()))
+                .map(|db| {
+                    crate::trade_db::read_recent(db.jsonl_path(), 0)
+                        .iter()
+                        .filter(|r| {
+                            let rid = r
+                                .get("accountId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            if rid.is_empty() {
+                                account_id.as_str() == crate::account::default_account_id().as_str()
+                            } else {
+                                rid == account_id.as_str()
+                            }
+                        })
+                        .count() as u64
+                })
                 .unwrap_or(0),
             position_log_lines: self
                 .position_db
                 .as_ref()
-                .map(|db| count_jsonl_lines(db.path()))
+                .map(|db| {
+                    db.load()
+                        .iter()
+                        .filter(|p| p.account_id.as_str() == account_id.as_str())
+                        .count() as u64
+                })
                 .unwrap_or(0),
-            open_positions: self.positions.open_positions().len(),
-            live_orders: self.ome.live_orders().len(),
-            balance: self.accounts.active_ledger().balance(),
+            open_positions: self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| p.account_id.as_str() == account_id.as_str())
+                .count(),
+            live_orders: self
+                .ome
+                .live_orders()
+                .iter()
+                .filter(|o| o.account_id.as_str() == account_id.as_str())
+                .count(),
+            balance: self
+                .accounts
+                .ledger_of(&account_id)
+                .map(|l| l.balance())
+                .unwrap_or(Decimal::ZERO),
         };
 
-        // 1) 停用全部已启用策略（复用 strategy.enable 的停用路径 —— 含
-        //    strategy-state.json 持久化与 shadow-evolution 重挂线）。
-        let disabled = self.enabled_strategy_names();
+        // 1) 停用目标账户 scopes 里的已启用策略（复用 strategy.enable 的
+        //    停用路径）。账户维裁决：只动该账户的 scopes —— 全局
+        //    `enabled_strategy_names` 会连其他账户的同名 scope 一起停。
+        //    accounts.toml 的启用集（持久真相）不写回：重置是运行时清洗
+        //    （会话级 OFF），不是授权变更，重启后启用集原样生效。
+        let account_scopes: Vec<String> = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.strategy_scopes_all()
+                    .into_iter()
+                    .filter(|(a, _)| a == account_id.as_str())
+                    .map(|(_, n)| n)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let disabled: Vec<String> = {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(e) = self.engine.as_ref() {
+                for name in &account_scopes {
+                    if e.enabled_strategies().iter().any(|n| n == name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+            names.sort();
+            names.dedup();
+            names
+        };
         for name in &disabled {
             self.set_strategy_enabled(name, false);
         }
 
-        // 2) 撤销全部 resting 挂单。逐单走 `cancel` 释放 BUY 预留、清
-        //    engine 的 pending-token 闩、记 fast_orders_dirty —— 这些与内存
-        //    整替有交集，但 cancel 先走一遍保证所有旁路状态都被触碰；随后
-        //    的 OME 整替负责「连记录都消失」的部分。
-        let cancelled = self.cancel_all(None, now_ms).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "reset_trading: cancel_all failed mid-reset");
-            0
-        });
+        // 2) 撤销目标账户的 resting 挂单。逐单走 `cancel` 释放 BUY 预留
+        //    （在订单自己的账簿里，E28）、清 engine 的 pending-token 闩、记
+        //    fast_orders_dirty；随后 remove_account_orders 负责「连记录都
+        //    消失」的部分。账户维裁决：token=None 改为账户过滤，其他账户
+        //    的挂单原样保留。
+        let cancelled = {
+            let ids: Vec<String> = self
+                .ome
+                .live_orders()
+                .into_iter()
+                .filter(|o| o.account_id.as_str() == account_id.as_str())
+                .map(|o| o.order_id.clone())
+                .collect();
+            let mut n = 0usize;
+            for id in &ids {
+                if let Err(e) = self.cancel(id, now_ms) {
+                    tracing::warn!(error = %e, order = %id, "reset_trading: cancel failed mid-reset");
+                } else {
+                    n += 1;
+                }
+            }
+            n
+        };
 
-        // 3) 内存态整表清零。OME 用全新实例 —— 订单表/live 索引/幂等表/
-        //    pending fills 全部消失。副作用（tx 事件）不重放：重置不是一个
-        //    需要逐单通知的操作。
+        // 3) 内存态按账户维清洗（issue 561 清单 A 项）+ 全局维照旧（清单
+        //    B 项）。OME 不再整替：整替会把其他账户的订单/幂等表一起抹掉，
+        //    只拿掉目标账户的订单行。副作用（tx 事件）不重放：重置不是一
+        //    个需要逐单通知的操作。
         let live_before = pre.live_orders;
-        self.ome = crate::ome::Ome::new();
+        self.ome.remove_account_orders(account_id.as_str());
         self.inflight_takers.clear();
         self.fast_dirty_tokens.clear();
         self.fast_eval_wake = false;
         self.fast_orders_dirty = true;
         self.fast_positions_dirty = true;
-        self.exit_reasons.clear();
-        self.exit_reason_order.clear();
-        self.strategy_exits.clear();
+        // exit 路由三态：exit_reasons 的键是 token——只清仍归属目标账户的
+        // token（其他账户可能持有同一 token 的独立行，账户↔venue 解耦后
+        // 双账户可同持一 token）。strategy_exits 按意图自带 account_id 过滤。
+        let account_tokens: std::collections::HashSet<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id.as_str() == account_id.as_str())
+            .map(|p| p.token_id.clone())
+            .chain(
+                self.ome
+                    .all()
+                    .iter()
+                    .filter(|o| o.account_id.as_str() == account_id.as_str())
+                    .map(|o| o.token_id.clone()),
+            )
+            .collect();
+        // 摘除该账户持仓/订单前先记下它的 token 集（上面），此刻 positions
+        // 还未动 —— remove_account_positions 在第 4 步执行，token 集先取。
+        let doomed_tokens: Vec<String> = {
+            let before = self
+                .positions
+                .open_positions()
+                .iter()
+                .filter(|p| p.account_id.as_str() == account_id.as_str())
+                .map(|p| p.token_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            account_tokens.union(&before).cloned().collect()
+        };
+        for t in &doomed_tokens {
+            if let Some(reason) = self.exit_reasons.remove(t) {
+                self.exit_reasons_evicted += 0; // 计数语义未变：清的是重置面
+                let _ = reason;
+            }
+            self.exit_reason_order.retain(|k| k != t);
+        }
+        self.strategy_exits
+            .retain(|x| x.account_id.as_str() != account_id.as_str());
         self.place_cooldowns.clear();
         self.escalation_skips.clear();
         self.pending_venue_cancels.clear();
         self.books.clear();
         self.consecutive_venue_rejects = 0;
-        self.consecutive_venue_rejects_by_account.clear();
-        self.account_freezes.clear();
+        self.consecutive_venue_rejects_by_account
+            .remove(account_id.as_str());
+        self.account_freezes.remove(account_id.as_str());
         self.consecutive_sweep_failures = 0;
         self.last_error = None;
         // #537: the strategy page's PnL counters are the OTHER survivor —
@@ -11831,7 +11955,11 @@ impl Core {
         // slices kept their closed_trades/wins/net_pnl_usd, so the panel's
         // 「真实余额 = 本金 + 净利」 kept folding a history the reset had
         // erased. A wiped environment reports zero for every counter.
-        self.strategy_accounting.clear();
+        // issue 561: 只摘目标账户的切片（键尾 `\u{1}account`），其他账户
+        // 的计数原样保留。
+        let acct_suffix = format!("\u{1}{}", account_id.as_str());
+        self.strategy_accounting
+            .retain(|k, _| !k.ends_with(&acct_suffix));
         if let Some(l) = self.applied_log.as_ref() {
             l.compact(&[]);
         }
@@ -11841,20 +11969,28 @@ impl Core {
         );
         self.risk.resume();
 
-        // 4) 持仓簿清空 + 磁盘记录截断重置（不重启进程）。
+        // 4) 持仓簿账户维摘除 + 磁盘记录按账户截断（不重启进程）。
         let open_before = pre.open_positions;
-        self.positions.restore_open(Vec::new());
+        let (removed_open, _removed_closed) =
+            self.positions.remove_account_positions(account_id.as_str());
+        let _ = removed_open;
         if let Some(db) = &self.position_db {
-            db.save(&[]);
+            // 保留其他账户的行原样落盘 —— 整簿 save(&[]) 会把 A 的持仓也
+            // 抹掉（账户维裁决）。
+            let remaining: Vec<crate::position::OpenPosition> =
+                self.positions.open_positions().to_vec();
+            db.save(&remaining);
         }
         if let Some(db) = &self.order_db {
-            db.compact(&[]);
+            db.compact_account(account_id.as_str());
         }
         if let Some(db) = &mut self.trade_db {
-            db.reset();
+            db.retract_account(account_id.as_str(), now_ms);
         }
         // #178/#175 的幂等簿与结算簿：重置后历史结算不再需要去重（记录文件
-        // 已空，结算簿对着空文件重放会凭空恢复 claims）。
+        // 已空，结算簿对着空文件重放会凭空恢复 claims）。全局维（清单 B）：
+        // 结算簿键无账户归属，保持整簿重置 —— 账户维清算绝不产生跨账户
+        // claims 复活。
         self.settlement = crate::settlement::SettlementBook::new(None);
         self.recon_watermark_ms = 0;
 
@@ -11869,58 +12005,99 @@ impl Core {
             ..Default::default()
         };
 
-        // 5) 重新 seed 全部账户到配置值。语义与启动 seed_all 一致（余额回到
-        //    种子值），但走 `reset_to_seed`：现金流水记一条 `Reset` 行（差额
-        //    入 trail，append-only 证据不截断），而不是 `Seed` —— 回放时这是
-        //    「环境被重置」而不是「又一次启动注资」。
-        self.accounts
-            .reset_all_to_seed(self.config.dry_seed_balance);
-
-        // 6) 自校验：live 索引空 / 记录文件 0 行 / 每个账户余额 == seed。
-        //    校验失败显式报错 —— 一个静默失败的重置比失败更糟（操作者以为
-        //    环境干净了）。
-        let mut problems: Vec<String> = Vec::new();
-        if !self.ome.live_orders().is_empty() {
-            problems.push(format!(
-                "live index not empty after reset ({} orders)",
-                self.ome.live_orders().len()
-            ));
-        }
-        if !self.positions.open_positions().is_empty() {
-            problems.push(format!(
-                "open positions not empty after reset ({} remain)",
-                self.positions.open_positions().len()
-            ));
-        }
-        if let Some(db) = &self.order_db
-            && count_jsonl_lines(db.path()) != 0
-        {
-            problems.push("order log still has lines after reset".to_string());
-        }
-        if let Some(db) = &self.trade_db
-            && count_jsonl_lines(db.jsonl_path()) != 0
-        {
-            problems.push("trade log still has lines after reset".to_string());
-        }
-        if let Some(db) = &self.position_db
-            && count_jsonl_lines(db.path()) != 0
-        {
-            problems.push("position log still has lines after reset".to_string());
-        }
-        let balances: Vec<(String, Decimal)> = self
+        // 5) 重新 seed 目标账户到配置值（issue 561 账户维原语）。语义与
+        //    启动 seed 一致（余额回到种子值），journal 重写为单行 `Reset`
+        //    行 —— boot 回放后 balance == 种子（与自检断言一致，裁决 3 修
+        //    复），其他账户的 journal 一字不动。
+        let journal_rewrote = self
             .accounts
-            .account_list()
+            .reset_account_to_seed(&account_id, self.config.dry_seed_balance)?;
+        if !journal_rewrote {
+            tracing::warn!(
+                account = %account_id.as_str(),
+                "issue 561: account journal rewrite failed at reset — the \
+                 next boot may replay pre-reset rows"
+            );
+        }
+
+        // 6) 自校验：目标账户 live 索引空 / 该账户 open 持仓空 / 该账户在
+        //    三个记录文件中的行数归零 / 余额 == seed。其他账户的行不在断言
+        //    面 —— 它们本就不该被清洗。
+        let mut problems: Vec<String> = Vec::new();
+        let leftover_live = self
+            .ome
+            .live_orders()
             .iter()
-            .map(|a| {
-                (
-                    a.id.to_string(),
-                    self.accounts
-                        .ledger_of(&a.id)
-                        .map(|l| l.balance())
-                        .unwrap_or(Decimal::ZERO),
-                )
-            })
-            .collect();
+            .filter(|o| o.account_id.as_str() == account_id.as_str())
+            .count();
+        if leftover_live != 0 {
+            problems.push(format!(
+                "account {account_id} live index not empty after reset ({leftover_live} orders)"
+            ));
+        }
+        let leftover_open = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id.as_str() == account_id.as_str())
+            .count();
+        if leftover_open != 0 {
+            problems.push(format!(
+                "account {account_id} open positions not empty after reset ({leftover_open} remain)"
+            ));
+        }
+        if let Some(db) = &self.order_db {
+            let n = db
+                .load()
+                .iter()
+                .filter(|o| o.account_id.as_str() == account_id.as_str())
+                .count();
+            if n != 0 {
+                problems.push(format!(
+                    "account {account_id} order log still has {n} lines after reset"
+                ));
+            }
+        }
+        if let Some(db) = &self.trade_db {
+            let n = crate::trade_db::read_recent(db.jsonl_path(), 0)
+                .iter()
+                .filter(|r| {
+                    let rid = r
+                        .get("accountId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if rid.is_empty() {
+                        account_id.as_str() == crate::account::default_account_id().as_str()
+                    } else {
+                        rid == account_id.as_str()
+                    }
+                })
+                .count();
+            if n != 0 {
+                problems.push(format!(
+                    "account {account_id} trade log still has {n} lines after reset"
+                ));
+            }
+        }
+        if let Some(db) = &self.position_db {
+            let n = db
+                .load()
+                .iter()
+                .filter(|p| p.account_id.as_str() == account_id.as_str())
+                .count();
+            if n != 0 {
+                problems.push(format!(
+                    "account {account_id} position log still has {n} lines after reset"
+                ));
+            }
+        }
+        let balances: Vec<(String, Decimal)> = vec![(
+            account_id.as_str().to_string(),
+            self.accounts
+                .ledger_of(&account_id)
+                .map(|l| l.balance())
+                .unwrap_or(Decimal::ZERO),
+        )];
         for (id, bal) in &balances {
             if *bal != self.config.dry_seed_balance {
                 problems.push(format!(
@@ -11942,6 +12119,7 @@ impl Core {
                     "phase": "self_check_failed",
                     "atMs": now_ms,
                     "actor": actor,
+                    "account": account_id.as_str(),
                     "reason": params.reason,
                     "problems": problems,
                 }),
@@ -11957,6 +12135,7 @@ impl Core {
                 "op": "reset_trading",
                 "atMs": now_ms,
                 "actor": actor,
+                "account": account_id.as_str(),
                 "reason": params.reason,
                 "mode": format!("{:?}", self.config.mode).to_lowercase(),
                 "pre": {
@@ -11988,11 +12167,13 @@ impl Core {
         tracing::info!(
             target: "risk",
             actor = %actor,
+            account = %account_id.as_str(),
             live_orders = live_before,
             open_positions = open_before,
             cancelled = cancelled,
             disabled = disabled.len(),
-            "trading environment reset — records wiped, cash re-seeded"
+            "trading environment reset (account-scoped) — the account's \
+             records wiped, its cash re-seeded; other accounts untouched"
         );
 
         Ok(ResetTradingResult {
@@ -12000,6 +12181,7 @@ impl Core {
             cancelled_orders: cancelled,
             cleared_open_positions: open_before,
             cleared_closed_trades: pre.trade_log_lines as usize,
+            account_id: account_id.as_str().to_string(),
             balances,
             pre_summary: pre,
             at_ms: now_ms,
@@ -17072,6 +17254,7 @@ mod tests {
         crate::ipc::schema::ResetTradingParams {
             confirm: confirm.to_string(),
             reason: Some("unit".to_string()),
+            account_id: None,
         }
     }
 
@@ -17306,6 +17489,447 @@ mod tests {
                 && r["wins"] == serde_json::json!(0)),
             "no strategy counter may survive the wipe: {post:?}"
         );
+    }
+
+    // ── issue 561: 账户维重置隔离（重置 B 不动其他账户）────────────────────
+
+    /// 账户维重置的双账户 fixture：default + paper 两个账簿、私有记录文件
+    /// 与审计路径（与上方 reset 测试家族同一 cwd 隔离纪律）。返回
+    /// (core, scratch dir) —— 调用方负责清理 dir。
+    fn two_account_reset_fixture(tag: &str) -> (Core, std::path::PathBuf) {
+        let dir = reset_audit_dir(tag);
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let c = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Dry,
+                manual_ops_audit_path: Some(
+                    dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+                ),
+                trade_log_path: log("trades.jsonl"),
+                order_log_path: log("orders.jsonl"),
+                position_log_path: log("positions.jsonl"),
+                dry_seed_balance: Decimal::from(1_000),
+                ..Default::default()
+            },
+            book,
+        );
+        (c, dir)
+    }
+
+    /// 铺一个已平仓交易到指定账户（生产路径：open → close() →
+    /// on_position_closed，TradeDb/positions.closed/strategy_accounting 三处
+    /// 各折一次 —— 与 9833 行注释的幂等契约一致）。
+    fn seed_closed_trade(c: &mut Core, account: &str, id: &str, net: Decimal) {
+        use crate::position::{CashFlows, OpenPosition};
+        // net = −8.69 形态：entry 0.5 × 10 股（cost 5），exit 价补足差额。
+        let exit_price = Decimal::new(5, 1) + net / Decimal::from(10);
+        let held = OpenPosition {
+            id: id.into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            entry_price: Decimal::ONE / Decimal::from(2),
+            current_price: exit_price,
+            prev_price: Decimal::ONE / Decimal::from(2),
+            shares: Decimal::from(10),
+            cost_usd: Decimal::from(5),
+            was_maker_entry: true,
+            entry_fee_pct: Decimal::ZERO,
+            entry_role: crate::model::OrderRole::Maker,
+            exit_role: crate::model::OrderRole::Taker,
+            target_exit_price: None,
+            entered_at_ms: 0,
+            expires_at_ms: 0,
+            account_id: crate::account::AccountId::from(account),
+            venue: "polymarket".into(),
+            partner_token_id: String::new(),
+            last_book_ts: 0,
+            state: crate::exit_policy::ExitState::new(Decimal::ONE / Decimal::from(2), 0),
+            flows: CashFlows::default(),
+        };
+        c.positions.restore_open(vec![held]);
+        let closed = c
+            .positions
+            .close(
+                id,
+                exit_price,
+                crate::model::ExitReason::TakeProfit,
+                false,
+                1,
+            )
+            .expect("the held position closes");
+        c.on_position_closed(&closed, 1);
+    }
+
+    /// (a) 隔离性主用例：重置 paper 不动 default 的任何记录 —— 成交史、
+    /// 策略盈亏切片、余额、closed 内存行全部原样；paper 自身三处归零。
+    #[test]
+    fn account_scoped_reset_leaves_other_accounts_untouched() {
+        let (mut c, dir) = two_account_reset_fixture("scoped-isolation");
+        c.set_balance(Decimal::from(1_000));
+        // 两本账各有真实历史：default 赚 7，paper 亏 8.69。
+        seed_closed_trade(&mut c, "default", "hft-d1", Decimal::from(7));
+        seed_closed_trade(
+            &mut c,
+            "paper",
+            "hft-p1",
+            Decimal::from(-8) - Decimal::new(69, 2),
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            Decimal::from(1_000),
+            "fixture books start on the seed"
+        );
+
+        let r = c
+            .reset_trading(
+                &crate::ipc::schema::ResetTradingParams {
+                    confirm: "RESET".into(),
+                    reason: Some("unit".into()),
+                    account_id: Some("paper".into()),
+                },
+                "uid:t",
+                3,
+            )
+            .unwrap();
+        assert_eq!(r.account_id, "paper", "the reply names the reset scope");
+        assert_eq!(
+            r.balances,
+            vec![("paper".to_string(), Decimal::from(1_000))],
+            "only the target account's balance rides the reply"
+        );
+
+        // paper：余额回种子、tradeSummary（账户维读数）归零、closed 内存行清空。
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            Decimal::from(1_000)
+        );
+        let paper_summary = c.trade_summary(Some("paper"));
+        assert_eq!(paper_summary["totalTrades"], serde_json::json!(0));
+        assert!(
+            c.positions()
+                .closed_positions()
+                .iter()
+                .all(|x| x.account_id.as_str() != "paper"),
+            "the in-memory closed rows of the reset account are gone — \
+             the 991.31 revival path (issue 561)"
+        );
+        let paper_stats = c.strategy_stats_for_account("paper");
+        assert!(
+            paper_stats
+                .iter()
+                .all(|row| row["closedTrades"] == serde_json::json!(0)),
+            "paper's per-account PnL slice is zeroed: {paper_stats:?}"
+        );
+
+        // default：一字不动 —— 成交史、策略切片、closed 行、余额。
+        assert_eq!(
+            c.trade_summary(Some("default"))["totalTrades"],
+            serde_json::json!(1),
+            "default's trade history survives a paper reset"
+        );
+        assert_eq!(
+            c.trade_summary(Some("default"))["totalNetPnl"],
+            serde_json::json!(7.0)
+        );
+        assert!(
+            c.positions()
+                .closed_positions()
+                .iter()
+                .any(|x| x.account_id.as_str() == "default"),
+            "default's in-memory closed row survives"
+        );
+        let default_stats = c.strategy_stats_for_account("default");
+        assert!(
+            default_stats
+                .iter()
+                .any(|row| row["closedTrades"] == serde_json::json!(1)),
+            "default's PnL slice survives: {default_stats:?}"
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::from(1_000)
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (b) 缺省账户解析：省略 accountId 的重置落在进程 display 格（不经
+    /// IPC 派发层的直连兜底），回执点名它。
+    #[test]
+    fn account_scoped_reset_defaults_to_the_display_account() {
+        let (mut c, dir) = two_account_reset_fixture("scoped-default");
+        c.set_balance(Decimal::from(1_000));
+        seed_closed_trade(&mut c, "default", "hft-d1", Decimal::from(7));
+
+        let r = c.reset_trading(&reset_params("RESET"), "uid:t", 3).unwrap();
+        assert_eq!(
+            r.account_id, "default",
+            "no explicit id = the display account (the process default here)"
+        );
+        assert_eq!(
+            c.trade_summary(Some("default"))["totalTrades"],
+            serde_json::json!(0),
+            "the display account was wiped"
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (c) 未知账户显式拒绝 —— 静默的空清洗比拒绝更糟。
+    #[test]
+    fn account_scoped_reset_refuses_an_unknown_account() {
+        let (mut c, dir) = two_account_reset_fixture("scoped-unknown");
+        c.set_balance(Decimal::from(1_000));
+        let err = c
+            .reset_trading(
+                &crate::ipc::schema::ResetTradingParams {
+                    confirm: "RESET".into(),
+                    reason: Some("unit".into()),
+                    account_id: Some("ghost".into()),
+                },
+                "uid:t",
+                3,
+            )
+            .expect_err("an unknown scope is refused");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("unknown account"),
+            "the refusal names the scope: {err}"
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (d) 三道门在账户维同样竖着：显式 accountId + 错误确认词照样红；
+    /// Live 模式连账户维重置也整个拒绝（不因范围变小而放水）。
+    #[test]
+    fn account_scoped_reset_keeps_the_three_gates() {
+        let (mut c, dir) = two_account_reset_fixture("scoped-gates");
+        c.set_balance(Decimal::from(1_000));
+        let err = c
+            .reset_trading(
+                &crate::ipc::schema::ResetTradingParams {
+                    confirm: "reset".into(),
+                    reason: Some("unit".into()),
+                    account_id: Some("paper".into()),
+                },
+                "uid:t",
+                3,
+            )
+            .expect_err("the confirm word is scoped too");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+
+        let mut live = live_core(dec!(10));
+        let err = live
+            .reset_trading(
+                &crate::ipc::schema::ResetTradingParams {
+                    confirm: "RESET".into(),
+                    reason: Some("unit".into()),
+                    account_id: Some("paper".into()),
+                },
+                "uid:t",
+                3,
+            )
+            .expect_err("live refuses even an account-scoped wipe");
+        assert_eq!(err.code, CoreErrorCode::RiskRejected);
+    }
+
+    /// (e) 裁决 3 端到端：挂单 + 已平仓亏损 → 账户维重置 → 「真实余额 =
+    /// 本金 + 净利」读数回到本金。recent_trades（trade 文件空后兜底读
+    /// closed 内存行）不再复活已抹掉的净利 —— 991.31 复活链全断。
+    #[test]
+    fn account_scoped_reset_breaks_the_balance_revival_chain() {
+        let (mut c, dir) = two_account_reset_fixture("scoped-revival");
+        c.set_balance(Decimal::from(1_000));
+        seed_closed_trade(
+            &mut c,
+            "default",
+            "hft-d1",
+            Decimal::from(-8) - Decimal::new(69, 2),
+        );
+        // The pre-reset panel reading: 1000 + (−8.69) = 991.31.
+        let pre = c.trade_summary(Some("default"));
+        assert_eq!(pre["totalNetPnl"], serde_json::json!(-8.69));
+
+        c.reset_trading(&reset_params("RESET"), "uid:t", 3).unwrap();
+
+        // The revival chain is cut at every link: the trade file is empty
+        // AND the in-memory closed fallback no longer names the account.
+        let post = c.trade_summary(Some("default"));
+        assert_eq!(
+            post["totalNetPnl"],
+            serde_json::json!(0.0),
+            "net stays zero after the reset — the balance reads seed, not seed + revived net"
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::from(1_000)
+        );
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (f) journal 端到端（裁决 3 的 boot 半环）：有持久 journal 的账户被
+    /// 重置后，磁盘上只剩一行 Reset 行，一次全新回放恢复的 balance == 种子
+    /// —— 与 ResetTradingResult 自检跨 boot 一致；其他账户的 journal 原样。
+    #[test]
+    fn account_scoped_reset_rewrites_only_the_target_journal() {
+        let dir = reset_audit_dir("scoped-journal");
+        let journal_dir = dir.join("ledger");
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Dry,
+                manual_ops_audit_path: Some(
+                    dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+                ),
+                trade_log_path: log("trades.jsonl"),
+                order_log_path: log("orders.jsonl"),
+                position_log_path: log("positions.jsonl"),
+                ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
+                dry_seed_balance: Decimal::from(1_000),
+                ..Default::default()
+            },
+            book,
+        );
+        // Attach journals by hand (the boot path's job): both accounts get a
+        // durable trail, default accumulates fills, paper stays on its seed.
+        let default_path = journal_dir.join("default.journal.jsonl");
+        let paper_path = journal_dir.join("paper.journal.jsonl");
+        c.accounts
+            .get_mut(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .set_journal_path(default_path.clone());
+        c.accounts
+            .get_mut(&crate::account::AccountId::from("paper"))
+            .unwrap()
+            .set_journal_path(paper_path.clone());
+        {
+            let l = c
+                .accounts
+                .get_mut(&crate::account::AccountId::from("default"))
+                .unwrap();
+            l.seed(Decimal::from(1_000));
+            l.settle_buy_fill("o1", Decimal::from(30), Decimal::ZERO);
+            l.settle_sell_fill(Decimal::from(21), Decimal::ONE);
+        }
+
+        c.reset_trading(
+            &crate::ipc::schema::ResetTradingParams {
+                confirm: "RESET".into(),
+                reason: Some("unit".into()),
+                account_id: Some("default".into()),
+            },
+            "uid:t",
+            3,
+        )
+        .unwrap();
+
+        // default's journal: exactly one Reset row, replay == seed.
+        let rows: Vec<crate::ledger::JournalEntry> =
+            crate::jsonl::load(&default_path, "test journal");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the reset journal is exactly the reset row: {rows:?}"
+        );
+        assert_eq!(rows[0].balance_after, Decimal::from(1_000));
+        let mut replayed = crate::ledger::Ledger::new();
+        replayed.replay_journal(crate::jsonl::load::<crate::ledger::JournalEntry>(
+            &default_path,
+            "test journal",
+        ));
+        assert_eq!(
+            replayed.balance(),
+            Decimal::from(1_000),
+            "boot replay over the rewritten journal lands on the seed"
+        );
+        // paper's journal: untouched by default's reset. The boot's seed_all
+        // put a Seed row here (dry 模式整簿注资，回放契约的一部分)；重置只
+        // 重写目标账户的文件 —— 这行 Seed 原样留在盘上。
+        let paper_rows: Vec<crate::ledger::JournalEntry> =
+            crate::jsonl::load(&paper_path, "test journal");
+        assert_eq!(
+            paper_rows.len(),
+            1,
+            "a sibling account's journal is not the reset's business (its \
+             boot Seed row stays exactly as the boot wrote it)"
+        );
+        assert_eq!(paper_rows[0].kind, crate::ledger::JournalKind::Seed);
+        drop(c);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn live_core(balance: Decimal) -> Core {
@@ -18959,9 +19583,11 @@ mod strategy_dispatch_tests {
 
     /// 显示账户配置化（display.account.set 的事务半）：合法切位把内存指针
     /// 与 accounts.toml 顶层 `display_account` 键一次写齐（persist 先行，
-    /// 失败两个存储都不动）；未知 id 与非 active 账户被计划先行拒绝且文件
-    /// 字节不动；持久化关（无 config 路径）整体拒绝。纯展示指针：active
-    /// 账户/记账不受任何影响 —— 内存的 display 单元独立于 active 单元。
+    /// 失败两个存储都不动）；未知 id 被计划先行拒绝且文件字节不动；持久
+    /// 化关（无 config 路径）整体拒绝。纯展示指针：active 账户/记账不受
+    /// 任何影响 —— 内存的 display 单元独立于 active 单元。
+    /// issue 561（2026-10-20 裁决）：校验放宽为「账户存在即可」，frozen
+    /// 账户也是合法 display 目标（旧断言钉住的 Active-only 已随裁决废除）。
     #[test]
     fn display_account_set_persists_and_validates_plan_first() {
         let dir = std::env::temp_dir().join(format!("bk-display-set-{}", std::process::id()));
@@ -19007,9 +19633,9 @@ mod strategy_dispatch_tests {
             "a refused write leaves the file byte-identical"
         );
 
-        // NON-active account (frozen): the display pointer only follows a
-        // book that can trade — showing a frozen one would present a venue
-        // that cannot.
+        // issue 561（2026-10-20 裁决）改写旧断言：frozen 账户此前被
+        // Active-only 校验拒绝，现在 display 是面板唯一可信账户源、切观察
+        // 户必须生效 —— 「存在即可」，frozen1 合法落位，内存与文件同步。
         std::fs::write(
             &accounts_path,
             "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"frozen1\"\nname = \"f\"\nstatus = \"frozen\"\n",
@@ -19022,15 +19648,15 @@ mod strategy_dispatch_tests {
             },
             crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
         );
-        let err = c2
-            .set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
-            .expect_err("non-active account");
-        assert!(
-            err.message.contains("not an active account"),
-            "{}",
-            err.message
+        c2.set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
+            .expect("a frozen account is a legal display target (issue 561)");
+        assert_eq!(
+            c2.accounts.display_id(),
+            "frozen1",
+            "display follows a frozen book — view-only, posture gates the orders"
         );
-        assert_eq!(c2.accounts.display_id(), "default", "memory untouched");
+        let reloaded2 = crate::account::config::load_account_ledgers(&accounts_path, 2).unwrap();
+        assert_eq!(reloaded2.display_id(), "frozen1", "durable across boot");
 
         // 持久化关（无 accounts_config_path 的内核 — 回测/进程内测试）：整体
         // 拒绝，内存指针也不动（与 account.trading.set 同一姿态）。

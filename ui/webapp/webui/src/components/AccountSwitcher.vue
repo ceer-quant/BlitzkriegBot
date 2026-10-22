@@ -50,10 +50,12 @@ interface AccountRow {
   dayRealizedUsd: string | number
 }
 
-/** Mirror of AccountListResult: `active` is THIS connection's default (§9.5). */
+/** Mirror of AccountListResult: `active` is the kernel-side session default
+ *  (§9.5). issue 561 起它不再驱动显示 —— 面板唯一可信源是 displayAccount。*/
 interface AccountsDoc {
   version: string
   active: string
+  displayAccount?: string
   accounts: AccountRow[]
 }
 
@@ -79,9 +81,14 @@ const open = ref(false)
 const loading = ref(false)
 const switching = ref<string | null>(null)
 const error = ref<string | null>(null)
+const switchErr = ref<string | null>(null)
 const doc = ref<AccountsDoc | null>(null)
 
-const active = computed(() => doc.value?.active ?? '')
+/** issue 561：按钮与选中勾都读 store 的 display 账户（唯一可信源）——
+ *  不再读本组件私有 `doc.active`（会话格语义，随 dispatcher 重连漂移）。
+ *  doc 仍负责下拉列表数据。快照轮询每拍带回内核读数，Header 与页面从此
+ *  同源同节拍。 */
+const active = computed(() => store.displayAccount || '')
 const rows = computed(() => doc.value?.accounts ?? [])
 async function command(cmd: string): Promise<CommandOutcome> {
   const res = await fetch('/api/command', {
@@ -94,40 +101,43 @@ async function command(cmd: string): Promise<CommandOutcome> {
   return (await res.json()) as CommandOutcome
 }
 
-/** The switch is session-scoped in the core (§9.5); the panel process owns one
- * IPC connection, so this is "my panel's default" — exactly the operator's
- * intent. A successful switch re-pulls every page through the store.
- * 切户残留窗口（issue 552 审计）：翻转 active 后、refresh 落地前，store 里
- * 还躺着旧账户的账户级读数（accountTradeSummary / accountStrategyStats），
- * 页面此刻渲染的是旧账户的数字——切成了谁、数字还是谁的。清掉它们让
- * 页面回落全局面读数（旧数字不渲染），新读数到达后立即恢复。
+/**
+ * issue 561（2026-10-20 操作者裁决）：display account 升格为面板唯一可信
+ * 账户事实源 —— 切换动作 = 写 display；一切消费点（Header、行情过滤、
+ * 策略归属、风控、流水卡）读 display。
  *
- * 显示账户（issue 559）：切换成功后同一账户写进 display.account.set ——
- * 「行情页显示谁的市场」跟随本面板的会话账户（徽章/名/slot/钟与切换器选
- * 中的账户不再错位）。fire-and-forget：失败静默不打断切换本身（账户切换
- * 是主事实，已成功；显示面下一拍快照带回 displayVenue，老内核缺该动词则
- * 永远回落账户绑定链 —— 现行为）。仍属纯视图上下文：不发任何启停/冻结/
- * 平仓动词，切换不启停任何东西的合同原样成立。 */
-function setDisplayAccount(id: string): void {
-  void api
-    .displayAccountSet({ accountId: id, reason: 'panel account switch' })
-    .catch(() => { /* 静默：快照回落链兜底，issue 559 */ })
-}
-
+ * switchTo 重排：**先** `display.account.set`（经 POST /api/display-account/
+ * set 专用代理），**成功才**乐观写 store（setDisplayAccount）并刷新读数；
+ * 失败（网络/未知账户）回滚乐观写并在切换器内 inline 可见提示 —— 不再
+ * 静默 catch。旧 `account <id>` 文本动词调用移除（内核保留该动词：CLI/
+ * 门禁兼容面），本连接的会话格不再被面板触碰 —— dispatcher 3s 重连清零
+ * 会话格也不再引起「页面静默回 default 而 Header 冻结」（两处都读同一
+ * display 源，重连后快照带回的 display 账户直接驱动全部消费点）。
+ *
+ * 切户残留窗口（issue 552 审计）：乐观写后、refresh 落地前，store 里还躺
+ * 着旧账户的账户级读数（accountTradeSummary / accountStrategyStats），清
+ * 掉它们让页面回落全局面读数，新读数到达后立即恢复。
+ *
+ * 仍属纯视图上下文：不发任何启停/冻结/平仓动词，切换不启停任何东西的
+ * 合同原样成立（check:switch-purity 的牙继续钉住）。
+ */
 async function switchTo(id: string): Promise<void> {
   if (id === active.value || switching.value) return
   switching.value = id
-  error.value = null
+  switchErr.value = null
+  const prev = active.value
   try {
-    const out = await command(`account ${id}`)
-    if (!out.ok) throw new Error(out.message ?? '切换被拒绝')
-    store.setAccounts(id, store.accounts)
+    const out = await api.displayAccountSet({ accountId: id, reason: 'panel account switch' })
+    if (out.error) throw new Error(out.error)
+    store.setDisplayAccount(id)
     store.clearAccountScoped()
     await refresh()
     store.refresh()
-    setDisplayAccount(id)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    // 失败回滚乐观写（下一拍快照本会带回内核读数，这里显式复位让 UI 立
+    // 刻回到真实状态），错误 inline 呈现在切换器内 —— 可见，不静默。
+    if (prev) store.setDisplayAccount(prev)
+    switchErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     switching.value = null
   }
@@ -141,9 +151,11 @@ async function refresh(): Promise<void> {
     if (!out.ok) throw new Error(out.message ?? '账户列表不可用')
     if (!out.data) throw new Error('网关未返回账户数据')
     doc.value = out.data
-    // Mirror into the store: pages read the active id + rows from here to
-    // label their figures (余额瓦片 / 挂单卡 / 插件页信息行) without each
-    // re-speaking the command surface.
+    // Mirror into the store: pages read the display account id + rows from
+    // here to label their figures (余额瓦片 / 挂单卡 / 插件页信息行) without
+    // each re-speaking the command surface. issue 561：镜像走 setAccounts
+    // 的 display 兜底通道（报文 displayAccount 在场采纳；快照在场时镜像
+    // 不覆盖内核读数）。
     store.setAccounts(
       out.data.active,
       out.data.accounts.map((a) => ({
@@ -157,6 +169,7 @@ async function refresh(): Promise<void> {
         strategies: Array.isArray(a.strategies) ? [...a.strategies] : undefined,
         reserved: a.reserved ?? '',
       })),
+      out.data.displayAccount ?? undefined,
     )
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -305,7 +318,7 @@ onBeforeUnmount(() => {
   <div ref="root" class="relative">
     <button
       class="flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2.5 py-1 text-[11.5px] font-semibold text-fg transition-colors hover:bg-panel-2/80"
-      :title="active ? `当前默认账户：${active}` : '账户'"
+      :title="active ? `当前显示账户：${active}` : '账户'"
       @click="toggle"
     >
       <Wallet class="size-3.5" />
@@ -338,6 +351,9 @@ onBeforeUnmount(() => {
       </div>
 
       <p v-if="error" class="px-2 py-1.5 text-[12px] text-down">{{ error }}</p>
+      <p v-if="switchErr" class="px-2 py-1.5 text-[12px] text-down">
+        切换失败：{{ switchErr }}
+      </p>
       <p v-else-if="loading && !rows.length" class="px-2 py-1.5 text-[12px] text-faint-fg">
         加载中…
       </p>
@@ -416,8 +432,9 @@ onBeforeUnmount(() => {
         账本为空（核心未就绪或账户簿未配置）。
       </p>
       <p class="mt-1 border-t border-line px-2 pt-1.5 text-[10.5px] leading-relaxed text-faint-fg">
-        切换只改变本面板连接的默认账户（§9.5 会话级）与行情/交易视图跟随（各账户的策略在后台持续运行，切换不启停任何东西）；
-        策略的启停在策略页按账户启用。绑定只在建户时设定（绑定即启用），已有账户不改绑——需要换交易所就删户重建；绑定了交易所的账户只能交易该交易所。
+        切换只改变显示账户（面板唯一可信账户源，accounts.toml 持久化、重启保持），行情/策略/流水视图随之跟随
+        （各账户的策略在后台持续运行，切换不启停任何东西）；策略的启停在策略页按账户启用。绑定只在建户时设定
+        （绑定即启用），已有账户不改绑——需要换交易所就删户重建；绑定了交易所的账户只能交易该交易所。
       </p>
     </div>
 

@@ -1423,6 +1423,13 @@ pub struct ResetTradingParams {
     /// Audit trail only — echoed in the reply, the log line and the
     /// manual-ops record.
     pub reason: Option<String>,
+    /// issue 561 账户维隔离：重置哪个账户。`None` = 本连接的缺省账户
+    /// （session → display → 进程 default，经 effective_default_account 链
+    /// —— 与 ORDER_PLACE 的缺省单解析同一规则）；显式 id 照字面执行，
+    /// 永不被会话格改写。重置只清洗该账户的账簿/挂单/持仓/记录，其他
+    /// 账户分文不动。
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// `system.reset_trading` result: what was cleared, and the post-reset
@@ -1434,8 +1441,14 @@ pub struct ResetTradingResult {
     pub cancelled_orders: usize,
     pub cleared_open_positions: usize,
     pub cleared_closed_trades: usize,
+    /// issue 561: 本次重置的账户范围 —— params.account_id 的最终解析值
+    /// （显式 id 或连接缺省账户）。回执与审计行都以它为准，操作者必须
+    /// 能看出「重置的是哪一本账」。
+    pub account_id: String,
     /// Post-reset cash per account id. Every entry must equal the configured
-    /// seed for a seeded core — the self-check asserts exactly that.
+    /// seed for a seeded core — the self-check asserts exactly that. issue 561
+    /// 账户维重置下它只含目标账户一行；其他账户的余额不在清洗范围，也
+    /// 不出现在回执里。
     pub balances: Vec<(String, Decimal)>,
     /// Pre-reset state snapshot persisted to the manual-ops audit record:
     /// jsonl line counts of the record files plus the pre-reset balance.

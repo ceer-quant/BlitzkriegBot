@@ -45,14 +45,16 @@ const store = usePanelStore()
 // 账户↔venue 解耦（2026-10 操作者裁决）：策略列表恒等全部已安装策略
 // （strategy.list 读数），不再按当前账户过滤 —— 「因选中 B 就看不到未在 B
 // 启用的策略」必须不可能。账户维度只活在启用按钮上：按钮语义 = 该策略在
-// 当前选中账户的启用状态，见 `isAccountEnabled` / `toggle`。
+// 显示账户（issue 561：面板唯一可信账户源）的启用状态，见
+// `isAccountEnabled` / `toggle`。
 const rows = computed<StrategyStatsRow[]>(() => store.strategyRows)
 
 const busy = ref<string | null>(null)
 const flash = ref<{ name: string; ok: boolean; msg: string } | null>(null)
 
 /**
- * 该策略在**当前选中账户**的启用状态（启停绑定在「账户+策略」级别）。
+ * 该策略在**显示账户**（issue 561：面板唯一可信账户源；store.activeAccount
+ * 是它的兼容读数）的启用状态（启停绑定在「账户+策略」级别）。
  *
  * 数据源两路，都照合同 feature-detect、缺字段降级：
  *  - 首选 `account.list` 行的 `strategies`（该账户的启用集；老内核不回该
@@ -90,10 +92,10 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
   busy.value = r.name
   flash.value = null
   try {
-    // 启停带当前选中账户（合同：strategy.enable/disable 接受 accountId，
-    // 缺省 = default）。无选中账户（老面板/单账户）走原全局动词，逐字节
-    // 不变。按钮显示的是账户级读数时，写也必须是账户级 —— 否则读到的是
-    // 一套、改的是另一套。
+    // 启停带当前显示账户（issue 561：面板唯一可信账户源；合同：
+    // strategy.enable/disable 接受 accountId，缺省 = default）。无账户读数
+    // （老面板/单账户）走原全局动词，逐字节不变。按钮显示的是账户级读数
+    // 时，写也必须是账户级 —— 否则读到的是一套、改的是另一套。
     const scoped = isAccountEnabled(r) !== null
     const res = await api.setStrategy(r.name, next, scoped ? store.activeAccount ?? undefined : undefined)
     // 代理通道的失败也走 HTTP 200（网关把 IPC 错误装进 `{"error": …}` 信封，
@@ -519,12 +521,12 @@ function onExpand(name: string): void {
                   </td>
                   <td class="px-2 py-2.5">
                     <span class="flex items-center justify-center gap-1.5">
-                      <!-- 启用按钮语义 = 该策略在当前选中账户的启用状态。
+                      <!-- 启用按钮语义 = 该策略在显示账户（issue 561 唯一可信源）的启用状态。
                            读数缺失（老内核）退回全局 enabled —— 列表不过滤。 -->
                       <Switch
                         :model-value="isAccountEnabled(r) ?? r.enabled"
                         :disabled="busy === r.name"
-                        :title="`${r.name} 的启停（只影响当前选中账户）`"
+                        :title="`${r.name} 的启停（只影响显示账户）`"
                         @update:model-value="toggle(r, $event)"
                       />
                     </span>
