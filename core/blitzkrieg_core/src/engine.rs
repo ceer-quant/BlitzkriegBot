@@ -1007,9 +1007,28 @@ impl Engine {
                             }
                         }
                     }
+                    // Observe the feeding batch's own expiry on the merge path
+                    // too. The comment above ("the first feed already observed
+                    // the round's one expiry") is a single-venue assumption:
+                    // in a mixed-venue table the staggered top-up is usually
+                    // the SECOND venue's ONLY feed of the round — its first
+                    // `RoundMarkets` lands here, never at the rollover — so
+                    // skipping the observation would leave it out of
+                    // `observed_venue_keys()` for the whole round: no panel
+                    // `venueRounds` row (the countdown rebind waits for it and
+                    // shows 00:00 on an account switch to that venue) and its
+                    // timing gate reading the sibling's clock. Same discipline
+                    // as the rollover arm: the declaration lands in ITS OWN
+                    // venue slot and out-of-band values are refused inside
+                    // `observe_end_time_for_venue`.
+                    let merge_venue = fresh.first().map(|m| (m.venue.clone(), m.expires_at_ms));
                     let mut merged = self.scanner.markets().to_vec();
                     merged.extend(fresh);
                     self.scanner.set_markets(merged);
+                    if let Some((venue, end_ms)) = merge_venue {
+                        self.scanner
+                            .observe_end_time_for_venue(&venue, end_ms, now_ms);
+                    }
                     return Vec::new();
                 }
                 // ── #550 复现缺陷（症状①）的根因之一：无界 sibling 存活 ──
@@ -3179,6 +3198,22 @@ mod tests {
             *rounds.lock().unwrap(),
             vec![2],
             "a same-slot cross-venue feed is not a round transition"
+        );
+        // The merge path must ALSO observe the second venue's own expiry —
+        // the merge comment's "the first feed already observed the round's
+        // one expiry" is a single-venue assumption. In a mixed-venue table
+        // the staggered top-up is usually the ONLY declaration the second
+        // venue ever makes (its first feed hits the merge, never the
+        // rollover below), so skipping the observation leaves it out of
+        // `observed_venue_keys()` forever: no panel `venueRounds` row (the
+        // countdown rebind waits for it and shows 00:00), and
+        // `round_timing_for_venue` falls back to the sibling's clock.
+        assert!(
+            e.scanner()
+                .observed_venue_keys()
+                .contains(&"kalshi".to_string()),
+            "the second venue's same-slot top-up must observe ITS OWN expiry \
+             (its first feed never reaches the rollover path)"
         );
 
         // Kalshi lists the NEXT slot while polymarket still sits in slot 2:
