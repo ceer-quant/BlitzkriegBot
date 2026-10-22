@@ -2257,10 +2257,13 @@ impl WebServer {
             }
             ("POST", "/api/system/reset-trading") => {
                 // issue 458 交易环境重置卡: the body IS the
-                // `system.reset_trading` params object (`{confirm, reason?}`),
-                // forwarded verbatim. The kernel refuses LIVE mode, a wrong
-                // confirmation word and a missing audit sink; a dry-mode pass
-                // wipes the paper ledger and reseeds, leaving one manual-ops
+                // `system.reset_trading` params object (`{confirm, reason?,
+                // accountId?}`), forwarded verbatim. issue 561: `accountId`
+                // (the panel's display account) rides through untouched — the
+                // reset is account-scoped at the kernel. The kernel refuses
+                // LIVE mode, a wrong confirmation word, an unknown account and
+                // a missing audit sink; a dry-mode pass wipes that account's
+                // records and reseeds ITS ledger, leaving one manual-ops
                 // audit row. Same proxy shape as round-duration: nothing is
                 // reshaped here, the kernel's typed deserialization validates.
                 self.proxy_backtest_body("system.reset_trading", &req.body)

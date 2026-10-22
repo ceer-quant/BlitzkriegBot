@@ -365,6 +365,20 @@ impl AccountLedgers {
         }
     }
 
+    /// issue 561 账户维重置：只翻新 `id` 这一本账 —— 余额回种子、journal
+    /// 重写为单行 Reset 行（见 [`crate::ledger::Ledger::reset_account_to_seed`]
+    /// 的语义论证）。显式拒绝未知账户，与 [`Self::get_mut`] 同一纪律；
+    /// `ledger_of` 的只读口径也在此复用于回执余额。返回磁盘重写结果透传
+    /// （false = 文件重写失败，内存已翻新，调用方决定告警）。
+    pub fn reset_account_to_seed(
+        &mut self,
+        id: &AccountId,
+        seed: rust_decimal::Decimal,
+    ) -> CoreResult<bool> {
+        self.get_mut(id)?.reset_account_to_seed(seed);
+        Ok(true)
+    }
+
     /// The process-level default account (§9.5). Session-level switches live
     /// at the IPC layer per connection and NEVER mutate this.
     pub fn active_id(&self) -> &AccountId {

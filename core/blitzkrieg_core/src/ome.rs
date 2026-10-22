@@ -262,6 +262,29 @@ impl Ome {
         self.orders.get(id)
     }
 
+    /// issue 561 账户维重置：把 `account` 的全部订单行（含终端态）从内存
+    /// 表里整个拿掉，其他账户的行一个不动。清单见 service.rs 重置分支的
+    /// 账户维/全局维分表——幂等表 `applied`/`by_internal` 是全局维（键无
+    /// 账户归属，整表由重置的其他全局项处理），这里只做订单行本身。返回
+    /// 移除的行数。
+    ///
+    /// 调用契约：目标账户的 resting 订单必须已先经 `cancel`（或已被整替）
+    /// ——本方法只负责「连记录都消失」，不负责释放预留/通知 venue。
+    pub fn remove_account_orders(&mut self, account: &str) -> usize {
+        let doomed: Vec<String> = self
+            .orders
+            .values()
+            .filter(|o| o.account_id.as_str() == account)
+            .map(|o| o.order_id.clone())
+            .collect();
+        let n = doomed.len();
+        for id in &doomed {
+            self.index_remove(id);
+            self.orders.remove(id);
+        }
+        n
+    }
+
     /// Insert into all order indexes. The sets must agree: an order in
     /// `by_submitted` but missing from the live indexes would vanish from
     /// the live views once it BECAME live again — impossible, statuses never

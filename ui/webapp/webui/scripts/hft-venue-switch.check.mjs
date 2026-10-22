@@ -237,12 +237,20 @@ check('venue 切换时倒计时残值清零（serverLeft/serverAt/leftSec 归零
   assert.match(body[0], /serverLeft\.value = 0/, '切换未清 serverLeft —— 旧倒计时残值跨 venue 存活')
   assert.match(body[0], /serverAt\.value = 0/, '切换未清 serverAt —— 本地插值基点跨 venue 存活')
   assert.match(body[0], /leftSec\.value = 0/, '切换未清 leftSec —— 渲染值跨 venue 存活')
-  // The clearing is conditional on the core speaking venueRounds — an old
-  // core keeps the legacy behaviour (the gate must not blank its countdown).
+  // issue 561（裁决 4）：清键必须【无条件】——曾以 `hasRows`（本帧
+  // venueRounds 非空）作前提，切到快照尚无钟行的 venue 时整段跳过，
+  // countForVenue 残键为真值把 fallback 门锁死，倒计时愣在 00:00。
+  // 对老内核清键是幂等空操作（它的 countForVenue 从未被赋过键），
+  // 无条件化不改变老内核行为，故 feature-detect 前提被本裁决移除。
+  assert.doesNotMatch(
+    body[0],
+    /hasRows/,
+    '清残值仍以 hasRows（venueRounds 非空）为前提 —— 无钟行 venue 的 00:00 卡死会回来（issue 561 裁决 4）',
+  )
   assert.match(
     body[0],
-    /venueRounds/,
-    '清残值没有 feature-detect venueRounds —— 老内核的倒计时会被误清空',
+    /countForVenue\.value = nv/,
+    '切换未把倒计时键钉到新 venue —— fallback 分支会被残键门死',
   )
 })
 

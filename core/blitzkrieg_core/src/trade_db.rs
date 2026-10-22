@@ -270,6 +270,57 @@ impl TradeDb {
         self.summary = TradeSummary::default();
         self.persist_summary();
     }
+
+    /// issue 561 账户维重置：只撤 `account` 的成交行 —— 其他账户的行与
+    /// 全局 summary 累计值原样保留（重置 B 账户不能抹掉 A 的成交史）。
+    /// 语义与 [`Self::retract`] 同族（rewrite_atomic 重写 + 从存留行重建
+    /// summary），只是过滤器从「一行」换成「一个账户」：pre-E28 行
+    /// （无 accountId）经 serde default 归入 default 账户，重置 default
+    /// 时一并撤走，与 [`crate::ipc::schema::AccountView`] 的读数口径一致。
+    /// 返回撤走的行数（自检/回执用）。
+    pub fn retract_account(&mut self, account: &str, now_ms: i64) -> usize {
+        let Ok(text) = std::fs::read_to_string(&self.jsonl_path) else {
+            return 0;
+        };
+        let all: Vec<TradeRecord> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let (kept, removed): (Vec<TradeRecord>, Vec<TradeRecord>) = all
+            .into_iter()
+            .partition(|r| r.account_id.as_str() != account);
+        if removed.is_empty() {
+            return 0;
+        }
+        let Ok(body) = kept
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|lines| lines.join("\n"))
+        else {
+            return 0;
+        };
+        let mut out = body;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        // 与 retract 同一原子重写纪律：重置窗口的崩溃不能撕开成交史。
+        if !crate::jsonl::rewrite_atomic(&self.jsonl_path, out.as_bytes()) {
+            tracing::warn!(
+                account = %account,
+                "issue 561: account trade-log rewrite failed — the on-disk \
+                 rows survive; the summary stays authoritative"
+            );
+            return 0;
+        }
+        self.summary = TradeSummary::default();
+        for r in &kept {
+            self.fold_summary(r);
+        }
+        self.summary.last_updated = now_ms;
+        self.persist_summary();
+        removed.len()
+    }
 }
 
 /// Read the last `limit` records from a trades JSONL file (newest last).

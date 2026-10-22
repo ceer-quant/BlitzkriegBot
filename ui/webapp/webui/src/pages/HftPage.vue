@@ -292,23 +292,21 @@ watch(identityVenue, (nv, ov) => {
   if (ov === undefined) return
   venueSwitchAt.value = Date.now()
   venueSwitchFrom.value = ov
-  // issue 550（症状②）倒计时重绑的扳机：本核会说 venueRounds 时，身份
-  // venue 变化即清倒计时的键与本地插值残值 —— 下一帧快照带新 venue 自己
-  // 的钟行，从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两次
-  // 快照间会续跳）绝不跨 venue 存活。不说话的核（老内核）保持现行为。
-  // 键写成新 venue 名而不是 ''：'' 会让快照 watch 的 fallback 分支把全局
-  // 标量钟（= 旧所的保守钟）重新灌进倒计时 —— 恰好把要清的残值请回来。
-  // 钉住新 venue 名 = fallback 只在「从未绑定过」时可达，切走后新所的
-  // 钟行到达前倒计时显示 00:00（Loading 门也开着），不跳旧钟。
-  const hasRows =
-    Array.isArray(snap.value?.round?.venueRounds) &&
-    (snap.value?.round?.venueRounds?.length ?? 0) > 0
-  if (hasRows) {
-    countForVenue.value = nv
-    serverLeft.value = 0
-    serverAt.value = 0
-    leftSec.value = 0
-  }
+  // issue 550（症状②）+ issue 561（裁决 4）倒计时重绑的扳机：身份 venue
+  // 变化即【无条件】清倒计时的键与本地插值残值 —— 下一帧快照带新 venue
+  // 自己的钟行，从它的首帧重新起跳；旧 venue 的残值（本地 500ms 插值在两
+  // 次快照间会续跳）绝不跨 venue 存活。曾以「本帧快照存在钟行」作清键前
+  // 提：切到一个「快照尚无钟行」的所时整段被跳过，countForVenue 仍钉在
+  // 旧所——其残键为真值，watch(snap) 的 fallback 门（`!countForVenue.value`）
+  // 永远进不去，倒计时愣在 00:00。清键对老内核同样安全：老内核的
+  // countForVenue 从未被赋过键，清零是幂等空操作；fallback 分支只在「从未
+  // 绑定过」时可达的语义不变（键仍是新 venue 名，不是 ''）。watch(snap) 内
+  // `countForVenue.value !== identityVenue.value` 的选行键卫兵保持原样 ——
+  // 本处只动清键窗口这一处。
+  countForVenue.value = nv
+  serverLeft.value = 0
+  serverAt.value = 0
+  leftSec.value = 0
 })
 
 /**
@@ -494,25 +492,43 @@ const cumStats = computed(() => {
 })
 
 // ── balance (本金 + 净利 is the real balance; cash is the ledger it commits against)
-const recon = computed(() => balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees))
-// E28 多账户的诚实标注：瓦片的现金/本金读数来自内核进程级活动账本（§9.5
-// gateway 走 active_ledger），不是 display 账户的自有账本——issue 561 起
-// 显示账户随切户走，进程级账本不动，两者可以不同，标签必须说出来而不是
-// 让两套数字冒充一套。单账户（<=1 行）不加后缀，与 0.2 部署逐字一致。
-// 账户级余额瓦片（读 account.list 行）等内核暴露账户级账本读数后再换源
-// （wallet 重构批次）。
+// issue 561（裁决 1）：瓦片换源到显示账户自有账本 —— account.list 行
+// （内核 account_views 按 ledger_of(id) 读该账户账本），不再读快照顶层的
+// 进程级 ledger.balance。切户后下一拍 refreshAccounts 镜像带回新账户的
+// balance/available/reserved，读数随显示账户走；行未到的一拍回落快照顶层，
+// 下面的标注 computed 如实说出该兜底口径，绝不冒充账户级。
+const recon = computed(() => {
+  const row = store.activeAccountRow
+  if (row) {
+    return balanceView(
+      {
+        // account.list 行的十进制跨线是 string|number，归一成 number 再进
+        // balanceView（该函数与内核快照的 number 口径对齐）。
+        balance: Number(row.balance) || 0,
+        reserved: Number(row.reserved) || 0,
+        available: Number(row.available) || 0,
+        seed: snap.value?.balance?.seed ?? null,
+      },
+      cumStats.value.net,
+      cumStats.value.fees,
+    )
+  }
+  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
+})
+// 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级」；账户行在场
+// 时读数就是显示账户的自有账本，不再有「显示账户的名字 + 进程级的钱」的
+// 错位（issue 561 裁决 1 要消除的正是一句标注遮不住的错位本身）。
 const balanceAccountNote = computed(() => {
+  if (store.activeAccountRow) return ''
   const id = store.activeAccount
   if (!id || store.accounts.length <= 1) return ''
-  return ` 当前读数属于进程默认账户「${id}」的进程级账本——不随显示账户切换改写读数。`
+  return ` 当前读数是进程级账本的兜底显示（账户行未到）——下一拍账户簿到达后即随显示账户。`
 })
 const balanceAccountSuffix = (label: string): string => {
   const id = store.activeAccount
   if (!id || store.accounts.length <= 1) return label
   return `${label} · ${id}`
 }
-// issue 561：两处 `store.activeAccount` 读 display 源（兼容读数），标注与
-// 过滤的账户口径一致 —— 瓦片数字仍读进程级账本（上文 note 的诚实标注）。
 
 // ── 现金流水卡（account.journal，issue 509 内核 / issue 511 动词 / issue 513 面板消费面）─────
 // issue 509 给 Ledger 加的 append-only 现金流水在此可见：操作者能看见每笔钱的来去

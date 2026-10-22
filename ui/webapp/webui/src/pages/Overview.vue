@@ -45,8 +45,29 @@ const lastError = computed(() => lastErrorBanner(stats.value, freeze.value !== n
 const selfCheck = computed(() => selfCheckBanner(stats.value))
 
 // ── balance (principal + net profit is the real balance in both modes) ──────
+// issue 561（裁决 1）：真实余额瓦片跟随显示账户 —— 读 account.list 行
+// （内核 account_views 已按 ledger_of(id) 读该账户自有账本：balance/
+// available/reserved），不再读快照顶层的进程级 ledger.balance。切到 B 账户
+// 时显示 B 的账本，不能扣 B 的名字却算 A 的钱。
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
-const balance = computed(() => snap.value?.balance ?? null)
+const balance = computed(() => {
+  const row = store.activeAccountRow
+  if (row) {
+    return {
+      // account.list 行的十进制跨线是 string|number，归一成 number 再进
+      // balanceView（该函数与内核快照的 number 口径对齐）。
+      balance: Number(row.balance) || 0,
+      reserved: Number(row.reserved) || 0,
+      available: Number(row.available) || 0,
+      // account.list 行不带 seed —— 本金从快照顶层（dry 配置值）取，
+      // equity = 本金 + 该账户净利的口径不变。
+      seed: snap.value?.balance?.seed ?? null,
+    }
+  }
+  // 行未到（面板刚启动的一拍）：回落快照顶层，标称口径由 balanceTitle
+  // 的 row 兜底分支如实标注 —— 不渲染一个猜出来的 0。
+  return snap.value?.balance ?? null
+})
 const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null)
 
 // ── trades ─────────────────────────────────────────────────────────────────
@@ -92,8 +113,11 @@ const recon = computed(() => balanceView(balance.value, trades.value.net, trades
  * computable the headline is 本金 ＋ 净利润; when the core reports no principal
  * the panel falls back to the cash ledger and the label must say so, or the
  * number would be read as a balance it is not.
+ * issue 561：读数源已是显示账户自有账本（account.list 行）；行未到的兜底
+ * 一拍标注「进程级」—— 那是快照顶层字段的口径，如实说出它属于谁。
  */
 const balanceTitle = computed(() => {
+  if (store.activeAccountRow === null) return '进程级读数'
   if (recon.value.equity !== null) return isDry.value ? '真实余额' : '账户权益'
   return isDry.value ? '内核现金账' : '交易所余额'
 })
@@ -116,9 +140,8 @@ const accountBadge = computed(() => {
 const round = computed(() => snap.value?.round ?? null)
 // E28 (§9.5) + issue 561: the 当前持仓 table is scoped to the display account
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
-// The balance tile above is deliberately NOT account-filtered — the kernel's
-// `ledger.balance` reads the process-level active book, and pretending
-// otherwise would fabricate a per-account number the wire does not carry.
+// issue 561（裁决 1）后余额瓦片同样是账户自有读数（account.list 行）——
+// 上方「余额瓦片故意不按账户过滤」的旧口径随进程级换源一并废除。
 const positions = computed(() =>
   filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
 )
@@ -211,8 +234,10 @@ const needsStrategyHint = computed(() => {
             No principal on the wire (LIVE, or a core older than the field): the
             equity is not computable, so show the cash ledger and say plainly that
             the principal is missing rather than inventing an equation.
+            issue 561: the cash number is the DISPLAY account's own book
+            (account.list row) once the rows have arrived.
           -->
-          <Tooltip v-else-if="isDry" content="内核未上报本金，无法计算「本金 ＋ 净利」的真实余额，这里显示内核的现金账。本金由内核按 --seed-balance 持有；当前运行中的内核早于该字段，重启内核后即可显示真实余额。">
+          <Tooltip v-else-if="isDry && store.activeAccountRow" content="账户未上报本金，无法计算「本金 ＋ 净利」的真实余额，这里显示该账户自有现金账。本金由内核按 --seed-balance 持有；当前运行中的内核早于该字段，重启内核后即可显示真实余额。">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
               内核现金账 · 本金未上报
             </span>

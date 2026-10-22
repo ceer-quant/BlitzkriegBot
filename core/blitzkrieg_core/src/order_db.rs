@@ -63,6 +63,20 @@ impl OrderDb {
         // the order log's recovery path.
         crate::jsonl::rewrite_atomic(&self.jsonl_path, buf.as_bytes());
     }
+
+    /// issue 561 账户维重置：从持久订单日志里丢掉 `account` 的全部行，其他
+    /// 账户的行原样保留。与 [`Self::compact`] 同一原子重写纪律；best-effort
+    /// 语义也与 append 一致（内存 OME 才是权威）。返回保留的行数（供回执/
+    /// 日志核对）。
+    pub fn compact_account(&self, account: &str) -> usize {
+        let kept: Vec<TrackedOrder> = self
+            .load()
+            .into_iter()
+            .filter(|o| o.account_id.as_str() != account)
+            .collect();
+        self.compact(&kept);
+        kept.len()
+    }
 }
 
 #[cfg(test)]

@@ -158,12 +158,15 @@ check('the filtered badge names the venue, the unfiltered one does not', () => {
 })
 
 check('balance tile is labeled with the account id under multi-account', () => {
-  // balanceAccountSuffix must append the id, and the note must disclose the
-  // tile reads the process-active ledger (not the switched session's book).
+  // balanceAccountSuffix must append the id. issue 561（裁决 1）：瓦片换源
+  // 到显示账户自有账本（account.list 行）——旧断言「note 必须披露读的是
+  // 进程级账本」随换源作废：账户行在场时读数就是该账户的钱，没有进程级
+  // 口径要披露；note 只在行未到的兜底一拍如实标注「进程级兜底」，单账户
+  // 部署照旧不加任何后缀（accounts.length <= 1 的守卫被钉住不动）。
   assert.match(hft, /balanceAccountSuffix/, 'suffix helper missing')
   const note = hft.match(/balanceAccountNote[\s\S]*?\n\}\)/)?.[0] ?? ''
   assert.match(note, /accounts\.length <= 1/, 'single-account runs must stay untouched')
-  assert.match(note, /进程默认账户|不会改写/, 'the disclosure must say what the tile actually reads')
+  assert.match(note, /进程级|兜底/, 'the fallback-beat disclosure must say what the tile actually reads')
 })
 
 check('empty state under venue filtering names the venue', () => {

@@ -544,10 +544,15 @@ export interface ResetPreSummaryDoc {
   balance: number | string
 }
 
-/** `system.reset_trading` 请求体：confirm 必须逐字 "RESET"（自由文本确认门）。 */
+/**
+ * `system.reset_trading` 请求体：confirm 必须逐字 "RESET"（自由文本确认门）。
+ * issue 561：accountId = 重置哪个账户（缺省 = 面板 display 账户，经内核
+ * effective_default_account 链解析）；重置按账户隔离，其他账户分文不动。
+ */
 export interface ResetTradingBody {
   confirm: string
   reason?: string
+  accountId?: string
 }
 
 /** `system.reset_trading` 回执：清理计数 + 自检后的余额 + 重置前快照。 */
@@ -556,6 +561,8 @@ export interface ResetTradingResultDoc {
   cancelledOrders: number
   clearedOpenPositions: number
   clearedClosedTrades: number
+  /** issue 561：本次重置的账户范围（显式 id 或连接缺省账户的解析值）。 */
+  accountId: string
   balances: [string, number | string][]
   preSummary: ResetPreSummaryDoc
   atMs: number
