@@ -120,6 +120,19 @@ const marketTypeText = computed(() => {
 })
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
+/**
+ * Whether the engine is up.
+ *
+ * `connected` is the gateway's "core is reachable on the socket" flag, and the
+ * core *is* the engine — 启动 spawns it, 停止 kills it — so reachability is the
+ * running state. It stays accurate on a failed poll too: the web adapter answers
+ * 200 with `connected: false` rather than erroring, so the store never keeps a
+ * stale `true`. Declared beside the countdown state (not down at the engine
+ * control block) because the lifecycle re-arm watcher below needs it before
+ * that block runs.
+ */
+const engineUp = computed(() => snap.value?.connected ?? false)
+
 // ── countdown: interpolate locally between server answers ────────────────────
 // issue 550（症状②）根因修复（显示链半边）：轮次钟必须随「行情身份」重绑
 // 定 —— 显示账户绑定 venue X 时，倒计时读 X 自己的钟（快照
@@ -136,6 +149,11 @@ const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 const serverLeft = ref(0)
 const serverAt = ref(0)
 const countForVenue = ref('')
+// 渲染值必须与插值锚点同区声明：immediate watch 的回调在 setup 同步段执行，
+// 它会触碰 leftSec —— 声明落在 watch 之后时，带着在场快照挂载（重挂载路径）
+// 会直接 ReferenceError（TDZ），整页挂载失败，只有刷新能救。这也是「行情页
+// 空白、刷新才恢复」的另一种成因。
+const leftSec = ref(0)
 
 /**
  * The round clock row of the identity venue (显示账户的 venue，老内核回落
@@ -149,6 +167,33 @@ const venueRound = computed(() => {
   const rows = snap.value?.round?.venueRounds
   if (!Array.isArray(rows) || rows.length === 0) return null
   return rows.find((r) => r.venue === v) ?? null
+})
+
+/**
+ * 引擎生命周期重臂（本修复的扳机）。
+ *
+ * 行情页的 启动/停止 驱动的是引擎进程本身（网关 Supervisor spawn/kill）。
+ * 停止后新内核从零启动：scanner 的内存轮钟（actual_end_time_ms）清零，要等
+ * 新进程首批 in-band 到期声明（RoundMarkets → observe_end_time_for_venue）
+ * 才有 venueRounds 行。这条边界上没有任何「身份 venue 变化」事件 ——
+ * identityVenue 停机期间翻成空串、重启后又翻回来 —— 现有的
+ * watch(identityVenue) 重绑链（issue 550/559 建）整个不触发，countForVenue
+ * 与本地插值残值跨进程存活：fallback 分支被残留的真值键门死，倒计时停在
+ * 上次状态或 00:00，直到浏览器刷新（重挂载重置组件状态）才恢复。
+ *
+ * 处置：引擎上线（false→true，含崩溃自愈）即把倒计时拨回「全新挂载」的
+ * 起点清零。键清成 '' 让 fallback 分支立即用新内核的全局格钟接管（老内核
+ * 无 venueRounds 时倒计时也能恢复）；等身份所自己的钟行到达，venue 分支
+ * 按 countForVenue 卫兵照常重绑。watcher 必须建在下面的 watch(snap) 之前
+ * —— 前端 watcher 按创建序 flush，保证先清残值、后喂新钟，同一帧不闪跳。
+ */
+watch(engineUp, (up, was) => {
+  if (up && !was) {
+    countForVenue.value = ''
+    serverLeft.value = 0
+    serverAt.value = 0
+    leftSec.value = 0
+  }
 })
 
 watch(snap, (s) => {
@@ -183,7 +228,6 @@ const { pause: stopTick } = useIntervalFn(() => {
   leftSec.value = Math.max(0, Math.round(serverLeft.value - (Date.now() - serverAt.value) / 1000))
 }, 500)
 onUnmounted(() => { stopTick() })
-const leftSec = ref(0)
 
 const round = computed(() => snap.value?.round ?? null)
 /**
@@ -601,17 +645,7 @@ const winBands = computed(() => {
 // ── engine control ──────────────────────────────────────────────────────────
 const busy = ref(false)
 const cmdMsg = ref<string | null>(null)
-
-/**
- * Whether the engine is up.
- *
- * `connected` is the gateway's "core is reachable on the socket" flag, and the
- * core *is* the engine — 启动 spawns it, 停止 kills it — so reachability is the
- * running state. It stays accurate on a failed poll too: the web adapter answers
- * 200 with `connected: false` rather than erroring, so the store never keeps a
- * stale `true`.
- */
-const engineUp = computed(() => snap.value?.connected ?? false)
+// engineUp 已上移到倒计时块（引擎生命周期重臂 watch 需要它先于该块声明）。
 
 // ── 空行情的判因（issue 488 空态的轮次分支）────────────────────────────────
 // 行情卡空 + 插件已接入 + 引擎在跑时，有两条互斥的真相：网络/代理拦了数据源
