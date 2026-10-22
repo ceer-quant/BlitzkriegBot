@@ -195,6 +195,17 @@ fn arb_core(pot: Option<Decimal>) -> Core {
         .expect("cross_venue_arb registers under its package name");
     assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     c.enable_engine(eng);
+    // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
+    // adapter's params bag). The fixture wires the same two venues the market
+    // data carries — without it the strategy pairs nothing (fail-closed).
+    c.arb_config_set(&blitzkrieg_core::account::CrossVenueArbConfig {
+        leg_a_venue: "polymarket".into(),
+        leg_a_account: default_account_id().to_string(),
+        leg_b_venue: "kalshi".into(),
+        leg_b_account: default_account_id().to_string(),
+        pairs: vec!["BTC".into()],
+    })
+    .expect("the leg configuration lands (memory-only core)");
     c
 }
 

@@ -497,6 +497,13 @@ pub struct Engine {
     /// one listing).
     unified_mappings:
         std::collections::BTreeMap<String, blitzkrieg_market_api::unified::UnifiedEvent>,
+    /// 跨所套利弹窗 v2: the arb leg configuration in force (the host's hot
+    /// push, mirroring accounts.toml's `[cross_venue_arb]`). `None` =
+    /// unconfigured — every stamp falls back to the instance account and no
+    /// arb params are merged. Read by `evaluate`'s strategy loop (each
+    /// adapter re-resolves the leg map per candidate) and by the params
+    /// merge; written by `set_arb_leg_config`.
+    arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
 }
 
 impl Engine {
@@ -532,7 +539,50 @@ impl Engine {
             size_pct_skipped: 0,
             klines: crate::kline::KlineAggregator::with_default_intervals(),
             unified_mappings: std::collections::BTreeMap::new(),
+            arb_leg_config: None,
         }
+    }
+
+    /// 跨所套利弹窗 v2: hot-push the arb leg configuration (the host calls it
+    /// on `arb.config.set`/`clear` and at registration). Fanned to every
+    /// hosted strategy's adapter — the stamp source AND the params bag update
+    /// in the same call, so a set is fully in force on the next evaluation.
+    ///
+    /// The fan-out is a PER-SCOPE PROJECTION, not a verbatim broadcast: a
+    /// scope whose instance account IS one of the configured leg accounts
+    /// receives the map as the user spelled it — its legs stamp per venue.
+    /// Any other scope of the same package is a SEPARATE deployment (a
+    /// second account running the package independently, the account-decouple
+    /// posture): it keeps its own book whole — its projection rewrites BOTH
+    /// leg accounts onto its own instance id, so its pair fills under its
+    /// scope account exactly as the pre-v2 shape did, and it can never
+    /// double-place legs onto the first deployment's accounts. Unconfigured
+    /// (= None) fans out as None everywhere.
+    pub fn set_arb_leg_config(&mut self, cfg: Option<crate::account::CrossVenueArbConfig>) {
+        self.arb_leg_config = cfg.clone();
+        for s in &mut self.strategies {
+            let scope_cfg = match (&cfg, s.account_id.as_str()) {
+                (Some(c), acct)
+                    if acct == c.leg_a_account.trim() || acct == c.leg_b_account.trim() =>
+                {
+                    Some(c.clone())
+                }
+                (Some(c), acct) => {
+                    let mut projected = c.clone();
+                    projected.leg_a_account = acct.to_string();
+                    projected.leg_b_account = acct.to_string();
+                    Some(projected)
+                }
+                (None, _) => None,
+            };
+            s.strategy.set_arb_leg_config(scope_cfg);
+        }
+    }
+
+    /// The arb leg configuration in force (diagnostics/tests read the engine
+    /// mirror; the Core cell remains the wire truth).
+    pub fn arb_leg_config(&self) -> Option<&crate::account::CrossVenueArbConfig> {
+        self.arb_leg_config.as_ref()
     }
 
     /// #427: record one confirmed cross-venue mapping (last write wins per
@@ -1203,12 +1253,29 @@ impl Engine {
             // loop: each scope's ctx carries ONLY its own positions — same
             // strategy on two accounts is two independent books, and neither
             // package may read the other's holdings through `bk.holdings()`.
+            // 跨所套利弹窗 v2 exception: a strategy that trades under the arb
+            // leg configuration STAMPS each leg to ITS OWN venue's account
+            // (entries and exits alike), so one instance's book legitimately
+            // spans the configured leg accounts — the release decision prices
+            // the WHOLE pair and must see both legs' held rows, or a B-leg
+            // exit would be suggested against a holding the instance cannot
+            // see (the leg would be trapped until settlement). The widening
+            // is bounded by the configuration itself: only rows whose account
+            // is one of the two leg accounts join the view, so unrelated
+            // scopes' books stay sealed.
             for s in self.strategies.iter_mut() {
+                let leg_accounts = s.strategy.arb_leg_accounts();
                 if s.enabled {
                     let held: Vec<HeldPosition> = self
                         .positions_view
                         .iter()
-                        .filter(|p| p.strategy == s.strategy.name() && p.account_id == s.account_id)
+                        .filter(|p| {
+                            p.strategy == s.strategy.name()
+                                && (p.account_id == s.account_id
+                                    || leg_accounts
+                                        .as_ref()
+                                        .is_some_and(|ls| ls.contains(&p.account_id)))
+                        })
                         .cloned()
                         .collect();
                     let ctx = StrategyCtx::new(
@@ -2050,6 +2117,28 @@ impl Engine {
         if let Some(h) = &self.hot_params {
             hosted.strategy.set_hot_params(Some(h.clone()));
         }
+        // 跨所套利弹窗 v2: a scope registered while an arb configuration is
+        // already in force receives ITS PROJECTION at birth (the same
+        // "later joiner" pattern the hot_params forward runs) — otherwise a
+        // scope added after an `arb.config.set` would stamp instance
+        // accounts until the next set. `set_arb_leg_config` owns the
+        // per-scope projection (the wired scope gets the map, a separate
+        // deployment keeps its own book).
+        let joiner_cfg = self.arb_leg_config.clone();
+        let joiner_account = account_id.to_string();
+        let scope_cfg = match (&joiner_cfg, joiner_account.as_str()) {
+            (Some(c), acct) if acct == c.leg_a_account.trim() || acct == c.leg_b_account.trim() => {
+                Some(c.clone())
+            }
+            (Some(c), acct) => {
+                let mut projected = c.clone();
+                projected.leg_a_account = acct.to_string();
+                projected.leg_b_account = acct.to_string();
+                Some(projected)
+            }
+            (None, _) => None,
+        };
+        hosted.strategy.set_arb_leg_config(scope_cfg);
         self.strategies.push(hosted);
         Ok(name)
     }

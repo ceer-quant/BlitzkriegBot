@@ -398,6 +398,14 @@ pub struct LuaEngineAdapter {
     /// birth — a twin prices `bk.fees()` from the same curve the live
     /// strategy sees.
     fee_cell: Arc<Mutex<Option<FeeScheduleView>>>,
+    /// 跨所套利弹窗 v2: the arb leg configuration in force (the engine's hot
+    /// push). Two consumers: the account STAMP — entry signals and exit
+    /// intents carry the token's OWN venue's leg account (venue→account map),
+    /// falling back to `account_id` for venues outside the configuration —
+    /// and the params bag, which gains the `arb_*` entries the strategy's
+    /// pairing logic reads. `None` = unconfigured: every stamp falls back and
+    /// no arb entries are merged (the pre-v2 behaviour, byte-identical).
+    arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
 }
 
 impl LuaEngineAdapter {
@@ -439,6 +447,7 @@ impl LuaEngineAdapter {
             defaults: tunables,
             specs,
             fee_cell: Arc::new(Mutex::new(None)),
+            arb_leg_config: None,
         }
     }
 
@@ -469,6 +478,7 @@ impl LuaEngineAdapter {
             defaults: tunables,
             specs: Vec::new(),
             fee_cell,
+            arb_leg_config: None,
         }
     }
 
@@ -631,6 +641,19 @@ impl EngineStrategy for LuaEngineAdapter {
                 st.params = bag;
             }
         }
+        // 跨所套利弹窗 v2: the leg configuration rides the SAME params bag —
+        // merged OVER whatever the cell/defaults produced, so a strategy that
+        // declares no such tunables still reads its legs/pairs from
+        // `bk.params()`. Unconfigured = no entries = the strategy pairs
+        // nothing (fail-closed), exactly the pre-v2 shape.
+        if self.arb_leg_config.is_some() {
+            let bag_extra = self.arb_params();
+            if let Ok(mut st) = self.inner.state().lock() {
+                for (k, v) in bag_extra {
+                    st.params.insert(k, v);
+                }
+            }
+        }
         self.inner.on_eval_books(&books);
         // THIS strategy's open positions, so `bk.holdings()` sees a gap-fill
         // opportunity (a partially-filled pair leg). The host already sliced
@@ -715,18 +738,20 @@ impl EngineStrategy for LuaEngineAdapter {
         // round tokens and become `TradeSignal`s. A token outside this round
         // is dropped (the kernel never trades an unknown token).
         for e in intents.exits {
+            // 跨所套利弹窗 v2: the close resolves to the row of the account
+            // the TOKEN'S VENUE is configured to trade under — the same stamp
+            // the entry carried, so a B leg's exit closes the B leg's row and
+            // never touches account A's identical token. Unconfigured (or a
+            // venue outside the configuration) falls back to the instance
+            // account — the pre-v2 behaviour, byte-identical.
             self.exit_intents.push(StrategyExitIntent {
+                account_id: self.stamp_account(ctx, &e.token),
                 token_id: e.token,
                 reason: if e.reason.is_empty() {
                     "strategy".to_string()
                 } else {
                     e.reason
                 },
-                // The intent closes THIS scope's row: two accounts can hold
-                // the same token, and an unaccounted close would resolve to
-                // whichever account's position a token-only lookup found
-                // first.
-                account_id: self.account_id.clone(),
             });
         }
         for b in intents.breaks {
@@ -752,7 +777,11 @@ impl EngineStrategy for LuaEngineAdapter {
                 if m.up_token_id == entry.token {
                     candidates.push(TradeSignal {
                         strategy: self.name().to_string(),
-                        account_id: self.account_id.clone(),
+                        // 跨所套利弹窗 v2: the leg stamp — the token's OWN
+                        // venue's configured account (A legs to the A account,
+                        // B legs to the B account), instance account as the
+                        // fallback. The scope gates downstream judge THIS id.
+                        account_id: self.stamp_account(ctx, &entry.token),
                         asset: m.asset.clone(),
                         direction: SignalDirection::Up,
                         token_id: m.up_token_id.clone(),
@@ -766,7 +795,7 @@ impl EngineStrategy for LuaEngineAdapter {
                 if m.down_token_id == entry.token {
                     candidates.push(TradeSignal {
                         strategy: self.name().to_string(),
-                        account_id: self.account_id.clone(),
+                        account_id: self.stamp_account(ctx, &entry.token),
                         asset: m.asset.clone(),
                         direction: SignalDirection::Down,
                         token_id: m.down_token_id.clone(),
@@ -806,6 +835,25 @@ impl EngineStrategy for LuaEngineAdapter {
         // Resolve only OUR cell (the foreign.rs pattern): no declared knobs →
         // no cell → the manifest defaults keep answering `bk.params()`.
         self.params_cell = registry.as_ref().and_then(|r| r.handle_for(self.name()));
+    }
+
+    /// 跨所套利弹窗 v2: store the leg configuration. The STAMP source and the
+    /// params entries both read this cell — one write, both consumers.
+    fn set_arb_leg_config(&mut self, cfg: Option<crate::account::CrossVenueArbConfig>) {
+        self.arb_leg_config = cfg;
+    }
+
+    /// 跨所套利弹窗 v2: the leg accounts this instance's book may span. The
+    /// engine widens this scope's `bk.holdings()` view with rows under THESE
+    /// accounts only — the stamp sends each leg to its own venue's account,
+    /// and the pair's release decision must see both legs' held rows.
+    fn arb_leg_accounts(&self) -> Option<Vec<String>> {
+        self.arb_leg_config.as_ref().map(|cfg| {
+            vec![
+                cfg.leg_a_account.trim().to_string(),
+                cfg.leg_b_account.trim().to_string(),
+            ]
+        })
     }
 
     /// #393: the knobs this package declared evolvable (manifest tunables
@@ -863,6 +911,40 @@ impl EngineStrategy for LuaEngineAdapter {
 }
 
 impl LuaEngineAdapter {
+    /// The account STAMP for one token: the configured venue trades under its
+    /// OWN leg account (the venue→account map the user's leg configuration
+    /// spells); a venue outside the configuration falls back to the INSTANCE
+    /// account — the pre-v2 behaviour for anything the user did not wire.
+    ///
+    /// Zero new API: the token's venue is read off `ctx.markets()` (every row
+    /// carries its venue tag — #427's tagging, #560/#567's (venue,asset)
+    /// uniqueness guarantees exactly one row per token).
+    fn stamp_account(&self, ctx: &StrategyCtx<'_>, token: &str) -> String {
+        let Some(cfg) = &self.arb_leg_config else {
+            return self.account_id.clone();
+        };
+        let venue = ctx
+            .markets()
+            .iter()
+            .find(|m| m.up_token_id == token || m.down_token_id == token)
+            .map(|m| m.venue.as_str())
+            .unwrap_or_default();
+        cfg.leg_account_for_venue(venue)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| self.account_id.clone())
+    }
+
+    /// The `arb_*` params entries the strategy's pairing logic reads, as a
+    /// plain string bag merged over the cycle's params (the st.params push
+    /// path — no new strategy API). Empty when unconfigured: the strategy
+    /// then sees no arb keys and pairs nothing (fail-closed).
+    fn arb_params(&self) -> HashMap<String, String> {
+        match &self.arb_leg_config {
+            None => HashMap::new(),
+            Some(cfg) => cfg.as_params().into_iter().collect(),
+        }
+    }
+
     /// The inner sandbox's observable health (call/error counters + the last
     /// deterministic Lua error). The SAME record `diagnostics()` serializes —
     /// exposed as data so a host (or a test driving the adapter directly)

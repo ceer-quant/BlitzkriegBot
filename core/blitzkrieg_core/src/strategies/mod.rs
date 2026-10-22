@@ -444,6 +444,30 @@ pub trait EngineStrategy: Send + Sync {
     fn poison_alert(&mut self) -> Option<String> {
         None
     }
+
+    /// 跨所套利弹窗 v2: the arb leg configuration in force (the accounts.toml
+    /// `[cross_venue_arb]` section, memory-mirrored on the engine). Two
+    /// consumers ride one push: the adapter's account STAMP (entry signals
+    /// and exit intents carry the token's OWN venue's leg account, falling
+    /// back to the instance account for venues outside the configuration)
+    /// and the strategy's `bk.params()` bag (the leg venues/accounts/pairs
+    /// the pairing logic reads). `None` = unconfigured: the stamp falls back
+    /// everywhere (instance account — the pre-v2 behaviour) and no params
+    /// entries are added. Default: ignore — every strategy that never opted
+    /// into the cross-venue flow keeps today's behaviour.
+    fn set_arb_leg_config(&mut self, _cfg: Option<crate::account::CrossVenueArbConfig>) {}
+
+    /// 跨所套利弹窗 v2: the leg accounts this strategy's OWN book may span —
+    /// the configured pair's two account ids when the strategy runs under a
+    /// leg configuration, `None` otherwise. The engine widens the scope's
+    /// `bk.holdings()` view with rows under THESE accounts only (the stamp
+    /// sends each leg to its own venue's account, so the release decision —
+    /// which prices the WHOLE pair — must see both legs' held rows). Default:
+    /// `None` — every non-cross-venue strategy keeps the strictly per-scope
+    /// slicing, byte-identical.
+    fn arb_leg_accounts(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 #[cfg(test)]
