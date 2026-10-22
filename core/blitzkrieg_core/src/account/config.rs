@@ -96,6 +96,100 @@ struct AccountsFile {
     /// key exists to make explicit).
     #[serde(default)]
     display_account: Option<String>,
+    /// The cross-venue arbitrage leg configuration (跨所套利弹窗 v2): user-
+    /// chosen A/B legs (venue, account) + the asset pairs the engine pairs on.
+    /// A top-level `[cross_venue_arb]` table, sibling of `[[account]]` — the
+    /// same durable operator state `account.venue.set` and friends persist
+    /// into this file. Missing = unconfigured (the pre-v2 shape: the legacy
+    /// `unified.confirm` chain stays the only pairing source). A section that
+    /// PARSES but is incoherent (identical venues, an account id no
+    /// `[[account]]` declares, an empty pairs list) REFUSES the boot —
+    /// fail-closed, exactly the discipline every other key in this file runs
+    /// under: a half-written arb config must never silently trade.
+    #[serde(default)]
+    cross_venue_arb: Option<CrossVenueArbFileSection>,
+}
+
+/// One `[cross_venue_arb]` section as it sits on disk. `cross_venue_arb` is
+/// the STRATEGY PACKAGE NAME the config feeds — the engine pushes these
+/// values into that package's `bk.params()` bag, and the lua_loader's
+/// account-stamp reads them as the venue→account leg map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CrossVenueArbFileSection {
+    leg_a_venue: String,
+    leg_a_account: String,
+    leg_b_venue: String,
+    leg_b_account: String,
+    pairs: Vec<String>,
+}
+
+/// The public reading of a `[cross_venue_arb]` section (the parse type is
+/// file-private; the wire and the engine see THIS shape). `CrossVenueArbStatus`
+/// is the runtime truth the IPC get answers from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossVenueArbConfig {
+    pub leg_a_venue: String,
+    pub leg_a_account: String,
+    pub leg_b_venue: String,
+    pub leg_b_account: String,
+    /// Upper-cased asset names, file order kept.
+    pub pairs: Vec<String>,
+}
+
+impl CrossVenueArbConfig {
+    /// The venue→account leg map the adapter's account-stamp consults: the
+    /// configured venue trades under its OWN leg account; any other venue
+    /// falls back to the instance's own account.
+    pub fn leg_account_for_venue(&self, venue: &str) -> Option<&str> {
+        let v = venue.trim();
+        if v == self.leg_a_venue.trim() {
+            Some(self.leg_a_account.trim())
+        } else if v == self.leg_b_venue.trim() {
+            Some(self.leg_b_account.trim())
+        } else {
+            None
+        }
+    }
+
+    /// Whether `asset` is in the configured pairs set (case-insensitive — the
+    /// file may spell `btc`, the scanner spells `BTC`).
+    pub fn admits_asset(&self, asset: &str) -> bool {
+        let up = asset.trim().to_uppercase();
+        self.pairs.iter().any(|p| p.trim().to_uppercase() == up)
+    }
+
+    /// The `bk.params()` entries the strategy reads its configuration from
+    /// (the st.params push path — no new strategy API). Values are the file
+    /// spellings trimmed; `pairs` joins on `,` (the strategy splits it).
+    pub fn as_params(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "arb_leg_a_venue".to_string(),
+                self.leg_a_venue.trim().to_string(),
+            ),
+            (
+                "arb_leg_a_account".to_string(),
+                self.leg_a_account.trim().to_string(),
+            ),
+            (
+                "arb_leg_b_venue".to_string(),
+                self.leg_b_venue.trim().to_string(),
+            ),
+            (
+                "arb_leg_b_account".to_string(),
+                self.leg_b_account.trim().to_string(),
+            ),
+            (
+                "arb_pairs".to_string(),
+                self.pairs
+                    .iter()
+                    .map(|p| p.trim().to_uppercase())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ]
+    }
 }
 
 impl AccountFileEntry {
@@ -224,11 +318,207 @@ pub fn from_str(text: &str, now_ms: i64) -> Result<AccountLedgers, CoreError> {
             .map(|a| a.id.as_str().to_string())
             .unwrap_or_else(|| accounts[0].id.as_str().to_string()),
     };
+    // The cross-venue arb section (跨所套利弹窗 v2): a section that exists
+    // must be COHERENT or the boot refuses — the same fail-closed posture the
+    // display pointer runs (a dangling leg would silently trade one account's
+    // money under a pairing the file cannot support).
+    if let Some(arb) = &file.cross_venue_arb {
+        validate_cross_venue_arb_section(
+            &lift_cross_venue_arb(arb),
+            &accounts
+                .iter()
+                .map(|a| a.id.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )?;
+    }
     Ok(AccountLedgers::new_with_display(
         accounts,
         active,
         AccountId::from(display.as_str()),
     ))
+}
+
+/// The file-section → public-config lift shared by the boot loader and the
+/// read path (`None` = the section is absent = unconfigured).
+fn lift_cross_venue_arb(a: &CrossVenueArbFileSection) -> CrossVenueArbConfig {
+    CrossVenueArbConfig {
+        leg_a_venue: a.leg_a_venue.trim().to_string(),
+        leg_a_account: a.leg_a_account.trim().to_string(),
+        leg_b_venue: a.leg_b_venue.trim().to_string(),
+        leg_b_account: a.leg_b_account.trim().to_string(),
+        pairs: a.pairs.iter().map(|p| p.trim().to_uppercase()).collect(),
+    }
+}
+
+/// Read the `[cross_venue_arb]` section back from the file on disk (the
+/// `arb.config.get` shape: `None` = unconfigured). A file that does not parse
+/// is REFUSED — the get answers the truth, it does not paper over a broken
+/// book (the boot would refuse the same file anyway).
+pub fn read_cross_venue_arb(path: &Path) -> Result<Option<CrossVenueArbConfig>, CoreError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable: {e}"),
+        )
+    })?;
+    let file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse: {e}"),
+        )
+    })?;
+    Ok(file.cross_venue_arb.as_ref().map(lift_cross_venue_arb))
+}
+
+/// The persisted write of the `[cross_venue_arb]` section: read-modify-write
+/// over the whole file, the exact fail-closed posture every other accounts.toml
+/// writer runs (a non-parsing file is REFUSED, never flattened; same-directory
+/// temp + rename; the re-render does not carry comments — every FIELD
+/// round-trips because the parse is `deny_unknown_fields`). The CALLER owns
+/// the semantic validations (venues distinct, accounts exist — it has the
+/// book); this layer only owns the file.
+pub fn persist_cross_venue_arb(path: &Path, cfg: &CrossVenueArbConfig) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the arb config write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the arb config write: {e}"),
+        )
+    })?;
+    file.cross_venue_arb = Some(CrossVenueArbFileSection {
+        leg_a_venue: cfg.leg_a_venue.trim().to_string(),
+        leg_a_account: cfg.leg_a_account.trim().to_string(),
+        leg_b_venue: cfg.leg_b_venue.trim().to_string(),
+        leg_b_account: cfg.leg_b_account.trim().to_string(),
+        pairs: cfg.pairs.iter().map(|p| p.trim().to_uppercase()).collect(),
+    });
+    let out = toml::to_string(&file).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not render: {e}"),
+        )
+    })?;
+    write_accounts_file_atomic(path, &out, "arbcfg")
+}
+
+/// The persisted removal of the `[cross_venue_arb]` section (`arb.config.clear`):
+/// the section key is REMOVED — the file returns to the pre-v2 shape a file
+/// without the key has. Same fail-closed posture as every writer above.
+pub fn clear_cross_venue_arb(path: &Path) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the arb config clear: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the arb config clear: {e}"),
+        )
+    })?;
+    file.cross_venue_arb = None;
+    let out = toml::to_string(&file).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not render: {e}"),
+        )
+    })?;
+    write_accounts_file_atomic(path, &out, "arbcfg")
+}
+
+/// The coherence rules a `[cross_venue_arb]` section must satisfy, shared by
+/// the boot loader (`from_str`) and the runtime write path (`persist_…`'s
+/// caller validates BEFORE the file is touched — a refused set moves nothing).
+/// Every refusal names the offending field.
+pub fn validate_cross_venue_arb_section(
+    arb: &CrossVenueArbConfig,
+    account_ids: &[String],
+) -> Result<(), CoreError> {
+    let err = |field: &str, msg: String| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml [cross_venue_arb]: {field} — {msg}"),
+        )
+    };
+    if arb.leg_a_venue.trim().is_empty() {
+        return Err(err("leg_a_venue", "must be a non-empty venue name".into()));
+    }
+    if arb.leg_b_venue.trim().is_empty() {
+        return Err(err("leg_b_venue", "must be a non-empty venue name".into()));
+    }
+    if arb.leg_a_venue.trim() == arb.leg_b_venue.trim() {
+        return Err(err(
+            "leg_b_venue",
+            format!(
+                "`{}` is the same venue as leg_a_venue — the two legs must \
+                 sit on DIFFERENT venues (the pair exists to span them)",
+                arb.leg_b_venue.trim()
+            ),
+        ));
+    }
+    if arb.leg_a_account.trim().is_empty() {
+        return Err(err(
+            "leg_a_account",
+            "must be a non-empty account id".into(),
+        ));
+    }
+    if arb.leg_b_account.trim().is_empty() {
+        return Err(err(
+            "leg_b_account",
+            "must be a non-empty account id".into(),
+        ));
+    }
+    for (field, id) in [
+        ("leg_a_account", &arb.leg_a_account),
+        ("leg_b_account", &arb.leg_b_account),
+    ] {
+        if !account_ids.iter().any(|a| a == id.trim()) {
+            return Err(err(
+                field,
+                format!(
+                    "`{}` names no `[[account]]` in this book — configured \
+                     accounts are: {}",
+                    id.trim(),
+                    if account_ids.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        account_ids.join(", ")
+                    }
+                ),
+            ));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for p in &arb.pairs {
+        let up = p.trim().to_uppercase();
+        if up.is_empty() {
+            return Err(err("pairs", "an entry is empty — name an asset".into()));
+        }
+        if !seen.insert(up.clone()) {
+            return Err(err(
+                "pairs",
+                format!("`{}` appears twice — the list is a set", up),
+            ));
+        }
+    }
+    if arb.pairs.is_empty() {
+        return Err(err(
+            "pairs",
+            "must name at least one asset — an empty list pairs nothing \
+             (delete the section to unconfigure instead)"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The persisted write-back of ONE account's venue binding

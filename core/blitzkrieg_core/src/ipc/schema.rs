@@ -461,6 +461,23 @@ pub mod method {
     /// 回（sha256 重算进 manifest，装载器照常验证）。`overwrite` 显式，与
     /// `blueprint.save` 同一裁决 —— 静默覆盖可能换掉操作员正在启用的策略。
     pub const BLUEPRINT_SAVE_SOURCE: &str = "blueprint.saveSource";
+
+    // ── 跨所套利弹窗 v2 — the arb leg-configuration surface ──────────────────
+    /// Write the cross-venue arbitrage leg configuration (`arb.config.set`):
+    /// two DISTINCT venues (`legAVenue`/`legBVenue`), the account each venue
+    /// trades under (`legAAccount`/`legBAccount`), and the asset `pairs` the
+    /// strategy pairs across them. Fail-closed validation names the offending
+    /// field (version, venue/account presence, venue distinctness, account
+    /// existence, account venue-binding coverage, pairs non-empty); a refused
+    /// write moves NOTHING (file and memory stay untouched). The kernel
+    /// persists the section to accounts.toml top-level `[cross_venue_arb]` in
+    /// the same transaction the memory mirror + engine push update — the next
+    /// boot re-reads the file (fail-closed on a bad hand edit).
+    pub const ARB_CONFIG_SET: &str = "arb.config.set";
+    /// The leg configuration readout (`arb.config.get`): `configured: true`
+    /// with the four leg fields + `pairs`, or `configured: false` with null
+    /// legs and an empty array — never a partial shape.
+    pub const ARB_CONFIG_GET: &str = "arb.config.get";
 }
 
 // ── #362 — the blueprint editor surface ──────────────────────────────────────
@@ -2039,6 +2056,54 @@ pub struct AccountVenueSetResult {
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
      unbound); persisted to accounts.toml, re-read at next boot; the same \
      venue on several accounts is the deployment model, not a conflict";
+
+// ── 跨所套利弹窗 v2 — arb.config.set / arb.config.get ────────────────────────
+
+/// `arb.config.set` params (the frozen Wire contract v1): two DISTINCT
+/// venues, the account each trades under, and the assets to pair. Validation
+/// is fail-closed server-side (APPLICATION errors naming the offending
+/// field); a refused write moves nothing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArbConfigSetParams {
+    pub version: u32,
+    pub leg_a_venue: String,
+    pub leg_a_account: String,
+    pub leg_b_venue: String,
+    pub leg_b_account: String,
+    pub pairs: Vec<String>,
+    /// Audit trail only; defaults to "panel".
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+/// `arb.config.get` result — the configured shape (v1 contract: `configured:
+/// true` with every leg field + `pairs`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArbConfigGetConfigured {
+    pub version: u32,
+    pub configured: bool,
+    pub leg_a_venue: String,
+    pub leg_a_account: String,
+    pub leg_b_venue: String,
+    pub leg_b_account: String,
+    pub pairs: Vec<String>,
+}
+
+/// `arb.config.get` result — the unconfigured shape (null legs, empty array;
+/// never a partial shape).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArbConfigGetUnconfigured {
+    pub version: u32,
+    pub configured: bool,
+    pub leg_a_venue: Option<String>,
+    pub leg_a_account: Option<String>,
+    pub leg_b_venue: Option<String>,
+    pub leg_b_account: Option<String>,
+    pub pairs: Vec<String>,
+}
 
 // ── 账户交易开关 + 策略分配 — account.trading.set / account.strategies.set ──
 

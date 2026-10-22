@@ -1,47 +1,64 @@
 -- cross_venue_arb — the cross-venue pair collector, as a Lua strategy
--- package (§6.5 contract). Issue #427's "跨平台套利蓝图".
+-- package (§6.5 contract). Issue #427's "跨平台套利蓝图", v2 pairing.
 --
--- One sentence: when the SAME real-world bet lists on two venues (a
--- confirmed `bk.unified_events()` mapping, zero discrepancies) and
--- ask_UP@venueA + ask_DOWN@venueB + BOTH legs' taker fees costs less than
--- $1.00 by more than `spread_open_pct`, buy BOTH legs at their own asks with
--- EQUAL share counts — the pair is worth exactly $1.00 no matter which venue
--- settles it, so the profit is locked at entry. `spread_close_pct` is the
--- release valve: while HELD, if the same all-in pair cost falls back within
--- `spread_close_pct` of the money (the discount has been repriced away and
--- the position no longer pays for its risk), the legs are offered back via
--- exits at their own bids; the kernel owns the ladder, the fill and the
--- final settlement either way.
+-- One sentence: when the SAME real-world bet lists on the TWO CONFIGURED
+-- venues (the operator's leg configuration — `arb.config.set` — riding the
+-- params bag as the `arb_*` keys) and ask_UP@cheaper + ask_DOWN@other +
+-- BOTH legs' taker fees costs less than $1.00 by more than `spread_open_pct`,
+-- buy BOTH legs at their own asks with EQUAL share counts — the pair is worth
+-- exactly $1.00 no matter which venue settles it, so the profit is locked at
+-- entry. `spread_close_pct` is the release valve: while HELD, if the same
+-- all-in pair cost falls back within `spread_close_pct` of the money (the
+-- discount has been repriced away and the position no longer pays for its
+-- risk), the legs are offered back via exits at their own bids; the kernel
+-- owns the ladder, the fill and the final settlement either way.
+--
+-- v2 PAIRING (breaking change from v1, disclosed here on purpose):
+--   v1 paired through `bk.unified_events()` — only a confirmed, zero-
+--   discrepancy mapping's listings were priced, cross-venue by the #427
+--   blueprint. v2 pairs from `bk.markets()` DIRECTLY: per configured asset,
+--   exactly one row per leg venue (`arb_leg_a_venue` / `arb_leg_b_venue`)
+--   must be present; the UP leg goes to the row quoting the CHEAPER UP ask,
+--   the DOWN leg to the OTHER row. No confirmed-mapping handshake stands in
+--   front of the trade any more — the operator's leg configuration IS the
+--   pairing authority (kernel-side `arb.config.set` validated the two
+--   venues, the two accounts and the pairs, fail-closed; unconfigured →
+--   this strategy pairs NOTHING). ROLLBACK PATH: the v1 pairing lives in
+--   this package's git history (restore strategy.lua from the v1.0.0
+--   revision, re-run `node scripts/lua-decimal-sync.mjs --apply` to re-sign
+--   the manifest, re-assign the package). Venue identity is still read as
+--   data — the leg venues are CONFIG STRINGS compared against row venue
+--   tags; no concrete venue name appears in code (no-venue-branch-check).
 --
 -- How the pieces fit:
---   * PAIRING — only events that arrive through `bk.unified_events()` are
---     priced, and only in `status == "paired"` with an EMPTY discrepancies
---     list (a settlement-source / rules / expiry disagreement is a
---     PseudoHedge: the two venues may not pay the same way — fail closed,
---     exactly the #425→#426 handoff HedgePlan::assess enforces kernel-side).
---     The two legs are picked CROSS-venue by the #427 blueprint: the UP leg
---     from the listing whose ask is cheaper, the DOWN leg from the OTHER
---     listing — venue identity is read as data ("cheapest listing wins the
---     leg"), never branched on by name.
+--   * PAIRING — per asset ∈ `arb_pairs`: exactly one bk.markets() row per
+--     leg venue, and both rows' UP books quoting fresh; the cheaper UP ask
+--     wins the UP leg, the other row is the DOWN leg. A missing row, a
+--     stale book, an unparseable quote — not a discount, an outage: the
+--     asset is skipped this cycle (fail-closed).
 --   * ENTRY — both legs, each priced AT its own ask, with `shares`
 --     DECLARED: capacity is the SMALLER of the two legs' visible ask depth
 --     (issue #427: "容量 = 两平台各自深度的最小值"), floored to the 0.01
 --     grid and floored again by the kernel's own max-shares budget. The
---     kernel routes entries MakerThenTaker and owns every gate.
+--     kernel routes entries MakerThenTaker and owns every gate. Per-
+--     DIRECTION emission: each leg is gated by its own (asset, direction)
+--     latch key — an armed UP never blocks the DOWN leg of the same asset
+--     (and vice versa), so a leg the kernel refused or dropped can be
+--     re-offered within the round while its sibling stands.
 --   * FEES — priced from `bk.fees()`, the kernel's ONE schedule
 --     (`rate * (p*(1-p))^exponent` per share, summed over BOTH legs). No
 --     schedule in force → NO entries and NO exits: the fee is a cost
 --     parameter of the same order as the edge, and guessing zero would
 --     fabricate profit. Fail-closed by construction.
---   * EXIT — "回落 < Y% 平仓": a held pair whose all-in cost has recovered
---     past `1 − spread_close_pct` is no longer a locked discount worth
---     holding against its risks (fill asymmetry, funding, settlement drag),
---     so both legs are offered as exit intents priced at their own bids.
---     This is an OPINION the kernel is free to refuse, never a stop-loss:
---     no price is sacred, the position is either better closed than held
---     under the SAME pair economics that opened it, or it rides to
---     settlement. The seal (strategy-no-stop-loss-check) is respected —
---     no reserved key is ever emitted, exits carry { token, reason } only.
+--   * EXIT — "回落 < Y% 平仓", per direction: a held leg whose all-in pair
+--     cost has recovered past `1 − spread_close_pct` is released at its own
+--     bid; the leg's OWN bid book gates its own release (the sibling's
+--     outage cannot block it). This is an OPINION the kernel is free to
+--     refuse, never a stop-loss: no price is sacred, the position is either
+--     better closed than held under the SAME pair economics that opened it,
+--     or it rides to settlement. The seal (strategy-no-stop-loss-check) is
+--     respected — no reserved key is ever emitted, exits carry
+--     { token, reason } only.
 --   * CAPACITY DISPLAY — the chosen size and the binding depth are named in
 --     every entry reason ("cap=min(depth)") so the panel can show capacity
 --     provenance without parsing anything.
@@ -50,16 +67,18 @@
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule,
 --     same helpers as flash_arb/pair_discount_arb). Every comparison in the
 --     trigger is an exact integer comparison — no float knife-edge anywhere.
---   * ONE pair ATTEMPT per event per round (`armed` latch on emission); the
---     kernel-side dedup drops a repeat while an order still rests on a
---     token. A rejected attempt is not retried into the same books.
---   * Exit evaluation runs every cycle while legs are held, keyed by the
---     pair's (up@A, down@B) token ids recorded at entry time.
---   * `bk.holdings()` is THIS strategy's view: a leg with no holding row and
---     no entry emitted this cycle simply has nothing to release.
+--   * ONE attempt per (asset, direction) per round (`armed` latch keyed
+--     `"<asset>|up"` / `"<asset>|down"`); the kernel-side dedup drops a
+--     repeat while an order still rests on a token. A rejected attempt is
+--     not retried into the same books.
+--   * Exit evaluation runs every cycle while a leg is held, keyed by the
+--     leg's token from the current pairing.
+--   * `bk.holdings()` is THIS strategy's view: a held leg is offered its
+--     release; an unheld leg of an open pair is offered its entry (a
+--     partially-filled pair can complete within the same round's economics).
 --   * NO branch on a specific venue anywhere (issue #427 reverse
---     acceptance, gated by no-venue-branch-check): listings are ordered by
---     price, `venue` is a string carried into the reason line only.
+--     acceptance, gated by no-venue-branch-check): leg venues arrive as
+--     config strings, `venue` is a string carried into the reason line only.
 
 -- ── exact decimal helpers (pair_discount_arb's, unchanged semantics) ────────
 
@@ -220,21 +239,6 @@ local DEC_1 = { m = 1, s = 0 }
 
 -- ── configuration (bk.params() — manifest tunables) ─────────────────────────
 
-local function dec_param(params, name, fallback)
-  local raw = params[name]
-  if type(raw) ~= "string" then return fallback end
-  local d = dec_parse(raw)
-  return d or fallback
-end
-
-local function int_param(params, name, fallback)
-  local raw = params[name]
-  if type(raw) ~= "string" then return fallback end
-  local n = tonumber(raw)
-  if n == nil or n ~= math.floor(n) then return fallback end
-  return math.floor(n)
-end
-
 local function read_config()
   local p = bk.params()
   return {
@@ -247,6 +251,41 @@ local function read_config()
     max_leg_price = dec_param(p, "max_leg_price", { m = 99, s = 2 }),
     min_pair_shares = dec_param(p, "min_pair_shares", { m = 1, s = 0 }),
     min_time_left_sec = int_param(p, "min_time_left_sec", 30),
+  }
+end
+
+-- ── the leg configuration (the kernel-pushed `arb_*` keys) ──────────────────
+
+--- The leg configuration, read off the params bag the adapter merged
+--- (`arb.config.set` → Core → engine hot-push → st.params). `nil` when ANY
+--- of the five keys is missing, empty or malformed — the strategy then
+--- pairs NOTHING this cycle (no entries, no exits): no legs spelled, no
+--- cross-venue trade. Fail-closed by construction.
+local function read_legs(p)
+  local a_venue = p.arb_leg_a_venue
+  local a_account = p.arb_leg_a_account
+  local b_venue = p.arb_leg_b_venue
+  local b_account = p.arb_leg_b_account
+  local pairs_raw = p.arb_pairs
+  if type(a_venue) ~= "string" or a_venue == ""
+    or type(a_account) ~= "string" or a_account == ""
+    or type(b_venue) ~= "string" or b_venue == ""
+    or type(b_account) ~= "string" or b_account == ""
+    or type(pairs_raw) ~= "string" or pairs_raw == "" then
+    return nil
+  end
+  local pairs = {}
+  for item in string.gmatch(pairs_raw, "[^,]+") do
+    local asset = string.upper(item:match("^%s*(.-)%s*$"))
+    if asset ~= "" then pairs[#pairs + 1] = asset end
+  end
+  if #pairs == 0 then return nil end
+  return {
+    a_venue = a_venue,
+    a_account = a_account,
+    b_venue = b_venue,
+    b_account = b_account,
+    pairs = pairs,
   }
 end
 
@@ -274,62 +313,85 @@ local function pair_fee_per_share(ask_up, ask_down, rate, exponent)
   return dec_add(fu, fd)
 end
 
--- ── the book-quote type ─────────────────────────────────────────────────────
--- One venue's listing quoted from the books: { venue, up_token, down_token,
--- ask_up, ask_down, depth_up, depth_down } or nil when any leg's book is
--- stale / ask-less / unparseable. A listing that cannot be fully quoted is
--- not a discount, it is an outage.
+-- ── the book-quote helpers ──────────────────────────────────────────────────
+-- One leg's view of one token's book. A stale / ask-less / unparseable /
+-- depth-less book is not a discount, it is an outage: `nil`, and the caller
+-- skips the asset (fail-closed).
 
-local function quote_listing(lua_listing)
-  local bu = bk.book(lua_listing.up_token)
-  local bd = bk.book(lua_listing.down_token)
-  if not (bu and bu.fresh == true and bd and bd.fresh == true) then return nil end
-  local au = dec_parse(bu.best_ask)
-  local ad = dec_parse(bd.best_ask)
-  if not (au and ad and au.m > 0 and ad.m > 0) then return nil end
-  local du = dec_parse(bu.ask_depth)
-  local dd = dec_parse(bd.ask_depth)
-  if not (du and dd and du.m > 0 and dd.m > 0) then return nil end
-  return {
-    venue = lua_listing.venue,
-    up_token = lua_listing.up_token,
-    down_token = lua_listing.down_token,
-    ask_up = au,
-    ask_down = ad,
-    depth_up = du,
-    depth_down = dd,
-  }
+--- Fresh-book best ask (the pairing decision's input: both rows' UP asks
+--- decide which row is the UP leg).
+local function book_ask(token)
+  local b = bk.book(token)
+  if not (b and b.fresh == true) then return nil end
+  local a = dec_parse(b.best_ask)
+  if not (a and a.m > 0) then return nil end
+  return a
 end
 
---- The pair the #427 blueprint trades: UP leg from the listing quoting the
---- cheaper UP ask, DOWN leg from the OTHER listing. `nil` unless exactly two
---- distinct listings quote cleanly. No branch on venue identity — the
---- ordering is by price, the winner is whoever is cheaper.
-local function pick_pair(quoted)
-  if #quoted ~= 2 then return nil end
-  local a, b = quoted[1], quoted[2]
-  if a.up_token == b.up_token or a.down_token == b.down_token then
-    -- Same token on both rows: not a cross-venue pair.
-    return nil
+--- Fresh-book ask + ask depth (the tradable-leg view: a leg without
+--- visible depth has no capacity).
+local function book_leg(token)
+  local b = bk.book(token)
+  if not (b and b.fresh == true) then return nil end
+  local a = dec_parse(b.best_ask)
+  if not (a and a.m > 0) then return nil end
+  local d = dec_parse(b.ask_depth)
+  if not (d and d.m > 0) then return nil end
+  return { ask = a, depth = d }
+end
+
+--- Fresh-book best bid (the release path's input).
+local function book_bid(token)
+  local b = bk.book(token)
+  if not (b and b.fresh == true) then return nil end
+  local v = dec_parse(b.best_bid)
+  if not (v and v.m > 0) then return nil end
+  return v
+end
+
+-- ── per-asset pairing ───────────────────────────────────────────────────────
+
+--- The two legs of ONE asset across the configured venues: exactly one
+--- bk.markets() row per leg venue (a duplicated venue row is ambiguous —
+--- `nil`), both rows' UP books quoting fresh; the CHEAPER UP ask wins the
+--- UP leg, the other row is the DOWN leg (the #427 blueprint: venue
+--- identity is data, the ordering is by price). `nil` unless both leg rows
+--- exist and both UP books quote — the asset then simply does not pair
+--- this cycle.
+local function pair_for_asset(asset, legs)
+  local row_a, row_b
+  for _, m in ipairs(bk.markets()) do
+    if m.venue ~= nil and type(m.asset) == "string" and string.upper(m.asset) == asset then
+      if m.venue == legs.a_venue then
+        if row_a ~= nil then return nil end
+        row_a = m
+      elseif m.venue == legs.b_venue then
+        if row_b ~= nil then return nil end
+        row_b = m
+      end
+    end
   end
-  local up_from_a = dec_cmp(a.ask_up, b.ask_up) <= 0
-  local up, down
-  if up_from_a then
-    up, down = a, b
+  if row_a == nil or row_b == nil then return nil end
+  local ask_a = book_ask(row_a.up_token)
+  local ask_b = book_ask(row_b.up_token)
+  if ask_a == nil or ask_b == nil then return nil end
+  local up_row, up_ask, down_row
+  if dec_cmp(ask_a, ask_b) <= 0 then
+    up_row, up_ask, down_row = row_a, ask_a, row_b
   else
-    up, down = b, a
+    up_row, up_ask, down_row = row_b, ask_b, row_a
   end
-  return {
-    up = up, down = down,
-    up_leg = { venue = up.venue, token = up.up_token, ask = up.ask_up, depth = up.depth_up },
-    down_leg = { venue = down.venue, token = down.down_token, ask = down.ask_down, depth = down.depth_down },
-  }
+  return { up_row = up_row, up_ask = up_ask, down_row = down_row }
 end
 
 -- ── the attempt latch ───────────────────────────────────────────────────────
--- event_id -> round_slot, set when both legs' entries are emitted; cleared
--- whenever the round slot moves on. Release (exit) evaluation is NOT gated
--- by the latch — a held pair must keep being repriced to the last tick.
+-- "(asset)|up" / "(asset)|down" -> round_slot, set when THAT leg's entry is
+-- emitted; cleared whenever the round slot moves on. Per-direction keys: an
+-- armed UP never blocks the DOWN leg of the same asset — a re-offer of the
+-- sibling (or the leg itself after a kernel-side refusal of the other) is
+-- exactly the degradation path the dual-leg accounting expects. Release
+-- (exit) evaluation is NOT gated by the latch — a held leg must keep being
+-- repriced to the last tick.
 
 local armed = {}
 
@@ -351,12 +413,13 @@ end
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────
 
---- The suggestion surface. Per confirmed paired event: a discount wider
---- than `spread_open_pct` emits BOTH legs (equal declared shares = the
---- smaller leg's ask depth), and arms the pair; a HELD pair whose all-in
---- cost has fallen back within `spread_close_pct` emits exit intents for
---- both legs at their own bids. `breaks` is always empty (no resting order
---- of ours survives an emission cycle the kernel does not already own).
+--- The suggestion surface. Per configured asset: a discount wider than
+--- `spread_open_pct` emits the pair's legs (equal declared shares = the
+--- smaller leg's ask depth), each gated by its own (asset, direction)
+--- latch; a HELD leg whose all-in pair cost has fallen back within
+--- `spread_close_pct` emits an exit intent at its own bid. `breaks` is
+--- always empty (no resting order of ours survives an emission cycle the
+--- kernel does not already own).
 function bk_evaluate()
   local cfg = read_config()
   local entries, exits = {}, {}
@@ -367,9 +430,18 @@ function bk_evaluate()
   end
   local slot = round.slot
 
-  -- A new round retires every latch: events do not survive their round.
-  for id, s in pairs(armed) do
-    if s ~= slot then armed[id] = nil end
+  -- The leg configuration. Unconfigured (no `arb_*` keys in the bag — the
+  -- kernel merges them only once `arb.config.set` has landed) or malformed
+  -- → the strategy pairs NOTHING this cycle: no entries, no exits.
+  -- Fail-closed.
+  local legs = read_legs(bk.params())
+  if legs == nil then
+    return { entries = entries, exits = exits, breaks = {} }
+  end
+
+  -- A new round retires every latch: attempts do not survive their round.
+  for key, s in pairs(armed) do
+    if s ~= slot then armed[key] = nil end
   end
 
   -- Fail-closed fee schedule: both the entry economics AND the release
@@ -393,94 +465,96 @@ function bk_evaluate()
   -- Release threshold: pair cost ≥ 1 − spread_close_pct/100.
   local close_floor = dec_sub(DEC_1, { m = cfg.spread_close_pct.m, s = cfg.spread_close_pct.s + 2 })
 
-  for _, ev in ipairs(bk.unified_events()) do
-    -- #425→#426 handoff, strategy-side mirror of HedgePlan::assess: only a
-    -- confirmed PAIRED event with ZERO discrepancy marks is hedgeable.
-    if ev.status == "paired" and #ev.discrepancies == 0 then
-      local quoted = {}
-      for _, l in ipairs(ev.listings) do
-        local q = quote_listing(l)
-        if q then quoted[#quoted + 1] = q end
-      end
-      local pair = pick_pair(quoted)
-      if pair then
-        local f = pair_fee_per_share(pair.up_leg.ask, pair.down_leg.ask, rate, exponent)
+  for _, asset in ipairs(legs.pairs) do
+    local pair = pair_for_asset(asset, legs)
+    if pair then
+      -- Both legs' full book views (ask + depth): the pair economics and
+      -- the capacity are computed from the SAME quotes the entries carry.
+      local up_leg = book_leg(pair.up_row.up_token)
+      local down_leg = book_leg(pair.down_row.down_token)
+      if up_leg and down_leg then
+        local f = pair_fee_per_share(up_leg.ask, down_leg.ask, rate, exponent)
         if f then
-          local cost = dec_add(dec_add(pair.up_leg.ask, pair.down_leg.ask), f)
-          local held_up = held_shares(pair.up_leg.token)
-          local held_down = held_shares(pair.down_leg.token)
-          local holding = held_up.m > 0 or held_down.m > 0
+          local cost = dec_add(dec_add(up_leg.ask, down_leg.ask), f)
+          local held_up = held_shares(pair.up_row.up_token)
+          local held_down = held_shares(pair.down_row.down_token)
 
-          if holding then
-            -- 回落平仓: the pair no longer trades wide enough to pay for
-            -- itself — offer both legs back at their own bids. Leg books
-            -- are re-quoted fresh (a stale book is not an exit either).
-            if dec_cmp(cost, close_floor) >= 0 then
-              local bu = bk.book(pair.up_leg.token)
-              local bd = bk.book(pair.down_leg.token)
-              if bu and bu.fresh == true and bd and bd.fresh == true then
-                local bid_up = dec_parse(bu.best_bid)
-                local bid_down = dec_parse(bd.best_bid)
-                if bid_up and bid_down and bid_up.m > 0 and bid_down.m > 0 then
-                  if held_up.m > 0 then
-                    exits[#exits + 1] = {
-                      token = pair.up_leg.token,
-                      reason = string.format(
-                        "cross-venue release up@%s: pair cost %s back within %s%% of $1",
-                        pair.up_leg.venue, dec_fmt(cost), dec_fmt(cfg.spread_close_pct)
-                      ),
-                    }
-                  end
-                  if held_down.m > 0 then
-                    exits[#exits + 1] = {
-                      token = pair.down_leg.token,
-                      reason = string.format(
-                        "cross-venue release down@%s: pair cost %s back within %s%% of $1",
-                        pair.down_leg.venue, dec_fmt(cost), dec_fmt(cfg.spread_close_pct)
-                      ),
-                    }
-                  end
-                end
+          if dec_cmp(cost, close_floor) >= 0 then
+            -- 回落平仓, per direction: each HELD leg is offered its release
+            -- when the pair no longer trades wide enough to pay for itself;
+            -- the leg's OWN bid book gates its own release (a sibling's
+            -- outage must not trap a closeable leg).
+            if held_up.m > 0 then
+              local bid = book_bid(pair.up_row.up_token)
+              if bid then
+                exits[#exits + 1] = {
+                  token = pair.up_row.up_token,
+                  reason = string.format(
+                    "cross-venue release up@%s: pair cost %s back within %s%% of $1",
+                    pair.up_row.venue, dec_fmt(cost), dec_fmt(cfg.spread_close_pct)
+                  ),
+                }
               end
             end
-          elseif round.time_left_sec >= cfg.min_time_left_sec
-            and dec_cmp(cost, open_ceiling) <= 0
-            and armed[ev.id] ~= slot then
-            -- 价差开仓: capacity = the SMALLER leg's visible ask depth —
-            -- the pair is as good as its thinner leg (issue #427).
-            local depth = dec_floor2(
-              dec_cmp(pair.up_leg.depth, pair.down_leg.depth) < 0
-                and pair.up_leg.depth or pair.down_leg.depth
-            )
-            local leg_price_ok = function(ask)
-              return dec_cmp(ask, cfg.min_leg_price) >= 0
-                and dec_cmp(ask, cfg.max_leg_price) <= 0
+            if held_down.m > 0 then
+              local bid = book_bid(pair.down_row.down_token)
+              if bid then
+                exits[#exits + 1] = {
+                  token = pair.down_row.down_token,
+                  reason = string.format(
+                    "cross-venue release down@%s: pair cost %s back within %s%% of $1",
+                    pair.down_row.venue, dec_fmt(cost), dec_fmt(cfg.spread_close_pct)
+                  ),
+                }
+              end
             end
-            if dec_cmp(depth, cfg.min_pair_shares) >= 0
-              and leg_price_ok(pair.up_leg.ask) and leg_price_ok(pair.down_leg.ask) then
-              local up_reason = string.format(
+          elseif dec_cmp(cost, open_ceiling) <= 0
+            and round.time_left_sec >= cfg.min_time_left_sec then
+            -- 价差开仓, per direction: each UNHELD leg of the open pair is
+            -- offered its entry — capacity = the SMALLER leg's visible ask
+            -- depth (the pair is as good as its thinner leg, issue #427),
+            -- and each leg answers to its OWN (asset, direction) latch key.
+            local depth = dec_floor2(
+              dec_cmp(up_leg.depth, down_leg.depth) < 0
+                and up_leg.depth or down_leg.depth
+            )
+            if dec_cmp(depth, cfg.min_pair_shares) >= 0 then
+              local leg_price_ok = function(ask)
+                return dec_cmp(ask, cfg.min_leg_price) >= 0
+                  and dec_cmp(ask, cfg.max_leg_price) <= 0
+              end
+              local up_key = asset .. "|up"
+              local down_key = asset .. "|down"
+              local reason = string.format(
                 "cross-venue pair %.4f (%s up@%s + %s down@%s + fees) vs $1, edge %.2f%%, cap=min(depth)=%s",
                 cost.m / POW10[cost.s],
-                dec_fmt(pair.up_leg.ask), pair.up_leg.venue,
-                dec_fmt(pair.down_leg.ask), pair.down_leg.venue,
+                dec_fmt(up_leg.ask), pair.up_row.venue,
+                dec_fmt(down_leg.ask), pair.down_row.venue,
                 (DEC_1.m / POW10[DEC_1.s] - cost.m / POW10[cost.s]) * 100,
                 dec_fmt(depth)
               )
-              entries[#entries + 1] = {
-                token = pair.up_leg.token,
-                price = dec_fmt(pair.up_leg.ask),
-                shares = dec_fmt(depth),
-                reason = up_reason,
-              }
-              entries[#entries + 1] = {
-                token = pair.down_leg.token,
-                price = dec_fmt(pair.down_leg.ask),
-                shares = dec_fmt(depth),
-                reason = up_reason,
-              }
-              -- One attempt per event per round: the declared share count
-              -- carries the size.
-              armed[ev.id] = slot
+              if armed[up_key] ~= slot and held_up.m <= 0
+                and leg_price_ok(up_leg.ask) then
+                entries[#entries + 1] = {
+                  token = pair.up_row.up_token,
+                  price = dec_fmt(up_leg.ask),
+                  shares = dec_fmt(depth),
+                  reason = reason,
+                }
+                -- One attempt per (asset, direction) per round: the
+                -- declared share count carries the size.
+                armed[up_key] = slot
+              end
+              if armed[down_key] ~= slot and held_down.m <= 0
+                and leg_price_ok(down_leg.ask) then
+                entries[#entries + 1] = {
+                  token = pair.down_row.down_token,
+                  price = dec_fmt(down_leg.ask),
+                  shares = dec_fmt(depth),
+                  reason = reason,
+                }
+                armed[down_key] = slot
+              end
             end
           end
         end

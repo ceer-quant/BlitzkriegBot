@@ -303,6 +303,22 @@ fn decouple_core(accounts_path: Option<&Path>, pot: Option<Decimal>, enable_defa
         assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     }
     c.enable_engine(eng);
+    // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
+    // adapter's params bag); unconfigured ⇒ the strategy pairs nothing
+    // (fail-closed). The fixture wires both legs onto `default` — the
+    // default scope is the WIRED deployment (its pair stamps onto default),
+    // and every OTHER scope (paper's, whether assigned or not) receives the
+    // per-scope PROJECTION: its leg accounts rewritten onto its own instance
+    // id, so its own pair trades its own book — the independence this file
+    // pins is untouched by the leg configuration.
+    c.arb_config_set(&blitzkrieg_core::account::CrossVenueArbConfig {
+        leg_a_venue: "polymarket".into(),
+        leg_a_account: default_account_id().to_string(),
+        leg_b_venue: "kalshi".into(),
+        leg_b_account: default_account_id().to_string(),
+        pairs: vec!["BTC".into()],
+    })
+    .expect("the leg configuration lands (memory-only core)");
     c
 }
 

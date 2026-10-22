@@ -1367,6 +1367,12 @@ pub struct Core {
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
+    /// 跨所套利弹窗 v2: the leg configuration in force (the accounts.toml
+    /// `[cross_venue_arb]` section's memory mirror). `None` = unconfigured.
+    /// Written by `arb_config_set_persisting` (file + memory in one
+    /// transaction), read by the engine hot-push (the adapter's account
+    /// stamp + the strategy's `bk.params()` leg entries).
+    arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
     /// Optional self-driving engine (P3). When present, book/spot/round events
     /// flow in and the core evaluates strategies and places orders on its own.
     /// Crate-visible so the replay driver can host strategies without going
@@ -2136,6 +2142,36 @@ impl Core {
         }
         let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
         intent_audit.enabled = config.intent_audit_enabled;
+        // 跨所套利弹窗 v2: the leg configuration reads from the SAME
+        // accounts.toml the book came from (when a path is configured). The
+        // FILE is validated at the parse layer (from_str refuses an
+        // incoherent section), so a read here after a successful book load
+        // cannot fail semantically — the unwrap-style default below is
+        // reachable only when the file vanished between the two reads, and
+        // then "unconfigured" is the honest answer.
+        let arb_leg_config = config
+            .accounts_config_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(|p| {
+                crate::account::config::read_cross_venue_arb(p)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            error = %e.message,
+                            "cross_venue_arb section unreadable at boot — running unconfigured"
+                        );
+                    })
+                    .ok()
+                    .flatten()
+            })
+            .inspect(|cfg| {
+                tracing::info!(
+                    leg_a = %format!("{}/{}", cfg.leg_a_venue, cfg.leg_a_account),
+                    leg_b = %format!("{}/{}", cfg.leg_b_venue, cfg.leg_b_account),
+                    pairs = ?cfg.pairs,
+                    "cross-venue arb legs configured (accounts.toml [cross_venue_arb])"
+                );
+            });
         // E-VA: the virtual pots are built from the config's caps BEFORE the
         // config moves into the struct (the caps are copied, so a later
         // runtime config mutation cannot move a quota mid-session).
@@ -2262,6 +2298,12 @@ impl Core {
             // Issue #390 (nofast): 0 = due on the first tick.
             fast_next_exit_deadline_ms: 0,
             pair_chase_attempts: HashMap::new(),
+            // 跨所套利弹窗 v2: the boot-loaded leg configuration (memory
+            // mirror of accounts.toml's `[cross_venue_arb]` — the file is the
+            // durable truth, this cell feeds the engine hot). None =
+            // unconfigured: the legacy unified-confirm chain stays the only
+            // pairing source and the account-stamp is inert.
+            arb_leg_config,
         }
     }
 
@@ -2979,6 +3021,225 @@ impl Core {
              immediately{}; the binding re-reads at next boot \
              ({ACCOUNT_VENUE_SET_NOTE})",
             if venue.is_empty() { " (empty venue = unbound)" } else { "" },
+        );
+        Ok(())
+    }
+
+    // ── 跨所套利弹窗 v2: the arb leg configuration surface ──────────────────
+
+    /// The arb leg configuration in force (`arb.config.get`'s data source).
+    /// `None` = unconfigured.
+    pub fn arb_leg_config(&self) -> Option<&crate::account::CrossVenueArbConfig> {
+        self.arb_leg_config.as_ref()
+    }
+
+    /// The arb leg configuration write (`arb.config.set`): validate → persist
+    /// FIRST (a failure leaves both stores untouched) → memory → hot-push the
+    /// engine. The hot-push is the whole runtime effect: the adapter stamps
+    /// entry/exit accounts per token venue, and the strategy reads its
+    /// legs/pairs from the `bk.params()` bag merged on the next evaluate.
+    ///
+    /// Validations (fail-closed, every refusal names its field):
+    ///   * both venues non-empty AND distinct;
+    ///   * both accounts exist in the book (accounts.toml's `[[account]]`s);
+    ///   * when an account carries a venue binding, that binding must admit
+    ///     its own leg's venue (an account pinned to venue V cannot trade
+    ///     leg venue W — the scope gate would refuse every leg);
+    ///   * pairs non-empty.
+    pub fn arb_config_set_persisting(
+        &mut self,
+        cfg: &crate::account::CrossVenueArbConfig,
+        actor: &str,
+        reason: &str,
+        _now_ms: i64,
+    ) -> CoreResult<()> {
+        let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
+        self.arb_config_validate(cfg)?;
+        // Persist first: the file's parse layer re-validates coherence (the
+        // same rules the boot runs), so a write that would produce a
+        // next-boot-refusing file is refused HERE, before memory moved.
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(err(
+                "arb.config.set: no accounts config path configured — persistence is \
+                 disabled for this core (backtests and in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_cross_venue_arb(std::path::Path::new(path), cfg).map_err(
+            |e| {
+                err(format!(
+                    "arb.config.set: persist failed, nothing changed: {}",
+                    e.message
+                ))
+            },
+        )?;
+        // Memory half, then the hot-push: the engine's adapters read the
+        // stamp source, and the strategy reads the params bag — both on the
+        // next evaluate, no restart.
+        self.arb_config_apply(cfg);
+        let (leg_a_venue, leg_a_account, leg_b_venue, leg_b_account) = (
+            cfg.leg_a_venue.trim(),
+            cfg.leg_a_account.trim(),
+            cfg.leg_b_venue.trim(),
+            cfg.leg_b_account.trim(),
+        );
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            leg_a = %format!("{leg_a_venue}/{leg_a_account}"),
+            leg_b = %format!("{leg_b_venue}/{leg_b_account}"),
+            pairs = ?self.arb_leg_config.as_ref().expect("just set").pairs,
+            reason = %reason,
+            "cross-venue arb legs written — the account stamp and the pairing params are \
+             in force on the next evaluation; the section re-reads at next boot"
+        );
+        Ok(())
+    }
+
+    /// The fail-closed validations `arb.config.set` runs BEFORE anything
+    /// moves (shared by the persisting write and the memory-only write —
+    /// every refusal names its field).
+    fn arb_config_validate(&self, cfg: &crate::account::CrossVenueArbConfig) -> CoreResult<()> {
+        let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
+        let leg_a_venue = cfg.leg_a_venue.trim();
+        let leg_b_venue = cfg.leg_b_venue.trim();
+        if leg_a_venue.is_empty() {
+            return Err(err(
+                "arb.config.set: legAVenue must be a non-empty venue name".into(),
+            ));
+        }
+        if leg_b_venue.is_empty() {
+            return Err(err(
+                "arb.config.set: legBVenue must be a non-empty venue name".into(),
+            ));
+        }
+        if leg_a_venue == leg_b_venue {
+            return Err(err(format!(
+                "arb.config.set: legBVenue `{leg_b_venue}` is the same venue as legAVenue — \
+                 the two legs must sit on DIFFERENT venues"
+            )));
+        }
+        let leg_a_account = cfg.leg_a_account.trim();
+        let leg_b_account = cfg.leg_b_account.trim();
+        for (field, id) in [
+            ("legAAccount", leg_a_account),
+            ("legBAccount", leg_b_account),
+        ] {
+            let account = self
+                .accounts
+                .account(&crate::account::AccountId::from(id))
+                .ok_or_else(|| {
+                    err(format!(
+                        "arb.config.set: {field} `{id}` names no configured account — \
+                         configured accounts are: {}",
+                        self.accounts
+                            .account_list()
+                            .iter()
+                            .map(|a| a.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?;
+            let bound = account.venue.trim();
+            let leg_venue = if field == "legAAccount" {
+                leg_a_venue
+            } else {
+                leg_b_venue
+            };
+            if !bound.is_empty() && bound != leg_venue {
+                return Err(err(format!(
+                    "arb.config.set: {field} `{id}` is bound to venue `{bound}` — it cannot \
+                     trade leg venue `{leg_venue}` (unbind it in accounts.toml or pick another \
+                     account)"
+                )));
+            }
+        }
+        if cfg.pairs.is_empty() {
+            return Err(err(
+                "arb.config.set: pairs must name at least one asset — an empty list pairs \
+                 nothing"
+                    .into(),
+            ));
+        }
+        // The pair list is a SET: a duplicate entry would double-push the
+        // same asset's pairing (and a next boot would refuse the same file —
+        // keep the set semantics identical to `validate_cross_venue_arb_section`).
+        let mut seen_pairs = std::collections::HashSet::new();
+        for p in &cfg.pairs {
+            let up = p.trim().to_uppercase();
+            if up.is_empty() {
+                return Err(err(
+                    "arb.config.set: pairs must not contain a blank asset name".into(),
+                ));
+            }
+            if !seen_pairs.insert(up) {
+                return Err(err(format!(
+                    "arb.config.set: pairs `{}` appears twice — the list is a set",
+                    p.trim()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The memory half of a validated set: the normalized config into the
+    /// Core cell, hot-pushed to the engine's adapters (the stamp source and
+    /// the `bk.params()` entries both read it on the next evaluate).
+    fn arb_config_apply(&mut self, cfg: &crate::account::CrossVenueArbConfig) {
+        self.arb_leg_config = Some(crate::account::CrossVenueArbConfig {
+            leg_a_venue: cfg.leg_a_venue.trim().to_string(),
+            leg_a_account: cfg.leg_a_account.trim().to_string(),
+            leg_b_venue: cfg.leg_b_venue.trim().to_string(),
+            leg_b_account: cfg.leg_b_account.trim().to_string(),
+            pairs: cfg
+                .pairs
+                .iter()
+                .map(|p| p.trim().to_uppercase())
+                .collect::<Vec<_>>(),
+        });
+        if let Some(e) = self.engine.as_mut() {
+            e.set_arb_leg_config(self.arb_leg_config.clone());
+        }
+    }
+
+    /// The MEMORY-ONLY leg-configuration write: the same validations and the
+    /// same hot-push as [`Self::arb_config_set_persisting`], without the file.
+    /// The shape a core without an `accounts.toml` path takes (backtests and
+    /// in-process tests) — a restart forgets it, exactly like every other
+    /// in-memory knob those cores run.
+    pub fn arb_config_set(&mut self, cfg: &crate::account::CrossVenueArbConfig) -> CoreResult<()> {
+        self.arb_config_validate(cfg)?;
+        self.arb_config_apply(cfg);
+        Ok(())
+    }
+
+    /// Unset the arb leg configuration (the panel's 「解除配置」): remove the
+    /// file section and the memory mirror, engine hot-pushed. `arb.config.set`
+    /// is the only writer in the v2 flow; this is the delete arm the wire
+    /// spells with `configured: false` after a successful call.
+    pub fn arb_config_clear_persisting(&mut self, actor: &str) -> CoreResult<()> {
+        let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(err(
+                "arb.config.clear: no accounts config path configured — persistence is \
+                 disabled for this core (backtests and in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::clear_cross_venue_arb(std::path::Path::new(path)).map_err(|e| {
+            err(format!(
+                "arb.config.clear: persist failed, nothing changed: {}",
+                e.message
+            ))
+        })?;
+        self.arb_leg_config = None;
+        if let Some(e) = self.engine.as_mut() {
+            e.set_arb_leg_config(None);
+        }
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            "cross-venue arb legs cleared — pairing falls back to the unified-confirm chain"
         );
         Ok(())
     }
@@ -5934,53 +6195,16 @@ impl Core {
             .map(|o| (o.token_id.clone(), o))
             .collect();
         // ── E-VA: the atomic-batch pre-reservation, judged BEFORE the first
-        // leg's gate runs. Strategies that declared `atomic_batch` (and sit
-        // in `virtual_limits`) reserve their WHOLE batch against the virtual
-        // pot here: an over-cap batch is cancelled wholesale — zero legs
-        // placed, zero real reservations taken — with the refusal bucketed
-        // through the existing StrategyLimit accounting (`limit.virtualCap`).
-        // Everything else (every shipped strategy, every undeclared batch)
-        // finds no governed scope and skips this block untouched.
-        let declared_atomic = |name: &str| {
-            self.engine
-                .as_ref()
-                .is_some_and(|e| e.strategy_atomic_batch(name))
-        };
-        for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
-            // internal_key → token_id: the batch tuples carry only key +
-            // notional; the venue/scope pre-check needs the leg's token.
-            let leg_tokens: HashMap<String, String> = tokens
-                .iter()
-                .map(|(_, req)| (req.internal_key.clone(), req.token_id.to_string()))
-                .collect();
-            let batch_fits = self.virtual_batch_fits(&account_id, &strategy, &batch, &leg_tokens);
-            if let Err(reason) = batch_fits {
-                self.stats.strategy_limit_rejected += 1;
-                let acc = self
-                    .strategy_accounting
-                    .entry(strategy_acc_key(&strategy, &account_id))
-                    .or_default();
-                acc.limit_rejected += batch.len() as u64;
-                // RFC #541 挂钩 B：凭证/scope 维度的拒绝分桶进各自的 cause
-                // key；pot 维度保持 `limit.virtualCap`（历史语义不动）。
-                let cause = if reason.starts_with("credentials.notReady") {
-                    "credentials.notReady"
-                } else if reason.starts_with("scope.legRefused") {
-                    "scope.legRefused"
-                } else {
-                    "limit.virtualCap"
-                };
-                for _ in &batch {
-                    *acc.rejection_causes.entry(cause.into()).or_default() += 1;
-                }
-                tracing::info!(target: "strategy",
-                    "batch rejected: strategy={strategy} account={account_id} \
-                     cause={cause} legs={} reason={reason}",
-                    batch.len());
-                let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
-                tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
-            }
-        }
+        // leg's gate runs — the whole-cycle dimensions (credentials/scope,
+        // RFC #541 hook B) plus the per-account pot dimension. Strategies
+        // that declared `atomic_batch` (and sit in `virtual_limits`) reserve
+        // their WHOLE batch against the virtual pot: an over-cap batch is
+        // cancelled wholesale — zero legs placed, zero real reservations
+        // taken — with the refusal bucketed through the existing
+        // StrategyLimit accounting. Everything else (every shipped strategy,
+        // every undeclared batch) finds no governed scope and skips
+        // untouched.
+        self.arb_precheck_filter(&mut tokens);
         let mut placed = 0;
         // ── #363: the execution policy's account-level verdict, judged BEFORE
         // arbitration. Two decisions ride here:
@@ -6496,49 +6720,11 @@ impl Core {
             .into_iter()
             .map(|o| (o.token_id.clone(), o))
             .collect();
-        // ── E-VA: the SAME atomic-batch pre-reservation the real cycle runs
-        // (issue #390's parity rule: the nofast twin reproduces the base
-        // cycle's kernel-side pipeline cycle for cycle). Ungoverned scopes
+        // ── E-VA: the SAME whole-cycle pre-check the real cycle runs (issue
+        // #390's parity rule: the nofast twin reproduces the base cycle's
+        // kernel-side pipeline cycle for cycle). Ungoverned scopes
         // short-circuit before touching anything.
-        let declared_atomic = |name: &str| {
-            self.engine
-                .as_ref()
-                .is_some_and(|e| e.strategy_atomic_batch(name))
-        };
-        for ((account_id, strategy), batch) in virtual_batches(&tokens, &declared_atomic) {
-            // The SAME three-dimension pre-check the real cycle runs (issue
-            // #390's parity rule; RFC #541 hook B's twin leg).
-            let leg_tokens: HashMap<String, String> = tokens
-                .iter()
-                .map(|(_, req)| (req.internal_key.clone(), req.token_id.to_string()))
-                .collect();
-            let batch_fits = self.virtual_batch_fits(&account_id, &strategy, &batch, &leg_tokens);
-            if let Err(reason) = batch_fits {
-                self.stats.strategy_limit_rejected += 1;
-                let acc = self
-                    .strategy_accounting
-                    .entry(strategy_acc_key(&strategy, &account_id))
-                    .or_default();
-                acc.limit_rejected += batch.len() as u64;
-                // Same cause buckets as the real cycle's loop above.
-                let cause = if reason.starts_with("credentials.notReady") {
-                    "credentials.notReady"
-                } else if reason.starts_with("scope.legRefused") {
-                    "scope.legRefused"
-                } else {
-                    "limit.virtualCap"
-                };
-                for _ in &batch {
-                    *acc.rejection_causes.entry(cause.into()).or_default() += 1;
-                }
-                tracing::info!(target: "strategy",
-                    "batch rejected: strategy={strategy} account={account_id} \
-                     cause={cause} legs={} reason={reason}",
-                    batch.len());
-                let refused: HashSet<String> = batch.into_iter().map(|(key, _)| key).collect();
-                tokens.retain(|(_, req)| !refused.contains(&req.internal_key));
-            }
-        }
+        self.arb_precheck_filter(&mut tokens);
         // The physics projection the base cycle judged (E25): refreshed for
         // THIS cycle's round clock by `replay_candidates`.
         let policy_time_left_sec = self
@@ -7024,7 +7210,7 @@ impl Core {
     // ── E-VA: strategy-level virtual accounts ───────────────────────────────
     //
     // The virtual quota book itself never appears in the placement pipeline —
-    // these three helpers are the ONLY seams. Each one short-circuits on
+    // these helpers are the ONLY seams. Each one short-circuits on
     // `governed`, which is false for every scope `config.virtual_limits` does
     // not name, so an unconfigured kernel takes the exact historical path.
 
@@ -7039,59 +7225,72 @@ impl Core {
         self.virtual_accounts.cap(account_id, strategy)
     }
 
-    /// E-VA test #2's seam: try a WHOLE candidate batch against the
-    /// strategy's virtual pot, atomically — every leg reserves or nothing
-    /// does. `batch` is one `submit_candidate_orders` cycle's legs for the
-    /// (account, strategy) scope, each carrying its `internal_key` and the
-    /// notional the leg will commit. `Err` carries the over-cap detail the
-    /// caller buckets through the existing StrategyLimit rejection path.
+    /// RFC #541 挂钩 B — the WHOLE-CYCLE batch pre-check, the single point
+    /// both call sites (the real cycle's submit pipeline and the nofast
+    /// twin's `engine_replay_cycle`) share. For every declared-atomic
+    /// strategy that emitted BUY legs this cycle, judge the strategy's legs
+    /// AS ONE TICKET and remove every leg wholesale on a refusal:
     ///
-    /// The occupied quota OUTSIDE this book is the strategy's open-position
-    /// cost basis (filled legs converted to real holdings); resting BUY
-    /// orders are NOT added — their commitment IS their batch reservation,
-    /// and counting both would double-charge the pot.
+    /// (a) credentials (Live only — a non-trading mode has no venue egress
+    ///     and no credentials story, so replay/backtest corpora are not
+    ///     batch-refused over shell env): any leg's venue lacking its
+    ///     plugin's required credentials refuses the WHOLE strategy cycle.
+    ///     Credentials are VENUE-scoped — judged across the strategy's full
+    ///     cycle legs, NOT per `(account, strategy)` batch: the v2 dual-leg
+    ///     stamp (entries and exits stamp the token's venue's leg account)
+    ///     splits one pair across two accounts, so a per-account grouping
+    ///     would judge each sub-batch against only its own legs and let the
+    ///     credentialed venue's leg fly naked (RFC failure mode ①).
+    /// (b) scope (all modes): any leg's token in conflict with its STAMPED
+    ///     account's venue binding refuses the WHOLE strategy cycle — the
+    ///     batch loop's last line of defence behind engine hook A (which
+    ///     already drops declared-atomic strategies upstream, before any
+    ///     OrderRequest exists).
+    /// (c) the virtual pot (per governed account): each leg tries its
+    ///     notional against ITS OWN (account, strategy) pot. A strategy may
+    ///     legitimately span two accounts under the v2 stamp, so the pot is
+    ///     the one dimension that stays per-account — an over-cap share
+    ///     refuses the whole cycle so a partial pair never egresses.
     ///
-    /// RFC #541 方案 2a-i 挂钩 B（原型）：对 declared_atomic 策略的批，pot
-    /// 之前先做三维提交时校验——
-    /// (a) 凭证就绪（仅 `Mode::may_trade()`，即 Live：凭证是 venue egress
-    ///     的前置，Dry/ReadOnly 无 egress 亦无凭证语义）：批内每条腿 token
-    ///     的 `venue_of_token` 非空 ⇒ 该 venue 插件的全部必需凭证变量必须
-    ///     可解析（env 优先、持久格次之，与 `market::credentials_status`
-    ///     同一谓词与同一持久格）。untagged token（venue 空，前 #427 语料）
-    ///     不阻断——与 scope 门的 untagged 语义一致。任一腿凭证未就绪 ⇒
-    ///     整批拒（`credentials.notReady`）。
-    /// (b) scope（全模式）：批内任一腿 token 与所在 scope 的 venue 绑定冲突
-    ///     ⇒ 整批拒（`scope.legRefused`）——批循环能看见的最后一条防线
-    ///     （引擎挂钩 A 在其上游已经把 declared_atomic 策略整组丢了；这里
-    ///     兜住不经引擎过滤进圈的批）。
-    /// 两个 call site（实周期与 nofast 孪生）共用本函数，对等规则天然成立；
-    /// 未声明 atomic_batch 的策略在 `virtual_batches` 就不分组，行为不变。
-    /// `leg_tokens` maps each batch's internal_key to its token id (the
-    /// request facts the caller already holds — the batch tuples carry only
-    /// key + notional).
-    fn virtual_batch_fits(
-        &mut self,
-        account_id: &str,
-        strategy: &str,
-        batch: &[(String, Decimal)],
-        leg_tokens: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        if !self.virtual_accounts.governed(account_id, strategy) {
-            return Ok(());
+    /// Undeclared strategies never enter (the grouping predicate is
+    /// `strategy_atomic_batch`); unconfigured pots are transparent
+    /// (`governed() == false` ⇒ that account's share always fits). Refusals
+    /// bucket per leg under the strategy's (strategy, stamped account)
+    /// accounting row with the SAME cause keys the batch loop carried
+    /// (`credentials.notReady` / `scope.legRefused` / `limit.virtualCap`),
+    /// bump `limit_rejected` per leg, log ONE `batch rejected:` INFO line
+    /// naming the missing vars or the binding conflict, and strip every leg
+    /// of the strategy from the cycle (0 legs to OME — no naked first leg).
+    fn arb_precheck_filter(&mut self, tokens: &mut Vec<(String, crate::model::OrderRequest)>) {
+        let declared_atomic = |name: &str| {
+            self.engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_atomic_batch(name))
+        };
+        // Owned leg facts (the borrow split: the judges below need `&self`
+        // while the rejection needs `&mut tokens`, so the cycle's leg list
+        // is captured by value). Declared-atomic strategy → the cycle's
+        // whole BUY leg list; a BTreeMap keeps multi-strategy traversal
+        // deterministic.
+        let mut cycles: std::collections::BTreeMap<String, Vec<CycleLeg>> =
+            std::collections::BTreeMap::new();
+        for (_, req) in tokens.iter() {
+            if req.side == Side::Buy && declared_atomic(&req.strategy) {
+                cycles
+                    .entry(req.strategy.clone())
+                    .or_default()
+                    .push(CycleLeg {
+                        internal_key: req.internal_key.clone(),
+                        token: req.token_id.to_string(),
+                        account: req.account_id.to_string(),
+                        notional: req.price * req.size,
+                    });
+            }
         }
-        let declared_atomic = self
-            .engine
-            .as_ref()
-            .is_some_and(|e| e.strategy_atomic_batch(strategy));
-        if declared_atomic {
-            // (a) 凭证就绪是 Live-only 危害（RFC 失败模式①：place 时才发现
-            // 凭证缺 ⇒ 单腿 egress 失败留裸腿）。Dry/ReadOnly 没有 venue
-            // egress——`Mode::may_trade` 是每个 egress 站点必经的同一谓词，
-            // 且 Dry 明确「has no credentials story」——回放/回测语料不因
-            // shell 恰好无凭证 env 被整批拒。pot (b) 与 scope (c) 两维照常。
+        for (strategy, legs) in cycles {
+            // (a) credentials — venue-scoped, judged across the WHOLE cycle
+            // once (the persisted cell loads at most one time per cycle).
             if self.config.mode.may_trade() {
-                // Same persisted cell `credentials_status` reads (env outranks
-                // it), loaded once per batch here.
                 let cell = self
                     .config
                     .runtime_config_path
@@ -7099,68 +7298,132 @@ impl Core {
                     .map(std::path::Path::new)
                     .map(|p| crate::ipc::runtime_config::load_credentials_from(p, None))
                     .unwrap_or_default();
-                for (key, _notional) in batch {
-                    let Some(token) = leg_tokens.get(key) else {
-                        continue; // no token fact — nothing venue-shaped to judge
-                    };
-                    let venue = self.venue_of_token(token);
-                    // tag 腿的 venue 插件必需凭证必须全部可解析（env 非空或
-                    // 持久格非空，与 market::credentials_status 同一谓词）。
+                let mut refusal: Option<String> = None;
+                for leg in &legs {
+                    let venue = self.venue_of_token(&leg.token);
+                    // tag 腿的 venue 插件必需凭证必须全部可解析（env 优先、
+                    // 持久格次之，与 market::credentials_status 同一谓词）；
                     // untagged 腿不阻断——scope 门对无标签语料同样放行。
                     if !venue.is_empty() && !venue_credentials_ready(&venue, &cell) {
                         // RFC #541 边界三（拒绝可见性）：the refusal names the
                         // leg, the venue, and the EXACT unresolved vars — the
                         // operator fixes the batch from this line alone.
                         let missing = venue_credentials_missing(&venue, &cell).join(",");
-                        return Err(format!(
-                            "credentials.notReady: leg {key} (token {token}) venue `{venue}` has \
-                             unresolved executor credentials: missing [{missing}]"
+                        refusal = Some(format!(
+                            "credentials.notReady: leg {} (token {}) venue `{venue}` has \
+                             unresolved executor credentials: missing [{missing}]",
+                            leg.internal_key, leg.token
                         ));
+                        break;
                     }
                 }
+                if let Some(reason) = refusal {
+                    self.reject_whole_cycle(
+                        tokens,
+                        &strategy,
+                        &legs,
+                        "credentials.notReady",
+                        &reason,
+                    );
+                    continue;
+                }
             }
-            for (key, _notional) in batch {
-                let Some(token) = leg_tokens.get(key) else {
-                    continue; // no token fact — nothing venue-shaped to judge
-                };
-                let venue = self.venue_of_token(token);
-                // (b) scope：批循环里的 scope 半边（引擎挂钩 A 的下游兜底）。
-                // 绑定账户不出所外——refuse_cross_venue_order 的同一裁决，
-                // 读同一账户簿；untagged/未绑定账户照旧放行。
+            // (b) scope — the leg's STAMPED account's binding judges its own
+            // leg (the v2 stamp precedes the gates intrinsically: 钉2).
+            let mut refusal: Option<String> = None;
+            for leg in &legs {
+                let venue = self.venue_of_token(&leg.token);
                 let bound = self
                     .accounts
-                    .account(&AccountId::from(account_id))
+                    .account(&AccountId::from(leg.account.as_str()))
                     .map(|a| a.venue.as_str())
                     .unwrap_or_default();
                 if !bound.is_empty() && !venue.is_empty() && venue != bound {
-                    return Err(format!(
-                        "scope.legRefused: leg {key} (token {token}) belongs to venue `{venue}` \
-                         but account `{account_id}` is bound to venue `{bound}`"
+                    refusal = Some(format!(
+                        "scope.legRefused: leg {} (token {}) belongs to venue `{venue}` \
+                         but account `{}` is bound to venue `{bound}`",
+                        leg.internal_key, leg.token, leg.account
                     ));
+                    break;
                 }
             }
+            if let Some(reason) = refusal {
+                self.reject_whole_cycle(tokens, &strategy, &legs, "scope.legRefused", &reason);
+                continue;
+            }
+            // (c) the virtual pot — per governed (account, strategy) scope:
+            // the ONE dimension that stays per-account under the v2 stamp
+            // (each leg's notional hits the pot of the account it spends).
+            // An over-cap share refuses the whole cycle: a partial pair
+            // never egresses, and the pot keeps its check-then-hold split
+            // (the per-order `virtual_batch_commit` is still the ONLY
+            // reservation point — DRY-RUN pre-checks hold nothing here).
+            let mut over: Option<String> = None;
+            for (account_id, share) in per_account_shares(&legs) {
+                // DRY-RUN semantics (the pre-check must not hold anything —
+                // the per-order loop's `virtual_batch_commit` is the ONLY
+                // reservation point; reserving here too double-charged every
+                // leg, the 4 red tests' ×2 signature): the occupied quota
+                // OUTSIDE the pot is the strategy's open-position cost basis
+                // on THIS account; resting BUY orders are NOT added (their
+                // commitment IS their reservation — counting both would
+                // double-charge the pot).
+                let committed: Decimal = self
+                    .positions
+                    .open_positions()
+                    .iter()
+                    .filter(|p| p.account_id.as_str() == account_id && p.strategy == strategy)
+                    .map(|p| p.cost_usd)
+                    .sum();
+                if let Err(reason) = self
+                    .virtual_accounts
+                    .batch_fits(account_id, &strategy, &share, committed)
+                {
+                    over = Some(reason);
+                    break;
+                }
+            }
+            if let Some(reason) = over {
+                self.reject_whole_cycle(tokens, &strategy, &legs, "limit.virtualCap", &reason);
+                continue;
+            }
         }
-        let committed: Decimal = self
-            .positions
-            .open_positions()
-            .iter()
-            .filter(|p| p.account_id.as_str() == account_id && p.strategy == strategy)
-            .map(|p| p.cost_usd)
-            .sum();
-        // DRY-RUN: the pre-check must not hold anything — the per-order
-        // loop's `virtual_batch_commit` is the ONLY reservation point
-        // (check-then-hold split; reserving here too double-charged every
-        // leg, the 4 red tests' ×2 signature).
-        self.virtual_accounts
-            .batch_fits(account_id, strategy, batch, committed)
     }
 
-    /// The commit twin of [`Self::virtual_batch_fits`]: same arithmetic, but
-    /// it RUNS at the head of the per-order loop and holds the batch's quota
-    /// until the state machine releases it. Called only when the pre-check
-    /// passed, so the reserve cannot fail here — an unexpected refusal (a
-    /// concurrent mutation cannot happen on `&mut self`) is logged loudly
-    /// and degrades to the per-order path rather than wedging the cycle.
+    /// The wholesale side effect shared by all three dimensions: bucket every
+    /// leg under its (strategy, stamped account) row, strip the strategy's
+    /// legs from the cycle, log ONE auditable INFO line. `legs` is the
+    /// strategy's full cycle leg list as captured BEFORE any removal.
+    fn reject_whole_cycle(
+        &mut self,
+        tokens: &mut Vec<(String, crate::model::OrderRequest)>,
+        strategy: &str,
+        legs: &[CycleLeg],
+        cause: &str,
+        reason: &str,
+    ) {
+        self.stats.strategy_limit_rejected += 1;
+        for leg in legs {
+            let acc = self
+                .strategy_accounting
+                .entry(strategy_acc_key(strategy, leg.account.as_str()))
+                .or_default();
+            acc.limit_rejected += 1;
+            *acc.rejection_causes.entry(cause.to_string()).or_default() += 1;
+        }
+        tracing::info!(target: "strategy",
+            "batch rejected: strategy={strategy} cause={cause} legs={} reason={reason}",
+            legs.len());
+        let refused: HashSet<&str> = legs.iter().map(|leg| leg.internal_key.as_str()).collect();
+        tokens.retain(|(_, req)| !refused.contains(req.internal_key.as_str()));
+    }
+
+    /// The commit twin of the whole-cycle pre-check: it RUNS at the head of
+    /// the per-order loop and holds the leg's quota until the state machine
+    /// releases it. Called only when the pre-check passed, so the reserve
+    /// cannot fail here — an unexpected refusal (a concurrent mutation
+    /// cannot happen on `&mut self`) is logged loudly and degrades to the
+    /// per-order path rather than wedging the cycle.
     fn virtual_batch_commit(
         &mut self,
         account_id: &str,
@@ -15114,32 +15377,46 @@ fn strategy_acc_key(strategy: &str, account: &str) -> String {
     format!("{strategy}\u{1}{account}")
 }
 
-/// E-VA: group one submit cycle's BUY candidates into the virtual-account
-/// batches the atomic pre-reservation judges — one (account, strategy) group
-/// per strategy that declared `atomic_batch` (the pot itself is checked
-/// separately via `virtual_limits`), legs carrying their `internal_key` and
-/// the limit-price notional each will commit. The BTreeMap sorts the
-/// traversal so the log/check order is deterministic.
-///
-/// Every strategy that did not declare the posture (or that emitted no BUY
-/// legs — SELL entries never reserve) is absent, so the callers' loop is
-/// empty and the historical path runs byte-identically.
-fn virtual_batches(
-    tokens: &[(String, crate::model::OrderRequest)],
-    declared_atomic: &dyn Fn(&str) -> bool,
-) -> std::collections::BTreeMap<(String, String), Vec<(String, Decimal)>> {
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<(String, Decimal)>> =
-        std::collections::BTreeMap::new();
-    for (_, req) in tokens {
-        if req.side != Side::Buy || !declared_atomic(&req.strategy) {
-            continue;
+/// RFC #541 挂钩 B (c)：one declared-atomic strategy's cycle leg, captured by
+/// value so the judges can read `&self` while the wholesale rejection mutates
+/// the token list (the borrow split `arb_precheck_filter` lives inside).
+#[derive(Clone)]
+struct CycleLeg {
+    internal_key: String,
+    token: String,
+    account: String,
+    notional: Decimal,
+}
+
+/// RFC #541 挂钩 B (c)：one declared-atomic strategy's cycle legs grouped by
+/// the account each spends — `(account_id, [(internal_key, notional)])`,
+/// request order preserved within an account, sorted by account id so the
+/// pot sweep is deterministic. The per-account pot dimension reads exactly
+/// these shares: under the v2 dual-leg stamp a pair may span two accounts,
+/// and each leg's notional is judged against the pot of the account it
+/// spends (no pot is charged for legs it does not own).
+fn per_account_shares(legs: &[CycleLeg]) -> Vec<(&str, Vec<(String, Decimal)>)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut groups: HashMap<&str, Vec<(String, Decimal)>> = HashMap::new();
+    for leg in legs {
+        let acct = leg.account.as_str();
+        if !groups.contains_key(acct) {
+            order.push(acct);
         }
         groups
-            .entry((req.account_id.to_string(), req.strategy.clone()))
+            .entry(acct)
             .or_default()
-            .push((req.internal_key.clone(), req.price * req.size));
+            .push((leg.internal_key.clone(), leg.notional));
     }
-    groups
+    order.sort_unstable();
+    order.dedup();
+    order
+        .into_iter()
+        .map(|acct| {
+            let share = groups.remove(acct).unwrap_or_default();
+            (acct, share)
+        })
+        .collect()
 }
 
 /// The commit body shared by `virtual_batch_commit`: the borrow split (core
@@ -22045,6 +22322,20 @@ mod strategy_dispatch_tests {
             .expect("cross_venue_arb registers");
         assert!(eng.set_strategy_enabled("cross_venue_arb", true));
         c.enable_engine(eng);
+        // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` →
+        // the adapter's params bag); unconfigured ⇒ the strategy pairs
+        // nothing (fail-closed). The fixture wires both legs onto the
+        // DEFAULT account — the pre-v2 single-account batch shape these
+        // dispatch tests judge (pot accounting, orphan sweep, naked-leg
+        // degradation ride the same (account, strategy) scope as before).
+        c.arb_config_set(&crate::account::CrossVenueArbConfig {
+            leg_a_venue: "polymarket".into(),
+            leg_a_account: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            leg_b_venue: "kalshi".into(),
+            leg_b_account: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            pairs: vec!["BTC".into()],
+        })
+        .expect("the leg configuration lands (memory-only core)");
         c
     }
 
