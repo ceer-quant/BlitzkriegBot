@@ -216,6 +216,10 @@ pub struct StrategyCtx<'a> {
     /// cycle. Empty unless the host pushes one — every existing call site and
     /// every single-venue package keeps today's shape.
     unified_events: &'a [blitzkrieg_market_api::unified::UnifiedEvent],
+    /// RFC 568 阶段一：THIS strategy's pair-book views (the `bk.arb.pairs()`
+    /// 数据源)，as of this cycle. Empty unless the host pushes one — every
+    /// existing call site keeps the old shape.
+    pair_views: &'a [crate::pair::PairView],
 }
 
 impl<'a> StrategyCtx<'a> {
@@ -234,6 +238,7 @@ impl<'a> StrategyCtx<'a> {
             fresh_book,
             held_positions: &[],
             unified_events: &[],
+            pair_views: &[],
         }
     }
 
@@ -252,6 +257,14 @@ impl<'a> StrategyCtx<'a> {
         events: &'a [blitzkrieg_market_api::unified::UnifiedEvent],
     ) -> Self {
         self.unified_events = events;
+        self
+    }
+
+    /// RFC 568 阶段一：attach THIS strategy's pair-book views for this cycle
+    /// （owner 过滤已在 Core 侧做完 —— 跨策略/跨账户不可见）。The engine's
+    /// real evaluation cycle is the only production caller.
+    pub fn with_pair_views(mut self, views: &'a [crate::pair::PairView]) -> Self {
+        self.pair_views = views;
         self
     }
 
@@ -279,6 +292,12 @@ impl<'a> StrategyCtx<'a> {
     /// error.
     pub fn unified_events(&self) -> &[blitzkrieg_market_api::unified::UnifiedEvent] {
         self.unified_events
+    }
+    /// RFC 568 阶段一：THIS strategy's pair-book views for this cycle. Empty
+    /// when the host did not push one（诊断路径、影子孪生）——策略读不到
+    /// 配对簿时按「无登记」处理，绝不视为错误。
+    pub fn pair_views(&self) -> &[crate::pair::PairView] {
+        self.pair_views
     }
     /// Token book, but only while it is fresh enough to price off.
     pub fn fresh_book(&self, token_id: &str) -> Option<OrderbookSnapshot> {
@@ -456,6 +475,14 @@ pub trait EngineStrategy: Send + Sync {
     /// entries are added. Default: ignore — every strategy that never opted
     /// into the cross-venue flow keeps today's behaviour.
     fn set_arb_leg_config(&mut self, _cfg: Option<crate::account::CrossVenueArbConfig>) {}
+
+    /// RFC 568 阶段一：THIS instance's own account scope (the instance's
+    /// registration account) —— 配对声明落账时经济键第二元（owner 实例隔离
+    /// 维度）的权威来源：腿的 `account_id` 是 stamp 结果（v2 可 A≠B），不
+    /// 能混作实例身份。Default = the default account（与注册缺省同形）。
+    fn instance_account(&self) -> String {
+        blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string()
+    }
 
     /// 跨所套利弹窗 v2: the leg accounts this strategy's OWN book may span —
     /// the configured pair's two account ids when the strategy runs under a

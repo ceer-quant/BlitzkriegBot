@@ -478,6 +478,7 @@ fn undeclared_strategy_keeps_the_per_leg_path() {
                             price: book.mid_price,
                             reason: "stub leg".into(),
                             shares: None,
+                            pair: None,
                         });
                     }
                 }

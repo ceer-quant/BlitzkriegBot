@@ -430,8 +430,36 @@ fn one_attempt_per_leg_direction_per_round() {
     );
     let got = candidates_of(&mut a, &ctx(&two_rows(), 600, NOW, &fresh));
     assert_eq!(got.len(), 2);
-    let got2 = candidates_of(&mut a, &ctx(&two_rows(), 500, NOW + 1_000, &fresh));
-    assert!(got2.is_empty(), "latched for the round: {got2:?}");
+    // issue 568 阶段一：latch 的权威迁到内核 PairBook —— 同轮第二周期
+    // 的 ctx 携带「两腿已登记」的配对簿视图（引擎真实路径：ctx.pair_views
+    // 经适配器推给 `bk.arb.pairs()`），两腿都不再 emit。
+    let booked_views = [blitzkrieg_core::pair::PairView {
+        owner_strategy: "cross_venue_arb".into(),
+        id: format!("cross_venue_arb\u{1}default\u{1}BTC:{SLOT}"),
+        slot: SLOT,
+        status: "pending".into(),
+        legs: vec![
+            blitzkrieg_core::pair::PairLegView {
+                token: PM_UP.into(),
+                account_id: "account-a".into(),
+                shares: "250.00".into(),
+                filled: "0".into(),
+            },
+            blitzkrieg_core::pair::PairLegView {
+                token: KX_DOWN.into(),
+                account_id: "account-b".into(),
+                shares: "250.00".into(),
+                filled: "0".into(),
+            },
+        ],
+        naked_token: None,
+    }];
+    let markets = two_rows();
+    let c2 =
+        blitzkrieg_core::strategies::StrategyCtx::new(&markets, SLOT, 500, NOW + 1_000, &fresh)
+            .with_pair_views(&booked_views);
+    let got2 = candidates_of(&mut a, &c2);
+    assert!(got2.is_empty(), "booked legs are not re-emitted: {got2:?}");
 }
 
 /// The latch is per DIRECTION: an armed UP never blocks the DOWN leg of the
@@ -470,6 +498,22 @@ fn an_armed_up_leg_does_not_block_the_down_leg_same_round() {
     );
     assert_eq!(got[0].token_id, PM_UP);
 
+    // issue 568 阶段一：内核受理 UP 腿 ⇒ 配对簿视图记它（单腿 pending 行
+    // —— DOWN 未声明，PairBook 还没见到它）。The latch is per DIRECTION:
+    // an armed UP never blocks the DOWN leg of the same asset.
+    let booked_up_views = [blitzkrieg_core::pair::PairView {
+        owner_strategy: "cross_venue_arb".into(),
+        id: format!("cross_venue_arb\u{1}default\u{1}BTC:{SLOT}"),
+        slot: SLOT,
+        status: "pending".into(),
+        legs: vec![blitzkrieg_core::pair::PairLegView {
+            token: PM_UP.into(),
+            account_id: "account-a".into(),
+            shares: "250.00".into(),
+            filled: "0".into(),
+        }],
+        naked_token: None,
+    }];
     // Round 1, next cycle: the roles flipped — the UP leg's entry was taken
     // (held) and the DOWN leg's earlier fill is gone. The DOWN leg must still
     // be offered: an armed UP never vetoes its sibling.
@@ -484,7 +528,9 @@ fn an_armed_up_leg_does_not_block_the_down_leg_same_round() {
         round_slot: SLOT,
     }];
     let c = blitzkrieg_core::strategies::StrategyCtx::new(&markets, SLOT, 500, NOW + 1_000, &fresh)
-        .with_positions(&held);
+        .with_positions(&held)
+        // issue 568 阶段一：UP 腿已被内核受理（配对簿视图记它一腿）。
+        .with_pair_views(&booked_up_views);
     let got2 = candidates_of(&mut a, &c);
     assert_eq!(
         got2.len(),

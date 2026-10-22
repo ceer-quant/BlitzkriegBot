@@ -478,6 +478,7 @@ pub fn evaluate_mean_reversion(
             condition_id: condition_id.to_string(),
             price: entry,
             shares: None,
+            pair: None,
             reason: format!(
                 "{} fell {:+.2}% off lookback high, cheap zone, resting bid {} (mid {})",
                 dir.as_str().to_uppercase(),

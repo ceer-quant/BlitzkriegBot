@@ -383,6 +383,23 @@ pub struct TradeSignal {
     /// whose legs must match in SHARES, not in notional (a complete-set pair
     /// buys the same n shares of UP and DOWN).
     pub shares: Option<Decimal>,
+    /// RFC 568 阶段一：跨所套利配对声明（OPTIONAL）。`None` = 旧行为逐位
+    /// 不变（非配对策略、未带 pair 字段的旧内核输出都落这里）；`Some(d)`
+    /// 是一条腿的配对登记：`key` 是策略自报的可读标签（防重不依赖它 ——
+    /// 内核按 (owner 实例, asset, slot) 经济身份复用配对），`leg` 是腿标签
+    /// （如 "up"/"down"，仅可读，方向不入经济键）。内核侧的受理链：
+    /// A≠B 账户校验（engine，两腿落同账户 ⇒ APPLICATION 错误整组拒）→
+    /// arb_precheck 过闸后 → PairBook::declare（凭证不校验 —— 补钉 3）。
+    pub pair: Option<TradePairDecl>,
+}
+
+/// RFC 568：一条腿的配对声明载荷（随 [`TradeSignal::pair`] 携带）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradePairDecl {
+    /// 策略自报的配对标签（可读性；经济身份 = (asset, slot) 由内核派生）。
+    pub key: String,
+    /// 腿标签（"up"/"down"；仅可读，方向不入经济键）。
+    pub leg: String,
 }
 
 /// Trend-confirmed dip buyer. Mirrors the original `evaluateSpreadArb`:
@@ -450,6 +467,7 @@ pub fn evaluate_spread_arb(
             condition_id: condition_id.to_string(),
             price: entry,
             shares: None,
+            pair: None,
             reason: format!(
                 "{} trend confirmed (held >{} for >={}s), resting bid {} ({}% of mid {})",
                 dir.as_str().to_uppercase(),

@@ -460,6 +460,7 @@ mod tests {
                 price,
                 reason: "stub".into(),
                 shares: None,
+                pair: None,
             }]
         }
         fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {

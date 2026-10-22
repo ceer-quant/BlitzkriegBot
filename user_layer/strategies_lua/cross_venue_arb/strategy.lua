@@ -41,10 +41,12 @@
 --     (issue #427: "容量 = 两平台各自深度的最小值"), floored to the 0.01
 --     grid and floored again by the kernel's own max-shares budget. The
 --     kernel routes entries MakerThenTaker and owns every gate. Per-
---     DIRECTION emission: each leg is gated by its own (asset, direction)
---     latch key — an armed UP never blocks the DOWN leg of the same asset
---     (and vice versa), so a leg the kernel refused or dropped can be
---     re-offered within the round while its sibling stands.
+--     DIRECTION emission: each leg carries its own `pair={key=,leg=}`
+--     declaration (issue 568 阶段一) — the kernel-side PairBook is the
+--     dedup authority (one pair per (instance, asset, round slot), same-
+--     direction repeats are idempotent no-ops), so a leg the kernel refused
+--     or dropped can be re-offered within the round while its sibling
+--     stands. The strategy keeps NO cross-cycle Lua state of its own.
 --   * FEES — priced from `bk.fees()`, the kernel's ONE schedule
 --     (`rate * (p*(1-p))^exponent` per share, summed over BOTH legs). No
 --     schedule in force → NO entries and NO exits: the fee is a cost
@@ -67,10 +69,14 @@
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule,
 --     same helpers as flash_arb/pair_discount_arb). Every comparison in the
 --     trigger is an exact integer comparison — no float knife-edge anywhere.
---   * ONE attempt per (asset, direction) per round (`armed` latch keyed
---     `"<asset>|up"` / `"<asset>|down"`); the kernel-side dedup drops a
---     repeat while an order still rests on a token. A rejected attempt is
---     not retried into the same books.
+--   * PAIR DEDUP is KERNEL-SIDE now (issue 568 阶段一): the strategy reads
+--     `bk.arb.pairs()` (its owner-filtered pair-book view, finally-
+--     consistent — a reading may lag one beat behind the fills) and skips a
+--     leg that already sits on a live pair row for this round's slot; the
+--     kernel re-checks on arrival anyway (same (instance, asset, slot) ⇒
+--     attach/idempotent-ignore), so the Lua check is an emission guard, not
+--     the authority. No `armed` latch, no cross-cycle tables: state lives in
+--     the kernel's PairBook or nowhere.
 --   * Exit evaluation runs every cycle while a leg is held, keyed by the
 --     leg's token from the current pairing.
 --   * `bk.holdings()` is THIS strategy's view: a held leg is offered its
@@ -384,16 +390,28 @@ local function pair_for_asset(asset, legs)
   return { up_row = up_row, up_ask = up_ask, down_row = down_row }
 end
 
--- ── the attempt latch ───────────────────────────────────────────────────────
--- "(asset)|up" / "(asset)|down" -> round_slot, set when THAT leg's entry is
--- emitted; cleared whenever the round slot moves on. Per-direction keys: an
--- armed UP never blocks the DOWN leg of the same asset — a re-offer of the
--- sibling (or the leg itself after a kernel-side refusal of the other) is
--- exactly the degradation path the dual-leg accounting expects. Release
--- (exit) evaluation is NOT gated by the latch — a held leg must keep being
--- repriced to the last tick.
+-- ── the pair-book view helpers (issue 568 阶段一) ──────────────────────────
 
-local armed = {}
+--- This strategy's live pair rows from `bk.arb.pairs()`（owner 过滤已在
+--- 内核做完；读数最终一致 —— 附注 2）。返回 { [token]=true }：本round
+--- slot 上已登记在任一未闭合配对里的腿 token 集合。读不到视图（宿主未
+--- push / 旧内核 feature-detect 为 nil）按「无登记」处理 —— 去重的权威在
+--- 内核 PairBook，这里只是发射闸，绝不视为错误。
+local function paired_tokens(slot)
+  local out = {}
+  local ok, rows = pcall(function() return bk.arb.pairs() end)
+  if not ok or rows == nil then return out end
+  for _, p in ipairs(rows) do
+    -- 只关心本轮 slot 上的活配对；closed 是终态（下一轮新键），旧轮
+    -- 的行即便投影尚未清退也不拦本轮发射。
+    if p.slot == slot and p.status ~= "closed" then
+      for _, l in ipairs(p.legs or {}) do
+        out[l.token] = true
+      end
+    end
+  end
+  return out
+end
 
 -- ── holdings helpers ────────────────────────────────────────────────────────
 
@@ -439,10 +457,9 @@ function bk_evaluate()
     return { entries = entries, exits = exits, breaks = {} }
   end
 
-  -- A new round retires every latch: attempts do not survive their round.
-  for key, s in pairs(armed) do
-    if s ~= slot then armed[key] = nil end
-  end
+  -- A new round retires every attempt: the kernel-side PairBook is the
+  -- state (retire_before 闭账旧轮), the strategy keeps no latch of its own.
+  local paired = paired_tokens(slot)
 
   -- Fail-closed fee schedule: both the entry economics AND the release
   -- verdict price BOTH legs' fees. No schedule → no suggestions at all.
@@ -523,8 +540,10 @@ function bk_evaluate()
                 return dec_cmp(ask, cfg.min_leg_price) >= 0
                   and dec_cmp(ask, cfg.max_leg_price) <= 0
               end
-              local up_key = asset .. "|up"
-              local down_key = asset .. "|down"
+              -- pair 键（issue 568 附注 1）：自报可读标签 = asset:slot；
+              -- 经济身份 (asset, slot) 在内核从腿 token 派生，这里拼形只
+              -- 进投影的 id，防重不依赖它。
+              local pair_key = asset .. ":" .. slot
               local reason = string.format(
                 "cross-venue pair %.4f (%s up@%s + %s down@%s + fees) vs $1, edge %.2f%%, cap=min(depth)=%s",
                 cost.m / POW10[cost.s],
@@ -533,27 +552,28 @@ function bk_evaluate()
                 (DEC_1.m / POW10[DEC_1.s] - cost.m / POW10[cost.s]) * 100,
                 dec_fmt(depth)
               )
-              if armed[up_key] ~= slot and held_up.m <= 0
+              -- 发射闸（内核兜底去重）：已登记在活配对里的腿不再 emit；
+              -- 未登记的腿带 pair 声明发射（UP/DOWN 各带自己的 leg 标签，
+              -- 方向不入经济键）。held 腿不重复开仓（旧语义保留）。
+              if not paired[pair.up_row.up_token] and held_up.m <= 0
                 and leg_price_ok(up_leg.ask) then
                 entries[#entries + 1] = {
                   token = pair.up_row.up_token,
                   price = dec_fmt(up_leg.ask),
                   shares = dec_fmt(depth),
                   reason = reason,
+                  pair = { key = pair_key, leg = "up" },
                 }
-                -- One attempt per (asset, direction) per round: the
-                -- declared share count carries the size.
-                armed[up_key] = slot
               end
-              if armed[down_key] ~= slot and held_down.m <= 0
+              if not paired[pair.down_row.down_token] and held_down.m <= 0
                 and leg_price_ok(down_leg.ask) then
                 entries[#entries + 1] = {
                   token = pair.down_row.down_token,
                   price = dec_fmt(down_leg.ask),
                   shares = dec_fmt(depth),
                   reason = reason,
+                  pair = { key = pair_key, leg = "down" },
                 }
-                armed[down_key] = slot
               end
             end
           end

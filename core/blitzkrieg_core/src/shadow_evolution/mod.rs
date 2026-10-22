@@ -1480,6 +1480,7 @@ mod tests {
                 price: book.mid_price,
                 reason: format!("mid {} <= cap {}", book.mid_price, self.cap),
                 shares: None,
+                pair: None,
             }]
         }
     }
