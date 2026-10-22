@@ -1373,6 +1373,11 @@ pub struct Core {
     /// transaction), read by the engine hot-push (the adapter's account
     /// stamp + the strategy's `bk.params()` leg entries).
     arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
+    /// RFC 568 阶段一：内核侧配对状态簿（PairBook）。事实事件驱动的观察者
+    /// 账本：engine 的提交管线在 arb_precheck 过闸后把带 pair 声明的腿
+    /// declare 进来，OME 的成交/死亡事实经 on_order_event 吸收，sweep 在
+    /// flatten 后落 Closed。进程内 BTreeMap，不持久化。
+    pair_book: crate::pair::PairBook,
     /// Optional self-driving engine (P3). When present, book/spot/round events
     /// flow in and the core evaluates strategies and places orders on its own.
     /// Crate-visible so the replay driver can host strategies without going
@@ -2304,6 +2309,9 @@ impl Core {
             // unconfigured: the legacy unified-confirm chain stays the only
             // pairing source and the account-stamp is inert.
             arb_leg_config,
+            // RFC 568 阶段一：配对簿随进程启动为空账（不持久化 —— 事实事件
+            // 重放经同一事件流重建，#559 3c 的口径见 pair 模块注释）。
+            pair_book: crate::pair::PairBook::default(),
         }
     }
 
@@ -3211,6 +3219,81 @@ impl Core {
         self.arb_config_validate(cfg)?;
         self.arb_config_apply(cfg);
         Ok(())
+    }
+
+    // ── RFC 568 阶段一：PairBook 的内核接线面 ───────────────────────────────
+
+    /// 配对声明受理（engine 提交管线在 arb_precheck 过闸后逐腿调用）。
+    /// 经济身份 (asset, slot) 从腿 token 经 engine scanner 的 token→market
+    /// 表派生（不是策略自报的）；token 不在本轮任何市场 ⇒ slot 派生不出
+    /// ⇒ 拒收（fail-closed）。owner_account 是实例主账户（实例隔离维度），
+    /// 策略自报 key 只作可读标签。声明载荷整体从 engine 的 [`crate::engine::PairDeclaration`]
+    /// 传入（owner/腿账户/token/shares 一个结构 —— 受理面不再逐参重抄）。
+    fn pair_declare_leg(&mut self, d: &crate::engine::PairDeclaration, now_ms: i64) {
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        // token→market 表：slot/asset 的派生权威（engine scanner 本轮市场）。
+        let (asset, slot) = match engine.round_slot_of(&d.token_id) {
+            Some(slot) if slot > 0 => (engine.asset_of(&d.token_id).unwrap_or_default(), slot),
+            _ => return, // 不在本轮任何市场：无轮次身份，不配进簿
+        };
+        let facts = crate::pair::TokenMarketFacts { asset, slot };
+        let decl = crate::pair::PairLegDecl {
+            token_id: d.token_id.clone(),
+            shares: d.shares.unwrap_or(Decimal::ZERO),
+            leg: d.decl.leg.clone(),
+            // 盖章结果（v2 可 A≠B）——PairBook 的腿账户与投影都以它为准。
+            leg_account: d.leg_account.clone(),
+        };
+        let _ = self.pair_book.declare(
+            &d.owner_strategy,
+            &d.owner_account,
+            &d.decl.key,
+            &decl,
+            &facts,
+            now_ms,
+        );
+    }
+
+    /// place 成功后的 internal_key 回填（OME 事实事件经它寻址回声明腿）。
+    fn pair_bind_key(
+        &mut self,
+        strategy: &str,
+        owner_account: &str,
+        token_id: &str,
+        internal_key: &str,
+    ) {
+        self.pair_book
+            .bind_by_leg(strategy, owner_account, token_id, internal_key);
+    }
+
+    /// OME 事实事件喂入（成交/死亡）——幂等，未命中声明腿的事件是空操作。
+    fn pair_on_order_event(&mut self, internal_key: &str, filled_delta: Decimal, dead: bool) {
+        self.pair_book
+            .on_order_event(internal_key, filled_delta, dead);
+    }
+
+    /// 轮次推进清退：换轮臂（engine_on_data 的 RoundMarkets 非 top-up）调用。
+    fn pair_retire_before(&mut self, before: i64) {
+        self.pair_book.retire_before(before);
+    }
+
+    /// `bk.arb.pairs()` 投影的数据源：owner 过滤的配对视图（跨策略/跨账户
+    /// 不可见）。`accounts` 是该实例可见的账户白名单（实例主账户 + arb 腿
+    /// 账户，与 holdings 视图的拓宽同形）。
+    pub(crate) fn pair_views_for(
+        &self,
+        strategy: &str,
+        accounts: &HashSet<String>,
+    ) -> Vec<crate::pair::PairView> {
+        self.pair_book.views_for(strategy, accounts)
+    }
+
+    /// 配对簿的测试/审计只读快照（无过滤）——`pair_book_check.rs` 经它断言
+    /// 受理链的落账结果；生产路径一律走 `pair_views_for`（owner 过滤投影）。
+    pub fn pair_book_all(&self) -> Vec<crate::pair::PairState> {
+        self.pair_book.all().into_iter().cloned().collect()
     }
 
     /// Unset the arb leg configuration (the panel's 「解除配置」): remove the
@@ -5634,6 +5717,9 @@ impl Core {
                     });
                 if !top_up {
                     self.stats.rounds += 1;
+                    // RFC 568 阶段一：轮次推进 ⇒ 旧轮配对闭账（retire_before，
+                    // PairBook 的清退臂 —— Closed 终态吸收迟到的迟发事件）。
+                    self.pair_retire_before(slot);
                     // 探针：新一轮的 token 覆盖掉上一轮的——per_token 表键随
                     // 轮替换保持有界（旧 token 不再被汇总点名）。round 声明
                     // 也算数据（零 tick 探针的起点）。
@@ -6130,6 +6216,31 @@ impl Core {
         // before the engine borrow opens (same once-per-cycle cadence as the
         // equity push below).
         let held_view = self.held_position_view();
+        // RFC 568 阶段一：本周期每策略的配对簿视图快照（owner 过滤在 Core
+        // 侧做完 —— 实例主账户 + arb 腿账户白名单，与 holdings 视图拓宽同
+        // 形）。也在引擎借用打开前构建；策略层经 `bk.arb.pairs()` 只读
+        // （最终一致，附注 2）。
+        let pair_views: Vec<crate::pair::PairView> = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.hosted()
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| {
+                        let mut accounts: HashSet<String> = HashSet::new();
+                        accounts.insert(s.account_id.clone());
+                        if let Some(ls) = s.strategy.arb_leg_accounts() {
+                            accounts.extend(ls.iter().cloned());
+                        }
+                        (s.strategy.name().to_string(), accounts)
+                    })
+                    .collect::<Vec<(String, HashSet<String>)>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(name, accounts)| self.pair_views_for(&name, &accounts))
+            .collect();
         let engine = self.engine.as_mut().expect("engine present");
         // #202: the equity-relative sizing is a percentage of the account, and
         // the account is the ledger — pushed here, once per cycle, so a ticket
@@ -6153,6 +6264,8 @@ impl Core {
             engine.set_account_frozen(id, self.account_freezes.contains_key(id));
         }
         engine.set_positions_view(held_view);
+        // 视图落引擎的 per-cycle 快照（evaluate 的 ctx 构造从这取）。
+        engine.set_pair_views_snapshot(pair_views);
         let orders = engine.evaluate(now_ms);
         // Replay fast path: recompute when the round-timing verdict can next
         // flip — quiet ticks skip the Lua call until then (or the fallback
@@ -6183,6 +6296,11 @@ impl Core {
         for rec in engine.take_exemptions() {
             tracing::info!(target: "strategy", "{}", rec.audit_line());
         }
+        // RFC 568 阶段一：A≠B 拒绝回执与配对声明都在引擎借用内先收下来
+        // （回执 → APPLICATION 事件、声明 → precheck 过闸后 declare，都在
+        // 借用结束后 —— 与 poison_alerts 的先收后发同一模式）。
+        let pair_refusals = engine.take_pair_refusals();
+        let pair_declarations = engine.take_pair_declarations();
         for (name, alert) in poison_alerts {
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
@@ -6194,6 +6312,15 @@ impl Core {
             .into_iter()
             .map(|o| (o.token_id.clone(), o))
             .collect();
+        // ── RFC 568 阶段一（补钉 5 的消费侧）：A≠B 校验的拒绝回执 →
+        // APPLICATION 错误事件（点名字段 pair.key）。订单路径照旧 —— 校验
+        // 拒的是「声明」，不是腿（裸腿由 arb_precheck 的整组语义与内核去重
+        // 兜底）；声明被拒 ⇒ 该腿不进 PairBook。
+        for reason in pair_refusals {
+            self.emit(Event::Error {
+                error: CoreError::new(CoreErrorCode::InvalidParams, reason),
+            });
+        }
         // ── E-VA: the atomic-batch pre-reservation, judged BEFORE the first
         // leg's gate runs — the whole-cycle dimensions (credentials/scope,
         // RFC #541 hook B) plus the per-account pot dimension. Strategies
@@ -6205,6 +6332,33 @@ impl Core {
         // every undeclared batch) finds no governed scope and skips
         // untouched.
         self.arb_precheck_filter(&mut tokens);
+        // ── RFC 568 阶段一（补钉 3 的落点）：声明受理在 arb_precheck 过闸
+        // 之后 —— 预检拒整批 ⇒ 不入账（凭证维度由预检管，声明不重复校验）；
+        // 过闸 ⇒ 逐腿 declare 进 PairBook。存活判定直接用 precheck 后的
+        // 幸存单集（strategy, 落账账户, token）三元组唯一对应一条腿：scope
+        // 整组丢、策略丢、去重吞掉的声明都不入账（配对簿只记将要发生的事
+        // 实的配对骨架）；经济身份 (asset, slot) 在 pair_declare_leg 里从腿
+        // token 经 scanner 派生。
+        let survived: HashSet<(String, String, String)> = tokens
+            .iter()
+            .map(|(_, req)| {
+                (
+                    req.strategy.clone(),
+                    req.account_id.to_string(),
+                    req.token_id.clone(),
+                )
+            })
+            .collect();
+        for d in pair_declarations {
+            if !survived.contains(&(
+                d.owner_strategy.clone(),
+                d.leg_account.clone(),
+                d.token_id.clone(),
+            )) {
+                continue;
+            }
+            self.pair_declare_leg(&d, now_ms);
+        }
         let mut placed = 0;
         // ── #363: the execution policy's account-level verdict, judged BEFORE
         // arbitration. Two decisions ride here:
@@ -6609,6 +6763,12 @@ impl Core {
             } else {
                 None
             };
+            // RFC 568 阶段一：place 前回填 internal_key —— 声明腿与 OME 订单
+            // 的事实钥匙挂钩（成交/死亡事件经它寻址回这条腿）。只对 BUY 入腿
+            // 有意义（SELL 是退出，不入配对簿）；未声明的 token 是空操作。
+            if req.side == Side::Buy {
+                self.pair_bind_key(&name, placed_account.as_str(), &token, &req.internal_key);
+            }
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -6986,6 +7146,12 @@ impl Core {
             } else {
                 None
             };
+            // RFC 568 阶段一：place 前回填 internal_key —— 声明腿与 OME 订单
+            // 的事实钥匙挂钩（成交/死亡事件经它寻址回这条腿）。只对 BUY 入腿
+            // 有意义（SELL 是退出，不入配对簿）；未声明的 token 是空操作。
+            if req.side == Side::Buy {
+                self.pair_bind_key(&name, placed_account.as_str(), &token, &req.internal_key);
+            }
             match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
@@ -8375,6 +8541,8 @@ impl Core {
                 self.virtual_release_order(&o);
             }
             self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+            // RFC 568 阶段一：死亡事实（venue 拒单）喂配对簿。
+            self.pair_on_order_event(&o.internal_key, Decimal::ZERO, true);
             // The rejected entry never rested: its token may be re-attempted.
             if let Some(engine) = self.engine.as_mut() {
                 engine.release_pending_token_for_strategy(
@@ -8413,6 +8581,15 @@ impl Core {
                 if let Some((_, worst)) =
                     self.marketable_walk(o.side, &o.token_id, o.size, cap, now_ms)
                 {
+                    // issue 568 阶段一：追单是同一入腿事实链的续段 —— 其
+                    // 成交/死亡事实必须寻址回声明腿。原腿的 key 已随死亡
+                    // 事实落在簿里；续段 key（{id}:escalated）在此登记。
+                    self.pair_book.bind_continuation(
+                        &o.strategy,
+                        o.account_id.as_str(),
+                        &o.token_id,
+                        &format!("{id}:escalated"),
+                    );
                     let req = OrderRequest {
                         token_id: o.token_id.clone(),
                         condition_id: o.condition_id.clone(),
@@ -9146,6 +9323,17 @@ impl Core {
     /// cancelled).
     fn apply_delta_effects(&mut self, d: FillDelta, now_ms: i64) {
         let px = d.price;
+        // RFC 568 阶段一：配对簿的成交事实喂入（观察者、非判定输入）。
+        // FillDelta 不携带 internal_key —— 经 ome.get 取 TrackedOrder 的
+        // internal_key；BUY 入腿的正 delta 才入账（SELL 是退出，回滚不
+        // 改成交事实的正累计）。未命中声明腿的事件是空操作。
+        if d.side == Side::Buy
+            && d.delta > Decimal::ZERO
+            && let Some(order) = self.ome.get(&d.order_id)
+        {
+            let key = order.internal_key.clone();
+            self.pair_on_order_event(&key, d.delta, false);
+        }
         // Replay fast path: a fill advances (or retires) a live order and
         // moves the position book — the escalation floor and the settlement
         // watch may both change on the next tick. It is also an ENGINE INPUT:
@@ -10505,6 +10693,13 @@ impl Core {
                 // book and the next tick re-judges it, so the result is
                 // honestly dropped rather than swallowed.
                 let _ = self.flatten(Some(&id), now_ms);
+                // RFC 568 阶段一（观察者写点）：flatten 已处置 ⇒ 配对落
+                // Closed 终态（判定链零改动 —— sweep 的 orphan 判定照旧直读
+                // OME 与持仓，这里只落账）。寻址按 token 形（close_by_token）：
+                // 经济键第二元是实例主账户，sweep 手里只有腿的落账账户
+                // （v2 A≠B 时两者不同），token 唯一对应本轮一个市场，绕开
+                // 这层不对称；幂等（同 token 跨轮旧键也一并闭账）。
+                self.pair_book.close_by_token(&strategy, &token);
                 // The chase did not save the leg: retire its attempt record so
                 // the next tick can offer a fresh chase (a repriced book may
                 // have made the pair feasible again) instead of waiting out a
@@ -10646,6 +10841,18 @@ impl Core {
                     size = %size,
                     "pair chase placed — the missing leg is re-offered past the counterparty"
                 );
+                // RFC 568 阶段一（观察者写点）：chase 成功 ⇒ 把 chase 订单的
+                // internal_key 绑到配对簿的缺失腿（naked token 的配对腿）——
+                // chase 的成交/死亡事实经同一 on_order_event 通道更新配对状
+                // 态（Partial → Complete 或 Orphan）。判定链零改动：绑回是
+                // 落账，不是输入。
+                let key = self
+                    .ome
+                    .get(&order_id)
+                    .map(|o| o.internal_key.clone())
+                    .unwrap_or_else(|| format!("pair-chase:{naked_token}:{missing_token}:{slot}"));
+                self.pair_book
+                    .bind_by_leg(strategy, account_id.as_str(), missing_token, &key);
                 true
             }
             Err(e) => {
@@ -10701,6 +10908,8 @@ impl Core {
         self.virtual_release_order(&order);
         self.ome
             .mark_terminal(id, OrderStatus::ForceClosed, now_ms)?;
+        // RFC 568 阶段一：死亡事实（过期强平）喂配对簿。
+        self.pair_on_order_event(&order.internal_key, Decimal::ZERO, true);
         if let Some(engine) = self.engine.as_mut() {
             engine.release_pending_token_for_strategy(
                 order.account_id.as_str(),
@@ -12777,6 +12986,13 @@ impl Core {
                                         self.virtual_release_order(&order);
                                     }
                                     self.ome.mark_terminal(id, OrderStatus::Rejected, now_ms)?;
+                                    // RFC 568 阶段一：死亡事实（taker 拒绝）
+                                    // 喂配对簿。
+                                    self.pair_on_order_event(
+                                        &order.internal_key,
+                                        Decimal::ZERO,
+                                        true,
+                                    );
                                     // The refused FOK never rested: its token may
                                     // be re-attempted on a refreshed book.
                                     if let Some(engine) = self.engine.as_mut() {
@@ -13001,6 +13217,8 @@ impl Core {
                     OrderStatus::Rejected,
                     leg.report_at_ms,
                 );
+                // RFC 568 阶段一：死亡事实（in-flight taker 被杀）喂配对簿。
+                self.pair_on_order_event(&order.internal_key, Decimal::ZERO, true);
                 let err = CoreError::new(CoreErrorCode::WouldCross, msg);
                 tracing::error!(
                     order = %order.order_id,
@@ -13126,6 +13344,8 @@ impl Core {
             self.virtual_release_order(&order);
         }
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
+        // RFC 568 阶段一：死亡事实（撤单）喂配对簿。
+        self.pair_on_order_event(&order.internal_key, Decimal::ZERO, true);
         // The token's repeat-suppression ends with the order: a cancelled
         // entry leaves no resting order behind, so a later cycle may re-attempt
         // (the strategy's own latch still bounds it to one attempt per book).
@@ -14499,6 +14719,15 @@ impl Core {
                 self.ome.set_escalation(&id, now_ms + timeout)?;
                 continue;
             };
+            // issue 568 阶段一：定时 escalation 的追单是同一入腿事实链的
+            // 续段 —— 成交/死亡事实寻址回声明腿（原腿 cancel 的死亡事实已
+            // 落账；续段 key 在追单 place 前登记，其 Taker 成交照旧记账）。
+            self.pair_book.bind_continuation(
+                &strategy,
+                account_id.as_str(),
+                &token,
+                &format!("{id}:escalated"),
+            );
             let req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -20125,6 +20354,7 @@ mod strategy_dispatch_tests {
                             price: book.mid_price,
                             reason: "target dip".into(),
                             shares: None,
+                            pair: None,
                         });
                     }
                 }
@@ -21916,6 +22146,7 @@ mod strategy_dispatch_tests {
                             price: book.mid_price,
                             reason: "atomic dip".into(),
                             shares: Some(dec!(10)),
+                            pair: None,
                         });
                     }
                 }

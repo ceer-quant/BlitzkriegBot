@@ -113,6 +113,7 @@ impl EngineStrategy for CapStrategy {
                 price: book.best_ask.min(book.mid_price),
                 reason: format!("mid {} <= cap {cap}", book.mid_price),
                 shares: None,
+                pair: None,
             });
         }
         out

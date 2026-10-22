@@ -142,6 +142,18 @@ pub struct Entry {
     pub price: String,
     pub reason: String,
     pub shares: Option<String>,
+    /// RFC 568 阶段一：可选配对声明 `{ key, leg }`（Lua `entries` 行的可选
+    /// `pair` 表透传）。`None` = 旧行为逐位不变；`Some` 时内核在 arb_precheck
+    /// 过闸后把这条腿登记进 PairBook（经济身份 (asset, slot) 内核派生）。
+    pub pair: Option<EntryPairDecl>,
+}
+
+/// RFC 568：`Entry.pair` 的载荷 —— 策略自报的可读标签 + 腿标签（均仅
+/// 可读；经济身份与防重由内核按 (owner 实例, asset, slot) 判定）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryPairDecl {
+    pub key: String,
+    pub leg: String,
 }
 
 /// An exit intent for an open position; the kernel prices off the live book.
@@ -948,6 +960,7 @@ impl SafeStrategy for Doubler {
                         price: mid.clone(),
                         reason: "doubler_mid".into(),
                         shares: None,
+                        pair: None,
                     });
                 }
             }

@@ -250,6 +250,7 @@ impl EngineStrategy for InTreeParity {
                 price: Decimal::from_str(&e.price).expect("parity price"),
                 reason: e.reason,
                 shares: None,
+                pair: None,
             });
         }
         out

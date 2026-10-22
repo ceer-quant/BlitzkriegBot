@@ -18,8 +18,8 @@
 use std::sync::{Arc, Mutex};
 
 use blitzkrieg_strategy_api::{
-    BookUpdate, Break, Entry, Exit, FreshBook, HoldingView, Intents, Kline, ParamBag, RoundContext,
-    RoundInfo, SafeStrategy, StrategyMode,
+    BookUpdate, Break, Entry, EntryPairDecl, Exit, FreshBook, HoldingView, Intents, Kline,
+    ParamBag, RoundContext, RoundInfo, SafeStrategy, StrategyMode,
 };
 use mlua::Value;
 
@@ -299,7 +299,8 @@ fn parse_intents(v: &Value) -> (Intents, Option<String>) {
     let Value::Table(t) = v else {
         return (intents, Some("bk_evaluate must return a table".into()));
     };
-    // entries ─ token/price required; reason/shares optional strings.
+    // entries ─ token/price required; reason/shares optional strings;
+    // pair (RFC 568) optional { key, leg } — absent ⇒ None（旧行为逐位不变）.
     if let Ok(arr) = t.raw_get::<mlua::Table>("entries") {
         for pair in arr.sequence_values::<mlua::Table>() {
             let Ok(row) = pair else { continue };
@@ -309,11 +310,17 @@ fn parse_intents(v: &Value) -> (Intents, Option<String>) {
             ) else {
                 return (intents, Some("entry missing token/price string".into()));
             };
+            let pair_decl = row.raw_get::<mlua::Table>("pair").ok().and_then(|pt| {
+                let key = pt.raw_get::<String>("key").ok()?;
+                let leg = pt.raw_get::<String>("leg").ok()?;
+                Some(EntryPairDecl { key, leg })
+            });
             intents.entries.push(Entry {
                 token,
                 price,
                 reason: row.raw_get::<String>("reason").unwrap_or_default(),
                 shares: row.raw_get::<String>("shares").ok(),
+                pair: pair_decl,
             });
         }
     }

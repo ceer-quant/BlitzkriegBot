@@ -16,7 +16,7 @@ pub use strategy_logic::mean_reversion::MeanReversionConfig;
 pub use strategy_logic::model::OrderbookSnapshot;
 pub use strategy_logic::model::SignalDirection;
 pub use strategy_logic::signal::{
-    PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig, TrendPhase, TrendTracker,
-    evaluate_spread_arb, round2,
+    PriceBuffer, SpreadArbConfig, TradePairDecl, TradeSignal, TrendConfig, TrendPhase,
+    TrendTracker, evaluate_spread_arb, round2,
 };
 pub use strategy_logic::trend_follow::TrendFollowConfig;

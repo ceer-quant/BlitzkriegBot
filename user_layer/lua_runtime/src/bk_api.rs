@@ -20,6 +20,7 @@
 //! | `bk.holdings()`   | THIS strategy's open positions (array, decimal STRINGS)    |
 //! | `bk.fees()`       | the active taker-fee schedule (`name/rate/exponent`) or nil |
 //! | `bk.unified_events()` | confirmed cross-venue mappings (#427) or empty array   |
+//! | `bk.arb.pairs()`  | RFC 568: THIS strategy's pair-book views (owner-filtered, eventually consistent) or empty array |
 //!
 //! Prices and sizes cross as exact decimal STRINGS (the `safe.rs` boundary
 //! rule): a float would let a resting price drift by a tick. `bk.kline`
@@ -180,6 +181,36 @@ pub struct BkState {
     /// pushed by the adapter from the ctx's view. Empty until a host pushes
     /// one — single-venue deployments answer an empty table, never an error.
     pub unified_events: Vec<UnifiedEventView>,
+    /// RFC 568 阶段一：THIS strategy's pair-book views (`bk.arb.pairs()`),
+    /// pushed by the adapter from the ctx's view（owner 过滤已在内核侧做完
+    /// —— 跨策略/跨账户不可见）。Empty until a host pushes one —— 策略读
+    /// 不到配对簿时按「无登记」处理，绝不视为错误。最终一致读数（允许滞
+    /// 后一拍，RFC 568 附注 2）。
+    pub pair_views: Vec<PairViewRow>,
+}
+
+/// RFC 568 阶段一：one pair-book row as the `bk.arb.pairs()` wire row —
+/// plain data（lua_runtime 不依赖 core 的 PairBook 类型）：id 是可读标签
+/// （`strategy\u{1}account\u{1}pair_key` 拼形），status 是五态字面量。
+#[derive(Debug, Clone, Default)]
+pub struct PairViewRow {
+    pub id: String,
+    pub slot: i64,
+    /// "pending" | "partial" | "complete" | "orphan" | "closed"。
+    pub status: String,
+    pub legs: Vec<PairLegRow>,
+    /// 裸腿 token（partial/orphan 记名；其余空串）。
+    pub naked_token: String,
+}
+
+/// RFC 568 阶段一：one leg row inside [`PairViewRow`]. `account_id` 是腿
+/// 账户（策略本来就知道的盖章结果，非凭证字段）。
+#[derive(Debug, Clone, Default)]
+pub struct PairLegRow {
+    pub token: String,
+    pub account_id: String,
+    pub shares: String,
+    pub filled: String,
 }
 
 /// #427: one confirmed cross-venue mapping as the `bk.unified_events()` wire
@@ -903,6 +934,74 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                 }
             })?,
         )?;
+    }
+
+    // -- bk.arb.pairs() (RFC 568 阶段一) --------------------------------------
+    // The pair-book's owner-filtered read projection: one row per pair THIS
+    // strategy instance may see (owner 过滤在内核侧做完 —— 跨策略/跨账户不
+    // 可见)。最终一致读数（RFC 568 附注 2）：读数是调用瞬间的快照，允许滞
+    // 后一拍 —— 事实事件（成交/死亡）落账与本次读数之间没有 happens-before。
+    // Empty until a host pushes one：读不到配对簿按「无登记」处理（幂等去
+    // 重内核兜底），绝不视为错误。
+    {
+        let st = Arc::clone(&state);
+        let slot: std::cell::RefCell<CacheSlot> = std::cell::RefCell::new(None);
+        let arb = lua.create_table()?;
+        arb.raw_set(
+            "pairs",
+            lua.create_function(move |lua, ()| {
+                let st = st.lock().expect("bk state mutex");
+                let mut fp = Fp::new();
+                for p in &st.pair_views {
+                    let _ = fp.field(&p.id).num(p.slot).field(&p.status);
+                    for l in &p.legs {
+                        let _ = fp
+                            .field(&l.token)
+                            .field(&l.account_id)
+                            .field(&l.shares)
+                            .field(&l.filled);
+                    }
+                    let _ = fp.field(&p.naked_token).field("\u{2}");
+                }
+                let key = fp.done();
+                if let Some((k, reg)) = slot.borrow().as_ref()
+                    && *k == key
+                {
+                    let t: Table = lua.registry_value(reg)?;
+                    return Ok(Value::Table(t));
+                }
+                let arr = lua.create_table()?;
+                for (i, p) in st.pair_views.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.raw_set("id", p.id.as_str())?;
+                    t.raw_set("slot", p.slot)?;
+                    t.raw_set("status", p.status.as_str())?;
+                    t.raw_set("naked_token", p.naked_token.as_str())?;
+                    let legs = lua.create_table()?;
+                    for (j, l) in p.legs.iter().enumerate() {
+                        let lt = lua.create_table()?;
+                        lt.raw_set("token", l.token.as_str())?;
+                        lt.raw_set("account_id", l.account_id.as_str())?;
+                        lt.raw_set("shares", l.shares.as_str())?;
+                        lt.raw_set("filled", l.filled.as_str())?;
+                        legs.raw_set(j as i64 + 1, lt)?;
+                    }
+                    t.raw_set("legs", legs)?;
+                    arr.raw_set(i as i64 + 1, t)?;
+                }
+                let arr = guard_readonly(lua, &arr)?;
+                let reg = lua.create_registry_value(arr)?;
+                *slot.borrow_mut() = Some((key, reg));
+                match slot.borrow().as_ref() {
+                    Some((_, reg)) => {
+                        let t: Table = lua.registry_value(reg)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => unreachable!("slot just stored"),
+                }
+            })?,
+        )?;
+        bk.raw_set("arb", arb)?;
     }
 
     // -- bk.vwap_for_size(symbol, side, size) ---------------------------------

@@ -34,7 +34,9 @@ use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use blitzkrieg_lua_runtime::{FeeScheduleView, LuaStrategy, UnifiedEventView, UnifiedListingView};
+use blitzkrieg_lua_runtime::{
+    FeeScheduleView, LuaStrategy, PairLegRow, PairViewRow, UnifiedEventView, UnifiedListingView,
+};
 use blitzkrieg_strategy_api::{
     BookUpdate, FreshBook, HoldingView, MarketInfo, RoundContext, RoundInfo, SafeStrategy,
     StrategyMode,
@@ -42,7 +44,7 @@ use blitzkrieg_strategy_api::{
 
 use crate::model::{OrderbookSnapshot, SignalDirection};
 use crate::shadow_evolution::knobs::{KnobSpec, StrategyParams};
-use crate::signal::TradeSignal;
+use crate::signal::{TradePairDecl, TradeSignal};
 use crate::strategies::shadow_twin::ShadowFactory;
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 
@@ -710,6 +712,35 @@ impl EngineStrategy for LuaEngineAdapter {
             st.unified_events = unified;
         }
 
+        // RFC 568 阶段一：THIS strategy's pair-book views, so `bk.arb.pairs()`
+        // sees the kernel-side pairing state（owner 过滤已在内核做完）。Same
+        // push pattern as unified_events — the adapter translates the kernel
+        // type into the lua_runtime's plain-data view（lua_runtime 不依赖
+        // core 的 pair 模块）。最终一致读数（附注 2：允许滞后一拍）。
+        let pairs: Vec<PairViewRow> = ctx
+            .pair_views()
+            .iter()
+            .map(|p| PairViewRow {
+                id: p.id.clone(),
+                slot: p.slot,
+                status: p.status.clone(),
+                naked_token: p.naked_token.clone().unwrap_or_default(),
+                legs: p
+                    .legs
+                    .iter()
+                    .map(|l| PairLegRow {
+                        token: l.token.clone(),
+                        account_id: l.account_id.clone(),
+                        shares: l.shares.clone(),
+                        filled: l.filled.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        if let Ok(mut st) = self.inner.state().lock() {
+            st.pair_views = pairs;
+        }
+
         let round_ctx = RoundContext {
             round: RoundInfo {
                 slot: ctx.round_slot(),
@@ -768,6 +799,13 @@ impl EngineStrategy for LuaEngineAdapter {
                 .shares
                 .as_deref()
                 .and_then(|s| Decimal::from_str_exact(s).ok());
+            // RFC 568 阶段一：Lua `pair={key=,leg=}` 透传为 TradePairDecl
+            // （缺省 None = 旧行为逐位不变）。方向不入经济键 —— 腿标签只是
+            // 可读信息，随声明原样携带。
+            let pair_decl = entry.pair.map(|p| TradePairDecl {
+                key: p.key,
+                leg: p.leg,
+            });
             let reason = if entry.reason.is_empty() {
                 "strategy entry".to_string()
             } else {
@@ -789,6 +827,7 @@ impl EngineStrategy for LuaEngineAdapter {
                         price,
                         reason: reason.clone(),
                         shares,
+                        pair: pair_decl.clone(),
                     });
                     break;
                 }
@@ -803,6 +842,7 @@ impl EngineStrategy for LuaEngineAdapter {
                         price,
                         reason: reason.clone(),
                         shares,
+                        pair: pair_decl.clone(),
                     });
                     break;
                 }
@@ -841,6 +881,12 @@ impl EngineStrategy for LuaEngineAdapter {
     /// params entries both read this cell — one write, both consumers.
     fn set_arb_leg_config(&mut self, cfg: Option<crate::account::CrossVenueArbConfig>) {
         self.arb_leg_config = cfg;
+    }
+
+    /// RFC 568 阶段一：本实例的注册账户（实例隔离维度）——配对声明经济键
+    /// 第二元的权威来源（腿 account_id 是 stamp 结果，v2 可 A≠B）。
+    fn instance_account(&self) -> String {
+        self.account_id.clone()
     }
 
     /// 跨所套利弹窗 v2: the leg accounts this instance's book may span. The

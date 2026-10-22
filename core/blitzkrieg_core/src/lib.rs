@@ -62,6 +62,11 @@ pub mod ome;
 pub mod onchain;
 pub mod order;
 pub mod order_db;
+/// RFC 568 阶段一：内核侧跨所套利配对状态簿（PairBook）。事实事件驱动的
+/// 观察者账本：declare 受理策略层声明、on_order_event 吸收 OME 事实、
+/// retire_before 轮次清退；经济身份 = (asset, slot)，进程内 BTreeMap，
+/// 不持久化（#559 3c 的口径见模块注释）。
+pub mod pair;
 pub mod position;
 pub mod position_db;
 /// 环境差异排查探针（任务二 1-3）：SNTP 时钟偏差 / tick 断流 / spot 失效。
