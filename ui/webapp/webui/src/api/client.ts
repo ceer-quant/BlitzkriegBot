@@ -666,6 +666,34 @@ export interface AccountVenueSetDoc {
   error?: string
 }
 
+// ── 跨所套利创建（arb.config.set / arb.config.get，合同 v1）─────────────────
+// 配置意图模型：A 腿（交易所+账户）+ B 腿（交易所+账户）+ 币对多选，创建即
+// 持久化（内核写 accounts.toml，面板零持久化职责）。专用代理路由（body 即
+// params 逐字转发，同 account-venue/set 的纪律）。B≠A（venue 与账户两个维度）
+// 的校验在内核是 APPLICATION 错误 —— 消息点名哪个字段非法，弹窗把原文转述。
+
+/** `arb.config.set` 请求体（camelCase wire 与合同 v1 对齐；version 恒 1）。 */
+export interface ArbConfigSetBody {
+  version: 1
+  legAVenue: string
+  legAAccount: string
+  legBVenue: string
+  legBAccount: string
+  pairs: string[]
+}
+
+/** `arb.config.get` / `arb.config.set` 的回执（configured 分支预填与回显用）。 */
+export interface ArbConfigDoc {
+  version: number
+  configured: boolean
+  legAVenue: string | null
+  legAAccount: string | null
+  legBVenue: string | null
+  legBAccount: string | null
+  pairs: string[]
+  error?: string
+}
+
 // ── 显示账户（issue 559）───────────────────────────────────────────────────
 // 身份唯一源改造：行情页倒计时卡的「这是谁的市场」不再从账户绑定派生，而
 // 是内核的 display_account 独立事实（accounts.toml 顶层持久化 + 运行时生
@@ -959,6 +987,21 @@ export const api = {
   /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
   accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
     request<AccountVenueSetDoc>('/account-venue/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // ── 跨所套利创建（arb.config.set / arb.config.get，合同 v1）──────────────
+  // 专用代理路由（body 即 params 逐字转发，同 account-venue/set 的纪律）。
+  // 内核侧校验失败 = JSON-RPC APPLICATION 错误，网关包成 200 + `{error}` 文档
+  // —— 调用方必须检查 `error` 并把消息原文转述给用户（消息点名非法字段）。
+  // get 返回 configured=false = 老内核（不认识该动词）与「未配置」两种情况的
+  // 区分在 feature-detect 层做（get 的 error 带 rpc -32601 字样 = 动词不存在）。
+
+  /** 已配置双腿的读数（弹窗预填：configured=true 时按腿回显）。 */
+  arbConfigGet: () => request<ArbConfigDoc>('/arb-config'),
+  /** 双腿配置写：先于 setStrategy 调用（合同提交序：config 成功才启用）。 */
+  arbConfigSet: (body: ArbConfigSetBody) =>
+    request<ArbConfigDoc>('/arb-config/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
