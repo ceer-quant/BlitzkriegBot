@@ -10,9 +10,12 @@
 //!
 //! Mapping decisions (all made HERE, the plugin boundary):
 //!   * series — `series_ticker_for(asset, round_sec)`: 15m rounds map to
-//!     `KX{ASSET}15M`, daily rounds to `KX{ASSET}D`. Kalshi ships no 5m/1h/4h
-//!     crypto-round series (verified), so those configurations simply find
-//!     nothing rather than discovering wrong markets.
+//!     `KX{ASSET}15M`. Kalshi ships no 5m/1h/4h crypto-round series
+//!     (verified), so those configurations simply find nothing rather than
+//!     discovering wrong markets. The daily family (`KX{ASSET}D`) is also
+//!     NOT routed — deliberately: it is a strike ladder, not an up/down
+//!     binary (see `series_ticker_for` and the one-time warning in
+//!     `discovery_loop`).
 //!   * asset — the series name carries the asset; the title match is only a
 //!     fallback sanity check (word-boundary, so "solved" is not SOL).
 //!   * UP/DOWN tokens — a Kalshi market is one binary with YES and NO sides.
@@ -50,9 +53,22 @@ pub(crate) struct DiscoveredMarket {
 }
 
 /// The Kalshi round series for one configured asset at the engine's round
-/// length. Only two crypto-round families exist on the venue (verified by
-/// query): `KX{ASSET}15M` and `KX{ASSET}D`. Anything else returns None —
-/// discovery finding nothing is honest; discovering the WRONG market is not.
+/// length. Only the 15m crypto-round family is routable: `KX{ASSET}15M`.
+/// Anything else returns None — discovery finding nothing is honest;
+/// discovering the WRONG market is not.
+///
+/// The daily family `KX{ASSET}D` is deliberately NOT routed, even though the
+/// series exists on the venue. Live-venue audit (2026-10-23,
+/// `target/kalshi-daily-audit-report.md`) settled it: `KX{ASSET}D` is a
+/// STRIKE LADDER, not an up/down binary — each event carries 188–300
+/// mutually exclusive `strike_type: greater` markets ("close ≥ $X", BRTI
+/// 60s-average settlement), so consuming it as UP/DOWN pairs misfeeds the
+/// engine three ways: every rung lands in the same round_slot, spread_arb
+/// reads a near-ITM rung as trend strength, and cross_venue_arb's
+/// UP+DOWN=$1 pair economics collapses (`pair_for_asset` silently nils
+/// once multiple rungs are listed). No true daily up/down family exists on
+/// the venue (all 278 crypto series enumerated). Re-enable only after a
+/// venue-side daily up/down family actually ships.
 pub(crate) fn series_ticker_for(asset: &str, round_sec: i64) -> Option<String> {
     let sym = match asset.to_ascii_uppercase().as_str() {
         "BTC" | "XBT" => "BTC",
@@ -64,9 +80,38 @@ pub(crate) fn series_ticker_for(asset: &str, round_sec: i64) -> Option<String> {
     };
     match round_sec {
         900 => Some(format!("KX{sym}15M")),
-        86_400 => Some(format!("KX{sym}D")),
+        // 86_400 (KX{ASSET}D) intentionally unmapped: strike ladder, not an
+        // up/down binary. `discovery_loop` warns once when this round length
+        // is configured, so an operator is never left with a silent empty
+        // market set.
         _ => None,
     }
+}
+
+/// One-time explicit warning that the configured round length is the daily
+/// family the plugin refuses to route. Fires once per process on the first
+/// discovery tick, before the loop settles into its normal cadence. Returns
+/// whether THIS call emitted the warning (test hook: the alarm is
+/// once-per-process, so tests probe the gate directly).
+fn warn_daily_family_disabled_once(round_sec: i64) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DAILY_WARNED: AtomicBool = AtomicBool::new(false);
+    if round_sec != 86_400 || DAILY_WARNED.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    tracing::warn!(
+        target: "kalshi",
+        round_sec,
+        "kalshi discovery: daily (86400s) round family DISABLED — Kalshi KX{{ASSET}}D \
+         (KXBTCD/KXETHD/…) is a STRIKE LADDER, not an up/down binary: each event lists \
+         188–300 mutually-exclusive 'close ≥ $X' rungs (strike_type=greater, BRTI 60s \
+         average settlement), so there is no up/down pair to consume. Routing it as \
+         UP/DOWN misfeeds every rung into one round_slot, makes spread_arb buy near-ITM \
+         rungs as fake trend, and breaks cross_venue_arb's UP+DOWN=$1 economics (audit: \
+         target/kalshi-daily-audit-report.md, verdict: 选项2 daily 族禁用+告警). \
+         Switch round_duration to 900 (15m) — the only verified up/down round family."
+    );
+    true
 }
 
 /// Word-boundary asset match inside prose titles. `"Will SOL be up"` matches
@@ -195,6 +240,12 @@ fn discovery_loop(
         // 改变签名 → 重喂（engine 同 slot merge 按 token 去重，只增不炸）。
         let mut last_fed_slot = i64::MIN;
         let mut last_fed_signature = String::new();
+        // #audit-daily: a configured 86400s round now routes to NOTHING (the
+        // daily family is a strike ladder, audit-settled). Warn once, loudly,
+        // instead of letting every asset fall through the per-asset `continue`
+        // silently — an operator must be able to tell "disabled on purpose"
+        // from "venue has nothing listed".
+        warn_daily_family_disabled_once(round_sec);
         let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
         loop {
             tick.tick().await;
@@ -357,12 +408,54 @@ mod tests {
         assert_eq!(series_ticker_for("BTC", 900).as_deref(), Some("KXBTC15M"));
         assert_eq!(series_ticker_for("doge", 900).as_deref(), Some("KXDOGE15M"));
         assert_eq!(series_ticker_for("XBT", 900).as_deref(), Some("KXBTC15M"));
-        assert_eq!(series_ticker_for("BTC", 86_400).as_deref(), Some("KXBTCD"));
-        // Round lengths the venue does not ship must find nothing.
+        // Round lengths the venue does not ship — and the deliberately
+        // disabled daily family (its own regression test below) — must find
+        // nothing.
         assert_eq!(series_ticker_for("BTC", 300), None);
         assert_eq!(series_ticker_for("BTC", 3_600), None);
         assert_eq!(series_ticker_for("BTC", 14_400), None);
         assert_eq!(series_ticker_for("APE", 900), None);
+    }
+
+    #[test]
+    fn daily_family_is_disabled_strike_ladder_not_an_updown_binary() {
+        // Regression gate for the audit-settled fix (2026-10-23,
+        // `target/kalshi-daily-audit-report.md`): KX{ASSET}D is a STRIKE
+        // LADDER, not an up/down binary — every event carries 188–300
+        // mutually-exclusive `strike_type: greater` rungs ("close ≥ $X", BRTI
+        // 60s-average settlement). Consuming it as UP/DOWN pairs put all 238
+        // rungs in one round_slot, made spread_arb read near-ITM rungs as
+        // trend, and voided cross_venue_arb's UP+DOWN=$1 economics
+        // (pair_for_asset silently nils). No true daily up/down family
+        // exists on the venue (278 crypto series enumerated), so 86400s
+        // rounds must route to NOTHING (discovery_loop warns once instead).
+        for asset in ["BTC", "XBT", "ETH", "SOL", "XRP", "DOGE", "btc"] {
+            assert_eq!(
+                series_ticker_for(asset, 86_400),
+                None,
+                "the daily strike-ladder family must never be routed as an up/down round"
+            );
+        }
+    }
+
+    #[test]
+    fn daily_family_warning_fires_once_per_process() {
+        // The explicit-alarm half of the fix: the one-time warning fires for
+        // a daily configuration (first call returns true), never for other
+        // round lengths, and repeats are suppressed (silent skip would hide
+        // an operator-visible misconfiguration again).
+        assert!(
+            !warn_daily_family_disabled_once(900),
+            "15m configurations must not trip the daily warning"
+        );
+        assert!(
+            warn_daily_family_disabled_once(86_400),
+            "the first daily tick must emit the explicit warning"
+        );
+        assert!(
+            !warn_daily_family_disabled_once(86_400),
+            "repeats are suppressed — it is a ONE-TIME alarm, not per-poll spam"
+        );
     }
 
     #[test]
