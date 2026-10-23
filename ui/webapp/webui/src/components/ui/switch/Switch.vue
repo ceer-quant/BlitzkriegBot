@@ -11,6 +11,8 @@ const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
 
 <template>
   <label :class="cn('inline-flex items-center gap-2 shrink-0', !props.disabled && 'cursor-pointer')">
+    <!-- 文字在前、开关落在行最右（行业标准开关位；2026-10-23 操作员裁决） -->
+    <span v-if="props.label" class="text-[12.5px] font-medium text-muted-fg select-none">{{ props.label }}</span>
     <SwitchRoot
       :model-value="props.modelValue"
       :disabled="props.disabled"
@@ -33,6 +35,5 @@ const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
         )"
       />
     </SwitchRoot>
-    <span v-if="props.label" class="text-[12.5px] font-medium text-muted-fg select-none">{{ props.label }}</span>
   </label>
 </template>
