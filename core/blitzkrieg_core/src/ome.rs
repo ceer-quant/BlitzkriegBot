@@ -680,6 +680,9 @@ impl Ome {
             account_id: r.account_id.clone(),
             // Derived at read time (list_orders); never stored.
             venue: String::new(),
+            // B1a: 0 until B1b stamps the family at the placement path (the
+            // write point is deliberately out of this PR's diff).
+            round_duration_sec: 0,
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());

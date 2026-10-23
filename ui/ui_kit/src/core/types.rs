@@ -171,6 +171,13 @@ pub struct VenueRoundView {
     /// The venue tag (empty = legacy bucket).
     #[serde(default)]
     pub venue: String,
+    /// B1a: the row's round-length family in seconds. Backward-compatible
+    /// incremental field — a pre-B1a core never sends it (serde default 0 =
+    /// undeclared, the panel falls back to the global clock) and a
+    /// multi-family core sends one row per (venue, duration); the panel
+    /// feature-detects the field (>0) before using it.
+    #[serde(default)]
+    pub duration_sec: i64,
     pub slot: i64,
     pub age_sec: i64,
     pub time_left_sec: i64,

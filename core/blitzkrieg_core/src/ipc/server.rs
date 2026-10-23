@@ -2794,6 +2794,13 @@ async fn handle_line(
         //（slot/age/timeLeft 与 trading 侧 `round_timing_for_venue` 同源，
         // 不另造第三种口径），前端按 active venue 选行渲染倒计时；
         // 无该 venue 行（老内核/venue 未开口）时前端保持现行为。
+        //
+        // B1a（多族地基）：装配源升级为 `observed_clock_keys()` —— 每
+        // (venue, duration) 一行，行带 `durationSec`，slot/age 用该族
+        // duration 推（`round_timing_for`，与 trading 侧多族读同一个
+        // 口径）。单族语料下每 venue 恰一行，行集合与旧装配逐字节等价
+        //（除新增的 durationSec 键）；跨族语料下同 venue 多行，前端按
+        // (venue, durationSec) 选行。
         method::ENGINE_ROUND => {
             let c = core.lock().await;
             let mut doc = serde_json::to_value(c.round_view()).unwrap_or(Value::Null);
@@ -2850,21 +2857,24 @@ async fn handle_line(
                 })
                 .unwrap_or_default();
             doc["marketPrices"] = serde_json::json!(markets);
-            // per-venue 轮次钟行（#550 症状②）。来源 = `observed_venue_keys`
-            // （已经开口的 venue + legacy bucket）× `round_timing_for_venue`
-            // —— 与 trading 侧的 per-candidate 门同一个口径，显示链不自立
-            // 尺度。老内核没有该键 → 前端 feature-detect 缺失时走现行为。
+            // per-venue 轮次钟行（#550 症状②；B1a 升级为逐族一行）。来源
+            // = `observed_clock_keys()`（已经开口的 (venue,duration) 钟 ×
+            // 全部）× `round_timing_for` —— 与 trading 侧的多族读同一口径，
+            // 显示链不自立尺度。老内核没有该键 → 前端 feature-detect 缺失
+            // 时走现行为；`durationSec` 为向后兼容增量字段（见 PR 正文
+            // 契约段），旧面板忽略该字段，新面板 feature-detect 在场才用。
             let venue_rounds: Vec<serde_json::Value> = c
                 .engine
                 .as_ref()
                 .map(|e| {
                     e.scanner()
-                        .observed_venue_keys()
+                        .observed_clock_keys()
                         .into_iter()
-                        .map(|venue| {
-                            let t = e.scanner().round_timing_for_venue(&venue, now);
+                        .map(|(venue, duration)| {
+                            let t = e.scanner().round_timing_for(&venue, duration, now);
                             serde_json::json!({
                                 "venue": venue,
+                                "durationSec": duration,
                                 "slot": t.slot,
                                 "ageSec": t.age_sec,
                                 "timeLeftSec": t.time_left_sec,
