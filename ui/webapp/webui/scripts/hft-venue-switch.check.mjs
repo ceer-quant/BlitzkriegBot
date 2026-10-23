@@ -254,4 +254,44 @@ check('venue 切换时倒计时残值清零（serverLeft/serverAt/leftSec 归零
   )
 })
 
+// ── 8. 轮次告警三修（2026-10-23）：Loading 必有超时释放 + discovery 空判信号 ──
+// 反向验收 — 以下必须在 UI 上不可能：
+//   · venue 切到「快照永远不来行」的所时，页面永远转圈 —— Loading 门
+//     必须有超时释放，把判定交给空判信号而不是无限 Loading；
+//   · 该所确实没有当前轮次档位的市场（discovery 空集）时，用户看到的
+//     还是「网络拦截」文案 —— 空判信号必须在快照层面（钟行+行情行双
+//     缺席）成立，且带稳定窗口（防轮界瞬间的合法空拍误报）。
+check('venueLoading 有超时释放（VENUE_LOADING_TIMEOUT_MS）—— 旧核降级之外的第二条防永转圈线', () => {
+  const body = page.match(/const venueLoading = computed\([\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 venueLoading 门')
+  assert.match(body[0], /VENUE_LOADING_TIMEOUT_MS/, 'Loading 门没有超时常量 —— 新所数据永不到达时页面无限转圈')
+  assert.match(body[0], /nowMs\.value\s*-\s*venueSwitchAt\.value/, '超时未以切换时间戳为起点的墙钟差计算')
+  const timeout = page.match(/const VENUE_LOADING_TIMEOUT_MS = ([\d_]+)/)
+  assert.ok(timeout, '缺 VENUE_LOADING_TIMEOUT_MS 常量定义')
+  assert.ok(Number(timeout[1].replaceAll('_', '')) >= 10_000, `超时窗口 ${timeout[1]} 过短 —— 轮界正常等待会被误释放`)
+  assert.ok(Number(timeout[1].replaceAll('_', '')) <= 60_000, `超时窗口 ${timeout[1]} 过长 —— 释放前用户等待不可接受`)
+})
+
+check('discovery 空判信号（venueDiscoveryEmpty）：钟行+行情行双缺席 + 稳定窗口防轮界误报', () => {
+  const body = page.match(/const venueDiscoveryEmpty = computed\([\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 venueDiscoveryEmpty 空判信号')
+  // 双条件：钟行与行情行都要缺席才成立（任一在场 = 该所活着，只是没数据）。
+  assert.match(body[0], /venueRounds/, '空判没看钟行（venueRounds）—— 只看行情行会在轮界空拍误报')
+  assert.match(body[0], /prices/, '空判没看行情行（prices）—— 只看钟行会在行情插件活着但暂无报价时误报')
+  // 稳定窗口：空拍持续满 VENUE_DISCOVERY_EMPTY_MS 才真（轮界瞬间合法为空）。
+  assert.match(body[0], /VENUE_DISCOVERY_EMPTY_MS/, '空判没有稳定窗口 —— 轮界瞬间双缺席会闪出「可能不支持」')
+  const win = page.match(/const VENUE_DISCOVERY_EMPTY_MS = ([\d_]+)/)
+  assert.ok(win, '缺 VENUE_DISCOVERY_EMPTY_MS 常量定义')
+  assert.ok(Number(win[1].replaceAll('_', '')) >= 5_000, `空判窗口 ${win[1]} 过短 —— 轮界空拍会闪报`)
+  // 复位纪律：任一缺席条件被推翻（有钟行/有行情行/有可见行/Loading/未绑定）必须清零。
+  assert.match(body[0], /venueDiscoveryEmptySince\.value = 0/, '空判窗口没有复位路径 —— 恢复后旧窗口残留会立即误报')
+})
+
+check('空判信号接入轮次告警判定（venueRoundUnsupported 的或支）—— 快照信号与探针判据并存', () => {
+  const body = page.match(/const venueRoundUnsupported = computed\([\s\S]*?\n\}\)/)
+  assert.ok(body, '缺 venueRoundUnsupported 判定')
+  assert.match(body[0], /venueDiscoveryEmpty\.value/, '空判信号没接进轮次告警 —— discovery 空集时用户仍看网络文案')
+  assert.match(body[0], /rep\.ok === true/, '探针判据（netCheck report）丢失 —— 降级面只剩信号一条腿')
+})
+
 process.exit(failures ? 1 : 0)
