@@ -511,6 +511,16 @@ impl PairBook {
     pub fn all(&self) -> Vec<&PairState> {
         self.pairs.values().collect()
     }
+
+    /// 只读计数：`owner_strategy` 名下未进 `Closed` 终态的配对数（统计面
+    /// 的 `arbActivePairs` 用 —— 套利策略行上「在册配对数」的簿记读数，
+    /// 与视图过滤无关，不携带任何腿细节）。
+    pub fn active_pairs_count(&self, owner_strategy: &str) -> usize {
+        self.pairs
+            .values()
+            .filter(|p| p.owner_strategy == owner_strategy && p.status != PairStatus::Closed)
+            .count()
+    }
 }
 
 #[cfg(test)]

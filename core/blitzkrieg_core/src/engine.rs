@@ -179,6 +179,10 @@ pub struct BlockedCandidate {
     /// The strategy whose candidate was blocked — so `blocked.timing` /
     /// `blocked.momentum` are attributable per strategy (E2-b / #27).
     pub strategy: String,
+    /// The account scope the candidate came from (the signal's own stamp),
+    /// so the gate counts can be sliced per account like every other
+    /// strategy counter (PR H / 账户跟随).
+    pub account_id: String,
     pub token_id: String,
     pub asset: String,
     pub direction: SignalDirection,
@@ -195,6 +199,9 @@ pub struct BlockedCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateExemptionRecord {
     pub strategy: String,
+    /// The account scope the exempted candidate came from (the signal's own
+    /// stamp) — the audit trail's account dimension, same as the block trail.
+    pub account_id: String,
     /// "timing" | "momentum".
     pub gate: &'static str,
     pub token_id: String,
@@ -419,6 +426,13 @@ pub struct Engine {
     blocked_momentum_total: u64,
     /// Session per-strategy gate counts (blocked vs exempted), E2-b / #27.
     gate_tally: HashMap<String, StrategyGateTally>,
+    /// Session per-(strategy, account) gate counts — the ACCOUNT slice of
+    /// [`Engine::gate_tally`], folded alongside it in `tally_blocked` /
+    /// `take_exemptions`. The key is `format!("{strategy}\u{1}{account}")`,
+    /// the same shape service.rs's `strategy_acc_key` builds (the engine does
+    /// not depend on the service; the separator cannot appear in a strategy
+    /// name, so the pair is unambiguous).
+    gate_tally_acc: HashMap<String, StrategyGateTally>,
     /// Optional per-strategy hot-parameter registry for Shadow Evolution
     /// (E2-c / #28). When present, each strategy resolves its OWN cell through it
     /// and reads that cell lock-free on the hot path, so an evolution takes effect
@@ -555,6 +569,7 @@ impl Engine {
             blocked_timing_total: 0,
             blocked_momentum_total: 0,
             gate_tally: HashMap::new(),
+            gate_tally_acc: HashMap::new(),
             hot_params: None,
             strategies,
             package_sources: std::collections::BTreeMap::new(),
@@ -1687,6 +1702,7 @@ impl Engine {
                     );
                     self.last_blocked.push(BlockedCandidate {
                         strategy: sig.strategy,
+                        account_id: sig.account_id,
                         token_id: sig.token_id,
                         asset: sig.asset,
                         direction: sig.direction,
@@ -1698,6 +1714,7 @@ impl Engine {
                 }
                 self.last_exemptions.push(GateExemptionRecord {
                     strategy: sig.strategy.clone(),
+                    account_id: sig.account_id.clone(),
                     gate: "timing",
                     token_id: sig.token_id.clone(),
                     asset: sig.asset.clone(),
@@ -1727,6 +1744,7 @@ impl Engine {
                     );
                     self.last_blocked.push(BlockedCandidate {
                         strategy: sig.strategy,
+                        account_id: sig.account_id,
                         token_id: sig.token_id,
                         asset: sig.asset,
                         direction: sig.direction,
@@ -1738,6 +1756,7 @@ impl Engine {
                 }
                 self.last_exemptions.push(GateExemptionRecord {
                     strategy: sig.strategy.clone(),
+                    account_id: sig.account_id.clone(),
                     gate: "momentum",
                     token_id: sig.token_id.clone(),
                     asset: sig.asset.clone(),
@@ -2076,11 +2095,17 @@ impl Engine {
     }
 
     /// Drain the honoured-exemption records (called by the host after evaluate)
-    /// and fold them into the per-strategy tallies.
+    /// and fold them into the per-strategy tallies (per-name AND per-account).
     pub fn take_exemptions(&mut self) -> Vec<GateExemptionRecord> {
         let out = std::mem::take(&mut self.last_exemptions);
         for r in &out {
             let t = self.gate_tally.entry(r.strategy.clone()).or_default();
+            match r.gate {
+                "timing" => t.exempted_timing += 1,
+                _ => t.exempted_momentum += 1,
+            }
+            let key = format!("{}\u{1}{}", r.strategy, r.account_id);
+            let t = self.gate_tally_acc.entry(key).or_default();
             match r.gate {
                 "timing" => t.exempted_timing += 1,
                 _ => t.exempted_momentum += 1,
@@ -2094,6 +2119,14 @@ impl Engine {
         self.gate_tally.get(name).copied().unwrap_or_default()
     }
 
+    /// Blocked / exempted counts for one (strategy, account) scope — the
+    /// account slice the per-account strategy page reads. Zeros when the
+    /// scope never saw a gate verdict.
+    pub fn gate_tally_for_account(&self, name: &str, account: &str) -> StrategyGateTally {
+        let key = format!("{}\u{1}{}", name, account);
+        self.gate_tally_acc.get(&key).copied().unwrap_or_default()
+    }
+
     /// Accumulate blocked counters (called by the caller after evaluate).
     pub fn tally_blocked(&mut self) {
         for b in &self.last_blocked {
@@ -2102,6 +2135,12 @@ impl Engine {
                 BlockReason::Momentum => self.blocked_momentum_total += 1,
             }
             let t = self.gate_tally.entry(b.strategy.clone()).or_default();
+            match b.reason {
+                BlockReason::Timing => t.blocked_timing += 1,
+                BlockReason::Momentum => t.blocked_momentum += 1,
+            }
+            let key = format!("{}\u{1}{}", b.strategy, b.account_id);
+            let t = self.gate_tally_acc.entry(key).or_default();
             match b.reason {
                 BlockReason::Timing => t.blocked_timing += 1,
                 BlockReason::Momentum => t.blocked_momentum += 1,
@@ -5750,6 +5789,115 @@ mod tests {
         assert_eq!(e.gate_tally("spread_arb").blocked_timing, 1);
         assert_eq!(e.gate_tally("spread_arb").exempted_timing, 0);
         assert_eq!(e.gate_tally("nobody"), StrategyGateTally::default());
+    }
+
+    /// 账户跟随（策略计数的账户切片）：same strategy on two accounts, each
+    /// scope's gate verdicts land under ITS OWN (strategy, account) key —
+    /// account A's page must never print account B's blocked counts, and the
+    /// global per-name tally stays the exact sum (the replay baseline reads
+    /// it byte-for-byte unchanged).
+    #[test]
+    fn blocked_gate_counts_are_attributable_per_account() {
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = engine_from(cfg);
+        let now = 1_000_000i64;
+        // The paper scope is trading-OFF until the host mirrors the account
+        // book (the engine fixture never does).
+        e.set_account_trading("paper", true);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        // Two candidates for the SAME token, DIFFERENT accounts: the timing
+        // gate blocks both (one entry per (account, token), so both ride the
+        // batch), each stamped with its own scope.
+        let orders = e.submit_candidate_orders_for_test(
+            vec![
+                scoped_signal(DEFAULT_ACCT, "up"),
+                scoped_signal("paper", "up"),
+            ],
+            now + 12_000,
+        );
+        assert!(orders.is_empty(), "both scopes are gated: {orders:?}");
+        assert_eq!(e.last_blocked().len(), 2);
+
+        e.tally_blocked();
+        let d = e.gate_tally_for_account("probe", DEFAULT_ACCT);
+        let p = e.gate_tally_for_account("probe", "paper");
+        assert_eq!(d.blocked_timing, 1, "{d:?}");
+        assert_eq!(p.blocked_timing, 1, "{p:?}");
+        assert_eq!(d.blocked_momentum, 0);
+        assert_eq!(p.exempted_timing, 0);
+        // A scope that never saw a gate verdict reads zeros.
+        assert_eq!(
+            e.gate_tally_for_account("probe", "nobody"),
+            StrategyGateTally::default()
+        );
+        // The per-name fold is unchanged: the sum of the slices.
+        assert_eq!(e.gate_tally("probe").blocked_timing, 2);
+    }
+
+    /// Same slicing for the honoured-exemption trail: each scope's exemption
+    /// counts under its own (strategy, account) key, global unchanged.
+    #[test]
+    fn honoured_exemptions_are_counted_per_account() {
+        let mut cfg = cfg();
+        cfg.scanner.min_round_age_sec = 10_000;
+        let mut e = engine_from(cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "window_fade",
+                dec!(0.45),
+                &["BTC"],
+                GateExemptions {
+                    timing: true,
+                    momentum: true,
+                    timing_min_time_left_sec: None,
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("window_fade", true));
+        let now = 1_000_000i64;
+        e.set_account_trading("paper", true);
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![market(1_800_000)],
+            now_ms: now,
+        });
+        trend_then_dip(&mut e, "up", now);
+        // Both scopes' candidates go through; both are EXEMPTED (the declared
+        // opt-out), each stamped with its own account. The candidates carry
+        // the strategy's own name — the exemption lookup reads the declared
+        // opt-out per strategy.
+        let mut a = scoped_signal(DEFAULT_ACCT, "up");
+        let mut p = scoped_signal("paper", "up");
+        a.strategy = "window_fade".into();
+        p.strategy = "window_fade".into();
+        let orders = e.submit_candidate_orders_for_test(vec![a, p], now + 12_000);
+        assert_eq!(
+            orders.len(),
+            2,
+            "both scopes ride the exemption: {orders:?}"
+        );
+        assert_eq!(e.last_exemptions().len(), 2);
+
+        let drained = e.take_exemptions();
+        assert_eq!(drained.len(), 2);
+        assert!(
+            drained
+                .iter()
+                .all(|r| r.strategy == "window_fade" && r.gate == "timing")
+        );
+        let d = e.gate_tally_for_account("window_fade", DEFAULT_ACCT);
+        let p = e.gate_tally_for_account("window_fade", "paper");
+        assert_eq!(d.exempted_timing, 1, "{d:?}");
+        assert_eq!(p.exempted_timing, 1, "{p:?}");
+        assert_eq!(d.blocked_timing, 0);
+        assert_eq!(p.blocked_momentum, 0);
+        // The per-name fold keeps its pre-fanout value semantics: the sum.
+        assert_eq!(e.gate_tally("window_fade").exempted_timing, 2);
     }
 
     #[test]

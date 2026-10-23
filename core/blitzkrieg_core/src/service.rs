@@ -7743,7 +7743,7 @@ impl Core {
                     .as_ref()
                     .map(|e| e.gate_tally(&name))
                     .unwrap_or_default();
-                serde_json::json!({
+                let mut row = serde_json::json!({
                     "name": name,
                     "enabled": enabled.contains(&name),
                     "source": source,
@@ -7797,7 +7797,21 @@ impl Core {
                     "losses": acc.losses,
                     "feesUsd": dec_json(acc.fees_usd),
                     "netPnlUsd": dec_json(acc.net_pnl_usd),
-                })
+                });
+                // 套利合计字段（契约）：仅套利行携带 —— 双腿平仓各记在
+                // (cross_venue_arb, 各腿账户) 键下（`on_position_closed`），
+                // 上面的 fold 已经是套利单元的全口径合计，原样再报一遍专名
+                // 字段，前端不必知道键形状；`arbActivePairs` 读配对簿的在册
+                // （非 Closed）配对数。非套利行不带这些键。
+                if name == ARB_STRATEGY {
+                    row["arbNetPnlUsd"] = dec_json(acc.net_pnl_usd);
+                    row["arbWins"] = serde_json::json!(acc.wins);
+                    row["arbLosses"] = serde_json::json!(acc.losses);
+                    row["arbClosedTrades"] = serde_json::json!(acc.closed_trades);
+                    row["arbActivePairs"] =
+                        serde_json::json!(self.pair_book.active_pairs_count(ARB_STRATEGY));
+                }
+                row
             })
             .collect()
     }
@@ -7814,6 +7828,22 @@ impl Core {
         for row in &mut rows {
             let Some(name) = row.get("name").and_then(|v| v.as_str()).map(String::from) else {
                 continue;
+            };
+            // The arb totals the GLOBAL row just carried (the arb unit's whole
+            // fold across its leg accounts); read before any slice overwrites
+            // the row, and re-attached below so every account's page shows the
+            // arb unit's combined take — the legs' own slices stay per-account
+            // in the plain counters.
+            let arb_totals = if name == ARB_STRATEGY {
+                Some((
+                    row.get("arbNetPnlUsd").cloned().unwrap_or_default(),
+                    row.get("arbWins").cloned().unwrap_or_default(),
+                    row.get("arbLosses").cloned().unwrap_or_default(),
+                    row.get("arbClosedTrades").cloned().unwrap_or_default(),
+                    row.get("arbActivePairs").cloned().unwrap_or_default(),
+                ))
+            } else {
+                None
             };
             let one = self
                 .strategy_accounting
@@ -7833,6 +7863,18 @@ impl Core {
             row["losses"] = serde_json::json!(one.losses);
             row["feesUsd"] = dec_json(one.fees_usd);
             row["netPnlUsd"] = dec_json(one.net_pnl_usd);
+            // Gate counts follow the account too: the engine folds them per
+            // (strategy, account), so this account's page never prints a
+            // sibling account's blocked/exempted numbers.
+            let tally = self
+                .engine
+                .as_ref()
+                .map(|e| e.gate_tally_for_account(&name, account))
+                .unwrap_or_default();
+            row["blockedTiming"] = serde_json::json!(tally.blocked_timing);
+            row["blockedMomentum"] = serde_json::json!(tally.blocked_momentum);
+            row["gateExemptedTiming"] = serde_json::json!(tally.exempted_timing);
+            row["gateExemptedMomentum"] = serde_json::json!(tally.exempted_momentum);
             // Open exposure: THIS account's slice of the strategy.
             let opens: Vec<&crate::position::OpenPosition> = self
                 .positions
@@ -7842,6 +7884,15 @@ impl Core {
                 .collect();
             row["openPositions"] = serde_json::json!(opens.len());
             row["openNotionalUsd"] = dec_json(opens.iter().map(|p| p.cost_usd).sum());
+            // The arb unit's combined take rides EVERY account's page
+            // (契约：无论面板选哪个账户，套利行显示套利单元合计收益).
+            if let Some((net, wins, losses, closed, pairs)) = arb_totals {
+                row["arbNetPnlUsd"] = net;
+                row["arbWins"] = wins;
+                row["arbLosses"] = losses;
+                row["arbClosedTrades"] = closed;
+                row["arbActivePairs"] = pairs;
+            }
         }
         rows
     }
@@ -15606,6 +15657,12 @@ fn strategy_acc_key(strategy: &str, account: &str) -> String {
     format!("{strategy}\u{1}{account}")
 }
 
+/// The ONE cross-venue arbitrage strategy's package name. Single-instance by
+/// contract: accounts.toml carries exactly one `[cross_venue_arb]` section,
+/// so the arb totals on the stats rows ARE the arb unit's totals.
+/// ponytail: 平台化多套利实例留待真有第二个实例再谈。
+pub(crate) const ARB_STRATEGY: &str = "cross_venue_arb";
+
 /// RFC #541 挂钩 B (c)：one declared-atomic strategy's cycle leg, captured by
 /// value so the judges can read `&self` while the wholesale rejection mutates
 /// the token list (the borrow split `arb_precheck_filter` lives inside).
@@ -20317,6 +20374,11 @@ mod strategy_dispatch_tests {
         assets: Vec<String>,
         /// Shared entry gates this strategy declares unnecessary (E2-b / #27).
         gates: crate::strategies::GateExemptions,
+        /// THIS instance's registration account — the stamp the signal
+        /// carries (packages are account-blind by declaration; the host
+        /// builder passes the scope account the same way `build_lua_scope`
+        /// does). Default scope keeps the process default.
+        scope: String,
     }
     impl crate::strategies::EngineStrategy for TargetDip {
         fn name(&self) -> &str {
@@ -20326,6 +20388,9 @@ mod strategy_dispatch_tests {
         fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
         fn gate_exemptions(&self) -> crate::strategies::GateExemptions {
             self.gates
+        }
+        fn instance_account(&self) -> String {
+            self.scope.clone()
         }
         fn find_candidates(
             &mut self,
@@ -20346,7 +20411,7 @@ mod strategy_dispatch_tests {
                     if book.mid_price <= self.buy_below {
                         out.push(crate::signal::TradeSignal {
                             strategy: self.name.clone(),
-                            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                            account_id: self.scope.clone(),
                             asset: market.asset.clone(),
                             direction,
                             token_id: token_id.clone(),
@@ -20449,6 +20514,7 @@ mod strategy_dispatch_tests {
                     buy_below: dec!(0.45),
                     assets: assets.iter().map(|a| (*a).to_string()).collect(),
                     gates: gates(name),
+                    scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                 }),
                 "test".into(),
             )
@@ -20577,6 +20643,7 @@ mod strategy_dispatch_tests {
                 buy_below: Decimal::ZERO,
                 assets: vec!["BTC".to_string()],
                 gates: crate::strategies::GateExemptions::none(),
+                scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             }),
             "test".into(),
         )
@@ -21283,6 +21350,7 @@ mod strategy_dispatch_tests {
                 buy_below: dec!(0.45),
                 assets: vec!["BTC".into()],
                 gates: crate::strategies::GateExemptions::none(),
+                scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             }),
             "test".into(),
         )
@@ -21650,6 +21718,122 @@ mod strategy_dispatch_tests {
             blocked["declaredExemptions"],
             serde_json::json!([{ "strategy": "mean_reversion", "gates": ["momentum"] }])
         );
+    }
+
+    /// 账户跟随（策略计数的账户切片）：同一策略名在两个账户各跑一个 scope，
+    /// 各自的 gate 判定只落在自己的 (strategy, account) 键下 —— 账户 A 的
+    /// 策略页绝不能看见账户 B 被挡了几次，而全局 fold（回放基线）不动。
+    #[test]
+    fn gate_counts_follow_the_account_in_the_strategy_page() {
+        // One strategy NAME, two scopes: default dips BTC, paper dips ETH.
+        // WINDOW_SHUT shuts the timing gate for every scope.
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                risk: RiskConfig {
+                    max_order_notional: dec!(100),
+                    ..Default::default()
+                },
+                dry_seed_balance: dec!(1000),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                min_round_age_sec: WINDOW_SHUT,
+                auto_exits_enabled: false,
+                assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+                positions: crate::position::PositionConfig {
+                    max_positions: 5,
+                    exit: crate::exit_policy::ExitConfig {
+                        min_time_left_sec: 0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            book,
+        );
+        let cfg = c.config().engine_config();
+        let mut eng = Engine::new(cfg.clone());
+        crate::strategies::test_support::host(&mut eng, cfg.trend, cfg.spread_arb);
+        eng.register_user_strategy(
+            Box::new(TargetDip {
+                name: "acc".into(),
+                buy_below: dec!(0.45),
+                assets: vec!["BTC".into()],
+                gates: crate::strategies::GateExemptions::none(),
+                scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        eng.register_scoped_strategy(
+            Box::new(TargetDip {
+                name: "acc".into(),
+                buy_below: dec!(0.45),
+                assets: vec!["ETH".into()],
+                gates: crate::strategies::GateExemptions::none(),
+                scope: "paper".into(),
+            }),
+            "test".into(),
+            "paper",
+        )
+        .expect("paper scope registers");
+        assert!(eng.set_strategy_enabled("acc", true));
+        c.enable_engine(eng);
+
+        let now = 1_000_000i64;
+        feed_three_asset_dip(&mut c, now);
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            0,
+            "both scopes are timing-gated"
+        );
+
+        let global_row = strategy_entry(&c.strategy_stats(), "acc").clone();
+        assert_eq!(
+            global_row["blockedTiming"], 2,
+            "the per-name fold is the sum of both slices: {global_row}"
+        );
+
+        let for_default = c.strategy_stats_for_account("default");
+        let d = strategy_entry(&for_default, "acc");
+        assert_eq!(
+            d["blockedTiming"], 1,
+            "default sees only its own block: {d}"
+        );
+        assert_eq!(d["blockedMomentum"], 0);
+        assert_eq!(d["gateExemptedTiming"], 0);
+        let for_paper = c.strategy_stats_for_account("paper");
+        let p = strategy_entry(&for_paper, "acc");
+        assert_eq!(p["blockedTiming"], 1, "paper sees only its own block: {p}");
+        assert_eq!(p["blockedMomentum"], 0);
+        assert_eq!(p["gateExemptedTiming"], 0);
     }
 
     #[test]
@@ -22246,6 +22430,7 @@ mod strategy_dispatch_tests {
                 buy_below: dec!(0.45),
                 assets: vec!["ETH".into()],
                 gates: crate::strategies::GateExemptions::none(),
+                scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
             }),
             "test".into(),
         )
@@ -22728,6 +22913,146 @@ mod strategy_dispatch_tests {
             c2.positions().open_positions().len(),
             2,
             "the pair is whole: one position per venue leg"
+        );
+    }
+
+    /// 套利合计字段（前端消费契约，PR #577）：arbNetPnlUsd / arbWins /
+    /// arbLosses / arbClosedTrades / arbActivePairs —— 只有 cross_venue_arb
+    /// 的行携带；无论账户切片选哪个账户，五个字段都读套利单元的全局合计
+    /// （双腿平仓各记在 (cross_venue_arb, 各腿账户) 键下，全局 fold 是和）。
+    /// 非套利行不带 arb* 键 —— 前端按行内有无字段 feature-detect。
+    #[test]
+    fn arb_totals_ride_every_account_slice_of_the_arb_row_only() {
+        let mut c = core_with_cross_venue_arb(Some(dec!(1000)));
+        // A≠B 的腿配置（跨所配对的声明闸要求两腿盖章到不同账户）：套利
+        // 单元 = 实例主账户 default + 腿账户 arb-b。arb-b 是内存账簿的新
+        // 账户（set 校验要求账户已配置）。
+        c.accounts_mut()
+            .insert(crate::account::Account {
+                id: crate::account::AccountId::from("arb-b"),
+                name: "arb-b".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                updated_at_ms: 0,
+            })
+            .expect("arb-b does not exist yet");
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("arb-b"))
+            .expect("arb-b just inserted")
+            .set_balance(dec!(1000));
+        c.arb_config_set(&crate::account::CrossVenueArbConfig {
+            leg_a_venue: "polymarket".into(),
+            leg_a_account: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            leg_b_venue: "kalshi".into(),
+            leg_b_account: "arb-b".into(),
+            pairs: vec!["BTC".into()],
+        })
+        .expect("the A≠B leg configuration lands");
+        let now = 1_700_000_000_000i64;
+        c.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: cross_venue_markets(now),
+                now_ms: now,
+            },
+            now,
+        );
+        confirm_cross_venue_mapping(&mut c, now);
+        feed_cross_venue_books(&mut c, now + 1_000);
+        assert_eq!(c.engine_evaluate(now + 2_000), 2, "both legs place");
+        // 声明受理：跨所配对真的进了配对簿（在册读数的前提）。
+        assert_eq!(
+            c.pair_book_all().len(),
+            1,
+            "the A≠B pair declaration lands in the book"
+        );
+
+        // 两腿平仓：生产 close 路径（close → on_position_closed），净额一
+        // 正一负，wins/losses 各记一笔；合计字段读全局 fold = 两腿之和
+        // （含各腿真实手续费 —— 合计字段是 fold 的别名，不是手抄数）。
+        let legs: Vec<crate::position::OpenPosition> = c.positions().open_positions().to_vec();
+        assert_eq!(legs.len(), 2, "fixture premise: the pair is open");
+        let mut net_sum = Decimal::ZERO;
+        for held in &legs {
+            // 价差驱动平仓价：正腿 +0.40/股，负腿 −0.30/股。
+            let delta = if held.entry_price < dec!(0.43) {
+                dec!(0.40)
+            } else {
+                dec!(-0.30)
+            };
+            let closed = c
+                .positions
+                .close(
+                    &held.id,
+                    held.entry_price + delta,
+                    crate::model::ExitReason::TakeProfit,
+                    false,
+                    1,
+                )
+                .expect("the leg closes through the production close path");
+            net_sum += closed.net_pnl_usd;
+            c.on_position_closed(&closed, 1);
+        }
+        assert!(net_sum.is_sign_positive(), "the fixture books a net profit");
+
+        // ── 全局行：arb* = 该行 fold 值（双腿各账户键之和）──────────────
+        let global = c.strategy_stats();
+        let g = strategy_entry(&global, "cross_venue_arb");
+        assert_eq!(
+            dec_of(&g["arbNetPnlUsd"]),
+            net_sum,
+            "the arb row's total is both legs' sum: {g}"
+        );
+        assert_eq!(g["arbWins"], serde_json::json!(1));
+        assert_eq!(g["arbLosses"], serde_json::json!(1));
+        assert_eq!(g["arbClosedTrades"], serde_json::json!(2));
+        assert_eq!(
+            g["arbActivePairs"],
+            serde_json::json!(1),
+            "the pair sits in the book until the round rolls: {g}"
+        );
+        assert_eq!(
+            dec_of(&g["netPnlUsd"]),
+            net_sum,
+            "the plain counter and the arb total agree on the global row"
+        );
+
+        // ── 账户切片行：arb* 仍读全局合计；平计数是该账户的腿切片 ──
+        // （一正一负 ⇒ 任一切片都只看得见自己那腿的胜负，但 arb* 都是 1/1。）
+        for account in [blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, "arb-b"] {
+            let sliced = c.strategy_stats_for_account(account);
+            let s = strategy_entry(&sliced, "cross_venue_arb");
+            assert_eq!(
+                dec_of(&s["arbNetPnlUsd"]),
+                net_sum,
+                "every account's page shows the arb unit's combined take ({account}): {s}"
+            );
+            assert_eq!(s["arbWins"], serde_json::json!(1), "{account}");
+            assert_eq!(s["arbLosses"], serde_json::json!(1), "{account}");
+            assert_eq!(s["arbClosedTrades"], serde_json::json!(2), "{account}");
+            assert_eq!(s["arbActivePairs"], serde_json::json!(1), "{account}");
+            // 切片的平计数是本账户腿的（两腿账户不同 ⇒ 各自 1 笔）。
+            assert_eq!(
+                s["closedTrades"],
+                serde_json::json!(1),
+                "the slice's plain counters stay per-account ({account}): {s}"
+            );
+        }
+
+        // ── 非套利行不带 arb* 键 ──
+        let g_plain = strategy_entry(&global, "spread_arb");
+        assert!(
+            g_plain.get("arbNetPnlUsd").is_none(),
+            "a non-arb row carries no arb totals: {g_plain}"
+        );
+        let s_plain_slice = c.strategy_stats_for_account("arb-b");
+        let s_plain = strategy_entry(&s_plain_slice, "spread_arb");
+        assert!(
+            s_plain.get("arbNetPnlUsd").is_none(),
+            "a non-arb row carries no arb totals on a slice either: {s_plain}"
         );
     }
 
