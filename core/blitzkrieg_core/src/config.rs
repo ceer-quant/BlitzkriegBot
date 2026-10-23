@@ -918,28 +918,38 @@ mod tests {
     fn the_shipped_default_file_is_fully_understood() {
         // The repo's own config must not contain a single unknown key: this test
         // is what keeps the file and the parser from drifting apart.
+        //
+        // env single-source (2026-10-23 ruling): the factory [engine] keys moved
+        // to the compiled defaults + .env (BK_*). The shipped file now pins ZERO
+        // explicit values — which is load-bearing, not cosmetic: an explicit
+        // round_sec here would suppress the round-duration UI card's persisted
+        // cell (issue 499). The compiled defaults these keys fall through to are
+        // asserted below at EXACTLY the values the file used to carry, so the
+        // migration is a no-op for every operator.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
         let cfg = FileConfig::load(Some(&root.join("default.toml")));
         assert!(cfg.path.is_some(), "default.toml must exist");
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
         assert!(cfg.unknown_keys.is_empty(), "{:?}", cfg.unknown_keys);
+        // The factory keys are GONE: nothing here may shadow the .env surface
+        // or the round-duration card. If one comes back, the card goes dead
+        // again (issue 499) and .env stops being the single source.
         assert_eq!(
-            cfg.assets.as_deref(),
-            Some(
-                &[
-                    "BTC".to_string(),
-                    "ETH".to_string(),
-                    "SOL".to_string(),
-                    "XRP".to_string()
-                ][..]
-            )
+            cfg.assets, None,
+            "assets must come from the compiled default / BK_ASSETS"
         );
-        // 900 (15m), not 300 (5m): the file only became live with KI-11, and a
-        // file-driven 5m is a measured regression (MIGRATION_LOG §12) that
-        // `scripts/soak-health.sh` alarms on. See DECISIONS_PENDING D-26.
-        assert_eq!(cfg.round_sec, Some(900));
-        assert_eq!(cfg.min_round_age_sec, Some(30));
-        assert_eq!(cfg.min_time_left_sec, Some(180));
+        assert_eq!(
+            cfg.round_sec, None,
+            "round_sec must come from the compiled default / BK_ROUND_SEC"
+        );
+        assert_eq!(
+            cfg.min_round_age_sec, None,
+            "min_round_age_sec must come from the compiled default / BK_MIN_ROUND_AGE_SEC"
+        );
+        assert_eq!(
+            cfg.min_time_left_sec, None,
+            "min_time_left_sec must come from the compiled default / BK_MIN_TIME_LEFT_SEC"
+        );
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
         // #269 reverses #249's choice: the shipped file leaves the evaluator OFF.
