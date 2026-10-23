@@ -1668,6 +1668,20 @@ export interface StrategyStatsRow {
    * 按「缺省降级」走全局开关语义，列表不再按账户过滤（列表恒等全部已安装）。
    */
   accounts?: string[]
+  /**
+   * 套利收益读数（与内核 fix/gate-account-slice 分支并行交付，纯
+   * feature-detect）：cross_venue_arb 行（及未来其它套利策略）由内核带出
+   * 的**两腿合计**口径 —— 净 PnL / 胜 / 负 / 平仓数两腿各计一次，与行自身
+   * 的单侧计数（netPnlUsd/wins/losses/closedTrades）不同源。字段缺失
+   * （老内核）= undefined —— 消费方必须回落行自身值，不得假设在场。
+   */
+  arbNetPnlUsd?: string | number
+  /** 两腿合计的胜 / 负 / 平仓计数（arbNetPnlUsd 同批；缺失回落行自身值）。 */
+  arbWins?: number
+  arbLosses?: number
+  arbClosedTrades?: number
+  /** 当前配置里激活的套利币对数（两腿合计视角；缺失 = 不渲染徽标）。 */
+  arbActivePairs?: number
 }
 
 export interface EngineStats {

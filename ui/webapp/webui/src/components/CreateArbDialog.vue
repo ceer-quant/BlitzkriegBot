@@ -26,8 +26,19 @@
  *        全局环境变量」+ 缺失变量名（若有）。
  *   参数预设 —— 保留四个 tunables 的编辑，只提交与默认不同的项。
  *
- * 提交序（合同）：arb.config.set 成功 → setStrategy('cross_venue_arb',
+ * 提交序（合同）：arb.config.set 成功 → setStrategy(selectedArbStrategy,
  * true, legAAccount) 启用；任一步失败停在弹窗内转述错误原文。
+ *
+ * 去标题化 + 策略选择段（2026-10）：cross_venue_arb 只是套利策略，不是套利
+ * 本身 —— 标题回归中性词「创建套利」，弹窗首段是「策略」选择。候选面探测
+ * 结论：strategy.list 行 wire 上只有 name/enabled/modes/compatible/
+ * incompatibleReason/accounts，modes wire 对象只带 market_type/structure
+ * —— 没有任何运行时字段能判定「谁是套利策略」（atomic_batch 只活在
+ * manifest 里，不上 wire），所以候选集是静态单选项，平台化时换成能力
+ * 声明驱动（内核 strategy.list 行带出套利能力后，候选集从该读数派生）。
+ * 内核 arb.config.set 的 IPC 动词只认 accounts.toml 的 [cross_venue_arb]
+ * 节 —— 选其它名字 = 该策略暂未支持，置灰不假提交（不提交一个内核必拒
+ * 的配置）。
  *
  * 老内核降级：arb.config.get feature-detect 失败（error 带 rpc -32601
  * 字样 = 动词不存在）→ 弹窗降级为只读提示「当前内核版本为单账户模型，
@@ -70,6 +81,23 @@ const emit = defineEmits<{
   /** 提交完成（无论成败）—— 父页面据此刷新 store 读数。 */
   committed: []
 }>()
+
+/**
+ * 套利策略候选集（静态单选项）。平台化时换成能力声明驱动 —— 内核
+ * strategy.list 行带出套利/双腿能力声明后，候选集从该读数派生（wire 现状
+ * 无可判定字段，见文件头探测结论）。单实例合同：候选集里的名字必须 =
+ * ARB_STRATEGY（内核 arb.config.set 只认 [cross_venue_arb] 节），新增名字
+ * 时内核未接即「暂未支持」，置灰不假提交。
+ */
+const ARB_STRATEGY = 'cross_venue_arb' // 平台化时换成配置驱动
+// 候选数据源：静态清单（wire 无套利能力声明字段）；平台化时换成能力声明驱动。
+const ARB_STRATEGY_OPTIONS: string[] = [ARB_STRATEGY]
+
+/** 选中策略是否已支持：唯一裁决 = ARB_STRATEGY 合同（内核只接这个名字）。
+ *  未来加策略时把支持集从合同里拆出（内核动词认几个就放几个）。 */
+function strategySupported(name: string): boolean {
+  return name === ARB_STRATEGY
+}
 
 /** cross_venue_arb 的预设旋钮：键 = 声明的 tunable 名，value = 默认草稿。 */
 const PARAM_DEFAULTS: Record<string, string> = {
@@ -135,7 +163,14 @@ function legAccountOptions(venue: string): LegAccountOption[] {
     .map((a) => ({ id: a.id, name: a.name, venue: a.venue ?? '' }))
 }
 
-// ── 段0 A 腿 / 段1 B 腿 的选择状态 ──────────────────────────────────────────
+// ── 段0 策略选择（首段）：现阶段唯一 cross_venue_arb ────────────────────────
+const selectedArbStrategy = ref(ARB_STRATEGY)
+
+/** 未支持的策略名不假提交：禁用下一步并在段内如实提示（内核 arb.config.set
+ *  只认 [cross_venue_arb] 节，提交一个必拒的配置是撒谎）。 */
+const strategyUnsupported = computed(() => !strategySupported(selectedArbStrategy.value))
+
+// ── 段1 A 腿 / 段2 B 腿 的选择状态 ──────────────────────────────────────────
 const legAVenue = ref('')
 const legAAccount = ref('')
 const legBVenue = ref('')
@@ -209,7 +244,7 @@ async function loadCurrentParams(): Promise<void> {
   paramsReadFailed.value = false
   const draft: Record<string, string> = { ...PARAM_DEFAULTS }
   try {
-    const doc = await api.strategyParams('cross_venue_arb')
+    const doc = await api.strategyParams(selectedArbStrategy.value)
     if (!doc.found) {
       paramsReadFailed.value = true
       return
@@ -385,12 +420,13 @@ const legsComplete = computed(
 )
 const pairsComplete = computed(() => selectedPairs.value.length >= 1)
 
-/** 可以进确认页 = 两腿齐 + 币对齐 + 凭证校验未明确失败。 */
-const canReview = computed(() => legsComplete.value && pairsComplete.value && !credBlocked.value)
+/** 可以进确认页 = 两腿齐 + 币对齐 + 凭证校验未明确失败 + 策略已支持。 */
+const canReview = computed(() => legsComplete.value && pairsComplete.value && !credBlocked.value && !strategyUnsupported.value)
 
 /** 下一步按钮的禁用原因（编辑页底部实时文案 —— 门在前端先拦）。 */
 const reviewBlockReason = computed<string | null>(() => {
   if (legacyCore.value) return '老内核不支持双腿配置'
+  if (strategyUnsupported.value) return '所选策略暂未支持 —— 当前内核只接受 cross_venue_arb'
   if (credBlocked.value) return '腿凭证未就绪 —— 提交前需补齐'
   if (sameAccountClash.value) return 'B 腿账户不能与 A 腿相同 —— 双腿双账户是配置意图模型的硬约束'
   if (!legAVenue.value || !legAAccount.value) return '先完成 A 腿（交易所 + 账户）'
@@ -406,6 +442,7 @@ watch(
     step.value = 'edit'
     error.value = null
     paramsError.value = null
+    selectedArbStrategy.value = ARB_STRATEGY
     selectedPairs.value = []
     legAVenue.value = ''
     legAAccount.value = ''
@@ -445,7 +482,7 @@ async function commit(): Promise<void> {
       pairs: [...selectedPairs.value],
     })
     if (cfg.error) throw new Error(cfg.error)
-    const res = await api.setStrategy('cross_venue_arb', true, legAAccount.value)
+    const res = await api.setStrategy(selectedArbStrategy.value, true, legAAccount.value)
     if (res.ok === false || res.reason) {
       // 内核拒绝（模式握手/已启用等）：如实转述 reason，配置已落盘 —— 文案
       // 说清哪一步失败，让操作员知道配置不再需要重写。
@@ -488,7 +525,7 @@ function credLabel(leg: LegCredStatus | null): string {
       <div class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-lg border border-line bg-panel-solid shadow-lg">
         <div class="flex items-center gap-2 border-b border-line px-4 py-3">
           <Link2 class="size-4 text-primary" />
-          <h3 class="text-[13.5px] font-semibold">创建套利（cross_venue_arb）</h3>
+          <h3 class="text-[13.5px] font-semibold">创建套利</h3>
           <Badge variant="outline" class="ml-auto">{{ step === 'edit' ? '配置双腿意图' : '提交前确认' }}</Badge>
         </div>
 
@@ -511,7 +548,41 @@ function credLabel(leg: LegCredStatus | null): string {
               :hint="configReadError"
             />
 
-            <!-- 段0 A 腿：交易所 + 账户。账户过滤在源头（venue 匹配 + 可交易
+            <!-- 段0 策略选择：候选面静态（wire 无套利能力字段，见文件头探测
+                 结论）；现阶段唯一 cross_venue_arb。选其它名字 = 暂未支持，
+                 置灰不假提交。 -->
+            <div>
+              <div class="flex items-center gap-1.5">
+                <Zap class="size-3 text-faint-fg" />
+                <span class="label-micro">策略</span>
+                <span class="text-[11px] text-faint-fg">—— 要启用的套利策略；当前可用清单如下。</span>
+              </div>
+              <div class="mt-1.5 grid gap-2">
+                <label
+                  v-for="s in ARB_STRATEGY_OPTIONS"
+                  :key="s"
+                  class="flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-2 text-[12px]"
+                  :class="selectedArbStrategy === s ? 'border-primary/55 bg-primary/8' : 'border-line bg-panel-2/40'"
+                >
+                  <input
+                    type="radio"
+                    name="arb-strategy"
+                    class="accent-[var(--primary)]"
+                    :checked="selectedArbStrategy === s"
+                    @change="selectedArbStrategy = s"
+                  />
+                  <span class="num font-semibold">{{ s }}</span>
+                </label>
+                <div
+                  v-if="strategyUnsupported"
+                  class="rounded-md border border-down/30 bg-down/10 px-2.5 py-2 text-[11.5px] text-down"
+                >
+                  该策略暂未支持 —— 当前内核的套利配置动词只接受 cross_venue_arb，创建已禁用（不提交必被拒绝的配置）。
+                </div>
+              </div>
+            </div>
+
+            <!-- 段1 A 腿：交易所 + 账户。账户过滤在源头（venue 匹配 + 可交易
                  状态），换交易所清空账户选择重过滤。 -->
             <div>
               <div class="flex items-center gap-1.5">
@@ -657,7 +728,7 @@ function credLabel(leg: LegCredStatus | null): string {
                 <span class="label-micro">创建动作</span>
               </div>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] leading-relaxed text-muted-fg">
-                提交后：先写入双腿配置（内核持久化进 accounts.toml，重启保留），再以 A 腿账户作用域启用 cross_venue_arb。
+                提交后：先写入双腿配置（内核持久化进 accounts.toml，重启保留），再以 A 腿账户作用域启用所选套利策略（{{ selectedArbStrategy }}）。
                 两腿各按其交易所的全局凭证（env）签名；凭证就绪见确认页披露。
               </div>
             </div>
@@ -769,9 +840,19 @@ function credLabel(leg: LegCredStatus | null): string {
             </div>
 
             <div>
+              <span class="label-micro">策略</span>
+              <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
+                <span class="num font-semibold">{{ selectedArbStrategy }}</span>
+                <div v-if="strategyUnsupported" class="mt-1 text-[11px] text-down">
+                  该策略暂未支持 —— 当前内核只接受 cross_venue_arb，返回上一页改选。
+                </div>
+              </div>
+            </div>
+
+            <div>
               <span class="label-micro">启用动作</span>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
-                提交后启用 cross_venue_arb（arb.config.set 成功 → strategy cross_venue_arb on，A 腿账户作用域）。
+                提交后启用 {{ selectedArbStrategy }}（arb.config.set 成功 → strategy {{ selectedArbStrategy }} on，A 腿账户作用域）。
                 <div class="mt-1 text-[11px] text-faint-fg">
                   双腿配置由内核持久化（accounts.toml，重启保留）；启用失败时配置已落盘，修复原因后无需重写配置。
                 </div>
