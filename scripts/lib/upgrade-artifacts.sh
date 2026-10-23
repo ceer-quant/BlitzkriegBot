@@ -39,7 +39,11 @@
 # keys out of accounts.toml this way). A file in this list is installed only
 # when the running checkout has none; an existing copy is left untouched and
 # the shipped one stays in STAGE + ROLLBACK for reference.
-UA_OPERATOR_STATE_CONFIGS="accounts.toml"
+# shadow_evolution.toml joined with #578: the evolution switches now LIVE in
+# the file (a panel flip writes back into it), so an upgrade overwriting it
+# silently reverts the operator's switches to factory OFF — same failure
+# shape as the accounts.toml wipe, caught live 2026-10-23.
+UA_OPERATOR_STATE_CONFIGS="accounts.toml shadow_evolution.toml"
 
 # Is this shipped config operator state? Matched by name, one entry per line.
 ua_config_is_operator_state() {
