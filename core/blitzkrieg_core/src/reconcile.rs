@@ -685,6 +685,7 @@ mod tests {
             execute_at_ms: now,
             report_at_ms: now,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.bind_venue(core_id, venue_id.into(), now).unwrap();
@@ -850,6 +851,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("dry1", 1).unwrap();

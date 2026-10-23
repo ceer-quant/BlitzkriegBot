@@ -733,6 +733,12 @@ pub struct OpenParams {
     /// fee comes from the fill's own role in [`PositionManager::apply_entry_fill`]).
     pub was_maker: bool,
     pub target_exit_price: Option<Decimal>,
+    /// B1b: the round-length family the entry was admitted under, resolved by
+    /// the opening path off the token's market and the global grid. `0` (older
+    /// callers) opens the position unstamped: B1a's lazy backfill at the
+    /// expiry/force-close consumers may still stamp it later, and the B1a
+    /// readers fall back through the market declaration as before.
+    pub round_duration_sec: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -867,6 +873,21 @@ impl PositionManager {
 
     pub fn open_positions(&self) -> &[OpenPosition] {
         &self.open
+    }
+
+    /// B1b: lazy family backfill over the whole open book — every still-legacy
+    /// (`round_duration_sec == 0`) row gets the family its token's market
+    /// resolves to, resolved by the CALLER (the core owns the market lookup;
+    /// the manager only owns rows). Idempotent by construction:
+    /// [`OpenPosition::backfill_round_duration`] never overwrites a non-0
+    /// stamp, so calling this on every sweep pass is free and stable.
+    pub fn backfill_round_families(&mut self, family_of: impl Fn(&str) -> i64) {
+        for p in &mut self.open {
+            let fam = family_of(&p.token_id);
+            if fam > 0 {
+                p.backfill_round_duration(fam);
+            }
+        }
     }
 
     /// Rebuild the open book from durable storage (crash recovery). Replaces any
@@ -1263,9 +1284,9 @@ impl PositionManager {
             venue: p.venue,
             partner_token_id: p.partner_token_id,
             last_book_ts: 0,
-            // B1a: 0 until B1b stamps the family at the open path (write
-            // point deliberately out of this PR's diff).
-            round_duration_sec: 0,
+            // B1b: stamped from the opening path's family resolution — `0`
+            // only when the caller had no family fact (older callers).
+            round_duration_sec: p.round_duration_sec,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
         };
@@ -1312,6 +1333,23 @@ impl PositionManager {
             pos.state = ExitState::new(pos.entry_price, pos.entered_at_ms);
         }
         Some(pos.clone())
+    }
+
+    /// B1b: idempotent lazy backfill of the position's round-length family —
+    /// the manager-flavoured wrapper over
+    /// [`OpenPosition::backfill_round_duration`]. A non-0 stamp is never
+    /// overwritten (the first family a record was admitted under stays
+    /// authoritative), so calling this on every fill / sweep pass is free and
+    /// stable. The whole state lives under the single-threaded Core lock
+    /// (`ipc/server.rs` serializes every verb and sweep), so the write-back
+    /// rides the ordinary field-assignment path — no new lock.
+    pub fn backfill_round_duration(&mut self, position_id: &str, sec: i64) {
+        if sec <= 0 {
+            return;
+        }
+        if let Some(p) = self.open.iter_mut().find(|p| p.id == position_id) {
+            p.backfill_round_duration(sec);
+        }
     }
 
     /// Accrue one EXIT fill (a partial close). Returns the position's new share
@@ -2427,6 +2465,7 @@ mod tests {
             account_id: crate::model::default_account_id(),
             venue: String::new(),
             partner_token_id: String::new(),
+            round_duration_sec: 0,
         }
     }
 
@@ -3456,6 +3495,7 @@ mod tests {
             account_id: crate::model::default_account_id(),
             venue: String::new(),
             partner_token_id: String::new(),
+            round_duration_sec: 0,
         }
     }
 
@@ -3648,6 +3688,7 @@ mod precision_tests {
                 account_id: crate::model::default_account_id(),
                 venue: String::new(),
                 partner_token_id: String::new(),
+                round_duration_sec: 0,
             },
             0,
         )

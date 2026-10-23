@@ -974,6 +974,7 @@ fn account_removal_is_delete_all_but_the_last_account() {
             expires_at_ms: now + 900_000,
             was_maker: true,
             target_exit_price: None,
+            round_duration_sec: 0,
         },
         now,
     );

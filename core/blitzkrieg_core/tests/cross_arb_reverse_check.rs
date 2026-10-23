@@ -581,6 +581,7 @@ fn a_hand_built_naked_leg_carries_the_partner_stamp() {
             expires_at_ms: NOW + 900_000,
             was_maker: false,
             target_exit_price: None,
+            round_duration_sec: 0,
         },
         NOW,
     );
