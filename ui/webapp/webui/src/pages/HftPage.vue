@@ -325,7 +325,14 @@ const venueDataArrived = computed(() => {
 /**
  * Loading 门开着 = venue 已切换、新所数据未到、且行数据带 venue 标签
  * （feature-detect：无标签的降级面没有「等新所数据」可言，门永不开）。
+ *
+ * 轮次告警三修（2026-10-23）：门加 15s 超时释放 —— 数据永远不来（该所在
+ * 当前轮次档位下 discovery 拿到空集）时不能永锁转圈；超时释放门后，
+ * venueDiscoveryEmpty 的空判信号接手显示「可能不支持」提示（而不是永远
+ * Loading）。超时窗口足够长：正常切换一拍（2s 快照）就到数据，15s 都没到
+ * 只有「该所根本没有这种轮次的市场」一种解释。
  */
+const VENUE_LOADING_TIMEOUT_MS = 15_000
 const venueLoading = computed(() => {
   if (!venueSwitchAt.value) return false
   if (!activeVenue.value) return false
@@ -333,7 +340,9 @@ const venueLoading = computed(() => {
     (snap.value?.round?.prices ?? []).some((r) => typeof r.venue === 'string' && r.venue !== '') ||
     (snap.value?.books ?? []).some((r) => typeof r.venue === 'string' && r.venue !== '')
   if (!anyTagged) return false
-  return !venueDataArrived.value
+  if (venueDataArrived.value) return false
+  // nowMs（2s tick）是重算驱动：快照静止时超时窗口也要能走完。
+  return nowMs.value - venueSwitchAt.value < VENUE_LOADING_TIMEOUT_MS
 })
 
 /** 行情卡的可见行：Loading 门开着 = 清空（绝不残留旧所盘口）。 */
@@ -693,9 +702,49 @@ async function askRoundHint(): Promise<void> {
 const venueRoundUnsupported = computed(() => {
   if (!visiblePrices.value.length || venueLoading.value) return false
   if (!marketName.value || !engineUp.value) return false
+  // 轮次告警三修（2026-10-23）：快照空判信号（A-lite，零内核改动）——
+  // 该 venue 既无 venueRounds 行（没开口钟 = discovery 从未带回该所在此
+  // 轮次族的市场）又无该 venue 的 marketPrices 行（没行情），两条件同时
+  // 成立且持续一个稳定窗口（VENUE_DISCOVERY_EMPTY_MS，防轮界瞬间合法为
+  // 空的误报）→「当前交易所可能不支持此轮次」。原判据（netCheck 报告 ok）
+  // 只证明连通性，证明不了「该所在当前轮长族下能发现市场」，保留为或支。
+  if (venueDiscoveryEmpty.value) return true
   const rep = roundHintDoc.value?.report
   if (!rep) return false
   return rep.ok === true
+})
+
+/**
+ * discovery 空判信号（三修之 1）：当前查看 venue 的钟行与行情行双缺席，
+ * 自发现首拍起持续满 8s 才为真。轮界瞬间（旧轮到期、新轮市场尚未被
+ * discovery 带回）两个集合可以合法地暂时为空 —— 稳定窗口滤掉这种抖动。
+ * nowMs（2s tick）驱动重算：快照静止时窗口也要能走满。
+ */
+const VENUE_DISCOVERY_EMPTY_MS = 8_000
+const venueDiscoveryEmptySince = ref(0)
+const venueDiscoveryEmpty = computed(() => {
+  if (!activeVenue.value || !engineUp.value || !marketName.value) {
+    venueDiscoveryEmptySince.value = 0
+    return false
+  }
+  if (visiblePrices.value.length || venueLoading.value || venueUnbound.value) {
+    venueDiscoveryEmptySince.value = 0
+    return false
+  }
+  const v = activeVenue.value
+  const hasClockRow = (snap.value?.round?.venueRounds ?? []).some((r) => r.venue === v)
+  const hasPriceRow = (snap.value?.round?.prices ?? []).some(
+    (r) => typeof r.venue === 'string' && r.venue !== '' && r.venue === v,
+  )
+  if (hasClockRow || hasPriceRow) {
+    venueDiscoveryEmptySince.value = 0
+    return false
+  }
+  if (venueDiscoveryEmptySince.value === 0) {
+    venueDiscoveryEmptySince.value = nowMs.value
+    return false
+  }
+  return nowMs.value - venueDiscoveryEmptySince.value >= VENUE_DISCOVERY_EMPTY_MS
 })
 
 // 空行情卡出现时问一次探针；离开空态（数据到了）就复位 one-shot，让下一次
