@@ -834,26 +834,6 @@ pub struct EvolutionProposalsView {
     pub proposals: Vec<EvolutionProposalView>,
 }
 
-/// One switch where the shipped file and the persisted runtime state disagree
-/// (from `shadow_evolution.status`). Both switches are runtime state, so the
-/// persisted value wins — which is why editing the file is not a kill switch.
-/// The kernel logs a WARN for each of these; carrying the same fact on the panel
-/// keeps it from living only in a log file (#269).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvolutionSwitchConflictView {
-    /// `"engine"` (is the evaluator running) or `"autoEvolve"` (who applies a
-    /// qualifying change).
-    #[serde(default)]
-    pub switch: String,
-    /// What `user_layer/configs/shadow_evolution.toml` says.
-    #[serde(default)]
-    pub file_value: bool,
-    /// What `data/evolution/state.json` says — the value actually in force.
-    #[serde(default)]
-    pub runtime_value: bool,
-}
-
 /// The shadow-evolution control block the UIs need (from `shadow_evolution.status`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -880,10 +860,11 @@ pub struct EvolutionStatusView {
     /// UI cannot print "72 hours" over a different setting.
     #[serde(default)]
     pub cycle_secs: i64,
-    /// Switches where the file and the persisted runtime state disagree (#269).
-    /// Empty is the normal case.
-    #[serde(default)]
-    pub switch_conflicts: Vec<EvolutionSwitchConflictView>,
+    // The switches live in the config FILE (`shadow_evolution.toml`), which the
+    // runtime verbs write back into — no `switchConflicts` field here, because
+    // a file/runtime disagreement cannot exist. The kernel still sends an
+    // always-empty `switchConflicts` list on the wire for an older WebUI; serde
+    // ignores the key it no longer knows.
 }
 
 // ── core.event notifications (kind-tagged) ───────────────────────────────────

@@ -69,6 +69,7 @@ fn adoption_signal(proposal: &EvolutionProposal, now_ms: i64) -> EvolveSignal {
 pub mod audit;
 pub mod config;
 pub mod evaluator;
+pub mod file;
 pub mod guard;
 pub mod knobs;
 pub mod proposal;
@@ -78,7 +79,7 @@ pub mod variants;
 
 pub use config::{
     EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams,
-    ShadowEvolutionConfig, StrategyParams, SwitchConflict, SwitchName, VariantView, exit_caliber,
+    ShadowEvolutionConfig, StrategyParams, VariantView, exit_caliber,
 };
 pub use proposal::{DecidedBy, EvolutionProposal, ProposalState, TradeMetrics};
 pub use registry::ParamRegistry;
@@ -229,10 +230,13 @@ pub struct ShadowEvolution {
     /// E13: wall-clock ms of the last DEEP round (0 = clock not started).
     last_cycle_ms: i64,
     cycle_seq: u64,
-    /// #269: switches where `state.json` and the config file disagreed at
-    /// startup. Kept (not merely logged) so the panel can render the state an
-    /// operator reading the file would get wrong.
-    switch_conflicts: Vec<SwitchConflict>,
+    /// The config FILE the switch verbs write back into (the file as the
+    /// single source of truth for `enabled` / `auto_evolve`). `None` — the
+    /// backtester, most in-process tests — disables the write path: a switch
+    /// flip then stays runtime-only and says so, instead of writing into
+    /// whatever checkout the caller happens to run from (the same posture as
+    /// `runtime_config_path` / `accounts_config_path`).
+    config_path: Option<String>,
 }
 
 impl ShadowEvolution {
@@ -243,74 +247,45 @@ impl ShadowEvolution {
     /// scaffolded and no file is ever created (D7) — but the cells are still
     /// published with the declared values, so the overlay is a no-op rather than
     /// an invented parameter.
+    ///
+    /// The switches (`enabled` / `auto_evolve`) come from the CONFIG FILE and
+    /// from nothing else: the file is the single source of truth, and the
+    /// runtime verbs write their flips back into it (`config_path`). A
+    /// legacy `state.json` may still carry `enabled` / `autoEvolve` keys
+    /// written by an older kernel; they are IGNORED — logged once, never
+    /// honored — so a production file that says OFF stays off, and the
+    /// "配置文件与运行期开关不一致" state can never exist again. The
+    /// bookkeeping keys (`lastCycleMs` / `cycleSeq`) keep their old meaning.
     pub fn new(cfg: ShadowEvolutionConfig, strategies: &[&dyn EngineStrategy]) -> Self {
+        Self::new_with_config_path(cfg, strategies, None)
+    }
+
+    /// [`Self::new`] with the write-back path for the switch verbs. Production
+    /// passes the shadow-evolution config file (`user_layer/configs/shadow_
+    /// evolution.toml`); the backtester and most in-process tests pass `None`
+    /// and get runtime-only switches.
+    pub fn new_with_config_path(
+        cfg: ShadowEvolutionConfig,
+        strategies: &[&dyn EngineStrategy],
+        config_path: Option<String>,
+    ) -> Self {
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
-        // E13 + #249: the runtime state (both switches + the deep-round clock) is
-        // persisted under the audit dir and WINS over the config file — it is what
-        // the UIs' switches flip, so a restart must not undo the operator. A key
-        // an older kernel never wrote hands that decision back to the config.
+        // The deep-round clock is the only thing the persisted state still
+        // decides: a restart must not fire a round immediately if the persisted
+        // clock says otherwise. The switch keys, if a legacy file carries them,
+        // are read past and ignored — one INFO line says so, because an
+        // operator who just deleted a panel flip by hand-editing state.json
+        // deserves to know that file no longer rules the switches.
         let st = store.load_state().unwrap_or_default();
-        let mut cfg = cfg;
-        // #269: a file/runtime disagreement is not an error (the runtime switch
-        // wins on purpose), but it is the exact state in which "the file says
-        // off" is not a kill switch — so it is kept, not just logged, and the
-        // panel reads it back through `switch_conflicts()`.
-        let mut switch_conflicts: Vec<SwitchConflict> = Vec::new();
-        if let Some(on) = st.enabled {
-            // The persisted switch is the operator's most recent word, so it wins
-            // over the file — a deploy editing the file must not undo a switch
-            // flipped in the panel. But when the FILE asks for OFF and the runtime
-            // says ON, that is a kill switch that did not kill: say so loudly, and
-            // name the way out, because "the file says off" is exactly what an
-            // incident responder will look at.
-            if on != cfg.enabled {
-                if on {
-                    tracing::warn!(
-                        file = false,
-                        "the config file disables the evolution engine but the persisted \
-                         runtime switch has it ON — the runtime switch wins; use the panel's \
-                         engine switch, or remove <audit_dir>/state.json, to turn it off"
-                    );
-                } else {
-                    tracing::info!(
-                        file = true,
-                        "the persisted runtime switch keeps the evolution engine off; the \
-                         file re-enables it only once that switch is turned back on"
-                    );
-                }
-                switch_conflicts.push(SwitchConflict {
-                    switch: SwitchName::Engine,
-                    file_value: cfg.enabled,
-                    runtime_value: on,
-                });
-            }
-            cfg.enabled = on;
-        }
-        if let Some(on) = st.auto_evolve {
-            // #269: the SAME precedence applies to the unattended switch, and it
-            // used to be applied silently — the one switch that lets the kernel
-            // adopt a change with nobody watching was the one whose file/runtime
-            // disagreement had no voice at all.
-            if on != cfg.auto_evolve {
-                tracing::warn!(
-                    file = cfg.auto_evolve,
-                    runtime = on,
-                    "the persisted runtime auto-evolve switch disagrees with the config \
-                     file — the runtime switch wins; use the panel's auto switch, or \
-                     remove <audit_dir>/state.json, to make the file the last word again"
-                );
-                switch_conflicts.push(SwitchConflict {
-                    switch: SwitchName::AutoEvolve,
-                    file_value: cfg.auto_evolve,
-                    runtime_value: on,
-                });
-            }
-            cfg.auto_evolve = on;
+        if st.enabled.is_some() || st.auto_evolve.is_some() {
+            tracing::info!(
+                "state.json carries legacy switch keys (enabled/autoEvolve); they are \
+                 ignored — the switches live in the config file now (and the runtime \
+                 verbs write back into it)"
+            );
         }
         let enabled = cfg.enabled;
-        // The audit log's own gate is read from this config: an engine the
-        // persisted state switched on (and the file did not) must not silently
-        // lose every record it writes.
+        // The audit log's own gate is read from this config.
         let audit = AuditLog::new(&cfg);
         let (last_cycle_ms, cycle_seq) = (st.last_cycle_ms, st.cycle_seq);
         let auto_evolve = cfg.auto_evolve;
@@ -325,7 +300,7 @@ impl ShadowEvolution {
             auto_evolve,
             last_cycle_ms,
             cycle_seq,
-            switch_conflicts,
+            config_path,
             proposal_store: store,
         };
         me.proposal_store.load();
@@ -569,9 +544,10 @@ impl ShadowEvolution {
     }
 
     /// Enable evolution: scaffold every unit around the parameters in force.
-    /// Persisted (#249), because the switch is runtime state: a restart that
-    /// silently switched the engine back off is what made "自动进化：开" a label
-    /// that did nothing.
+    /// The flip is persisted INTO THE CONFIG FILE (the file is the single
+    /// source of truth for the switches — a restart reads it back), so a
+    /// deploy that edits the file and an operator's flip can no longer
+    /// disagree. `state.json` keeps only the bookkeeping.
     pub fn enable(&mut self, now_ms: i64) {
         self.enabled = true;
         self.cfg.enabled = true;
@@ -579,7 +555,7 @@ impl ShadowEvolution {
         for i in 0..self.units.len() {
             self.units[i].scaffold(&self.cfg, now_ms);
         }
-        self.resolve_switch_conflict(SwitchName::Engine, true);
+        self.persist_switch(file::SwitchKey::Enabled, true);
         self.persist_state();
     }
 
@@ -590,20 +566,8 @@ impl ShadowEvolution {
         for u in self.units.iter_mut() {
             u.set = VariantSet::empty(&u.strategy);
         }
-        self.resolve_switch_conflict(SwitchName::Engine, false);
+        self.persist_switch(file::SwitchKey::Enabled, false);
         self.persist_state();
-    }
-
-    /// A switch flipped back onto the file's value resolves its boot-time
-    /// conflict (#269): the entry said "the file says X but the runtime says
-    /// Y", and now the runtime agrees with the file again — keeping the entry
-    /// would leave the panel's banner announcing a disagreement that no longer
-    /// exists, and there is no other path back (the list was rebuilt only at
-    /// construction). Removing the entry is the honest readout, and a future
-    /// file edit that re-disagrees re-arms the warning at the next boot.
-    fn resolve_switch_conflict(&mut self, switch: SwitchName, new_value: bool) {
-        self.switch_conflicts
-            .retain(|c| !(c.switch == switch && c.file_value == new_value));
     }
 
     /// Record the current round: token expiries for the tick context, and the
@@ -1206,8 +1170,9 @@ impl ShadowEvolution {
         self.proposal_store.pending_count()
     }
 
-    /// The unattended switch (the UIs' auto-evolve checkbox). Persisted, so a
-    /// restart keeps the last chosen mode.
+    /// The unattended switch (the UIs' auto-evolve checkbox). Persisted INTO
+    /// THE CONFIG FILE, same as the engine switch — the file is the single
+    /// source of truth, `state.json` keeps only the bookkeeping.
     pub fn set_auto_evolve(&mut self, on: bool) {
         if self.auto_evolve == on {
             return;
@@ -1215,7 +1180,7 @@ impl ShadowEvolution {
         self.auto_evolve = on;
         self.cfg.auto_evolve = on;
         tracing::info!(auto_evolve = on, "shadow evolution auto-evolve switched");
-        self.resolve_switch_conflict(SwitchName::AutoEvolve, on);
+        self.persist_switch(file::SwitchKey::AutoEvolve, on);
         self.persist_state();
     }
 
@@ -1247,10 +1212,37 @@ impl ShadowEvolution {
         Some(self.last_cycle_ms + self.cfg.evolution_cycle_secs * 1000).filter(|t| *t > now_ms)
     }
 
+    /// Write ONE switch flip back into the config file (the durable half of
+    /// the switch verbs). Best-effort like every config write face: a core
+    /// without `config_path` (backtester, most in-process tests) and a write
+    /// failure are logged and otherwise silent — the in-memory switch has
+    /// already moved, and the operator's next flip retries the persist.
+    fn persist_switch(&self, key: file::SwitchKey, value: bool) {
+        let Some(path) = self.config_path.as_deref() else {
+            tracing::debug!(
+                switch = key.key(),
+                "no shadow config path on this core — the switch is runtime-only"
+            );
+            return;
+        };
+        if let Err(e) = file::persist_switch(std::path::Path::new(path), key, value) {
+            tracing::error!(
+                switch = key.key(),
+                value,
+                "{e} — the switch is in force for this session but NOT persisted"
+            );
+        }
+    }
+
+    /// Persist the pure bookkeeping (the deep-round clock). The switch keys
+    /// are NO LONGER written: the file is their single source of truth, and a
+    /// state.json that carries them at all is legacy read-past.
     fn persist_state(&self) {
         self.proposal_store.save_state(proposal::PersistedState {
-            enabled: Some(self.enabled),
-            auto_evolve: Some(self.auto_evolve),
+            // The legacy switch keys stay `None`: the file is their single
+            // source of truth, and writing them would resurrect it.
+            enabled: None,
+            auto_evolve: None,
             last_cycle_ms: self.last_cycle_ms,
             cycle_seq: self.cycle_seq,
         });
@@ -1291,14 +1283,6 @@ impl ShadowEvolution {
             "deep evolution round re-anchored variant sets"
         );
         Some(event)
-    }
-
-    /// #269: the switches `state.json` and the config file disagreed about at
-    /// startup. Empty is the normal case; a non-empty list means an operator
-    /// reading the file gets the wrong answer about what is in force, which is
-    /// why the panel renders it rather than leaving it in the log.
-    pub fn switch_conflicts(&self) -> &[SwitchConflict] {
-        &self.switch_conflicts
     }
 
     /// The exit-ladder identity this manager's twins replay (#269). Stamped on
@@ -2251,10 +2235,12 @@ mod tests {
         );
     }
 
-    /// The auto-evolve switch is persisted: a restart keeps the last chosen
-    /// mode, whichever way it was flipped.
+    /// Without a write-back path the auto switch is runtime-only by design
+    /// (durable writers are disabled), so a restart falls back to the file —
+    /// with one, the flip lives in the file and the restart keeps it (that is
+    /// `a_switch_flip_writes_back_into_the_config_file`).
     #[test]
-    fn the_auto_evolve_switch_survives_a_restart() {
+    fn the_auto_evolve_switch_without_a_config_path_falls_back_to_the_file() {
         let (a, _b) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&a];
         let cfg = fast_cfg(false, "autoswitch");
@@ -2263,20 +2249,30 @@ mod tests {
         let mut m = ShadowEvolution::new(cfg, &refs);
         assert!(!m.auto_evolve(), "file default is manual");
         m.set_auto_evolve(true);
+        assert!(m.auto_evolve(), "the in-session flip is in force");
 
+        // No config path was configured, so the flip had nowhere durable to
+        // land: the next boot reads the file again.
         let m2 = ShadowEvolution::new(fast_cfg(false, "autoswitch"), &refs);
-        assert!(m2.auto_evolve(), "the persisted switch wins over the file");
+        assert!(
+            !m2.auto_evolve(),
+            "runtime-only flip: the file decides at the next boot"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// #269: when `state.json` and the file disagree, the disagreement must be
-    /// READABLE, not merely logged. The runtime switch still wins — that is the
-    /// design — but a panel that can only print the two booleans cannot explain
-    /// why a file saying "off" sits next to an engine that is on.
+    /// The operator's ruling: the config FILE is the single source of truth
+    /// for the switches. A legacy `state.json` that carries conflicting
+    /// switch keys is read past, not honored — the exact production sample
+    /// (file OFF, state.json `{autoEvolve:true, enabled:true}`) boots OFF
+    /// with a log line, and the panel's "配置文件与运行期开关不一致" banner
+    /// can never describe reality again.
     #[test]
-    fn a_file_runtime_switch_conflict_is_reported_not_only_logged() {
+    fn a_legacy_state_json_switch_conflict_is_ignored_the_file_wins() {
         let (a, _b) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&a];
-        // The shipped file says OFF; a panel flip said ON and was persisted.
+        // The shipped file says OFF; an older kernel's panel flip said ON and
+        // was persisted in state.json.
         let cfg = fast_cfg(false, "conflict");
         let dir = std::path::PathBuf::from(&cfg.audit_dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2287,78 +2283,110 @@ mod tests {
             cycle_seq: 0,
         });
         let m = ShadowEvolution::new(cfg, &refs);
-        assert!(m.is_enabled(), "the runtime switch wins over the file");
-        assert_eq!(
-            m.switch_conflicts(),
-            [
-                SwitchConflict {
-                    switch: SwitchName::Engine,
-                    file_value: false,
-                    runtime_value: true,
-                },
-                SwitchConflict {
-                    switch: SwitchName::AutoEvolve,
-                    file_value: false,
-                    runtime_value: true,
-                },
-            ],
-            "both switches are reported with the file's value and the one in force"
-        );
-
-        // Agreement is not a conflict, and a missing key is not a disagreement.
-        let clean = ShadowEvolution::new(fast_cfg(true, "conflict-agree"), &refs);
         assert!(
-            clean.switch_conflicts().is_empty(),
-            "the file and the runtime agree"
+            !m.is_enabled(),
+            "the FILE decides: the legacy state.json switch key is ignored"
         );
-    }
+        assert!(
+            !m.auto_evolve(),
+            "the auto switch follows the file just as strictly"
+        );
 
-    /// #269 follow-up: a conflict entry dies when the switch is flipped back
-    /// onto the file's value. The panel's exit button routes through
-    /// enable/disable/set_auto_evolve, and the entry must be gone from the
-    /// NEXT status read (there is no boot between the flip and the read) —
-    /// and it must NOT take the *other* switch's conflict down with it.
-    #[test]
-    fn flipping_a_switch_back_to_the_file_value_resolves_its_conflict() {
-        let (a, _b) = strategies();
-        let refs: Vec<&dyn EngineStrategy> = vec![&a];
-        let cfg = fast_cfg(false, "conflict-resolve");
-        let dir = std::path::PathBuf::from(&cfg.audit_dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        proposal::ProposalStore::new(&dir).save_state(proposal::PersistedState {
-            enabled: Some(true),
-            auto_evolve: Some(true),
+        // And the reverse direction: a legacy file that says OFF under a file
+        // saying ON cannot hold the engine down either.
+        let dir2 = std::path::PathBuf::from(&fast_cfg(true, "conflict-off").audit_dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        proposal::ProposalStore::new(&dir2).save_state(proposal::PersistedState {
+            enabled: Some(false),
+            auto_evolve: Some(false),
             last_cycle_ms: 0,
             cycle_seq: 0,
         });
-        let mut m = ShadowEvolution::new(cfg, &refs);
-        assert_eq!(m.switch_conflicts().len(), 2, "both switches disagree");
-
-        // Auto first: only the auto entry leaves; the engine conflict stays.
-        m.set_auto_evolve(false);
-        assert_eq!(
-            m.switch_conflicts(),
-            [SwitchConflict {
-                switch: SwitchName::Engine,
-                file_value: false,
-                runtime_value: true,
-            }],
-            "the auto entry is resolved, the engine entry is untouched"
+        let m2 = ShadowEvolution::new(fast_cfg(true, "conflict-off"), &refs);
+        assert!(
+            m2.is_enabled(),
+            "the file's ON is not undone by legacy state"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
 
-        // Then the engine: disabling lands it on the file's OFF, and the list
-        // empties. A persisted state is also rewritten with the agreed values,
-        // so the next boot starts clean.
+    /// With a write-back path configured, a runtime switch flip persists into
+    /// the CONFIG FILE (the file is the single source of truth), the
+    /// bookkeeping keeps flowing to state.json, and the next boot reads the
+    /// flip back from the file.
+    #[test]
+    fn a_switch_flip_writes_back_into_the_config_file() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        let root = std::env::temp_dir().join(format!("bkevo-writeback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg_path = root.join("shadow_evolution.toml");
+        std::fs::write(
+            &cfg_path,
+            "[shadow_evolution]\nenabled = false\nauto_evolve = false\n",
+        )
+        .unwrap();
+        let cfg = fast_cfg(false, "writeback");
+        let dir = std::path::PathBuf::from(&cfg.audit_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut m = ShadowEvolution::new_with_config_path(
+            cfg,
+            &refs,
+            Some(cfg_path.to_string_lossy().into_owned()),
+        );
+        m.enable(0);
+        m.set_auto_evolve(true);
+        // The file carries both flips…
+        let cfg = crate::config::FileConfig::load(Some(&cfg_path));
+        assert_eq!(cfg.shadow.enabled, Some(true), "the enable flip landed");
+        assert_eq!(cfg.shadow.auto_evolve, Some(true), "the auto flip landed");
+        // …and state.json carries only the bookkeeping.
+        let st = proposal::ProposalStore::new(&dir).load_state().unwrap();
+        assert_eq!(st.enabled, None, "state.json no longer speaks for switches");
+        assert_eq!(st.auto_evolve, None);
+
+        // The next boot reads the switches FROM THE FILE (what main.rs does:
+        // `FileConfig::load` → the [shadow_evolution] section → the manager's
+        // config), so the flip survived WITHOUT any state.json switch key.
+        let mut boot_cfg = fast_cfg(false, "writeback");
+        let file = crate::config::FileConfig::load(Some(&cfg_path));
+        boot_cfg.enabled = file.shadow.enabled.unwrap_or(false);
+        boot_cfg.auto_evolve = file.shadow.auto_evolve.unwrap_or(false);
+        let m2 = ShadowEvolution::new_with_config_path(
+            boot_cfg,
+            &refs,
+            Some(cfg_path.to_string_lossy().into_owned()),
+        );
+        assert!(m2.is_enabled(), "the boot honors the file the verb wrote");
+        assert!(m2.auto_evolve());
+
+        // The bookkeeping file itself: written, readable, switch-free.
+        let text = std::fs::read_to_string(dir.join("state.json")).unwrap();
+        assert!(
+            !text.contains("enabled") && !text.contains("autoEvolve"),
+            "state.json is bookkeeping only: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Without a write-back path (the backtester, most in-process tests) a
+    /// switch flip stays runtime-only and nothing is written into whatever
+    /// checkout the caller happens to run from — the same posture as every
+    /// other `None`-path durable writer.
+    #[test]
+    fn a_switch_flip_without_a_config_path_stays_runtime_only() {
+        let (a, _b) = strategies();
+        let refs: Vec<&dyn EngineStrategy> = vec![&a];
+        // cwd here is the crate during tests; nothing may appear beside it.
+        let mut m = ShadowEvolution::new(fast_cfg(false, "nopath"), &refs);
+        m.enable(0);
+        assert!(m.is_enabled(), "the in-session switch still works");
         m.disable();
-        assert!(
-            m.switch_conflicts().is_empty(),
-            "the engine entry is resolved too"
-        );
-        let m2 = ShadowEvolution::new(fast_cfg(false, "conflict-resolve"), &refs);
-        assert!(
-            m2.switch_conflicts().is_empty(),
-            "the next boot re-arms nothing: state.json now agrees with the file"
-        );
+        assert!(!m.is_enabled());
     }
 
     /// #249: with the auto switch on there is nobody to answer a held proposal,
@@ -2679,33 +2707,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// #249: the engine switch is runtime state too. It used to live in memory
-    /// only, so every restart silently switched the engine back to whatever the
-    /// config file said — that is how "自动进化：开" became a label with zero
-    /// variants behind it.
+    /// Without a write-back path the engine switch is runtime-only: the
+    /// in-session flip is in force, and the next boot falls back to the file.
+    /// The durable flip (the production posture) is
+    /// `a_switch_flip_writes_back_into_the_config_file`.
     #[test]
-    fn the_engine_switch_survives_a_restart() {
+    fn the_engine_switch_without_a_config_path_falls_back_to_the_file() {
         let (a, _b) = strategies();
         let refs: Vec<&dyn EngineStrategy> = vec![&a];
         let dir = std::path::PathBuf::from(&fast_cfg(false, "engineswitch").audit_dir);
         let _ = std::fs::remove_dir_all(&dir);
 
-        // The file says off, the operator switches it on.
+        // The file says off, the operator switches it on (runtime-only).
         let mut m = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
         assert!(!m.is_enabled());
         m.enable(0);
-        let mut m2 = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
-        assert!(m2.is_enabled(), "the runtime switch wins over the file");
+        assert!(m.is_enabled(), "the in-session flip is in force");
+        let m2 = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
+        assert!(
+            !m2.is_enabled(),
+            "no durable writer: the file decides at the next boot"
+        );
         assert_eq!(
             m2.variant_count(),
-            3,
-            "and the engine returns with its twins"
+            0,
+            "no twins behind a file that says off"
         );
 
-        // And off is remembered just as firmly, even against a file saying on.
-        m2.disable();
+        // A file saying ON arms the engine without any state.json in play.
         let m3 = ShadowEvolution::new(fast_cfg(true, "engineswitch"), &refs);
-        assert!(!m3.is_enabled(), "an operator's off survives the restart");
+        assert!(m3.is_enabled(), "the file's ON stands on its own");
+        assert_eq!(m3.variant_count(), 3, "and carries its twins");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

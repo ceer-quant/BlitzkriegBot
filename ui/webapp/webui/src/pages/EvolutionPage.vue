@@ -44,12 +44,6 @@ const autoActive = computed(() => engineOn.value && autoEvolve.value)
 const cycleSeq = computed(() => evo.value?.status?.cycleSeq ?? 0)
 /** 内核上报的深度轮周期（秒）；旧内核不上报时为 0，文案退回「未上报」。 */
 const cycleSecs = computed(() => evo.value?.status?.cycleSecs ?? 0)
-/**
- * #269：文件与 state.json 不一致的开关。两个开关都是运行期状态，所以持久值赢 ——
- * 这正是「改文件不再是急停开关」的代价。内核为每一条打 WARN，这里把同一事实
- * 显示出来，免得它只躺在日志里。
- */
-const switchConflicts = computed(() => evo.value?.status?.switchConflicts ?? [])
 
 /** 当前真实行为，一句话（三种组合分开说，不留含糊）。 */
 const modeSummary = computed(() => {
@@ -137,18 +131,6 @@ async function setEngine(next: boolean): Promise<void> {
   showFlash('info', next
     ? `进化引擎已启用：开始评估影子变异体${autoEvolve.value ? '，并按自动模式自行采纳' : '，达标的变异挂到待决区等你拍板'}。深度轮首次计时从此刻开始。`
     : '进化引擎已关闭：不再评估、不再采纳，已挂起的提案保留但不会推进。')
-}
-
-/** #269 冲突横幅的出口按钮：把开关拨回文件值。内核在翻转落到文件值时同步
- *  清掉对应的冲突条目（switch_conflicts 只在 boot 重建，运行期没有第二条路），
- *  act 里的 store.refresh 拉回已清除的列表，横幅随之消失。 */
-function conflictName(c: { switch: string }): string {
-  return c.switch === 'autoEvolve' ? '自动进化（auto_evolve）' : '进化引擎（enabled）'
-}
-
-function resolveConflict(c: { switch: string; fileValue: boolean }): void {
-  if (c.switch === 'autoEvolve') void setAuto(c.fileValue)
-  else void setEngine(c.fileValue)
 }
 
 async function decide(p: EvolutionProposalRow, decision: 'accept' | 'reject' | 'defer'): Promise<void> {
@@ -420,39 +402,14 @@ const cycleAgo = (ms: number): string => {
       </Card>
     </div>
 
-    <!-- #269：文件与运行期开关打架 —— 先说清楚「谁在说话」，否则下面所有
-         「引擎未启用 / 自动已开」的文案都可能被读成文件说了算。每条冲突
-         带出口按钮：拨回文件值后内核清掉该条目，横幅随 refresh 消失。 -->
-    <div v-if="switchConflicts.length" class="mt-3.5">
-      <AlertBanner
-        tone="warn"
-        title="配置文件与运行期开关不一致"
-        hint="点「拨回文件值」让面板开关与文件重新一致；或删掉 data/evolution/state.json 让文件重新说了算"
-      >
-        <div class="space-y-1.5">
-          <div v-for="c in switchConflicts" :key="c.switch" class="flex flex-wrap items-center gap-2">
-            <span class="break-words opacity-90">{{ conflictName(c) }}：配置文件说「{{ c.fileValue ? '开' : '关' }}」，但 state.json 记的是「{{ c.runtimeValue ? '开' : '关' }}」，实际以「{{ c.runtimeValue ? '开' : '关' }}」运行</span>
-            <Button
-              size="sm"
-              variant="outline"
-              :disabled="busy !== null"
-              @click="resolveConflict(c)"
-            >拨回文件值（{{ c.fileValue ? '开' : '关' }}）</Button>
-          </div>
-        </div>
-      </AlertBanner>
-    </div>
-
     <!-- 引擎未启用：一切「没动静」的统一解释，放在最显眼处 -->
     <div v-if="evo && !engineOn" class="mt-3.5">
       <AlertBanner tone="warn" title="进化引擎未启用">
         内核当前不评估、不采纳、也不排深度轮 —— 下面的「已采纳的变异」只是历史记录，
         待决提案不会被自动处理（自动开关记录的是模式，不是运行状态）。
-        打开上方「进化引擎」开关即可让它跑起来，开关状态会持久化，重启后仍然有效。
-        注意：内核上次关机时记下的开关优先于
-        <span class="num">user_layer/configs/shadow_evolution.toml</span> 里的
-        <span class="num">enabled</span>（那一行只决定首次启动），所以改文件关不掉/开不动它 ——
-        想用文件说话，得先删掉 <span class="num">data/evolution/state.json</span>。
+        打开上方「进化引擎」开关即可让它跑起来；开关状态以
+        <span class="num">user_layer/configs/shadow_evolution.toml</span> 为唯一可信源，
+        面板翻转会写回该文件，重启后仍然有效。
       </AlertBanner>
     </div>
 

@@ -225,6 +225,15 @@ pub struct CoreConfig {
     pub shadow_evolution_enabled: bool,
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
     pub shadow_evolution_tuning: Option<ShadowEvolutionTuning>,
+    /// The shadow-evolution CONFIG FILE the switch verbs write back into
+    /// (`user_layer/configs/shadow_evolution.toml` in production). The file is
+    /// the single source of truth for `enabled` / `auto_evolve`: a runtime
+    /// flip persists here and the next boot reads it back, so the panel's
+    /// file/runtime conflict state cannot exist. `None` disables the write
+    /// path — the backtester and most in-process tests run with `None`, and a
+    /// switch flip then stays runtime-only (the same posture as
+    /// `runtime_config_path` / `accounts_config_path`).
+    pub shadow_config_path: Option<String>,
     /// Optional per-strategy entry caps, keyed by strategy name (P-1.1). An
     /// absent entry means unlimited — a strategy keeps its current behaviour
     /// unless an operator configures a cap.
@@ -889,6 +898,7 @@ impl Default for CoreConfig {
             update_interval_secs: 0,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
+            shadow_config_path: None,
             strategy_limits: HashMap::new(),
             virtual_limits: HashMap::new(),
             entry_maker_timeout_ms: 5000,
@@ -2182,6 +2192,9 @@ impl Core {
         // runtime config mutation cannot move a quota mid-session).
         let virtual_accounts =
             crate::risk::virtual_account::VirtualAccounts::new(&config.virtual_limits);
+        // The shadow manager reads the write-back path off the config before
+        // the config moves into the struct (same ordering concern as above).
+        let shadow_config_path = config.shadow_config_path.clone();
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
@@ -2237,7 +2250,11 @@ impl Core {
                 reg.install(Box::new(ext), cfg.path);
                 reg
             },
-            shadow_evolution: ShadowEvolution::new(shadow_cfg, &[]),
+            shadow_evolution: ShadowEvolution::new_with_config_path(
+                shadow_cfg,
+                &[],
+                shadow_config_path,
+            ),
             trade_db,
             order_db,
             position_db,

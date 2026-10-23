@@ -2645,12 +2645,13 @@ async fn handle_line(
                 "enabled": c.shadow_evolution().is_enabled(),
                 "cycleSeq": c.shadow_evolution().cycle_info().1,
                 "cycleSecs": c.shadow_evolution().cycle_secs(),
-                // #269: where `state.json` and the config file disagreed at
-                // startup. The runtime switch wins by design, so the file alone
-                // can read "off" while the engine is on — a panel that shows
-                // only the two booleans cannot explain that, and an operator
-                // reading the file gets the wrong answer.
-                "switchConflicts": c.shadow_evolution().switch_conflicts(),
+                // The config FILE is the single source of truth for the
+                // switches and the switch verbs write back into it, so a
+                // file/runtime disagreement cannot exist anymore. The key
+                // stays on the wire as an always-empty list: an older WebUI
+                // that still renders the (removed) conflict banner reads `[]`
+                // and shows nothing, instead of failing to parse a missing key.
+                "switchConflicts": [],
             }))
         }
         method::SE_HISTORY => {

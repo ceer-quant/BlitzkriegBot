@@ -512,16 +512,19 @@ impl ProposalStore {
         hit
     }
 
-    /// Load the runtime evolution state (the two switches + the cycle clock).
+    /// Load the runtime evolution state (the deep-round clock).
     ///
-    /// Every field is optional ON READ: a file written by an older kernel has no
-    /// `enabled` key, and an absent key must mean "the config file decides" —
-    /// never a silent `false` that switches an engine off on restart. `None`
-    /// (no file at all) means the same for every field.
+    /// A file an older kernel wrote may also carry `enabled` / `autoEvolve`
+    /// switch keys. They are READ (so the caller can log that they are being
+    /// ignored) but never honored: the switches live in the config file now —
+    /// the file is their single source of truth, and the runtime verbs write
+    /// their flips back into it. `None` (no file at all) means the clock has
+    /// not started.
     pub fn load_state(&self) -> Option<PersistedState> {
         let text = std::fs::read_to_string(self.state_path()).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         Some(PersistedState {
+            // Legacy keys, read only to be announced as ignored.
             enabled: v.get("enabled").and_then(|x| x.as_bool()),
             auto_evolve: v.get("autoEvolve").and_then(|x| x.as_bool()),
             last_cycle_ms: v.get("lastCycleMs").and_then(|x| x.as_i64()).unwrap_or(0),
@@ -530,17 +533,14 @@ impl ProposalStore {
     }
 
     /// Persist the runtime evolution state (best-effort, atomic replace).
+    /// BOOKKEEPING ONLY: the switch keys are deliberately never written —
+    /// writing them would resurrect the second source of truth this module
+    /// removed.
     pub fn save_state(&self, state: PersistedState) {
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "lastCycleMs": state.last_cycle_ms,
             "cycleSeq": state.cycle_seq,
         });
-        if let Some(on) = state.enabled {
-            body["enabled"] = serde_json::Value::Bool(on);
-        }
-        if let Some(on) = state.auto_evolve {
-            body["autoEvolve"] = serde_json::Value::Bool(on);
-        }
         if let Some(parent) = self.state_path().parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -555,14 +555,16 @@ impl ProposalStore {
 
 /// The runtime evolution state as it lives on disk (`state.json`).
 ///
-/// Read back with every field optional so a file an older kernel wrote keeps
-/// meaning what it meant: the keys it has win, the keys it lacks hand the
-/// decision back to the config file (#249).
+/// The two switch fields are LEGACY: an older kernel persisted the switches
+/// here and let them outrank the config file at boot, which is exactly the
+/// second source of truth the file-single-source ruling removed. They are
+/// still parsed so the loader can log one INFO line when a legacy file
+/// carries them — never honored, never rewritten.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PersistedState {
-    /// The engine switch. `None` = the key was absent.
+    /// Legacy `enabled` key, if the file carries one. Read, logged, ignored.
     pub enabled: Option<bool>,
-    /// The unattended switch. `None` = the key was absent.
+    /// Legacy `autoEvolve` key, if the file carries one. Read, logged, ignored.
     pub auto_evolve: Option<bool>,
     pub last_cycle_ms: i64,
     pub cycle_seq: u64,
@@ -761,10 +763,15 @@ mod tests {
             cycle_seq: 7,
         });
         let st = store.load_state().unwrap();
-        assert_eq!(st.enabled, Some(true));
-        assert_eq!(st.auto_evolve, Some(true));
         assert_eq!(st.last_cycle_ms, 1234);
         assert_eq!(st.cycle_seq, 7);
+        // The bookkeeping file no longer carries the switch keys at all:
+        // writing them would resurrect the second source of truth.
+        let text = std::fs::read_to_string(store.state_path()).unwrap();
+        assert!(
+            !text.contains("enabled") && !text.contains("autoEvolve"),
+            "state.json is bookkeeping only: {text}"
+        );
         // A directory with no state file reads as the defaults.
         let empty = ProposalStore::new(tmp_dir("state-missing"));
         assert!(empty.load_state().is_none());
@@ -772,23 +779,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(tmp_dir("state-missing"));
     }
 
-    /// #249: a file written before the engine switch existed must not read as
-    /// "the engine is off" — an absent key means the config file decides, which
-    /// is how an upgrade keeps an engine the operator had switched on.
+    /// A state file a LEGACY kernel wrote carries the switch keys. They are
+    /// still parsed — the manager logs that they are being ignored — but the
+    /// file-single-source ruling means they decide nothing, and the bookkeeping
+    /// around them (the deep-round clock) keeps its meaning.
     #[test]
-    fn a_state_file_without_the_engine_key_leaves_it_undecided() {
+    fn a_legacy_state_file_switch_keys_are_read_but_decide_nothing() {
         let dir = tmp_dir("state-legacy");
         let store = ProposalStore::new(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             store.state_path(),
-            r#"{"autoEvolve":true,"lastCycleMs":99,"cycleSeq":3}"#,
+            r#"{"autoEvolve":true,"cycleSeq":3,"enabled":true,"lastCycleMs":1792660982929}"#,
         )
         .unwrap();
         let st = store.load_state().unwrap();
-        assert_eq!(st.enabled, None, "an absent key is not a `false`");
+        // Parsed, so the manager can announce the legacy keys…
+        assert_eq!(st.enabled, Some(true));
         assert_eq!(st.auto_evolve, Some(true));
-        assert_eq!(st.last_cycle_ms, 99);
+        // …while the bookkeeping keeps its meaning.
+        assert_eq!(st.last_cycle_ms, 1792660982929);
         assert_eq!(st.cycle_seq, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
