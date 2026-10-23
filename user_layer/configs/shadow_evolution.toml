@@ -7,15 +7,20 @@
 # `user_layer/configs/default.toml` (so `--config <dir>/default.toml` also picks
 # this file up on the side).
 #
-# Precedence, highest first. Two of the settings below are RUNTIME SWITCHES and
-# did not come from this list at all: a WebUI/TUI flip is remembered in
-# `state.json` and outranks every line here (including the flag and the
-# environment variable), because it is the operator's most recent word — see
-# "BOTH switches are runtime state" at the bottom of this header.
+# Precedence, highest first:
 #
-#     runtime switch (state.json)  >  command-line flag  >  BK_* environment
-#     variable  >  this file  >  built-in default
+#     command-line flag  >  BK_* environment variable  >  this file  >
+#     built-in default
 #
+# The TWO SWITCHES (`enabled` and `auto_evolve`) answer to THIS FILE and to
+# nothing else: it is their single source of truth. A WebUI/TUI flip is written
+# BACK into this file (with the operator's comments preserved), so a restart
+# reads the flip back from here and a deploy that edits the file and an
+# operator's click can never disagree — the "runtime switch (state.json) wins"
+# second source of truth (and the conflict banner it forced onto the panel) is
+# gone. `state.json` keeps only the deep-round bookkeeping; a legacy file that
+# still carries `enabled`/`autoEvolve` keys is read past and ignored, never
+# honored.
 # Note the units: the two windows below are written in MINUTES here, while the
 # kernel works in seconds. That conversion happens at load and is reported in the
 # startup log.
@@ -67,14 +72,11 @@
 # backlog as `auto`, through the same guards and the same promotion log a
 # hand-clicked acceptance writes.
 #
-# BOTH switches are runtime state — the WebUI/TUI flips persist in `state.json`
-# and WIN over this file on restart, so a switch an operator turned on is not
-# silently turned back off by a deploy. The cost, stated plainly: editing this
-# file is no longer a kill switch. If the file says off and the persisted switch
-# says on, the kernel logs a WARN at startup AND reports the disagreement as
-# `switchConflicts` in `shadow_evolution.status` (the panel renders it) — turn it
-# off from the panel, or delete `data/evolution/state.json`, to make the file the
-# last word again.
+# BOTH switches live HERE now (the file is their single source of truth): a
+# panel/TUI flip is written back into this file, so editing it IS how the
+# switches change across a restart. A legacy `data/evolution/state.json` that
+# still carries `enabled`/`autoEvolve` keys from an older kernel is read past
+# and ignored — one INFO line says so at boot.
 #
 # WHY THE SHIPPED FILE IS OFF (#269). Until 2026-09-23 this file shipped
 # `enabled = true` + `auto_evolve = true`, i.e. unattended auto-evolution out of
@@ -91,12 +93,12 @@
 #   2. There is no trustworthy WR/PF baseline for the evolution targets yet
 #      (#262). Measurement that can drift while nobody watches is not
 #      measurement.
-# Turning it on is a deliberate act: flip it in the panel (which persists to
-# `state.json`), pass `--shadow-evolution`, or set the two switches below — then
-# re-evaluate this default once P0 and #262 have landed.
+# Turning it on is a deliberate act: flip it in the panel (which writes back
+# into this file), pass `--shadow-evolution`, or set the two switches below —
+# then re-evaluate this default once P0 and #262 have landed.
 
 [shadow_evolution]
-enabled = false                      # evaluator OFF out of the box (#269); runtime switch persists
+enabled = false                      # evaluator OFF out of the box (#269); the panel flip writes here
 evaluation_window_minutes = 30       # rolling metrics window
 min_sample_count = 30                # >=30 virtual trades before judging
 min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp

@@ -121,34 +121,6 @@ impl Default for ShadowEvolutionConfig {
     }
 }
 
-/// Which switch a config-file / runtime-state disagreement is about (#269).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SwitchName {
-    /// `enabled` — the evaluator switch.
-    Engine,
-    /// `auto_evolve` — the unattended-adoption switch.
-    AutoEvolve,
-}
-
-/// One switch the config FILE and the persisted runtime state disagree about
-/// (#269).
-///
-/// The runtime switch wins by design (an operator's last click must not be
-/// undone by a deploy), so a disagreement is not an error — but it is exactly
-/// the state in which "the file says off" is NOT a kill switch, and an incident
-/// responder reading the file deserves to be told. The log line alone was not
-/// enough: this struct is what the panel renders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SwitchConflict {
-    pub switch: SwitchName,
-    /// What the shipped/edited file says.
-    pub file_value: bool,
-    /// What `state.json` says — the value actually in force.
-    pub runtime_value: bool,
-}
-
 /// A stable identifier of the EXIT LADDER a replay was judged under (#269).
 ///
 /// A promotion says "the variant is better", and that claim is only meaningful
