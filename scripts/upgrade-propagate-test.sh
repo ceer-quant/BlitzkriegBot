@@ -82,9 +82,13 @@ printf 'assets\n' > "$BUILD_WT/$DIST_DIR/bundle.js"
 
 printf 'round_sec = 900\n' > "$BUILD_WT/$CONFIG_DIR/default.toml"
 printf 'round_sec = 900\n' > "$REPO_ROOT/$CONFIG_DIR/default.toml"
-# A config the operator edited by hand: it must be backed up, not silently lost.
+# shadow_evolution.toml is OPERATOR STATE since #578 (the evolution switches
+# live in the file; a panel flip writes back into it). The 2026-10-23 upgrade
+# reverted the operator's panel-flipped `enabled = true` to factory OFF by
+# overwriting this file — the exact failure shape accounts.toml already had.
+# It joins UA_OPERATOR_STATE_CONFIGS: running copy wins, shipped copy waits.
 printf 'auto_evolve = true\n' > "$BUILD_WT/$CONFIG_DIR/shadow_evolution.toml"
-printf 'auto_evolve = false  # hand-edited locally\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+printf 'enabled = true\nauto_evolve = false  # panel-flipped locally\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
 cp "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml" "$tmp/operator-copy.toml"
 # An operator-state config (UA_OPERATOR_STATE_CONFIGS, 2026-10-20): the kernel
 # persists runtime writes INTO accounts.toml, so the running copy is live state
@@ -116,7 +120,8 @@ fi
 printf '\ndrift report\n'
 ua_drift > "$tmp/drift.txt"
 check "drift: unchanged config marked =" "1" "$(grep -c '= default.toml' "$tmp/drift.txt" | tr -d ' ')"
-check "drift: edited config marked ~" "1" "$(grep -c '~ shadow_evolution.toml' "$tmp/drift.txt" | tr -d ' ')"
+check "drift: operator-state config kept, running copy wins" "1" \
+  "$(grep -c '= shadow_evolution.toml (operator state kept' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: operator-state config kept, running copy wins" "1" \
   "$(grep -c '= accounts.toml (operator state kept' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: rebuilt cdylib marked ~" "1" "$(grep -c '~ lib.*_strategy.dylib' "$tmp/drift.txt" | tr -d ' ')"
@@ -133,12 +138,10 @@ check_same "new cdylib installed" "$STAGE/dylibs/user_layer/parity_strategy/targ
   "$REPO_ROOT/user_layer/parity_strategy/target/release/libfresh_strategy.dylib"
 check_same "bundle replaced" "$STAGE/dist/index.html" "$REPO_ROOT/$DIST_DIR/index.html"
 check "bundle holds exactly the staged set" "2" "$(ls "$REPO_ROOT/$DIST_DIR" | wc -l | tr -d ' ')"
-check_same "config replaced by the shipped value" "$STAGE/configs/shadow_evolution.toml" \
-  "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
 check_same "operator-state config NOT overwritten (the running copy wins)" "$tmp/operator-accounts.toml" \
   "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
-check_same "the operator's edited config is kept for rollback" "$tmp/operator-copy.toml" \
-  "$ROLLBACK/configs/shadow_evolution.toml"
+check_same "operator-state config NOT overwritten (panel-flipped switches survive, #578)" \
+  "$tmp/operator-copy.toml" "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
 check_same "the previous binary is kept for rollback" "$tmp/old-blitzkrieg" "$ROLLBACK/bin/blitzkrieg"
 
 # ── 4. a tampered install must not reach the restart ─────────────────────────
