@@ -71,21 +71,35 @@ const balance = computed(() => {
 const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null)
 
 // ── trades ─────────────────────────────────────────────────────────────────
+// issue 561 同型补漏（真实余额错位，2026-10-23 操作者报告）：issue 571 把瓦片的
+// 现金账切到了显示账户的 account.list 行，但这里的净利还在读快照顶层的
+// 全局 tradeSummary —— seed+全局净利会把别的账户的亏算进本账户的余额
+// （真线实锤：default 现金账 999.33、自账仅 1 笔，瓦片却显示 990.48，
+// 因为全局 17 笔里含 kalshi 的 −8.85）。读数源改为与 HftPage cumStats
+// 同型：内核账户切片 summary（/api/trades-summary?accountId=display，
+// store.accountTradeSummary）优先；切片缺失（老内核/未到一拍）回落到
+// 账户过滤后的行求和 —— 回落也必须过滤，不能用全局行。
 const tradeRows = computed(() => store.tradeRows)
-const summary = computed(() => snap.value?.tradeSummary ?? null)
+const accountFilteredRows = computed(() => filterByAccount(tradeRows.value, store.activeAccount).rows)
 const trades = computed(() => {
-  const s = summary.value
-  if (s && (s.totalTrades ?? 0) > 0) {
+  // 切片在场且报了成交数即用（内核已按账户过滤，与 HftPage cumStats 同型）；
+  // 切片报 0 笔时也回落行兜底——老内核切片字段可能缺席，行求和仍按账户过滤。
+  const scoped = store.accountTradeSummary
+  if (scoped && (scoped.totalTrades ?? 0) > 0) {
     return {
-      count: s.totalTrades ?? 0,
-      net: s.totalNetPnl ?? 0,
-      fees: s.totalFees ?? 0,
-      winRate: winRatePct(s.winRate),
-      win: s.wins ?? 0,
-      loss: s.losses ?? 0,
+      count: scoped.totalTrades ?? 0,
+      net: scoped.totalNetPnl ?? 0,
+      fees: scoped.totalFees ?? 0,
+      winRate: winRatePct(scoped.winRate),
+      win: scoped.wins ?? 0,
+      loss: scoped.losses ?? 0,
     }
   }
-  const rows = tradeRows.value
+  // 切片读数缺席时的兜底：账户过滤后的行求和。不能用全局行——有显示账户
+  // 而切片未到的一拍，宁可显示过滤行求和，也不能拿全局净利冒充本账户余额
+  // （真线实锤：default 自账 1 笔 −0.67，全局 17 笔含 kalshi −8.85，读全局
+  // 块瓦片显示 990.48 而非 999.33）。无显示账户时全量行即进程级一拍。
+  const rows = store.activeAccount ? accountFilteredRows.value : tradeRows.value
   const win = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
   return {
     count: rows.length,
