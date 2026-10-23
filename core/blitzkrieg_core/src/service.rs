@@ -16919,6 +16919,7 @@ mod tests {
             maker_timeout_ms: 0,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            round_duration_sec: 0,
         };
         std::fs::write(&log, serde_json::to_string(&restored).unwrap() + "\n").unwrap();
         let mut c = Core::new(CoreConfig {
@@ -17647,6 +17648,7 @@ mod tests {
             venue: "polymarket".into(),
             partner_token_id: String::new(),
             last_book_ts: 0,
+            round_duration_sec: 0,
             state: crate::exit_policy::ExitState::new(Decimal::ONE / Decimal::from(2), 0),
             flows: CashFlows::default(),
         };
@@ -28275,6 +28277,7 @@ mod audit_fix_tests {
                 venue: String::new(),
                 partner_token_id: String::new(),
                 last_book_ts: 0,
+                round_duration_sec: 0,
                 state: crate::exit_policy::ExitState::new(dec!(0.43), 1000),
                 flows: crate::position::CashFlows {
                     entry_cost_usd: dec!(4.3),

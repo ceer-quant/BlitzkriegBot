@@ -266,13 +266,56 @@ pub struct TrackedOrder {
     /// account the order was placed from (the same fact `account.list`
     /// reports; #505 routes the execution by it). A DERIVED read: written
     /// empty on every new/restored order (so the persisted log lines and the
-    /// backtest/replay wire stay byte-identical) and filled in when the
-    /// view is read. Empty = the account is unbound (or unknown to the
+    /// backtest/replay wire stay byte-identical) and filled in when the view
+    /// is read. Empty = the account is unbound (or unknown to the
     /// book) — the row renders untagged and the panel's venue filter keeps
     /// it visible. Never inferred from the token or market (#427's mapping
     /// is a different system; the order path does not reach into it).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub venue: String,
+    /// B1a: the round-length family the order was sized/timed against, in
+    /// seconds. `0` = pre-multi-family legacy archive (serde default keeps
+    /// old order-log lines loading unchanged and byte-identical on rewrite);
+    /// B1b stamps it at the consumption points. The authoritative source is
+    /// the market's `round_duration_sec`; [`TrackedOrder::effective_round_duration_sec`]
+    /// resolves the three-state fallback (own > market declaration > global).
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub round_duration_sec: i64,
+}
+
+impl TrackedOrder {
+    /// B1a: the order's effective round length, resolved three-state (read
+    /// only — no write here): the order's OWN stamp when it carries one
+    /// (B1b's write path), else the market's declared duration when the
+    /// market spoke (#354's `round_duration_sec`), else the configured
+    /// global grid. `0` from every source = the caller has no clock fact at
+    /// all; B1b's consumers decide what a 0 means at their own gates.
+    pub fn effective_round_duration_sec(&self, market_decl: Option<i64>, global_sec: i64) -> i64 {
+        if self.round_duration_sec > 0 {
+            return self.round_duration_sec;
+        }
+        if let Some(d) = market_decl.filter(|d| *d > 0) {
+            return d;
+        }
+        global_sec
+    }
+
+    /// B1a: idempotent lazy backfill — write `sec` only when the field is
+    /// still the legacy `0`. An existing non-0 stamp is never overwritten
+    /// (the first family a record was admitted under stays authoritative),
+    /// so calling this on every tick / sweep pass is free and stable.
+    pub fn backfill_round_duration(&mut self, sec: i64) {
+        if self.round_duration_sec == 0 {
+            self.round_duration_sec = sec;
+        }
+    }
+}
+
+/// B1a serde companion: `0` (= undeclared / legacy archive) never reaches the
+/// wire, so a persisted log line written after this PR stays byte-identical
+/// with the pre-B1a shape whenever the field still carries the default.
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
 }
 
 // ── Exit reasons & orderbook ─────────────────────────────────────────────────
@@ -397,5 +440,176 @@ mod mode_tests {
         assert_eq!(s(Mode::Dry), "\"dry\"");
         assert_eq!(s(Mode::Live), "\"live\"");
         assert_eq!(s(Mode::ReadOnly), "\"readonly\"");
+    }
+}
+
+#[cfg(test)]
+mod round_duration_tests {
+    use super::{SignalDirection, TrackedOrder};
+    use blitzkrieg_market_api::{FillPolicy, OrderStatus, Side, default_account_id};
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    /// A legacy archive order: every field the pre-B1a shape carried, and
+    /// nothing else. Constructed (not deserialized) so the struct literal
+    /// itself proves the field is at the tail and defaulted.
+    fn legacy_order() -> TrackedOrder {
+        TrackedOrder {
+            order_id: "o1".into(),
+            internal_key: "k1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Maker,
+            price: dec!(0.43),
+            size: dec!(10),
+            filled_size: Decimal::ZERO,
+            avg_fill_price: None,
+            status: OrderStatus::Live,
+            round_slot: 1,
+            submitted_at_ms: 1,
+            updated_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 0,
+            report_at_ms: 0,
+            venue_order_id: None,
+            escalate_at_ms: None,
+            maker_timeout_ms: 0,
+            role: super::OrderRole::Pending,
+            account_id: default_account_id(),
+            venue: String::new(),
+            round_duration_sec: 0,
+        }
+    }
+
+    fn direction() -> SignalDirection {
+        SignalDirection::Up
+    }
+
+    #[test]
+    fn effective_duration_resolves_the_three_states() {
+        // State 1: the record's own stamp wins over everything.
+        let mut o = legacy_order();
+        o.round_duration_sec = 900;
+        assert_eq!(o.effective_round_duration_sec(Some(3600), 1800), 900);
+
+        // State 2: own 0 + market declaration > 0 → the declaration.
+        let o = legacy_order();
+        assert_eq!(o.effective_round_duration_sec(Some(3600), 1800), 3600);
+
+        // State 2b: a present-but-nonpositive declaration is not a fact.
+        assert_eq!(o.effective_round_duration_sec(Some(0), 1800), 1800);
+        assert_eq!(o.effective_round_duration_sec(Some(-5), 1800), 1800);
+
+        // State 3: no own stamp, no declaration → the global grid (also
+        // when the market never spoke at all).
+        assert_eq!(o.effective_round_duration_sec(None, 1800), 1800);
+
+        // No clock fact anywhere → 0; B1b's consumers gate on that.
+        assert_eq!(o.effective_round_duration_sec(None, 0), 0);
+    }
+
+    #[test]
+    fn backfill_is_idempotent_and_never_overwrites() {
+        let mut o = legacy_order();
+        // First backfill writes.
+        o.backfill_round_duration(3600);
+        assert_eq!(o.round_duration_sec, 3600);
+        // Second backfill is a no-op — two calls, one write.
+        o.backfill_round_duration(900);
+        assert_eq!(
+            o.round_duration_sec, 3600,
+            "a non-0 stamp is never overwritten"
+        );
+        // 0 is not a fact: backfilling 0 onto 0 stays 0.
+        let mut o2 = legacy_order();
+        o2.backfill_round_duration(0);
+        assert_eq!(o2.round_duration_sec, 0);
+    }
+
+    #[test]
+    fn serde_default_and_skip_keep_old_lines_byte_identical() {
+        // The serde contract: a pre-B1a JSON line (no field) deserializes to
+        // 0; a 0 value serializes back WITHOUT the field, so re-persisted
+        // legacy log lines stay byte-identical; a stamped value round-trips
+        // under the camelCase wire name.
+        let o = legacy_order();
+        let line = serde_json::to_string(&o).unwrap();
+        assert!(
+            !line.contains("roundDurationSec"),
+            "0 never reaches the wire: {line}"
+        );
+        let back: TrackedOrder = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            back.round_duration_sec, 0,
+            "absent field defaults to the legacy 0"
+        );
+
+        let mut o = legacy_order();
+        o.backfill_round_duration(900);
+        let line = serde_json::to_string(&o).unwrap();
+        assert!(
+            line.contains("\"roundDurationSec\":900"),
+            "stamped value rides the camelCase wire"
+        );
+        let back: TrackedOrder = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.round_duration_sec, 900);
+    }
+
+    #[test]
+    fn position_carries_the_same_tri_state_and_backfill() {
+        // The position mirrors the order contract (B1b's expiry sweep and
+        // force-close consume it): the same three states, the same
+        // idempotence — `direction()` referenced so the helper is load-bearing.
+        let _ = direction();
+        let mut p = crate::position::OpenPosition {
+            id: "hft-1".into(),
+            strategy: "spread_arb".into(),
+            asset: "BTC".into(),
+            direction: direction(),
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            entry_price: dec!(0.40),
+            current_price: dec!(0.40),
+            prev_price: dec!(0.40),
+            shares: dec!(10),
+            cost_usd: dec!(4),
+            was_maker_entry: true,
+            entry_fee_pct: Decimal::ZERO,
+            entry_role: super::OrderRole::Maker,
+            exit_role: super::OrderRole::Pending,
+            target_exit_price: None,
+            entered_at_ms: 0,
+            expires_at_ms: 0,
+            account_id: default_account_id(),
+            venue: String::new(),
+            partner_token_id: String::new(),
+            last_book_ts: 0,
+            round_duration_sec: 0,
+            state: crate::exit_policy::ExitState::new(dec!(0.40), 0),
+            flows: crate::position::CashFlows::default(),
+        };
+        assert_eq!(p.effective_round_duration_sec(Some(900), 1800), 900);
+        assert_eq!(p.effective_round_duration_sec(None, 1800), 1800);
+        p.round_duration_sec = 3600;
+        assert_eq!(p.effective_round_duration_sec(Some(900), 1800), 3600);
+        // Wire contract, mirrored: the bare (0) snapshot skips the field
+        // (serialize BEFORE the backfill — a stamped value must ride).
+        p.round_duration_sec = 0;
+        let bare = serde_json::to_string(&p).unwrap();
+        assert!(!bare.contains("roundDurationSec"));
+        // Backfill idempotence, mirrored.
+        p.backfill_round_duration(900);
+        p.backfill_round_duration(3600);
+        assert_eq!(p.round_duration_sec, 900);
+        // A stamped value rides the camelCase wire.
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"roundDurationSec\":900")
+        );
     }
 }

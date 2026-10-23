@@ -364,10 +364,13 @@ pub fn render_json_full(
             // #550（症状②）：per-venue 轮次钟行 —— 倒计时卡按 active venue
             // 选行重绑（账户切换器就是交易所切换器），不再读全局保守钟的
             // 标量块。老内核没有该键 → 空表，面板走现行为（feature-detect
-            // 降级同一纪律）。
+            // 降级同一纪律）。B1a：行还带 `durationSec`（向后兼容增量字
+            // 段，老内核经 serde default 落 0）—— 多族语料下同 venue 多
+            // 行，面板按 (venue, durationSec) 选行，字段在场（>0）才用。
             "venueRounds": r.venue_rounds.iter().map(|v| serde_json::json!({
-                "venue": v.venue, "slot": v.slot, "ageSec": v.age_sec,
-                "timeLeftSec": v.time_left_sec })).collect::<Vec<_>>() })),
+                "venue": v.venue, "durationSec": v.duration_sec, "slot": v.slot,
+                "ageSec": v.age_sec, "timeLeftSec": v.time_left_sec }))
+                .collect::<Vec<_>>() })),
         "positions": s.positions.iter().map(|p| serde_json::json!({
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
@@ -3257,16 +3260,20 @@ mod tests {
                     },
                 ],
                 // #550（症状②）：the per-venue round clock rows travel the
-                // same wire — one row per venue that has spoken.
+                // same wire — one row per venue that has spoken. B1a: the
+                // rows carry `durationSec` (the row's round-length family;
+                // 0 = a pre-B1a core's undeclared default).
                 venue_rounds: vec![
                     VenueRoundView {
                         venue: "polymarket".into(),
+                        duration_sec: 900,
                         slot: 7,
                         age_sec: 1,
                         time_left_sec: 299,
                     },
                     VenueRoundView {
                         venue: "kalshi".into(),
+                        duration_sec: 3600,
                         slot: 7,
                         age_sec: 5,
                         time_left_sec: 295,
@@ -3297,6 +3304,11 @@ mod tests {
         assert_eq!(vr.len(), 2, "one row per venue that has spoken");
         assert_eq!(vr[0]["venue"], serde_json::json!("polymarket"));
         assert_eq!(vr[1]["timeLeftSec"], serde_json::json!(295));
+        // B1a: the typed re-assembly must not strip `durationSec` — the same
+        // "网关类型化重组剥字段" failure class the `venue` fields pinned
+        // above. The multi-family panel selects its row by (venue, duration).
+        assert_eq!(vr[0]["durationSec"], serde_json::json!(900));
+        assert_eq!(vr[1]["durationSec"], serde_json::json!(3600));
 
         // Backward compatibility: a core that never wrote `venue` parses into
         // the empty-string default and the wire still carries the key.

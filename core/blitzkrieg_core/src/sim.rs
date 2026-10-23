@@ -381,6 +381,7 @@ mod tests {
             role: OrderRole::Pending,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            round_duration_sec: 0,
         }
     }
 

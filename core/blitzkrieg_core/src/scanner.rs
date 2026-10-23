@@ -120,13 +120,21 @@ pub struct RoundTiming {
 pub struct Scanner {
     cfg: ScannerConfig,
     markets: Vec<CryptoMarket>,
-    /// Venue-reported actual round end (ms), keyed by the market's `venue`
-    /// tag. Multi-plugin data planes run one clock per venue: a Kalshi
-    /// declaration must not move the Polymarket expiry and vice versa. The
-    /// empty-string key is the legacy bucket — markets (or corpora) without a
-    /// venue tag — so old replays behave exactly as the single-value clock did.
-    actual_end_time_ms: HashMap<String, i64>,
-    /// Venue time − local time (ms), keyed by venue like `actual_end_time_ms`.
+    /// Venue-reported actual round end (ms), keyed by **(venue, round duration
+    /// sec)** — the multi-family clock key (B1a). A venue can run SEVERAL
+    /// round-length families at once (PM 15m matches alongside PM 1h markets);
+    /// each family's expiry declaration lands in its own (venue, duration)
+    /// slot, so a 15m close must never freeze a 1h sibling's countdown.
+    /// Multi-plugin data planes keep one clock per venue on top of that: a
+    /// Kalshi declaration must not move the Polymarket expiry and vice versa.
+    /// The empty-string venue is the legacy bucket — markets (or corpora)
+    /// without a venue tag — and the legacy single-duration key is
+    /// `(DEFAULT_VENUE, cfg.round_duration_sec)`, so old replays behave
+    /// exactly as the per-venue-only clock did.
+    actual_end_time_ms: HashMap<(String, i64), i64>,
+    /// Venue time − local time (ms), keyed by VENUE only — the offset is the
+    /// venue's clock property, not a family's: the same venue's wall clock
+    /// serves every round duration it lists.
     clock_offset_ms: HashMap<String, i64>,
 }
 
@@ -188,10 +196,6 @@ impl Scanner {
         venue_now / 1000 / self.cfg.round_duration_sec
     }
 
-    fn slot_expiry_ms(&self, slot: i64) -> i64 {
-        (slot + 1) * self.cfg.round_duration_sec * 1000
-    }
-
     /// The round clock without a markets copy: slot, expiry and the two window
     /// gates. This is the shape the evaluation hot path consumes — it walks the
     /// scanner's live market list by reference, so cloning the owned snapshot
@@ -212,29 +216,97 @@ impl Scanner {
     /// the legacy bucket). Callers that already know the venue of the market
     /// they judge (per-candidate gates, per-token exits) use this so one
     /// venue's observed drift never freezes a sibling venue's trading.
+    ///
+    /// 单族兼容（B1a 回放逐字节不变的关键）：这里 = `round_timing_for` 于
+    /// `(venue, cfg.round_duration_sec)` 的同族折叠。经旧入口写路径
+    /// （`observe_end_time_for_venue`）落表的所有观察都带 cfg 的 duration，
+    /// 单族语料下同族 min ≡ 旧的全表 min —— 断言钉在
+    /// `legacy_venue_entry_equals_pre_b1a_semantics`。
     pub fn round_timing_for_venue(&self, venue: &str, local_now_ms: i64) -> RoundTiming {
-        let slot = self.current_slot(local_now_ms);
-        let grid = self.slot_expiry_ms(slot);
-        let earliest_observed = self
+        self.round_timing_for(venue, self.cfg.round_duration_sec, local_now_ms)
+    }
+
+    /// The multi-family clock (B1a): the round timing of ONE (venue, duration)
+    /// family. The slot grid comes from the FAMILY's duration
+    /// (`duration` sec per slot, venue-offset adjusted), the family's own
+    /// declaration is authoritative, and the conservative fallback folds ONLY
+    /// same-duration observations — a PM 1h market's time_left must never be
+    /// pinned to 0 by a kalshi 15m sibling's expiry (cross-family decay is
+    /// not contagion).
+    pub fn round_timing_for(
+        &self,
+        venue: &str,
+        duration_sec: i64,
+        local_now_ms: i64,
+    ) -> RoundTiming {
+        let offset = self.clock_offset_ms.get(venue).copied().unwrap_or(0);
+        let venue_now = local_now_ms + offset;
+        let slot = venue_now / 1000 / duration_sec;
+        let grid = (slot + 1) * duration_sec * 1000;
+        // Same-family fold only: the family key carries the duration, so a
+        // sibling family's (much nearer) expiry never gates this clock. A
+        // venue with no own declaration reads the earliest same-duration
+        // expiry — the conservative shared window (a round is tradeable only
+        // while every same-duration venue's market is still open); with no
+        // declaration at all in the family, the family's own grid. Single-
+        // family deployments fold the whole table, byte-identical with the
+        // pre-B1a `round_timing_for_venue` behaviour.
+        let earliest_in_family = self
             .actual_end_time_ms
-            .values()
-            .copied()
-            .filter(|t| *t > 0)
+            .iter()
+            .filter(|((_, d), t)| *d == duration_sec && **t > 0)
+            .map(|(_, t)| *t)
             .min();
-        let effective = match self.actual_end_time_ms.get(venue) {
-            // The venue's own declaration is authoritative for its markets.
+        let effective = match self
+            .actual_end_time_ms
+            .get(&(venue.to_string(), duration_sec))
+        {
+            // The venue's own declaration (in this family) is authoritative
+            // for its markets.
             Some(t) if *t > 0 => *t,
-            // No own declaration: the conservative global clock — the earliest
-            // observed expiry across venues, or the grid when none has spoken.
-            _ => earliest_observed.unwrap_or(grid),
+            // No own declaration: the conservative family clock — the earliest
+            // observed expiry across same-duration venues, or the family grid
+            // when none has spoken.
+            _ => earliest_in_family.unwrap_or(grid),
         };
         let time_left = ((effective - local_now_ms) / 1000).max(0);
         RoundTiming {
             slot,
             expires_at_ms: effective,
-            age_sec: self.cfg.round_duration_sec - time_left,
+            age_sec: duration_sec - time_left,
             time_left_sec: time_left,
         }
+    }
+
+    /// The (venue, duration) clocks that have SPOKEN (an in-band expiry
+    /// declaration landed in their slot), as ordered unique pairs — the key
+    /// set of `round_timing_for`. The per-venue rows the panel renders walk
+    /// this in B1a's wire assembly: one row per family, `durationSec` carried.
+    ///
+    /// 排序确定（插入序不稳定）：legacy venue（空串）恒排最前，其余按
+    /// venue 名字典序、同 venue 内按 duration 升序 —— 门禁可逐字节断言
+    /// 行序。`observed_venue_keys`（旧口径）从这里派生 unique venues。
+    pub fn observed_clock_keys(&self) -> Vec<(String, i64)> {
+        let mut keys: Vec<(String, i64)> = self
+            .actual_end_time_ms
+            .iter()
+            .filter(|(_, t)| **t > 0)
+            .map(|((v, d), _)| (v.clone(), *d))
+            .collect();
+        keys.sort_by(|a, b| {
+            if a.0.is_empty() {
+                if b.0.is_empty() {
+                    a.1.cmp(&b.1)
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            } else if b.0.is_empty() {
+                std::cmp::Ordering::Greater
+            } else {
+                a.cmp(b)
+            }
+        });
+        keys
     }
 
     /// The venues that have SPOKEN (an in-band expiry declaration landed in
@@ -248,22 +320,13 @@ impl Scanner {
     /// 排序确定（插入序不稳定，BTreeMap 没用上）：legacy bucket（空串）
     /// 恒排最前，其余按 venue 名字典序 —— 门禁可逐字节断言行序。
     pub fn observed_venue_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self
-            .actual_end_time_ms
-            .iter()
-            .filter(|(_, t)| **t > 0)
-            .map(|(v, _)| v.clone())
-            .collect();
-        keys.sort_by(|a, b| {
-            if a.is_empty() {
-                std::cmp::Ordering::Less
-            } else if b.is_empty() {
-                std::cmp::Ordering::Greater
-            } else {
-                a.cmp(b)
+        let mut venues: Vec<String> = Vec::new();
+        for (v, _) in self.observed_clock_keys() {
+            if !venues.contains(&v) {
+                venues.push(v);
             }
-        });
-        keys
+        }
+        venues
     }
 
     pub fn round_state(&self, local_now_ms: i64) -> RoundState {
@@ -352,17 +415,41 @@ impl Scanner {
 
     /// The same observation, stamped into `venue`'s clock slot. An empty
     /// venue lands in the legacy bucket, keeping #498-era corpora identical.
+    ///
+    /// B1a 兼容委托：duration 取 cfg 的全局轮长 —— 旧调用方（engine.rs
+    /// 的 merge/rollover 观察点）零改动可编译，写入的键落在
+    /// `(venue, cfg.round_duration_sec)`，即旧单族语义的精确化身。多族
+    /// 写入走 [`Self::observe_end_time_for`]。
     pub fn observe_end_time_for_venue(&mut self, venue: &str, end_ms: i64, local_now_ms: i64) {
-        if end_ms <= 0 {
+        self.observe_end_time_for(venue, self.cfg.round_duration_sec, end_ms, local_now_ms);
+    }
+
+    /// Record the venue-reported end time into the (venue, duration) family
+    /// slot — the multi-family write path (B1a). The guard semantics are the
+    /// per-venue path's, verbatim: non-positive declarations ignored, and a
+    /// declaration more than two rounds (of THIS family's duration) out in
+    /// either direction REFUSED rather than adopted, so a discovery bug or a
+    /// long-stale timestamp cannot hijack the family clock. The clock offset
+    /// stays keyed by venue alone — it is the venue's wall-clock property,
+    /// shared by every family the venue runs.
+    pub fn observe_end_time_for(
+        &mut self,
+        venue: &str,
+        duration_sec: i64,
+        end_ms: i64,
+        local_now_ms: i64,
+    ) {
+        if end_ms <= 0 || duration_sec <= 0 {
             return;
         }
-        let round_ms = self.cfg.round_duration_sec * 1000;
+        let round_ms = duration_sec * 1000;
         if (end_ms - local_now_ms).abs() > 2 * round_ms {
             return;
         }
-        self.actual_end_time_ms.insert(venue.to_string(), end_ms);
-        let local_slot = (local_now_ms / 1000) / self.cfg.round_duration_sec;
-        let local_expected_end = (local_slot + 1) * self.cfg.round_duration_sec * 1000;
+        self.actual_end_time_ms
+            .insert((venue.to_string(), duration_sec), end_ms);
+        let local_slot = (local_now_ms / 1000) / duration_sec;
+        let local_expected_end = (local_slot + 1) * duration_sec * 1000;
         self.clock_offset_ms
             .insert(venue.to_string(), end_ms - local_expected_end);
     }
@@ -450,7 +537,7 @@ mod tests {
         let now = 1_000_000i64;
         let observed = |s: &Scanner| {
             s.actual_end_time_ms
-                .get(DEFAULT_VENUE)
+                .get(&(DEFAULT_VENUE.to_string(), 900))
                 .copied()
                 .unwrap_or(0)
         };
@@ -572,6 +659,273 @@ mod tests {
             }
             .to_string()
             .contains("Too close to expiry (120s < 180s)")
+        );
+    }
+
+    // ── B1a：多族 (venue, duration) 时钟键 ──────────────────────────────
+
+    #[test]
+    fn cross_family_clocks_get_their_own_slot_and_expiry() {
+        // 同一时刻（无任何观察、无偏移）两个族各推各的 slot/expiry：
+        // 900s 族与 3600s 族在 now = 1_000_000（slot 边界 900_000 与
+        // 3_600_000 的整倍数相差甚远）必须得出不同的 slot 与到期，证明
+        // slot 网格跟族走，不再全局一根尺。
+        let s = Scanner::new(ScannerConfig {
+            round_duration_sec: 3600,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        let f15 = s.round_timing_for("polymarket", 900, now);
+        let f1h = s.round_timing_for("polymarket", 3600, now);
+        // 900s grid: slot 1, expiry 1_800_000。3600s grid: slot 0, expiry 3_600_000。
+        assert_eq!(f15.slot, 1);
+        assert_eq!(f15.expires_at_ms, 1_800_000);
+        assert_eq!(f15.time_left_sec, 800);
+        assert_eq!(f15.age_sec, 100);
+        assert_eq!(f1h.slot, 0);
+        assert_eq!(f1h.expires_at_ms, 3_600_000);
+        assert_eq!(f1h.time_left_sec, 2_600);
+        assert_eq!(f1h.age_sec, 1_000);
+        assert_ne!(f15.slot, f1h.slot);
+        assert_ne!(f15.expires_at_ms, f1h.expires_at_ms);
+    }
+
+    #[test]
+    fn a_15m_observation_never_pollutes_a_1h_clock() {
+        // 族内折叠隔离证明：kalshi@900 的到期声明落表后，polymarket@3600
+        // 在「自己没有声明」时的兜底折叠只扫同 duration 键 —— 15m 的
+        // observed expiry（近得多）不得把 1h 的 time_left 钉死。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        // A kalshi 15m declaration, in-band for the 900s family.
+        s.observe_end_time_for("kalshi", 900, 1_800_500, now);
+        // A polymarket 1h declaration too — the 1h family has its OWN voice.
+        s.observe_end_time_for("polymarket", 3600, 3_600_200, now);
+
+        // PM@3600 reads its OWN declaration (authoritative per family).
+        let pm_1h = s.round_timing_for("polymarket", 3600, now);
+        assert_eq!(
+            pm_1h.expires_at_ms, 3_600_200,
+            "own family declaration wins"
+        );
+        assert_eq!(pm_1h.time_left_sec, 2_600);
+
+        // A 1h venue that has NOT spoken folds ONLY same-duration clocks:
+        // the 15m expiry (1_800_500) must not appear in its fold.
+        let other_1h = s.round_timing_for("kalshi", 3600, now);
+        assert_eq!(
+            other_1h.expires_at_ms, 3_600_200,
+            "the 1h fold sees the only 1h declaration, never the 15m one"
+        );
+
+        // And the 15m family keeps its own clock despite the 1h presence.
+        let k15 = s.round_timing_for("kalshi", 900, now);
+        assert_eq!(k15.expires_at_ms, 1_800_500);
+        assert_eq!(k15.time_left_sec, 800);
+    }
+    #[test]
+    fn family_fallback_folds_within_the_same_duration_only() {
+        // 兜底 earliest_observed 折叠的同族性：唯一声明在 15m 族，1h 族
+        // 无任何声明 → 1h 兜底走自己的网格（不是 15m 的 observed）。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        s.observe_end_time_for("kalshi", 900, 1_800_300, now);
+        let silent_1h = s.round_timing_for("polymarket", 3600, now);
+        assert_eq!(
+            silent_1h.expires_at_ms, 3_600_000,
+            "a family with no declarations falls back to ITS OWN grid, never a sibling family's expiry"
+        );
+        assert_eq!(
+            silent_1h.slot, 0,
+            "the 1h slot grid runs on the family duration"
+        );
+        // The 15m family's own fold still sees the declaration.
+        let fold_15 = s.round_timing_for("polymarket", 900, now);
+        assert_eq!(
+            fold_15.expires_at_ms, 1_800_300,
+            "same-family fold reaches the sibling's declaration"
+        );
+    }
+
+    #[test]
+    fn legacy_venue_entry_equals_pre_b1a_semantics() {
+        // 回放逐字节不变的关键证明：多 venue 单族观察表下，旧入口
+        // `round_timing_for_venue` 的结果与升级前语义一致。升级前：
+        // slot = current_slot（cfg 网格 + venue 偏移），折叠 = 全表
+        // `>0` min（升级前全表 = 单族表，同族折叠 ≡ 全表 min），own
+        // declaration 权威。这些期望值是升级前语义的手工演算（同一
+        // 公式），不是改动后的输出。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 900_000i64;
+        s.observe_end_time_for_venue("polymarket", 1_800_500, now);
+        s.observe_end_time_for_venue("kalshi", 1_799_800, now);
+        s.observe_end_time_for_venue("", 1_800_200, now);
+
+        // Own declaration authoritative; offset-derived slot grid unchanged.
+        let pm = s.round_timing_for_venue("polymarket", now);
+        assert_eq!(pm.slot, 1, "offset-adjusted slot: (900_000 + 500ms) / 900s");
+        assert_eq!(pm.expires_at_ms, 1_800_500);
+        assert_eq!(
+            pm.time_left_sec, 900,
+            "(1_800_500 − 900_000)ms / 1000, floored"
+        );
+        assert_eq!(pm.age_sec, 0, "age = duration − time_left");
+
+        let k = s.round_timing_for_venue("kalshi", now);
+        assert_eq!(k.expires_at_ms, 1_799_800);
+        assert_eq!(k.time_left_sec, 899);
+
+        // A venue with no voice folds the whole single-family table's min.
+        let ghost = s.round_timing_for_venue("ghost", now);
+        assert_eq!(
+            ghost.expires_at_ms, 1_799_800,
+            "single-family fold ≡ the pre-B1a whole-table min"
+        );
+
+        // The same values through the new keyed entry — the legacy entry IS
+        // the (venue, cfg.duration) projection.
+        let pm2 = s.round_timing_for("polymarket", 900, now);
+        assert_eq!(pm.slot, pm2.slot);
+        assert_eq!(pm.expires_at_ms, pm2.expires_at_ms);
+        assert_eq!(pm.time_left_sec, pm2.time_left_sec);
+
+        // The global entry (`round_timing`, legacy bucket) is byte-untouched:
+        // the empty-venue clock folds the same single-family table.
+        let global = s.round_timing(now);
+        assert_eq!(global.slot, 1);
+        assert_eq!(global.expires_at_ms, 1_800_200);
+        assert_eq!(global.time_left_sec, 900);
+    }
+
+    #[test]
+    fn observe_end_time_for_writes_family_keys_and_keeps_offset_per_venue() {
+        // 写路径：多族声明各落各族键；偏移仍按 venue 一份（后来族的声明
+        // 刷新同一 venue 的偏移，不另立族表）。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        s.observe_end_time_for("polymarket", 900, 1_800_500, now);
+        s.observe_end_time_for("polymarket", 3600, 3_600_900, now);
+
+        // The 900s family stores its value under the family key (visible
+        // through the read path; the map is private, so assert by clock).
+        assert_eq!(
+            s.round_timing_for("polymarket", 900, now).expires_at_ms,
+            1_800_500
+        );
+        assert_eq!(
+            s.round_timing_for("polymarket", 3600, now).expires_at_ms,
+            3_600_900
+        );
+
+        // Offset stays per venue: the LAST in-band declaration refreshed the
+        // same (single) offset entry — 3_600_900 − local expected 1h end.
+        // Local expected end for the 3600s family at now = (1_000_000/1000/
+        // 3600 + 1) * 3600 * 1000 = 3_600_000 → offset 900.
+        assert_eq!(s.clock_offset_ms(), 900);
+
+        // Guard semantics copied verbatim: non-positive refused.
+        s.observe_end_time_for("polymarket", 900, 0, now);
+        assert_eq!(
+            s.round_timing_for("polymarket", 900, now).expires_at_ms,
+            1_800_500,
+            "0 refused"
+        );
+        // Out-of-band (this family's own 2-round band) refused: the ghost's
+        // own key stays absent, and its read falls back to the conservative
+        // same-family clock — the polymarket declaration that IS in band.
+        s.observe_end_time_for("ghost", 900, now + 10 * 365 * 86_400_000, now);
+        assert_eq!(
+            s.round_timing_for("ghost", 900, now).expires_at_ms,
+            1_800_500,
+            "the refused declaration leaves no ghost key; the family fold reads the in-band sibling"
+        );
+        // A non-positive duration is a malformed call — ignored wholesale.
+        s.observe_end_time_for("polymarket", 0, 1_800_500, now);
+        assert!(
+            !s.observed_clock_keys()
+                .iter()
+                .any(|(v, d)| v == "polymarket" && *d == 0),
+            "duration ≤ 0 never opens a family key"
+        );
+    }
+
+    #[test]
+    fn observed_clock_keys_dedupe_and_order_deterministically() {
+        // 去重保序：legacy venue 恒最前；其余按 (venue, duration) 字典序；
+        // 同 (venue,duration) 只一行（去重）；未开口的 venue/族绝不出现。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        assert!(
+            s.observed_clock_keys().is_empty(),
+            "no declaration → no rows"
+        );
+        let now = 1_000_000i64;
+        s.observe_end_time_for("polymarket", 3600, 3_600_500, now);
+        s.observe_end_time_for("kalshi", 900, 1_800_500, now);
+        s.observe_end_time_for("kalshi", 3600, 3_600_200, now);
+        s.observe_end_time_for("kalshi", 900, 1_800_600, now); // refresh, not a new key
+        s.observe_end_time_for("", 900, 1_800_200, now);
+        assert_eq!(
+            s.observed_clock_keys(),
+            vec![
+                (String::new(), 900),
+                ("kalshi".to_string(), 900),
+                ("kalshi".to_string(), 3600),
+                ("polymarket".to_string(), 3600),
+            ],
+            "legacy first, then (venue, duration) lexicographic, deduped"
+        );
+        // A refused declaration never opens a key.
+        s.observe_end_time_for("ghost", 900, now + 10 * 365 * 86_400_000, now);
+        assert!(!s.observed_clock_keys().iter().any(|(v, _)| v == "ghost"));
+        // The legacy venue list derives from the clock keys, order intact.
+        assert_eq!(
+            s.observed_venue_keys(),
+            vec![
+                String::new(),
+                "kalshi".to_string(),
+                "polymarket".to_string()
+            ],
+            "unique venues in the clock-key order"
+        );
+    }
+
+    #[test]
+    fn out_of_band_family_declarations_are_refused_per_family_band() {
+        // 守卫带按族轮长算：3600s 族的 ±2 轮 = ±7200s，900s 族拒收的
+        // 30 分钟外声明在 1h 族 in-band。
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        // 3_600_000ms out: refused by the 900s family (band ±1_800_000)…
+        s.observe_end_time_for("kalshi", 900, now + 3_600_000, now);
+        assert!(
+            !s.observed_clock_keys()
+                .contains(&("kalshi".to_string(), 900)),
+            "outside the 15m family's ±2-round band"
+        );
+        // …but in-band for the 3600s family (band ±7_200_000).
+        s.observe_end_time_for("kalshi", 3600, now + 3_600_000, now);
+        assert_eq!(
+            s.round_timing_for("kalshi", 3600, now).expires_at_ms,
+            now + 3_600_000,
+            "the same declaration is inside the 1h family's band"
         );
     }
 }

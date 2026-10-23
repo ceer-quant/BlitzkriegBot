@@ -561,11 +561,29 @@ pub struct OpenPosition {
     /// loading as "no book seen since restart").
     #[serde(default)]
     pub last_book_ts: i64,
+    /// B1a: the round-length family the position was opened under, in
+    /// seconds. `0` = pre-multi-family legacy snapshot (serde default keeps
+    /// old positions.jsonl lines loading unchanged and byte-identical on
+    /// rewrite); B1b stamps it at the open path and backfills lazily at the
+    /// expiry/force-close consumers. The authoritative source is the
+    /// market's `round_duration_sec`;
+    /// [`OpenPosition::effective_round_duration_sec`] resolves the
+    /// three-state fallback (own > market declaration > global).
+    #[serde(default, skip_serializing_if = "position_zero_i64")]
+    pub round_duration_sec: i64,
     pub state: ExitState,
     /// Actual cash flows since the position opened. Snapshots written before E17
     /// carry the serde default (all zero) and are repaired by [`OpenPosition::flows`].
     #[serde(default)]
     pub flows: CashFlows,
+}
+
+/// B1a serde companion: `0` (= undeclared / legacy snapshot) never reaches
+/// the wire, so a positions.jsonl line written after this PR stays
+/// byte-identical with the pre-B1a shape whenever the field still carries
+/// the default.
+fn position_zero_i64(v: &i64) -> bool {
+    *v == 0
 }
 
 impl OpenPosition {
@@ -587,6 +605,36 @@ impl OpenPosition {
                 * self.shares,
             opened_shares: self.shares,
             ..Default::default()
+        }
+    }
+
+    /// B1a: the position's effective round length, resolved three-state (read
+    /// only — no write here): the position's OWN stamp when it carries one
+    /// (B1b's write path at open), else the market's declared duration when
+    /// the market spoke (#354's `round_duration_sec`), else the configured
+    /// global grid. `0` from every source = the caller has no clock fact at
+    /// all; B1b's consumers (expiry sweep, force-close, held-position view,
+    /// pair-chase) decide what a 0 means at their own gates.
+    pub fn effective_round_duration_sec(&self, market_decl: Option<i64>, global_sec: i64) -> i64 {
+        if self.round_duration_sec > 0 {
+            return self.round_duration_sec;
+        }
+        if let Some(d) = market_decl.filter(|d| *d > 0) {
+            return d;
+        }
+        global_sec
+    }
+
+    /// B1a: idempotent lazy backfill — write `sec` only when the field is
+    /// still the legacy `0`. An existing non-0 stamp is never overwritten
+    /// (the first family a record was admitted under stays authoritative),
+    /// so calling this on every sweep pass is free and stable. The kernel's
+    /// whole state lives under the single-threaded Core lock
+    /// (`ipc/server.rs` serializes every verb and sweep), so the write-back
+    /// rides the ordinary field-assignment path — no new lock.
+    pub fn backfill_round_duration(&mut self, sec: i64) {
+        if self.round_duration_sec == 0 {
+            self.round_duration_sec = sec;
         }
     }
 }
@@ -1215,6 +1263,9 @@ impl PositionManager {
             venue: p.venue,
             partner_token_id: p.partner_token_id,
             last_book_ts: 0,
+            // B1a: 0 until B1b stamps the family at the open path (write
+            // point deliberately out of this PR's diff).
+            round_duration_sec: 0,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
         };
