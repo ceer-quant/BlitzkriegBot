@@ -4314,6 +4314,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_compiled_defaults_carry_the_former_factory_file_values() {
+        // env single-source guard: the [engine] rows deleted from the shipped
+        // default.toml (2026-10-23) resolved to these values. If a change moves
+        // a compiled default, it must be an EXPLICIT act paired with a .env /
+        // BK_* rollout — never a silent drift hidden behind "the file still
+        // says 900" (it no longer says anything). 900 (15m), not 300 (5m): a
+        // file-driven 5m is a measured regression (MIGRATION_LOG §12) that
+        // `scripts/soak-health.sh` alarms on.
+        assert_eq!(DEFAULT_ASSETS, ["BTC", "ETH", "SOL", "XRP"]);
+        assert_eq!(DEFAULT_ROUND_SEC, 900);
+        assert_eq!(DEFAULT_MIN_ROUND_AGE_SEC, 30);
+        assert_eq!(DEFAULT_MIN_TIME_LEFT_SEC, 180);
+    }
+
     // ── E17/#264: the engine-level exit ladder ──────────────────────────────
 
     /// The property the ticket turns on: the four flags exist, and leaving them

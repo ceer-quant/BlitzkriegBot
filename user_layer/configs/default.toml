@@ -13,18 +13,20 @@
 # Turn the file off entirely with `--no-config` or `BK_CONFIG=none`; point at a
 # different one with `--config <path>` or `BK_CONFIG=<path>`. The sibling
 # `shadow_evolution.toml` in this directory is read with this file.
+#
+# ── env single-source (2026-10-23 operator ruling) ───────────────────────────
+# The factory keys are GONE from this file on purpose: `.env` is the single
+# trusted configuration source (see .env.example), and this file now documents
+# the extension surface only. Every `[engine]` key the file used to set
+# (assets / round_sec / min_round_age_sec / min_time_left_sec) is compiled into
+# the binary at exactly the same value, so removing the explicit rows changes
+# nothing at runtime — and it un-suppresses the round-duration UI card's
+# persisted cell (data/runtime/config.json), which an explicit round_sec here
+# was shadowing (issue 499, 2026-10-16 six-answers finding 1). Per-experiment
+# overrides go in `.env` as BK_* variables or on the command line.
 
 [engine]
-assets = ["BTC", "ETH", "SOL", "XRP"]
-# 900 = 15m rounds. Do NOT lower this to 300 (5m) as a "tuning" change: the
-# tradeable window is [min_round_age_sec, round_sec - min_time_left_sec] and the
-# timing gates are absolute seconds, so 5m shrinks the post-confirmation wait for
-# a retrace from ~660s to ~30s. Measured: switching to 5m took the engine from
-# ~3 trades/hour to zero signals (see MIGRATION_LOG §12), and `soak-health.sh`
-# alarms on any running core whose argv says 300.
-round_sec = 900
-min_round_age_sec = 30
-min_time_left_sec = 180
+# (keys intentionally absent — see the env single-source note above)
 
 # ── The engine-level exit ladder (E17/#264) ──────────────────────────────────
 # Exits belong to the KERNEL, not to a strategy library: these four knobs are
