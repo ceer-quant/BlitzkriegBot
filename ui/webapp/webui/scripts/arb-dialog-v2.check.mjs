@@ -19,11 +19,14 @@
  * What this gate pins (source-level, following the repo's .check.mjs teeth
  * pattern):
  *   1. 弹窗的四段锚点：A 腿 / B 腿 / 币对（静态候选集披露）/ 确认页只读汇总。
- *   2. 提交序：arb.config.set 成功在前，setStrategy 启用在后（A 腿账户作用域）。
+ *   2. 提交序：arb.config.set 成功在前，setStrategy 启用在后（A 腿账户作用域，
+ *      策略名 = 弹窗策略段选中的策略）。
  *   3. 硬门在前端先拦：B 交易所 ≠ A、B 账户 ≠ A —— 两道门的判据与文案。
  *   4. 账户过滤在源头：venue 匹配（含绑定留空 = 任意交易所）+ 可交易状态
  *      白名单（read_only / frozen 不进列表）。
  *   5. client.ts 的 wire 面：arbConfigGet / arbConfigSet 走专用代理路由。
+ *   6. 去标题化（2026-10）：标题是中性词「创建套利」，cross_venue_arb 只是
+ *      策略名不是套利本身；弹窗首段是策略选择（静态单选项 + 未支持不假提交）。
  *
  *   cd ui/webapp/webui && npm run check:arb-dialog
  */
@@ -146,8 +149,53 @@ check('提交序：arb.config.set 成功在前，setStrategy 启用在后（A �
   const onAt = commit.indexOf('setStrategy')
   assert.ok(setAt >= 0, 'commit 缺 arbConfigSet 调用')
   assert.ok(onAt > setAt, 'setStrategy 出现在 arb.config.set 之前 —— 合同提交序反了')
-  assert.match(commit, /setStrategy\('cross_venue_arb', true, legAAccount\.value\)/, '启用未落在 A 腿账户作用域')
+  // 2026-10 弹窗加策略选择段：启用名 = 选中的策略（selectedArbStrategy），
+  // 不再钉死字面量 —— 硬编码字面量会让平台化时启用错策略。
+  assert.match(
+    commit,
+    /setStrategy\(\s*selectedArbStrategy\.value\s*,\s*true,\s*legAAccount\.value\)/,
+    '启用未落在 A 腿账户作用域，或仍硬编码策略名（应消费选中策略）',
+  )
   assert.match(commit, /cfg\.error/, 'config 回执的 error 字段未检查（APPLICATION 错误会被吞）')
+})
+
+// ── 去标题化 + 策略选择段（2026-10）─────────────────────────────────────────
+check('标题去 cross_venue_arb 化：弹窗标题是中性词（创建套利）', () => {
+  const title = dialog.match(/<h3[^>]*>([^<]*)<\/h3>/)?.[1] ?? ''
+  assert.ok(!title.includes('cross_venue_arb'), `标题仍含策略名：「${title}」—— cross_venue_arb 只是套利策略之一，不是套利本身`)
+  assert.ok(/创建套利/.test(title), `标题缺中性词「创建套利」：「${title}」`)
+})
+
+check('弹窗有策略选择段（置于最前，A 腿段之前）', () => {
+  assert.match(dialog, /label-micro">策略</, '缺「策略」段标题')
+  const segAt = dialog.indexOf('label-micro">策略<')
+  const legAt = dialog.indexOf('label-micro">A 腿<')
+  assert.ok(segAt >= 0 && legAt >= 0 && segAt < legAt, '策略段不在 A 腿段之前 —— 策略选择是第一段')
+  assert.match(dialog, /selectedArbStrategy/, '缺 selectedArbStrategy 选中状态')
+})
+
+check('策略候选面：静态单选项 + 平台化时换能力声明驱动的注释在场', () => {
+  // 探测结论：strategy.list 行 wire 上无 arb/atomic_batch 能力字段
+  // （modes wire 对象只带 market_type/structure），没有可靠的运行时判定
+  // 面板能据它推导「谁是套利策略」—— 候选集只能静态。
+  assert.match(dialog, /const ARB_STRATEGY_OPTIONS/, '缺策略候选常量 ARB_STRATEGY_OPTIONS')
+  // 注释必须钉在常量附近（平台化时的替换点可寻）。
+  const block = dialog.match(/\/\*[\s\S]*?\*\/\nconst ARB_STRATEGY_OPTIONS|\/\/[^\n]*\nconst ARB_STRATEGY_OPTIONS/)
+  assert.ok(block, '候选常量附近缺注释 —— 平台化时换能力声明驱动的替换依据必须钉在数据源上')
+  assert.match(block[0], /能力声明/, '候选常量的注释未点名「能力声明」驱动')
+})
+
+check('未支持的策略名不假提交：选择非 cross_venue_arb 时置灰/提示', () => {
+  // 内核 arb.config.set IPC 只认 [cross_venue_arb] 节 —— 面板不提交一个
+  // 内核必拒的名字。
+  const m = dialog.match(/strategySupported|arbSupported|strategyNotSupported/)
+  assert.ok(m, '缺「该策略暂未支持」的具名判定 —— 未支持的策略必须被拦，不假提交')
+  assert.match(dialog, /该策略暂未支持|暂未支持/, '缺未支持提示文案')
+  assert.match(
+    dialog,
+    /ARB_STRATEGY\.includes\(|ARB_STRATEGY ===|strategySupported\(/,
+    '未支持判定不消费 ARB_STRATEGY 合同（判定与提交链脱钩）',
+  )
 })
 
 check('老内核降级面：只读提示 + 禁用创建，不降级为单账户单选', () => {
