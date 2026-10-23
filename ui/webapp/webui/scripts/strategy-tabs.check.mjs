@@ -90,6 +90,19 @@ check('arb 段渲染是条件门（不可见 = 段消失，不是禁用）', () 
   )
 })
 
+check('段消失时选中 tab 拨回单所（悬空 arb id = 高亮变黑 + 行过滤泄漏）', () => {
+  assert.match(
+    page,
+    /watch\(arbTabVisible/,
+    '缺 arbTabVisible watch —— 腿账户切走后 perfTab 悬停在 arb，段没了高亮匹配也没了',
+  )
+  assert.match(
+    page,
+    /perfTab\.value === 'arb'\)?\s*perfTab\.value = 'single'/,
+    '拨回目标不是 single',
+  )
+})
+
 // ── 3. 行切分 ───────────────────────────────────────────────────────────────
 check('ARB_STRATEGY 单实例合同（平台化时换配置驱动的 ponytail 注释在场）', () => {
   assert.match(page, /const ARB_STRATEGY = 'cross_venue_arb'/, '缺 ARB_STRATEGY 单实例常量')

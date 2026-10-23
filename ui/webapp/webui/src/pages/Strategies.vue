@@ -29,7 +29,7 @@
  * （账户跟随的切片由 store 保证），tab 只按策略身份切分，不丢行。「创建套利」
  * 按钮固定在 header —— 它是弹窗的唯一入口，可达性优先于 tab 归属。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, ChevronDown, Link2, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
 import { api, type StrategyStatsRow, type StrategyParamsReadoutDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
@@ -368,6 +368,13 @@ const arbTabVisible = computed(() => {
   const acct = store.displayAccount
   if (!arbConfigured.value || !acct) return false
   return arbLegAccounts.value.includes(acct)
+})
+
+// 段消失时把选中 tab 拨回单所：账户从腿账户切走（或配置被解除）后
+// `arb` 不再是 segments 里的一员，v-model 悬空会让 SegmentedControl
+// 失去高亮匹配段（变黑），行过滤也会按悬空的 'arb' 继续裁行。
+watch(arbTabVisible, (visible) => {
+  if (!visible && perfTab.value === 'arb') perfTab.value = 'single'
 })
 
 onMounted(() => {

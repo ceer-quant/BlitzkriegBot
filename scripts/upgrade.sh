@@ -35,8 +35,9 @@
 # successful upgrade, which is how a green deploy kept behaving like the old build:
 #   * user_layer/configs/*.toml — the factory values (e.g. shadow_evolution's
 #     enabled / auto_evolve). These are shipped defaults, not the operator's
-#     surface: the runtime switches persist in data/evolution/state.json and
-#     outrank the file. A locally edited copy is backed up under the rollback
+#     surface: since #578 the FILE is the single source of truth for the
+#     evolution switches (a runtime verb writes back into it; state.json keeps
+#     only bookkeeping). A locally edited copy is backed up under the rollback
 #     directory and named in the log before it is replaced. EXCEPTION: configs
 #     the KERNEL rewrites at runtime (accounts.toml — venue bindings, per-account
 #     strategy sets, the display pointer all persist there) are operator STATE,
@@ -245,10 +246,12 @@ fi
 grep -E '\[core\]' "$RUN_LOG" | tail -3 || true
 printf 'core: %s (identity verified via %s)\n' "$ready" "$lock"
 # The switches the operator cares about, as the kernel resolved them: a deploy that
-# shipped a new config file must be able to show that the value moved.
+# shipped a new config file must be able to show that the value moved. Since #578
+# the FILE decides, so the toml lines above are the whole story; state.json is
+# bookkeeping only and is printed as such (never as an override).
 grep -E 'config shadow_evolution\.(enabled|auto_evolve)=' "$RUN_LOG" | tail -4 || true
 if [ -f "$repo_root/data/evolution/state.json" ]; then
-  printf 'evolution switches (runtime state, outranks the file): %s\n' \
+  printf 'evolution bookkeeping (state.json, no switch authority since #578): %s\n' \
     "$(cat "$repo_root/data/evolution/state.json")"
 fi
 printf 'panel: HTTP %s on 127.0.0.1:51888/panel/\n' "$code"
