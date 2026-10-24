@@ -9,7 +9,8 @@
 //! only builds the struct by hand proves nothing about the wire.
 
 use crate::core::types::{
-    EngineStatsView, LastErrorView, RoundView, TradingFrozenView, UiSnapshot, VenueRoundView,
+    EngineStatsView, LastErrorView, MarketPluginRow, RoundView, TradingFrozenView, UiSnapshot,
+    VenueRoundView,
 };
 
 /// Build one per-venue round clock row (the panel's countdown source, issue 550
@@ -182,4 +183,28 @@ fn a_frozen_payload_carries_what_the_banner_renders() {
     let f: TradingFrozenView = v.trading_frozen.expect("freeze state");
     assert!(f.active);
     assert!(f.reason.unwrap().contains("consecutive venue rejections"));
+}
+
+/// #604: `market.list` rows carry the round families each plugin declares
+/// (`supportedRoundSecs`, omitted for plugins that declare none). The panel
+/// snapshot rides on this row, so the view must keep the key — dropping it
+/// silently in this translation layer is exactly how the declaration face
+/// vanished from the panel while the kernel and the webui both had it.
+#[test]
+fn market_plugin_rows_keep_the_declared_round_families() {
+    let declared = serde_json::json!({
+        "name": "kalshi", "type": "market", "enabled": true, "active": true,
+        "capabilities": [], "supportedRoundSecs": [900],
+    });
+    let v: MarketPluginRow =
+        serde_json::from_value(declared).expect("a declared row must deserialize");
+    assert_eq!(v.supported_round_secs, Some(vec![900]));
+
+    let undeclared = serde_json::json!({
+        "name": "predictfun", "type": "market", "enabled": true,
+        "capabilities": [],
+    });
+    let v: MarketPluginRow =
+        serde_json::from_value(undeclared).expect("an undeclared row must deserialize");
+    assert_eq!(v.supported_round_secs, None, "absent key = no restriction");
 }
