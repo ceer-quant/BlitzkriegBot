@@ -8,10 +8,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
-import type { RoundDurationDoc, ResetTradingResultDoc } from '@/api/client'
+import type { ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
-import { useRestartCore, RESTART_DELAY_SEC } from '@/lib/restart-core'
+import { useRoundDuration } from '@/lib/round-duration'
 import { useSettingsStore } from '@/stores/settings'
 import { usePanelStore } from '@/stores/panel'
 import { useTheme, type ThemeMode } from '@/lib/theme'
@@ -106,107 +106,15 @@ const themeValue = computed<ThemeMode>({
 })
 
 // ── 轮次时间周期（next_session：轮次网格是坐标系，热切会错解存量 round_slot）──
-const roundDoc = ref<RoundDurationDoc | null>(null)
-const roundErr = ref<string | null>(null)
-const roundMsg = ref<string | null>(null)
-const roundBusy = ref(false)
-const roundPending = ref<number | null>(null)
-
-// issue 488：写入持久格成功后 10s 自动重启内核（可在倒计时内取消/立即）。
-const restart = useRestartCore()
-
-const roundSegments = computed(() => {
-  const allowed = roundDoc.value?.allowed ?? []
-  const seen = new Set<number>()
-  const out: { id: string; label: string }[] = []
-  for (const o of allowed) {
-    if (seen.has(o.sec)) continue
-    seen.add(o.sec)
-    out.push({ id: String(o.sec), label: o.label ?? `${o.sec}s` })
-  }
-  return out
-})
-const roundValue = computed<string>({
-  // 预填「下次会话将跑的值」（持久格优先），不是本会话生效值 —— 卡片承诺
-  // 的是「重启后是什么」。
-  get: () => String(roundPending.value ?? roundDoc.value?.nextSessionSec ?? ''),
-  set: (v) => { roundPending.value = Number(v) },
-})
-const roundDirty = computed(
-  () => roundPending.value !== null
-    && roundPending.value !== roundDoc.value?.nextSessionSec,
-)
-const roundFlagLocked = computed(
-  () => roundDoc.value?.source === 'cli_or_env',
-)
-const roundSourceLabel = computed(() => {
-  switch (roundDoc.value?.source) {
-    case 'cli_or_env': return '命令行/环境变量'
-    case 'runtime': return '面板设置'
-    case 'toml': return '配置文件'
-    case 'env': return '环境变量'
-    default: return '出厂默认'
-  }
-})
-
-async function loadRound(): Promise<void> {
-  roundBusy.value = true
-  try {
-    roundDoc.value = await api.roundDuration()
-    roundErr.value = roundDoc.value.error ?? null
-    roundPending.value = null
-  } catch (e) {
-    roundErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    roundBusy.value = false
-  }
-}
-
-async function saveRound(): Promise<void> {
-  if (roundPending.value === null) return
-  roundBusy.value = true
-  roundErr.value = null
-  roundMsg.value = null
-  try {
-    const res = await api.roundDurationSet({
-      durationSec: roundPending.value,
-      reason: 'webui 面板编辑（轮次时间周期卡）',
-    })
-    if (res.error) {
-      roundErr.value = res.error
-    } else {
-      roundMsg.value = `已保存：${RESTART_DELAY_SEC}s 后自动重启内核生效，将按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
-      await loadRound()
-      restart.schedule()
-    }
-  } catch (e) {
-    roundErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    roundBusy.value = false
-  }
-}
-
-async function resetRound(): Promise<void> {
-  roundBusy.value = true
-  roundErr.value = null
-  roundMsg.value = null
-  try {
-    const res = await api.roundDurationSet({ reset: true, reason: 'webui 面板清除（轮次时间周期卡）' })
-    if (res.error) {
-      roundErr.value = res.error
-    } else {
-      roundMsg.value = `已清除面板设置：${RESTART_DELAY_SEC}s 后自动重启，下次会话回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。`
-      await loadRound()
-      restart.schedule()
-    }
-  } catch (e) {
-    roundErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    roundBusy.value = false
-  }
-}
-
-onMounted(loadRound)
+// 2026-10-24 操作者指令：切换入口主阵地挪到行情页倒计时卡（盯盘时切周期
+// 不离开语境）；本卡保留为同一 composable 的第二卡面 —— 共享一份读数与
+// 写路径（lib/round-duration.ts），语义零改动。
+const {
+  doc: roundDoc, err: roundErr, msg: roundMsg, busy: roundBusy,
+  segments: roundSegments, value: roundValue, dirty: roundDirty,
+  flagLocked: roundFlagLocked, sourceLabel: roundSourceLabel,
+  save: saveRound, reset: resetRound, restart,
+} = useRoundDuration()
 
 // ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
 // issue 561（裁决 2）：重置按账户隔离 —— 显式携带面板 display 账户（唯一可
