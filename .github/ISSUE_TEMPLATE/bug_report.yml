@@ -47,7 +47,7 @@ body:
       label: 复现步骤
       description: 尽量给出可复现的命令/回放（优先确定性复现器，勿依赖实时行情）。
       placeholder: |
-        1. 模式为 DRY（HFT_CORE=rust, dry=true）
+        1. 模式为 DRY（.env 里 DRY_RUN=true）
         2. 运行 `cargo test -p blitzkrieg-core` 或 `node scripts/cycle-check.mjs`
         3. 观察到 ...
     validations:
