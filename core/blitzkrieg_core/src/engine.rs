@@ -875,7 +875,7 @@ impl Engine {
     /// currently satisfies the entry band (per strategy).
     pub fn confirmed_diagnostics(&self, now_ms: i64) -> Vec<serde_json::Value> {
         // E3: the diagnostic ctx's round clock resolves on the TABLE's own
-        // family — every row through `row_duration_sec`, read on the legacy
+        // family — every row through `row_family_duration`, read on the legacy
         // venue bucket exactly like the global clock. No candidate exists at
         // this call (diagnostics walks strategies, not signals), so the table
         // shape is the best family fact here; a single-family table — every
@@ -2989,7 +2989,7 @@ pub fn row_family_duration(declared: i64, global_sec: i64) -> i64 {
 
 impl Engine {
     /// E3 (轮次多族收尾): the round clock of ONE market's own family — the
-    /// duration the row declares (`row_duration_sec`: own declaration >
+    /// duration the row declares (`row_family_duration`: own declaration >
     /// global grid), read on the legacy venue bucket (the same fold the
     /// global `round_timing()` used) with only the duration grid refined.
     /// Strategies and the per-candidate gate trail read this family's
@@ -2998,12 +2998,12 @@ impl Engine {
     /// row to the configured grid, making this byte-identical with the old
     /// global read.
     fn family_round_timing(&self, m: &crate::model::CryptoMarket, now_ms: i64) -> RoundTiming {
-        let dur = row_duration_sec(m.round_duration_sec, self.cfg.scanner.round_duration_sec);
+        let dur = row_family_duration(m.round_duration_sec, self.cfg.scanner.round_duration_sec);
         self.scanner.round_timing_legacy_at(dur, now_ms)
     }
 
     /// E3: the round clock of the TABLE's resolved family — every row
-    /// through `row_duration_sec` must agree (true for every single-family
+    /// through `row_family_duration` must agree (true for every single-family
     /// table: the replay corpora, and the per-family boot instances B1d
     /// mounts); the venue dimension stays the legacy bucket, the same fold
     /// `round_timing()` read. A heterogeneous multi-family table takes the
@@ -3014,7 +3014,7 @@ impl Engine {
         let global = self.cfg.scanner.round_duration_sec;
         match self.scanner.markets().first() {
             Some(m) => {
-                let dur = row_duration_sec(m.round_duration_sec, global);
+                let dur = row_family_duration(m.round_duration_sec, global);
                 self.scanner.round_timing_legacy_at(dur, now_ms)
             }
             // No market, no family fact: the legacy global clock (the
@@ -4089,7 +4089,7 @@ mod tests {
     #[test]
     fn single_family_tables_read_the_global_numbers_verbatim() {
         // Byte-identical duty (the replay-baseline red line): every corpus is
-        // single-family, where `row_duration_sec` resolves EVERY row to the
+        // single-family, where `row_family_duration` resolves EVERY row to the
         // configured grid and the legacy-bucket read degenerates to the
         // global `round_timing()` — so the waiver record, the emitted
         // order's slot/key and the E25 projection must equal the scanner's
