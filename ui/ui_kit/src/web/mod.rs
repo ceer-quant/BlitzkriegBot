@@ -2511,6 +2511,16 @@ impl WebServer {
                 // if it was the one removed, and persists the book.
                 self.proxy_backtest_body("account.remove", &req.body)
             }
+            ("POST", "/api/account-rounds/set") => {
+                // 轮次周期集写（account.rounds.set，轮次多族 B2）—— body 即
+                // params 对象（`{accountId, rounds, reason?}`），逐字转发
+                // （同 account-trading/set 的代理纪律：网关零加工）。
+                // `rounds` = 白名单秒数数组（空数组 = 未声明限制，许可轴空集
+                // 放行）；移除有敞口的族被内核整体拒绝 —— APPLICATION 错误
+                // 原文过线给卡面转述。老内核不认识该动词 → JSON-RPC
+                // unknown-method 错误原样返回，面板 feature-detect 降级只读。
+                self.proxy_backtest_body("account.rounds.set", &req.body)
+            }
             ("POST", "/api/strategy-enable") => {
                 // 账户↔venue 解耦（本轮）：策略启用写的账户级通道 —— body 即
                 // `strategy.enable` 的 params 对象（`{name, enabled,

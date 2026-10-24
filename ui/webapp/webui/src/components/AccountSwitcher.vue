@@ -13,12 +13,13 @@
  * and this component would not render one if there were.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Wallet, ChevronDown, Check, RefreshCw, Link2, Plus, Trash2 } from 'lucide-vue-next'
+import { Wallet, ChevronDown, Check, RefreshCw, Link2, Plus, Trash2, Timer } from 'lucide-vue-next'
 import { getToken, api } from '../api/client'
 import { money } from '../lib/format'
 import { usePanelStore } from '../stores/panel'
 import AddAccountDialog from './AddAccountDialog.vue'
 import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
+import Button from './ui/button/Button.vue'
 
 /** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
  *  `venue` 是账户↔交易所绑定（market-plugin 名），只在建户时设定（绑定
@@ -29,7 +30,10 @@ import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
  *  INHERIT 已废除，空集不跟随全局开关，issue 552 裁决）
  *  ——老内核不回 → undefined，开关按开启渲染、启用集按「未启用」渲染。
  *  `strategies` 只读展示：启停唯一入口在策略页的启用按钮（账户↔venue
- *  解耦裁决 —— 分配编辑器退场）。 */
+ *  解耦裁决 —— 分配编辑器退场）。
+ *  `rounds` 是该账户的轮次周期集（轮次多族 B1d；秒，白名单五档）——
+ *  空数组 = 未声明限制（许可轴空集放行）；undefined = 老内核缺字段，
+ *  周期集编辑段据此降级为只读提示（issue 550）。 */
 interface AccountRow {
   id: string
   name: string
@@ -45,6 +49,8 @@ interface AccountRow {
   tradingEnabled?: boolean
   /** 策略启用集（多账户扇出）；非空 = 逐字集合，空 = 显式不跑。老内核缺省 = 未启用。 */
   strategies?: string[]
+  /** 轮次周期集（轮次多族 B1d；秒）；空数组 = 不限制。老内核缺省 = undefined。 */
+  rounds?: number[]
   reserved?: string | number
   openPositions: number
   dayRealizedUsd: string | number
@@ -167,6 +173,7 @@ async function refresh(): Promise<void> {
         available: a.available,
         venue: a.venue ?? '',
         strategies: Array.isArray(a.strategies) ? [...a.strategies] : undefined,
+        rounds: Array.isArray(a.rounds) ? [...a.rounds] : undefined,
         reserved: a.reserved ?? '',
       })),
       out.data.displayAccount ?? undefined,
@@ -290,6 +297,97 @@ async function doRemove(): Promise<void> {
     removeErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     removeBusy.value = false
+  }
+}
+
+// ── 轮次周期集（account.rounds.set，轮次多族 B2；issue 550 面板侧）───────────
+// 每账户的轮长族声明编辑段：白名单五档 checkbox 多选（全不选 = 不限制，
+// 许可轴空集放行 —— 如实显示，不造「至少选一个」的前端门）。内核是拒绝方：
+// 移除有敞口的族会被整体拒绝（错误消息点名族列表），UI 不预判敞口、不造
+// 确认弹窗，拒绝原文 inline 透出（refusal attribution 既有模式）。
+// 老内核 AccountView 无 rounds 字段（undefined）→ 编辑段整段降级为只读
+// 提示（「当前内核不支持周期集」），feature-detect，不炸。
+const ROUND_OPTIONS: { sec: number; label: string }[] = [
+  { sec: 300, label: '5 分钟' },
+  { sec: 900, label: '15 分钟' },
+  { sec: 3600, label: '1 小时' },
+  { sec: 14400, label: '4 小时' },
+  { sec: 86400, label: '24 小时' },
+]
+
+/** 正在展开周期集编辑段的账户 id（下拉里一次只展开一行）。 */
+const roundsOpenFor = ref<string | null>(null)
+/** 编辑缓冲：勾选的秒数集合（打开时从该行 rounds 预填）。 */
+const roundsDraft = ref<number[]>([])
+const roundsBusy = ref<string | null>(null)
+const roundsErr = ref<string | null>(null)
+const roundsMsg = ref<string | null>(null)
+
+const roundsUnsupported = (a: AccountRow): boolean => a.rounds === undefined
+
+function roundsLabel(sec: number): string {
+  return ROUND_OPTIONS.find((o) => o.sec === sec)?.label ?? `${sec}s`
+}
+
+/** 该账户行内勾选状态（草稿未开时只读显示当前声明）。 */
+function roundChecked(a: AccountRow, sec: number): boolean {
+  const set = roundsOpenFor.value === a.id ? roundsDraft.value : a.rounds ?? []
+  return set.includes(sec)
+}
+
+function toggleRound(a: AccountRow, sec: number): void {
+  if (roundsOpenFor.value !== a.id) return
+  roundsDraft.value = roundsDraft.value.includes(sec)
+    ? roundsDraft.value.filter((s) => s !== sec)
+    : [...roundsDraft.value, sec]
+  // 预检错误随下一次输入清掉：拒绝面留给真正的内核裁决。
+  roundsErr.value = null
+  roundsMsg.value = null
+}
+
+function toggleRoundsEditor(a: AccountRow): void {
+  roundsErr.value = null
+  roundsMsg.value = null
+  if (roundsOpenFor.value === a.id) {
+    roundsOpenFor.value = null
+    return
+  }
+  if (roundsUnsupported(a)) return
+  roundsDraft.value = [...(a.rounds ?? [])]
+  roundsOpenFor.value = a.id
+}
+
+/** 草稿相对当前声明是否有改动（展开中才谈 dirty）。 */
+function roundsDirty(a: AccountRow): boolean {
+  if (roundsOpenFor.value !== a.id) return false
+  const cur = [...(a.rounds ?? [])].sort((x, y) => x - y)
+  const next = [...roundsDraft.value].sort((x, y) => x - y)
+  return cur.length !== next.length || cur.some((s, i) => s !== next[i])
+}
+
+/** 全不选 = 「不限制（未声明）」——如实显示的空选集。 */
+const roundsDraftEmpty = computed(() => roundsOpenFor.value !== null && roundsDraft.value.length === 0)
+
+async function saveRounds(a: AccountRow): Promise<void> {
+  if (roundsBusy.value || roundsOpenFor.value !== a.id) return
+  roundsBusy.value = a.id
+  roundsErr.value = null
+  roundsMsg.value = null
+  try {
+    await store.setAccountRounds(a.id, roundsDraft.value)
+    roundsMsg.value =
+      roundsDraft.value.length === 0
+        ? `账户 ${a.id} 的轮次周期限制已清除（不限制）。`
+        : `账户 ${a.id} 只在 ${roundsDraft.value.map(roundsLabel).join('、')} 轮次交易。`
+    roundsOpenFor.value = null
+    await refresh()
+    store.refresh()
+  } catch (e) {
+    // 内核拒绝（移除有敞口的族 / 老内核 unknown-method）原文透出，不吞。
+    roundsErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    roundsBusy.value = null
+    setTimeout(() => { roundsMsg.value = null }, 6000)
   }
 }
 
@@ -418,6 +516,67 @@ onBeforeUnmount(() => {
               :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"
               :title="Array.isArray(a.strategies) && a.strategies.length ? `已启用 ${a.strategies.length} 个策略（启停在策略页按账户启用）` : '该账户暂无启用中的策略（启停在策略页按账户启用）'"
             >{{ Array.isArray(a.strategies) && a.strategies.length ? `已启用 ${a.strategies.length} 个策略` : '未启用策略' }}</span>
+          </span>
+          <!-- 轮次周期集行（issue 550）：只读摘要行 + 展开编辑段。老内核
+               （rounds 缺字段）整段降级为只读提示，不出编辑面。 -->
+          <span class="mt-1 flex items-center gap-1.5 text-[11px]">
+            <Timer class="size-3 shrink-0 text-faint-fg" />
+            <span
+              v-if="roundsUnsupported(a)"
+              class="min-w-0 flex-1 truncate text-faint-fg"
+              title="当前内核不支持周期集（account.list 未带 rounds 字段）——升级内核后可按账户声明轮次周期"
+            >当前内核不支持周期集</span>
+            <button
+              v-else
+              class="min-w-0 flex-1 truncate text-left"
+              :class="a.rounds && a.rounds.length ? 'text-fg' : 'text-faint-fg'"
+              :title="a.rounds && a.rounds.length ? `只在 ${a.rounds.map(roundsLabel).join('、')} 轮次交易；点击编辑` : '不限制（未声明轮次周期）；点击声明'"
+              @click.stop="toggleRoundsEditor(a)"
+            >{{ a.rounds && a.rounds.length ? a.rounds.map(roundsLabel).join('、') : '不限制（未声明）' }}</button>
+            <button
+              v-if="!roundsUnsupported(a)"
+              class="shrink-0 rounded px-1 text-[10.5px] text-faint-fg transition-colors hover:text-fg"
+              :title="roundsOpenFor === a.id ? '收起周期集编辑' : '编辑该账户的轮次周期集'"
+              @click.stop="toggleRoundsEditor(a)"
+            ><ChevronDown class="size-3 transition-transform" :class="roundsOpenFor === a.id ? 'rotate-180' : ''" /></button>
+          </span>
+          <span
+            v-if="roundsOpenFor === a.id && !roundsUnsupported(a)"
+            class="mt-1.5 block rounded-lg border border-line bg-panel-2 p-2"
+            @click.stop
+          >
+            <span class="label-micro">轮次周期（多选；全不选 = 不限制）</span>
+            <span class="mt-1.5 flex flex-wrap gap-1.5">
+              <label
+                v-for="opt in ROUND_OPTIONS"
+                :key="opt.sec"
+                class="flex cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[10.5px] transition-colors hover:bg-panel-solid"
+                :class="roundChecked(a, opt.sec) ? 'text-fg' : 'text-faint-fg'"
+              >
+                <input
+                  type="checkbox"
+                  class="accent-current"
+                  :checked="roundChecked(a, opt.sec)"
+                  @change="toggleRound(a, opt.sec)"
+                />
+                <span class="num">{{ opt.sec }}s</span>
+                <span>{{ opt.label }}</span>
+              </label>
+            </span>
+            <span v-if="roundsDraftEmpty" class="mt-1.5 block text-[10.5px] text-faint-fg">
+              未选中任何周期 —— 保存后该账户不限制轮次（未声明）。
+            </span>
+            <span class="mt-1.5 flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" :disabled="roundsBusy !== null" @click="toggleRoundsEditor(a)">取消</Button>
+              <Button
+                size="sm"
+                :disabled="roundsBusy !== null || !roundsDirty(a)"
+                title="把勾选的轮次周期写入内核（account.rounds.set）——移除有敞口的族会被内核整体拒绝"
+                @click="saveRounds(a)"
+              >保存</Button>
+            </span>
+            <span v-if="roundsErr" class="mt-1 block text-[10.5px] text-down">{{ roundsErr }}</span>
+            <span v-else-if="roundsMsg" class="mt-1 block text-[10.5px] text-up">{{ roundsMsg }}</span>
           </span>
           <span v-if="tradingErr" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
           <span v-else-if="tradingMsg" class="mt-0.5 block text-[10.5px] text-up">{{ tradingMsg }}</span>

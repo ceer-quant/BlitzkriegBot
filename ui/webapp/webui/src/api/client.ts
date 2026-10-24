@@ -774,6 +774,26 @@ export interface AccountRemoveDoc {
   error?: string
 }
 
+// ── 轮次周期集（account.rounds.set，轮次多族 B2）─────────────────────────────
+// 账户的轮长族声明写动词：params `{accountId, rounds, reason?}`（camelCase
+// wire，rounds = 白名单秒数数组，空数组 = 不限制）。移除有敞口的族会被内核
+// 整体拒绝（错误消息点名族列表）—— 面板不预判敞口，拒绝原文透出。老内核
+// 不认识该动词 → JSON-RPC unknown-method 错误原样返回，卡面据此降级只读。
+
+/** `account.rounds.set` 回执：persisted=false = 内存生效但未落盘。 */
+export interface AccountRoundsSetResult {
+  accountId: string
+  /** 内核收下的族集（秒）；空数组 = 未声明限制（许可轴空集放行）。 */
+  rounds: number[]
+  persisted: boolean
+  atMs: number
+  actor: string
+  reason?: string
+  note: string
+  runtimeEnabled?: boolean
+  error?: string
+}
+
 export const api = {
   snapshot: () => request<Snapshot>('/snapshot'),
   plugins: () => request<PluginsDoc>('/plugins'),
@@ -1054,6 +1074,19 @@ export const api = {
   /** 删户：default 与有持仓的账户内核拒绝；删的是当前默认时内核回切。 */
   accountRemove: (body: { id: string; reason?: string }) =>
     request<AccountRemoveDoc>('/account-remove', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 轮次周期集写（`account.rounds.set`，轮次多族 B2）：body 即 params 对象
+   * （`{accountId, rounds, reason?}`），逐字转发（同 account-trading/set 的
+   * 纪律）。rounds = 白名单秒数数组（空数组 = 不限制）；移除有敞口的族被
+   * 内核整体拒绝 —— APPLICATION 错误原文随 `{error}` 回来，调用方必须把消
+   * 息转述给用户。老内核不认识该动词 → error 带 JSON-RPC unknown-method 字
+   * 样，卡面 feature-detect 降级为只读提示。
+   */
+  accountRoundsSet: (body: { accountId: string; rounds: number[]; reason?: string }) =>
+    request<AccountRoundsSetResult>('/account-rounds/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
