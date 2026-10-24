@@ -5,74 +5,98 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [Unreleased]
 
-### Fixed
+## [0.4.1] - 2026-10-25
 
-- **策略兼容性握手收敛**（插件切换全不相容的根因修复）：策略声明面回归规格
-  ——只许声明市场类型与结构，`capabilities` 是插件的 offer 面、不是策略的
-  声明面。9 个 Lua 策略包曾复制 polymarket 模板的三件套能力要求
-  （websocket_feed+level2_snapshot+post_only），在 kalshi/predictfun（仅
-  level2_snapshot）上被握手判据全拒；现判据收敛为两条——market_type 强相等
-  + 结构 None 或相等，能力位完全退出判定（插件侧 market.list 徽章数据不受
-  影响）。校验器对策略 payload 里的 `capabilities` 键 fail-loud
-  （`ModeError::CapabilityForbidden`），`StrategyMode.required_capabilities`
-  字段删除（编译期强制）。
-- **boot 棘轮不再抹持久格**：行情插件切换后，被握手拒绝的策略名字保留在
-  `strategy-state.json`（记录的是操作者意图，本会话被门禁拦下而已）；切回
-  兼容插件自动复活，无需手动重开。显式 disable 仍会移除名字——那是决定，
-  不是市场不匹配。首个版本保存的是有效启用集，一次切换就把所有不兼容策略
-  从文件里静默剥掉、切回也带不回来。
-- **Kalshi 插件对真线重建**（此前只对 mock 自证）：轮发现改为按系列查询
-  `KX{ASSET}15M`（默认 `/events` 列表把长周期事件排前，15m 轮永远到不了
-  第 1 页）；盘口解析改为真线的 `orderbook_fp` 形态（两条 BID 阶梯、价格
-  即 0..1 概率、深度为美元名义→按名义/价格换算张数；YES asks 由 NO bids
-  对偶导出 1−p）；报价字段改为真线的 `*_dollars` 概率字符串（旧建模的
-  `yes_bid` 美分整数在这些系列上不存在——0.005 假概率的根因）；标题匹配
-  改词边界（"resolved" 不再撞 SOL，predictfun 同款复制一并修）；无报价市
-  场跳过不再造 0.5 假概率；轮终超两个轮长的声明拒绝入 scanner（19 年倒计
-  时的内核侧防线）。真线只读验收 30/30（5 资产 × 轮结构/报价/盘口对偶）。
-- **面板**：HFT 页价格卡按 asset 去重（同资产多市场不再重复卡片撞 Vue
-  key）；`engine.books` JSON 补 `upTokenId`/`downTokenId`（此前 core 带
-  了 token id 但 UI 转换层丢弃，K 线卡对所有插件永久隐藏）。
-
-## [0.4.1] - 2026-10-15
-
-0.4.0 → 0.4.1 的 22 条提交，按主题归并。四大主线：**安全与风控加固**
-（#460–#464 五项审计修复 + 幽灵订单根因）、**插件版图**（PolySimulator 模拟
-盘 + Kalshi/predictfun 执行器收口）、**运维与面板**（发布包等效性 + 插件启
-停 + 强平三端 + 交易环境重置）、**策略面**（tunables 编辑 + 跨所配对监控）。
+0.4.0 → 0.4.1 的 ~110 条提交，按主题归并。六大主线：**多账户体系**（账户簿
+运行时增删 + 绑定即启用 + 真实记账钱包 + 策略级虚拟账户 + kill switch 按账
+户 + 显示账户指针）、**跨所套利**（统一映射账本 + 原子双腿 + 配置化弹窗）、
+**轮次多族**（(venue,duration) 族钟全链 + 账户轮次集热管理）、**插件版图**
+（Kalshi 真线重建 + PolySimulator 模拟盘 + 多插件数据面 + API 凭据）、
+**风控与退出**（trailing 止盈归策略自声明）、**面板与运维**（doctor 探针 +
+蓝图导入 + env 唯一可信化 + 网络诊断跟随账户）。
 
 ### Added
 
+- **多账户体系**：账户簿运行时增删（`account.create`/`account.remove`，运行
+  时铸造账户带注资与 ledger journal 路径，#516/#517/#521/#522）；每账户独立
+  启停与持仓账户维度 + 行情跟随绑定（#532）；多账户同时跑策略扇出 + 账户交
+  易开关 + 策略分配编辑器（空=不跑，废除 INHERIT，#518/#519/#523）；绑定即
+  启用闭环——插件页转只读、boot 启用集从账户绑定派生（#508/#510/#512）；
+  真实记账钱包——每账户现金流水 journal + 持久化回放 + 赔付归属 + 面板现金
+  流水卡（#509/#511/#513）；显示账户指针配置化（`display.account.set` +
+  快照字段 + 账户维重置/余额跟随单源化，#561/#562/#571）；账户级急冻簿 +
+  `account.freeze`（#530）；策略级虚拟账户——(account, strategy) 配额簿 +
+  配队双腿原子预占 + 终态精确释放（#528）；升级不再覆盖 accounts.toml/
+  shadow_evolution.toml（操作员状态运行副本永远赢，#565/#581）。
+- **跨所套利**：统一映射账本——自动配对只提议、操作员 confirm 才生效 +
+  candidates/confirm/revoke IPC + 回灌（#501）；策略级虚拟账户配队双腿原子
+  预占（E-VA）+ `atomic_batch` 接线 + `--virtual-limit` 旗标 + 单腿裸奔看护
+  （#528/#531）；跨所套利创建弹窗 v2——配置意图模型、双腿双账户、币对多选、
+  凭证门与内核 may_trade 同形（#569/#570/#576）；策略页套利 tab + 套利收益
+  合计 + gate 四计数切账户（#577/#579）；凭证轮换运维语义与 RFC 决议落文档
+  （#544/#554/#566/#574）。
+- **轮次多族**：账户可订阅 (venue, duration) 轮次族集合——accounts.toml
+  rounds 声明 + 白名单 fail-closed + `account.rounds.set` 热管理动词（增族即
+  挂/移除敞口拒绝/软卸 poll 丢弃，#586/#589/#590/#591/#599）；scanner/入场
+  门/rollover/slot 判定全链按族（#598/#600）；面板轮次周期集多选卡 + 周期切
+  换入口挪行情页倒计时卡 + 瓦片身份标注（#593/#596/#597/#601/#602）；插件自
+  声明轮次族 `supported_round_secs`——面板按声明筛档 + kalshi 14400 静默盲点
+  补告警（#604/#605）。
 - **插件**：PolySimulator 模拟盘插件全链路（SIMULATED 能力位 + 查询式身份解
   析 + 双腿成交归属，#454/#455/#480）；Kalshi OrderExecutor（cancel-first/
   timeout→reconcile/孤儿清扫，#479）与 predictfun OrderExecutor（EIP-712 签
-  名下单，#484）——三组件合同全部收口。
-- **面板**：插件页开启/停用（extension 启停即时生效 + 行情插件 next_session
-  切换，#486）；挂单强平三端（Orders tab / force-order / 批量清理，#477）；
-  交易环境重置（三道门 + 确认词，#475）；轮次时间周期可设置（#474）；网关
-  restart 动词 + 10s 自动重启 + 行情空态诊断导向（#488）；策略 tunables 编辑
-  + 跨所配对监控（#482）。
-- **发布工程**：发布包与编译包**完全等效**——user_layer 布局修复（configs/
-  形状 bug 曾致解压后内核读不到任何配置、execution_policy 静默落
-  NEUTRAL）、交叉编译 lib/ 空目录修复、.env.example/插件配置落点/策略投放
-  点补齐、单源打包（release tarball 与 CI 尺寸门禁同一脚本）（#491）；发布
-  包 webui 预编译——解压即启动，无需 Node/npm（#489）。
-- **文档**：Windows WSL2 安装与运行指南（#467）；全策略评审报告
-  0.4.1（#473）。
+  名下单，#484）——三组件合同全部收口；插件页开启/停用（extension 启停即时
+  生效 + 行情插件 next_session 切换，#486）；多插件并发行情数据面（多 venue
+  同时喂数 + feeds per-plugin，#502）；行情插件 API 凭据（`market.credentials.
+  status/set` + 凭据卡，#500）；executor per-venue 路由 + PluginModes 多值 +
+  账户↔venue 绑定（#505/#506）；`blitzkrieg doctor`——环境探针读数面子命令
+  （NTP 时钟偏差/tick 断流/spot 失效，#529）；盘口批次原子化（整批同瞬无撕
+  裂）+ 书视图前 10 档挂单与 `bk.vwap_for_size`（#524）。
+- **面板**：网络诊断跟随显示账户——探针走操作员正在看的 venue，绑定 venue
+  无插件时诚实报 `unsupported`，网关缓存带 venue 维度切户即失效（#612）；蓝
+  图编辑器导入 JSON 粘贴闭环 + `in` 操作符成员逐行编辑（#610）；策略启用复
+  合键读数修复 + 启停即时反映（#552/#553/#558/#563）；首页全内容跟随账户
+  （权益曲线账户×venue 过滤 + 轮次钟身份链 + 引擎计数「进程级」诚实标注 +
+  真实余额读账户切片，#585/#592/#608）；挂单强平三端（#477）；交易环境重置
+  （#475）；轮次时间周期可设置（#474/#499/#503）；网关 restart 动词 + 10s
+  自动重启（#488）；策略 tunables 编辑 + 跨所配对监控（#482）；K 线卡按市场
+  类型门控（#495）。
+- **发布工程与配置**：发布包与编译包**完全等效**（#491）+ webui 预编译解压
+  即启动（#489）；env 唯一可信化 P1——配置面盘点判决书 `docs/ENV_MIGRATION.
+  md` + `.env.example` 零漂移对齐 + 4 个死键退役（POLYMARKET_API_*/HFT_CORE，
+  #588/#607）；Windows WSL2 安装指南（#467）；全策略评审报告 0.4.1（#473）。
 
 ### Fixed
 
+- **风控**：PolySimulator 场地 429 按 Retry-After 重试——启动突发自愈，不再
+  把瞬态限速当成能力失败触发交易冻结/丢余额种子/行情卡顿；自检探针失败原因
+  进冻结行（#611）；trailing_enabled 升格 `risk.setExit` 热写 + `trailing_
+  exit` 策略自声明三态面（manifest 键，spread_arb 声明 true——出场教义归策
+  略不归全局开关，#603/#606）；TP maker 退出单挂买一上方一档——post-only 结
+  构性拒单根治（#496/#497）；资金穿透四路封堵（#461/#468）；订单状态机三缺
+  陷（#462/#469）；回撤净值口径 + DRY post-only 对齐 + risk.ladder 真接线
+  （#464/#471）；过期幽灵订单根因——ForceClosed 终态 + `orders.force_close`
+  （#457/#472）。
+- **插件与行情**：Kalshi 插件对真线重建——series 发现 + `orderbook_fp` 解析
+  + 词边界 + 轮终防线，真线只读验收 30/30（#494）；策略兼容性握手收敛——判
+  据收敛为 market_type + 结构两条，能力位退出判定，boot 棘轮不再抹持久格
+  （#493）；迟上架轮内补查 + 同 slot 增量合并——币对中途缩减根治（#498）；
+  轮次长度持久格抬到 TOML 之上——面板切换形同虚设根治（#499）；行情快照按
+  到期 slot 过滤 + (venue,asset) 唯一化——行情页重复币对行根治（#560/#567）；
+  PM 盘口批路径归档/探针双盲区（#548/#555）；运行时挂载把 boot discovery
+  config 传给插件（#536）；kalshi daily 族禁用（行权阶梯非二元）+ polymarket
+  1h/daily ET 命名族 slug 解锁（#583/#584）；行情页账户切换重绑定 + 倒计时
+  per-venue 重臂（#551/#572）。
+- **面板与运维**：长时间空闲后假死——IPC 客户端 64 行跳过上限移除（#476/
+  #478）；supervisor 放弃重启告警的 stderr 尾巴竞态（#470）；套利弹窗 dry 豁
+  免与执行账户（#539/#546/#576）；审计泄漏三连修 + 空行情轮次判因（#537）；
+  建户即挂行情数据面（#535）；strategy.enable 默认分支 scoped 写接管（#563）；
+  策略开关读代理失败信封——HTTP 200 {error} 不再弹绿色假成功（#564）；进化文
+  件唯一可信源——开关写回 toml、废除面板独立态（#578）；账户删除文案汉化
+  （#534）；reset 语义收口 + 倒计时卡随所（#556）。
 - **安全**：面板认证加固——无凭据写面封死 + token 查询通道废除 + 内核只读
   防御（#460/#465）；持久化加固——原子重写统一 + 损坏 fail-loud +
   close_credentials 跨重启（#463/#466）。
-- **风控**：资金穿透四路封堵——merge 先烧后收/追价硬约束/挂单计敞口/
-  orders.place 过九限额（#461/#468）；订单状态机三缺陷——撤旧建新顺序化/
-  place 超时不即拒/盘口时间戳贯通（#462/#469）；回撤净值口径 + DRY post-only
-  对齐 + risk.ladder 真接线（#464/#471）。
-- **状态机**：过期幽灵订单根因——ForceClosed 终态 + 过期扫描 +
-  orders.force_close 动词（#457/#472）。
-- **面板**：长时间空闲后假死——IPC 客户端 64 行跳过上限移除（#476/#478）；
-  supervisor 放弃重启告警的 stderr 尾巴竞态（#470）。
 
 ## [0.4.0] - 2026-10-12
 
