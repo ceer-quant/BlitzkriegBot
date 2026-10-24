@@ -12,14 +12,21 @@ use blitzkrieg_market_api::{CoreError, CoreErrorCode};
 #[derive(Debug, thiserror::Error)]
 pub enum PolySimError {
     /// HTTP status the venue answered with (any status; mapped below).
+    /// `retry_after_ms` carries the venue's `Retry-After` header (seconds →
+    /// ms) when it answered 429 — the invitation to come back later.
     #[error("polysimulator http {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        retry_after_ms: Option<u64>,
+    },
     /// The venue answered with a structured error body (`{error, message}`).
     #[error("polysimulator api {code}: {message}")]
     Api {
         code: String,
         message: String,
         status: u16,
+        retry_after_ms: Option<u64>,
     },
     /// Request exceeded its deadline. Never retried past the budget.
     #[error("polysimulator request timed out after {ms}ms")]
@@ -59,6 +66,16 @@ impl PolySimError {
         matches!(self, PolySimError::RateLimited { .. })
             || matches!(self, PolySimError::Http { status: 429, .. })
             || matches!(self, PolySimError::Api { status: 429, .. })
+    }
+
+    /// The venue's `Retry-After` advice (ms), when it sent one. Only a 429
+    /// can carry it; everything else has no advertised wait.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            PolySimError::Http { retry_after_ms, .. }
+            | PolySimError::Api { retry_after_ms, .. } => *retry_after_ms,
+            _ => None,
+        }
     }
 }
 
@@ -165,14 +182,16 @@ mod tests {
         assert!(
             PolySimError::Http {
                 status: 502,
-                body: String::new()
+                body: String::new(),
+                retry_after_ms: None,
             }
             .retryable()
         );
         assert!(
             !PolySimError::Http {
                 status: 400,
-                body: String::new()
+                body: String::new(),
+                retry_after_ms: None,
             }
             .retryable()
         );
@@ -180,9 +199,19 @@ mod tests {
         assert!(
             PolySimError::Http {
                 status: 429,
-                body: String::new()
+                body: String::new(),
+                retry_after_ms: Some(1_000),
             }
             .is_rate_limited()
+        );
+        assert_eq!(
+            PolySimError::Http {
+                status: 429,
+                body: String::new(),
+                retry_after_ms: Some(1_000),
+            }
+            .retry_after_ms(),
+            Some(1_000)
         );
     }
 }

@@ -118,43 +118,41 @@ pub fn executor_tests_only_spawn(host: Arc<dyn MarketHost>, client: Arc<PolySimR
 /// One capability probe against the paths trading actually uses: balance
 /// (auth), open orders and a one-page trades query. A failed item means
 /// order egress cannot work either.
+/// One capability probe against the paths trading actually uses: balance
+/// (auth), open orders and a one-page trades query. A failed item means
+/// order egress cannot work either.
 async fn self_check(client: &PolySimRest) -> SelfCheckReport {
+    // Each probe's failure reason rides in the detail: a freeze whose only
+    // text is "trades failed" sent an operator hunting blind (the venue's
+    // "Rate limit exceeded. Retry after 1s." is a different story than an
+    // auth rejection, and #184 says the reason goes on the line).
+    let balance = client.balance().await;
+    let orders = client.open_orders().await;
+    let trades = client.trades().await;
     let items = vec![
-        {
-            let ok = client.balance().await.is_ok();
-            SelfCheckItem {
-                name: "balance".into(),
-                ok,
-                detail: if ok {
-                    "balance endpoint answered".into()
-                } else {
-                    "balance failed (API key or venue down)".into()
-                },
-            }
+        SelfCheckItem {
+            name: "balance".into(),
+            ok: balance.is_ok(),
+            detail: match balance {
+                Ok(_) => "balance endpoint answered".into(),
+                Err(e) => format!("balance failed: {e}"),
+            },
         },
-        {
-            let ok = client.open_orders().await.is_ok();
-            SelfCheckItem {
-                name: "orders".into(),
-                ok,
-                detail: if ok {
-                    "open orders answered".into()
-                } else {
-                    "open orders failed".into()
-                },
-            }
+        SelfCheckItem {
+            name: "orders".into(),
+            ok: orders.is_ok(),
+            detail: match orders {
+                Ok(_) => "open orders answered".into(),
+                Err(e) => format!("open orders failed: {e}"),
+            },
         },
-        {
-            let ok = client.trades().await.is_ok();
-            SelfCheckItem {
-                name: "trades".into(),
-                ok,
-                detail: if ok {
-                    "trades answered".into()
-                } else {
-                    "trades failed".into()
-                },
-            }
+        SelfCheckItem {
+            name: "trades".into(),
+            ok: trades.is_ok(),
+            detail: match trades {
+                Ok(_) => "trades answered".into(),
+                Err(e) => format!("trades failed: {e}"),
+            },
         },
     ];
     SelfCheckReport {
