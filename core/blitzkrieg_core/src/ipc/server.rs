@@ -8725,6 +8725,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
+    /// account.remove 的 journal 收尾（流水卡幽灵 seed 根因修复的 wire 半边）：
+    /// 删户把该账户的磁盘流水文件一并清掉、内存 trail 清空；同名 id 立刻重建
+    /// 时，`account.journal` 回执是一份**没有上一世成交**的新账本。生产 kalshi
+    /// 实锤的 6 笔幽灵 seed@account.create（Σamount 比真实余额多 5000）就是
+    /// 本测试钉死的不变量被打破的形状。
+    #[tokio::test]
+    async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
+        let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
+        let journal_dir = accounts_path.parent().expect("fixture dir").join("ledger");
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        let journal_path = journal_dir.join("paper.journal.jsonl");
+        // 上一世：seed + 一买一卖全落盘（boot attach_journals 会整表回放的形状）。
+        {
+            let mut c = core.lock().await;
+            let l = c
+                .accounts_mut()
+                .get_mut(&AccountId::from("paper"))
+                .expect("paper ledger");
+            l.set_journal_path(journal_path.clone());
+            l.seed(rust_decimal_macros::dec!(1000));
+            l.settle_buy_fill(
+                "old_1",
+                rust_decimal_macros::dec!(30),
+                rust_decimal::Decimal::ZERO,
+            );
+            l.settle_sell_fill(rust_decimal_macros::dec!(21), rust_decimal_macros::dec!(1));
+        }
+        assert!(journal_path.exists(), "previous-life trail is on disk");
+
+        // The retirement takes the file with it.
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.remove","params":{"id":"paper","actor":"panel","reason":"retire"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "remove must land: {reply}");
+        assert!(
+            !journal_path.exists(),
+            "the journal file is retired with the account"
+        );
+
+        // Same-id re-create: a fresh book. The journal wire surface reports an
+        // EMPTY trail — the previous life's fills cannot leak in (memory AND,
+        // by the file assertion above, the next boot's replay).
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.create","params":{"id":"paper","name":"reborn","actor":"panel"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "re-create must land: {reply}");
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.journal","params":{"accountId":"paper"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "journal read: {reply}");
+        let rows = reply["result"]["rows"].as_array().expect("rows");
+        assert!(
+            rows.iter()
+                .all(|r| r["kind"] != serde_json::json!("buy_fill")
+                    && r["kind"] != serde_json::json!("sell_fill")),
+            "no previous-life fills survive the recreate: {rows:?}"
+        );
+        let scratch = accounts_path
+            .parent()
+            .expect("the fixture file has a parent")
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     /// 两个新动词都是写动词：只读模式的内核拒绝（READONLY_REFUSED 名单，
     /// 同 venue.set 的文案形状）。
     #[tokio::test]
