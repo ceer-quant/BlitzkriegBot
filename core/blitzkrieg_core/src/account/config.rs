@@ -78,6 +78,27 @@ struct AccountFileEntry {
     /// `account.strategies.set`), not at parse.
     #[serde(default)]
     strategies: Option<Vec<String>>,
+    /// THIS account's round-length FAMILY declaration (轮次多族): the
+    /// (single) durations, in seconds, this account trades — each combined
+    /// with the account's venue (or every venue when unbound) into the
+    /// (venue, duration) family set the B1c admission gate reads. Missing
+    /// = the legacy shape: NO family restriction is declared and the
+    /// account trades every duration the data plane feeds (the gate's
+    /// empty-set reading — today's behaviour, byte-identical). EMPTY is
+    /// ALSO unrestricted (rounds = [] spells "no declared family set", NOT
+    /// "subscribed to nothing"): durations are an ADDED permission axis,
+    /// not a subtracted one, so an empty list must never lock an account
+    /// out of trading — the zero-config spellings and the explicit one
+    /// converge on the same verdict. Values are validated against the
+    /// kernel's allowed-duration whitelist AT PARSE (fail-closed, the
+    /// same discipline every other key here runs: a typo'd 9000 must not
+    /// silently become "no restriction"); duplicates are removed with
+    /// first-seen order kept (a stable diff reads better than a
+    /// canonical sort). A non-empty set does NOT clip the global chain:
+    /// the round-timing math (B1a's three-state read) still falls back to
+    /// the global single value for grids this account never declared.
+    #[serde(default)]
+    rounds: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -221,9 +242,43 @@ impl AccountFileEntry {
             venue: self.venue.unwrap_or_default(),
             trading_enabled: self.trading_enabled.unwrap_or(true),
             strategies: self.strategies.unwrap_or_default(),
+            rounds: validate_rounds(self.rounds)?,
             updated_at_ms: now_ms,
         })
     }
+}
+
+/// The parse-side validation of one account's `rounds` declaration
+/// (轮次多族). `None`/empty both come out as an EMPTY vec — the gate's
+/// "no family restriction declared" reading (rounds is a permission axis:
+/// an empty declaration must never lock the account out of trading).
+/// Values outside the kernel's allowed-duration whitelist refuse the
+/// WHOLE boot (fail-closed: a typo'd duration must not silently become
+/// "no restriction" — the operator believes the restriction is live).
+/// Duplicates are dropped with first-seen order kept.
+fn validate_rounds(rounds: Option<Vec<i64>>) -> Result<Vec<i64>, CoreError> {
+    let Some(rounds) = rounds else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<i64> = Vec::with_capacity(rounds.len());
+    for sec in rounds {
+        if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&sec) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "accounts.toml: `rounds` names {sec}s, which is not an allowed round \
+                     duration (allowed: {:?}) — fix the value or delete the key (fail-closed: \
+                     a declared set that cannot be honoured must not degrade into \
+                     \"no restriction\")",
+                    crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                ),
+            ));
+        }
+        if !out.contains(&sec) {
+            out.push(sec);
+        }
+    }
+    Ok(out)
 }
 
 /// Load the account book from `path` (§9.5). Missing file → the single
@@ -646,6 +701,7 @@ pub fn persist_account_create(
         venue: venue.filter(|v| !v.is_empty()).map(|v| v.to_string()),
         trading_enabled: None,
         strategies: None,
+        rounds: None,
     });
     let out = toml::to_string(&file).map_err(|e| {
         CoreError::new(
@@ -974,6 +1030,58 @@ status = "read_only"
         assert!(matches!(a.status, Active));
         assert_eq!(a.name, "solo");
         assert!(matches!(a.market_type, MarketType::Prediction));
+    }
+
+    // ── 轮次多族 (B1d): the `rounds` family declaration ─────────────────────
+
+    #[test]
+    fn rounds_parse_deduplicate_and_keep_first_seen_order() {
+        let book = from_str(
+            r#"
+[[account]]
+id = "multi"
+rounds = [3600, 900, 3600, 86_400]
+"#,
+            1,
+        )
+        .expect("a rounds declaration parses");
+        let a = book.account(&AccountId("multi".into())).unwrap();
+        assert_eq!(a.rounds, vec![3600, 900, 86_400], "dedup, order kept");
+    }
+
+    #[test]
+    fn a_missing_or_empty_rounds_key_means_no_family_restriction() {
+        // Missing key: the legacy shape. Explicit empty: the same verdict —
+        // rounds is a permission axis; an empty declaration must never lock
+        // the account out of trading.
+        let book =
+            from_str("[[account]]\nid = \"a\"\nrounds = []\n", 1).expect("an empty rounds parses");
+        assert!(
+            book.account(&AccountId("a".into()))
+                .unwrap()
+                .rounds
+                .is_empty()
+        );
+        let book2 = from_str("[[account]]\nid = \"b\"\n", 1).expect("absent rounds parses");
+        assert!(
+            book2
+                .account(&AccountId("b".into()))
+                .unwrap()
+                .rounds
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_rounds_value_outside_the_whitelist_refuses_the_boot() {
+        let err = from_str("[[account]]\nid = \"x\"\nrounds = [9000]\n", 1)
+            .expect_err("a typo'd duration is fail-closed");
+        assert!(err.message.contains("9000"), "{}", err.message);
+        assert!(
+            err.message.contains("allowed round duration"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

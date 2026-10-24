@@ -1069,17 +1069,45 @@ impl Backtester for EventBacktester {
             // the replay instead. An undeclared market (0: old archives, and
             // the live host's own path) stays silent — it rides the configured
             // grid by definition.
+            //
+            // B1d (轮次多族) refinement: the refusal is per (venue, duration)
+            // FAMILY. The live kernel times each family on its own grid (the
+            // scanner keys its clocks (venue, duration)); a replay corpus is
+            // a single grid, so a corpus carrying MORE THAN ONE declared
+            // family (or one family that is not the configured grid) cannot
+            // be replayed honestly — the error names the families and the
+            // split instruction instead of the old single-value wording. A
+            // corpus whose only declared family IS the configured grid
+            // (the historical shape, and every existing baseline) passes
+            // byte-identically, as does a corpus with no declared duration
+            // at all.
             if let DataEvent::RoundMarkets { markets, .. } = &te.event {
                 let grid = self.core.config().round_duration_sec;
+                let mut foreign: Vec<(String, i64)> = Vec::new();
                 for m in markets {
-                    if m.round_duration_sec > 0 && m.round_duration_sec != grid {
-                        return Err(format!(
-                            "replay cadence mismatch: round for {} declares {}s but the replay \
-                             grid is {}s (--round-sec). Every timing gate would run on the \
-                             wrong clock; replay with the matching --round-sec.",
-                            m.asset, m.round_duration_sec, grid
-                        ));
+                    if m.round_duration_sec > 0
+                        && m.round_duration_sec != grid
+                        && !foreign
+                            .iter()
+                            .any(|(v, d)| v == &m.venue && d == &m.round_duration_sec)
+                    {
+                        foreign.push((m.venue.clone(), m.round_duration_sec));
                     }
+                }
+                if !foreign.is_empty() {
+                    let listed = foreign
+                        .iter()
+                        .map(|(v, d)| format!("({v}, {d}s)"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "replay cadence mismatch: the corpus declares round families {listed} \
+                         but the replay grid is {grid}s (--round-sec). The replay engine runs \
+                         ONE grid; the live kernel runs one clock per (venue, duration) family. \
+                         Every timing gate would run on the wrong clock for the foreign \
+                         families — replay each (venue, duration) family as its own run with \
+                         the matching --round-sec (请按 (venue, duration) 分段跑)."
+                    ));
                 }
             }
             // Late/out-of-order events still get the current clock (never a
@@ -1425,6 +1453,54 @@ mod tests {
         assert!(r.errors.is_empty());
     }
 
+    /// B1d (轮次多族): a corpus carrying TWO declared families (the live
+    /// kernel's multi-family shape) cannot run on one replay grid — the
+    /// refusal names every foreign family as (venue, duration) and spells
+    /// the split instruction. RED must stay red: the old single-value
+    /// wording died with the single-value kernel.
+    #[test]
+    fn a_mixed_family_corpus_refuses_with_the_family_list() {
+        let core = base_core(None); // the 900s grid
+        let mut m1 = market_declaring(NOW, 300);
+        m1.venue = "polymarket".into();
+        let mut m2 = market_declaring(NOW, 3600);
+        m2.venue = "kalshi".into();
+        let err = bt_result(
+            core.clone(),
+            Box::new(VecSource::new(vec![TimedEvent {
+                at_ms: NOW,
+                event: DataEvent::RoundMarkets {
+                    markets: vec![m1.clone(), m2],
+                    now_ms: NOW,
+                },
+            }])),
+            0,
+        )
+        .expect_err("two foreign families must be refused");
+        assert!(err.contains("polymarket, 300s"), "{err}");
+        assert!(err.contains("kalshi, 3600s"), "{err}");
+        assert!(
+            err.contains("分段跑"),
+            "the split instruction rides the refusal: {err}"
+        );
+        // The same venue repeated at the SAME foreign duration collapses to
+        // one listed family (the dedup keeps the message readable).
+        let mut m3 = market_declaring(NOW, 300);
+        m3.venue = "polymarket".into();
+        let err2 = bt_result(
+            core,
+            Box::new(VecSource::new(vec![TimedEvent {
+                at_ms: NOW,
+                event: DataEvent::RoundMarkets {
+                    markets: vec![m1.clone(), m3],
+                    now_ms: NOW,
+                },
+            }])),
+            0,
+        )
+        .expect_err("one foreign family (twice) is still refused");
+        assert_eq!(err2.matches("polymarket, 300s").count(), 1, "{err2}");
+    }
     /// #354 (5.1): the replay charges the ACTIVE schedule's curve on taker
     /// legs and NOTHING on maker legs. The scenario's entry is an escalated
     /// taker (10 shares at the 0.45 ask); its take-profit exit is a maker at

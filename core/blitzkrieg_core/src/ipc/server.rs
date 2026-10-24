@@ -224,10 +224,22 @@ fn claim_socket_path(socket_path: &str) -> anyhow::Result<()> {
 
 /// The data plane's boot-resolved shape, shared with every session: the
 /// mount flags (config is the flag's only channel — they never change
-/// mid-session) and the ALREADY-MOUNTED plugin names (boot actives + any
-/// runtime enablements). `account.venue.set` reads it to decide whether a
-/// re-binding needs a runtime mount (`venue_mounted` is the idempotence
-/// guard — a re-bind of a live venue must not restart its feed).
+/// mid-session) and the ALREADY-MOUNTED discovery instances. `account.venue.set`
+/// reads it to decide whether a re-binding needs a runtime mount.
+///
+/// B1d (轮次多族): the mount book is keyed on (venue, duration) — each
+/// round-length family its own discovery instance (the plugin's
+/// `DiscoveryConfig` bakes the duration in at start, so one instance per
+/// family is the physical shape; kalshi selects its series from
+/// (`asset`, `round_duration_sec`), polymarket its slug from
+/// (`asset`, duration, now)). The book holds EVERY family the deployment
+/// declares — the accounts' `rounds` sets plus the boot's global
+/// single value — assembled once at boot (`at_boot`); a mount is
+/// idempotent per PAIR, so the same venue can carry 900s and 3600s
+/// instances side by side without one restarting the other. Feed mounts
+/// stay per-venue (the feed is venue-anchored, tokens arrive later via
+/// `subscribe_tokens`); `venue_mounted` (venue alone) keeps its meaning
+/// for the FEED idempotence the venue.set/create guards rely on.
 #[derive(Clone)]
 struct DataPlaneRuntime {
     feed_ws_enabled: bool,
@@ -242,37 +254,84 @@ struct DataPlaneRuntime {
     /// reported `runtimeEnabled: true` while zero kalshi events ever landed.
     discovery_assets: Vec<String>,
     discovery_round_duration_sec: i64,
-    mounted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Every (venue, duration) discovery family the deployment declares —
+    /// boot actives on the global value, plus every account `rounds` row
+    /// (B1d). The idempotence guard: an instance whose pair is already here
+    /// is never restarted (a duplicate `disc.start` would evict the running
+    /// one's host handle).
+    discovery_mounted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<(String, i64)>>>,
 }
 
 impl DataPlaneRuntime {
-    /// The boot shape: every boot-selected plugin is mounted.
+    /// The boot shape: every boot-selected plugin is mounted on the GLOBAL
+    /// duration (the historical single-instance posture), and every account
+    /// `rounds` family gains its own discovery instance — the boot half of
+    /// 轮次多族's instance pool. Feed mounts stay per-venue and are visible
+    /// through [`Self::venue_mounted`].
     fn at_boot(
         config: &CoreConfig,
         actives: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
+        accounts: &[crate::account::Account],
     ) -> Self {
-        let mounted = actives.iter().map(|p| p.name().to_string()).collect();
+        let global = config.round_duration_sec;
+        let mut pairs = std::collections::BTreeSet::new();
+        for p in actives {
+            pairs.insert((p.name().to_string(), global));
+        }
+        for a in accounts {
+            for &dur in &a.rounds {
+                if a.venue.is_empty() {
+                    // An unbound account's declaration speaks for EVERY
+                    // venue this boot enabled.
+                    for p in actives {
+                        pairs.insert((p.name().to_string(), dur));
+                    }
+                } else {
+                    pairs.insert((a.venue.clone(), dur));
+                }
+            }
+        }
         Self {
             feed_ws_enabled: config.feed_ws_enabled,
             discovery_enabled: config.engine_enabled && config.discovery_enabled,
             discovery_assets: config.assets.clone(),
-            discovery_round_duration_sec: config.round_duration_sec,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            discovery_round_duration_sec: global,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(pairs)),
         }
     }
 
+    /// The FEED idempotence guard (per-venue: one feed per venue, its
+    /// tokens arrive later) — the shape `account.venue.set` /
+    /// `account.create` have always checked.
     fn venue_mounted(&self, venue: &str) -> bool {
-        self.mounted
+        self.discovery_mounted
             .lock()
             .expect("data plane mounted set poisoned")
-            .contains(venue)
+            .iter()
+            .any(|(v, _)| v == venue)
+    }
+
+    /// The DISCOVERY idempotence guard: this exact (venue, duration) family
+    /// already runs its own instance.
+    fn discovery_mounted_at(&self, venue: &str, duration: i64) -> bool {
+        self.discovery_mounted
+            .lock()
+            .expect("data plane mounted set poisoned")
+            .contains(&(venue.to_string(), duration))
     }
 
     fn mark_mounted(&self, venue: &str) {
-        self.mounted
+        self.discovery_mounted
             .lock()
             .expect("data plane mounted set poisoned")
-            .insert(venue.to_string());
+            .insert((venue.to_string(), self.discovery_round_duration_sec));
+    }
+
+    fn mark_discovery_mounted(&self, venue: &str, duration: i64) {
+        self.discovery_mounted
+            .lock()
+            .expect("data plane mounted set poisoned")
+            .insert((venue.to_string(), duration));
     }
 }
 
@@ -290,6 +349,13 @@ impl DataPlaneRuntime {
 /// the host), kalshi selects its series from (`asset`, `round_duration_sec`)
 /// and would silently discover nothing forever.
 ///
+/// B1d (轮次多族): `families` lists every (venue, duration) pair to mount —
+/// the venue's GLOBAL family plus each family the account's `rounds` row
+/// declares (the same set `at_boot` pre-records; pairs already mounted are
+/// skipped by the caller's idempotence guard). ONE feed mount runs per
+/// call (the feed is venue-anchored, duration-blind); discovery starts
+/// once per family.
+///
 /// Executor: NOT mounted here. `mode.may_trade()` is a boot-frozen promise —
 /// Dry/ReadOnly never construct egress, and a Live core's executor set is
 /// built around the boot's own plugins (`ExecutorConfig.markets` etc.). A
@@ -304,6 +370,7 @@ async fn enable_venue_at_runtime(
     discovery_enabled: bool,
     discovery_assets: &[String],
     discovery_round_duration_sec: i64,
+    families: &[(String, i64)],
 ) {
     let name = plugin.name();
     if feed_ws_enabled {
@@ -320,20 +387,33 @@ async fn enable_venue_at_runtime(
         }
     }
     if discovery_enabled {
-        match plugin.discovery() {
-            Some(disc) => {
-                let cfg = blitzkrieg_market_api::DiscoveryConfig {
-                    assets: discovery_assets.to_vec(),
-                    round_duration_sec: discovery_round_duration_sec,
-                    poll_sec: 5,
-                };
-                if let Err(e) = disc.start(host.clone(), cfg).await {
-                    eprintln!("blitzkrieg-core: discovery start failed for {name}: {e}");
-                } else {
-                    eprintln!("blitzkrieg-core: discovery started for {name} (runtime enablement)");
+        for (_, duration) in families {
+            match plugin.discovery() {
+                Some(disc) => {
+                    let cfg = blitzkrieg_market_api::DiscoveryConfig {
+                        assets: discovery_assets.to_vec(),
+                        round_duration_sec: *duration,
+                        poll_sec: 5,
+                    };
+                    if let Err(e) = disc.start(host.clone(), cfg).await {
+                        eprintln!(
+                            "blitzkrieg-core: discovery start failed for {name}@{duration}s: {e}"
+                        );
+                    } else if *duration == discovery_round_duration_sec {
+                        eprintln!(
+                            "blitzkrieg-core: discovery started for {name} (runtime enablement)"
+                        );
+                    } else {
+                        eprintln!(
+                            "blitzkrieg-core: discovery started for {name} @ {duration}s family \
+                             (runtime enablement)"
+                        );
+                    }
+                }
+                None => {
+                    eprintln!("blitzkrieg-core: {name} declares no discovery — nothing to mount")
                 }
             }
-            None => eprintln!("blitzkrieg-core: {name} declares no discovery — nothing to mount"),
         }
     }
 }
@@ -561,8 +641,18 @@ pub async fn run(
         Arc::new(h)
     };
     // The boot-resolved data-plane shape the venue.set write consults: the
-    // mount flags and the already-mounted names (idempotence guard).
-    let data_plane = DataPlaneRuntime::at_boot(&config, &actives);
+    // mount flags and the already-mounted (venue, duration) discovery pairs
+    // (idempotence guard) — the global family per boot plugin, plus every
+    // account `rounds` row (轮次多族's boot instance pool).
+    let account_families: Vec<crate::account::Account> = core
+        .lock()
+        .await
+        .accounts()
+        .account_list()
+        .into_iter()
+        .cloned()
+        .collect();
+    let data_plane = DataPlaneRuntime::at_boot(&config, &actives, &account_families);
 
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
@@ -594,22 +684,43 @@ pub async fn run(
     // the engine + orderbook subscriptions, so Node is out of the data path.
     // Per-plugin loops: each discovery reports ONLY its own venue's markets and
     // subscribes only its own tokens.
+    //
+    // B1d (轮次多族): the loop walks the DECLARED (venue, duration) pairs —
+    // the boot's global family on every plugin, plus every account `rounds`
+    // row — instead of one instance per plugin. Each pair starts its own
+    // discovery with that duration baked into the config (the plugin picks
+    // its series/slug from it); the pairs were pre-recorded in
+    // `data_plane.discovery_mounted` by `at_boot`, and the set walk here is
+    // the same information. A single-family deployment declares nothing but
+    // the global value, so the walk degenerates to exactly the historical
+    // one-instance-per-plugin shape — the replay/corpus byte-identity
+    // posture.
     if config.engine_enabled && config.discovery_enabled {
-        let cfg = blitzkrieg_market_api::DiscoveryConfig {
-            assets: config.assets.clone(),
-            round_duration_sec: config.round_duration_sec,
-            poll_sec: 5,
-        };
-        for p in &actives {
-            if let Some(disc) = p.discovery() {
-                if let Err(e) = disc.start(host.clone(), cfg.clone()).await {
-                    eprintln!(
-                        "blitzkrieg-core: discovery start failed for {}: {e}",
-                        p.name()
-                    );
-                } else {
-                    eprintln!("blitzkrieg-core: discovery started for {}", p.name());
-                }
+        let pairs: Vec<(String, i64)> = data_plane
+            .discovery_mounted
+            .lock()
+            .expect("data plane mounted set poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        for (venue, duration) in &pairs {
+            let Some(p) = actives.iter().find(|p| p.name() == *venue) else {
+                continue;
+            };
+            let Some(disc) = p.discovery() else {
+                continue;
+            };
+            let cfg = blitzkrieg_market_api::DiscoveryConfig {
+                assets: config.assets.clone(),
+                round_duration_sec: *duration,
+                poll_sec: 5,
+            };
+            if let Err(e) = disc.start(host.clone(), cfg).await {
+                eprintln!("blitzkrieg-core: discovery start failed for {venue}@{duration}s: {e}");
+            } else if *duration == config.round_duration_sec {
+                eprintln!("blitzkrieg-core: discovery started for {venue}");
+            } else {
+                eprintln!("blitzkrieg-core: discovery started for {venue} @ {duration}s family");
             }
         }
         eprintln!("blitzkrieg-core: rust-native round discovery enabled");
@@ -3296,15 +3407,42 @@ async fn handle_line(
                         && !data_plane.venue_mounted(venue)
                         && let Some(plugin) = registry.get(venue)
                     {
-                        enable_venue_at_runtime(
-                            plugin.as_ref(),
-                            host.clone(),
-                            data_plane.feed_ws_enabled,
-                            data_plane.discovery_enabled,
-                            &data_plane.discovery_assets,
-                            data_plane.discovery_round_duration_sec,
-                        )
-                        .await;
+                        // 轮次多族: the mount walks every (venue, duration)
+                        // family this venue must run — the boot's global
+                        // family plus each family the (possibly re-bound)
+                        // account's `rounds` declares. Pairs already mounted
+                        // are filtered out here (the idempotence guard).
+                        let mut fams =
+                            vec![(venue.to_string(), data_plane.discovery_round_duration_sec)];
+                        for a in core.lock().await.accounts().account_list() {
+                            if a.venue == venue {
+                                for &dur in &a.rounds {
+                                    let pair = (venue.to_string(), dur);
+                                    if !fams.contains(&pair) {
+                                        fams.push(pair);
+                                    }
+                                }
+                            }
+                        }
+                        fams.retain(|(v, d)| v != venue || !data_plane.discovery_mounted_at(v, *d));
+                        if !fams.is_empty() {
+                            enable_venue_at_runtime(
+                                plugin.as_ref(),
+                                host.clone(),
+                                data_plane.feed_ws_enabled,
+                                data_plane.discovery_enabled,
+                                &data_plane.discovery_assets,
+                                data_plane.discovery_round_duration_sec,
+                                &fams,
+                            )
+                            .await;
+                            for (_, d) in &fams {
+                                data_plane.mark_discovery_mounted(venue, *d);
+                            }
+                        }
+                        // The feed side keeps its per-venue guard: mark the
+                        // venue mounted even when every family was already
+                        // live (a re-bind must not restart the feed).
                         data_plane.mark_mounted(venue);
                         runtime_enabled = true;
                     }
@@ -3515,15 +3653,40 @@ async fn handle_line(
                         && !data_plane.venue_mounted(v)
                         && let Some(plugin) = registry.get(v)
                     {
-                        enable_venue_at_runtime(
-                            plugin.as_ref(),
-                            host.clone(),
-                            data_plane.feed_ws_enabled,
-                            data_plane.discovery_enabled,
-                            &data_plane.discovery_assets,
-                            data_plane.discovery_round_duration_sec,
-                        )
-                        .await;
+                        // 轮次多族: the same family walk venue.set runs —
+                        // the boot's global family plus the new account's
+                        // `rounds` rows (idempotent per pair; the venue is
+                        // fresh, so in practice nothing is filtered).
+                        let mut fams =
+                            vec![(v.to_string(), data_plane.discovery_round_duration_sec)];
+                        if let Ok(c) = core.try_lock() {
+                            for a in c.accounts().account_list() {
+                                if a.venue == v {
+                                    for &dur in &a.rounds {
+                                        let pair = (v.to_string(), dur);
+                                        if !fams.contains(&pair) {
+                                            fams.push(pair);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        fams.retain(|(vv, d)| vv != v || !data_plane.discovery_mounted_at(vv, *d));
+                        if !fams.is_empty() {
+                            enable_venue_at_runtime(
+                                plugin.as_ref(),
+                                host.clone(),
+                                data_plane.feed_ws_enabled,
+                                data_plane.discovery_enabled,
+                                &data_plane.discovery_assets,
+                                data_plane.discovery_round_duration_sec,
+                                &fams,
+                            )
+                            .await;
+                            for (_, d) in &fams {
+                                data_plane.mark_discovery_mounted(v, *d);
+                            }
+                        }
                         data_plane.mark_mounted(v);
                         runtime_enabled = true;
                     }
@@ -4515,6 +4678,7 @@ mod tests {
     /// observable effects, not against a log line.
     struct VenueLivePlugin {
         name: String,
+        discovery: VenueLiveDiscovery,
     }
     impl blitzkrieg_market_api::MarketPlugin for VenueLivePlugin {
         fn name(&self) -> &str {
@@ -4527,7 +4691,7 @@ mod tests {
             Some(&VenueLiveFeed)
         }
         fn discovery(&self) -> Option<&dyn blitzkrieg_market_api::MarketDiscovery> {
-            Some(&VenueLiveDiscovery)
+            Some(&self.discovery)
         }
     }
 
@@ -4572,11 +4736,18 @@ mod tests {
     /// config is recorded so tests can pin the boot-shape contract: a runtime
     /// mount must hand the plugin the boot's assets/round length, not zeroes
     /// (kalshi selects its series from exactly those two fields — #535).
-    struct VenueLiveDiscovery;
-    /// The DiscoveryConfig of the LAST start call (each test drives one mount).
+    /// The tag carries the OWNING plugin's name: parallel tests register
+    /// their own plugin instances, and each reads only its own log slice
+    /// (a process-global capture without the tag raced two mount tests).
+    struct VenueLiveDiscovery {
+        tag: String,
+    }
+    /// Every (plugin-name, DiscoveryConfig) the start call has received, in
+    /// order (B1d family mounts start ONE discovery per (venue, duration);
+    /// readers filter by tag then walk their slice).
     static VENUE_LIVE_DISCOVERY_CFG: std::sync::Mutex<
-        Option<blitzkrieg_market_api::DiscoveryConfig>,
-    > = std::sync::Mutex::new(None);
+        Vec<(String, blitzkrieg_market_api::DiscoveryConfig)>,
+    > = std::sync::Mutex::new(Vec::new());
     impl blitzkrieg_market_api::MarketDiscovery for VenueLiveDiscovery {
         fn name(&self) -> &str {
             "venue-live-discovery"
@@ -4588,9 +4759,10 @@ mod tests {
         ) -> blitzkrieg_market_api::BoxFuture<'a, Result<(), blitzkrieg_market_api::CoreError>>
         {
             Box::pin(async move {
-                *VENUE_LIVE_DISCOVERY_CFG
+                VENUE_LIVE_DISCOVERY_CFG
                     .lock()
-                    .expect("venue live discovery cfg poisoned") = Some(config);
+                    .expect("venue live discovery cfg poisoned")
+                    .push((self.tag.clone(), config));
                 use rust_decimal_macros::dec;
                 host.on_round_markets(vec![blitzkrieg_market_api::MarketDescriptor {
                     asset: "BTC".to_string(),
@@ -4862,7 +5034,7 @@ mod tests {
             discovery_enabled: false,
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         let mut session = SessionState::default();
         serde_json::from_str(
@@ -4902,7 +5074,7 @@ mod tests {
             discovery_enabled: false,
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         serde_json::from_str(
             &handle_line(
@@ -5038,7 +5210,7 @@ mod tests {
             discovery_enabled: false,
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         let mut session = SessionState::default();
         serde_json::from_str(
@@ -6040,7 +6212,7 @@ mod tests {
             discovery_enabled: false,
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
         serde_json::from_str(
             &handle_line(
@@ -6560,6 +6732,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -6571,6 +6744,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: now,
                 },
             ],
@@ -6957,6 +7131,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                     crate::account::Account {
@@ -6968,6 +7143,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                 ],
@@ -6991,6 +7167,9 @@ mod tests {
             // binary anyway (the same trick the round-trip test uses).
             let registry = crate::market::registry::MarketPluginRegistry::new();
             registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "venuelive".to_string(),
+                },
                 name: "venuelive".to_string(),
             }));
             (
@@ -7004,13 +7183,13 @@ mod tests {
         let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
             Arc::new(crate::market::host::CoreHost::new(core.clone()));
         let mut mounted = std::collections::BTreeSet::new();
-        mounted.insert("polymarket".to_string());
+        mounted.insert(("polymarket".to_string(), 900));
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: true,
             discovery_enabled: true,
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
         };
 
         let reply = rpc_with_data_plane(
@@ -7071,8 +7250,12 @@ mod tests {
         let seen = VENUE_LIVE_DISCOVERY_CFG
             .lock()
             .expect("venue live discovery cfg poisoned")
-            .clone();
-        let seen = seen.expect("the runtime mount must have started the discovery");
+            .iter()
+            .filter(|(tag, _)| tag == "venuelive")
+            .map(|(_, cfg)| cfg)
+            .next_back()
+            .cloned()
+            .expect("the runtime mount must have started the discovery");
         assert_eq!(
             seen.assets,
             vec!["BTC".to_string(), "ETH".to_string()],
@@ -7105,6 +7288,161 @@ mod tests {
             reply["result"]["runtimeEnabled"],
             serde_json::json!(false),
             "an already-mounted venue must not be re-mounted: {reply}"
+        );
+    }
+
+    /// B1d (轮次多族): the runtime mount walks EVERY declared family — a
+    /// bind whose account declares `rounds = [900, 3600]` mounts the
+    /// global 900 family AND a 3600 instance of the same venue, each with
+    /// its own duration baked into the discovery config (the plugin picks
+    /// its series/slug from that field). The per-pair idempotence guard: a
+    /// second venue.set with every family already mounted mounts nothing
+    /// (runtimeEnabled=false, feed untouched).
+    #[tokio::test]
+    async fn venue_set_mounts_every_declared_family_of_the_account() {
+        let dir = std::env::temp_dir().join(format!("bk-family-mount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    // The declaration under test: two families on one venue.
+                    rounds: vec![900, 3600],
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "familylive".to_string(),
+                },
+                name: "familylive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        // Boot shape: venuelive never mounted; the boot's global family (900)
+        // sits on the polymarket slot only.
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert(("polymarket".to_string(), 900));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+        };
+        VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .retain(|(tag, _)| tag != "familylive");
+
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{"accountId":"paper","venue":"familylive","reason":"family mount"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "the bind must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "{reply}"
+        );
+        // BOTH families mounted: the boot's global 900 AND the declared
+        // 3600 — each pair recorded in the book, each with its own
+        // discovery instance (two starts, two distinct durations).
+        {
+            let book = data_plane.discovery_mounted.lock().unwrap();
+            assert!(book.contains(&("familylive".to_string(), 900)), "{book:?}");
+            assert!(book.contains(&("familylive".to_string(), 3600)), "{book:?}");
+        }
+        let durations: Vec<i64> = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == "familylive")
+            .map(|(_, cfg)| cfg.round_duration_sec)
+            .collect();
+        assert!(
+            durations.contains(&900) && durations.contains(&3600),
+            "the mount started one discovery per family, each with its own \
+             duration: {durations:?}"
+        );
+
+        // Idempotence per pair: a second venue.set with everything mounted
+        // mounts nothing.
+        let mark = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == "familylive")
+            .count();
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.venue.set","params":{"accountId":"paper","venue":"familylive","reason":"idempotence"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "re-bind must succeed: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "every declared family already mounted: {reply}"
+        );
+        assert_eq!(
+            VENUE_LIVE_DISCOVERY_CFG
+                .lock()
+                .expect("venue live discovery cfg poisoned")
+                .iter()
+                .filter(|(tag, _)| tag == "familylive")
+                .count(),
+            mark,
+            "the idempotent re-bind started no discovery"
         );
     }
 
@@ -7141,6 +7479,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: now,
                 }],
                 AccountId::from("default"),
@@ -7158,6 +7497,9 @@ mod tests {
             c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
             let registry = crate::market::registry::MarketPluginRegistry::new();
             registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "venuelive".to_string(),
+                },
                 name: "venuelive".to_string(),
             }));
             (
@@ -7171,13 +7513,13 @@ mod tests {
         let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
             Arc::new(crate::market::host::CoreHost::new(core.clone()));
         let mut mounted = std::collections::BTreeSet::new();
-        mounted.insert("polymarket".to_string());
+        mounted.insert(("polymarket".to_string(), 900));
         let data_plane = DataPlaneRuntime {
             feed_ws_enabled: true,
             discovery_enabled: true,
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
         };
 
         let reply = rpc_with_data_plane(
@@ -7308,6 +7650,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                     crate::account::Account {
@@ -7319,6 +7662,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                 ],
@@ -7334,6 +7678,9 @@ mod tests {
             let c = Core::with_account_book(cfg, book);
             let registry = crate::market::registry::MarketPluginRegistry::new();
             registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "venuelive".to_string(),
+                },
                 name: "venuelive".to_string(),
             }));
             (
@@ -7349,7 +7696,7 @@ mod tests {
             discovery_enabled: true,
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
-            mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         };
 
         // Unbind: the write lands, nothing mounts.
@@ -7445,6 +7792,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                     crate::account::Account {
@@ -7456,6 +7804,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     },
                 ],
@@ -7882,6 +8231,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -7893,6 +8243,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: now,
                 },
             ],
@@ -8653,6 +9004,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -8664,6 +9016,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -8710,6 +9063,7 @@ mod tests {
                 venue: String::new(),
                 trading_enabled: true,
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: 0,
             }],
             AccountId::from("default"),
@@ -8878,6 +9232,7 @@ mod tests {
                         venue: String::new(),
                         trading_enabled: true,
                         strategies: Vec::new(),
+                        rounds: Vec::new(),
                         updated_at_ms: now,
                     })
                     .collect(),

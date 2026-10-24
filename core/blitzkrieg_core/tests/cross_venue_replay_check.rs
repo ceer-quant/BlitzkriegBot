@@ -295,6 +295,7 @@ fn replay_with_config(
                 venue: "kalshi".into(),
                 trading_enabled: true,
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: NOW,
             })
             .expect("the kalshi account mints (unique id)");

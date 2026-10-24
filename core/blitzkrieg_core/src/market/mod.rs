@@ -1015,6 +1015,7 @@ mod derive_tests {
                 venue: (*venue).to_string(),
                 trading_enabled: true,
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: now,
             })
             .collect();
