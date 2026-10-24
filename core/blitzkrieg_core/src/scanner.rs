@@ -376,6 +376,17 @@ impl Scanner {
     /// THE MARKET'S OWN venue clock, so one venue running hot-to-expiry no
     /// longer freezes a sibling venue's candidates (multi-plugin data plane).
     /// Presence and age remain global (they describe the shared round).
+    ///
+    /// B1c-family refinement (E2): the clock is the market's OWN (venue,
+    /// duration) family — `round_timing_for` on the row's declared
+    /// `round_duration_sec` (`0` = legacy/undeclared → the configured global
+    /// grid, exactly the pre-E2 read). The previous shape folded to
+    /// `(venue, cfg.round_duration_sec)`, a grid the row's family key never
+    /// speaks under: an 86400s declaration lands in `(venue, 86400)`
+    /// (engine writes per feed duration), so the global-900s read could never
+    /// see it and every gate verdict was computed off a stale grid instead of
+    /// the family's own. Single-family tables resolve every row to
+    /// `cfg.round_duration_sec` — the projection is identical, byte for byte.
     pub fn can_trade_reason_for(
         &self,
         market: &CryptoMarket,
@@ -384,7 +395,12 @@ impl Scanner {
         if self.markets.is_empty() {
             return Err(TimingBlock::NoMarkets);
         }
-        let t = self.round_timing_for_venue(&market.venue, local_now_ms);
+        let family_duration = if market.round_duration_sec > 0 {
+            market.round_duration_sec
+        } else {
+            self.cfg.round_duration_sec
+        };
+        let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
         if t.age_sec < self.cfg.min_round_age_sec {
             return Err(TimingBlock::TooYoung {
                 age_sec: t.age_sec,
@@ -398,6 +414,39 @@ impl Scanner {
             });
         }
         Ok(())
+    }
+
+    /// E2 (multi-family read views): whether `market` is a row of the round
+    /// CURRENTLY BEING TRADED — the shared filter predicate of the two
+    /// per-market read views (`books_view`, the `marketPrices` rows of
+    /// `engine.round`). The #560 contract ("expiry slot = the clock's current
+    /// slot + 1, `round_slot == 0` legacy rows always pass") judged every row
+    /// on the GLOBAL grid (`current_slot(now) + 1`): a row whose family runs
+    /// its own round length (a PM daily discovery stamps `(slot, 86400)`)
+    /// never equals the 900s grid's `+1`, so BOTH views silently dropped every
+    /// foreign-family row — B1d's multi-family discovery instances fed rows
+    /// the panel could never show. The predicate therefore judges each row on
+    /// ITS OWN (venue, duration) family clock: the row's declared
+    /// `round_duration_sec` (0 = legacy/undeclared → the configured global
+    /// grid) picks the family, `round_timing_for` derives that family's
+    /// current slot, and the row is live iff its slot is that family's +1.
+    ///
+    /// `round_slot == 0` stays an unconditional pass (old corpora, the #560
+    /// bridge). Single-family deployments (every row declares or defaults to
+    /// the configured grid, offsets 0) resolve the family clock to exactly the
+    /// global grid — the verdict is bit-identical with the pre-E2
+    /// `current_slot(now) + 1` comparison.
+    pub fn is_live_round_row(&self, market: &CryptoMarket, local_now_ms: i64) -> bool {
+        if market.round_slot == 0 {
+            return true;
+        }
+        let family_duration = if market.round_duration_sec > 0 {
+            market.round_duration_sec
+        } else {
+            self.cfg.round_duration_sec
+        };
+        let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
+        market.round_slot == t.slot + 1
     }
 
     /// Record the venue-reported end time and derive the clock offset — in the
@@ -926,6 +975,150 @@ mod tests {
             s.round_timing_for("kalshi", 3600, now).expires_at_ms,
             now + 3_600_000,
             "the same declaration is inside the 1h family's band"
+        );
+    }
+
+    // ── E2：入场 timing 门按行自身族钟（多族漏网 ①）────────────────────
+
+    /// Local row fixture (the engine test module's `venue_market` shape):
+    /// a 900s-declared BTC row expiring at `end_ms` on `venue`.
+    fn gate_market(end_ms: i64, venue: &str) -> CryptoMarket {
+        CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-{venue}"),
+            question_id: format!("q-{venue}"),
+            up_token_id: format!("{venue}-up"),
+            down_token_id: format!("{venue}-down"),
+            up_price: rust_decimal_macros::dec!(0.6),
+            down_price: rust_decimal_macros::dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: true,
+            question: "BTC up or down".into(),
+        }
+    }
+
+    /// A daily (86400s) market's declaration lands in its (venue, 86400)
+    /// family clock — a key the pre-E2 read (`round_timing_for_venue` =
+    /// (venue, cfg 900s)) could never consult, so `can_trade_reason_for`
+    /// judged the row on the global grid and mis-timed every verdict. The
+    /// gate must read the row's OWN family: inside the daily family's active
+    /// window the market trades even while the global 900s grid sits in a
+    /// different phase; a same-venue 900s row still answers to the 900s
+    /// family, unchanged.
+    #[test]
+    fn entry_timing_gate_judges_a_daily_market_on_its_own_family_clock() {
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            min_time_left_sec: 180,
+            ..Default::default()
+        });
+        // now = 1_000_000ms: the 900s grid is 100s into slot 1 (800s left).
+        let now = 1_000_000i64;
+        // The daily market's declaration, in-band for the 86400s family:
+        // the round ends one day after the grid slot now sits in.
+        let daily_end = (now / 1000 / 86_400 + 1) * 86_400 * 1000;
+        s.observe_end_time_for("polymarket", 86_400, daily_end, now);
+        let mut daily = gate_market(daily_end, "polymarket");
+        daily.round_duration_sec = 86_400;
+        daily.round_slot = daily_end / 1000 / 86_400;
+        s.set_markets(vec![daily.clone()]);
+
+        // Pre-E2 the gate read (polymarket, 900): the earliest 900s-grid
+        // fallback — nothing had spoken there — pinned time_left to the 900s
+        // grid's phase (800s), while the OWN family shows ~86_300s. The
+        // family clock is what trades.
+        let t = s.can_trade_reason_for(&daily, now);
+        assert!(
+            t.is_ok(),
+            "a daily market inside its own family's active window trades: {t:?}"
+        );
+        assert_eq!(
+            s.round_timing_for("polymarket", 86_400, now).time_left_sec,
+            (daily_end - now) / 1000,
+            "the family clock carries the daily declaration, not the 900s grid"
+        );
+
+        // The gate stays honest WITHIN the family: pull the daily close into
+        // the force-exit window (an in-band refusal would be the guard, so
+        // instead judge at a `now` where the family clock itself runs low —
+        // shift the declaration to end 100s out; 100s < 100_000ms band) and
+        // the same row is refused.
+        let mut s2 = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            min_time_left_sec: 180,
+            ..Default::default()
+        });
+        let near_end = now + 100_000;
+        s2.observe_end_time_for("polymarket", 86_400, near_end, now);
+        let mut hot = gate_market(near_end, "polymarket");
+        hot.round_duration_sec = 86_400;
+        hot.round_slot = near_end / 1000 / 86_400;
+        s2.set_markets(vec![hot.clone()]);
+        assert_eq!(
+            s2.can_trade_reason_for(&hot, now),
+            Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: 100,
+                min_time_left_sec: 180
+            }),
+            "inside the family's force-exit window the gate still blocks"
+        );
+    }
+
+    /// The single-family legacy path is byte-identical: a row declaring 0
+    /// (or the configured 900s) answers to the (venue, cfg) family — the
+    /// exact clock `round_timing_for_venue` folded to before E2 — so every
+    /// pre-E2 verdict (including the sibling-venue per-market refinement)
+    /// reproduces bit for bit.
+    #[test]
+    fn entry_timing_gate_legacy_rows_still_answer_to_the_global_family() {
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            min_time_left_sec: 180,
+            ..Default::default()
+        });
+        let poly_end = 1_800_000i64;
+        let kalshi_end = 1_950_000i64;
+        s.observe_end_time_for_venue("polymarket", poly_end, 900_000);
+        s.observe_end_time_for_venue("kalshi", kalshi_end, 900_000);
+        let poly = gate_market(poly_end, "polymarket");
+        let kalshi = gate_market(kalshi_end, "kalshi");
+        s.set_markets(vec![poly.clone(), kalshi.clone()]);
+
+        // The pre-E2 per-venue verdict, verbatim: at 1_630_000 the polymarket
+        // close sits 170s out (< 180 → blocked) and kalshi's 320s out (ok) —
+        // the exact numbers the pre-E2 test pinned.
+        let now = 1_630_000i64;
+        assert_eq!(
+            s.can_trade_reason_for(&poly, now),
+            Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: 170,
+                min_time_left_sec: 180
+            }),
+            "the polymarket row keeps its own-window refusal"
+        );
+        assert!(
+            s.can_trade_reason_for(&kalshi, now).is_ok(),
+            "the kalshi row keeps its own-window admission"
+        );
+
+        // A zero-declared row (legacy archive) folds to the cfg grid — the
+        // same verdict the pre-E2 read produced.
+        let mut ghost = gate_market(poly_end, "ghost");
+        ghost.round_duration_sec = 0;
+        assert_eq!(
+            s.can_trade_reason_for(&ghost, now),
+            Err(TimingBlock::TooCloseToExpiry {
+                time_left_sec: 170,
+                min_time_left_sec: 180
+            }),
+            "undeclared rows ride the configured grid, exactly as before"
         );
     }
 }

@@ -1000,14 +1000,14 @@ impl Engine {
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
                 let feeding_venue = markets.first().map(|m| m.venue.clone()).unwrap_or_default();
                 let global_duration_sec = self.cfg.scanner.round_duration_sec;
-                let feed_duration = row_duration_sec(
+                let feed_duration = row_family_duration(
                     markets.first().map(|m| m.round_duration_sec).unwrap_or(0),
                     global_duration_sec,
                 );
                 let scanner_holds_slot = slot != 0
                     && self.scanner.markets().iter().any(|m| {
                         m.round_slot == slot
-                            && row_duration_sec(m.round_duration_sec, global_duration_sec)
+                            && row_family_duration(m.round_duration_sec, global_duration_sec)
                                 == feed_duration
                     });
                 if scanner_holds_slot {
@@ -1114,7 +1114,8 @@ impl Engine {
                             // resolve to the historic `slot - round_slot`
                             // verbatim.
                             let row_dur =
-                                row_duration_sec(m.round_duration_sec, global_duration_sec).max(1);
+                                row_family_duration(m.round_duration_sec, global_duration_sec)
+                                    .max(1);
                             let lag = if row_dur == feed_duration {
                                 slot - m.round_slot
                             } else {
@@ -1196,7 +1197,7 @@ impl Engine {
                         set.insert(m.down_token_id.clone());
                     }
                     for m in self.scanner.markets() {
-                        if row_duration_sec(m.round_duration_sec, global_duration_sec)
+                        if row_family_duration(m.round_duration_sec, global_duration_sec)
                             == feed_duration
                         {
                             set.insert(m.up_token_id.clone());
@@ -1246,7 +1247,7 @@ impl Engine {
                         .iter()
                         .filter(|m| {
                             m.venue != venue
-                                || row_duration_sec(m.round_duration_sec, global_duration_sec)
+                                || row_family_duration(m.round_duration_sec, global_duration_sec)
                                     != feed_duration
                         })
                         .cloned()
@@ -2936,7 +2937,14 @@ fn fresh_book(
 /// with the pre-B1c slot-only behaviour. Mirrors `TrackedOrder`'s tri-state
 /// resolution (own stamp > global), simplified for rows (no per-row fallback
 /// chain beyond the two states the model carries).
-fn row_duration_sec(declared: i64, global_sec: i64) -> i64 {
+///
+/// E2: `pub` and shared — the service layer's top-up mirror (the #498
+/// staggered-listing membership test) and the kill-arm family scope judge the
+/// SAME (slot, duration) pairs the engine's merge arm does, so the two sides
+/// cannot drift. Kept a free function (not a `Scanner` method): the callers
+/// hold either a `CryptoMarket` or a bare declared duration, never a scanner
+/// borrow in the same scope.
+pub fn row_family_duration(declared: i64, global_sec: i64) -> i64 {
     if declared > 0 { declared } else { global_sec }
 }
 

@@ -2931,20 +2931,27 @@ async fn handle_line(
             // 命中 +1，照旧放行桥接。再按 (venue,asset) 唯一化（先到先得，
             // 行序稳定）：任何上游组合再送进同一 (venue,asset) 的重复行也
             // 只成一行。
+            //
+            // E2（多族读面）：过滤谓词升级为 scanner 的共用纯函数
+            // `is_live_round_row` —— 每行按自己的 (venue, duration) 族钟
+            // 判定（行声明 `round_duration_sec`，0 = 老语料 → 全局网格），
+            // 与 `books_view` 同一谓词：外族行（如 86400s discovery 按自家
+            // 轮长盖的 round_slot）在全局 900s 网格上永不等于 +1，旧谓词
+            // 会把 B1d 多族实例喂出的行整体滤没。单族部署下族钟 ≡ 全局
+            // 网格，判定与升级前逐位一致。
             let now = now_ms();
             let markets: Vec<serde_json::Value> = c
                 .engine
                 .as_ref()
                 .map(|e| {
                     let scanner = e.scanner();
-                    let trading_slot = scanner.current_slot(now) + 1;
                     let mut seen: std::collections::HashSet<(String, String)> =
                         std::collections::HashSet::new();
                     scanner
                         .round_state(now)
                         .markets
                         .iter()
-                        .filter(|m| m.round_slot == 0 || m.round_slot == trading_slot)
+                        .filter(|m| scanner.is_live_round_row(m, now))
                         .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
                         .map(|m| {
                             let up = e
@@ -10246,6 +10253,14 @@ mod tests {
         // on the wire BEFORE the trading batch): next tier first, then the
         // trading batch. All through the feed entry (`engine_on_data`), the
         // same path a real plugin's RoundMarkets lands in.
+        //
+        // E2: per-VENUE batches (the production shape — a discovery lists its
+        // own venue's round). The pre-E2 single mixed batch relied on the
+        // global-min offset fold to time the kalshi rows: the rollover arm
+        // observes only `markets.first()`'s declaration, so kalshi's own
+        // clock never spoke and its rows silently rode polymarket's offset.
+        // The family-aware filter reads each venue's OWN clock, so the
+        // kalshi batch carries its declaration the way a real feed does.
         let mk = |asset: &str, venue: &str, end_ms: i64, up: &str| CryptoMarket {
             asset: asset.to_string(),
             condition_id: format!("cond-{venue}-{asset}-{end_ms}"),
@@ -10278,13 +10293,11 @@ mod tests {
         feed(&core, vec![mk("BTC", "kalshi", next_end, "0.55")], now).await;
         feed(
             &core,
-            vec![
-                mk("BTC", "polymarket", trading_end, "0.30"),
-                mk("BTC", "kalshi", trading_end, "0.40"),
-            ],
+            vec![mk("BTC", "polymarket", trading_end, "0.30")],
             now,
         )
         .await;
+        feed(&core, vec![mk("BTC", "kalshi", trading_end, "0.40")], now).await;
 
         let reply = rpc(
             &core,
@@ -10373,7 +10386,9 @@ mod tests {
             question: format!("{asset} up or down"),
         };
         // Adversarial order, same as the price-row test: the next tier's
-        // batch lands first, then the trading round's.
+        // batch lands first, then the trading round's — per VENUE (the
+        // production discovery shape; see the price-row test's E2 note on
+        // why the mixed single batch no longer reflects a real feed).
         {
             let mut c = core.lock().await;
             c.engine_on_data(
@@ -10385,10 +10400,14 @@ mod tests {
             );
             c.engine_on_data(
                 crate::engine::DataEvent::RoundMarkets {
-                    markets: vec![
-                        mk("BTC", "polymarket", trading_end),
-                        mk("BTC", "kalshi", trading_end),
-                    ],
+                    markets: vec![mk("BTC", "polymarket", trading_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("BTC", "kalshi", trading_end)],
                     now_ms: now,
                 },
                 now,
@@ -10441,6 +10460,138 @@ mod tests {
             kalshi_up,
             format!("up-kalshi-BTC-{trading_end}"),
             "the depth view must expose the trading round's tokens"
+        );
+    }
+
+    // ── E2（多族漏网 ③④）：读面过滤按行自身族钟 ─────────────────────────
+
+    /// A daily (86400s) family rides the SAME scanner beside the 15m family
+    /// (polymarket lists 15m, kalshi lists a daily — the multi-family data
+    /// plane B1d's discovery instances feed). The pre-E2 filter
+    /// (`current_slot(now)+1` on the GLOBAL grid) dropped the daily row
+    /// forever — a daily-grid slot number can never equal the global grid's
+    /// +1 — so `books_view` and the `engine.round` price rows lost every
+    /// foreign-family row. Both views now judge each row on its OWN (venue,
+    /// duration) family clock (the shared `is_live_round_row` predicate):
+    /// the 15m row AND the daily row surface together, both next tiers stay
+    /// out, and the `round_slot == 0` legacy bridge is untouched.
+    ///
+    /// 偏移按 venue 单键（B1a 设计：venue 墙钟属性，同 venue 各族共用），
+    /// 同 venue 双族的声明偏移互踩是 B1a 既有形状——本牙用跨 venue 双族
+    /// 隔开偏移，钉的是审计点「外族行在全局 900s 网格上永不等于
+    /// trading_slot 而被整体滤没」，与行属于哪个 venue 无关（旧谓词对
+    /// 任何 duration ≠ 全局网格的行一律误杀）。
+    #[tokio::test]
+    async fn multi_family_rows_surface_in_both_read_views() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, _registry, _peer) = hot_reload_fixture().await;
+        let now = now_ms();
+        let s_slot = now / 1000 / 900i64; // the 900s grid's current slot
+        let d_slot = now / 1000 / 86_400i64; // the daily grid's current slot
+        let s_trading_end = (s_slot + 2) * 900 * 1000; // the traded 15m round
+        let s_next_end = (s_slot + 3) * 900 * 1000; // the 15m next tier (out of band)
+        let d_trading_end = (d_slot + 2) * 86_400 * 1000; // the traded daily round
+        let d_next_end = (d_slot + 3) * 86_400 * 1000; // the daily next tier (out of band)
+
+        let mk = |asset: &str, venue: &str, end_ms: i64, dur: i64| CryptoMarket {
+            asset: asset.to_string(),
+            condition_id: format!("cond-{venue}-{asset}-{end_ms}"),
+            question_id: format!("q-{asset}-{end_ms}"),
+            up_token_id: format!("up-{asset}-{end_ms}"),
+            down_token_id: format!("down-{asset}-{end_ms}"),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / dur,
+            round_duration_sec: dur,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: format!("{asset} up or down"),
+        };
+        // Each venue's NEXT tier first (its declaration is out of the
+        // ±2-round band → refused), then the traded round — the adversarial
+        // order the boundary produces. The DAILY family feeds BEFORE the 15m
+        // one: engine.rs's #550 stale-row sweep measures a sibling's lag on
+        // its own grid against the FEEDING family's slot, and a daily feed
+        // arriving last would mis-measure a live 15m row ~96 rounds "behind"
+        // and sweep it (a pre-existing B1c cross-family wrinkle, out of this
+        // fix's scope) — the 15m-feeding direction measures the daily row at
+        // lag ≈ 0 and keeps it.
+        {
+            let mut c = core.lock().await;
+            for (asset, venue, end, dur) in [
+                ("ETH", "kalshi", d_next_end, 86_400),
+                ("ETH", "kalshi", d_trading_end, 86_400),
+                ("BTC", "polymarket", s_next_end, 900),
+                ("BTC", "polymarket", s_trading_end, 900),
+            ] {
+                c.engine_on_data(
+                    crate::engine::DataEvent::RoundMarkets {
+                        markets: vec![mk(asset, venue, end, dur)],
+                        now_ms: now,
+                    },
+                    now,
+                );
+            }
+        }
+
+        // ③ the depth view: both FAMILIES' traded rows are in, both next
+        // tiers are out, and the traded tokens (not the next tier's) surface.
+        let rows = {
+            let c = core.lock().await;
+            c.books_view(5, now)
+        };
+        let tokens: Vec<&str> = rows.iter().map(|r| r.up_token_id.as_str()).collect();
+        assert!(
+            tokens.contains(&&format!("up-BTC-{s_trading_end}")[..]),
+            "the 15m traded row surfaces: {rows:?}"
+        );
+        assert!(
+            tokens.contains(&&format!("up-ETH-{d_trading_end}")[..]),
+            "the daily traded row must NOT be dropped by the global grid: {rows:?}"
+        );
+        assert!(
+            !tokens.contains(&&format!("up-BTC-{s_next_end}")[..]),
+            "the 15m next tier stays filtered (#560): {rows:?}"
+        );
+        assert!(
+            !tokens.contains(&&format!("up-ETH-{d_next_end}")[..]),
+            "the daily next tier stays filtered on its OWN grid: {rows:?}"
+        );
+
+        // ④ the wire's price rows judge the same predicate — the ENGINE_ROUND
+        // assembly's filter keeps exactly the two traded family rows.
+        let c = core.lock().await;
+        let e = c.engine.as_ref().expect("engine");
+        let scanner = e.scanner();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let surfaced: Vec<String> = scanner
+            .round_state(now)
+            .markets
+            .iter()
+            .filter(|m| scanner.is_live_round_row(m, now))
+            .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
+            .map(|m| m.up_token_id.clone())
+            .collect();
+        assert_eq!(
+            surfaced,
+            vec![
+                format!("up-ETH-{d_trading_end}"),
+                format!("up-BTC-{s_trading_end}"),
+            ],
+            "the engine.round row filter keeps exactly the two traded family rows (table order)"
+        );
+        // The legacy bridge: a round_slot == 0 row passes unconditionally
+        // (the pre-#560 corpora shape).
+        let mut legacy = mk("SOL", "polymarket", s_trading_end, 900);
+        legacy.round_slot = 0;
+        assert!(
+            scanner.is_live_round_row(&legacy, now),
+            "round_slot == 0 rows ride the unconditional legacy bridge"
         );
     }
 }
