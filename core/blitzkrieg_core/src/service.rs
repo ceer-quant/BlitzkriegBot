@@ -5796,9 +5796,34 @@ impl Core {
                     .map(|m| m.venue.as_str())
                     .unwrap_or_default()
                     .to_string();
+                // B1c/E2: slot numbers are only comparable WITHIN one duration
+                // family — the membership test is the (slot, duration) PAIR the
+                // engine's merge arm (engine.rs) already judges, not the bare
+                // slot. The feeding batch's own declared `round_duration_sec`
+                // (0 = legacy archive → the configured global grid) must match
+                // the resident row's, or a foreign-family batch's first feed is
+                // misread as a rollover and the kill arm below (scoped by the
+                // feeding VENUE alone, pre-E2) murders a sibling family's
+                // in-flight taker on the same venue. Single-family deployments
+                // resolve every row and every batch to the SAME duration, so
+                // the added condition is constant-true there — the verdict is
+                // bit-identical with the pre-B1c slot-only check. The kill arm
+                // below gains the same family scope: an in-flight leg dies only
+                // when its OWN family rolled over.
+                let global_duration_sec = self.config.round_duration_sec;
+                let feed_duration = crate::engine::row_family_duration(
+                    markets.first().map(|m| m.round_duration_sec).unwrap_or(0),
+                    global_duration_sec,
+                );
                 let top_up = slot != 0
                     && self.engine.as_ref().is_some_and(|e| {
-                        e.scanner().markets().iter().any(|m| m.round_slot == slot)
+                        e.scanner().markets().iter().any(|m| {
+                            m.round_slot == slot
+                                && crate::engine::row_family_duration(
+                                    m.round_duration_sec,
+                                    global_duration_sec,
+                                ) == feed_duration
+                        })
                     });
                 if !top_up {
                     self.stats.rounds += 1;
@@ -5845,27 +5870,50 @@ impl Core {
                     // at its report time, reservation released). A leg that
                     // already matched keeps its fill: the venue matched it before
                     // the close.
+                    //
+                    // E2 (family scope): "this venue's round" means the VENUE'S
+                    // FEEDING FAMILY — the engine's rollover replacement arm
+                    // (B1c) is already family-scoped (a same-venue sibling
+                    // family is replaced by its OWN feed), and this kill arm
+                    // must not out-scope it: a 1h rollover on the same venue
+                    // must not murder a 15m leg whose round is still running.
+                    // The leg's family resolves three-state off its own market
+                    // row (own declaration > the global grid) — the same
+                    // projection `row_family_duration` gives every other
+                    // consumer. Single-family tables hold one duration, so the
+                    // added condition is constant-true there: byte-identical
+                    // with the pre-E2 venue-only scope.
                     let tokens: Vec<String> = markets
                         .iter()
                         .flat_map(|m| [m.up_token_id.clone(), m.down_token_id.clone()])
                         .collect();
                     for leg in self.inflight_takers.iter_mut() {
                         if leg.matched_price.is_none() && leg.rejected_msg.is_none() {
-                            // Only legs on the ROLLED-OVER venue are in scope: a
-                            // sibling venue's leg is not closed by this feed.
-                            // The leg's token comes from its own OME order.
+                            // Only legs on the ROLLED-OVER (venue, family) are in
+                            // scope: a sibling venue's leg is not closed by this
+                            // feed, and neither is a sibling FAMILY's leg on the
+                            // same venue. The leg's token comes from its own OME
+                            // order.
                             let leg_token = self
                                 .ome
                                 .get(&leg.order_id)
                                 .map(|o| o.token_id.clone())
                                 .unwrap_or_default();
-                            let leg_venue = self
+                            let (leg_venue, leg_family) = self
                                 .engine
                                 .as_ref()
                                 .and_then(|e| e.market_for_token(&leg_token))
-                                .map(|m| m.venue.clone())
+                                .map(|m| {
+                                    (
+                                        m.venue.clone(),
+                                        crate::engine::row_family_duration(
+                                            m.round_duration_sec,
+                                            global_duration_sec,
+                                        ),
+                                    )
+                                })
                                 .unwrap_or_default();
-                            if leg_venue != venue {
+                            if leg_venue != venue || leg_family != feed_duration {
                                 continue;
                             }
                             let ended = self
@@ -8408,19 +8456,25 @@ impl Core {
     /// 判定钟由调用方传入（`round_state` / `current_slot` 同风格）：窗口边
     /// 界附近「喂入轮恰好是视图当下认定的 trading slot」是真实链路里插件
     /// 5s 轮询自带的性质，测试要精确钉住这个关系就不能赌宿主墙钟不翻格。
+    ///
+    /// E2（多族读面）：过滤谓词是 scanner 的共用纯函数
+    /// `is_live_round_row` —— 每行按自己的 (venue, duration) 族钟判定
+    /// 「到期 slot = 该族当前 slot + 1」，`engine.round` 行情行（ipc/server）
+    /// 与本视图同谓词。老语料（round_slot == 0）无条件放行，单族部署下
+    /// 族钟 ≡ 全局网格（偏移 0、行声明 ≡ cfg），判定与升级前的
+    /// `current_slot(now) + 1` 逐位一致。
     pub fn books_view(&self, max_levels: usize, now: i64) -> Vec<AssetBooksView> {
         let Some(engine) = self.engine.as_ref() else {
             return Vec::new();
         };
         let scanner = engine.scanner();
-        let trading_slot = scanner.current_slot(now) + 1;
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
         scanner
             .round_state(now)
             .markets
             .iter()
-            .filter(|m| m.round_slot == 0 || m.round_slot == trading_slot)
+            .filter(|m| scanner.is_live_round_row(m, now))
             .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
             .map(|m| AssetBooksView {
                 asset: m.asset.clone(),
@@ -28258,6 +28312,128 @@ mod round_family_b1b_tests {
             "single family: the historic end-of-slot projection"
         );
         assert_eq!(pos.round_duration_sec, 900);
+    }
+
+    // ── E2（多族漏网 ②）：top-up 判定按 (slot, duration) 对 + kill 按族圈定 ──
+
+    /// A polymarket 15m leg is IN FLIGHT (latency dials engaged) when the same
+    /// venue's 1h family feeds its NEW round. The pre-E2 mirror predicate was
+    /// a BARE slot equality — the feeding batch's slot (a 3600s-grid number)
+    /// matches nothing in the table, so the batch was misread as a ROLLOVER,
+    /// and the kill arm scoped by the feeding VENUE alone murdered the 15m
+    /// leg whose round was still running (`taker_killed_round_ended`). After
+    /// the fix the predicate is the engine's (slot, duration) pair and the
+    /// kill arm is family-scoped: the 1h rollover still happens (its old row
+    /// is replaced by its own feed — the correct B1c behaviour), but the 15m
+    /// leg survives to its fill.
+    #[test]
+    fn a_foreign_family_first_feed_does_not_kill_a_sibling_family_s_inflight_taker() {
+        let mut c = family_core(&[("polymarket", "pm15", 900)]);
+        c.config_mut().fill_model = crate::sim::FillModel {
+            taker_latency_ms: 100,
+            taker_rtt_ms: 50,
+            ..Default::default()
+        };
+        // Timeline: 900s slot 8 = [7_200_000, 8_100_000); 3600s slot 1 =
+        // [3_600_000, 7_200_000) is ALREADY OVER at t0 — its stale row still
+        // bridges in the scanner until its own feed replaces it (the same
+        // staggered shape a live 1h discovery produces at the boundary).
+        let row = |slot: i64, dur: i64, up: &str| crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-pm-{slot}-{dur}"),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: format!("{up}-d"),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * dur * 1000,
+            round_slot: slot,
+            round_duration_sec: dur,
+            archive_verdict: false,
+            venue: "polymarket".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        let t0 = 7_599_900i64;
+        // The live 15m round and the ALREADY-EXPIRED 1h row (bridge state).
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![row(8, 900, "pm15-up")],
+                now_ms: t0,
+            },
+            t0,
+        );
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![row(1, 3600, "pm1h-old")],
+                now_ms: t0,
+            },
+            t0,
+        );
+        // The 15m leg goes in flight: matches at t0+100, reports at t0+150.
+        c.book_snapshot("pm15-up", vec![], vec![(dec!(0.40), dec!(500))], t0);
+        let req = OrderRequest {
+            token_id: "pm15-up".into(),
+            condition_id: "cond-pm-8-900".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Taker,
+            price: dec!(0.40),
+            size: dec!(1),
+            internal_key: "k-inflight".into(),
+            strategy: STRATEGY.into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 8,
+            account_id: crate::model::default_account_id(),
+        };
+        let (id, st) = c.place(req, 0, t0).unwrap();
+        assert_eq!(st, OrderStatus::Pending, "the leg is in flight");
+
+        // t0+20: the SAME venue's 1h family feeds its NEW round (slot 2). A
+        // bare-slot mirror predicate matches nothing → rollover arm → the
+        // venue-scoped kill murdered the 15m leg here (pre-E2). The family
+        // scope lets the leg through.
+        let t1 = t0 + 20;
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![row(2, 3600, "pm1h-new")],
+                now_ms: t1,
+            },
+            t1,
+        );
+        // The 1h rollover DID happen: the stale slot-1 row is replaced by the
+        // feeding family's own slot-2 row.
+        let e = c.engine.as_ref().expect("engine");
+        assert!(
+            e.scanner()
+                .markets()
+                .iter()
+                .any(|m| m.up_token_id == "pm1h-new"),
+            "the 1h feed still rolls its own family over"
+        );
+        assert!(
+            !e.scanner()
+                .markets()
+                .iter()
+                .any(|m| m.up_token_id == "pm1h-old"),
+            "the expired 1h row leaves the table"
+        );
+        // Past report_at: the 15m leg FILLS — no taker_killed_round_ended
+        // rejection may exist for it.
+        c.tick(t0 + 160).unwrap();
+        let o = c.ome().get(&id).unwrap();
+        assert_eq!(
+            o.status,
+            OrderStatus::Filled,
+            "the 15m in-flight leg survives the sibling family's rollover"
+        );
+        assert!(
+            c.positions()
+                .open_positions()
+                .iter()
+                .any(|p| p.token_id == "pm15-up"),
+            "the fill books a position"
+        );
     }
 }
 
