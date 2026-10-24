@@ -22,7 +22,7 @@
 
 use crate::marketdata::LocalBook;
 use crate::model::{CryptoMarket, OrderbookSnapshot, Side, SignalDirection};
-use crate::scanner::{Scanner, ScannerConfig};
+use crate::scanner::{RoundTiming, Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{
     EngineStrategy, GateExemptions, HeldPosition, StrategyCtx, StrategyExitIntent,
@@ -874,7 +874,14 @@ impl Engine {
     /// Diagnostics: for each confirmed token, its current mid and whether it
     /// currently satisfies the entry band (per strategy).
     pub fn confirmed_diagnostics(&self, now_ms: i64) -> Vec<serde_json::Value> {
-        let round = self.scanner.round_timing(now_ms);
+        // E3: the diagnostic ctx's round clock resolves on the TABLE's own
+        // family — every row through `row_duration_sec`, read on the legacy
+        // venue bucket exactly like the global clock. No candidate exists at
+        // this call (diagnostics walks strategies, not signals), so the table
+        // shape is the best family fact here; a single-family table — every
+        // corpus, and the per-family boot instances — resolves to ONE
+        // duration, byte-identical with the old global read.
+        let round = self.table_round_timing(now_ms);
         let fresh =
             |token: &str| fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms);
         let ctx = StrategyCtx::new(
@@ -1444,7 +1451,13 @@ impl Engine {
         self.pair_declarations.clear();
         self.pair_refusals.clear();
 
-        let round = self.scanner.round_timing(now_ms);
+        // E3: the cycle's round clock reads the TABLE's own family (the
+        // legacy venue fold, duration refined) instead of the configured
+        // grid — single-family tables resolve to the same numbers, a mixed
+        // table stops reporting 15m-grid slot/time_left to strategies
+        // pricing other durations. The per-candidate refinements below use
+        // each candidate's OWN market family.
+        let round = self.table_round_timing(now_ms);
         // E25: the arbitration pipeline's physics projection reads the SAME
         // round timing this cycle was judged against.
         self.last_time_left_sec = round.time_left_sec;
@@ -1551,7 +1564,11 @@ impl Engine {
         }
         self.last_blocked.clear();
         self.last_exemptions.clear();
-        let round = self.scanner.round_timing(now_ms);
+        // E3: same family resolution as the real evaluation — the table's
+        // own duration on the legacy venue fold (single-family corpora read
+        // the same numbers; the per-candidate refinements inside
+        // `submit_candidate_orders` are each candidate's own family).
+        let round = self.table_round_timing(now_ms);
         self.last_time_left_sec = round.time_left_sec;
         // The freshness rule is the one collection input that moves with the
         // clock alone (`now_ms - book.timestamp`): a book that has gone stale
@@ -1606,7 +1623,10 @@ impl Engine {
         candidates: Vec<TradeSignal>,
         now_ms: i64,
     ) -> Vec<crate::model::OrderRequest> {
-        let round = self.scanner.round_timing(now_ms);
+        // E3: the table-level clock the per-candidate refinement falls back
+        // to (a candidate whose market the scanner already dropped) — the
+        // table's own family resolution, same shape as the callers read.
+        let round = self.table_round_timing(now_ms);
         let mut orders = Vec::new();
         // At most one entry per token per cycle: the first candidate (in
         // registration order) wins, matching the one-live-entry-per-token rule
@@ -1776,6 +1796,17 @@ impl Engine {
             // Presence/age stay the global verdict; the per-market form only
             // refines which expiry applies. Without a market (stale signal for
             // a token the scanner dropped) the whole-table verdict decides.
+            // E3: the same per-market refinement now carries the FAMILY — the
+            // candidate's own declared duration grid (its own expiry clock
+            // and its slot), so the whole gate trail below (D-31 floor,
+            // near-miss telemetry, block/exemption stamps, the internal
+            // key's round segment) reads numbers from the candidate's clock,
+            // not the global grid. Single-family tables resolve every row to
+            // the configured grid, byte-identical with the pre-E3 read.
+            let cand_round = match self.scanner.market_for_token(&sig.token_id) {
+                Some(m) => self.family_round_timing(m, now_ms),
+                None => round,
+            };
             let timing = match self.scanner.market_for_token(&sig.token_id) {
                 Some(m) => self.scanner.can_trade_reason_for(m, now_ms).err(),
                 None => self.scanner.can_trade_reason(now_ms).err(),
@@ -1801,7 +1832,7 @@ impl Engine {
                         .strategy_gate_exemptions(&sig.strategy)
                         .is_some_and(|e| {
                             e.timing
-                                && round.time_left_sec
+                                && cand_round.time_left_sec
                                     >= e.timing_floor_sec(self.cfg.scanner.min_time_left_sec)
                         });
                 if !waived {
@@ -1816,8 +1847,8 @@ impl Engine {
                         sig.price,
                         mid,
                         crate::shadow::NearMissReason::Timing,
-                        round.time_left_sec,
-                        round.slot,
+                        cand_round.time_left_sec,
+                        cand_round.slot,
                         now_ms,
                     );
                     self.last_blocked.push(BlockedCandidate {
@@ -1828,7 +1859,7 @@ impl Engine {
                         direction: sig.direction,
                         price: sig.price,
                         reason: BlockReason::Timing,
-                        time_left_sec: round.time_left_sec,
+                        time_left_sec: cand_round.time_left_sec,
                     });
                     continue;
                 }
@@ -1839,7 +1870,7 @@ impl Engine {
                     token_id: sig.token_id.clone(),
                     asset: sig.asset.clone(),
                     detail: block.to_string(),
-                    time_left_sec: round.time_left_sec,
+                    time_left_sec: cand_round.time_left_sec,
                 });
             }
             if let Err(detail) = self.momentum_ok(&sig.asset, sig.direction, now_ms) {
@@ -1858,8 +1889,8 @@ impl Engine {
                         sig.price,
                         mid,
                         crate::shadow::NearMissReason::Momentum,
-                        round.time_left_sec,
-                        round.slot,
+                        cand_round.time_left_sec,
+                        cand_round.slot,
                         now_ms,
                     );
                     self.last_blocked.push(BlockedCandidate {
@@ -1870,7 +1901,7 @@ impl Engine {
                         direction: sig.direction,
                         price: sig.price,
                         reason: BlockReason::Momentum,
-                        time_left_sec: round.time_left_sec,
+                        time_left_sec: cand_round.time_left_sec,
                     });
                     continue;
                 }
@@ -1881,7 +1912,7 @@ impl Engine {
                     token_id: sig.token_id.clone(),
                     asset: sig.asset.clone(),
                     detail,
-                    time_left_sec: round.time_left_sec,
+                    time_left_sec: cand_round.time_left_sec,
                 });
             }
 
@@ -1935,13 +1966,15 @@ impl Engine {
                 size,
                 internal_key: if sig.account_id == blitzkrieg_market_api::DEFAULT_ACCOUNT_ID {
                     // Default scope: byte-identical to the pre-fanout key —
-                    // the replay baseline compares these strings.
+                    // the replay baseline compares these strings. E3: the
+                    // slot segment is the CANDIDATE's own family slot (the
+                    // single-family corpora produce the same numbers).
                     format!(
                         "{}:{}:{}:{}",
                         sig.strategy,
                         sig.asset,
                         sig.direction.as_str(),
-                        round.slot
+                        cand_round.slot
                     )
                 } else {
                     // A second scope on the same strategy/asset/slot must not
@@ -1952,14 +1985,14 @@ impl Engine {
                         sig.strategy,
                         sig.asset,
                         sig.direction.as_str(),
-                        round.slot,
+                        cand_round.slot,
                         sig.account_id
                     )
                 },
                 strategy: sig.strategy,
                 asset: sig.asset.clone(),
                 direction: sig.direction.as_str().to_string(),
-                round_slot: round.slot,
+                round_slot: cand_round.slot,
                 // E28 §9.2, extended by the multi-account fanout: the signal
                 // carries its SCOPE's account (the default scope keeps the
                 // process default, byte-identical to the old behaviour).
@@ -2109,7 +2142,12 @@ impl Engine {
         if self.scanner.markets().is_empty() {
             return None;
         }
-        let round = self.scanner.round_timing(now_ms);
+        // E3: the table's own family clock (single-family tables resolve the
+        // duration to the configured grid — the same numbers the global read
+        // produced). NOT one of the audited strategy-visible sites: this is
+        // the replay fast path's WAKE predictor, and its conservative
+        // whole-table expiry stays the correct wake bound for every family.
+        let round = self.table_round_timing(now_ms);
         let expires = round.expires_at_ms;
         let t = round.time_left_sec.max(0);
         let mut best: i64 = i64::MAX;
@@ -2140,10 +2178,11 @@ impl Engine {
             }
         }
         // Min-round-age: blocked while age < min_age; flips when time_left
-        // first reads (duration - min_age).
+        // first reads (duration - min_age). E3: the duration is the table's
+        // resolved family's (single-family = the configured grid, verbatim).
         let min_age = self.cfg.scanner.min_round_age_sec.max(0);
         if round.age_sec < min_age {
-            let v = self.cfg.scanner.round_duration_sec - min_age;
+            let v = round.age_sec - min_age + round.time_left_sec;
             if v > 0 {
                 consider(expires - v * 1000 - 999, &mut best);
             }
@@ -2946,6 +2985,43 @@ fn fresh_book(
 /// borrow in the same scope.
 pub fn row_family_duration(declared: i64, global_sec: i64) -> i64 {
     if declared > 0 { declared } else { global_sec }
+}
+
+impl Engine {
+    /// E3 (轮次多族收尾): the round clock of ONE market's own family — the
+    /// duration the row declares (`row_duration_sec`: own declaration >
+    /// global grid), read on the legacy venue bucket (the same fold the
+    /// global `round_timing()` used) with only the duration grid refined.
+    /// Strategies and the per-candidate gate trail read this family's
+    /// slot/time_left, so a 4h market's context no longer reports 15m-grid
+    /// numbers. Single-family tables (every replay corpus) resolve every
+    /// row to the configured grid, making this byte-identical with the old
+    /// global read.
+    fn family_round_timing(&self, m: &crate::model::CryptoMarket, now_ms: i64) -> RoundTiming {
+        let dur = row_duration_sec(m.round_duration_sec, self.cfg.scanner.round_duration_sec);
+        self.scanner.round_timing_legacy_at(dur, now_ms)
+    }
+
+    /// E3: the round clock of the TABLE's resolved family — every row
+    /// through `row_duration_sec` must agree (true for every single-family
+    /// table: the replay corpora, and the per-family boot instances B1d
+    /// mounts); the venue dimension stays the legacy bucket, the same fold
+    /// `round_timing()` read. A heterogeneous multi-family table takes the
+    /// FIRST row's resolution — a best-effort context for callers with no
+    /// candidate to name a market (the per-candidate sites use
+    /// [`Self::family_round_timing`]), never a verdict.
+    fn table_round_timing(&self, now_ms: i64) -> RoundTiming {
+        let global = self.cfg.scanner.round_duration_sec;
+        match self.scanner.markets().first() {
+            Some(m) => {
+                let dur = row_duration_sec(m.round_duration_sec, global);
+                self.scanner.round_timing_legacy_at(dur, now_ms)
+            }
+            // No market, no family fact: the legacy global clock (the
+            // scanner's `NoMarkets` posture — unchanged).
+            None => self.scanner.round_timing(now_ms),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3905,6 +3981,167 @@ mod tests {
             e.scope_admits_token("unbound", "kalshi-up"),
             "an unbound scope admits everything, as before"
         );
+    }
+
+    // ── E3 (轮次多族收尾): strategy-visible round clocks follow the market's
+    //    own declared family ────────────────────────────────────────────────
+
+    #[test]
+    fn each_family_reads_its_own_clock_in_the_gate_trail() {
+        // The audit's E3 finding: the strategy-visible round clock (the D-31
+        // waiver line, the near-miss/block telemetry, the emitted order's
+        // slot) read the GLOBAL grid, so a 1h market's candidate was judged
+        // by 15m numbers. Two families, one venue, one evaluation: the 15m
+        // candidate is inside ITS force-exit window (172s left on the 900s
+        // grid) while the 1h candidate has 3772s left on ITS grid — the same
+        // `timing: true` declaration must block one and waive the other,
+        // each on its OWN family clock.
+        //
+        // Fixture arithmetic (cfg grid 900s, min_time_left 180s):
+        //   feed 1 @ 7_000_000ms: pm/900 row, expiry 7_200_000 (900s slot 7's
+        //   grid end; offset[pm] ← 0). Feed 2 @ 7_028_000ms: pm/3600 row,
+        //   expiry 10_800_000 (offset[pm] ← 3_600_000, the 1h schedule).
+        //   Legacy-bucket clocks (offsetless "") at 7_028_000:
+        //     900s family → slot 7, effective earliest same-duration
+        //     declaration 7_200_000 → time_left 172 < 180 (BLOCK);
+        //     3600s family → slot 1, effective 10_800_000 → time_left 3_772
+        //     ≥ 180 (WAIVE). The pre-E3 code read the global clock for both
+        //     waivers: 172 < 180 → BOTH blocked, zero orders.
+        let mut cfg = cfg();
+        cfg.scanner.min_time_left_sec = 180;
+        let mut e = Engine::new(cfg);
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "btc_fade",
+                dec!(0.45),
+                &["BTC"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: None,
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        e.register_user_strategy(
+            Box::new(DipBuyer::exempting(
+                "eth_fade",
+                dec!(0.45),
+                &["ETH"],
+                GateExemptions {
+                    timing: true,
+                    momentum: false,
+                    timing_min_time_left_sec: None,
+                },
+            )),
+            "test".into(),
+        )
+        .unwrap();
+        assert!(e.set_strategy_enabled("btc_fade", true));
+        assert!(e.set_strategy_enabled("eth_fade", true));
+
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(7_200_000, "polymarket", 900)],
+            now_ms: 7_000_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(10_800_000, "polymarket", 3600)],
+            now_ms: 7_028_000,
+        });
+        dip_only(&mut e, "polymarket-900-up", 7_028_000);
+        dip_only(&mut e, "polymarket-3600-up", 7_028_000);
+
+        let orders = e.evaluate(7_028_000);
+        // The 1h candidate enters (its family says 3772s left); the 15m one
+        // is blocked (its family says 172s left).
+        assert_eq!(orders.len(), 1, "{orders:?}");
+        assert_eq!(orders[0].strategy, "eth_fade");
+        assert_eq!(
+            orders[0].round_slot, 1,
+            "the emitted order stamps the 3600s FAMILY's slot, not the global grid's"
+        );
+        assert_eq!(
+            orders[0].internal_key, "eth_fade:ETH:up:1",
+            "the internal key's round segment is the candidate family's slot"
+        );
+        let blocked = e.last_blocked();
+        assert_eq!(blocked.len(), 1, "{blocked:?}");
+        assert_eq!(blocked[0].strategy, "btc_fade");
+        assert_eq!(blocked[0].reason, BlockReason::Timing);
+        assert_eq!(
+            blocked[0].time_left_sec, 172,
+            "the near-miss/block telemetry reads the 900s family's time_left"
+        );
+        // The audit trail: the honoured waiver is the 1h candidate's, and its
+        // `time_left_sec` is the FAMILY's number (3772s), not the global 172
+        // that used to deny the waiver.
+        let ex = e.last_exemptions();
+        assert_eq!(ex.len(), 1, "{ex:?}");
+        assert_eq!(ex[0].strategy, "eth_fade");
+        assert_eq!(ex[0].gate, "timing");
+        assert_eq!(ex[0].time_left_sec, 3_772);
+        // E25 projection: the cycle's table-family clock (first row = the
+        // 900s family on the legacy bucket).
+        assert_eq!(e.last_time_left_sec(), 172);
+    }
+
+    #[test]
+    fn single_family_tables_read_the_global_numbers_verbatim() {
+        // Byte-identical duty (the replay-baseline red line): every corpus is
+        // single-family, where `row_duration_sec` resolves EVERY row to the
+        // configured grid and the legacy-bucket read degenerates to the
+        // global `round_timing()` — so the waiver record, the emitted
+        // order's slot/key and the E25 projection must equal the scanner's
+        // global clock exactly. A zero-duration row (the pre-B1a corpus
+        // shape) resolves the same way.
+        for declared in [900i64, 0] {
+            let mut cfg = cfg();
+            cfg.scanner.min_round_age_sec = 10_000; // force the TooYoung block
+            cfg.scanner.min_time_left_sec = 180;
+            let mut e = Engine::new(cfg);
+            e.register_user_strategy(
+                Box::new(DipBuyer::exempting(
+                    "fade",
+                    dec!(0.45),
+                    &["BTC"],
+                    GateExemptions {
+                        timing: true,
+                        momentum: false,
+                        timing_min_time_left_sec: None,
+                    },
+                )),
+                "test".into(),
+            )
+            .unwrap();
+            assert!(e.set_strategy_enabled("fade", true));
+            let mut row = market(1_800_000);
+            row.round_duration_sec = declared;
+            e.on_data(DataEvent::RoundMarkets {
+                markets: vec![row],
+                now_ms: 1_400_000,
+            });
+            dip_only(&mut e, "up", 1_500_000);
+
+            let orders = e.evaluate(1_500_000);
+            // The scanner's global clock — the exact numbers the pre-E3 code
+            // fed every one of these sites.
+            let global = e.scanner().round_timing(1_500_000);
+            assert_eq!(orders.len(), 1, "declared {declared}: {orders:?}");
+            assert_eq!(orders[0].round_slot, global.slot);
+            assert_eq!(
+                orders[0].internal_key,
+                format!("fade:BTC:up:{}", global.slot)
+            );
+            let ex = e.last_exemptions();
+            assert_eq!(ex.len(), 1, "declared {declared}: {ex:?}");
+            assert_eq!(ex[0].gate, "timing");
+            assert_eq!(
+                ex[0].time_left_sec, global.time_left_sec,
+                "declared {declared}: the waiver line reads the global clock's time_left"
+            );
+            assert_eq!(e.last_time_left_sec(), global.time_left_sec);
+        }
     }
 
     fn cfg() -> EngineConfig {
