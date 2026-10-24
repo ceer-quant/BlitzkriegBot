@@ -1503,6 +1503,12 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           v-if="journalRows.length"
           class="text-[11px] text-faint-fg num"
         ><RollingNumber :value="journalRows.length" /> 笔</span>
+        <!-- 口径说明（现金事件流水）：一笔成交拆成买入+卖出两行现金事件，
+             与「交易记录」（一笔一行）口径不同 —— 数字对得上，行数对不上
+             是本来的形状。悬浮展开。 -->
+        <Tooltip content="这里是现金事件流水：一笔成交拆成「买入成交」+「卖出成交」两行（手续费、注资、重置各占一行），与交易记录的一笔一行口径不同——金额逐笔相等，行数天然更多。">
+          <span class="cursor-help text-[11px] text-faint-fg underline decoration-dotted decoration-line underline-offset-2">现金事件口径</span>
+        </Tooltip>
         <span class="ml-auto text-[11px] text-faint-fg">{{ journalOpen ? '收起' : '展开' }}</span>
       </button>
 
@@ -1527,11 +1533,18 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 </tr>
               </thead>
               <tbody>
-                <tr
-                  v-for="(r, i) in journalRows"
-                  :key="`${r.atMs}-${i}`"
-                  class="border-t border-line transition-colors hover:bg-panel-2"
-                >
+                <template v-for="(r, i) in journalRows" :key="`${r.atMs}-${i}`">
+                  <!-- 重置分隔线：reset 是「此前一切清账」的硬事实，账目在其
+                       前后互不可加和（流水总额与当前余额对不上 = 中间有
+                       reset），显性切一刀免得读者硬算一个不存在的总额。 -->
+                  <tr v-if="r.kind === 'reset' && i > 0" class="border-t border-line">
+                    <td colspan="5" class="px-2 py-1 text-center text-[10.5px] text-faint-fg">
+                      ── 以下为此前记录 · {{ clockTime(r.atMs) }} 交易环境已重置，余额回到 {{ journalBalance(r.balanceAfter) }} ──
+                    </td>
+                  </tr>
+                  <tr
+                    class="border-t border-line transition-colors hover:bg-panel-2"
+                  >
                   <td class="whitespace-nowrap px-2 py-2 font-mono text-[11.5px] text-faint-fg">{{ clockTime(r.atMs) }}</td>
                   <td class="px-2 py-2">
                     <Badge variant="outline">{{ journalKindLabel(r.kind) }}</Badge>
@@ -1545,7 +1558,8 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                     class="max-w-[220px] truncate px-2 py-2 font-mono text-[11px] text-faint-fg"
                     :title="r.ref"
                   >{{ journalRef(r.ref) }}</td>
-                </tr>
+                  </tr>
+                </template>
               </tbody>
             </table>
           </div>
