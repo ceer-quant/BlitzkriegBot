@@ -133,6 +133,31 @@ check('HftPage 挂单过期轮长走 durationSec → round_duration.get → 900 
   assert.doesNotMatch(hft, /const roundDurSec = 900/, 'const roundDurSec = 900 裸常量回归')
 })
 
+// ── 4b. 周期切换入口在行情页倒计时卡（2026-10-24 操作者指令）──────────────────
+// 入口从设置 · 通用 挪到行情页（盯盘时切周期不离开监视语境）；两卡共享
+// lib/round-duration.ts 一份读数与写路径，语义零改动。牙钉四点：
+//   · composable 是唯一写路径（两页面都消费它，不许各自再摸 roundDurationSet）；
+//   · 行情页倒计时卡必须挂 SegmentedControl（入口在场）；
+//   · next_session 语义钉死：写入后走 useRestartCore 重启链（不许热切幻觉）；
+//   · flagLocked（cli_or_env 显式参数在管）必须禁用切换控件。
+check('轮次周期切换入口在行情页倒计时卡（共享 composable 单一写路径）', () => {
+  const lib = read('src', 'lib', 'round-duration.ts')
+  assert.match(lib, /roundDurationSet/, 'composable 缺 roundDurationSet 写路径')
+  assert.match(lib, /useRestartCore/, 'composable 缺重启链 —— next_session 写入必须 10s 自动重启')
+  assert.match(lib, /onMounted\(load\)/, 'composable 缺装载 —— 卡面挂着就要读数')
+  // 行情页：入口在场 + 消费 composable + 语义钉死。
+  assert.match(hft, /useRoundDuration\(\)/, 'HftPage 缺 useRoundDuration —— 周期切换入口没进倒计时卡')
+  assert.match(hft, /v-model="roundSwitch\.value\.value"[\s\S]*?:segments="roundSwitch\.segments\.value"/, '倒计时卡缺 SegmentedControl 切换控件')
+  assert.match(hft, /roundSwitch\.flagLocked\.value/, '倒计时卡未消费 flagLocked —— 显式启动参数在管时必须禁用切换')
+  assert.match(hft, /roundSwitch\.restart\.counting\.value/, '倒计时卡缺重启倒计时条 —— next_session 写入后无生效路径可见')
+  // 设置页保留同源卡面（第二入口），且不许再私藏一份独立写路径。
+  const settings = read('src', 'pages', 'settings', 'SettingsGeneral.vue')
+  assert.match(settings, /useRoundDuration\(\)/, '设置页轮次卡未接 composable —— 两卡必须共享一份逻辑')
+  for (const [file, src] of [['HftPage.vue', hft], ['SettingsGeneral.vue', settings]]) {
+    assert.doesNotMatch(src, /api\.roundDurationSet/, `${file} 直接摸 roundDurationSet —— 写路径必须走 lib/round-duration.ts 单源`)
+  }
+})
+
 // ── 5. comment hygiene（RAW_COLOR / venue-name bans）──────────────────────────
 check('注释 issue 号用「issue 550」格式（禁 #550 —— RAW_COLOR 门禁误判 hex 色）', () => {
   for (const [file, src] of [['client.ts', client], ['panel.ts', store], ['AccountSwitcher.vue', switcher], ['HftPage.vue', hft]]) {

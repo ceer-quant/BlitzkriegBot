@@ -6,7 +6,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info, ChevronDown } from 'lucide-vue-next'
+import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info, ChevronDown, Timer, Check } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow, type AccountJournalDoc, type AccountJournalRowDoc, type NetCheckDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
@@ -19,6 +19,7 @@ import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import { newestFirst, tradeIdentity } from '@/lib/trades'
 import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
+import { useRoundDuration } from '@/lib/round-duration'
 import {
   playDang, playDing, playOrder, playProfit, playWuwu,
 } from '@/composables/alertSounds'
@@ -771,6 +772,16 @@ const roundDurLabel = computed(() => {
 })
 
 /**
+ * 轮次时间周期切换卡（2026-10-24 操作者指令：切换入口从设置 · 通用 挪到
+ * 本卡 —— 盯盘时切周期不离开监视语境；设置页保留同源的第二卡面，共享
+ * lib/round-duration.ts 一份读数与写路径）。语义与设置卡逐字一致：
+ * next_session 写入持久格、本会话网格不动、重启（10s 自动倒计时）生效；
+ * cli_or_env 显式参数在场时写入不赢，提示条如实说明。倒计时期间挂单
+ * 过期链照旧走本会话网格 —— 重启会把一切坐标系重建。
+ */
+const roundSwitch = useRoundDuration()
+
+/**
  * What the two controls can actually do here.
  *
  * Reachability alone is not enough to offer a live 停止: a gateway started
@@ -1093,6 +1104,35 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         </div>
 
         <div class="ml-auto flex items-center gap-2">
+          <!-- 轮次时间周期切换（2026-10-24 操作者指令：入口从设置 · 通用 挪到
+               倒计时卡 —— 盯盘时切周期不离开监视语境；与设置卡共享
+               lib/round-duration.ts 同一份读数与写路径）。next_session 语义
+               不变：写入持久格、本会话网格不动、重启生效；显式启动参数在管
+               （flagLocked）时写入不赢，title 里如实说明。 -->
+          <Tooltip
+            :content="roundSwitch.flagLocked.value
+              ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
+              : `轮次时间周期：本会话 ${roundDurLabel}。切换写入下次会话（重启内核后生效，轮次网格是坐标系不能热切）。`"
+          >
+            <div class="flex items-center gap-1.5">
+              <Timer class="size-3.5 text-faint-fg" />
+              <SegmentedControl
+                v-model="roundSwitch.value.value"
+                :segments="roundSwitch.segments.value"
+                size="sm"
+                :disabled="roundSwitch.busy.value || roundSwitch.flagLocked.value"
+              />
+            </div>
+          </Tooltip>
+          <Button
+            v-if="roundSwitch.dirty.value"
+            size="sm"
+            :disabled="roundSwitch.busy.value"
+            title="把选中的轮次周期写入持久格（重启内核后生效）"
+            @click="roundSwitch.save()"
+          >
+            <Check class="size-3.5" />保存
+          </Button>
           <Tooltip :content="sound ? '关闭提示音' : '开启提示音'">
             <Button variant="ghost" size="icon" @click="toggleSound">
               <Bell v-if="sound" /><BellOff v-else class="opacity-60" />
@@ -1139,6 +1179,28 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
         <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
         <span>{{ control.blockedReason }}</span>
       </div>
+
+      <!-- 轮次周期切换的落定反馈（与设置 · 通用 卡同一组横幅；next_session
+           写入后 10s 自动重启，可立即/取消 —— useRestartCore 组件级约定）。 -->
+      <AlertBanner v-if="roundSwitch.err.value" class="mt-3" tone="warn">{{ roundSwitch.err.value }}</AlertBanner>
+      <AlertBanner v-if="roundSwitch.msg.value" class="mt-3" tone="info">{{ roundSwitch.msg.value }}</AlertBanner>
+      <div v-if="roundSwitch.restart.counting.value" class="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+        <span class="text-[12px] font-semibold text-gold">{{ roundSwitch.restart.countdown.value }}s 后自动重启内核（轮次周期切换生效）</span>
+        <Button size="sm" variant="outline" :disabled="roundSwitch.restart.restarting.value" @click="roundSwitch.restart.now">立即重启</Button>
+        <Button size="sm" variant="ghost" :disabled="roundSwitch.restart.restarting.value" @click="roundSwitch.restart.cancel">取消</Button>
+      </div>
+      <AlertBanner
+        v-if="roundSwitch.restart.restarting.value"
+        class="mt-3"
+        tone="info"
+        title="内核重启中…"
+      >轮次周期切换需要重启生效；本页读数会短暂断开，内核重新上线后自动恢复。</AlertBanner>
+      <AlertBanner
+        v-if="roundSwitch.restart.restartErr.value"
+        class="mt-3"
+        tone="error"
+        :title="roundSwitch.restart.restartErr.value"
+      />
 
       <!--
         A crash is stated in the panel rather than left to be inferred from a
