@@ -327,6 +327,19 @@ export const usePanelStore = defineStore('panel', () => {
     }
   }
 
+  /**
+   * 轮次周期集写（`account.rounds.set`，轮次多族 B2）：把该账户的轮长族
+   * 声明交给内核（空数组 = 不限制）。成功后 refreshAccounts 重拉账户簿
+   * （AccountView.rounds 随行带回，卡面读数即新值）；失败抛出 —— 内核的
+   * 拒绝（如移除有敞口的族，消息点名族列表）与老内核的 unknown-method 都
+   * 由调用方原样透出，这里不吞、不预判敞口。
+   */
+  async function setAccountRounds(id: string, rounds: number[]): Promise<void> {
+    const out = await api.accountRoundsSet({ accountId: id, rounds, reason: 'panel rounds card' })
+    if (out.error) throw new Error(out.error)
+    await refreshAccounts()
+  }
+
   async function refresh(): Promise<void> {
     if (!hasToken()) return
     loading.value = true
@@ -387,7 +400,7 @@ export const usePanelStore = defineStore('panel', () => {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
-    activeAccount, accounts, setAccounts, setDisplayAccount, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow,
+    activeAccount, accounts, setAccounts, setDisplayAccount, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow, setAccountRounds,
     displayAccount, displayVenue,
     accountTradeSummary, accountStrategyStats,
     refresh, acknowledgeSessionReset,

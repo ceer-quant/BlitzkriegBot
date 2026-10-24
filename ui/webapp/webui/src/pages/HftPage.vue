@@ -759,7 +759,8 @@ watch([venueUnbound, venueLoading, visiblePrices, engineUp], () => {
 }, { immediate: true })
 
 /** 空态文案里的当前轮次档位名（5m/15m/1h/…）；非标档位回退秒数。
- *  读 `round_duration.get` 的生效值（config 驱动），不拿 age+left 反推。 */
+ *  读 `round_duration.get` 的生效值（config 驱动），不拿 age+left 反推。
+ *  该 ref 同时是挂单过期链的回落源（identityDurSec）—— 一份读数两个消费点。 */
 const roundDurHintSec = ref<number | null>(null)
 void api.roundDuration().then((d) => { roundDurHintSec.value = d.effectiveSec }).catch(() => {})
 const roundDurLabel = computed(() => {
@@ -881,9 +882,21 @@ const positions = computed(() =>
 // 轮次是否已过期：round_slot N 覆盖 [N·dur, (N+1)·dur)，与内核过期扫描同一
 // 公式；slot 0（无轮次）不参与（内核同样豁免它）。过期与否只决定按钮
 // 可用性 —— 真判定在内核，按钮点了也过不了活轮拒绝。
-const roundDurSec = 900
+//
+// 轮长不再写死：轮次多族（issue 550/559）下每 venue 自己的族长在快照
+// round.venueRounds 行的 durationSec（B1a 增量字段）——身份所（venueRound）
+// 有行就读它，行缺席（老内核 venueRounds 全缺省 = 还是全局块）回落
+// round_duration.get 的生效值（roundDurHintSec，下方空态文案同源），再缺
+// 省（读数未到）回落 900 保持现行为。orderExpired 是函数，逐单调用的当拍
+// 取值 —— venue 变化后下一拍即按新族长算，无需重绑。
+const identityDurSec = computed<number | null>(() => {
+  const d = venueRound.value?.durationSec
+  if (typeof d === 'number' && d > 0) return d
+  return roundDurHintSec.value
+})
 function orderExpired(o: OrderRow): boolean {
-  return o.roundSlot > 0 && Date.now() / 1000 >= (o.roundSlot + 1) * roundDurSec
+  const dur = identityDurSec.value ?? 900
+  return o.roundSlot > 0 && Date.now() / 1000 >= (o.roundSlot + 1) * dur
 }
 
 /**
