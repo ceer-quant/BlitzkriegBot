@@ -14,6 +14,7 @@ import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
+import Switch from '@/components/ui/switch/Switch.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 
 const store = usePanelStore()
@@ -62,13 +63,7 @@ async function checkNow(): Promise<void> {
   void poll()
 }
 
-/** 「自动更新」开关：状态来源是内核；写盘失败必须报错（不静默回退）。
- *
- * 交互形态（2026-10 操作者方案）：Switch 收编成「徽章顺序切换」—— 点击徽章
- * 按顺序循环 开 → 关 → 开；取值与写路径（configure）逐字不变，变的只是控件
- * 外观。徽章读的是内核回显的 autoUpdate（快照轮询），点击只是把下一个值交给
- * 同一条 configure 路径 —— 不自持本地状态，写完以内核读数为准。
- */
+/** 「自动更新」开关：状态来源是内核；写盘失败必须报错（不静默回退）。 */
 async function toggleAutoUpdate(on: boolean): Promise<void> {
   await configure({ autoUpdate: on })
 }
@@ -78,19 +73,15 @@ async function toggleAutoUpdate(on: boolean): Promise<void> {
  * 却没有解锁路径，是半成品。内核的 system.update.configure 本就双键可选，
  * 这里补上第二支开关；同一纪律：状态来自内核，写盘失败原样报错。
  *
- * 交互形态（2026-10 操作者方案）：Switch 收编成「徽章顺序切换」—— 点击徽章
- * 按顺序循环 已允许 → 已关闭 → 已允许；取值与写路径（configure）逐字不变，
- * 变的只是控件外观。Badge 是状态读数（内核的 checkEnabled），点击只是把
- * 下一个值交给同一条 configure 路径 —— 不自持本地状态，绝不先斩后奏。
+ * 排列顺序（2026-10 操作者指正）：行内控件为 Badge（状态读数）在前、Switch
+ * （操作控件）在后贴行右缘 —— 组件各司其职原样保留，只对调视觉顺序。
  */
 async function toggleUpdateCheck(on: boolean): Promise<void> {
   await configure({ checkEnabled: on })
 }
 
 /** 两条开关共用的写路径：内核落盘+落审计后回显，轮询刷新读回内核确认值。 */
-const configureBusy = ref(false)
 async function configure(body: { autoUpdate?: boolean; checkEnabled?: boolean }): Promise<void> {
-  configureBusy.value = true
   try {
     const res = await api.updateConfigure(body)
     if (res.ok === false && res.error) {
@@ -100,7 +91,6 @@ async function configure(body: { autoUpdate?: boolean; checkEnabled?: boolean })
     versionErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     await store.refresh()
-    configureBusy.value = false
   }
 }
 
@@ -216,23 +206,20 @@ onUnmounted(() => {
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
             <span class="text-faint-fg">出网检查（更新检查）</span>
-            <!-- 徽章顺序切换（操作者方案）：原 Switch 的语义/取值原封不动
-                 （checkEnabled → system.update.configure），控件换成一颗可点击
-                 徽章贴行最右 —— 状态读数与操作控件合一：徽章说什么，点一下就
-                 切到它的反面。role/aria/键盘走原生 button；busy 期不许点。
-                 徽章文字与色变体沿用原 Switch+Badge 对的词汇（已允许/已关闭）。 -->
-            <button
-              type="button"
-              class="inline-flex cursor-pointer items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-45"
-              :disabled="configureBusy"
-              :title="version.checkEnabled ? '点击关闭出网检查（内核将一个包都不发）' : '点击允许内核检查发布更新'"
-              :aria-pressed="version.checkEnabled"
-              @click="toggleUpdateCheck(!version.checkEnabled)"
-            >
-              <Badge :variant="version.checkEnabled ? 'up' : 'default'" class="transition-colors">
+            <!-- 排列顺序（2026-10 操作者指正，修正此前误读）：Badge 在前、
+                 Switch 在后贴行右缘 —— 组件原样保留（Switch 还是 Switch、
+                 Badge 还是 Badge），只对调这一行的控件顺序；语义/取值/写路径
+                 不动（checkEnabled → system.update.configure）。 -->
+            <span class="flex items-center gap-2">
+              <Badge :variant="version.checkEnabled ? 'up' : 'default'">
                 {{ version.checkEnabled ? '已允许' : '已关闭' }}
               </Badge>
-            </button>
+              <Switch
+                :model-value="version.checkEnabled"
+                :title="version.checkEnabled ? '关闭出网检查（内核将一个包都不发）' : '允许内核检查发布更新'"
+                @update:model-value="toggleUpdateCheck"
+              />
+            </span>
           </div>
         </div>
 
@@ -275,24 +262,9 @@ onUnmounted(() => {
             {{ stageDependencyHint(version) }}
           </span>
 
-          <!-- 自动更新（徽章顺序切换，操作者方案）：一颗可点击徽章贴本行最右
-               （ml-auto 把它钉在按钮行的右缘）。语义/取值与原 Switch 完全一致
-               （autoUpdate → system.update.configure）；徽章文字与色变体沿用
-               「已允许/已关闭」词汇；busy 期不许点。 -->
           <div class="ml-auto flex items-center gap-2">
             <span class="text-[11px] text-faint-fg">自动更新（默认关闭；开启后安装由启动器校验执行，需重启内核生效）</span>
-            <button
-              type="button"
-              class="inline-flex cursor-pointer items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-45"
-              :disabled="configureBusy"
-              :title="version.autoUpdate ? '点击关闭自动更新（内核不再下载发布资产）' : '点击开启自动更新（内核才可下载并校验发布资产，§7.5）'"
-              :aria-pressed="version.autoUpdate"
-              @click="toggleAutoUpdate(!version.autoUpdate)"
-            >
-              <Badge :variant="version.autoUpdate ? 'up' : 'default'" class="transition-colors">
-                {{ version.autoUpdate ? '已允许' : '已关闭' }}
-              </Badge>
-            </button>
+            <Switch :model-value="version.autoUpdate" @update:model-value="toggleAutoUpdate" />
           </div>
         </div>
 
