@@ -68,6 +68,9 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Fixed
 
+- **账本**：场地现金真值按账户绑定路由——`seed_balance`/`venue_free_balance`
+  带venue 名，落进绑定该 venue 的账户簿而非 active 账户（单账户时代路由曾把
+  PolySimulator 的 100 USDC 写到 default 账户上冲掉真余额）（#614）。
 - **风控**：PolySimulator 场地 429 按 Retry-After 重试——启动突发自愈，不再
   把瞬态限速当成能力失败触发交易冻结/丢余额种子/行情卡顿；自检探针失败原因
   进冻结行（#611）；trailing_enabled 升格 `risk.setExit` 热写 + `trailing_
