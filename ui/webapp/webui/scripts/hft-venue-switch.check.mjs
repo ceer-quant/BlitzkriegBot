@@ -287,6 +287,21 @@ check('Overview 可交易徽章按身份所窗口判定（全局 or 值不标到
   assert.match(overviewPage, /:variant="roundCanTrade/, '模板徽章未接 roundCanTrade')
 })
 
+// 瓦片标签身份标注（真线报告 2026-10-24）：跟随链在工作，但单族下两所钟
+// 数字逐字节相同（同一 (venue,duration) 纪元取整必然同值）——切户在数字
+// 上不可见，瓦片标签必须说出这口钟属于谁。牙钉两点：
+//   · 标签必须消费 identityVenue / venueRound（身份链），不许写死「当前轮次」；
+//   · 行缺席回落必须如实标「全局」——不猜所名。
+check('Overview 轮次瓦片标签标注身份所（单族等价下跟随的可见性）', () => {
+  const tt = overviewPage.match(/const roundTileTitle = computed\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(tt, 'Overview 缺 roundTileTitle —— 瓦片标签写死，切户后看不出钟属于谁')
+  assert.match(tt[0], /identityVenue\.value/, 'roundTileTitle 未读身份链 identityVenue')
+  assert.match(tt[0], /venueRound\.value/, 'roundTileTitle 未读钟行 venueRound（族时长标注源）')
+  assert.match(tt[0], /全局/, 'roundTileTitle 缺「全局」回落标注 —— 行缺席时口径不明')
+  assert.doesNotMatch(overviewPage, /label="当前轮次"/, '模板仍写死「当前轮次」标签 —— 身份标注被旁路')
+  assert.match(overviewPage, /:label="roundTileTitle"/, '模板瓦片未接 roundTileTitle')
+})
+
 // ── 8. 轮次告警三修（2026-10-23）：Loading 必有超时释放 + discovery 空判信号 ──
 // 反向验收 — 以下必须在 UI 上不可能：
 //   · venue 切到「快照永远不来行」的所时，页面永远转圈 —— Loading 门
