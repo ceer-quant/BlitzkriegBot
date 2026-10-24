@@ -8,7 +8,85 @@
 //! `core/blitzkrieg_core/tests/engine_stats_view_seam.rs`, because a test that
 //! only builds the struct by hand proves nothing about the wire.
 
-use crate::core::types::{EngineStatsView, LastErrorView, TradingFrozenView};
+use crate::core::types::{
+    EngineStatsView, LastErrorView, RoundView, TradingFrozenView, UiSnapshot, VenueRoundView,
+};
+
+/// Build one per-venue round clock row (the panel's countdown source, issue 550
+/// 症状②).
+fn venue_row(venue: &str, duration: i64, slot: i64, age: i64, left: i64) -> VenueRoundView {
+    VenueRoundView {
+        venue: venue.into(),
+        duration_sec: duration,
+        slot,
+        age_sec: age,
+        time_left_sec: left,
+    }
+}
+
+/// issue 550 / issue 559 显示面口径（TUI 三处漏网的共用回落链）：显示账户
+/// 绑定的 venue 行优先；行缺席回落第一个非空行；整体缺席回落 `None`（调用
+/// 方再回落全局标量块，单族逐字节现行为）。
+#[test]
+fn display_venue_round_follows_the_identity_venue_then_the_first_spoken_row() {
+    let round = |rows: Vec<VenueRoundView>| UiSnapshot {
+        round: Some(RoundView {
+            slot: 7,
+            age_sec: 1,
+            time_left_sec: 299,
+            markets: 2,
+            can_trade: true,
+            venue_rounds: rows,
+            ..RoundView::default()
+        }),
+        ..UiSnapshot::default()
+    };
+
+    // 1. display_venue 绑定 kalshi → 读 kalshi 自己的族钟，不用 polymarket 的。
+    let mut s = round(vec![
+        venue_row("polymarket", 900, 7, 1, 299),
+        venue_row("kalshi", 3600, 7, 5, 295),
+    ]);
+    s.display_venue = "kalshi".into();
+    let row = s
+        .display_venue_round()
+        .expect("the identity venue's own row must win");
+    assert_eq!(row.venue, "kalshi");
+    assert_eq!(row.time_left_sec, 295);
+    assert_eq!(row.duration_sec, 3600);
+
+    // 2. 绑定的 venue 没有行（钟未开口）→ 回落第一个非空 venue 行。
+    s.display_venue = "latency".into();
+    let row = s
+        .display_venue_round()
+        .expect("an unspoken identity venue falls back to the first spoken row");
+    assert_eq!(row.venue, "polymarket");
+
+    // 2b. display_venue 为空（老内核未下发指针）→ 同样回落第一个非空行。
+    s.display_venue = String::new();
+    assert_eq!(
+        s.display_venue_round()
+            .expect("a row is still picked")
+            .venue,
+        "polymarket"
+    );
+
+    // 3. pre-issue-550 内核：venue_rounds 缺席（serde default 空表）→ None，
+    //    调用方回落全局标量块（现行为，单族逐字节不变）。
+    let mut s = round(Vec::new());
+    s.display_venue = "kalshi".into();
+    assert!(
+        s.display_venue_round().is_none(),
+        "no venue rows → the caller keeps the global scalar block"
+    );
+
+    // 3b. 只有未分所行（pre-venue core 的空串 tag）→ 同样 None，不过滤。
+    let s = round(vec![venue_row("", 0, 7, 1, 299)]);
+    assert!(
+        s.display_venue_round().is_none(),
+        "untagged rows are never filtered on"
+    );
+}
 
 /// The payload of a core that predates the trading-safety keys: nothing new is
 /// present, and the view must still deserialize. `#[serde(default)]` is what

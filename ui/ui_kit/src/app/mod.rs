@@ -42,12 +42,24 @@ pub struct AppRow {
 
 impl AppView {
     pub fn from_snapshot(s: &UiSnapshot) -> Self {
+        // issue 550 / issue 559 显示面口径（TUI headline 漏网）：全局标量块
+        // 是各 venue 最早到期的保守钟，多族并存时原生面板 headline 却读它
+        // —— 显示账户绑着 kalshi 时 headline 标的是 polymarket 的 slot。
+        // 回落链共用 `UiSnapshot::display_venue_round`：displayVenue 行优先
+        // → 第一个非空行 → 全局标量块（单族逐字节现行为）。
+        let (round_slot, time_left_sec) = match s.display_venue_round() {
+            Some(v) => (v.slot, v.time_left_sec),
+            None => (
+                s.round.as_ref().map(|r| r.slot).unwrap_or(0),
+                s.round.as_ref().map(|r| r.time_left_sec).unwrap_or(0),
+            ),
+        };
         let mut v = AppView {
             connected: s.connected,
             mode: s.mode().to_string(),
             balance: s.balance.as_ref().map(|b| b.balance).unwrap_or(0.0),
-            round_slot: s.round.as_ref().map(|r| r.slot).unwrap_or(0),
-            time_left_sec: s.round.as_ref().map(|r| r.time_left_sec).unwrap_or(0),
+            round_slot,
+            time_left_sec,
             can_trade: s.round.as_ref().map(|r| r.can_trade).unwrap_or(false),
             open_positions: s.positions.len(),
             trades: s.trades.len(),
@@ -133,4 +145,95 @@ pub fn render_headless(v: &AppView) -> String {
     }
     o.push_str("└──────────────────────────────────────────────────\n");
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::{RoundView, VenueRoundView};
+
+    /// issue 550 / issue 559 显示面口径（TUI headline 漏网）：the native
+    /// panel's headline (and `round_slot`/`time_left_sec`) must follow the
+    /// display account's own venue round row when `venue_rounds` is
+    /// populated, and stay byte-for-byte on the global scalar block when the
+    /// rows are absent (pre-issue-550 core → empty serde default).
+    #[test]
+    fn the_headline_follows_the_display_venue_row_then_the_global_block() {
+        let snap = |rows: Vec<VenueRoundView>, display_venue: &str| UiSnapshot {
+            connected: true,
+            round: Some(RoundView {
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+                markets: 2,
+                can_trade: true,
+                venue_rounds: rows,
+                ..RoundView::default()
+            }),
+            display_venue: display_venue.into(),
+            ..UiSnapshot::default()
+        };
+
+        // Multi-family: display venue kalshi's own 3600s clock wins the
+        // headline (slot AND time left), not the conservative earliest-expiry
+        // global block.
+        let v = AppView::from_snapshot(&snap(
+            vec![
+                VenueRoundView {
+                    venue: "polymarket".into(),
+                    duration_sec: 900,
+                    slot: 7,
+                    age_sec: 1,
+                    time_left_sec: 299,
+                },
+                VenueRoundView {
+                    venue: "kalshi".into(),
+                    duration_sec: 3600,
+                    slot: 3,
+                    age_sec: 5,
+                    time_left_sec: 295,
+                },
+            ],
+            "kalshi",
+        ));
+        assert_eq!(
+            v.round_slot, 3,
+            "the headline slot is the display venue's own"
+        );
+        assert_eq!(
+            v.time_left_sec, 295,
+            "the headline countdown is the display venue's own"
+        );
+        assert!(
+            v.headline.contains("round #3 295s left"),
+            "the rendered headline reads the display venue's row: {}",
+            v.headline
+        );
+
+        // No display pointer (older core): falls back to the first spoken row —
+        // with a single family that is the same clock a legacy headline showed.
+        let v = AppView::from_snapshot(&snap(
+            vec![VenueRoundView {
+                venue: "polymarket".into(),
+                duration_sec: 900,
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+            }],
+            "",
+        ));
+        assert_eq!(v.round_slot, 7);
+        assert_eq!(v.time_left_sec, 299);
+
+        // Legacy equivalence: without venue_rounds the headline fields are the
+        // global scalar block, exactly as before this change.
+        let v = AppView::from_snapshot(&snap(Vec::new(), "kalshi"));
+        assert_eq!(v.round_slot, 7);
+        assert_eq!(v.time_left_sec, 299);
+        assert!(
+            v.headline.contains("round #7 299s left"),
+            "the legacy headline text is byte-for-byte unchanged: {}",
+            v.headline
+        );
+    }
 }
