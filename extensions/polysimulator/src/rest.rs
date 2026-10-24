@@ -28,6 +28,13 @@ use std::time::Duration;
 /// Production API root.
 pub const PRODUCTION_BASE_URL: &str = "https://api.polysimulator.com";
 
+/// The wait a venue 429 advertises when it sends no `Retry-After` header —
+/// the free tier's own documented advice ("Retry after 1s").
+const VENUE_RETRY_AFTER_DEFAULT_MS: u64 = 1_000;
+/// Ceiling on the advertised wait, so a bogus header can never park a
+/// request path for longer than the limiter's own give-up budget.
+const VENUE_RETRY_AFTER_CAP_MS: u64 = 5_000;
+
 #[derive(Debug, Clone)]
 pub struct RestConfig {
     pub base_url: String,
@@ -302,8 +309,31 @@ impl PolySimRest {
                         .map_err(|e| PolySimError::Schema(format!("{}: {}", path, e)));
                 }
                 Err(err) => {
-                    if err.is_rate_limited() {
+                    // The LOCAL limiter's refusal (its own bounded wait could
+                    // not cover the call) surfaces immediately: a retry here
+                    // would pile a second waiter onto an already-starving
+                    // bucket.
+                    if matches!(err, PolySimError::RateLimited { .. }) {
                         return Err(err);
+                    }
+                    // A VENUE 429 is an invitation, not a capability failure —
+                    // the body literally says "Retry after 1s". Sleep the
+                    // advertised wait (header first, then the free tier's
+                    // documented 1s) and retry within the same bounded budget:
+                    // the startup burst (balance seed → self-check probes →
+                    // first sweep) trips the venue's limiter by construction,
+                    // and that burst must self-heal here rather than come back
+                    // as `trades failed` → trading freeze → wrong ledger seed.
+                    if err.is_rate_limited() {
+                        if attempts > self.max_retries {
+                            return Err(err);
+                        }
+                        let wait = err
+                            .retry_after_ms()
+                            .unwrap_or(VENUE_RETRY_AFTER_DEFAULT_MS)
+                            .min(VENUE_RETRY_AFTER_CAP_MS);
+                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                        continue;
                     }
                     if !err.retryable() || attempts > self.max_retries {
                         return Err(err);
@@ -353,6 +383,18 @@ impl PolySimRest {
             })?
             .map_err(|e| classify_send_error(e, self.timeout))?;
         let status = response.status();
+        // The venue's `Retry-After` (seconds) travels with the error so the
+        // retry loop can honor the advertised wait instead of guessing.
+        let retry_after_ms = if status == 429 {
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|secs| secs.saturating_mul(1_000))
+        } else {
+            None
+        };
         let body_text = response
             .text()
             .await
@@ -367,11 +409,13 @@ impl PolySimRest {
                     code: err_body.error,
                     message: err_body.message.unwrap_or(body_text),
                     status: status.as_u16(),
+                    retry_after_ms,
                 });
             }
             return Err(PolySimError::Http {
                 status: status.as_u16(),
                 body: body_text,
+                retry_after_ms,
             });
         }
         Ok(body_text)
