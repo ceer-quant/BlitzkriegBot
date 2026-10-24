@@ -201,7 +201,7 @@ async function doResetTrading(): Promise<void> {
 
     <!-- ── 轮次时间周期（next_session）────────────────────────────────── -->
     <Card class="mt-3.5">
-      <CardHeader label="轮次时间周期">
+      <CardHeader label="全局轮次坐标系（回放/回落）">
         <template #title>
           <Timer class="size-4 text-faint-fg" />
         </template>
@@ -220,9 +220,10 @@ async function doResetTrading(): Promise<void> {
       <template v-else>
         <div class="flex items-center justify-between gap-3">
           <div>
-            <div class="text-[12.5px] font-semibold">下次会话的轮次长度</div>
+            <div class="text-[12.5px] font-semibold">下次会话的全局轮长</div>
             <p class="mt-0.5 text-[11px] text-faint-fg">
-              切换在重启内核后生效 —— 轮次网格是坐标系（round_slot 按会话的周期推导），热切会错解存量仓位与订单。
+              这是回放坐标系与未配置账户的回落，不是各账户的交易周期 —— 账户各跑各的周期族在账户卡配置（热生效）。
+              本格改动影响历史回测的 round_slot 索引，重启后生效。
             </p>
           </div>
           <SegmentedControl

@@ -73,6 +73,13 @@ impl MarketPlugin for PredictFunPlugin {
             capabilities: MarketCapabilities::LEVEL2_SNAPSHOT,
         }]
     }
+    /// Undeclared on purpose: predict.fun has no round concept of its own —
+    /// the discovery folds whatever live markets exist into the CONFIGURED
+    /// round length (see `crate::discovery`), so no duration is wrong to
+    /// offer. `None` = the panel filters nothing.
+    fn supported_round_secs(&self) -> Option<Vec<i64>> {
+        None
+    }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&PREDICT_DATA_FEED)
     }

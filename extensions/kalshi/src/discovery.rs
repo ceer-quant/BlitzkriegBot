@@ -81,35 +81,51 @@ pub(crate) fn series_ticker_for(asset: &str, round_sec: i64) -> Option<String> {
     match round_sec {
         900 => Some(format!("KX{sym}15M")),
         // 86_400 (KX{ASSET}D) intentionally unmapped: strike ladder, not an
-        // up/down binary. `discovery_loop` warns once when this round length
-        // is configured, so an operator is never left with a silent empty
-        // market set.
+        // up/down binary. Any unmapped round length gets the one-time
+        // `discovery_loop` warning, so an operator is never left with a
+        // silent empty market set.
         _ => None,
     }
 }
 
-/// One-time explicit warning that the configured round length is the daily
-/// family the plugin refuses to route. Fires once per process on the first
-/// discovery tick, before the loop settles into its normal cadence. Returns
-/// whether THIS call emitted the warning (test hook: the alarm is
-/// once-per-process, so tests probe the gate directly).
+/// One-time explicit warning that the configured round length routes to
+/// NOTHING. Two shapes share the alarm: the 86400s daily family (refused on
+/// purpose — a strike ladder, audit-settled) and any other duration with no
+/// `series_ticker_for` mapping (e.g. a 4h configuration, which used to fail
+/// SILENTLY — discovery mounted, zero findings, not even one log line).
+/// Fires once per process on the first discovery tick, before the loop
+/// settles into its normal cadence. Returns whether THIS call emitted the
+/// warning (test hook: the alarm is once-per-process, so tests probe the
+/// gate directly).
 fn warn_daily_family_disabled_once(round_sec: i64) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DAILY_WARNED: AtomicBool = AtomicBool::new(false);
-    if round_sec != 86_400 || DAILY_WARNED.swap(true, Ordering::Relaxed) {
+    let why = match round_sec {
+        86_400 => Some(
+            "Kalshi KX{{ASSET}}D (KXBTCD/KXETHD/…) is a STRIKE LADDER, not an up/down binary: \
+             each event lists 188–300 mutually-exclusive 'close ≥ $X' rungs (strike_type=greater, \
+             BRTI 60s average settlement), so there is no up/down pair to consume. Routing it as \
+             UP/DOWN misfeeds every rung into one round_slot, makes spread_arb buy near-ITM rungs \
+             as fake trend, and breaks cross_venue_arb's UP+DOWN=$1 economics (audit: \
+             target/kalshi-daily-audit-report.md, verdict: 选项2 daily 族禁用+告警).",
+        ),
+        s if series_ticker_for("BTC", s).is_none() => Some(
+            "no up/down series exists for this round length — `series_ticker_for` routes only \
+             900 (KX{ASSET}15M), so discovery will find NOTHING for it. The venue declares \
+             its supported families via `supported_round_secs` (market.list); configure the \
+             account's rounds to 900 (15m) — the only verified up/down round family.",
+        ),
+        _ => None,
+    };
+    let Some(why) = why else { return false };
+    if DAILY_WARNED.swap(true, Ordering::Relaxed) {
         return false;
     }
     tracing::warn!(
         target: "kalshi",
         round_sec,
-        "kalshi discovery: daily (86400s) round family DISABLED — Kalshi KX{{ASSET}}D \
-         (KXBTCD/KXETHD/…) is a STRIKE LADDER, not an up/down binary: each event lists \
-         188–300 mutually-exclusive 'close ≥ $X' rungs (strike_type=greater, BRTI 60s \
-         average settlement), so there is no up/down pair to consume. Routing it as \
-         UP/DOWN misfeeds every rung into one round_slot, makes spread_arb buy near-ITM \
-         rungs as fake trend, and breaks cross_venue_arb's UP+DOWN=$1 economics (audit: \
-         target/kalshi-daily-audit-report.md, verdict: 选项2 daily 族禁用+告警). \
-         Switch round_duration to 900 (15m) — the only verified up/down round family."
+        "kalshi discovery: round family DISABLED for {round_sec}s — {why} \
+         Switch round_duration to 900 (15m)."
     );
     true
 }
@@ -401,6 +417,7 @@ fn discovery_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blitzkrieg_market_api::MarketPlugin as _;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -439,11 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn daily_family_warning_fires_once_per_process() {
+    fn unmapped_round_lengths_trip_the_same_once_alarm() {
         // The explicit-alarm half of the fix: the one-time warning fires for
         // a daily configuration (first call returns true), never for other
         // round lengths, and repeats are suppressed (silent skip would hide
         // an operator-visible misconfiguration again).
+        //
+        // The 4h blind spot rides the SAME alarm in the SAME test: the gate
+        // is once-per-PROCESS (a bare AtomicBool), so a second #[test]
+        // asserting a "first" emission would race this one for the flag —
+        // whichever runs first wins and the other starves. One test, both
+        // families, order pinned.
         assert!(
             !warn_daily_family_disabled_once(900),
             "15m configurations must not trip the daily warning"
@@ -456,6 +479,32 @@ mod tests {
             !warn_daily_family_disabled_once(86_400),
             "repeats are suppressed — it is a ONE-TIME alarm, not per-poll spam"
         );
+        // A 4h configuration used to mount discovery and find NOTHING without
+        // one log line. Silence is exactly how the 4h misconfiguration hid
+        // for weeks; the first tick now names the missing family.
+        assert!(
+            !warn_daily_family_disabled_once(14_400),
+            "the process-wide flag is spent by the daily emission above — this is the ONCE contract"
+        );
+    }
+
+    #[test]
+    fn the_plugin_declares_only_the_family_it_routes() {
+        // The declaration is the panel's filter source — it must equal the
+        // routing truth (`series_ticker_for`), or the editor offers a
+        // duration discovery can never serve.
+        let declared = crate::plugin::KalshiPlugin.supported_round_secs();
+        assert_eq!(
+            declared,
+            Some(vec![900]),
+            "kalshi routes exactly the 15m up/down family"
+        );
+        for sec in declared.unwrap_or_default() {
+            assert!(
+                series_ticker_for("BTC", sec).is_some(),
+                "declared family {sec}s must actually route"
+            );
+        }
     }
 
     #[test]

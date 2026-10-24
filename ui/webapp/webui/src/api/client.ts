@@ -251,6 +251,11 @@ export interface RiskExitView {
   stopLossPct: number | string
   takeProfitPct: number | string
   forceExitSec: number
+  /**
+   * 移动止盈总开关（trailing stop 武装与否）。老内核缺省 → undefined：
+   * 开关降级为不可用态，不造默认值。
+   */
+  trailingEnabled?: boolean
 }
 
 /** The whole `risk.limits` readout. */
@@ -308,6 +313,8 @@ export interface RiskSetExitBody {
   stopLossPct?: string | number
   takeProfitPct?: string | number
   forceExitSec?: number
+  /** 移动止盈武装开关（出厂 false，issue 356 校准）；热配升格后进请求体。 */
+  trailingEnabled?: boolean
   reason?: string
 }
 
@@ -2096,6 +2103,12 @@ export interface PluginRow {
   hasDataFeed?: boolean
   hasDiscovery?: boolean
   hasExecutor?: boolean
+  /**
+   * 插件自声明的可发现轮次族（秒；supported_round_secs）。undefined =
+   * 未声明 → 面板不筛（predictfun/模拟盘一类无轮次概念所）。轮次多族：
+   * 账户周期集编辑器以此隐藏该所服务不了的档位。
+   */
+  supportedRoundSecs?: number[]
   // ── E27 (§8.3) mode declaration fields — market.list rows ────────────────
   /**
    * The concrete structure the plugin declares, when its `declare_modes()`

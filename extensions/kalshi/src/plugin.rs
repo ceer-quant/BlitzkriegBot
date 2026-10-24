@@ -75,6 +75,14 @@ impl MarketPlugin for KalshiPlugin {
             capabilities: MarketCapabilities::LEVEL2_SNAPSHOT,
         }]
     }
+    /// The only up/down family this venue routes (see `crate::discovery`:
+    /// `series_ticker_for` maps 900 → KX{ASSET}15M and nothing else — the
+    /// daily KX{ASSET}D is a strike ladder, not a binary). Declared here so
+    /// the panel's rounds editor never offers a duration the venue cannot
+    /// serve (the 4h configuration used to discover nothing, silently).
+    fn supported_round_secs(&self) -> Option<Vec<i64>> {
+        Some(vec![900])
+    }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&KALSHI_DATA_FEED)
     }

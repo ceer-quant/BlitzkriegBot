@@ -55,6 +55,13 @@ impl MarketPlugin for PolymarketPlugin {
                 | MarketCapabilities::POST_ONLY,
         }]
     }
+    /// The Gamma slug families this plugin routes (`crate::gamma`:
+    /// `duration_label` maps exactly these five; the epoch family for
+    /// 5m/15m/4h, the ET clock-wall family for 1h/daily). Declared here so
+    /// the panel's rounds editor offers only durations that discover.
+    fn supported_round_secs(&self) -> Option<Vec<i64>> {
+        Some(vec![300, 900, 3600, 14400, 86_400])
+    }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&POLY_DATA_FEED)
     }
