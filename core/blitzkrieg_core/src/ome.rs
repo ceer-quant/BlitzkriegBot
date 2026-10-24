@@ -191,6 +191,13 @@ pub struct SubmitParams {
     /// (see `service::escalation_delay_ms`). Not "0 = no escalation" — that was
     /// the doc, and it was wrong.
     pub maker_timeout_ms: i64,
+    /// B1b: the round-length family the order was sized/timed against (the
+    /// placement path resolves it three-state off the token's market and the
+    /// global grid). `0` = the caller had no family fact (legacy callers /
+    /// restored rows): the tracked order keeps the B1a serde default and the
+    /// effective duration falls back through the market declaration, exactly
+    /// as before this field existed.
+    pub round_duration_sec: i64,
 }
 
 pub struct Ome {
@@ -680,9 +687,10 @@ impl Ome {
             account_id: r.account_id.clone(),
             // Derived at read time (list_orders); never stored.
             venue: String::new(),
-            // B1a: 0 until B1b stamps the family at the placement path (the
-            // write point is deliberately out of this PR's diff).
-            round_duration_sec: 0,
+            // B1b: the placement path's family stamp — `0` when the caller
+            // had no family fact, the order then falls back through the
+            // market declaration (B1a's tri-state) at every read.
+            round_duration_sec: p.round_duration_sec,
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
@@ -739,6 +747,23 @@ impl Ome {
             o.venue_order_id = Some(venue_order_id);
             Ok(())
         })
+    }
+
+    /// B1b: idempotent lazy backfill of the order's round-length family — the
+    /// OME-flavoured wrapper over [`TrackedOrder::backfill_round_duration`].
+    /// A non-0 stamp is never overwritten (the first family a record was
+    /// admitted under stays authoritative), so calling this on every sweep /
+    /// fill pass is free and stable. The whole state lives under the
+    /// single-threaded Core lock (`ipc/server.rs` serializes every verb and
+    /// sweep), so the write-back rides the ordinary field-assignment path —
+    /// no new lock.
+    pub fn backfill_round_duration(&mut self, id: &str, sec: i64) {
+        if sec <= 0 {
+            return;
+        }
+        if let Some(o) = self.orders.get_mut(id) {
+            o.backfill_round_duration(sec);
+        }
     }
 
     /// Resolve an exchange order id (or a core id) to our tracked order.
@@ -1124,6 +1149,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 2).unwrap();
@@ -1176,6 +1202,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         // MATCHED provisional +5
@@ -1219,6 +1246,7 @@ mod tests {
             execute_at_ms: 3,
             report_at_ms: 3,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         let drained = ome.drain_pending(4).unwrap();
@@ -1239,6 +1267,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         assert!(
@@ -1250,6 +1279,7 @@ mod tests {
                 execute_at_ms: 2,
                 report_at_ms: 2,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .is_err()
         );
@@ -1264,6 +1294,7 @@ mod tests {
                 execute_at_ms: 4,
                 report_at_ms: 4,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .is_ok()
         );
@@ -1287,6 +1318,7 @@ mod tests {
                 execute_at_ms: 1,
                 report_at_ms: 1,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .unwrap();
         first.mark_live("o1", 2).unwrap();
@@ -1344,6 +1376,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("old", 1).unwrap();
@@ -1366,6 +1399,7 @@ mod tests {
                 execute_at_ms: 5,
                 report_at_ms: 5,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .unwrap();
         restarted.mark_live("new", 5).unwrap();
@@ -1402,6 +1436,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 1).unwrap();
@@ -1456,6 +1491,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 1).unwrap();
@@ -1502,6 +1538,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 1).unwrap();
@@ -1539,6 +1576,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("live", 1).unwrap();
@@ -1559,6 +1597,7 @@ mod tests {
                 execute_at_ms: 10,
                 report_at_ms: 10,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .unwrap();
             ome.mark_live(&id, 10).unwrap();
@@ -1609,6 +1648,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 1).unwrap();
@@ -1641,6 +1681,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
         ome.mark_live("o1", 1).unwrap();
@@ -1726,6 +1767,7 @@ mod tests {
                 execute_at_ms: ts,
                 report_at_ms: ts,
                 maker_timeout_ms: 0,
+                round_duration_sec: 0,
             })
             .unwrap();
         }
@@ -1803,6 +1845,7 @@ mod tests {
             execute_at_ms: ts,
             report_at_ms: ts,
             maker_timeout_ms: 0,
+            round_duration_sec: 0,
         })
         .unwrap();
     }

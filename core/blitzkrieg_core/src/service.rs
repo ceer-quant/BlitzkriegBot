@@ -8,7 +8,7 @@ use crate::ledger::Ledger;
 use crate::market::{venue_credentials_missing, venue_credentials_ready};
 use crate::model::*;
 use crate::ome::{AppliedFillRecord, FillDelta, FillOutcome, LateFill, Ome, SubmitParams};
-use crate::position::{EquityBasis, OpenParams, PositionConfig, PositionManager};
+use crate::position::{EquityBasis, OpenParams, OpenPosition, PositionConfig, PositionManager};
 use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
 use crate::risk::{LossBreakers, RiskConfig, RiskGate};
 use crate::settlement::{SETTLEMENT_EXIT_REASON, SettlementBook, booking_for, settlement_key};
@@ -1720,28 +1720,86 @@ const FAST_EVAL_FALLBACK_MS: i64 = 2_000;
 const EXIT_REPORT_BEAT_MS: i64 = 1_000;
 
 impl Core {
+    /// B1b: the round-length family a token belongs to — the market's declared
+    /// duration when it carries one (#354), else the configured global grid.
+    /// `0` = the token belongs to no live market AND the grid is unset (no
+    /// family fact anywhere); every B1b write path stamps this, and the B1a
+    /// readers (`effective_round_duration_sec`) treat a 0 as "no clock fact".
+    fn round_family_of_token(&self, token_id: &str) -> i64 {
+        let global = self.config.round_duration_sec;
+        match self
+            .engine
+            .as_ref()
+            .and_then(|e| e.market_for_token(token_id))
+            .map(|m| m.round_duration_sec)
+        {
+            Some(d) if d > 0 => d,
+            _ => global,
+        }
+    }
+
+    /// B1b: the round-length family ONE order was admitted under, resolved
+    /// three-state through B1a's `effective_round_duration_sec` (read only):
+    /// the order's OWN stamp when it carries one, else the market's declared
+    /// duration while the engine still names the token's market, else the
+    /// configured global grid. `0` = no clock fact at all — the caller's gate
+    /// decides what that means.
+    ///
+    /// Single-family discipline: with every stamp 0 (pre-B1b archives) and
+    /// every market declaring the configured grid (or 0, the legacy corpora),
+    /// this folds to `self.config.round_duration_sec` — the value every
+    /// consumer read before B1b, byte-for-byte.
+    fn order_eff_round_sec(&self, o: &TrackedOrder) -> i64 {
+        let market_decl = self
+            .engine
+            .as_ref()
+            .and_then(|e| e.market_for_token(&o.token_id))
+            .map(|m| m.round_duration_sec);
+        o.effective_round_duration_sec(market_decl, self.config.round_duration_sec)
+    }
+
+    /// B1b: the round-length family ONE position was opened under — the
+    /// position-shaped twin of [`Core::order_eff_round_sec`]: same tri-state
+    /// fold through B1a's `effective_round_duration_sec`, same single-family
+    /// equivalence (eff == `self.config.round_duration_sec` when every stamp
+    /// is 0 and no market contradicts the grid).
+    fn position_eff_round_sec(&self, p: &OpenPosition) -> i64 {
+        let market_decl = self
+            .engine
+            .as_ref()
+            .and_then(|e| e.market_for_token(&p.token_id))
+            .map(|m| m.round_duration_sec);
+        p.effective_round_duration_sec(market_decl, self.config.round_duration_sec)
+    }
+
     /// The open-position snapshot strategies see through `bk.holdings()`,
     /// rebuilt once per evaluation cycle (the #202 equity push's position
     /// sibling). Flattened to wire strings here — the engine slices it per
     /// strategy, so a package never reads another package's book. The round
-    /// slot is re-derived from the entry time on the configured grid (the
-    /// scanner's `current_slot` formula, minus the clock offset a live kernel
-    /// adds); a position cannot outlive its round, so the exact boundary the
-    /// entry sat on is all the gap-fill loop needs.
+    /// slot is re-derived from the entry time on the position's OWN family
+    /// grid (B1b: the tri-state eff — own stamp > market declaration >
+    /// global grid, floored at 1 — so a legacy unstamped row whose market
+    /// declares a different family still projects onto the family the
+    /// market actually trades; a single-family deployment folds eff == cfg,
+    /// the historic formula byte-for-byte); a position cannot outlive its
+    /// round, so the exact boundary the entry sat on is all the gap-fill
+    /// loop needs.
     fn held_position_view(&self) -> Vec<crate::strategies::HeldPosition> {
-        let duration = self.config.round_duration_sec.max(1);
         self.positions
             .open_positions()
             .iter()
-            .map(|p| crate::strategies::HeldPosition {
-                strategy: p.strategy.clone(),
-                account_id: p.account_id.to_string(),
-                condition_id: p.condition_id.clone(),
-                token_id: p.token_id.clone(),
-                direction: p.direction.as_str().to_string(),
-                shares: p.shares.to_string(),
-                entry_price: p.entry_price.to_string(),
-                round_slot: p.entered_at_ms / 1000 / duration,
+            .map(|p| {
+                let duration = self.position_eff_round_sec(p).max(1);
+                crate::strategies::HeldPosition {
+                    strategy: p.strategy.clone(),
+                    account_id: p.account_id.to_string(),
+                    condition_id: p.condition_id.clone(),
+                    token_id: p.token_id.clone(),
+                    direction: p.direction.as_str().to_string(),
+                    shares: p.shares.to_string(),
+                    entry_price: p.entry_price.to_string(),
+                    round_slot: p.entered_at_ms / 1000 / duration,
+                }
             })
             .collect()
     }
@@ -8494,6 +8552,7 @@ impl Core {
         let id = self.new_order_id();
         let buy = req.side == Side::Buy;
         let req_account = req.account_id.clone();
+        let req_token = req.token_id.clone();
         if buy {
             self.accounts
                 .get_mut(&req.account_id)?
@@ -8511,6 +8570,9 @@ impl Core {
             // The pre-submit path cannot know the entry's escalation window;
             // `confirm_live` falls back to the default clock when it arms.
             maker_timeout_ms: 0,
+            // B1b: the order's round-length family, resolved three-state off
+            // the token's market and the global grid.
+            round_duration_sec: self.round_family_of_token(&req_token),
         }) {
             // #537: a submit refusal happens AFTER the notional reservation —
             // leaving it on the books strands cash on an order that does not
@@ -9551,13 +9613,33 @@ impl Core {
                     Some(id) => id,
                     None => {
                         let direction = parse_direction(&d.direction);
+                        // B1b: the fill's own order carries the family it was
+                        // admitted under; the three-state eff (own stamp >
+                        // market declaration > global grid) projects the slot
+                        // onto the family grid the ORDER actually traded, not
+                        // the configured grid. Single-family equivalence: a
+                        // deployment on the configured grid alone folds eff ==
+                        // cfg, byte-for-byte the historic formula. (Falls back
+                        // to the global grid when the order is unknown to the
+                        // OME — a synthetic/reconciliation fill.)
+                        let eff_sec = self
+                            .ome
+                            .get(&d.order_id)
+                            .map(|o| self.order_eff_round_sec(o))
+                            .filter(|eff| *eff > 0)
+                            .unwrap_or(self.config.round_duration_sec);
+                        // Segment 2 of the wiring template: the lazy stamp —
+                        // the order's family is written from the resolution
+                        // this projection just made (idempotent; a non-0
+                        // stamp is never overwritten).
+                        self.ome.backfill_round_duration(&d.order_id, eff_sec);
                         // A round slot N covers [N*dur, (N+1)*dur): the market
                         // expires at the END of the slot. (Using N*dur would place
                         // expiry in the past and force-exit immediately.)
                         let expires_at_ms = if d.round_slot > 0 {
-                            (d.round_slot + 1) * self.config.round_duration_sec * 1000
+                            (d.round_slot + 1) * eff_sec * 1000
                         } else {
-                            now_ms + self.config.round_duration_sec * 1000
+                            now_ms + eff_sec * 1000
                         };
                         let p = OpenParams {
                             strategy: d.strategy.clone(),
@@ -9590,6 +9672,12 @@ impl Core {
                                 .as_ref()
                                 .and_then(|e| e.partner_of(&d.token_id))
                                 .unwrap_or_default(),
+                            // B1b: the family the entry was admitted under —
+                            // the order's own resolution (its stamp, else the
+                            // market declaration, else the grid), so the
+                            // position and the order that opened it carry the
+                            // SAME family.
+                            round_duration_sec: eff_sec,
                         };
                         self.positions.open(p, now_ms).id
                     }
@@ -10525,16 +10613,46 @@ impl Core {
         if dur_ms <= 0 {
             return;
         }
-        let expired: Vec<String> = self
-            .ome
-            .live_orders()
-            .into_iter()
-            .filter(|o| o.round_slot > 0 && now_ms >= (o.round_slot + 1) * dur_ms)
-            .map(|o| o.order_id.clone())
-            .collect();
-        for id in expired {
+        // B1b: EVERY live order is judged on ITS OWN family clock — the
+        // three-state effective duration (own stamp > market declaration >
+        // global grid; a `0` family folds to the global grid, exactly the
+        // pre-B1b value). Single-family equivalence: a deployment where every
+        // market declares the configured grid (or nothing) and every stamp
+        // rides the grid resolves eff == cfg here, byte-for-byte the old
+        // filter. The expired ids are collected BEFORE the mutation pass (the
+        // market lookup reads the engine).
+        let mut expired: Vec<(String, i64)> = Vec::new();
+        for o in self.ome.live_orders() {
+            if o.round_slot <= 0 {
+                continue;
+            }
+            let eff = self.order_eff_round_sec(o);
+            if eff > 0 && now_ms >= (o.round_slot + 1) * eff * 1000 {
+                expired.push((o.order_id.clone(), eff));
+            }
+        }
+        for (id, eff) in expired {
+            // Segment 2 of the wiring template: the lazy idempotent stamp —
+            // a `0` family is written once from the resolution the expiry
+            // judgment just made; a non-0 stamp is never touched.
+            self.ome.backfill_round_duration(&id, eff);
             self.force_close_order(&id, now_ms, "round expired").ok();
         }
+        // B1b lazy backfill: positions opened before the family stamp existed
+        // (restored legacy snapshots) get their family written the first time
+        // the expiry consumer touches them — idempotent
+        // (`backfill_round_duration` never overwrites a non-0 stamp), so
+        // running this every sweep is free. The families are resolved BEFORE
+        // the mutable borrow (the market lookup reads the engine).
+        let families: std::collections::HashMap<String, i64> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.round_duration_sec == 0)
+            .map(|p| (p.token_id.clone(), self.round_family_of_token(&p.token_id)))
+            .collect();
+        self.positions
+            .backfill_round_families(|tok| families.get(tok).copied().unwrap_or(0));
     }
 
     /// E-VA companion: the single-leg orphan sweep for ATOMIC pair strategies.
@@ -10845,9 +10963,29 @@ impl Core {
             // is stale/absent) — the infeasible arm.
             return false;
         };
-        let slot = self
-            .books_round_slot(missing_token)
-            .unwrap_or_else(|| now_ms / (self.config.round_duration_sec * 1000).max(1));
+        // B1b: the chase completes the NAKED leg's pair attempt, so it runs on
+        // the naked leg's family clock, not the configured grid — the missing
+        // leg is sized/timed against the same round the pair was admitted
+        // under. The naked POSITION carries the family (stamped at open,
+        // backfilled at the expiry consumer); a `0` stamp folds to the global
+        // grid, the pre-B1b slot fallback byte-for-byte.
+        let naked_family = self
+            .positions
+            .open_positions()
+            .iter()
+            .find(|p| {
+                p.token_id == naked_token
+                    && p.account_id.as_str() == account_id.as_str()
+                    && p.strategy == strategy
+            })
+            .map(|p| self.position_eff_round_sec(p))
+            .filter(|eff| *eff > 0);
+        let slot = self.books_round_slot(missing_token).unwrap_or_else(|| {
+            let fam = naked_family
+                .unwrap_or(self.config.round_duration_sec)
+                .max(1);
+            now_ms / (fam * 1000).max(1)
+        });
         let internal_key = format!("pair-chase:{naked_token}:{missing_token}:{slot}");
         let req = OrderRequest {
             token_id: missing_token.to_string(),
@@ -10898,6 +11036,15 @@ impl Core {
         }
         match self.place_escalated(req, now_ms) {
             Ok((order_id, status)) => {
+                // B1b: the chase order inherits the naked leg's family — the
+                // same lazy idempotent stamp the placement path's market
+                // lookup would have resolved, but the PAIR attempt's family
+                // is authoritative (the missing leg's own market may declare
+                // a different family than the round the pair was priced
+                // under). A non-0 stamp is never overwritten.
+                if let Some(fam) = naked_family {
+                    self.ome.backfill_round_duration(&order_id, fam);
+                }
                 tracing::info!(
                     order = %order_id,
                     ?status,
@@ -10955,8 +11102,16 @@ impl Core {
             ));
         }
         if order.round_slot > 0 {
-            let dur_ms = self.config.round_duration_sec * 1000;
+            // B1b: the round's liveness is judged on the ORDER'S OWN family
+            // clock — the three-state eff (own stamp > market declaration >
+            // global grid), not the configured grid: a 3600s order must stay
+            // live for its full hour even while the core runs 900s rounds.
+            // A `0` family folds to the global grid — the pre-B1b value —
+            // and the resolution just made is the lazy idempotent stamp.
+            let eff = self.order_eff_round_sec(&order);
+            let dur_ms = eff * 1000;
             let expires_at = (order.round_slot + 1) * dur_ms;
+            self.ome.backfill_round_duration(id, eff);
             if now_ms < expires_at {
                 return Err(CoreError::new(
                     CoreErrorCode::InvalidOrderState,
@@ -12824,6 +12979,7 @@ impl Core {
         let id = self.new_order_id();
         let buy = req.side == Side::Buy;
         let req_account = req.account_id.clone();
+        let req_token = req.token_id.clone();
 
         // Reserve BUY notional up front (prevents over-commitment). E28: the
         // reservation commits cash in the REQUEST'S OWN book.
@@ -12848,6 +13004,9 @@ impl Core {
             request: req,
             submitted_at_ms: now_ms,
             maker_timeout_ms,
+            // B1b: the order's round-length family, resolved three-state off
+            // the token's market and the global grid.
+            round_duration_sec: self.round_family_of_token(&req_token),
         }) {
             // #537: same rollback contract as the pre-submit path — a submit
             // refusal must not strand the notional it just reserved.
@@ -27422,6 +27581,7 @@ mod exit_reason_table_tests {
                     account_id: crate::model::default_account_id(),
                     venue: String::new(),
                     partner_token_id: String::new(),
+                    round_duration_sec: 0,
                 },
                 1_000,
             );
@@ -27503,6 +27663,433 @@ mod exit_reason_table_tests {
         let off = view(0);
         assert_eq!(off["maxStaleMs"], serde_json::json!(0));
         assert_eq!(off["checkEnabled"], serde_json::json!(false));
+    }
+}
+
+/// B1b: the round-duration family reaches the durable records — the placed
+/// order carries its family stamp, the opened position carries its own, the
+/// legacy rows backfill idempotently at the expiry consumer, and the held
+/// position view derives its slot on the POSITION'S OWN family grid.
+#[cfg(test)]
+mod round_family_b1b_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    const SEED: Decimal = dec!(1000);
+    const STRATEGY: &str = "acc";
+
+    /// Two live round markets on two families (polymarket 900s, kalshi 3600s),
+    /// engine enabled, accounts seeded — the B1b write paths have something
+    /// real to resolve against. `two_family_core()` is the double-family
+    /// deployment (polymarket 900s + kalshi 3600s); `single_family_core()`
+    /// feeds BOTH venues at 900s — the pre-B1b world the equivalence test
+    /// replays.
+    fn two_family_core() -> Core {
+        family_core(&[("polymarket", "poly", 900), ("kalshi", "kal", 3600)])
+    }
+
+    fn single_family_core() -> Core {
+        family_core(&[("polymarket", "poly", 900), ("kalshi", "kal", 900)])
+    }
+
+    fn family_core(families: &[(&str, &str, i64)]) -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: crate::account::AccountId::from("default"),
+                name: "default".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                updated_at_ms: 0,
+            }],
+            crate::model::default_account_id(),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                risk: RiskConfig {
+                    max_order_notional: dec!(100),
+                    ..Default::default()
+                },
+                dry_seed_balance: SEED,
+                auto_exits_enabled: false,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            },
+            book,
+        );
+        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig {
+            scanner: crate::scanner::ScannerConfig {
+                assets: vec!["BTC".into()],
+                round_duration_sec: 900,
+                min_round_age_sec: 0,
+                min_time_left_sec: 0,
+            },
+            ..Default::default()
+        }));
+        let now: i64 = 1_000_000;
+        let market = |venue: &str, up: &str, down: &str, dur: i64| crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: format!("cond-{venue}-{dur}"),
+            question_id: "q".into(),
+            up_token_id: up.into(),
+            down_token_id: down.into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: now / 1000 / dur * dur + dur * 1000,
+            round_slot: now / 1000 / dur,
+            round_duration_sec: dur,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        let markets: Vec<crate::model::CryptoMarket> = families
+            .iter()
+            .map(|(venue, stem, dur)| {
+                market(venue, &format!("{stem}-up"), &format!("{stem}-down"), *dur)
+            })
+            .collect();
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets,
+                now_ms: now,
+            },
+            now,
+        );
+        c
+    }
+
+    fn order(token: &str, key: &str) -> OrderRequest {
+        OrderRequest {
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            side: Side::Buy,
+            mode: FillPolicy::Maker,
+            price: dec!(0.40),
+            size: dec!(1),
+            internal_key: key.into(),
+            strategy: STRATEGY.into(),
+            asset: "BTC".into(),
+            direction: "up".into(),
+            round_slot: 1,
+            account_id: crate::model::default_account_id(),
+        }
+    }
+
+    fn open_params(
+        token: &str,
+        venue: &str,
+        dur: i64,
+        entered_ms: i64,
+    ) -> crate::position::OpenParams {
+        crate::position::OpenParams {
+            strategy: STRATEGY.into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: token.into(),
+            condition_id: "cond".into(),
+            account_id: crate::model::default_account_id(),
+            venue: venue.into(),
+            partner_token_id: String::new(),
+            entry_price: dec!(0.40),
+            expires_at_ms: entered_ms + dur * 1000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: dur,
+        }
+    }
+
+    #[test]
+    fn a_placed_order_carries_its_family_stamp() {
+        let mut c = two_family_core();
+        // The polymarket token's market declares 900s — the tracked order is
+        // stamped 900 at submit (its family, matching the global grid here
+        // only by coincidence).
+        c.place(order("poly-up", "k1"), 0, 1).unwrap();
+        let o = &c.list_orders()[0];
+        assert_eq!(
+            o.round_duration_sec, 900,
+            "stamped from the market declaration"
+        );
+        // The kalshi token declares 3600s — DIFFERENT family, own stamp.
+        c.place(order("kal-up", "k2"), 0, 2).unwrap();
+        let o = &c.list_orders()[1];
+        assert_eq!(
+            o.round_duration_sec, 3600,
+            "the second family stamps its own duration"
+        );
+        // A token belonging to NO live market falls back to the global grid.
+        c.place(order("ghost-up", "k3"), 0, 3).unwrap();
+        let o = &c.list_orders()[2];
+        assert_eq!(o.round_duration_sec, 900, "no market: the global grid");
+    }
+
+    #[test]
+    fn an_opened_position_carries_its_family_stamp() {
+        let mut c = two_family_core();
+        // The production open path (project_fill_delta) resolves the family
+        // through OpenParams; here the same shape opens unstamped-vs-stamped
+        // rows and the manager carries them through.
+        let p = c
+            .positions
+            .open(open_params("kal-up", "kalshi", 3600, 1_000), 1_000);
+        assert_eq!(
+            p.round_duration_sec, 3600,
+            "the position opens with its family"
+        );
+        let p2 = c
+            .positions
+            .open(open_params("poly-up", "polymarket", 0, 1_100), 1_100);
+        assert_eq!(
+            p2.round_duration_sec, 0,
+            "an unstamped caller opens a legacy row"
+        );
+    }
+
+    #[test]
+    fn legacy_positions_backfill_idempotently_at_the_expiry_consumer() {
+        let mut c = two_family_core();
+        // A legacy snapshot: restored with the B1a serde default (0).
+        let p = c
+            .positions
+            .open(open_params("poly-up", "polymarket", 0, 1_000), 1_000);
+        assert_eq!(p.round_duration_sec, 0, "legacy row opens unstamped");
+        // One sweep pass backfills it from the market declaration.
+        c.run_expiry_sweep(1_001);
+        let p = &c.positions.open_positions()[0];
+        assert_eq!(
+            p.round_duration_sec, 900,
+            "backfilled from the market lookup"
+        );
+        // A second pass is a no-op (the non-0 stamp is never overwritten) —
+        // and a sibling family row stays on its own family.
+        c.positions
+            .open(open_params("kal-up", "kalshi", 3600, 1_100), 1_100);
+        c.run_expiry_sweep(1_002);
+        let rows: Vec<(bool, i64)> = c
+            .positions
+            .open_positions()
+            .iter()
+            .map(|p| (p.token_id.contains("kal"), p.round_duration_sec))
+            .collect();
+        assert!(
+            rows.contains(&(false, 900)) && rows.contains(&(true, 3600)),
+            "each row keeps its own family: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_held_position_view_derives_the_slot_on_the_own_family_grid() {
+        let mut c = two_family_core();
+        // The view's slot formula works in SECONDS (entered_ms/1000/dur):
+        // 3_600_000 ms is slot 1 on the position's OWN 3600s grid, slot 4 on
+        // the 900s GLOBAL grid — the stamped row must read its own.
+        c.positions
+            .open(open_params("kal-up", "kalshi", 3600, 3_600_000), 3_600_000);
+        let held = c.held_position_view();
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            held[0].round_slot, 1,
+            "slot derived on the position's OWN 3600s grid, not the 900s global"
+        );
+        // A legacy (unstamped) row still derives on the global grid.
+        c.positions.open(
+            open_params("poly-up", "polymarket", 0, 3_600_000),
+            3_600_000,
+        );
+        let held = c.held_position_view();
+        assert_eq!(held.len(), 2);
+        let legacy_slot = held
+            .iter()
+            .find(|h| h.token_id.contains("poly"))
+            .map(|h| h.round_slot)
+            .unwrap();
+        assert_eq!(legacy_slot, 4, "no stamp: the historic global-grid formula");
+    }
+
+    // ── 消费点 2/5：到期判定按各订单自己的族钟 ────────────────────────────
+    // （先红后绿：升级前这两处读 `self.config.round_duration_sec`，3600s
+    // 订单会在 1_800_000ms 被误杀 / 误放行——把 eff 改回全局即红。）
+
+    /// A 900s order and a 3600s order rest on slot 1 SIMULTANEOUSLY: the
+    /// sweep at 1.8M ms force-closes only the 900s order — the 3600s order
+    /// keeps living on its own family clock until its own hour ends.
+    #[test]
+    fn the_expiry_sweep_judges_each_order_on_its_own_family_clock() {
+        let mut c = two_family_core();
+        // Slot 1: [900s, 1800s) on the poly grid, [3600s, 7200s) on kalshi's.
+        // Place both INSIDE their rounds (place stamps the family itself).
+        let poly = c.place(order("poly-up", "k1"), 0, 901_000).unwrap().0;
+        let kal = c.place(order("kal-up", "k2"), 0, 902_000).unwrap().0;
+        assert_eq!(c.ome().get(&poly).unwrap().round_duration_sec, 900);
+        assert_eq!(c.ome().get(&kal).unwrap().round_duration_sec, 3600);
+        // 1.8M ms: the poly round has ENDED, the kalshi round has 30min left.
+        c.run_expiry_sweep(1_800_000);
+        assert_eq!(
+            c.ome().get(&poly).unwrap().status,
+            OrderStatus::ForceClosed,
+            "the 900s order expires on its own clock"
+        );
+        assert_eq!(
+            c.ome().get(&kal).unwrap().status,
+            OrderStatus::Live,
+            "the 3600s order must NOT be judged on the 900s grid"
+        );
+        // The sweep pass also stamped the survivor's family (lazy backfill).
+        assert_eq!(
+            c.ome().get(&kal).unwrap().round_duration_sec,
+            3600,
+            "the survivor carries its own family stamp"
+        );
+        // 7.2M ms: now the kalshi slot-1 round has ended too (slot 1 covers
+        // [3600s, 7200s) on the hour grid).
+        c.run_expiry_sweep(7_200_000);
+        assert_eq!(
+            c.ome().get(&kal).unwrap().status,
+            OrderStatus::ForceClosed,
+            "the 3600s order expires on ITS clock, one grid later"
+        );
+    }
+
+    /// The manual verb refuses a 3600s order whose round is still live at
+    /// 1.8M ms (the 900s grid alone would call it expired) and accepts it
+    /// once ITS hour has passed.
+    #[test]
+    fn force_close_judges_the_order_s_own_round_clock() {
+        let mut c = two_family_core();
+        let kal = c.place(order("kal-up", "k1"), 0, 901_000).unwrap().0;
+        let err = c
+            .force_close_order(&kal, 1_800_000, "manual test")
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            CoreErrorCode::InvalidOrderState,
+            "a 3600s round is still live at the 900s grid's end"
+        );
+        assert_eq!(c.ome().get(&kal).unwrap().status, OrderStatus::Live);
+        // Past its OWN hour (slot 1 ends at 7.2M ms) the verb succeeds —
+        // and stamps the family.
+        c.force_close_order(&kal, 7_200_001, "manual test").unwrap();
+        assert_eq!(c.ome().get(&kal).unwrap().status, OrderStatus::ForceClosed);
+        assert_eq!(c.ome().get(&kal).unwrap().round_duration_sec, 3600);
+    }
+
+    // ── 消费点 1：fill 投影按订单自己的族钟 ───────────────────────────────
+
+    /// A 3600s taker fill opens a position that expires at the 3600s slot's
+    /// END — the 900s global grid would put the expiry a quarter into the
+    /// round and force-exit the hold immediately.
+    #[test]
+    fn project_fill_delta_projects_expiry_on_the_order_s_own_family() {
+        let mut c = two_family_core();
+        let kal = c.place(order("kal-up", "k1"), 0, 901_000).unwrap().0;
+        // Cross the book: the resting-ish taker fills at its limit.
+        c.book_snapshot("kal-up", vec![], vec![(dec!(0.39), dec!(500))], 901_500);
+        c.ingest_fill(
+            crate::model::Fill {
+                order_id: kal.clone(),
+                trade_id: Some("t1".into()),
+                token_id: "kal-up".into(),
+                side: Side::Buy,
+                price: dec!(0.40),
+                size: dec!(1),
+                status: crate::model::FillStatus::Matched,
+                ts_ms: 901_500,
+                tx_hash: None,
+                maker: None,
+                account_id: crate::model::default_account_id(),
+            },
+            901_500,
+        )
+        .unwrap();
+        let pos = c
+            .positions()
+            .open_positions()
+            .iter()
+            .find(|p| p.token_id == "kal-up")
+            .expect("the fill opened the position");
+        assert_eq!(
+            pos.round_duration_sec, 3600,
+            "the position carries the order's family"
+        );
+        assert_eq!(
+            pos.expires_at_ms, 7_200_000,
+            "slot 1 on the 3600s grid ends at 2h — not 1.8M ms (the 900s grid's end)"
+        );
+    }
+
+    // ── 回填幂等（放置路径 + sweep 双写点）───────────────────────────────
+
+    /// Backfill twice (place stamp, then two sweep passes over the survivor)
+    /// changes nothing after the first write: the family a record was
+    /// admitted under stays authoritative.
+    #[test]
+    fn the_family_stamp_is_idempotent_across_repeat_passes() {
+        let mut c = two_family_core();
+        let kal = c.place(order("kal-up", "k1"), 0, 901_000).unwrap().0;
+        assert_eq!(c.ome().get(&kal).unwrap().round_duration_sec, 3600);
+        // Two more sweep passes — the stamp must not move (idempotent), and
+        // the order stays live (its round has not ended on its own clock).
+        c.run_expiry_sweep(1_800_000);
+        c.run_expiry_sweep(1_800_500);
+        let o = c.ome().get(&kal).unwrap();
+        assert_eq!(o.round_duration_sec, 3600, "non-0 stamp never overwritten");
+        assert_eq!(o.status, OrderStatus::Live);
+    }
+
+    // ── 单族等价：全 900s 部署与升级前逐字节同判 ─────────────────────────
+
+    /// Every market declares the configured grid (or nothing): sweep,
+    /// force-close and the fill projection must land exactly where the
+    /// pre-B1b code put them — the same expiry second, the same refusal
+    /// boundary, the same slot.
+    #[test]
+    fn single_family_deployment_matches_the_pre_b1b_verdicts() {
+        // A single-family core: BOTH markets declare 900 == the global grid.
+        let mut c = single_family_core();
+        // Sweep rides the same grid: a slot-1 order placed at 901s survives
+        // 1.7M ms and dies at exactly 1.8M ms — the #457 matrix unchanged.
+        let id = c.place(order("kal-up", "k1"), 0, 901_000).unwrap().0;
+        assert_eq!(c.ome().get(&id).unwrap().round_duration_sec, 900);
+        c.run_expiry_sweep(1_700_000);
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+        c.run_expiry_sweep(1_800_000);
+        assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::ForceClosed);
+        // Force-close's refusal boundary sits at the same second.
+        let id3 = c.place(order("poly-up", "k3"), 0, 901_000).unwrap().0;
+        assert!(c.force_close_order(&id3, 1_799_999, "manual").is_err());
+        c.force_close_order(&id3, 1_800_000, "manual").unwrap();
+        // The fill projection lands on the same end-of-slot second.
+        let id2 = c.place(order("kal-up", "k2"), 0, 901_000).unwrap().0;
+        c.book_snapshot("kal-up", vec![], vec![(dec!(0.39), dec!(500))], 901_500);
+        c.ingest_fill(
+            crate::model::Fill {
+                order_id: id2,
+                trade_id: Some("t2".into()),
+                token_id: "kal-up".into(),
+                side: Side::Buy,
+                price: dec!(0.40),
+                size: dec!(1),
+                status: crate::model::FillStatus::Matched,
+                ts_ms: 901_500,
+                tx_hash: None,
+                maker: None,
+                account_id: crate::model::default_account_id(),
+            },
+            901_500,
+        )
+        .unwrap();
+        let pos = &c.positions().open_positions()[0];
+        assert_eq!(
+            pos.expires_at_ms, 1_800_000,
+            "single family: the historic end-of-slot projection"
+        );
+        assert_eq!(pos.round_duration_sec, 900);
     }
 }
 
