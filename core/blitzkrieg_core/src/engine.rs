@@ -986,9 +986,30 @@ impl Engine {
                 // now across venues). Single-venue tables hold one slot, so
                 // `any` == the old `first` check — #498's corpus and the
                 // pre-venue baselines stay byte-identical.
+                //
+                // B1c: slot numbers are only comparable WITHIN one duration
+                // family — the 900s grid's slot 5 and the 3600s grid's slot 5
+                // are two different wall-clock rounds (9000s apart). The
+                // membership test is therefore (slot, duration) equality: the
+                // feeding batch's own declared `round_duration_sec` (0 =
+                // legacy archive → the configured global grid) must match the
+                // resident row's. Single-family deployments resolve every row
+                // and every batch to the SAME duration, so the added
+                // condition is constant-true there and the verdict is
+                // bit-identical with the pre-B1c slot-only check.
                 let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
-                let scanner_holds_slot =
-                    slot != 0 && self.scanner.markets().iter().any(|m| m.round_slot == slot);
+                let feeding_venue = markets.first().map(|m| m.venue.clone()).unwrap_or_default();
+                let global_duration_sec = self.cfg.scanner.round_duration_sec;
+                let feed_duration = row_duration_sec(
+                    markets.first().map(|m| m.round_duration_sec).unwrap_or(0),
+                    global_duration_sec,
+                );
+                let scanner_holds_slot = slot != 0
+                    && self.scanner.markets().iter().any(|m| {
+                        m.round_slot == slot
+                            && row_duration_sec(m.round_duration_sec, global_duration_sec)
+                                == feed_duration
+                    });
                 if scanner_holds_slot {
                     let known: std::collections::HashSet<&str> = self
                         .scanner
@@ -1041,8 +1062,14 @@ impl Engine {
                     merged.extend(fresh);
                     self.scanner.set_markets(merged);
                     if let Some((venue, end_ms)) = merge_venue {
+                        // B1c: the declaration lands in the FEEDING FAMILY's
+                        // (venue, duration) clock slot, not the global-grid
+                        // slot — a 1h top-up must not speak into the 15m
+                        // family's clock. Single-family feeds resolve
+                        // `feed_duration` to the configured grid, the same
+                        // key the legacy entry wrote.
                         self.scanner
-                            .observe_end_time_for_venue(&venue, end_ms, now_ms);
+                            .observe_end_time_for(&venue, feed_duration, end_ms, now_ms);
                     }
                     return Vec::new();
                 }
@@ -1058,17 +1085,43 @@ impl Engine {
                 // 处置：错满一整轮（round_slot 距本批 slot ≥ 2）的兄弟行
                 // 清出表；只差一格的照旧桥接（下方 per-venue 替换照常处置
                 // feeding venue 自己的行，这里不重复动它）。venue-blind 的
-                // merge 判定按 slot 相等匹配，落后行永不命中 merge 路径，
-                // 所以这不改变 merge/rollover 的判定本身 —— 只给「存活」
-                // 加一条可退出的边界。
-                let slot = markets.first().map(|m| m.round_slot).unwrap_or(0);
-                let feeding_venue = markets.first().map(|m| m.venue.clone()).unwrap_or_default();
+                // merge 判定按 (slot, duration) 相等匹配（B1c），落后行永不
+                // 命中 merge 路径，所以这不改变 merge/rollover 的判定本身
+                // —— 只给「存活」加一条可退出的边界。
+                //
+                // B1c（#550 按族网格）：slot 数字跨 duration 族不可比 ——
+                // 900s 网格的 slot N 与 3600s 网格的 slot N 相差数小时。
+                // 「落后几格」的判定因此按每行自己的 duration 网格逐行算
+                // （行带 round_duration_sec 用它，否则全局轮长），而不是
+                // 一根全局尺。单族表里每行解析出同一个 duration，逐行判定
+                // 与旧的全局判定逐字节等价。
                 if slot != 0 {
                     let mut kept: Vec<CryptoMarket> = self
                         .scanner
                         .markets()
                         .iter()
-                        .filter(|m| slot - m.round_slot < 2 || m.venue == feeding_venue)
+                        .filter(|m| {
+                            // B1c: the lag is measured on the ROW's OWN grid —
+                            // the feeding round's start (slot × feed duration,
+                            // seconds) converted onto that row's duration
+                            // before the distance is taken. Slot numbers are
+                            // not comparable across duration families (the
+                            // 900s grid's slot 100 and the 3600s grid's slot
+                            // 100 are hours apart); a 0-duration row (legacy
+                            // archive) rides the global grid — the same
+                            // resolution the merge test uses. Same-family rows
+                            // (the only rows a single-family table holds)
+                            // resolve to the historic `slot - round_slot`
+                            // verbatim.
+                            let row_dur =
+                                row_duration_sec(m.round_duration_sec, global_duration_sec).max(1);
+                            let lag = if row_dur == feed_duration {
+                                slot - m.round_slot
+                            } else {
+                                slot * feed_duration / row_dur - m.round_slot
+                            };
+                            lag < 2 || m.venue == feeding_venue
+                        })
                         .cloned()
                         .collect();
                     if kept.len() != self.scanner.markets().len() {
@@ -1093,35 +1146,97 @@ impl Engine {
                 // into the feeding market's OWN venue slot (multi-plugin:
                 // Kalshi's declaration must not move Polymarket's clock).
                 if let Some(m) = markets.first() {
-                    self.scanner
-                        .observe_end_time_for_venue(&m.venue, m.expires_at_ms, now_ms);
+                    // B1c: the feeding batch's declaration speaks for ITS OWN
+                    // (venue, duration) family — a 1h rollover must not move
+                    // the 15m family's clock.
+                    self.scanner.observe_end_time_for(
+                        &m.venue,
+                        feed_duration,
+                        m.expires_at_ms,
+                        now_ms,
+                    );
                 }
                 // Real round timing for the transition: how much of the round
                 // was left at this instant, straight from the scanner. The
                 // same-batch venue's own clock (a rollover REPLACES that
                 // venue's markets — its old expiry is gone with them; the
                 // conservative global window still covers the siblings).
+                // B1c: the family's own clock — the feeding family's duration,
+                // not the global grid, decides the slot boundary. In a
+                // single-family deployment this is the legacy entry verbatim.
                 let venue = feeding_venue.clone();
                 let time_left_sec = self
                     .scanner
-                    .round_timing_for_venue(&venue, now_ms)
+                    .round_timing_for(&venue, feed_duration, now_ms)
                     .time_left_sec;
                 for s in &mut self.strategies {
                     s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
-                self.pending_tokens.clear();
+                // ── B1c：rollover 只重置 feeding (venue, duration) 族 ──
+                // 这三条状态（pending 去重、staged 候选、稳定相位）是
+                // 「这一轮的入场」的事实。升级前全局轮长一根尺：任何 venue
+                // 换轮都全体清空 —— 单族正确；多族下 1h 轮的翻转会把 15m
+                // 族轮内刚挂上的 pending 清掉（重新武装重复入场）并作废
+                // 别族 staged 候选。scanner 侧喂钟（B1a）已按 (venue,
+                // duration) 键控，engine 侧 reset 对齐同族：只有本族 token
+                // /本族候选出局，别族不动。
+                //
+                // 本族 token 集：本批换轮后的新行 token ∪ 表里同族旧行
+                // token —— 同 (venue,duration) 的全部行（不分 slot 数字：
+                // 落后一兩格的同族兄弟行是 staggered 桥接里的旧轮行，其轮
+                // 已换、其 pending 同样必须出局）就是「这个族的入场事实」
+                // 的全部对象；别族（不同 duration）的行不在集合里，它们的
+                // pending/staged 候选原样不动。喂入行无 venue 标签（legacy
+                // 单插件）时整表就是本族，集合即全表 —— 与旧的全清逐字节
+                // 等价。
+                let family_tokens: HashSet<String> = {
+                    let mut set: HashSet<String> = HashSet::new();
+                    for m in &markets {
+                        set.insert(m.up_token_id.clone());
+                        set.insert(m.down_token_id.clone());
+                    }
+                    for m in self.scanner.markets() {
+                        if row_duration_sec(m.round_duration_sec, global_duration_sec)
+                            == feed_duration
+                        {
+                            set.insert(m.up_token_id.clone());
+                            set.insert(m.down_token_id.clone());
+                        }
+                    }
+                    set
+                };
+                self.pending_tokens
+                    .retain(|(_, tok)| !family_tokens.contains(tok));
                 // Issue #390 (replay nofast): the new round retires every
                 // staged candidate — the base's next collection ran against
                 // the new market list and round clock, so a replayed set from
-                // the old round must not leak into it.
-                self.last_candidates.clear();
-                self.candidates_stable = false;
+                // the old round must not leak into it. B1c: only candidates
+                // of the FEEDING FAMILY retire — a sibling family's staged
+                // set (its tokens still live, its clock still running) stays
+                // staged; single-family tables lose everything, byte-identical
+                // with the unscoped clear.
+                self.last_candidates
+                    .retain(|sig| !family_tokens.contains(&sig.token_id));
+                // A set that survived the family cut is a candidate set the
+                // base's next collection can still reproduce (its inputs —
+                // the sibling family's books, clock and round list — did not
+                // change with THIS family's rollover), so the stability flag
+                // keeps describing it. The historic whole-clear emptied the
+                // set, and an empty staged set was exactly "not stable"; the
+                // empty-set verdict falls out naturally here too.
+                self.candidates_stable = self.candidates_stable && !self.last_candidates.is_empty();
                 // The rollover replaces the FEEDING VENUE's markets only: a
                 // batch always lists the complete round of its own venue, so
                 // everything of `venue` in the table is stale. Sibling venues'
                 // markets (multi-plugin data plane) stay live — they roll over
                 // through their own feeds. An empty venue tag keeps the whole
                 // table replace (the historical single-plugin semantics).
+                // B1c: "everything of the venue" means the venue's rows of the
+                // FEEDING FAMILY — a same-venue sibling family (PM 15m rows
+                // beside PM 1h rows) is live in its own round and is replaced
+                // by its OWN feed, never collateral of this one. Single-family
+                // tables resolve every row to the feed's duration, so the
+                // predicate degenerates to the historic `m.venue != venue`.
                 if venue.is_empty() {
                     self.scanner.set_markets(markets);
                 } else {
@@ -1129,7 +1244,11 @@ impl Engine {
                         .scanner
                         .markets()
                         .iter()
-                        .filter(|m| m.venue != venue)
+                        .filter(|m| {
+                            m.venue != venue
+                                || row_duration_sec(m.round_duration_sec, global_duration_sec)
+                                    != feed_duration
+                        })
                         .cloned()
                         .collect();
                     kept.extend(markets);
@@ -2809,6 +2928,18 @@ fn fresh_book(
     Some(b.snapshot(token_id))
 }
 
+/// B1c: a market row's effective round length — its own declared duration when
+/// it carries one, else the configured global grid. `0` is the legacy archive's
+/// "undeclared" and always resolves to the global duration, so a single-family
+/// (all-900s) table and a pre-B1a corpus (all zeros) resolve every row to the
+/// same family: the family-scoped merge/rollover verdicts stay byte-identical
+/// with the pre-B1c slot-only behaviour. Mirrors `TrackedOrder`'s tri-state
+/// resolution (own stamp > global), simplified for rows (no per-row fallback
+/// chain beyond the two states the model carries).
+fn row_duration_sec(declared: i64, global_sec: i64) -> i64 {
+    if declared > 0 { declared } else { global_sec }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3347,6 +3478,341 @@ mod tests {
             venues,
             vec!["kalshi"],
             "a venue that missed a full round must not keep its finished-round row: {venues:?}"
+        );
+    }
+
+    // ── B1c: multi-family rounds — the engine plane ────────────────────────
+
+    /// A market row carrying an EXPLICIT duration family: same shape as
+    /// [`venue_market`], but the row stamps its own `round_duration_sec` and
+    /// its slot is computed on ITS OWN grid (a 1h row's slot numbers and a
+    /// 15m row's slot numbers are drawn from different rulers).
+    fn family_market(end_ms: i64, venue: &str, duration_sec: i64) -> CryptoMarket {
+        let asset = if duration_sec == 900 { "BTC" } else { "ETH" };
+        CryptoMarket {
+            asset: asset.into(),
+            condition_id: format!("cond-{venue}-{duration_sec}"),
+            question_id: format!("q-{venue}-{duration_sec}"),
+            up_token_id: format!("{venue}-{duration_sec}-up"),
+            down_token_id: format!("{venue}-{duration_sec}-down"),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / duration_sec,
+            round_duration_sec: duration_sec,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: true,
+            question: "up or down".into(),
+        }
+    }
+
+    #[test]
+    fn a_same_slot_number_from_another_family_is_a_rollover_not_a_merge() {
+        // B1c merge discipline: slot equality alone is venue-blind AND
+        // family-blind — the 900s grid's slot N and the 3600s grid's slot N
+        // are two different wall-clock rounds (thousands of seconds apart).
+        // A 1h feed whose slot NUMBER collides with the resident 15m slot
+        // must take the rollover arm (replacing ITS family's rows), never
+        // the merge arm (which would graft a 1h market into a live 15m
+        // round and skip its on_round).
+        let rounds = Arc::new(Mutex::new(Vec::new()));
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(RoundProbe {
+                rounds: rounds.clone(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        // The 15m family feeds first: slot 2 (1_800_000 ms / 900 s).
+        let end15 = 1_800_000i64;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end15, "polymarket", 900)],
+            now_ms: 1_000,
+        });
+        assert_eq!(*rounds.lock().unwrap(), vec![2]);
+
+        // The 1h family feeds a market whose SLOT NUMBER is also 2 — the
+        // 3600s grid's slot 2 covers [7200s, 10800s), hours away from the
+        // 15m slot 2 ([1800s, 2700s)). It must NOT merge: it is a real
+        // rollover of its own family.
+        let end1h = 2 * 3600 * 1000; // 3600s-grid slot 2 covers [7200s, 10800s)
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end1h, "polymarket", 3600)],
+            now_ms: 1_000,
+        });
+        assert_eq!(
+            *rounds.lock().unwrap(),
+            vec![2, 2],
+            "the colliding slot NUMBER from another family is a real rollover \
+             of that family — on_round refires"
+        );
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the 1h row joins the table (its family is new); the 15m row stays"
+        );
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .any(|m| m.round_duration_sec == 900),
+            "the 15m row survives the 1h family's rollover"
+        );
+    }
+
+    #[test]
+    fn a_same_slot_same_family_feed_still_merges() {
+        // The green half of the merge pair: within ONE family the slot
+        // number is the round identity — a staggered top-up from the same
+        // (venue, duration) family still merges (the #498 semantics the
+        // duration check must not break).
+        let rounds = Arc::new(Mutex::new(Vec::new()));
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(RoundProbe {
+                rounds: rounds.clone(),
+            }),
+            "test".into(),
+        )
+        .unwrap();
+        let end15 = 1_800_000i64; // 900s-grid slot 2
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end15, "polymarket", 900)],
+            now_ms: 1_000,
+        });
+        assert_eq!(*rounds.lock().unwrap(), vec![2]);
+        // The SAME family's second asset, listed a minute into the round —
+        // its own tokens (the top-up filter grafts by unknown token ids).
+        let eth15 = CryptoMarket {
+            asset: "ETH".into(),
+            condition_id: "cond-poly-900-eth".into(),
+            question_id: "q-poly-900-eth".into(),
+            up_token_id: "polymarket-900-eth-up".into(),
+            down_token_id: "polymarket-900-eth-down".into(),
+            question: "ETH up or down".into(),
+            ..family_market(end15, "polymarket", 900)
+        };
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![eth15],
+            now_ms: 61_000,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "a same-family same-slot top-up merges"
+        );
+        assert_eq!(
+            *rounds.lock().unwrap(),
+            vec![2],
+            "a same-family top-up is not a round transition"
+        );
+    }
+
+    #[test]
+    fn family_a_rolling_over_does_not_reset_family_b_feeding_state() {
+        // B1c rollover discipline: the feeding-state reset (pending tokens,
+        // staged candidates) used to be global — ANY venue's rollover wiped
+        // EVERY family's pending entries and re-armed duplicates mid-round.
+        // The reset is now scoped to the feeding family: a 1h rollover must
+        // leave a 15m token's pending latch and staged candidate untouched.
+        let mut e = Engine::new(cfg());
+        let end15 = 1_800_000i64; // 900s-grid slot 2
+        let end1h = 2 * 3600 * 1000; // 3600s-grid slot 2 covers [7200s, 10800s)
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![
+                family_market(end15, "polymarket", 900),
+                family_market(end1h, "polymarket", 3600),
+            ],
+            now_ms: 1_000,
+        });
+        // An in-flight 15m entry (the state the old whole-clear wiped) plus
+        // a staged 15m candidate (Issue #390's replay staging).
+        e.pending_tokens.insert((
+            blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            "polymarket-900-up".into(),
+        ));
+        e.last_candidates = vec![test_signal("polymarket-900-up")];
+        e.candidates_stable = true;
+
+        // The 1h family rolls over its next slot: the feeding family is
+        // (polymarket, 3600) — the 15m family's feeding state must survive.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end1h + 3_600_000, "polymarket", 3600)],
+            now_ms: end1h,
+        });
+        assert!(
+            e.pending_tokens.contains(&(
+                blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                "polymarket-900-up".into()
+            )),
+            "family A's rollover must not re-arm family B's pending entry"
+        );
+        assert!(
+            e.last_candidates
+                .iter()
+                .any(|sig| sig.token_id == "polymarket-900-up"),
+            "family A's rollover must not retire family B's staged candidate"
+        );
+        assert!(
+            e.candidates_stable,
+            "the surviving staged set keeps its stability flag"
+        );
+
+        // The 15m family's OWN rollover still clears it — the historic
+        // semantics, scoped.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end15 + 900_000, "polymarket", 900)],
+            now_ms: end15,
+        });
+        assert!(
+            !e.pending_tokens.contains(&(
+                blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                "polymarket-900-up".into()
+            )),
+            "the family's own rollover keeps its reset semantics"
+        );
+        assert!(
+            !e.last_candidates
+                .iter()
+                .any(|sig| sig.token_id == "polymarket-900-up"),
+            "the family's own rollover retires its staged candidates"
+        );
+        assert!(
+            !e.candidates_stable,
+            "an emptied staged set is not stable — the historic whole-clear verdict"
+        );
+    }
+
+    #[test]
+    fn a_1h_rollover_does_not_reset_the_clock_of_the_15m_family() {
+        // The clock half of the family-scoped rollover: the feeding batch's
+        // expiry declaration lands in ITS (venue, duration) family slot and
+        // the time_left handed to on_round comes from that family's clock —
+        // a 1h rollover must never speak into the 15m family's clock (the
+        // B1a keying the engine reset now aligns with).
+        let mut e = Engine::new(cfg());
+        let end15 = 1_800_000i64;
+        let end1h = 2 * 3600 * 1000; // 3600s-grid slot 2 covers [7200s, 10800s)
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end15, "polymarket", 900)],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end1h, "polymarket", 3600)],
+            now_ms: 1_000,
+        });
+        // Both families spoke; the 15m clock still reads ITS family's expiry.
+        assert!(
+            e.scanner()
+                .observed_clock_keys()
+                .contains(&("polymarket".to_string(), 900)),
+            "the 15m family's declaration stays keyed (polymarket, 900)"
+        );
+        assert!(
+            e.scanner()
+                .observed_clock_keys()
+                .contains(&("polymarket".to_string(), 3600)),
+            "the 1h family's declaration lands in its own key"
+        );
+        assert_eq!(
+            e.scanner()
+                .round_timing_for("polymarket", 900, 1_000)
+                .expires_at_ms,
+            end15,
+            "the 1h rollover never moves the 15m family's clock"
+        );
+    }
+
+    #[test]
+    fn stale_rows_are_measured_on_their_own_duration_grid() {
+        // #550 on multi-family tables: the "missed a full round" distance
+        // used ONE global ruler (slot-number subtraction), so a 1h sibling's
+        // slot N sat arbitrarily far from a 15m feed's slot N and its row
+        // was judged by numbers from two different grids. Each row is now
+        // measured against the feeding round's start CONVERTED onto the
+        // row's own grid.
+        let mut e = Engine::new(cfg());
+        // A 1h row resident at 3600s-grid slot 2 (covers [7200s, 10800s)).
+        let end1h = 2 * 3600 * 1000; // 3600s-grid slot 2 covers [7200s, 10800s)
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(end1h, "polymarket", 3600)],
+            now_ms: 1_000,
+        });
+        // A 15m feed deep into the 1h round — 900s-grid slot 10 starts at
+        // 9000s, still INSIDE the 1h slot-2 round (which runs to 10800s).
+        // On each row's own grid: the 1h row's lag = (10 × 900 / 3600) − 2
+        // = 2 − 2 = 0 — well inside the bridge, the row MUST survive.
+        let feed15 = 10 * 900 * 1000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![family_market(feed15, "kalshi", 900)],
+            now_ms: 9_000_000,
+        });
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .any(|m| m.round_duration_sec == 3600),
+            "the 1h row is mid-round on ITS OWN grid and must not be judged \
+             stale by 15m slot arithmetic"
+        );
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .any(|m| m.round_duration_sec == 900),
+            "the feeding 15m row is in the table"
+        );
+    }
+
+    #[test]
+    fn legacy_zero_duration_rows_keep_the_global_grid_verdict() {
+        // Byte-identical duty: rows and feeds that declare NO duration (the
+        // pre-B1a corpus, `round_duration_sec == 0`) resolve to the global
+        // grid, so the family-scoped stale-row arithmetic degenerates to the
+        // historic `slot - round_slot < 2` for every row — the existing
+        // corpus replays unchanged.
+        let mut e = Engine::new(cfg());
+        let mut row = venue_market(1_800_000, "kalshi");
+        row.round_duration_sec = 0; // the legacy shape
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![row],
+            now_ms: 1_000,
+        });
+        let mut late = venue_market(1_800_000, "polymarket");
+        late.round_duration_sec = 0;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![late], // same slot: merges (the #498 bridge)
+            now_ms: 61_000,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "zero-duration rows merge on the global grid, exactly as before"
+        );
+        // Two slots behind → dropped, the #550 boundary unchanged: the ghost
+        // row sits in slot 2 and the next feed (polymarket, a DIFFERENT
+        // venue) rolls to slot 4 — the ghost missed a full round and its
+        // zero-duration rows leave the table on the global grid, exactly as
+        // the pre-B1c #550 verdict did.
+        let mut dead = venue_market(1_800_000, "ghost");
+        dead.round_duration_sec = 0;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![dead],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![venue_market(3_600_000, "polymarket")], // slot 4
+            now_ms: 2_700_000,
+        });
+        assert!(
+            !e.scanner.markets().iter().any(|m| m.venue == "ghost"),
+            "the global-grid verdict for zero-duration rows is untouched"
+        );
+        assert!(
+            e.scanner.markets().iter().any(|m| m.venue == "polymarket"),
+            "the feeding venue's own rows survive, as before"
         );
     }
 

@@ -1661,6 +1661,12 @@ pub struct Core {
     /// when the fallback does. Process-local (an in-memory debounce, not a
     /// durable fact): a restart simply re-judges from the book.
     pair_chase_attempts: HashMap<(String, String, String), (String, i64)>,
+    /// B1c test seam: a staged (venue, duration) subscription set the
+    /// admission gate reads instead of the (still empty, pre-B1d) real one.
+    /// `None` outside tests and before staging — the gate then reads the
+    /// constant empty set and admits everything (today's behaviour).
+    #[cfg(test)]
+    test_duration_subscriptions: Option<HashSet<(String, i64)>>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -2378,6 +2384,8 @@ impl Core {
             // Issue #390 (nofast): 0 = due on the first tick.
             fast_next_exit_deadline_ms: 0,
             pair_chase_attempts: HashMap::new(),
+            #[cfg(test)]
+            test_duration_subscriptions: None,
             // 跨所套利弹窗 v2: the boot-loaded leg configuration (memory
             // mirror of accounts.toml's `[cross_venue_arb]` — the file is the
             // durable truth, this cell feeds the engine hot). None =
@@ -8547,6 +8555,10 @@ impl Core {
         // Account↔venue binding (first batch), same rule as `place`: an
         // account pinned to venue V may not trade another venue's tokens.
         self.refuse_cross_venue_order(&req)?;
+        // Duration-family admission (B1c), same rule as `place_gated`: the
+        // account's (venue, duration) subscription set gates the place; an
+        // empty set (today's always-shape) admits everything, closes exempt.
+        self.refuse_unsubscribed_duration(&req)?;
         self.risk
             .check_with_equity(&req, self.accounts.ledger_of(&req.account_id)?.balance())?;
         let id = self.new_order_id();
@@ -12786,6 +12798,112 @@ impl Core {
         ))
     }
 
+    /// The account's SUBSCRIBED round-duration families — the set of
+    /// (venue, duration_sec) pairs this account is allowed to trade — as the
+    /// admission gate sees it. THIS PR (B1c) the account book carries no
+    /// subscription field (accounts.toml has no `rounds` key; B1d adds it),
+    /// so the set is EMPTY for every account: an empty set means "no declared
+    /// restriction", and the gate admits everything — today's behaviour,
+    /// byte-identical. B1d assembles the real set here (the comment above the
+    /// return is the single seam); hot management (subscribe/unsubscribe at
+    /// runtime) lands in B2.
+    fn account_duration_subscriptions(&self, _account_id: &AccountId) -> HashSet<(String, i64)> {
+        // Test override first (the gate's teeth must be constructible before
+        // B1d's config surface exists).
+        #[cfg(test)]
+        if let Some(subs) = &self.test_duration_subscriptions {
+            return subs.clone();
+        }
+        // B1d 装配：真订阅集来自 accounts.toml 的账户族声明（venue ×
+        // duration）经 Account 结构新字段落账；本 PR 的 Account 无该字段
+        // （B1d 领地），恒返回空表 = 未声明任何限制 ⇒ 门全放行。
+        HashSet::new()
+    }
+
+    /// Duration-family admission gate (B1c): an order whose (venue, duration)
+    /// family is NOT in the account's subscribed family set is refused with
+    /// the AccountLimit vocabulary — the same admission dimension family as
+    /// `refuse_cross_venue_order` (which binds the venue axis; this binds the
+    /// duration axis on top), NOT a new public contract hop (#559/#568's
+    /// untouched list is about new hops, not about extending the account
+    /// admission chain's existing dimensions).
+    ///
+    /// Exemptions copy the frozen-gate precedent (the #174 hatch):
+    ///  - CLOSE intents always pass — a position admitted when the family was
+    ///    subscribed must never be trapped by a later unsubscribe;
+    ///  - an account with NO declared family set (the zero-config / pre-B1d
+    ///    shape, and today's always-shape) admits everything — an empty set
+    ///    is "no restriction declared", not "subscribed to nothing";
+    ///  - an order whose token belongs to no labelled live market (the engine
+    ///    down, a legacy corpus) carries no family evidence to judge, so it
+    ///    passes — whatever refuses it must be another gate with its own
+    ///    reason (same stance the venue guard takes for untagged tokens).
+    ///
+    /// Placement: the `place_gated` chain calls this right AFTER
+    /// `refuse_cross_venue_order` and BEFORE the risk/equity gates, so a
+    /// family refusal surfaces before notional is reserved against the
+    /// ledger. The call convention, the order and the semantics of every
+    /// existing gate are untouched.
+    fn refuse_unsubscribed_duration(&self, req: &OrderRequest) -> CoreResult<()> {
+        // The #174 hatch: closing intents are never family-gated.
+        if crate::risk::is_close_intent(&req.internal_key) {
+            return Ok(());
+        }
+        let subs = self.account_duration_subscriptions(&req.account_id);
+        if subs.is_empty() {
+            // No declared subscription set ⇒ no restriction ⇒ admit. Today's
+            // behaviour for every account until B1d wires the real set.
+            return Ok(());
+        }
+        let token_venue = self.venue_of_token(&req.token_id);
+        if token_venue.is_empty() {
+            // No labelled market, no family evidence — same stance as the
+            // venue guard's untagged-token pass.
+            return Ok(());
+        }
+        let duration = self.duration_of_token_for_admission(&req.token_id);
+        if subs.contains(&(token_venue.clone(), duration)) {
+            return Ok(());
+        }
+        Err(CoreError::new(
+            CoreErrorCode::AccountLimit,
+            format!(
+                "unsubscribed round family: account `{}` has no (venue, duration) subscription \
+                 for (`{token_venue}`, {duration}s) — order's token {} refused (close intents \
+                 are exempt)",
+                req.account_id, req.token_id
+            ),
+        ))
+    }
+
+    /// The round-length family a token's market declares, in seconds, as the
+    /// admission gate reads it. `0` = undeclared: the market carries no
+    /// family fact (legacy corpus / the engine down). The gate refuses on the
+    /// exact declared value — a `0` can never match a subscribed (venue,
+    /// duration) pair, but the unlabelled-market exemption above already
+    /// admitted the empty-venue case; a venue-tagged market without a
+    /// duration declaration is a B1d concern (the subscription writer must
+    /// stamp durations on every row it lists).
+    fn duration_of_token_for_admission(&self, token_id: &str) -> i64 {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.market_for_token(token_id))
+            .map(|m| m.round_duration_sec)
+            .unwrap_or(0)
+    }
+
+    /// Test seam for the B1c gate's teeth: stages a subscription set that
+    /// [`Self::account_duration_subscriptions`] returns for every account.
+    /// The real per-account assembly is B1d's (the Account struct gains its
+    /// rounds field there); this override exists so the gate's two verdicts
+    /// (subscribed / unsubscribed) are provable TODAY, red-green, before any
+    /// config surface exists. Never compiled outside tests — production reads
+    /// the constant empty set.
+    #[cfg(test)]
+    fn stage_duration_subscriptions_for_test(&mut self, subs: HashSet<(String, i64)>) {
+        self.test_duration_subscriptions = Some(subs);
+    }
+
     fn place_gated(
         &mut self,
         mut req: OrderRequest,
@@ -12836,6 +12954,13 @@ impl Core {
         // for the next batch — the "switch" semantics (session vs process
         // level) are still ambiguous and must not be guessed here.
         self.refuse_cross_venue_order(&req)?;
+        // Duration-family admission (B1c): the same account-admission chain
+        // extended to the (venue, duration) axis — an order of a round-length
+        // family the account has not subscribed is refused (AccountLimit),
+        // closes exempt. Until B1d wires the real subscription set no account
+        // declares one, so this admits everything today — the hook is placed
+        // now, in position, and takes its teeth from B1d's assembly.
+        self.refuse_unsubscribed_duration(&req)?;
         // #202: the equity-relative per-order cap is a percentage of the account
         // AT SUBMISSION, so the gate is handed the live balance rather than a
         // remembered copy of it. E28: the account is the one the request names —
@@ -28732,6 +28857,125 @@ mod audit_fix_tests {
             by_id("paper").venue,
             "",
             "unbound renders as the empty string"
+        );
+    }
+
+    // ── B1c: refuse_unsubscribed_duration — the admission gate's teeth ─────
+
+    #[test]
+    fn an_unsubscribed_family_order_is_refused_with_account_limit() {
+        // The gate's core verdict: with a declared subscription set that does
+        // NOT contain the order's (venue, duration) family, the order is
+        // refused with the AccountLimit vocabulary, naming the family. The
+        // chain position (right after the venue binding guard, before risk)
+        // means the refusal surfaces before any notional is reserved.
+        let mut c = venue_bound_core();
+        // The set declares ONLY polymarket 15m; the kalshi token belongs to
+        // (kalshi, 900) — unsubscribed. The kalshi attempt runs from the
+        // UNBOUND account (the venue binding guard would refuse it first
+        // for the bound one — earlier gate in the chain, unchanged); the
+        // duration gate fires for it because the empty-venue account still
+        // reads the shared staged set.
+        c.stage_duration_subscriptions_for_test(HashSet::from([("polymarket".to_string(), 900)]));
+        let mut kal = bound_order("kal-up", "k1");
+        kal.account_id = crate::account::AccountId::from("paper");
+        let err = c.place(kal, 0, 1).unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::AccountLimit, "{err:?}");
+        assert!(err.message.contains("unsubscribed round family"), "{err}");
+        assert!(
+            err.message.contains("`kalshi`") && err.message.contains("900"),
+            "the refusal names the offending family: {err}"
+        );
+        assert!(c.list_orders().is_empty(), "nothing reached the book");
+        // A family the account DID subscribe passes (from the bound account,
+        // its own venue and its declared family).
+        c.place(bound_order("poly-up", "k2"), 0, 2).unwrap();
+        assert_eq!(c.list_orders().len(), 1);
+    }
+
+    #[test]
+    fn a_close_intent_is_exempt_from_the_duration_gate() {
+        // The #174 hatch, copied verbatim: a position admitted while the
+        // family was subscribed must never be trapped by an unsubscribe —
+        // closing intents always pass the family gate, even for a family the
+        // account never declared.
+        let mut c = venue_bound_core();
+        // The declared set contains nothing for polymarket's own family — a
+        // non-close BUY on poly-up would be refused. The token still belongs
+        // to the bound account's own venue, so the earlier venue binding
+        // guard has no verdict either: only the duration gate could stop
+        // this order, and the close intent must sail past it.
+        c.stage_duration_subscriptions_for_test(HashSet::from([("kalshi".to_string(), 900)]));
+        // A close SELL on a polymarket token (no open position — the exit for
+        // a token with none flows through, same as the cross-account guard's
+        // precedent; the gate under test must not be the thing that stops it).
+        let mut close = bound_order("poly-up", "exit:probe-1");
+        close.side = Side::Sell;
+        c.place(close, 0, 1).unwrap();
+        assert_eq!(c.list_orders().len(), 1, "the close passed the family gate");
+    }
+
+    #[test]
+    fn an_empty_subscription_set_admits_everything() {
+        // Today's behaviour (and the zero-config shape): no declared set ⇒
+        // no restriction ⇒ every family passes. The production gate reads a
+        // constant empty set until B1d wires the real assembly, so this is
+        // also the byte-compatibility proof for every existing corpus.
+        let mut c = venue_bound_core();
+        // No staging: the gate reads the empty set. Both families pass —
+        // the bound account through its own venue, the unbound one anywhere.
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+        let mut kal = bound_order("kal-up", "k2");
+        kal.account_id = crate::account::AccountId::from("paper");
+        c.place(kal, 0, 2).unwrap();
+        assert_eq!(c.list_orders().len(), 2);
+        // Explicitly staged EMPTY set: the same verdict.
+        let mut c2 = venue_bound_core();
+        c2.stage_duration_subscriptions_for_test(HashSet::new());
+        c2.place(bound_order("poly-up", "k3"), 0, 1).unwrap();
+        assert_eq!(c2.list_orders().len(), 1);
+    }
+
+    #[test]
+    fn a_duration_mismatch_within_one_venue_is_refused() {
+        // The gate is a (venue, duration) PAIR check, not a venue check:
+        // polymarket 15m subscribed does not admit a polymarket 1h token —
+        // the duration axis is the new dimension this gate adds.
+        let mut c = venue_bound_core();
+        c.stage_duration_subscriptions_for_test(HashSet::from([("polymarket".to_string(), 900)]));
+        // A 1h polymarket market, same venue, different family.
+        let now = 1_000_000;
+        let end1h = 2 * 3600 * 1000;
+        let market = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-poly-3600".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-1h-up".into(),
+            down_token_id: "poly-1h-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end1h,
+            round_slot: end1h / 1000 / 3600,
+            round_duration_sec: 3600,
+            archive_verdict: false,
+            venue: "polymarket".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![market],
+                now_ms: now,
+            },
+            now,
+        );
+        let mut order = bound_order("poly-1h-up", "k1");
+        order.token_id = "poly-1h-up".into();
+        let err = c.place(order, 0, 1).unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::AccountLimit, "{err:?}");
+        assert!(
+            err.message.contains("3600"),
+            "the refusal names the 1h family: {err}"
         );
     }
 
