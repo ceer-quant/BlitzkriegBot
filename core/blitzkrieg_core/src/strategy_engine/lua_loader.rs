@@ -91,6 +91,15 @@ pub struct LuaManifest {
     /// the per-order path byte-identically.
     #[serde(default)]
     pub atomic_batch: bool,
+    /// The strategy's own trailing-stop verdict, THREE-STATE: absent (null /
+    /// missing key) = follow the kernel-wide value (`risk.setExit`
+    /// trailingEnabled); `true` = bank profit on give-back even when the
+    /// kernel value is off; `false` = never trail even when it is on. Issue
+    /// 356's calibration (kernel OFF) came from one operator whose exits were
+    /// all REDEEM/MERGE; a mean-reversion seller wants the opposite — the
+    /// strategy knows its own exit doctrine, so it declares it.
+    #[serde(default)]
+    pub trailing_exit: Option<bool>,
     /// Entry-gate exemptions (E2-b, the dylib declaration surface's Lua
     /// mirror). Default: nothing declared = fully gated.
     #[serde(default)]
@@ -221,6 +230,9 @@ pub struct LoadedLua {
     pub holds_to_settlement: bool,
     /// The manifest's E-VA atomic-batch declaration (`false` when absent).
     pub atomic_batch: bool,
+    /// The manifest's three-state trailing verdict (`None` = follow the
+    /// kernel-wide value).
+    pub trailing_exit: Option<bool>,
     /// The manifest's entry-gate exemptions. `none()` when absent — every
     /// existing package keeps today's fully-gated behaviour.
     pub gate_exemptions: GateExemptions,
@@ -350,6 +362,7 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
         tunables: manifest.tunables.defaults(),
         holds_to_settlement: manifest.holds_to_settlement,
         atomic_batch: manifest.atomic_batch,
+        trailing_exit: manifest.trailing_exit,
         gate_exemptions: GateExemptions {
             timing: manifest.gate_exemptions.timing,
             momentum: manifest.gate_exemptions.momentum,
@@ -383,6 +396,9 @@ pub struct LuaEngineAdapter {
     /// reservation posture). Armed only when `CoreConfig::virtual_limits`
     /// also configures the strategy's pot.
     atomic_batch: bool,
+    /// The manifest's three-state trailing verdict (`None` = follow the
+    /// kernel-wide `risk.setExit` value).
+    trailing_exit: Option<bool>,
     /// The strategy's cell of the shared ParamRegistry, when one is attached
     /// (E2-c plumbing; a cell exists only for strategies that declared
     /// evolvable knobs).
@@ -445,6 +461,7 @@ impl LuaEngineAdapter {
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
             atomic_batch: false,
+            trailing_exit: None,
             params_cell: None,
             defaults: tunables,
             specs,
@@ -476,6 +493,7 @@ impl LuaEngineAdapter {
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
             atomic_batch: false,
+            trailing_exit: None,
             params_cell: None,
             defaults: tunables,
             specs: Vec::new(),
@@ -499,6 +517,13 @@ impl LuaEngineAdapter {
     /// path; the same route `declare` rides).
     pub fn declare_atomic_batch(mut self, atomic_batch: bool) -> Self {
         self.atomic_batch = atomic_batch;
+        self
+    }
+
+    /// Stamp the manifest's three-state trailing verdict (the loaded-package
+    /// path). `None` = follow the kernel-wide `risk.setExit` value.
+    pub fn declare_trailing_exit(mut self, trailing_exit: Option<bool>) -> Self {
+        self.trailing_exit = trailing_exit;
         self
     }
 
@@ -859,6 +884,10 @@ impl EngineStrategy for LuaEngineAdapter {
         self.holds_to_settlement
     }
 
+    fn wants_trailing_exit(&self) -> Option<bool> {
+        self.trailing_exit
+    }
+
     fn atomic_batch(&self) -> bool {
         self.atomic_batch
     }
@@ -1091,6 +1120,45 @@ mod tests {
         assert_eq!(loaded.name, "lua_ok");
         assert_eq!(loaded.version, "0.1.0");
         assert!(loaded.declared_modes.is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The three-state trailing verdict rides the manifest verbatim: a JSON
+    /// boolean lands as `Some`, an absent key stays `None` (follow the
+    /// kernel-wide value) — never a silent default-to-on.
+    #[test]
+    fn manifest_trailing_exit_is_three_state() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-trail-{}", std::process::id()));
+        let pkg_dir = tmp.join("trail_true");
+        std::fs::create_dir_all(&pkg_dir).expect("mkdir");
+        std::fs::write(pkg_dir.join("strategy.lua"), STRATEGY_LUA).expect("write entry");
+        let digest = super::super::loader::sha256_file(&pkg_dir.join("strategy.lua")).expect("sha");
+        let manifest = serde_json::json!({
+            "name": "trail_true",
+            "version": "0.1.0",
+            "api": "1.0",
+            "entry": "strategy.lua",
+            "sha256": digest,
+            "author": "test",
+            "description": "test",
+            "trailing_exit": true,
+        });
+        std::fs::write(pkg_dir.join("manifest.json"), manifest.to_string())
+            .expect("write manifest");
+        let loaded = load_lua_package(&pkg_dir).expect("loads");
+        assert_eq!(
+            loaded.trailing_exit,
+            Some(true),
+            "a declared boolean lands as Some"
+        );
+
+        // Absent key = None (the "follow the kernel value" state).
+        let pkg_absent = write_package(&tmp.join("trail_absent"), "trail_absent", &[]);
+        let loaded = load_lua_package(&pkg_absent).expect("loads");
+        assert_eq!(
+            loaded.trailing_exit, None,
+            "an absent key stays None — never a silent default"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

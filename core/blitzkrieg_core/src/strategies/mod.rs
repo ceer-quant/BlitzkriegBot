@@ -376,6 +376,31 @@ pub trait EngineStrategy: Send + Sync {
         false
     }
 
+    /// The strategy's own verdict on the trailing stop, as a THREE-STATE
+    /// declaration: `None` = follow the kernel-wide value (`risk.setExit`
+    /// trailingEnabled, the operator's lever); `Some(true)` = this strategy
+    /// wants profit-banking sells even when the kernel value is off;
+    /// `Some(false)` = this strategy must never see one even when the kernel
+    /// value is on.
+    ///
+    /// Why the declaration exists: issue 356's calibration (trailing OFF
+    /// shipped) came from ONE operator's history — every exit was a REDEEM/
+    /// MERGE, so trailing banking was a counter-factual behaviour for them.
+    /// spread_arb's mean-reversion exits are the opposite shape: its +46.7%
+    /// peak dissolved into a stop-loss because nothing banked the profit.
+    /// A kernel-wide flag forces those two philosophies onto one switch and
+    /// re-opens the same wound whichever way it lands; the strategy itself
+    /// knows which exit doctrine its positions follow.
+    ///
+    /// Same authority shape as [`EngineStrategy::holds_to_settlement`]: NOT a
+    /// safety bypass — the protective stop, take-profit, time exits, force
+    /// exit and every quota still apply; this only arms/disarms the ONE
+    /// profit-trail rule. Default `None` (every existing strategy follows the
+    /// kernel value byte-identically).
+    fn wants_trailing_exit(&self) -> Option<bool> {
+        None
+    }
+
     /// E-VA: whether this strategy's entry candidates form an ATOMIC BATCH —
     /// the host must reserve the WHOLE batch's virtual quota (the
     /// `virtual_limits` pot) BEFORE the first leg is placed, and a pot that
