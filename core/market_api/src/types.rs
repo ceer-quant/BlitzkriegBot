@@ -733,6 +733,12 @@ pub struct ExecutorConfig {
 #[serde(rename_all = "camelCase")]
 pub struct PluginInfo {
     pub name: String,
+    /// The round-length families the plugin can actually discover, in
+    /// seconds (its `supported_round_secs()` declaration). `None` =
+    /// undeclared — the panel filters nothing. Incremental field: old
+    /// cores omit it, old panels ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_round_secs: Option<Vec<i64>>,
     pub market_type: MarketType,
     pub has_data_feed: bool,
     pub has_discovery: bool,

@@ -22,6 +22,7 @@ import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
+import Switch from '@/components/ui/switch/Switch.vue'
 
 const riskDoc = ref<RiskLimitsDoc | null>(null)
 const riskErr = ref<string | null>(null)
@@ -89,6 +90,9 @@ function syncBuffers(d: RiskLimitsDoc): void {
   next['stopLossPct'] = String(d.exit.stopLossPct)
   next['takeProfitPct'] = String(d.exit.takeProfitPct)
   next['forceExitSec'] = String(d.exit.forceExitSec)
+  // 老内核缺 trailingEnabled → undefined：开关缺省 = 关（显示层如实降级，
+  // 发送的 patch 里也不带它 —— 不会意外把未声明的开关拨到 true）。
+  next['trailingEnabled'] = String(d.exit.trailingEnabled ?? false)
   editBufs.value = next
   riskReceipt.value = null
   exitReceipt.value = null
@@ -107,6 +111,16 @@ function fieldUnit(field: string): string {
   if (field === 'stopLossPct' || field === 'takeProfitPct') return '%'
   if (field === 'forceExitSec') return 's'
   return ''
+}
+/** trailing 行的回执 from/to 是 'true'/'false' 原文 —— 展示成 开/关。 */
+function changeText(c: { field: string; from: string; to: string }): string {
+  if (c.field !== 'trailingEnabled') {
+    const u = fieldUnit(c.field)
+    const f = c.from === '0' ? '关闭' : c.from
+    const t = c.to === '0' ? '关闭' : c.to
+    return `${f}${u} → ${t}${u}`
+  }
+  return `${c.from === 'true' ? '开' : '关'} → ${c.to === 'true' ? '开' : '关'}`
 }
 
 /** 只发改动过的字段；空串=保持不变。非法输入就地拒绝保存。 */
@@ -130,11 +144,17 @@ function buildPatch(): Record<string, string> | string {
 // 内核里它是行为旋钮），percentages 拒绝 ≤ 0，forceExitSec 0 = 关闭强平
 // （出厂校准值）。生效 = live：新入场下一笔按新值绑定，已开仓位的退出扫描
 // 同步跟随 —— 内核回执逐项 old→new。
-interface ExitRowDef { field: string; label: string }
+interface ExitRowDef { field: string; label: string; toggle?: boolean; hint?: string }
 const EXIT_ROW_DEFS: ExitRowDef[] = [
   { field: 'stopLossPct', label: '止损' },
   { field: 'takeProfitPct', label: '止盈' },
   { field: 'forceExitSec', label: '强平' },
+  {
+    field: 'trailingEnabled',
+    label: '移动止盈',
+    toggle: true,
+    hint: '浮盈回吐即锁利离场。出厂关（issue 356 校准：旧操盘手全部持有到期）；spread_arb 一类价差策略建议开。',
+  },
 ]
 const EXIT_FIELDS = new Set(EXIT_ROW_DEFS.map((r) => r.field))
 
@@ -153,16 +173,28 @@ function exitPlaceholder(field: string): string {
   if (field === 'takeProfitPct') return String(e.takeProfitPct)
   return String(e.forceExitSec)
 }
+/** trailing 开关（toggle 行）：草稿缓冲存 'true'/'false' 字符串。 */
+function trailingOn(): boolean {
+  return (editBufs.value['trailingEnabled'] ?? 'false') === 'true'
+}
+function setTrailing(on: boolean): void {
+  editBufs.value['trailingEnabled'] = String(on)
+  riskMsg.value = null
+  exitReceipt.value = null
+}
+/** 老内核不认识 trailingEnabled（读数缺字段）→ 开关禁用并说明。 */
+const trailingSupported = computed(() => riskDoc.value?.exit.trailingEnabled !== undefined)
+
 /** 退出纪律没有 LimitSource 枚举：热改后 badge 如实写「热改」。 */
 function exitSourceLabel(): string {
   return '行为旋钮'
 }
 
 /** 退出纪律 patch：只发改动项；百分比必须 > 0，强平 ≥ 0（0 = 关闭）。 */
-function buildExitPatch(): Record<string, string | number> | string {
+function buildExitPatch(): Record<string, string | number | boolean> | string {
   const e = riskDoc.value?.exit
   if (!e) return '读不到退出纪律当前值'
-  const patch: Record<string, string | number> = {}
+  const patch: Record<string, string | number | boolean> = {}
   const sl = (editBufs.value['stopLossPct'] ?? '').trim()
   if (sl !== '' && String(e.stopLossPct) !== sl) {
     const n = Number(sl)
@@ -180,6 +212,12 @@ function buildExitPatch(): Record<string, string | number> | string {
     const n = Number(fe)
     if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return '强平：必须是 ≥ 0 的整数秒（0 = 关闭强平）'
     patch.forceExitSec = n
+  }
+  // trailing 开关只在老内核缺字段（undefined）时降级为不可拨 —— 缺省发送
+  // 会把未声明的开关意外拨到 true，宁可不发。
+  if (e.trailingEnabled !== undefined) {
+    const tr = (editBufs.value['trailingEnabled'] ?? 'false') === 'true'
+    if (tr !== e.trailingEnabled) patch.trailingEnabled = tr
   }
   return patch
 }
@@ -304,9 +342,19 @@ onMounted(() => void loadRisk())
             class="flex items-center justify-between gap-3 py-1.5 text-[12px]"
             :class="i === 0 ? '' : 'border-t border-line'"
           >
-            <span class="text-faint-fg">{{ row.label }}</span>
+            <span class="text-faint-fg">{{ row.label }}<span v-if="row.hint" class="ml-1 text-[10.5px] text-faint-fg">{{ row.hint }}</span></span>
             <span class="flex items-center gap-2">
+              <!-- issue 356 升格：trailingEnabled 热配开关（bool 行用 Switch，
+                   数值行保持 Input；老内核缺字段 → 禁用态，不造默认值）。 -->
+              <Switch
+                v-if="row.toggle"
+                :model-value="trailingOn()"
+                :disabled="!trailingSupported"
+                :aria-label="row.label"
+                @update:model-value="(v: boolean) => setTrailing(v)"
+              />
               <Input
+                v-else
                 v-model="editBufs[row.field]"
                 class="num h-7 w-24 text-right text-[12px]"
                 type="text"
@@ -315,7 +363,7 @@ onMounted(() => void loadRisk())
                 :placeholder="exitPlaceholder(row.field)"
                 :aria-label="row.label"
               />
-              <span class="text-[10.5px] font-normal text-faint-fg">{{ exitCurrentText(row.field) }}</span>
+              <span class="text-[10.5px] font-normal text-faint-fg">{{ row.toggle ? (trailingSupported ? (trailingOn() ? '开' : '关') : '内核不支持') : exitCurrentText(row.field) }}</span>
               <Badge variant="gold">{{ exitSourceLabel() }}</Badge>
             </span>
           </div>
@@ -353,7 +401,7 @@ onMounted(() => void loadRisk())
           退出纪律已写入 {{ exitReceipt.applied.length }} 项（未持久化，重启回到启动配置）
         </div>
         <div v-for="c in exitReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
-          {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }}{{ fieldUnit(c.field) }} → {{ c.to === '0' ? '关闭' : c.to }}{{ fieldUnit(c.field) }}
+          {{ fieldLabel(c.field) }}：{{ changeText(c) }}
           <Badge variant="gold" class="ml-1">{{ effectLabel(c.effect) }}</Badge>
         </div>
         <div class="mt-1 text-faint-fg">新入场下一笔按新值绑定；已开仓位的退出扫描同步跟随新值。</div>

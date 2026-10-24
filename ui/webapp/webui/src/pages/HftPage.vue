@@ -1109,10 +1109,13 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                lib/round-duration.ts 同一份读数与写路径）。next_session 语义
                不变：写入持久格、本会话网格不动、重启生效；显式启动参数在管
                （flagLocked）时写入不赢，title 里如实说明。 -->
+          <!-- 全局复盘坐标系（不是账户的交易周期！）：账户各跑各的周期族在
+               账户卡配置（account.rounds.set，热生效）；这个单值只服务复盘
+               坐标系与未配置账户的回落 —— 语义剥离防「切换交易周期」误用。 -->
           <Tooltip
             :content="roundSwitch.flagLocked.value
               ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
-              : `轮次时间周期：本会话 ${roundDurLabel}。切换写入下次会话（重启内核后生效，轮次网格是坐标系不能热切）。`"
+              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换写入下次会话（重启生效，改动影响历史回测的 slot 索引）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
           >
             <div class="flex items-center gap-1.5">
               <Timer class="size-3.5 text-faint-fg" />
@@ -1128,7 +1131,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             v-if="roundSwitch.dirty.value"
             size="sm"
             :disabled="roundSwitch.busy.value"
-            title="把选中的轮次周期写入持久格（重启内核后生效）"
+            title="把选中的全局轮次坐标系写入持久格（重启生效；账户实时周期在账户卡配置）"
             @click="roundSwitch.save()"
           >
             <Check class="size-3.5" />保存

@@ -2719,7 +2719,12 @@ async fn handle_line(
                     // gate can push the two against each other in both
                     // directions.
                     let caps = blitzkrieg_market_api::modes::capabilities_to_names(p.capabilities);
-                    serde_json::json!({
+                    // The plugin's own round-family declaration (supported_
+                    // round_secs): omitted entirely when undeclared — the
+                    // panel filters nothing for such a plugin. Omitting the
+                    // KEY (not null) keeps the wire shape for undeclared
+                    // plugins byte-identical to the pre-declaration core.
+                    let mut row = serde_json::json!({
                         "name": p.name,
                         "type": p.market_type,
                         "structure": p.structure,
@@ -2730,7 +2735,11 @@ async fn handle_line(
                         "hasExecutor": p.has_executor,
                         "enabled": p.enabled,
                         "active": p.active,
-                    })
+                    });
+                    if let Some(secs) = p.supported_round_secs {
+                        row["supportedRoundSecs"] = serde_json::json!(secs);
+                    }
+                    row
                 })
                 .collect();
             // 显示账户配置化: the display pointer rides on market.list so

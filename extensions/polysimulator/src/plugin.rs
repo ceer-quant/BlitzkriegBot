@@ -84,6 +84,12 @@ impl MarketPlugin for PolySimulatorPlugin {
             capabilities: MarketCapabilities::LEVEL2_SNAPSHOT | MarketCapabilities::SIMULATED,
         }]
     }
+    /// Undeclared on purpose: the simulator replays the configured round
+    /// length whatever it is (see its discovery), so no duration is wrong
+    /// to offer. `None` = the panel filters nothing.
+    fn supported_round_secs(&self) -> Option<Vec<i64>> {
+        None
+    }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&POLYSIM_DATA_FEED)
     }

@@ -193,6 +193,22 @@ pub trait MarketPlugin: Send + Sync {
     fn executor(&self) -> Option<&dyn OrderExecutor> {
         None
     }
+    /// The round-length families this plugin can actually discover, in
+    /// seconds (the up/down binaries it routes). `None` = undeclared —
+    /// every duration is treated as possible, the panel filters nothing
+    /// (the zero-config shape keeps every existing and third-party plugin
+    /// loading unchanged). An empty `Some(_)` is legal and means the venue
+    /// has NO round family: the panel hides every option and discovery
+    /// finding nothing is the honest answer.
+    ///
+    /// This is the plugin's OWN declaration, next to `declare_modes()` —
+    /// the venue knows which series it routes, the panel must not
+    /// hard-code a venue→durations table. It is a PRESENTATION filter for
+    /// the account-rounds editor; the admission gate and discovery stay
+    /// the only enforcement points.
+    fn supported_round_secs(&self) -> Option<Vec<i64>> {
+        None
+    }
     /// Static capability report for `market.list`.
     fn info(&self) -> PluginInfo {
         let modes = self.declare_modes();
@@ -210,6 +226,7 @@ pub trait MarketPlugin: Send + Sync {
             .filter(|first| modes.iter().all(|m| m.structure == Some(*first)));
         PluginInfo {
             name: self.name().to_string(),
+            supported_round_secs: self.supported_round_secs(),
             market_type: self.market_type(),
             structure,
             capabilities,

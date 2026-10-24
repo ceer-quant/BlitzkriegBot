@@ -315,6 +315,31 @@ const ROUND_OPTIONS: { sec: number; label: string }[] = [
   { sec: 86400, label: '24 小时' },
 ]
 
+/**
+ * 该账户 venue 的可服务周期集（插件自声明 supported_round_secs）：
+ * undefined = 插件未声明 → 全档可见（predictfun/模拟盘一类无轮次概念所，
+ * 不发明滤网）；空数组 = 该所没有任何轮次族 → 全档禁用（选了也永远空）。
+ * 老内核缺字段 → undefined，同样不筛 —— 面板只渲染声明面，不硬编码
+ * venue→周期表（那是插件的自描述职责）。
+ */
+function declaredRoundSecs(a: AccountRow): number[] | undefined {
+  const doc = store.plugins
+  if (!doc) return undefined
+  const row = doc.marketPlugins.find((p) => p.name === a.venue)
+  return row?.supportedRoundSecs
+}
+/** 档位渲染集合：声明存在时按声明筛序；未声明时全档。 */
+function roundOptionsFor(a: AccountRow): { sec: number; label: string }[] {
+  const declared = declaredRoundSecs(a)
+  if (!declared) return ROUND_OPTIONS
+  return ROUND_OPTIONS.filter((o) => declared.includes(o.sec))
+}
+/** 档位禁用态：声明了空集（该所没有可路由族）→ 全档禁用。 */
+function roundOptionDisabled(a: AccountRow, sec: number): boolean {
+  const declared = declaredRoundSecs(a)
+  return declared !== undefined && !declared.includes(sec)
+}
+
 /** 正在展开周期集编辑段的账户 id（下拉里一次只展开一行）。 */
 const roundsOpenFor = ref<string | null>(null)
 /** 编辑缓冲：勾选的秒数集合（打开时从该行 rounds 预填）。 */
@@ -547,8 +572,10 @@ onBeforeUnmount(() => {
           >
             <span class="label-micro">轮次周期（多选；全不选 = 不限制）</span>
             <span class="mt-1.5 flex flex-wrap gap-1.5">
+              <!-- 档位集合按该所插件的自声明筛（supportedRoundSecs）；被滤档
+                   直接不渲染（选了也永远零发现 —— 4h@kalshi 的教训）。 -->
               <label
-                v-for="opt in ROUND_OPTIONS"
+                v-for="opt in roundOptionsFor(a)"
                 :key="opt.sec"
                 class="flex cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[10.5px] transition-colors hover:bg-panel-solid"
                 :class="roundChecked(a, opt.sec) ? 'text-fg' : 'text-faint-fg'"

@@ -158,6 +158,33 @@ check('轮次周期切换入口在行情页倒计时卡（共享 composable 单�
   }
 })
 
+// ── 4b. 插件自声明筛档（supported_round_secs，市场插件周期声明面）────────────
+check('client PluginRow 带 supportedRoundSecs（插件自声明，undefined = 不筛）', () => {
+  assert.match(
+    client,
+    /supportedRoundSecs\?: number\[\]/,
+    'client.ts PluginRow 缺 supportedRoundSecs 字段 —— 声明面上不了面板',
+  )
+})
+check('账户卡按声明筛档：档位渲染走 roundOptionsFor（声明面，非前端硬编码 venue 表）', () => {
+  assert.match(switcher, /function declaredRoundSecs\(a: AccountRow\)/, '缺 declaredRoundSecs 声明读取')
+  assert.match(switcher, /marketPlugins\.find\(\(p\) => p\.name === a\.venue\)/, '声明必须按账户 venue 绑定查 marketPlugins 行')
+  assert.match(switcher, /function roundOptionsFor\(a: AccountRow\)/, '缺 roundOptionsFor 渲染集合')
+  assert.match(switcher, /v-for="opt in roundOptionsFor\(a\)"/, '编辑器档位未走声明筛 —— v-for 直接摸 ROUND_OPTIONS 会把该所服务不了的档位摆上桌')
+  assert.doesNotMatch(switcher, /v-for="opt in ROUND_OPTIONS"/, '档位 v-for 裸用 ROUND_OPTIONS 回归 —— 4h@kalshi 零发现静默盲点的教训')
+})
+
+// ── 4c. 退出纪律 trailing 热配开关（issue 356 升格；risk.setExit）─────────────
+check('退出纪律卡有 trailingEnabled Switch（老内核缺字段 → 禁用降级，不造默认值）', () => {
+  const risk = read('src', 'pages', 'settings', 'SettingsRiskLimits.vue')
+  assert.match(risk, /field: 'trailingEnabled'/, 'EXIT_ROW_DEFS 缺 trailingEnabled 行')
+  assert.match(risk, /<Switch/, 'trailing 行未用 Switch 组件（bool 旋钮不是输入框）')
+  assert.match(risk, /trailingSupported/, '缺 trailingSupported feature-detect（老内核缺字段禁用）')
+  assert.match(risk, /e\.trailingEnabled !== undefined/, '发送端缺缺省守卫 —— 旧内核会意外收 true')
+  const c = read('src', 'api', 'client.ts')
+  assert.match(c, /trailingEnabled\?: boolean/, 'RiskSetExitBody 缺 trailingEnabled')
+})
+
 // ── 5. comment hygiene（RAW_COLOR / venue-name bans）──────────────────────────
 check('注释 issue 号用「issue 550」格式（禁 #550 —— RAW_COLOR 门禁误判 hex 色）', () => {
   for (const [file, src] of [['client.ts', client], ['panel.ts', store], ['AccountSwitcher.vue', switcher], ['HftPage.vue', hft]]) {
