@@ -213,6 +213,22 @@ const roundCanTrade = computed(() => {
   if (vr) return vr.timeLeftSec > 0
   return round.value?.canTrade ?? false
 })
+/**
+ * 轮次瓦片的身份副标（真线报告 2026-10-24：切户后瓦片「看不出跟随」）。
+ * 数据层跟随链本身在工作（切户后快照 displayVenue 正确翻转、瓦片读身份
+ * 所的 venueRounds 行），但当前生产只有 900s 单族——两所行数字逐字节相同
+ * （同一 (venue,duration) 纪元取整必然同值），加上两账户均零成交，切户在
+ * 数字上不可见；瓦片标签又写死「当前轮次」四字，没有任何标识说明这口钟
+ * 属于谁。补一个与 balanceTitle/accountBadge 同口径的身份标注：身份所在
+ * 场（displayVenue 或账户绑定）时标出所名（+ 族时长，行带 durationSec
+ * 时），行缺席/老内核回落全局块时如实标「全局」——不猜。
+ */
+const roundTileTitle = computed(() => {
+  const v = identityVenue.value
+  const dur = venueRound.value?.durationSec
+  if (v) return dur ? `当前轮次 · ${v} · ${Math.round(dur / 60)}m` : `当前轮次 · ${v}`
+  return '当前轮次 · 全局'
+})
 // E28 (§9.5) + issue 561: the 当前持仓 table is scoped to the display account
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
 // issue 561（裁决 1）后余额瓦片同样是账户自有读数（account.list 行）——
@@ -362,7 +378,7 @@ const needsStrategyHint = computed(() => {
         </div>
       </StatTile>
 
-      <StatTile label="当前轮次" :value="roundDisplay ? `#${roundDisplay.slot}` : '—'">
+      <StatTile :label="roundTileTitle" :value="roundDisplay ? `#${roundDisplay.slot}` : '—'">
         <template #sub>
           <span v-if="roundDisplay">{{ duration(roundDisplay.ageSec) }} 已过 · {{ duration(roundTimeLeft) }} 剩余</span>
           <!-- issue 488: 行情插件活跃但轮次空 = 数据源没到达（网络/代理），不是「等待插件」。 -->
