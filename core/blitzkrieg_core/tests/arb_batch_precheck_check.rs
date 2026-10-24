@@ -246,6 +246,7 @@ fn arb_core_live(pot: Decimal, default_venue: Option<&str>, nofast: bool) -> Cor
             venue: String::new(),
             trading_enabled: true,
             strategies: Vec::new(),
+            rounds: Vec::new(),
             updated_at_ms: NOW,
         })
         .expect("arb-b does not exist yet — the fixture account inserts");

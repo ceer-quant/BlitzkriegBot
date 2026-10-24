@@ -247,6 +247,22 @@ pub struct Account {
     /// historical zero-config shape.
     #[serde(default)]
     pub strategies: Vec<String>,
+    /// THIS account's round-length FAMILY declaration (轮次多族 v5): the
+    /// durations, in seconds, this account trades — each paired with the
+    /// account's venue (or EVERY venue when unbound) into the (venue,
+    /// duration) family set `account_duration_subscriptions` assembles for
+    /// the B1c admission gate. EMPTY = NO family restriction declared: the
+    /// account trades whatever duration the data plane feeds, the
+    /// historical behaviour (an added permission axis is never spelled as
+    /// a subtraction — an empty set admits, it does not lock out). The
+    /// global single-value chain (CLI/env > 格 > TOML > 900) is NOT clipped
+    /// by this field: it feeds the gate's subscription set and the boot's
+    /// discovery mounting, while the timing math keeps its own fallback
+    /// (B1a's three-state read). Parse-side validated against the
+    /// allowed-duration whitelist (fail-closed), deduplicated with
+    /// first-seen order kept.
+    #[serde(default)]
+    pub rounds: Vec<i64>,
     pub updated_at_ms: i64,
 }
 
@@ -335,6 +351,7 @@ impl AccountLedgers {
                 // enablement is the only truth; the old 0.2 "empty follows the
                 // GLOBAL toggle" behaviour is retired).
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: now_ms,
             }],
             default_account_id(),
@@ -500,6 +517,34 @@ impl AccountLedgers {
         let mut v: Vec<&Account> = self.accounts.values().collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
+    }
+
+    /// Replace ONE account's round-family declaration (轮次多族) in memory.
+    /// The durable half is the caller's job (B2's `account.rounds.set`
+    /// persists into accounts.toml beside this write — the venue.set
+    /// transaction posture). Unknown ids refuse (the book never mints an
+    /// implicit account). The value arrives parse-validated and
+    /// deduplicated; the set path re-checks the whitelist so an IPC caller
+    /// cannot bypass what the parser enforces (same fail-closed posture at
+    /// every door).
+    pub fn set_rounds(&mut self, id: &AccountId, rounds: Vec<i64>) -> CoreResult<()> {
+        let account = self
+            .accounts
+            .get_mut(id)
+            .ok_or_else(|| unknown_account(id))?;
+        for sec in &rounds {
+            if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(sec) {
+                return Err(crate::model::CoreError::new(
+                    crate::model::CoreErrorCode::InvalidParams,
+                    format!(
+                        "rounds value {sec}s is not an allowed round duration (allowed: {:?})",
+                        crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                    ),
+                ));
+            }
+        }
+        account.rounds = rounds;
+        Ok(())
     }
 
     /// Session-independent switch of the PROCESS-level active account. The
@@ -761,6 +806,7 @@ mod book_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 1,
                 },
                 Account {
@@ -772,6 +818,7 @@ mod book_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 1,
                 },
             ],
@@ -1028,6 +1075,7 @@ mod book_tests {
             venue: String::new(),
             trading_enabled: true,
             strategies: Vec::new(),
+            rounds: Vec::new(),
             updated_at_ms: now_ms,
         }
     }

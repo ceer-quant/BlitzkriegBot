@@ -3015,6 +3015,7 @@ impl Core {
                     venue: a.venue.clone(),
                     trading_enabled: a.trading_enabled,
                     strategies: a.strategies.clone(),
+                    rounds: a.rounds.clone(),
                     open_positions,
                     day_realized_usd,
                     updated_at_ms: a.updated_at_ms,
@@ -3889,6 +3890,7 @@ impl Core {
             venue: venue.filter(|v| !v.is_empty()).unwrap_or("").to_string(),
             trading_enabled: true,
             strategies: Vec::new(),
+            rounds: Vec::new(),
             updated_at_ms: now_ms,
         })?;
         // A runtime mint on a locally-settling core gets the same seed a boot
@@ -12807,17 +12809,46 @@ impl Core {
     /// byte-identical. B1d assembles the real set here (the comment above the
     /// return is the single seam); hot management (subscribe/unsubscribe at
     /// runtime) lands in B2.
-    fn account_duration_subscriptions(&self, _account_id: &AccountId) -> HashSet<(String, i64)> {
-        // Test override first (the gate's teeth must be constructible before
-        // B1d's config surface exists).
+    fn account_duration_subscriptions(&self, account_id: &AccountId) -> HashSet<(String, i64)> {
+        // Test override first (the gate's teeth must stay constructible
+        // without a config surface).
         #[cfg(test)]
         if let Some(subs) = &self.test_duration_subscriptions {
             return subs.clone();
         }
-        // B1d 装配：真订阅集来自 accounts.toml 的账户族声明（venue ×
-        // duration）经 Account 结构新字段落账；本 PR 的 Account 无该字段
-        // （B1d 领地），恒返回空表 = 未声明任何限制 ⇒ 门全放行。
-        HashSet::new()
+        // B1d 装配：真订阅集 = 账户族声明 rounds × venue 绑定。每个声明的
+        // duration 与该账户绑定的 venue 组成一对；未绑 venue（空）账户的
+        // 声明作用于所有 venue —— 一行 duration 膨胀为当前 live 市场里该
+        // duration 的每个 venue（抖动的 venue 集合由 live 市场承载，声明
+        // 本身保持 venue 无关）。空 rounds = 未声明任何限制 ⇒ 空表 ⇒ 门
+        // 全放行（回放/单族部署的逐字节不变量）。热管理（增族/移族）
+        // 落在 B2。
+        let Some(account) = self.accounts.account(account_id) else {
+            return HashSet::new();
+        };
+        if account.rounds.is_empty() {
+            return HashSet::new();
+        }
+        let bound_venue = account.venue.as_str();
+        let mut out = HashSet::new();
+        if !bound_venue.is_empty() {
+            for &dur in &account.rounds {
+                out.insert((bound_venue.to_string(), dur));
+            }
+            return out;
+        }
+        // Unbound: the declaration speaks for every venue the live book
+        // currently labels with each declared duration. A venue with no
+        // live market at that duration gets no pair — nothing to admit
+        // there anyway.
+        if let Some(e) = self.engine.as_ref() {
+            for m in e.scanner().markets() {
+                if m.round_duration_sec > 0 && account.rounds.contains(&m.round_duration_sec) {
+                    out.insert((m.venue.clone(), m.round_duration_sec));
+                }
+            }
+        }
+        out
     }
 
     /// Duration-family admission gate (B1c): an order whose (venue, duration)
@@ -17869,6 +17900,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -17880,6 +17912,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -18193,6 +18226,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -18204,6 +18238,7 @@ mod tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -20556,6 +20591,7 @@ mod strategy_dispatch_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -20567,6 +20603,7 @@ mod strategy_dispatch_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -22041,6 +22078,7 @@ mod strategy_dispatch_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -22052,6 +22090,7 @@ mod strategy_dispatch_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -23240,6 +23279,7 @@ mod strategy_dispatch_tests {
                 venue: String::new(),
                 trading_enabled: true,
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: 0,
             })
             .expect("arb-b does not exist yet");
@@ -25887,6 +25927,7 @@ mod trading_capability_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -25898,6 +25939,7 @@ mod trading_capability_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -27828,6 +27870,7 @@ mod round_family_b1b_tests {
                 venue: String::new(),
                 trading_enabled: true,
                 strategies: Vec::new(),
+                rounds: Vec::new(),
                 updated_at_ms: 0,
             }],
             crate::model::default_account_id(),
@@ -28596,6 +28639,7 @@ mod audit_fix_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -28607,6 +28651,7 @@ mod audit_fix_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -28707,6 +28752,7 @@ mod audit_fix_tests {
                     venue: "polymarket".into(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
                 crate::account::Account {
@@ -28718,6 +28764,7 @@ mod audit_fix_tests {
                     venue: String::new(),
                     trading_enabled: true,
                     strategies: Vec::new(),
+                    rounds: Vec::new(),
                     updated_at_ms: 0,
                 },
             ],
@@ -29022,6 +29069,116 @@ mod audit_fix_tests {
             "the unbound order's wire row carries NO venue key: {}",
             wire[1]
         );
+    }
+
+    /// B1d (轮次多族): the gate's subscription set assembles from the
+    /// ACCOUNT's own `rounds` declaration (the real seam, not the test
+    /// override). A bound account's set is (venue × every declared
+    /// duration); a declared family the account did not list is refused.
+    #[test]
+    fn the_duration_gate_assembles_from_the_account_rounds_declaration() {
+        let mut c = venue_bound_core();
+        // `default` is bound to polymarket; declare ONLY the 900s family —
+        // every poly market in this fixture IS 900s, so its orders sail.
+        c.accounts_mut()
+            .set_rounds(&crate::account::AccountId::from("default"), vec![900])
+            .unwrap();
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+        assert_eq!(c.list_orders().len(), 1, "the declared family passes");
+        // A poly 1h token is (polymarket, 3600) — declared? No. Refused.
+        let now = 1_000_000;
+        let end1h = 2 * 3600 * 1000;
+        let m = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-poly-1h".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-1h-up".into(),
+            down_token_id: "poly-1h-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end1h,
+            round_slot: end1h / 1000 / 3600,
+            round_duration_sec: 3600,
+            archive_verdict: false,
+            venue: "polymarket".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![m],
+                now_ms: now,
+            },
+            now,
+        );
+        let err = c.place(bound_order("poly-1h-up", "k2"), 0, 2).unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::AccountLimit, "{err:?}");
+        assert!(err.message.contains("3600"), "{err}");
+        // Declaring the 1h family too re-opens it — the assembly is the
+        // declaration's product, venue × every listed duration.
+        c.accounts_mut()
+            .set_rounds(&crate::account::AccountId::from("default"), vec![900, 3600])
+            .unwrap();
+        c.place(bound_order("poly-1h-up", "k3"), 0, 3).unwrap();
+        assert_eq!(c.list_orders().len(), 2);
+    }
+
+    /// B1d: an UNBOUND account's `rounds` declaration speaks for EVERY
+    /// venue the live book currently labels at that duration — the set is
+    /// the declaration expanded across the live venues, so the account
+    /// trades its declared families everywhere without naming venues.
+    #[test]
+    fn an_unbound_accounts_rounds_span_every_live_venue_at_the_declared_duration() {
+        let mut c = venue_bound_core();
+        // `paper` is unbound; it declares 900s only.
+        c.accounts_mut()
+            .set_rounds(&crate::account::AccountId::from("paper"), vec![900])
+            .unwrap();
+        // Both live venues carry 900s markets: both are admitted.
+        let mut p1 = bound_order("poly-up", "k1");
+        p1.account_id = crate::account::AccountId::from("paper");
+        c.place(p1, 0, 1).unwrap();
+        let mut p2 = bound_order("kal-up", "k2");
+        p2.account_id = crate::account::AccountId::from("paper");
+        c.place(p2, 0, 2).unwrap();
+        assert_eq!(c.list_orders().len(), 2, "900s on both venues passes");
+        // The poly 1h family is not declared: refused from the same account.
+        let now = 1_000_000;
+        let end1h = 2 * 3600 * 1000;
+        let m = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-poly-1h".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-1h-up".into(),
+            down_token_id: "poly-1h-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end1h,
+            round_slot: end1h / 1000 / 3600,
+            round_duration_sec: 3600,
+            archive_verdict: false,
+            venue: "polymarket".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![m],
+                now_ms: now,
+            },
+            now,
+        );
+        let mut p3 = bound_order("poly-1h-up", "k3");
+        p3.account_id = crate::account::AccountId::from("paper");
+        let err = c.place(p3, 0, 3).unwrap_err();
+        assert_eq!(err.code, CoreErrorCode::AccountLimit, "{err:?}");
+        // A bound account with an EMPTY rounds set stays unrestricted —
+        // the historical shape (no declaration = no gate).
+        c.accounts_mut()
+            .set_rounds(&crate::account::AccountId::from("default"), Vec::new())
+            .unwrap();
+        c.place(bound_order("poly-1h-up", "k4"), 0, 4).unwrap();
+        assert_eq!(c.list_orders().len(), 3);
     }
 
     /// The venue tag is a DERIVED read, never stored: the persisted order

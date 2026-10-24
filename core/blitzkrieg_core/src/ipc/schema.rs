@@ -1954,6 +1954,13 @@ pub struct AccountView {
     /// truth; an absent key on a fresh deployment just leaves the account
     /// silent — the zero-config shape).
     pub strategies: Vec<String>,
+    /// The account's round-length FAMILY declaration (轮次多族): every
+    /// duration this account trades, in seconds — paired with the venue
+    /// binding into the (venue, duration) families the admission gate
+    /// reads. Empty = no family restriction declared (the account trades
+    /// whatever the data plane feeds). Backward-compatible incremental
+    /// field: old panels ignore it.
+    pub rounds: Vec<i64>,
     pub open_positions: usize,
     #[serde(with = "crate::decimal")]
     pub day_realized_usd: Decimal,
