@@ -658,30 +658,38 @@ onMounted(() => {
                     :class="Number(rowNetPnl(r)) >= 0 ? 'text-up' : 'text-down'"
                   ><RollingNumber :value="signedMoney(rowNetPnl(r))" /></td>
                   <td class="px-2 py-2.5 text-right">
-                    <!-- 套利行的活跃配对徽标（内核 arbActivePairs 读数，两腿合计
-                         视角）；字段缺失（老内核）不渲染 —— feature-detect。 -->
-                    <Badge
-                      v-if="r.arbActivePairs !== undefined"
-                      variant="outline"
-                      :title="`当前配置激活 ${r.arbActivePairs} 个套利币对（两腿合计）`"
-                      class="num"
-                    ><RollingNumber :value="r.arbActivePairs" /> 对</Badge>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      :title="expanded === r.name ? '收起详情' : '展开详情'"
-                      @click="onExpand(r.name)"
-                    >
-                      <AlertTriangle
-                        v-if="profile(r).causes.length || profile(r).causesMissing"
-                        class="size-3.5 text-primary"
-                      />
-                      <ShieldCheck v-else class="size-4 text-up/45" />
-                      <ChevronDown
-                        class="size-3 transition-transform"
-                        :class="expanded === r.name && 'rotate-180'"
-                      />
-                    </Button>
+                    <!-- 原因列：徽标与展开按钮在同一 flex 行里排队（gap 保底间距、
+                         min-w-0+shrink 允许徽标收缩、whitespace-nowrap 保数字不折行
+                         但 flex-wrap 在极窄时兜底换行）—— 截图里「N 对」压到盾牌/
+                         下拉按钮的根因是两者裸排在 td 里：没有 flex、没有 gap、徽章
+                         不可收缩，任何宽度下都靠内容长度碰运气。 -->
+                    <span class="flex flex-wrap items-center justify-end gap-x-1.5 gap-y-1">
+                      <!-- 套利行的活跃配对徽标（内核 arbActivePairs 读数，两腿合计
+                           视角）；字段缺失（老内核）不渲染 —— feature-detect。 -->
+                      <Badge
+                        v-if="r.arbActivePairs !== undefined"
+                        variant="outline"
+                        :title="`当前配置激活 ${r.arbActivePairs} 个套利币对（两腿合计）`"
+                        class="num max-w-full min-w-0 shrink whitespace-nowrap"
+                      ><RollingNumber :value="r.arbActivePairs" /> 对</Badge>
+                      <Button
+                        class="shrink-0"
+                        variant="ghost"
+                        size="sm"
+                        :title="expanded === r.name ? '收起详情' : '展开详情'"
+                        @click="onExpand(r.name)"
+                      >
+                        <AlertTriangle
+                          v-if="profile(r).causes.length || profile(r).causesMissing"
+                          class="size-3.5 text-primary"
+                        />
+                        <ShieldCheck v-else class="size-4 text-up/45" />
+                        <ChevronDown
+                          class="size-3 transition-transform"
+                          :class="expanded === r.name && 'rotate-180'"
+                        />
+                      </Button>
+                    </span>
                   </td>
                 </tr>
                 <!-- 详情展开行：来源完整路径（不截断）、模式声明、豁免、拒单归因。
