@@ -163,12 +163,20 @@ impl MarketHost for ExecSink {
             self.self_checks.lock().await.push(report);
         })
     }
-    fn seed_balance(&self, balance: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn seed_balance(
+        &self,
+        _venue: &str,
+        balance: Decimal,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.balances.lock().await.push(balance);
         })
     }
-    fn venue_free_balance(&self, free: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn venue_free_balance(
+        &self,
+        _venue: &str,
+        free: Decimal,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.balances.lock().await.push(free);
         })

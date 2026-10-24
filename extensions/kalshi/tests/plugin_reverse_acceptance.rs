@@ -172,10 +172,14 @@ impl MarketHost for DiscoverySink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn seed_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn venue_free_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn venue_free_balance(
+        &self,
+        _venue: &str,
+        _: Decimal,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
@@ -320,10 +324,14 @@ impl MarketHost for BookSink {
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn seed_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn venue_free_balance(&self, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn venue_free_balance(
+        &self,
+        _venue: &str,
+        _: Decimal,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
