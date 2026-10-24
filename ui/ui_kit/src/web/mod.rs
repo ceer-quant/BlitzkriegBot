@@ -1003,6 +1003,12 @@ struct NetCheckCache {
     at: Option<std::time::Instant>,
     /// A probe is running right now.
     probing: bool,
+    /// The display venue the report was probed FOR (the kernel resolves the
+    /// plugin by the display account's venue binding, so the report is only
+    /// meaningful for that venue). A display-account switch invalidates the
+    /// cached reading even inside the TTL — otherwise the card shows the
+    /// previous account's network for up to 20s after a switch.
+    venue: String,
     /// The last report, exactly as the core serialised it.
     report: Option<serde_json::Value>,
     /// Why the last probe failed to ANSWER (core unreachable, socket refused).
@@ -1865,10 +1871,15 @@ impl WebServer {
             })
             .to_string();
         };
+        // The report follows the display account (the kernel probes the
+        // display venue's plugin), so the cache's identity is the venue the
+        // SNAPSHOT currently names — a switch re-probes even inside the TTL.
+        let display_venue = self.snapshot().display_venue;
         let age = cache.at.map(|t| t.elapsed().as_millis());
-        let stale = age.is_none_or(|a| a > NET_CHECK_TTL_MS);
+        let stale = age.is_none_or(|a| a > NET_CHECK_TTL_MS) || cache.venue != display_venue;
         if stale && !cache.probing && !socket.is_empty() {
             cache.probing = true;
+            cache.venue = display_venue;
             // The previous probe's error is not this probe's: clear it, or the
             // panel shows a stale failure beside a fresh "探测中…".
             cache.error = None;

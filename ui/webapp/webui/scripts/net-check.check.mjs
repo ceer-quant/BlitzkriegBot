@@ -223,6 +223,40 @@ for (const [field, rustFnName, heading, tsFnName] of TABLES) {
   })
 }
 
+// 网络诊断跟随显示账户（2026-10-25 操作者报告）：内核按 display venue 选插件、
+// 网关缓存带 venue 维度 —— 切户后读数必须立刻换到新账户的 venue，不许在 TTL
+// 内继续端旧账户的网络。三个钉各守一层。
+check('内核 NET_CHECK 按 display venue 解析插件（net_check_plugin 单一入口）', () => {
+  const server = read('core', 'blitzkrieg_core', 'src', 'ipc', 'server.rs')
+  assert.ok(
+    server.includes('net_check_plugin(registry, display_venue'),
+    'NET_CHECK does not resolve the plugin via net_check_plugin',
+  )
+  assert.ok(
+    server.includes('display_venue().to_string()'),
+    'NET_CHECK does not read the display venue from the account book',
+  )
+})
+
+check('绑定 venue 无插件时走 no-op（诚实 unsupported），绝不去探别的 venue', () => {
+  const market = read('core', 'blitzkrieg_core', 'src', 'market', 'mod.rs')
+  const fnBody = market.match(/pub\(crate\) fn net_check_plugin\([\s\S]*?\n\}/)
+  assert.notEqual(fnBody, null, 'net_check_plugin missing from market/mod.rs')
+  assert.ok(fnBody[0].includes('NoopMarketPlugin'), 'no-op fallback missing')
+})
+
+check('网关缓存的 venue 维度：切户即失效（displayVenue 变化 → 重新探针）', () => {
+  const web = read('ui', 'ui_kit', 'src', 'web', 'mod.rs')
+  assert.ok(
+    web.includes('cache.venue != display_venue'),
+    'NetCheckCache does not compare venues — a display-account switch serves the stale reading',
+  )
+  assert.ok(
+    web.includes('cache.venue = display_venue'),
+    'the in-flight probe does not record the venue it was started under',
+  )
+})
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
   process.exit(1)
