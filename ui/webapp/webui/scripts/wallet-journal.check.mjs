@@ -81,5 +81,20 @@ check('unknown-verb degrade to 「需要升级内核」 is present', () => {
   assert.match(page, /当前内核不支持流水查看，需要升级内核/, 'upgrade sentence missing')
 })
 
-console.log(`\nRESULT: ${failures > 0 ? `FAIL — ${failures} check(s) red` : 'PASS — journal card wired: wrapper + nine labels + truncation disclosure + old-kernel degrade'}`)
+// ⑤ reset 分隔线（流水卡可读性 2026-10-20）：reset 是「此前一切清账」的硬
+//    事实，账目在 reset 前后互不可加和 —— 分隔行显性切刀，免得读者硬算一
+//    个不存在的总额（生产 kalshi/default 流水卡「对不上」的可读性半边）。
+check('reset rows render as a divider before the row (not a silent mid-table reset)', () => {
+  assert.match(page, /r\.kind === 'reset' && i > 0/, 'reset divider condition missing')
+  assert.match(page, /交易环境已重置/, 'divider copy missing')
+})
+
+// ⑥ 口径说明（2026-10-20）：一笔成交 = 买入+卖出两行现金事件，与交易记录的
+//    一笔一行口径不同 —— 卡头必须把这一点说出来，行数对不上是本来的形状。
+check('caliber note「现金事件口径」with tooltip is on the header', () => {
+  assert.match(page, /现金事件口径/, 'header caliber note missing')
+  assert.match(page, /一笔成交拆成「买入成交」\+「卖出成交」两行/, 'tooltip explanation missing')
+})
+
+console.log(`\nRESULT: ${failures > 0 ? `FAIL — ${failures} check(s) red` : 'PASS — journal card wired: wrapper + nine labels + truncation disclosure + old-kernel degrade + reset divider + caliber note'}`)
 if (failures > 0) process.exit(1)
