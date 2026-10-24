@@ -56,6 +56,10 @@ const check = (label, fn) => {
 console.log('行情跟所 — the venue-following contract')
 
 const page = read('src', 'pages', 'HftPage.vue')
+// 首页（Overview）的轮次瓦片与行情页倒计时卡共用一条跟随链（issue 559 起
+// identityVenue/displayVenue），混钟尾审计（2026-10-20）后这里一并钉住它：
+// 同一症状（slot 随身份所、剩余/窗口随全局保守钟）不许在第二张页面复活。
+const overviewPage = read('src', 'pages', 'Overview.vue')
 
 // ── 1. venue follows the account binding ─────────────────────────────────────
 check('activeVenue 派生自账户绑定（store.activeAccountVenue）——行情源跟账户走', () => {
@@ -252,6 +256,35 @@ check('venue 切换时倒计时残值清零（serverLeft/serverAt/leftSec 归零
     /countForVenue\.value = nv/,
     '切换未把倒计时键钉到新 venue —— fallback 分支会被残键门死',
   )
+})
+
+// ── 7b. 首页（Overview）轮次瓦片同一跟随链 —— 混钟尾（审计 2026-10-20）────────
+// 症状与 #550 症状②同族但长在第二张页面：瓦片副行的「剩余」与「可交易」
+// 徽章此前永远读全局标量块 —— 多族（多插件）下全局块是各 venue 最早到期
+// 的保守钟，slot 随身份所、剩余随别家，一个瓦片两个钟。反向验收：
+//   · Overview 的剩余秒/窗口徽章必须消费身份所自己的 venueRounds 行；
+//   · 行缺席（老内核无 venueRounds / 该所钟未开口）必须 feature-detect
+//     回落全局块 —— 单族/老内核逐字节不变；
+//   · 旁路即 FAIL：两处消费不得绕过 venueRound 直读全局块。
+check('Overview 轮次瓦片剩余秒跟随身份所钟行（混钟尾）', () => {
+  const vt = overviewPage.match(/const roundTimeLeft = computed\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(vt, 'Overview 缺 roundTimeLeft —— 副行「剩余」仍直读全局块 timeLeftSec')
+  assert.match(vt[0], /venueRound\.value/, 'roundTimeLeft 未消费身份所钟行 venueRound')
+  assert.match(vt[0], /timeLeftSec/, 'roundTimeLeft 没读钟行的 timeLeftSec')
+  assert.match(vt[0], /round\.value\?\.timeLeftSec/, 'roundTimeLeft 缺全局块回落 —— 老内核/无钟行时读数悬空')
+  // 模板侧旁路即 FAIL：副行必须吃 roundTimeLeft，不再有 `round?.timeLeftSec` 直插。
+  assert.doesNotMatch(overviewPage, /\{\{\s*duration\(round\?\.timeLeftSec/, '模板仍直插全局块 timeLeftSec —— 修了 computed 没接线等于没修')
+  assert.match(overviewPage, /duration\(roundTimeLeft\)/, '模板副行未接 roundTimeLeft')
+})
+
+check('Overview 可交易徽章按身份所窗口判定（全局 or 值不标到单所头上）', () => {
+  const ct = overviewPage.match(/const roundCanTrade = computed\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(ct, 'Overview 缺 roundCanTrade —— 徽章仍吃全局 or 值 canTrade')
+  assert.match(ct[0], /venueRound\.value/, 'roundCanTrade 未消费身份所钟行 venueRound')
+  assert.match(ct[0], /round\.value\?\.canTrade/, 'roundCanTrade 缺全局块回落 —— 老内核行为改变')
+  // 模板侧旁路即 FAIL：徽章必须吃 roundCanTrade。
+  assert.doesNotMatch(overviewPage, /:variant="round\?\.canTrade/, '模板徽章仍直读全局块 canTrade —— 多族下把别族的窗口标到身份所头上')
+  assert.match(overviewPage, /:variant="roundCanTrade/, '模板徽章未接 roundCanTrade')
 })
 
 // ── 8. 轮次告警三修（2026-10-23）：Loading 必有超时释放 + discovery 空判信号 ──

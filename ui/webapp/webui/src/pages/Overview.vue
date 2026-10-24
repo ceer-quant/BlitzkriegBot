@@ -189,6 +189,30 @@ const roundDisplay = computed(() => {
   if (vr) return { slot: vr.slot, ageSec: vr.ageSec }
   return round.value
 })
+/**
+ * 混钟尾（审计 2026-10-20）：瓦片副行的「剩余」此前永远读全局块的
+ * timeLeftSec —— 多族（或多插件）下全局块是各 venue 最早到期的保守钟，
+ * 4h 族的瓦片会倒计 15m 族的剩余，同一瓦片里 slot 随身份所、剩余随别家。
+ * 修法与 roundDisplay 同一回落链：身份所有 venueRounds 行读行的
+ * timeLeftSec（B1a 增量字段同一行），行缺席（老内核无 venueRounds / 该所
+ * 钟未开口）feature-detect 回落全局块 —— 单族/老内核逐字节不变。
+ */
+const roundTimeLeft = computed(() => {
+  const vr = venueRound.value
+  if (vr) return vr.timeLeftSec
+  return round.value?.timeLeftSec ?? 0
+})
+/**
+ * 「可交易」徽章同病：canTrade 是全局「任何一族窗口开着」的或值，多族下
+ * 不能标到身份所头上。身份所有自己的钟行时，窗口判定按该行的剩余秒
+ * （行在场即该所钟已开口；timeLeftSec>0 = 该所窗口开着）——与 trading 侧
+ * per-candidate 门同一口径。行缺席回落全局值（老行为，老内核逐字节不变）。
+ */
+const roundCanTrade = computed(() => {
+  const vr = venueRound.value
+  if (vr) return vr.timeLeftSec > 0
+  return round.value?.canTrade ?? false
+})
 // E28 (§9.5) + issue 561: the 当前持仓 table is scoped to the display account
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
 // issue 561（裁决 1）后余额瓦片同样是账户自有读数（account.list 行）——
@@ -340,13 +364,13 @@ const needsStrategyHint = computed(() => {
 
       <StatTile label="当前轮次" :value="roundDisplay ? `#${roundDisplay.slot}` : '—'">
         <template #sub>
-          <span v-if="roundDisplay">{{ duration(roundDisplay.ageSec) }} 已过 · {{ duration(round?.timeLeftSec ?? 0) }} 剩余</span>
+          <span v-if="roundDisplay">{{ duration(roundDisplay.ageSec) }} 已过 · {{ duration(roundTimeLeft) }} 剩余</span>
           <!-- issue 488: 行情插件活跃但轮次空 = 数据源没到达（网络/代理），不是「等待插件」。 -->
           <span v-else-if="snap?.marketActiveName">行情插件 {{ snap?.marketActiveName }} 活跃，等待轮次数据</span>
           <span v-else>等待行情插件</span>
         </template>
         <div v-if="roundDisplay" class="mt-2">
-          <Badge :variant="round?.canTrade ? 'up' : 'gold'" dot>{{ round?.canTrade ? '可交易' : '等待窗口' }}</Badge>
+          <Badge :variant="roundCanTrade ? 'up' : 'gold'" dot>{{ roundCanTrade ? '可交易' : '等待窗口' }}</Badge>
         </div>
       </StatTile>
 
