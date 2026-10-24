@@ -302,6 +302,33 @@ check('Overview 轮次瓦片标签标注身份所（单族等价下跟随的可�
   assert.match(overviewPage, /:label="roundTileTitle"/, '模板瓦片未接 roundTileTitle')
 })
 
+// 引擎计数卡口径标注（真线报告 2026-10-24：切户后「引擎计数没跟随账户」）。
+// 数据链定谳：五个计数（books/rounds/evaluations/signals/placeRejected）在
+// 内核 CoreStats 是进程内单份、自 boot 累计的事件计数（on_book/on_rollover/
+// 评估循环路径自增，不带 accountId 维度）；engine.stats 唯一带账户维的面是
+// `strategies` 行（engine.stats?accountId= 的 strategy_stats_for_account），
+// 顶层标量切不动 —— 强行按 venue 摊分是把一个事实掰成五个错数。与轮次
+// 瓦片（#601）同一修法：数字不动，标题说出口径。牙钉三点：
+//   · engineCounterScope 必须消费 display 身份（store.activeAccount），
+//     账户在场时点名「进程级 · {account}」，缺席回落「进程级」——不猜；
+//   · 标题必须走 engineCounterLabel（身份标注接进 CardHeader），
+//     模板写死 label="引擎计数" 即旁路即 FAIL；
+//   · 角落的灰字 action 槽必须还在且绑同一 scope（双通道同口径）。
+check('Overview 引擎计数卡标注进程级口径与显示账户（进程量切不动的诚实归属）', () => {
+  const scope = overviewPage.match(/const engineCounterScope = computed\(\(\) => \{[\s\S]*?\n\}\)/)
+  assert.ok(scope, 'Overview 缺 engineCounterScope —— 引擎计数卡的归属标注被拆或写死')
+  assert.match(scope[0], /store\.activeAccount/, 'engineCounterScope 未读显示账户 store.activeAccount')
+  assert.match(scope[0], /进程级/, 'engineCounterScope 缺「进程级」字样 —— 口径不说就是谎报')
+  const label = overviewPage.match(/const engineCounterLabel = computed\(\(\) => [\s\S]*?\n\}\)/) ??
+    overviewPage.match(/const engineCounterLabel = computed\(\(\) => [^\n]*/)
+  assert.ok(label, 'Overview 缺 engineCounterLabel —— 卡标题未携带口径标注')
+  assert.match(label[0], /engineCounterScope\.value/, 'engineCounterLabel 未消费 engineCounterScope —— 标题与口径标注脱钩')
+  assert.doesNotMatch(overviewPage, /label="引擎计数"/, '模板仍写死「引擎计数」标签 —— 口径标注被旁路')
+  assert.match(overviewPage, /:label="engineCounterLabel"/, '模板引擎计数卡未接 engineCounterLabel')
+  const action = overviewPage.match(/<template #action>\s*\n\s*<span class="text-\[10px\] text-faint-fg">\{\{ engineCounterScope \}\}<\/span>/)
+  assert.ok(action, '引擎计数卡 action 槽未绑 engineCounterScope —— 灰字与标题口径不一致')
+})
+
 // ── 8. 轮次告警三修（2026-10-23）：Loading 必有超时释放 + discovery 空判信号 ──
 // 反向验收 — 以下必须在 UI 上不可能：
 //   · venue 切到「快照永远不来行」的所时，页面永远转圈 —— Loading 门
