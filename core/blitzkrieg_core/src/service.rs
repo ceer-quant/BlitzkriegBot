@@ -5088,6 +5088,7 @@ impl Core {
                 let holds = loaded.holds_to_settlement;
                 let exemptions = loaded.gate_exemptions;
                 let atomic = loaded.atomic_batch;
+                let trailing = loaded.trailing_exit;
                 // E27 (§8.2): the SAME handshake verdict BEFORE registration.
                 let refusal =
                     Self::modes_refusal(&self.plugin_modes, &name, &loaded.declared_modes);
@@ -5109,7 +5110,8 @@ impl Core {
                 };
                 let adapter = LuaEngineAdapter::new(loaded.strategy, tunables)
                     .declare(holds, exemptions)
-                    .declare_atomic_batch(atomic);
+                    .declare_atomic_batch(atomic)
+                    .declare_trailing_exit(trailing);
                 adapter.set_fee_schedule(fee_view);
                 match engine
                     .register_user_strategy(Box::new(adapter), format!("lua:{}", dir.display()))
@@ -5414,6 +5416,22 @@ impl Core {
                 e.set_hot_params(None);
             }
         }
+        // The strategies' trailing declarations ride the same registry-change
+        // beat: a whole-map replace (stale entries of unregistered strategies
+        // must not linger) into the position book, whose ladder then overlays
+        // each verdict on the kernel-wide value. Registration, unregistration
+        // and account-scope wiring all pass through here.
+        let overrides: std::collections::HashMap<String, bool> = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.strategy_refs()
+                    .into_iter()
+                    .filter_map(|s| s.wants_trailing_exit().map(|v| (s.name().to_string(), v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.positions.set_trailing_overrides(overrides);
     }
 
     pub fn shadow_evolution_enable(&mut self, now_ms: i64) -> bool {

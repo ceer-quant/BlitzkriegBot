@@ -47,17 +47,26 @@
 #   trailing_enabled      = false the trailing stop's arming switch. OFF is the
 #                                 issue-356 calibration (the proven operator
 #                                 never sold into profit — every exit was a
-#                                 REDEEM/MERGE); strategies that DO sell into
-#                                 profit (spread_arb's mean-reversion exits)
-#                                 want it on, and it is also hot-writable per
-#                                 session via `risk.setExit` (trailingEnabled).
+#                                 REDEEM/MERGE); hot-writable per session via
+#                                 `risk.setExit` (trailingEnabled). Strategies
+#                                 declare their OWN verdict per package — the
+#                                 Lua manifest's `trailing_exit` key (absent =
+#                                 follow this value; true/false = force
+#                                 on/off for that strategy's positions) — so
+#                                 spread_arb-style mean-reversion sellers bank
+#                                 profit without flipping the kernel-wide
+#                                 switch that the REDEEM-family philosophies
+#                                 were calibrated against. NOT a startup
+#                                 config key: this ladder's compiled face has
+#                                 no trailing_enabled field, and the knob is
+#                                 operator-hot-write + strategy-declaration
+#                                 territory by design.
 #   trailing_min_high_pct = 15    profit (%) needed before the trailing stop arms
 #   min_trail_pct         = 8     floor for the trailing stop's give-back (%)
 #
 # [exit]
 # stop_loss_pct = 12
 # min_trail_pct = 8
-# trailing_enabled = true
 
 # ── Systemic risk limits (E26 / DEV_V0_3 §4) ─────────────────────────────────
 # Nine NEW limits that bound what any entry can put at risk, each shipped at
