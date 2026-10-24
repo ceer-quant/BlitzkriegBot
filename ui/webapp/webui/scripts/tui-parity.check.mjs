@@ -138,6 +138,17 @@ if (webuiIds.includes('blueprint')) {
     assert.ok(page.includes('api.blueprintCompile'), 'BlueprintPage does not call api.blueprintCompile')
     assert.ok(page.includes('api.blueprintSave'), 'BlueprintPage does not call api.blueprintSave')
   })
+  // 导入闭环（导出的镜像）：导入必须走粘贴 + 共享的 parseBlueprintDoc 校验，
+  // `in` 成员在面板上可编辑 —— 「导出→手填→回不来」的死角不许回来。
+  check('WebUI blueprint import loop stays on parseBlueprintDoc and in-members are editable', () => {
+    const page = read('src', 'pages', 'BlueprintPage.vue')
+    assert.ok(page.includes('parseBlueprintDoc(importText.value)'), 'import does not go through parseBlueprintDoc')
+    assert.ok(page.includes('doImportApply'), 'paste-import apply missing')
+    assert.ok(page.includes('addInMember'), 'in-members add control missing')
+    assert.ok(!/type=["']file["']/.test(page), 'import must stay paste-only — file inputs are a panel red line')
+    const lib = read('src', 'lib', 'blueprint.ts')
+    assert.ok(lib.includes('export function parseBlueprintDoc'), 'parseBlueprintDoc missing from lib')
+  })
 }
 
 console.log('TUI face → WebUI home (every TUI tab must live somewhere)')

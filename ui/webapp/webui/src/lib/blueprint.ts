@@ -175,6 +175,43 @@ export function toBlueprintDoc(name: string, nodes: BpNode[], edges: BpEdge[]): 
 }
 
 /**
+ * Parse an imported blueprint JSON into the editor graph. Same acceptance the
+ * preload path applies to `blueprint.load` documents: v1 only, whitelisted
+ * node types only, edges must reference known ids. Returns the rejection as a
+ * string — the caller renders it verbatim; nothing is coerced into a
+ * best-effort graph that would misrepresent what the author wrote.
+ */
+export function parseBlueprintDoc(raw: string): { doc: BlueprintDoc } | { error: string } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { error: '不是合法 JSON。' }
+  }
+  if (!parsed || typeof parsed !== 'object') return { error: '蓝图文档必须是 JSON 对象。' }
+  const doc = parsed as Partial<BlueprintDoc>
+  if (doc.version !== 1) return { error: '不是 v1 版蓝图文档（内核只编译 v1）。' }
+  if (!Array.isArray(doc.nodes) || !Array.isArray(doc.edges)) {
+    return { error: '缺 nodes 或 edges 数组。' }
+  }
+  const nodes: BpNode[] = []
+  const seen = new Set<string>()
+  for (const n of doc.nodes) {
+    if (!n || typeof n.id !== 'string' || n.id === '' || seen.has(n.id)) continue
+    if (!NODE_SPECS.some((s) => s.type === n.type)) continue
+    seen.add(n.id)
+    nodes.push({ id: n.id, type: n.type as BlueprintNodeType, params: structuredClone(n.params ?? {}) })
+  }
+  if (nodes.length === 0) return { error: 'nodes 里没有可识别的节点（类型必须在 8 种白名单内、id 非空且不重复）。' }
+  const edges: BpEdge[] = []
+  for (const e of doc.edges) {
+    if (!e || !seen.has(e.from) || !seen.has(e.to)) continue
+    edges.push({ from: e.from, to: e.to, when: !!e.when })
+  }
+  return { doc: { version: 1, name: typeof doc.name === 'string' ? doc.name : 'untitled_strategy', nodes, edges } }
+}
+
+/**
  * The save request body — the exact params object `blueprint.save` accepts
  * (`{name, json, overwrite?}`). `overwrite` is the editor's explicit
  * acknowledgement that a package of this name already exists.

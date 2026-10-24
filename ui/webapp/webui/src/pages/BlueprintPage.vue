@@ -16,22 +16,23 @@
  * flowId 让页面 setup 与 <VueFlow> 命中同一个实例），蓝图语义（type/params/
  * when）另存 bpNodes/bpEdges，两侧用节点 id 对齐。画布位置属于 UI 状态，
  * 永不进蓝图文档。保存 = 组装 blueprint.json → `blueprint.save`（内核校验
- * 名字、现场编译、落盘三件套并回执 sha256）；导出 = 前端把当前蓝图 JSON
- * 下载为文件。UI 从不碰文件系统 —— 落盘是内核的事，UI 只拿回执。
+ * 名字、现场编译、落盘三件套并回执 sha256）；导出/导入 = 前端把当前蓝图
+ * JSON 下载为文件 / 读回画布（v1 + 白名单 + 边端点校验，拒绝原样亮出）。
+ * UI 从不碰文件系统 —— 落盘是内核的事，UI 只拿回执。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { VueFlow, Handle, Panel, Position, MarkerType, useVueFlow } from '@vue-flow/core'
 import type { Edge as FlowEdge, Connection } from '@vue-flow/core'
 import type { LucideProps } from 'lucide-vue-next'
-import { Database, ToggleLeft, ShoppingCart, Tag, PauseCircle, Hash, GitMerge, Split, Save, Download, Trash2, RefreshCw } from 'lucide-vue-next'
+import { Database, ToggleLeft, ShoppingCart, Tag, PauseCircle, Hash, GitMerge, Split, Save, Download, Upload, Trash2, RefreshCw } from 'lucide-vue-next'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import { api, ApiError } from '@/api/client'
 import {
   FIELD_WHITELIST, CONDITION_OPS,
   NODE_SPECS, nodeSpec, defaultParams, edgeFamily, isValueProducer,
-  starterBlueprint, toBlueprintDoc,
+  starterBlueprint, toBlueprintDoc, parseBlueprintDoc,
 } from '@/lib/blueprint'
 import type { BlueprintDoc, BlueprintNodeType, BpNode, BpEdge, NodeFamily } from '@/lib/blueprint'
 import { highlightLua } from '@/lib/lua-highlight'
@@ -253,6 +254,37 @@ function parseLoose(raw: string): unknown {
   return raw !== '' && Number.isFinite(v) ? v : raw
 }
 
+/** `in` 的数组成员：params.value 是 unknown[]，面板逐行编辑 —— 每行一个
+ * 成员，parseLoose 定型（数字/布尔/字符串）。删除 = 抽掉该行；空串行不进
+ * 数组（与 setParam 的空值即删除同语义）。 */
+const inMembers = computed<string[]>(() => {
+  const v = selectedNode.value?.params.value
+  return Array.isArray(v) ? v.map((m) => String(m)) : []
+})
+
+function setInMembers(members: string[]): void {
+  const n = selectedNode.value
+  if (!n) return
+  const typed = members.filter((m) => m !== '').map(parseLoose)
+  if (typed.length === 0) delete n.params.value
+  else n.params.value = typed
+  void scheduleCompile()
+}
+
+function onInMemberInput(idx: number, raw: string): void {
+  const members = [...inMembers.value]
+  members[idx] = raw
+  setInMembers(members)
+}
+
+function addInMember(): void {
+  setInMembers([...inMembers.value, ''])
+}
+
+function removeInMember(idx: number): void {
+  setInMembers(inMembers.value.filter((_, i) => i !== idx))
+}
+
 // ── 编译（去抖） ───────────────────────────────────────────────────────────
 
 const compiling = ref(false)
@@ -351,6 +383,56 @@ function doExport(): void {
   a.download = `${strategyName.value.trim() || 'untitled_strategy'}.json`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+// ── 导入：与导出成对。`in` 操作符的数组成员此前靠「导出→手填」，填完回不来
+// —— 导入把这条路闭环：同一份文档读回画布。面板红线（backtest-ipc 门）禁
+// 一切本地文件读取面（文件选择框 / FileReader 都在黑名单），所以导入走
+// 粘贴：textarea 粘贴 JSON 文本，同一 parseBlueprintDoc 校验，拒绝原样亮出。
+
+const importing = ref(false)
+const importOpen = ref(false)
+const importText = ref('')
+const importError = ref<string | null>(null)
+
+function doImportOpen(): void {
+  importOpen.value = true
+  importError.value = null
+  importText.value = ''
+}
+
+function doImportApply(): void {
+  importing.value = true
+  try {
+    const result = parseBlueprintDoc(importText.value)
+    if ('error' in result) {
+      importError.value = result.error
+      return
+    }
+    const doc = result.doc
+    clearCanvas()
+    strategyName.value = doc.name || 'untitled_strategy'
+    syncSaveName(strategyName.value)
+    // 与预载同款纵向布局：文档 id 就是画布 id（导出原样序列化，导入原样落位）。
+    let y = 40
+    for (const n of doc.nodes) {
+      bpNodes.value.push(n)
+      addNodes([{ id: n.id, type: 'bp', position: { x: 80, y }, data: { bpType: n.type } }])
+      y += 110
+    }
+    for (const e of doc.edges) {
+      bpEdges.value.push(e)
+      pushFlowEdge(e)
+    }
+    selectedId.value = null
+    importOpen.value = false
+    importText.value = ''
+    // 清空触发的去抖编译（350ms）会拿旧图空跑一次；下一拍再排一次编译，
+    // 用导入图的结果覆盖它。
+    void nextTick(() => scheduleCompile())
+  } finally {
+    importing.value = false
+  }
 }
 
 // 首访加载示例模板：操作员从一个能跑的蓝图开始，而不是空白网格。
@@ -716,11 +798,21 @@ function exitSourceMode(): void {
                     <option v-for="op in CONDITION_OPS" :key="op" :value="op">{{ op }}</option>
                   </select>
                 </label>
-                <label v-if="selectedNode.params.op !== 'in'" class="flex flex-col gap-1">
+                <template v-if="selectedNode.params.op === 'in'">
+                  <div class="flex flex-col gap-1">
+                    <span class="text-[11.5px] text-muted-fg">成员列表（每行一个：数字 / 文本 / true|false）</span>
+                    <div v-for="(m, i) in inMembers" :key="i" class="flex items-center gap-1.5">
+                      <Input size="sm" :model-value="m" @update:model-value="onInMemberInput(i, $event)" />
+                      <Button variant="ghost" size="icon-sm" title="删除该成员" @click="removeInMember(i)"><Trash2 /></Button>
+                    </div>
+                    <p v-if="inMembers.length === 0" class="text-[11px] leading-snug text-faint-fg">成员列表为空 —— `in` 永假。点下面加一个。</p>
+                    <Button variant="outline" size="sm" class="mt-0.5 self-start" @click="addInMember">＋ 加成员</Button>
+                  </div>
+                </template>
+                <label v-else class="flex flex-col gap-1">
                   <span class="text-[11.5px] text-muted-fg">阈值（数字 / 文本 / true|false）</span>
                   <Input size="sm" :model-value="String(selectedNode.params.value ?? '')" @update:model-value="setParam('value', parseLoose($event))" />
                 </label>
-                <p v-else class="text-[11px] leading-snug text-faint-fg">`in` 的 value 是数组：先导出 JSON 手填成员再保存（保存按当前画布，数组成员留在导出文件里）。</p>
                 <label class="flex flex-col gap-1">
                   <span class="text-[11.5px] text-muted-fg">左操作数字段（可选；留空 = 吃操作数入边）</span>
                   <select
@@ -806,8 +898,27 @@ function exitSourceMode(): void {
         <Input :model-value="saveName" size="sm" class="!w-52" placeholder="保存名（ASCII）" @update:model-value="syncSaveName" />
         <Button variant="gold" size="sm" :disabled="!canSave" @click="doSave(false)"><Save /> 保存策略包</Button>
         <Button variant="default" size="sm" :disabled="!canSave" @click="doExport"><Download /> 导出 JSON</Button>
+        <Button variant="default" size="sm" :disabled="importing" @click="doImportOpen"><Upload /> 导入 JSON</Button>
         <Button v-if="needOverwrite" variant="danger" size="sm" :disabled="saving" @click="doSave(true)">同名已存在 —— 确认覆盖</Button>
       </div>
+      <div v-if="importOpen" class="mt-3 flex flex-col gap-2 rounded-md border border-line bg-panel-2 p-3">
+        <label class="label-micro" for="bp-import-text">粘贴蓝图 JSON（v1 文档 —— 导出文件的全文，或手写文档）</label>
+        <textarea
+          id="bp-import-text"
+          v-model="importText"
+          class="h-40 w-full resize-y rounded-md border border-line bg-panel-2 p-2.5 font-mono text-[11.5px] leading-relaxed text-fg outline-none focus:border-primary"
+          spellcheck="false"
+          placeholder='{ "version": 1, "name": "...", "nodes": [...], "edges": [...] }'
+        ></textarea>
+        <div class="flex items-center gap-2">
+          <Button variant="default" size="sm" :disabled="importing || importText.trim() === ''" @click="doImportApply">读入画布</Button>
+          <Button variant="ghost" size="sm" @click="importOpen = false">取消</Button>
+          <span class="text-[11px] text-faint-fg">导入会替换当前画布内容（先导出留底）。</span>
+        </div>
+      </div>
+      <AlertBanner v-if="importError" tone="error" title="导入被拒（蓝图文档未落画布）" class="mt-2.5">
+        <span class="font-mono text-[12px] break-all">{{ importError }}</span>
+      </AlertBanner>
       <AlertBanner v-if="saveError" tone="error" title="保存被拒（内核 blueprint.save）" class="mt-2.5">
         <span class="font-mono text-[12px] break-all">{{ saveError }}</span>
       </AlertBanner>
