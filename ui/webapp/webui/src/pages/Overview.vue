@@ -239,6 +239,32 @@ const positions = computed(() =>
 const engine = computed(() => snap.value?.stats ?? {})
 
 /**
+ * 引擎计数卡的口径标注（真线报告 2026-10-24：切户后「引擎计数没跟随账户」）。
+ * 数据链定谳（为什么切不动）：
+ *   快照 stats 链 = 内核 CoreStats（service.rs，进程内单份、自 boot 饱和累计，
+ *   books/rounds 在 on_book/on_rollover 事件路径上自增、evaluations/signals
+ *   在评估循环上自增，均不带 accountId 维度）→ IpcClient::stats（空参
+ *   engine.stats）→ UiSnapshot.stats（EngineStatsView）→ 网关 render_json_full
+ *   原样透传 → /api/snapshot → Overview 的 counters。内核唯一带账户维的
+ *   engine.stats 面是 `strategies` 行（engine.stats?accountId= 的
+ *   strategy_stats_for_account 切片），顶层的 books/rounds/evaluations/
+ *   signals/placeRejected 是进程级事件计数，切片在内核侧就不成立 —— 强行
+ *   按 venue 摊分是把一个事实掰成五个错数。所以修的是归属可见性而不是
+ *   数字：issue 592 的死字「进程级」升级为身份标注（与 roundTileTitle/
+ *   balanceTitle 同口径）—— 显示账户在场时标出「进程级 · {account}」，
+ *   副行点明数字属于内核进程而非该账户；账户未定（快照/账户簿未到的一
+ *   拍）回落「进程级」——不猜。未平仓浮动合计仍是例外：读上方已按账户
+ *   过滤的持仓集，是账户切片读数。
+ */
+const engineCounterScope = computed(() => {
+  const id = store.activeAccount
+  return id ? `进程级 · ${id}` : '进程级'
+})
+/** 卡标题：静态四字 + 口径尾巴，与 roundTileTitle 的「当前轮次 · {venue}」
+ * 同一形态 —— 标题自己说出口径，不依赖角落里的灰字被看见。 */
+const engineCounterLabel = computed(() => `引擎计数 · ${engineCounterScope.value}`)
+
+/**
  * Feed counters, all cumulative since core boot.
  *
  * `tops` is deliberately absent. The wire format and the `market_api` ABI both
@@ -442,12 +468,14 @@ const needsStrategyHint = computed(() => {
       </Card>
 
       <Card>
-        <CardHeader label="引擎计数">
+        <CardHeader :label="engineCounterLabel">
           <!-- 引擎计数是内核进程级事实（feed/评估/信号自 boot 起累计），无
-               账户切片 —— 与余额/持仓的账户自有读数不同源，如实标注归属。
-               未平仓浮动合计是例外：它读上方已按账户过滤的持仓集。 -->
+               账户切片 —— 与余额/持仓的账户自有读数不同源，如实标注归属
+               （engineCounterScope：显示账户在场时点名账户，免得读成该账
+               户自己的计数）。未平仓浮动合计是例外：它读上方已按账户过滤
+               的持仓集，是账户切片读数。 -->
           <template #action>
-            <span class="text-[10px] text-faint-fg">进程级</span>
+            <span class="text-[10px] text-faint-fg">{{ engineCounterScope }}</span>
           </template>
         </CardHeader>
         <div class="grid grid-cols-2 gap-x-5 gap-y-3.5 sm:grid-cols-3 xl:grid-cols-2">
