@@ -437,6 +437,36 @@ impl Ledger {
         self.journal.push_back(entry);
         true
     }
+
+    /// 账户退役（`account.remove`）的 journal 收尾：删掉该账户的磁盘流水
+    /// 文件并清空内存 trail。为什么删文件而不是留 tombstone —— 同名 id 的
+    /// 下一次 `account.create` 是一个**新身份的新账本**，不是老账户的续弦；
+    /// 留着旧文件，boot 的 `attach_journals` 会把上一世的成交流水整表回放
+    /// 进新账本（生产 kalshi 实锤：6 次 建户→删户 循环叠出 6 笔幽灵
+    /// `seed@account.create`，Σamount 比真实余额多出整整 5000 —— 流水卡
+    /// 与任何账户都对不上的根因）。内存 trail 同步清空：账户都没了，trail
+    /// 也不该再占窗口。文件不存在（本就无 journal 的账户）是合法 no-op。
+    /// 返回 false 仅当删除失败（调用方决定是否告警）—— 删除失败比重写失
+    /// 败更糟（旧文件会复活），所以调用方在 false 时拒绝整个 remove。
+    pub fn retire_journal_file(&mut self) -> bool {
+        self.journal.clear();
+        match self.journal_path.clone() {
+            Some(path) => match std::fs::remove_file(&path) {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "account remove: journal file delete failed — the \
+                         stale trail would resurrect at the next boot"
+                    );
+                    false
+                }
+            },
+            None => true,
+        }
+    }
 }
 
 /// Market-agnostic reservation lifecycle (see `ledger_api`). The core pipeline
@@ -811,6 +841,55 @@ mod tests {
         ));
         assert_eq!(restored.balance(), dec!(1000), "replay == seed");
         assert_eq!(restored.journal_snapshot().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// account.remove 的 journal 收尾（流水卡幽灵 seed 根因修复）：删文件 +
+    /// 清 trail，同名 id 下一次 create 是新账本 —— boot 的 attach_journals
+    /// 再也回放不出上一世的成交。缺文件的合法 no-op 与删除失败语义一并在
+    /// 这里钉住。
+    #[test]
+    fn account_retire_deletes_the_journal_file_and_clears_the_trail() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-ledger-retire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("kalshi.journal.jsonl");
+        let mut l = Ledger::new();
+        l.set_journal_path(path.clone());
+        l.seed(dec!(1000));
+        l.settle_buy_fill("o1", dec!(30), Decimal::ZERO);
+        l.settle_sell_fill(dec!(21), dec!(1));
+        assert!(path.exists(), "the trail is on disk");
+        assert!(l.retire_journal_file());
+        assert!(!path.exists(), "the file is gone — no resurrection");
+        assert!(
+            l.journal_snapshot().is_empty(),
+            "the memory trail is cleared too"
+        );
+        assert_eq!(
+            l.balance(),
+            dec!(990),
+            "the balance is NOT touched — the retiree leaves with its cash trail, the book arithmetic stays exact"
+        );
+
+        // A same-id re-create replays NOTHING: the boot replay over the
+        // (now absent) file is empty, and the fresh seed starts clean.
+        let fresh = Ledger::new();
+        assert!(fresh.journal_snapshot().is_empty());
+
+        // A missing file is a legal no-op (an account with no journal).
+        let mut bare = Ledger::new();
+        bare.set_journal_path(dir.join("ghost.journal.jsonl"));
+        assert!(bare.retire_journal_file());
+        // A pathless ledger (backtester posture) retires fine too.
+        let mut pathless = Ledger::new();
+        assert!(pathless.retire_journal_file());
         let _ = std::fs::remove_dir_all(dir);
     }
 

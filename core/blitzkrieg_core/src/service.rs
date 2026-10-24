@@ -4001,6 +4001,24 @@ impl Core {
                     ),
                 )
             })?;
+        // Journal 收尾（现金流水卡与任何账户对不上的根因修复）：把该账户的
+        // 磁盘流水文件删掉，内存 trail 同步清空。同名 id 的下一次
+        // `account.create` 是新账本，不是老账户续弦 —— 留着旧文件，下一次
+        // boot 的 attach_journals 会把上一世的成交流水整表回放进来（生产
+        // kalshi 实锤：6 轮建/删叠出 6 笔幽灵 seed@account.create，Σamount
+        // 比真实余额多 5000）。删文件失败则整体拒绝 —— 此时 accounts.toml
+        // 已收下了删除（persist 先行的代价），但内存未动、旧 journal 还在，
+        // 重试一次即可收敛；拒绝的消息如实告知。
+        if !self.accounts.get_mut(id)?.retire_journal_file() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.remove：`{id}` 的流水文件删除失败 —— accounts.toml \
+                     已落盘但内存未动，旧流水文件还在；请重试一次，问题持续 \
+                     请检查 data/ledger/ 的写权限"
+                ),
+            ));
+        }
         self.accounts.remove(id)?;
         self.accounts.repair_active_after_removal(id);
         // 显示账户配置化: the removal must not orphan the display pointer —
