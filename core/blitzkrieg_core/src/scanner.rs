@@ -226,6 +226,19 @@ impl Scanner {
         self.round_timing_for(venue, self.cfg.round_duration_sec, local_now_ms)
     }
 
+    /// E3 (轮次多族收尾): the legacy VENUE bucket's clock at an EXPLICIT
+    /// duration — `round_timing()` with only the duration refined. The
+    /// strategy-context sites (`evaluate`/`replay_candidates`/
+    /// `confirmed_diagnostics`) have no single candidate to name a venue,
+    /// so the venue dimension stays the historical legacy bucket (the same
+    /// fold `round_timing()` read) while the duration grid follows the
+    /// market rows' own declared family. A single-family table resolves the
+    /// duration to the configured grid, making this verbatim
+    /// `round_timing()`.
+    pub fn round_timing_legacy_at(&self, duration_sec: i64, local_now_ms: i64) -> RoundTiming {
+        self.round_timing_for(DEFAULT_VENUE, duration_sec, local_now_ms)
+    }
+
     /// The multi-family clock (B1a): the round timing of ONE (venue, duration)
     /// family. The slot grid comes from the FAMILY's duration
     /// (`duration` sec per slot, venue-offset adjusted), the family's own
