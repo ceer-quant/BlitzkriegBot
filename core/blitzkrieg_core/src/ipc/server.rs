@@ -2764,19 +2764,16 @@ async fn handle_line(
         }
 
         method::NET_CHECK => {
-            // Resolve the plugin and drop the registry lock BEFORE awaiting: the
-            // probe does real network I/O with multi-second timeouts, and
-            // holding a lock the maintenance tick needs would turn a diagnostic
-            // into a stall. The registry hands out an `Arc`, so the handle
-            // outlives the borrow.
-            let plugin = registry
-                .active()
-                .and_then(|name| registry.get(&name))
-                .or_else(|| registry.names().first().and_then(|n| registry.get(n)))
-                // A market-free build still answers: the no-op plugin's default
-                // probe reports `unsupported`, which is honest and, unlike an
-                // error, keeps the report shape every UI reads.
-                .unwrap_or_else(|| std::sync::Arc::new(crate::market::NoopMarketPlugin));
+            // The probe follows the DISPLAY account (显示账户)：操作员读到的是
+            // 他正在看的那个 venue 的网络判定——选择逻辑（含未绑定的旧语义
+            // 回落）收在 `net_check_plugin`，那里有按名字的单测。
+            let display_venue = {
+                let c = core.lock().await;
+                c.accounts().display_venue().to_string()
+            };
+            let plugin = crate::market::net_check_plugin(registry, display_venue.as_str());
+            // The registry hands out an `Arc`, so the handle outlives the
+            // borrow; the probe's real network I/O runs lock-free.
             let report = plugin.net_check().await;
             serde_json::to_value(report).map_err(|e| {
                 (

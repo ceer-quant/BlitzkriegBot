@@ -273,6 +273,28 @@ impl blitzkrieg_market_api::MarketPlugin for NoopMarketPlugin {
     }
 }
 
+/// `net.check` 的插件解析（网络诊断跟随显示账户）：探针走的是操作员正在看的
+/// venue——display account 的 venue 绑定（#561/#562 显示账户配置化，与行情页/
+/// 引擎计数同一身份）。未绑定（空串）保持旧语义 active 席位 → 首个注册名；
+/// 绑定了但注册表里没有该插件（编译面缺插件/名字错位）交给 no-op 插件——它的
+/// 默认探针报告 `unsupported`，诚实且报文形状每个 UI 都认识，绝不去探另一个
+/// venue 冒充这个账户的网络。
+pub(crate) fn net_check_plugin(
+    registry: &registry::MarketPluginRegistry,
+    display_venue: &str,
+) -> std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin> {
+    if display_venue.is_empty() {
+        return registry
+            .active()
+            .and_then(|name| registry.get(&name))
+            .or_else(|| registry.names().first().and_then(|n| registry.get(n)))
+            .unwrap_or_else(|| std::sync::Arc::new(NoopMarketPlugin));
+    }
+    registry
+        .get(display_venue)
+        .unwrap_or_else(|| std::sync::Arc::new(NoopMarketPlugin))
+}
+
 /// `market.plugin.get` readout (#485): the running session's active plugin,
 /// the compiled-in registry, and what a restart would select. The registry
 /// lives in the server's shared context (NOT inside Core — the core is
@@ -751,6 +773,38 @@ mod set_tests {
             }));
         }
         reg
+    }
+
+    // ── net.check 插件解析（网络诊断跟随显示账户） ─────────────────────────
+
+    #[test]
+    fn net_check_probes_the_display_venues_plugin() {
+        let reg = registry_with(&["alpha", "beta"]);
+        assert_eq!(net_check_plugin(&reg, "beta").name(), "beta");
+        assert_eq!(net_check_plugin(&reg, "alpha").name(), "alpha");
+    }
+
+    #[test]
+    fn net_check_falls_back_to_active_then_first_when_display_unbound() {
+        let reg = registry_with(&["alpha", "beta"]);
+        // 未绑定：保持旧语义——active 席位（无 active 时首个注册名）。
+        assert_eq!(net_check_plugin(&reg, "").name(), "alpha");
+        reg.set_active("beta");
+        assert_eq!(net_check_plugin(&reg, "").name(), "beta");
+    }
+
+    #[test]
+    fn net_check_refuses_to_probe_another_venue_for_a_bound_unknown() {
+        // 绑定了 ghost venue 而注册表没有它：no-op（默认探针报 unsupported）
+        // ——绝不拿 alpha 的网络冒充 ghost 的。
+        let reg = registry_with(&["alpha"]);
+        assert_eq!(net_check_plugin(&reg, "ghost").name(), "none");
+    }
+
+    #[test]
+    fn net_check_empty_registry_still_answers_via_noop() {
+        let reg = registry_with(&[]);
+        assert_eq!(net_check_plugin(&reg, "").name(), "none");
     }
 
     fn core_with_cell(path: Option<String>) -> tokio::sync::Mutex<crate::service::Core> {
