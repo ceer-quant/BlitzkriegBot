@@ -92,13 +92,47 @@ check('「检查更新」按钮在 checkEnabled=false 时禁用并说明', () =>
 })
 
 check('自动更新开关的值来自内核，写盘失败要报错', () => {
-  // The switch binds the KERNEL's autoUpdate (snapshot), not a local ref.
-  assert.match(settingsPage, /:model-value="version\.autoUpdate"/, '开关没有绑定内核的 autoUpdate')
+  // The control binds the KERNEL's autoUpdate (snapshot), not a local ref.
+  // 2026-10 操作者方案：Switch 收编成「徽章顺序切换」—— 点击徽章循环开/关，
+  // 取值与写路径不变；绑定从 `:model-value="version.autoUpdate"` 变成徽章的
+  // variant/文字判定与循环点击的取反源，门盯同一条数据线（内核读数进、
+  // configure 出）。
+  assert.match(
+    settingsPage,
+    /version\.autoUpdate \? 'up' : 'default'/,
+    '自动更新徽章没有绑定内核的 autoUpdate（variant 判定缺失）',
+  )
+  assert.match(settingsPage, /toggleAutoUpdate\(!version\.autoUpdate\)/, '徽章循环点击没有取内核的 autoUpdate 反值')
   assert.ok(client.includes("'/version/configure'"), 'configure 路由缺失')
   assert.ok(client.includes("'/version/check'"), 'check 路由缺失')
   // configure 的调用方必须把 error 展示出来 —— 静默回退的开关比没有更糟（§7.4）。
   const toggle = settingsPage.slice(settingsPage.indexOf('toggleAutoUpdate'))
   assert.ok(toggle.includes('versionErr.value'), 'configure 失败没有落到可见的错误条')
+})
+
+console.log('徽章顺序切换（2026-10 操作者方案）—— 交互形态变，取值/写路径不变')
+
+check('出网检查：Switch 收编成徽章循环，语义仍是内核的 checkEnabled', () => {
+  // 徽章 variant 直接吃内核读数（已允许=up / 已关闭=default），点击把反值交给
+  // 同一条 configure({ checkEnabled }) —— 不自持本地状态，不先斩后奏。
+  assert.match(
+    settingsPage,
+    /version\.checkEnabled \? 'up' : 'default'/,
+    '出网检查徽章没有绑定内核的 checkEnabled',
+  )
+  assert.match(settingsPage, /toggleUpdateCheck\(!version\.checkEnabled\)/, '徽章循环点击没有取 checkEnabled 反值')
+  assert.ok(settingsPage.includes('已允许') && settingsPage.includes('已关闭'), '「已允许/已关闭」词汇缺失 —— 徽章状态不可分辨')
+})
+
+check('两处徽章循环都是真按钮：可聚焦、busy 期禁用', () => {
+  // 操作形态合入原生 button（键盘可达）；写路径在途时禁止再点 —— 连点会把
+  // 两次 configure 排队，读数没回来就把相反的值又写一遍。
+  const buttons = settingsPage.match(/<button[^>]*type="button"[\s\S]*?<\/button>/g) ?? []
+  assert.ok(buttons.length >= 2, `徽章循环按钮缺位（找到 ${buttons.length} 颗）`)
+  for (const b of buttons) {
+    assert.match(b, /:disabled="configureBusy"/, '徽章循环按钮没有 busy 禁用 —— 连点会双写')
+    assert.match(b, /aria-pressed=/, '徽章循环按钮缺 aria-pressed —— 状态对读屏不可见')
+  }
 })
 
 console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)

@@ -149,6 +149,18 @@ check('活跃配对徽标：arbActivePairs 缺失不渲染（feature-detect）',
   assert.ok(m, '活跃配对徽标缺 v-if feature-detect 门 —— 字段缺失必须不渲染')
 })
 
+check('原因列：徽标与展开按钮同一条 flex 队列，不靠内容长度碰运气', () => {
+  // 2026-10 截图重叠修复：「N 对」徽标与盾牌/下拉按钮曾裸排在 td 里 —— 没有
+  // flex、没有 gap、徽标不可收缩，窄列（7%）下内容一长就压到按钮上。结构修法
+  // 钉三件事：flex 容器 + gap 保底间距；按钮 shrink-0（控件永不被压）；徽标
+  // min-w-0 shrink（可收缩，极窄时 flex-wrap 兜底换行而不是叠字）。
+  const cell = page.match(/<td class="px-2 py-2\.5 text-right">\s*<!-- 原因列[\s\S]*?<\/td>/)
+  assert.ok(cell, '原因列 td 缺失')
+  assert.match(cell[0], /flex flex-wrap items-center justify-end gap-x-1\.5/, '徽标与按钮没有排进同一条 flex 队列（gap 缺失）')
+  assert.match(cell[0], /class="shrink-0"\s+variant="ghost"/, '展开按钮必须 shrink-0 —— 控件被压缩就是新的重叠面')
+  assert.match(cell[0], /max-w-full min-w-0 shrink whitespace-nowrap/, '徽标缺收缩约束 —— 不可收缩就会重新压到按钮上')
+})
+
 check('client.ts StrategyStatsRow 带五个可选 arb 字段（老内核缺省 = undefined）', () => {
   for (const f of ['arbNetPnlUsd', 'arbWins', 'arbLosses', 'arbClosedTrades', 'arbActivePairs']) {
     assert.match(
