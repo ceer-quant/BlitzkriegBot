@@ -11830,7 +11830,7 @@ impl Core {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "risk.setExit needs at least one of stopLossPct / takeProfitPct / \
-                 forceExitSec; read the current values with risk.limits"
+                 forceExitSec / trailingEnabled; read the current values with risk.limits"
                     .to_string(),
             ));
         }
@@ -11893,6 +11893,18 @@ impl Core {
             });
         }
 
+        // A bool has no illegal value to refuse — the patch either names it or
+        // it doesn't. The from/to audit strings are `true`/`false` verbatim,
+        // same convention as the decimal fields' `to_string`.
+        if let Some(on) = patch.trailing_enabled {
+            changes.push(ExitSetChange {
+                field: "trailingEnabled",
+                from: current.trailing_enabled.to_string(),
+                to: on.to_string(),
+                effect: "live",
+            });
+        }
+
         if changes.is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -11915,6 +11927,9 @@ impl Core {
             }
             if let Some(sec) = patch.force_exit_sec {
                 exit.force_exit_sec = sec;
+            }
+            if let Some(on) = patch.trailing_enabled {
+                exit.trailing_enabled = on;
             }
             self.config.positions.exit = exit.clone();
             let mut positions = self.config.positions.clone();

@@ -44,12 +44,20 @@
 #   take_profit_pct       = 100   fixed take-profit, % of entry (a backstop only:
 #                                 normal exits ride the trailing stop)
 #   stop_loss_pct         = 12    stop-loss, % of entry
+#   trailing_enabled      = false the trailing stop's arming switch. OFF is the
+#                                 issue-356 calibration (the proven operator
+#                                 never sold into profit — every exit was a
+#                                 REDEEM/MERGE); strategies that DO sell into
+#                                 profit (spread_arb's mean-reversion exits)
+#                                 want it on, and it is also hot-writable per
+#                                 session via `risk.setExit` (trailingEnabled).
 #   trailing_min_high_pct = 15    profit (%) needed before the trailing stop arms
 #   min_trail_pct         = 8     floor for the trailing stop's give-back (%)
 #
 # [exit]
 # stop_loss_pct = 12
 # min_trail_pct = 8
+# trailing_enabled = true
 
 # ── Systemic risk limits (E26 / DEV_V0_3 §4) ─────────────────────────────────
 # Nine NEW limits that bound what any entry can put at risk, each shipped at
