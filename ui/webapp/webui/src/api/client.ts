@@ -1870,13 +1870,16 @@ export interface CumulativeTradeSummary {
 }
 
 /** One venue's own round clock (`round.venueRounds` row, issue 550 症状②)：
- * 与 trading 侧 per-candidate 门同一口径的 per-venue slot/age/timeLeft。 */
+ * 与 trading 侧 per-candidate 门同一口径的 per-venue slot/age/timeLeft。
+ * `durationSec`（B1a 增量字段，轮次多族）：该钟行的轮长族（秒）；老内核
+ * 缺席 → undefined，消费方 feature-detect 回落全局轮长。 */
 export interface VenueRound {
   /** The venue tag (empty = legacy bucket). */
   venue: string
   slot: number
   ageSec: number
   timeLeftSec: number
+  durationSec?: number
 }
 
 export interface Round {

@@ -34,6 +34,11 @@ export interface PanelAccountRow {
    * 级为全局语义）。可见性与它无关：策略列表恒显全部。
    */
   strategies?: string[]
+  /**
+   * 该账户的轮长族声明（轮次多族 B1d；秒）。空数组 = 未声明限制（许可轴
+   * 空集放行）；undefined = 老内核缺字段。面板周期集卡（PR-D）读它。
+   */
+  rounds?: number[]
   /** 账户自有账本的预留/可用（账户级余额瓦片走这里，进程级 ledger 不再是
    *  余额来源 —— E28 §9.5：一个账户一套账本）。 */
   reserved?: string | number
@@ -292,6 +297,7 @@ export const usePanelStore = defineStore('panel', () => {
           available: string | number
           venue?: string
           strategies?: unknown
+          rounds?: unknown
           reserved?: string
         }>
       }
@@ -305,6 +311,7 @@ export const usePanelStore = defineStore('panel', () => {
         available: a.available,
         venue: a.venue ?? '',
         strategies: Array.isArray(a.strategies) ? [...(a.strategies as string[])] : undefined,
+        rounds: Array.isArray(a.rounds) ? [...(a.rounds as number[])] : undefined,
         reserved: a.reserved ?? '',
       }))
       // issue 561：镜像只供行数据与显示兜底 —— display 账户优先读快照

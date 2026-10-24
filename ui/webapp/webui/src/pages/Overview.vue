@@ -13,7 +13,7 @@ import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
-import { filterByAccount } from '@/lib/account-filter'
+import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner,
 } from '@/lib/safety'
@@ -81,6 +81,16 @@ const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wall
 // 账户过滤后的行求和 —— 回落也必须过滤，不能用全局行。
 const tradeRows = computed(() => store.tradeRows)
 const accountFilteredRows = computed(() => filterByAccount(tradeRows.value, store.activeAccount).rows)
+// 权益曲线跟随显示账户（像真实余额一样，2026-10-20 操作者指令）：曲线此前
+// 读快照顶层的全局 tradeRows —— 余额瓦片已切到账户自有读数，曲线还画着
+// 全进程的成交（跨所跑多账户时 B 账户的曲线里混着 A 的亏），口径劈叉。
+// 读数源 = 已平仓交易瓦片同一过滤链（账户切片）再叠 venue 域
+// （filterByVenue：显示账户绑定的所；未绑定 = 全域）。无显示账户时全量行
+// 即进程级一拍（老行为）。
+const equityCurveRows = computed(() => {
+  if (!store.activeAccount) return tradeRows.value
+  return filterByVenue(accountFilteredRows.value, store.activeAccountVenue).rows
+})
 const trades = computed(() => {
   // 切片在场且报了成交数即用（内核已按账户过滤，与 HftPage cumStats 同型）；
   // 切片报 0 笔时也回落行兜底——老内核切片字段可能缺席，行求和仍按账户过滤。
@@ -152,6 +162,33 @@ const accountBadge = computed(() => {
 })
 
 const round = computed(() => snap.value?.round ?? null)
+
+// ── 当前轮次跟随显示账户（像真实余额一样，2026-10-20 操作者指令）────────────
+// 全局标量块是各 venue 最早到期的保守钟，多插件（或多族）下通常是先接入
+// 那个所/族的钟 —— 显示账户绑着 kalshi 时瓦片却标 polymarket 的 slot，
+// 与 HftPage 修过的 issue 550 同一症状。跟随链照抄行情页（issue 550/559
+// 建立的口径）：identityVenue（displayVenue 优先，老内核回落账户绑定）
+// 有自己的 venueRounds 行时读该行（slot/已过秒随该所的钟），行缺席
+// （老内核没有 venueRounds / 该所钟未开口）feature-detect 回落全局块。
+const identityVenue = computed<string>(() => {
+  const s = snap.value
+  if (s?.displayAccount !== undefined || s?.displayVenue !== undefined) {
+    return s?.displayVenue ?? ''
+  }
+  return store.activeAccountVenue
+})
+const venueRound = computed(() => {
+  const v = identityVenue.value
+  if (!v) return null
+  const rows = snap.value?.round?.venueRounds
+  if (!Array.isArray(rows) || rows.length === 0) return null
+  return rows.find((r) => r.venue === v) ?? null
+})
+const roundDisplay = computed(() => {
+  const vr = venueRound.value
+  if (vr) return { slot: vr.slot, ageSec: vr.ageSec }
+  return round.value
+})
 // E28 (§9.5) + issue 561: the 当前持仓 table is scoped to the display account
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
 // issue 561（裁决 1）后余额瓦片同样是账户自有读数（account.list 行）——
@@ -293,18 +330,23 @@ const needsStrategyHint = computed(() => {
           <span v-if="accountBadge">{{ accountBadge }}</span>
           <span v-if="accountBadge && walletAddr" class="opacity-50"> · </span>
           <span v-if="walletAddr" class="num">{{ shortAddr(walletAddr) }}</span>
+          <!-- 钱包地址目前是快照顶层单值（进程级身份）：显示账户带 venue
+               绑定时如实标注，免得读成「每个账户各有一个地址」。 -->
+          <span v-if="walletAddr && store.activeAccountVenue" class="opacity-50">
+            · {{ store.activeAccountVenue }} 钱包（进程级单值）
+          </span>
         </div>
       </StatTile>
 
-      <StatTile label="当前轮次" :value="round ? `#${round.slot}` : '—'">
+      <StatTile label="当前轮次" :value="roundDisplay ? `#${roundDisplay.slot}` : '—'">
         <template #sub>
-          <span v-if="round">{{ duration(round.ageSec) }} 已过 · {{ duration(round.timeLeftSec) }} 剩余</span>
+          <span v-if="roundDisplay">{{ duration(roundDisplay.ageSec) }} 已过 · {{ duration(round?.timeLeftSec ?? 0) }} 剩余</span>
           <!-- issue 488: 行情插件活跃但轮次空 = 数据源没到达（网络/代理），不是「等待插件」。 -->
           <span v-else-if="snap?.marketActiveName">行情插件 {{ snap?.marketActiveName }} 活跃，等待轮次数据</span>
           <span v-else>等待行情插件</span>
         </template>
-        <div v-if="round" class="mt-2">
-          <Badge :variant="round.canTrade ? 'up' : 'gold'" dot>{{ round.canTrade ? '可交易' : '等待窗口' }}</Badge>
+        <div v-if="roundDisplay" class="mt-2">
+          <Badge :variant="round?.canTrade ? 'up' : 'gold'" dot>{{ round?.canTrade ? '可交易' : '等待窗口' }}</Badge>
         </div>
       </StatTile>
 
@@ -356,11 +398,18 @@ const needsStrategyHint = computed(() => {
             <Badge variant="default" dot><RollingNumber :value="trades.count" /> 笔</Badge>
           </template>
         </CardHeader>
-        <EquityCurve :rows="tradeRows" :height="196" />
+        <EquityCurve :rows="equityCurveRows" :height="196" />
       </Card>
 
       <Card>
-        <CardHeader label="引擎计数" />
+        <CardHeader label="引擎计数">
+          <!-- 引擎计数是内核进程级事实（feed/评估/信号自 boot 起累计），无
+               账户切片 —— 与余额/持仓的账户自有读数不同源，如实标注归属。
+               未平仓浮动合计是例外：它读上方已按账户过滤的持仓集。 -->
+          <template #action>
+            <span class="text-[10px] text-faint-fg">进程级</span>
+          </template>
+        </CardHeader>
         <div class="grid grid-cols-2 gap-x-5 gap-y-3.5 sm:grid-cols-3 xl:grid-cols-2">
           <div v-for="c in counters" :key="c.label" class="min-w-0">
             <div class="label-micro">{{ c.label }}</div>
