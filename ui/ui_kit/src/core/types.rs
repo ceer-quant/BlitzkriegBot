@@ -145,7 +145,7 @@ pub struct MarketPriceView {
     pub venue: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundView {
     pub slot: i64,
@@ -1101,5 +1101,31 @@ impl UiSnapshot {
             .as_ref()
             .map(|r| r.mode.as_str())
             .unwrap_or("unknown")
+    }
+
+    /// issue 550 / issue 559 的显示面口径：轮次钟跟随显示账户绑定的 venue。
+    ///
+    /// 回落链（与 webapp Overview/HftPage 的 feature-detect 同一纪律）：
+    /// 1. `venue_rounds` 里有 `identity_venue`（snapshot 的 `display_venue`，
+    ///    空串 = 老内核未下发 → 跳过）自己的行 → 读该行；
+    /// 2. 显示 venue 无行（或为空）→ 第一个非空 venue 的行（多族并存时
+    ///    保守钟与任一族都可能不同，披露第一族的钟比静默显示全局钟诚实；
+    ///    单 venue 老口径下它就是唯一一行，读数不变）；
+    /// 3. `venue_rounds` 整体缺席（pre-issue-550 内核，serde default 空表）
+    ///    或全为未分所行 → `None`，调用方回落全局 `round` 标量块 ——
+    ///    单族逐字节维持现行为。
+    pub fn display_venue_round(&self) -> Option<&VenueRoundView> {
+        let r = self.round.as_ref()?;
+        let rows = &r.venue_rounds;
+        if rows.is_empty() {
+            return None;
+        }
+        let identity = &self.display_venue;
+        if !identity.is_empty() {
+            if let Some(row) = rows.iter().find(|v| v.venue == *identity) {
+                return Some(row);
+            }
+        }
+        rows.iter().find(|v| !v.venue.is_empty())
     }
 }

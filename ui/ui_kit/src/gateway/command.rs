@@ -1124,6 +1124,16 @@ fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
         "round": round.map(|r| serde_json::json!({
             "slot": r.slot, "ageSec": r.age_sec, "timeLeftSec": r.time_left_sec,
             "markets": r.markets, "canTrade": r.can_trade,
+            // issue 550 / issue 559 显示面口径（TUI status 面漏网之一）：全局
+            // 标量块是各 venue 最早到期的保守钟，多族并存时 TUI status 面只
+            // 看得到它。这里把 snapshot 已类型化携带的 per-venue 轮次钟行原
+            // 样下发（与 web/mod.rs 快照下发的 venueRounds 同一形状）—— 新
+            // 面板按行选钟，老客户端忽略新键。老内核 venue_rounds 为空表 →
+            // 下发空数组，feature-detect 回落现行为，单族逐字节不变。
+            "venueRounds": r.venue_rounds.iter().map(|v| serde_json::json!({
+                "venue": v.venue, "durationSec": v.duration_sec, "slot": v.slot,
+                "ageSec": v.age_sec, "timeLeftSec": v.time_left_sec }))
+                .collect::<Vec<_>>(),
         })),
         "balance": s.balance.as_ref().map(|b| serde_json::json!({
             "balance": b.balance, "reserved": b.reserved, "available": b.available,
@@ -1417,5 +1427,81 @@ mod tests {
                 "COMMANDS row `{verb}` parses as a different command"
             );
         }
+    }
+
+    /// issue 550 / issue 559 显示面口径（TUI status 面漏网）：`status_json`
+    /// must forward the snapshot's typed per-venue round rows as a
+    /// `round.venueRounds` array beside the legacy global scalar block — the
+    /// TUI status surface reads this payload and had no venue rows at all. An
+    /// old core's empty `venue_rounds` degrades to an empty array (the key is
+    /// still written; legacy clients ignore it, the scalar block is untouched).
+    #[test]
+    fn status_json_carries_the_per_venue_round_rows() {
+        use crate::core::types::{RoundView, VenueRoundView};
+        use crate::gateway::supervisor::SupervisorConfig;
+
+        let disp = Dispatcher::new(
+            SupervisorConfig::from_env("/tmp/none-such.sock".into()),
+            false,
+        );
+        let round = |rows: Vec<VenueRoundView>| UiSnapshot {
+            round: Some(RoundView {
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+                markets: 2,
+                can_trade: true,
+                venue_rounds: rows,
+                ..RoundView::default()
+            }),
+            ..UiSnapshot::default()
+        };
+
+        // Multi-family: both rows travel verbatim, (venue, durationSec) intact.
+        let doc = status_json(
+            &disp,
+            &round(vec![
+                VenueRoundView {
+                    venue: "polymarket".into(),
+                    duration_sec: 900,
+                    slot: 7,
+                    age_sec: 1,
+                    time_left_sec: 299,
+                },
+                VenueRoundView {
+                    venue: "kalshi".into(),
+                    duration_sec: 3600,
+                    slot: 3,
+                    age_sec: 5,
+                    time_left_sec: 295,
+                },
+            ]),
+        );
+        assert_eq!(
+            doc["round"]["slot"],
+            serde_json::json!(7),
+            "the legacy global scalar block stays exactly where it was"
+        );
+        let vr = doc["round"]["venueRounds"].as_array().expect("rows array");
+        assert_eq!(vr.len(), 2, "one row per spoken (venue, family)");
+        assert_eq!(vr[0]["venue"], serde_json::json!("polymarket"));
+        assert_eq!(vr[0]["durationSec"], serde_json::json!(900));
+        assert_eq!(vr[1]["venue"], serde_json::json!("kalshi"));
+        assert_eq!(vr[1]["slot"], serde_json::json!(3));
+        assert_eq!(vr[1]["timeLeftSec"], serde_json::json!(295));
+
+        // Backward compatibility: a pre-issue-550 core's empty venue_rounds
+        // serialises as an EMPTY array — every legacy scalar field unchanged.
+        let doc = status_json(&disp, &round(Vec::new()));
+        assert_eq!(doc["round"]["slot"], serde_json::json!(7));
+        assert_eq!(doc["round"]["ageSec"], serde_json::json!(1));
+        assert_eq!(doc["round"]["timeLeftSec"], serde_json::json!(299));
+        assert_eq!(doc["round"]["markets"], serde_json::json!(2));
+        assert_eq!(doc["round"]["canTrade"], serde_json::json!(true));
+        assert_eq!(
+            doc["round"]["venueRounds"],
+            serde_json::json!([]),
+            "no rows → empty array, never a missing key"
+        );
     }
 }

@@ -63,11 +63,60 @@ pub fn render_html_full(
     let mode = esc(s.mode());
     let mut rows = String::new();
     if let Some(r) = &s.round {
-        rows.push_str(&format!(
-            "<div class=card><h2>Round</h2><div class=big>#{}</div><div class=sub>{}s old · {}s left · {}</div></div>",
-            r.slot, r.age_sec, r.time_left_sec,
-            if r.can_trade { "TRADING" } else { "WAITING" }
-        ));
+        // issue 550 / issue 559 显示面口径（TUI 三处漏网之一）：全局标量块
+        // 是各 venue 最早到期的保守钟，多族并存时状态页 headline 却读它 ——
+        // 显示账户绑着 kalshi 时卡上标的是 polymarket 的 slot。回落链照抄
+        // webapp Overview：display_venue 的 venueRounds 行优先（helper 的
+        // 缺省回落 = 第一个非空行），行整体缺席回落全局标量块 —— 单族
+        // 逐字节维持现行为。下面同时补 venueRounds 行渲染（有数据才渲染）。
+        let vr = s.display_venue_round();
+        let (slot, age, left) = match vr {
+            Some(v) => (v.slot, v.age_sec, v.time_left_sec),
+            None => (r.slot, r.age_sec, r.time_left_sec),
+        };
+        let mut venue_lines = String::new();
+        for v in &r.venue_rounds {
+            let tag = if v.venue.is_empty() {
+                "未分所"
+            } else {
+                &v.venue
+            };
+            venue_lines.push_str(&format!(
+                "<span class=pill>{}: #{} · {}s left · {}s family</span>",
+                esc(tag),
+                v.slot,
+                v.time_left_sec,
+                v.duration_sec
+            ));
+        }
+        if venue_lines.is_empty() {
+            rows.push_str(&format!(
+                "<div class=card><h2>Round</h2><div class=big>#{}</div><div class=sub>{}s old · {}s left · {}</div></div>",
+                r.slot, r.age_sec, r.time_left_sec,
+                if r.can_trade { "TRADING" } else { "WAITING" }
+            ));
+        } else {
+            rows.push_str(&format!(
+                "<div class=card><h2>Round</h2><div class=big>#{}</div><div class=sub>{}s old · {}s left · {}</div><div>{}{}</div></div>",
+                slot,
+                age,
+                left,
+                if r.can_trade { "TRADING" } else { "WAITING" },
+                if vr.is_some() {
+                    format!(
+                        "<span class=pill>显示: {}</span>",
+                        esc(if s.display_venue.is_empty() {
+                            "全局"
+                        } else {
+                            &s.display_venue
+                        })
+                    )
+                } else {
+                    String::new()
+                },
+                venue_lines
+            ));
+        }
     }
     if let Some(b) = &s.balance {
         rows.push_str(&format!(
@@ -3345,6 +3394,104 @@ mod tests {
             doc["round"]["venueRounds"],
             serde_json::json!([]),
             "pre-#550 cores degrade to an empty venueRounds, never a missing key"
+        );
+    }
+
+    /// issue 550 / issue 559 显示面口径（TUI 状态页漏网）：the built-in HTML
+    /// panel's Round card must follow the display account's own venue round row
+    /// when `venue_rounds` is populated, render one pill per spoken row, and
+    /// stay byte-for-byte on the legacy single-family card when the rows are
+    /// absent (pre-issue-550 core → empty serde default).
+    #[test]
+    fn the_round_card_follows_the_display_venue_row_and_lists_every_family() {
+        use crate::core::types::{RoundView, VenueRoundView};
+
+        let round = |rows: Vec<VenueRoundView>| UiSnapshot {
+            round: Some(RoundView {
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+                markets: 2,
+                can_trade: true,
+                venue_rounds: rows,
+                ..RoundView::default()
+            }),
+            ..UiSnapshot::default()
+        };
+
+        // Multi-family: display venue kalshi's own 3600s clock wins the
+        // headline, and both families render as pills beneath it.
+        let mut s = round(vec![
+            VenueRoundView {
+                venue: "polymarket".into(),
+                duration_sec: 900,
+                slot: 7,
+                age_sec: 1,
+                time_left_sec: 299,
+            },
+            VenueRoundView {
+                venue: "kalshi".into(),
+                duration_sec: 3600,
+                slot: 3,
+                age_sec: 5,
+                time_left_sec: 295,
+            },
+        ]);
+        s.display_venue = "kalshi".into();
+        let html = render_html(&s);
+        assert!(
+            html.contains("<div class=big>#3</div>"),
+            "the headline must read the display venue's own slot: {html}"
+        );
+        assert!(
+            html.contains("5s old · 295s left"),
+            "the headline must read the display venue's own age/timeLeft: {html}"
+        );
+        assert!(
+            html.contains("<span class=pill>显示: kalshi</span>"),
+            "the card must disclose which venue's clock the headline follows: {html}"
+        );
+        assert!(
+            html.contains("<span class=pill>polymarket: #7 · 299s left · 900s family</span>"),
+            "every spoken family renders a pill: {html}"
+        );
+        assert!(
+            html.contains("<span class=pill>kalshi: #3 · 295s left · 3600s family</span>"),
+            "every spoken family renders a pill: {html}"
+        );
+
+        // Single family, no display pointer: the fallback row is the venue's
+        // own row, the headline still follows it (same numbers a legacy card
+        // showed when that family was the only clock).
+        s.display_venue = String::new();
+        let html = render_html(&round(vec![VenueRoundView {
+            venue: "polymarket".into(),
+            duration_sec: 900,
+            slot: 7,
+            age_sec: 1,
+            time_left_sec: 299,
+        }]));
+        assert!(
+            html.contains("<div class=big>#7</div>") && html.contains("1s old · 299s left"),
+            "a single spoken family keeps the same headline numbers: {html}"
+        );
+
+        // Legacy byte-for-byte equivalence: without venue_rounds the card is
+        // the exact pre-change markup (global scalar block, no pills).
+        let legacy_html = render_html(&round(Vec::new()));
+        assert!(
+            legacy_html.contains(
+                "<div class=card><h2>Round</h2><div class=big>#7</div><div class=sub>1s old · 299s left · TRADING</div></div>"
+            ),
+            "the legacy card markup must not change when no venue rows exist: {legacy_html}"
+        );
+        assert!(
+            !legacy_html.contains("class=pill>显示"),
+            "no display pill without venue rows: {legacy_html}"
+        );
+        assert!(
+            !legacy_html.contains("s family"),
+            "no family pills without venue rows: {legacy_html}"
         );
     }
 
