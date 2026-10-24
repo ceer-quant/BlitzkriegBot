@@ -798,6 +798,14 @@ pub struct PositionManager {
     /// policy's own stop — `move_stop_to` only ever moves the stop UP, never
     /// down. Dropped with the position, like the ledger above.
     ladder_stop_floor: std::collections::HashMap<String, Decimal>,
+    /// Per-strategy trailing-stop overrides (the strategies' own declaration,
+    /// `EngineStrategy::wants_trailing_exit`): `Some(true)` banks profit even
+    /// when the kernel-wide trailing is off, `Some(false)` refuses it even
+    /// when on, absent = follow the kernel value in `config.exit`. Written by
+    /// the service at registration and re-read per ladder tick — a declaration
+    /// is a policy fact, not per-position state, so it needs no persistence
+    /// beyond the strategies themselves.
+    trailing_overrides: std::collections::HashMap<String, bool>,
 }
 
 fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
@@ -855,6 +863,7 @@ impl PositionManager {
             exit_ladder_last_run: Default::default(),
             ladder_steps_done: Default::default(),
             ladder_stop_floor: Default::default(),
+            trailing_overrides: Default::default(),
         }
     }
 
@@ -869,6 +878,15 @@ impl PositionManager {
                 self.daily = loaded;
             }
         }
+    }
+
+    /// Refresh the strategies' trailing declarations (the service calls this
+    /// whenever the registry changes — registration, unregistration, enable).
+    /// A whole-map replace keeps stale entries of unregistered strategies from
+    /// lingering; strategies that declared nothing are simply absent, which
+    /// IS the "follow the kernel value" state.
+    pub fn set_trailing_overrides(&mut self, overrides: std::collections::HashMap<String, bool>) {
+        self.trailing_overrides = overrides;
     }
 
     pub fn open_positions(&self) -> &[OpenPosition] {
@@ -1594,6 +1612,22 @@ impl PositionManager {
         let mut out = Vec::new();
         let mut withheld: Vec<SuppressedStopEvent> = Vec::new();
         for pos in self.open.iter_mut() {
+            // The strategy's own trailing declaration rides ON TOP of the
+            // kernel-wide config for THIS position's verdict; every other knob
+            // stays shared. Cheap: an absent override short-circuits to the
+            // borrowed config via an early match arm.
+            let overridden;
+            let pos_cfg = match self.trailing_overrides.get(&pos.strategy) {
+                None => &cfg,
+                Some(on) if *on == cfg.trailing_enabled => &cfg,
+                Some(on) => {
+                    overridden = ExitConfig {
+                        trailing_enabled: *on,
+                        ..cfg.clone()
+                    };
+                    &overridden
+                }
+            };
             let book = books(&pos.token_id);
             if interval_mode {
                 crate::exit_policy::update_exit_state_interval_2x(
@@ -1601,7 +1635,7 @@ impl PositionManager {
                     pos.entry_price,
                     book.as_ref(),
                     now_ms,
-                    &cfg,
+                    pos_cfg,
                     self.exit_ladder_last_run
                         .get(&pos.id)
                         .copied()
@@ -1610,7 +1644,7 @@ impl PositionManager {
                 );
                 self.exit_ladder_last_run.insert(pos.id.clone(), now_ms);
             } else {
-                Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
+                Self::valuate_one(pos, book.as_ref(), now_ms, pos_cfg);
             }
             // F6: the exit price is an EXECUTABLE bid or nothing. The old code
             // fell back to `pos.current_price` — a stale reference that could
@@ -1695,7 +1729,7 @@ impl PositionManager {
                 hold_sec,
                 state: &pos.state,
                 now_ms,
-                cfg: &cfg,
+                cfg: pos_cfg,
             });
             if let Some(s) = suppressed_stop {
                 withheld.push(SuppressedStopEvent {
@@ -3244,6 +3278,131 @@ mod tests {
         );
         assert!(ev.message().contains("TrailingStop"), "{}", ev.message());
         assert_eq!(pm.suppressed_stop_count(), 1);
+    }
+
+    /// The strategies' own trailing declarations ride on top of the kernel-wide
+    /// config for their positions: kernel OFF + declaration `true` banks the
+    /// profit anyway (the spread_arb shape — its +46.7% peak dissolved into a
+    /// stop-loss because nothing banked it); kernel ON + declaration `false`
+    /// refuses the sell (the REDEEM-family shape the issue-356 calibration
+    /// came from); no declaration = follow the kernel value byte-identically.
+    #[test]
+    fn a_strategy_trailing_declaration_overrides_the_kernel_value_for_its_positions() {
+        // Kernel-wide OFF — the shipped calibration. The book climbs to +60%
+        // then falls back to +25%: a give-back the trail would bank.
+        let mut pm = PositionManager::new(PositionConfig::default());
+        // spread_arb declared `true`; a neighbor declared `false`; the default
+        // fixture strategy declared nothing.
+        pm.set_trailing_overrides(
+            [("declared_on".into(), true), ("declared_off".into(), false)]
+                .into_iter()
+                .collect(),
+        );
+        let mut on = params("BTC", SignalDirection::Up, dec!(0.40));
+        on.strategy = "declared_on".into();
+        let on_pos = enter(&mut pm, on, OrderRole::Maker, 0);
+
+        // Kernel OFF + declaration ON ⇒ the give-back IS banked: the ladder
+        // fires TrailingStop once the give-back exceeds the floor (min 8%).
+        pm.tick(
+            &on_pos.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        pm.tick(
+            &on_pos.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+        let now = on_pos.expires_at_ms - 10_000;
+        let reqs = pm.check_exits(
+            &|_| {
+                Some(BookView::from_snapshot(&two_sided_book(
+                    dec!(0.50),
+                    dec!(0.52),
+                    now,
+                )))
+            },
+            now,
+        );
+        assert_eq!(
+            reqs.len(),
+            1,
+            "kernel OFF + declaration ON ⇒ trail banks: {reqs:?}"
+        );
+        assert_eq!(reqs[0].reason, ExitReason::TrailingStop);
+
+        // Kernel OFF + NO declaration ⇒ byte-identical to the historical
+        // kernel: no trailing anywhere (the same give-back is held).
+        let mut quiet = PositionManager::new(PositionConfig::default());
+        let silent = enter(
+            &mut quiet,
+            params("BTC", SignalDirection::Up, dec!(0.40)),
+            OrderRole::Maker,
+            0,
+        );
+        quiet.tick(
+            &silent.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        quiet.tick(
+            &silent.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+        let reqs = quiet.check_exits(
+            &|_| {
+                Some(BookView::from_snapshot(&two_sided_book(
+                    dec!(0.50),
+                    dec!(0.52),
+                    now,
+                )))
+            },
+            now,
+        );
+        assert!(
+            !reqs.iter().any(|r| r.reason == ExitReason::TrailingStop),
+            "no declaration ⇒ follow the kernel OFF: {reqs:?}"
+        );
+
+        // Kernel ON + declaration OFF ⇒ the REDEEM family keeps its doctrine:
+        // no profit-banking sell even though the kernel value would trail.
+        let mut loud = PositionManager::new(PositionConfig {
+            exit: ExitConfig {
+                trailing_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        loud.set_trailing_overrides([("declared_off".into(), false)].into_iter().collect());
+        let mut off = params("BTC", SignalDirection::Up, dec!(0.40));
+        off.strategy = "declared_off".into();
+        let off_pos = enter(&mut loud, off, OrderRole::Maker, 0);
+        loud.tick(
+            &off_pos.id,
+            Some(&two_sided_book(dec!(0.64), dec!(0.66), 100_000)),
+            100_000,
+        );
+        loud.tick(
+            &off_pos.id,
+            Some(&two_sided_book(dec!(0.50), dec!(0.52), 490_000)),
+            490_000,
+        );
+        let reqs = loud.check_exits(
+            &|_| {
+                Some(BookView::from_snapshot(&two_sided_book(
+                    dec!(0.50),
+                    dec!(0.52),
+                    now,
+                )))
+            },
+            now,
+        );
+        assert!(
+            !reqs.iter().any(|r| r.reason == ExitReason::TrailingStop),
+            "kernel ON + declaration OFF ⇒ the trail is disarmed for this strategy: {reqs:?}"
+        );
     }
 
     /// #268, item 2: a stale book is an outage, not a thin market. Nothing is
