@@ -72,6 +72,9 @@ async function toggleAutoUpdate(on: boolean): Promise<void> {
  * 「更新检查」开关（issue 393）：出网检查此前只能改 TOML —— 面板有开关、按钮灰着、
  * 却没有解锁路径，是半成品。内核的 system.update.configure 本就双键可选，
  * 这里补上第二支开关；同一纪律：状态来自内核，写盘失败原样报错。
+ *
+ * 排列顺序（2026-10 操作者指正）：行内控件为 Badge（状态读数）在前、Switch
+ * （操作控件）在后贴行右缘 —— 组件各司其职原样保留，只对调视觉顺序。
  */
 async function toggleUpdateCheck(on: boolean): Promise<void> {
   await configure({ checkEnabled: on })
@@ -203,15 +206,19 @@ onUnmounted(() => {
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
             <span class="text-faint-fg">出网检查（更新检查）</span>
+            <!-- 排列顺序（2026-10 操作者指正，修正此前误读）：Badge 在前、
+                 Switch 在后贴行右缘 —— 组件原样保留（Switch 还是 Switch、
+                 Badge 还是 Badge），只对调这一行的控件顺序；语义/取值/写路径
+                 不动（checkEnabled → system.update.configure）。 -->
             <span class="flex items-center gap-2">
+              <Badge :variant="version.checkEnabled ? 'up' : 'default'">
+                {{ version.checkEnabled ? '已允许' : '已关闭' }}
+              </Badge>
               <Switch
                 :model-value="version.checkEnabled"
                 :title="version.checkEnabled ? '关闭出网检查（内核将一个包都不发）' : '允许内核检查发布更新'"
                 @update:model-value="toggleUpdateCheck"
               />
-              <Badge :variant="version.checkEnabled ? 'up' : 'default'">
-                {{ version.checkEnabled ? '已允许' : '已关闭' }}
-              </Badge>
             </span>
           </div>
         </div>

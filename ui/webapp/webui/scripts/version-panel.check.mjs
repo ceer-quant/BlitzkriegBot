@@ -93,12 +93,33 @@ check('「检查更新」按钮在 checkEnabled=false 时禁用并说明', () =>
 
 check('自动更新开关的值来自内核，写盘失败要报错', () => {
   // The switch binds the KERNEL's autoUpdate (snapshot), not a local ref.
+  // 2026-10-24 操作者指正：此前误把 Switch 收编成徽章循环，已还原 —— 组件
+  // 原样保留（Switch 还是 Switch、Badge 还是 Badge），门恢复盯 Switch 的
+  // 内核绑定。
   assert.match(settingsPage, /:model-value="version\.autoUpdate"/, '开关没有绑定内核的 autoUpdate')
   assert.ok(client.includes("'/version/configure'"), 'configure 路由缺失')
   assert.ok(client.includes("'/version/check'"), 'check 路由缺失')
   // configure 的调用方必须把 error 展示出来 —— 静默回退的开关比没有更糟（§7.4）。
   const toggle = settingsPage.slice(settingsPage.indexOf('toggleAutoUpdate'))
   assert.ok(toggle.includes('versionErr.value'), 'configure 失败没有落到可见的错误条')
+})
+
+check('出网检查行：Badge 在前、Switch 在后（只对调顺序，不换组件）', () => {
+  // 2026-10-24 操作者原话指正：「把 版本与更新 卡片的 出网检查（更新检查）
+  // 部分改为 Badge + Switch 顺序（目前是Switch + Badge）没让你换组件」。
+  // 牙钉三件事：行内控件组里 Badge 声明在 Switch 声明之前（视觉/代码顺序
+  // 一致）；Switch 仍在（组件没有被移除或替换）；Switch 的内核绑定与写
+  // 路径原样（checkEnabled → system.update.configure）。
+  const row = settingsPage.match(/出网检查（更新检查）<\/span>[\s\S]*?<\/span>\s*\n\s*<\/div>/)
+  assert.ok(row, '出网检查行缺失')
+  const badgeAt = row[0].indexOf('<Badge')
+  const switchAt = row[0].indexOf('<Switch')
+  assert.ok(badgeAt !== -1, '出网检查行缺 Badge —— 状态读数丢失')
+  assert.ok(switchAt !== -1, '出网检查行缺 Switch —— 组件被换掉即违规')
+  assert.ok(badgeAt < switchAt, '出网检查行顺序仍不对 —— 必须 Badge 在前、Switch 在后贴行右缘')
+  assert.match(row[0], /:model-value="version\.checkEnabled"/, '出网检查 Switch 没有绑定内核的 checkEnabled')
+  assert.match(row[0], /@update:model-value="toggleUpdateCheck"/, '出网检查 Switch 没有接 configure 写路径')
+  assert.doesNotMatch(row[0], /aria-pressed/, '出网检查行仍残留徽章循环按钮形态 —— Switch 还原不彻底')
 })
 
 console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)
