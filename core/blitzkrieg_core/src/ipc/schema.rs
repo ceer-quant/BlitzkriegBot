@@ -332,6 +332,20 @@ pub mod method {
     /// to), which is why the write persists to accounts.toml and must never
     /// lose a sibling account's fields on the way.
     pub const ACCOUNT_VENUE_SET: &str = "account.venue.set";
+    /// The account's round-length FAMILY write (`account.rounds.set`,
+    /// 轮次多族 B2): the set spells exactly which (venue, duration) families
+    /// the account trades. An ACCOUNT-CONFIGURATION MANAGEMENT verb, the same
+    /// family as `account.venue.set`/`account.list` — it writes the CONFIG
+    /// PLANE's fact (accounts.toml + the in-memory book), its consumers are
+    /// the panel's account card and the ops CLI, and it is NOT the strategy
+    /// runtime's business-verb family #568 vetoed (策略运行时对周期集的感知
+    /// 走内存共享态，不另开业务动词). The write is ONE transaction (persist
+    /// FIRST, then memory): a removed family with open positions refuses the
+    /// WHOLE write, a removal with no exposure soft-unloads the family's
+    /// poll output, an added family mounts its discovery instance at runtime
+    /// (增族即挂). Empty set = the key is REMOVED from accounts.toml (the
+    /// unrestricted spelling, identical to a missing key at the next boot).
+    pub const ACCOUNT_ROUNDS_SET: &str = "account.rounds.set";
     /// The per-account trading switch (`account.trading.set`): `false` =
     /// this account's NEW ENTRIES are refused while its EXITS keep flowing
     /// (positions stay strategy-managed until flat). Persisted to
@@ -2063,6 +2077,58 @@ pub struct AccountVenueSetResult {
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
      unbound); persisted to accounts.toml, re-read at next boot; the same \
      venue on several accounts is the deployment model, not a conflict";
+
+// ── round-length family write — account.rounds.set (轮次多族 B2) ─────────────
+
+/// `account.rounds.set` params: the WHOLE replacement set (not a delta — the
+/// panel's card edits a list, the wire carries the list). `rounds` is
+/// whitelist-validated and deduplicated (first-seen order kept), the empty
+/// list removes the accounts.toml key (the unrestricted spelling). `reason`
+/// is audit-only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRoundsSetParams {
+    pub account_id: String,
+    pub rounds: Vec<i64>,
+    /// Audit trail only — echoed in the reply and the log line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `account.rounds.set` result: the set now in force (memory AND
+/// accounts.toml — `persisted` says the file write landed; a persist failure
+/// refuses the whole write so the two stores cannot disagree). Shape follows
+/// [`AccountVenueSetResult`] minus the venue-specific fields — no per-family
+/// change list: the reply's `rounds` IS the fact.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRoundsSetResult {
+    pub account_id: String,
+    pub rounds: Vec<i64>,
+    pub persisted: bool,
+    pub at_ms: i64,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub note: &'static str,
+    /// The runtime half of 增族即挂: whether THIS write mounted at least one
+    /// new (venue, duration) discovery instance into the running session.
+    /// False when every family was already live (boot enabled it) or the set
+    /// only shrank (removal is a soft-unload — see the note). Older panels
+    /// ignore the field.
+    #[serde(default)]
+    pub runtime_enabled: bool,
+}
+
+/// [`AccountRoundsSetResult::note`] — one spelling, used by the reply and the
+/// log line.
+pub const ACCOUNT_ROUNDS_SET_NOTE: &str = "replaces the account's (venue, duration) family set \
+     (empty = unrestricted, the key is removed from accounts.toml); persisted \
+     first, memory second — a removal with open positions in the removed \
+     families refuses the WHOLE write, a clean removal soft-unloads the \
+     families' poll output without killing the running discovery instances, \
+     an added family mounts its discovery instance at runtime; re-read at \
+     next boot";
 
 // ── 跨所套利弹窗 v2 — arb.config.set / arb.config.get ────────────────────────
 

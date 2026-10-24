@@ -132,8 +132,16 @@ fn snapshot_from_api(s: &api::ReconcileSnapshot) -> crate::reconcile::VenueSnaps
 
 // ── Host ─────────────────────────────────────────────────────────────────────
 
+/// The poll-admission gate's type: a sync predicate over one discovery-poll
+/// batch, verdict = keep/drop. Shared as `Arc` so the host stays `Clone`
+/// without cloning the cell.
+pub type PollAdmissionGate =
+    std::sync::Arc<dyn Fn(Vec<api::MarketDescriptor>) -> bool + Send + Sync>;
+
 /// Implements [`MarketHost`] over the shared `Core`. Cloneable so each plugin
-/// component can hold its own handle.
+/// component can hold its own handle (hand-written `Clone`: the poll-admission
+/// cell is a `Mutex<Option<Arc<_>>>`, and `Arc` already shares the gate — a
+/// clone re-sees the installed one).
 #[derive(Clone)]
 pub struct CoreHost {
     core: Arc<AsyncMutex<Core>>,
@@ -142,6 +150,17 @@ pub struct CoreHost {
     /// label markets) route their subscription here — the single-plugin
     /// behaviour — instead of a hardcoded plugin name.
     active_plugin: std::sync::Arc<std::sync::RwLock<String>>,
+    /// B2 (轮次多族 软卸): an optional gate the session assembly installs —
+    /// `None` keeps `on_round_markets` byte-identical with the historical
+    /// forward (every in-process test, backtest replay and legacy host path).
+    /// When present, every discovery-poll batch passes through it BEFORE the
+    /// engine sees anything: a batch whose (venue, duration) family has been
+    /// soft-unloaded (removed from every account's active family set) is
+    /// dropped here — the instance keeps polling, its output never lands.
+    /// The closure carries the session's `DataPlaneRuntime` (the active-family
+    /// computation and the gauge live there); the host stays data-plane-blind.
+    /// `Arc` inside the Mutex makes the whole cell trivially shareable.
+    poll_admission: std::sync::Arc<std::sync::Mutex<Option<PollAdmissionGate>>>,
 }
 
 impl CoreHost {
@@ -149,6 +168,7 @@ impl CoreHost {
         Self {
             core,
             active_plugin: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+            poll_admission: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -159,6 +179,16 @@ impl CoreHost {
             .active_plugin
             .write()
             .expect("core host active plugin lock poisoned") = name.to_string();
+    }
+
+    /// B2 (轮次多族 软卸): install the discovery poll-output gate. Called once
+    /// by the session assembly AFTER the data plane exists; the default
+    /// (never called) is admit-everything — the historical shape.
+    pub fn set_poll_admission(&self, gate: PollAdmissionGate) {
+        *self
+            .poll_admission
+            .lock()
+            .expect("core host poll admission lock poisoned") = Some(gate);
     }
 }
 
@@ -229,6 +259,22 @@ impl MarketHost for CoreHost {
 
     fn on_round_markets(&self, markets: Vec<api::MarketDescriptor>) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            // B2 (轮次多族 软卸): the poll-output gate, when the assembly
+            // installed one. A soft-unloaded family's batch is dropped
+            // BEFORE any state moves — no engine event, no subscription.
+            // Default (no gate): admit-everything, the historical shape.
+            if let Some(gate) = self
+                .poll_admission
+                .lock()
+                .expect("core host poll admission lock poisoned")
+                .as_ref()
+                .cloned()
+            {
+                let keep = gate(markets.clone());
+                if !keep {
+                    return;
+                }
+            }
             let now = now_ms();
             let models: Vec<m::CryptoMarket> = markets.iter().map(market_from_api).collect();
             let tokens: Vec<String> = models

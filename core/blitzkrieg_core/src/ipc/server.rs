@@ -260,6 +260,16 @@ struct DataPlaneRuntime {
     /// is never restarted (a duplicate `disc.start` would evict the running
     /// one's host handle).
     discovery_mounted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<(String, i64)>>>,
+    /// B2 (轮次多族 软卸): discovery-poll batches whose (venue, duration)
+    /// family has been soft-unloaded (removed from every account's active
+    /// family set while the instance itself keeps running) are DROPPED at
+    /// this gate instead of reaching the engine. Count = batches dropped
+    /// since boot — the operator's 「软卸还在漏喂吗」 readout. A plain
+    /// AtomicUsize surfaced through `core.status`, not a metrics framework:
+    /// this is the only counter the feature needs.
+    /// ponytail ceiling: no aggregation/history — if a second runtime gauge
+    /// ever appears, promote both into a real register.
+    soft_unloaded_polling_instances: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DataPlaneRuntime {
@@ -297,6 +307,9 @@ impl DataPlaneRuntime {
             discovery_assets: config.assets.clone(),
             discovery_round_duration_sec: global,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(pairs)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         }
     }
 
@@ -332,6 +345,104 @@ impl DataPlaneRuntime {
             .lock()
             .expect("data plane mounted set poisoned")
             .insert((venue.to_string(), duration));
+    }
+
+    /// B2 (轮次多族 软卸): the ACTIVE family set — every family some account
+    /// currently declares, UNION the boot's global family. Computed on read
+    /// from the live account book (never a second stored copy that could
+    /// drift), the same口径 the boot assembly used: a bound account speaks
+    /// for ITS venue, an unbound one for EVERY venue it is paired with in
+    /// `pairs`'s venue dimension (the boot's actives + runtime mounts).
+    /// `pairs` is the caller's already-materialized (venue, duration) mount
+    /// book — the venue dimension this session actually runs.
+    fn active_families(
+        &self,
+        accounts: &[crate::account::Account],
+        pairs: &std::collections::BTreeSet<(String, i64)>,
+    ) -> std::collections::BTreeSet<(String, i64)> {
+        let mut active: std::collections::BTreeSet<(String, i64)> = pairs
+            .iter()
+            .filter(|(_, d)| *d == self.discovery_round_duration_sec)
+            .cloned()
+            .collect();
+        for a in accounts {
+            for &dur in &a.rounds {
+                if a.venue.is_empty() {
+                    // An unbound account's declaration speaks for EVERY
+                    // venue this session runs (the boot's same reading).
+                    for (v, _) in pairs.iter() {
+                        active.insert((v.clone(), dur));
+                    }
+                } else {
+                    active.insert((a.venue.clone(), dur));
+                }
+            }
+        }
+        active
+    }
+
+    /// B2 (轮次多族 软卸): the discovery poll-output gate. A batch whose
+    /// (venue, duration) family is NOT in the active set is dropped here —
+    /// the soft-unloaded instance keeps polling (nothing kills it) but its
+    /// rounds never reach the engine/scanner again. The batch's family is
+    /// resolved the way the plugins stamp their descriptors: the venue tag
+    /// plus the batch's own round length derived from the descriptors'
+    /// expiry/span (`row_duration_sec`'s reading — 0 = the global family).
+    /// Every dropped batch bumps the gauge.
+    async fn admit_poll_batch(
+        &self,
+        core: &Arc<AsyncMutex<Core>>,
+        markets: &[blitzkrieg_market_api::MarketDescriptor],
+    ) -> bool {
+        let Some(first) = markets.first() else {
+            return true;
+        };
+        // The batch's duration: the plugin baked its family into the slot
+        // derivation, so the batch's span reproduces it (the same fact
+        // `round_slot = end_ms / 1000 / round_sec` was built from). One
+        // descriptor is enough — a batch is one family's poll.
+        let span_sec = if first.round_slot > 0 && first.expires_at_ms > 0 {
+            first.expires_at_ms / 1000 / first.round_slot
+        } else {
+            0
+        };
+        let global = self.discovery_round_duration_sec;
+        let dur = if span_sec > 0 { span_sec } else { global };
+        let venue = first.venue.as_str();
+        let active = {
+            let pairs = self
+                .discovery_mounted
+                .lock()
+                .expect("data plane mounted set poisoned")
+                .clone();
+            let accounts: Vec<crate::account::Account> = core
+                .lock()
+                .await
+                .accounts()
+                .account_list()
+                .into_iter()
+                .cloned()
+                .collect();
+            self.active_families(&accounts, &pairs)
+        };
+        if active.contains(&(venue.to_string(), dur)) {
+            return true;
+        }
+        self.soft_unloaded_polling_instances
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "blitzkrieg-core: discovery batch for {venue}@{dur}s dropped — the family was \
+             soft-unloaded (no account declares it any more); restart the core or re-add the \
+             family to resume"
+        );
+        false
+    }
+
+    /// The gauge readout (`core.status`): how many discovery-poll batches
+    /// soft-unload has dropped since boot.
+    fn soft_unloaded_count(&self) -> usize {
+        self.soft_unloaded_polling_instances
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -632,14 +743,6 @@ pub async fn run(
     // host, at boot AND later (account.venue.set re-binding an account to a
     // venue whose plugin never booted mounts that venue's components here —
     // the runtime half of 绑定即启用; see `enable_venue_at_runtime`).
-    let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
-        let h = crate::market::host::CoreHost::new(core.clone());
-        // Untagged round lists (legacy corpora / Node bridge) route their
-        // orderbook subscription to the active plugin — the historical
-        // single-plugin behaviour, resolved at assembly instead of hardcoded.
-        h.set_active_plugin(actives[0].name());
-        Arc::new(h)
-    };
     // The boot-resolved data-plane shape the venue.set write consults: the
     // mount flags and the already-mounted (venue, duration) discovery pairs
     // (idempotence guard) — the global family per boot plugin, plus every
@@ -653,6 +756,44 @@ pub async fn run(
         .cloned()
         .collect();
     let data_plane = DataPlaneRuntime::at_boot(&config, &actives, &account_families);
+
+    // B2 (轮次多族 软卸): the discovery poll-output gate, installed on the
+    // CONCRETE CoreHost before it erases into the trait object. Every
+    // extension discovery funnels through `CoreHost::on_round_markets`; from
+    // here on, a batch whose (venue, duration) family no account declares
+    // (and the global family does not cover) is dropped at the host — the
+    // soft-unloaded instance keeps polling, its output never reaches the
+    // engine. The closure carries the data plane's gauge + active-family
+    // computation and the Core handle.
+    let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
+        let h = crate::market::host::CoreHost::new(core.clone());
+        // Untagged round lists (legacy corpora / Node bridge) route their
+        // orderbook subscription to the active plugin — the historical
+        // single-plugin behaviour, resolved at assembly instead of hardcoded.
+        h.set_active_plugin(actives[0].name());
+        {
+            let gate_core = core.clone();
+            let gate_plane = data_plane.clone();
+            h.set_poll_admission(std::sync::Arc::new(move |markets: Vec<_>| {
+                let core = gate_core.clone();
+                // The gate runs on the plugin's poll task; the admission
+                // check is async (it takes the Core lock). The forward the
+                // gate precedes blocks on that same lock anyway, so blocking
+                // here changes no deadlock surface: the runtime is
+                // multi-thread (`rt-multi-thread` in Cargo.toml), so
+                // `block_in_place` moves the poll task off the shared
+                // workers while it waits. A runtime-less caller (none
+                // today) admits by default — the historical shape.
+                match tokio::runtime::Handle::try_current() {
+                    Ok(rt) => tokio::task::block_in_place(|| {
+                        rt.block_on(gate_plane.admit_poll_batch(&core, &markets))
+                    }),
+                    Err(_) => true,
+                }
+            }));
+        }
+        Arc::new(h)
+    };
 
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
@@ -1129,6 +1270,7 @@ async fn handle_line(
         method::ROUND_DURATION_SET,
         method::MARKET_PLUGIN_SET,
         method::ACCOUNT_VENUE_SET,
+        method::ACCOUNT_ROUNDS_SET,
         method::ACCOUNT_CREATE,
         method::ACCOUNT_REMOVE,
         method::DISPLAY_ACCOUNT_SET,
@@ -1183,6 +1325,13 @@ async fn handle_line(
                 "peerUid": peer.uid(),
                 "peerAuth": peer.describe(),
                 "socketMode": format!("{SOCKET_MODE:04o}"),
+                // B2 (轮次多族 软卸): discovery-poll batches dropped because
+                // their (venue, duration) family was soft-unloaded — the
+                // operator's 「软卸还在漏喂吗」 readout (an incrementing
+                // number here means a live instance is polling a family no
+                // account declares). Incremental field: old clients ignore
+                // it.
+                "softUnloadedPollingInstances": data_plane.soft_unloaded_count(),
             }))
         }
 
@@ -3462,6 +3611,215 @@ async fn handle_line(
             .await
         }
 
+        // ── 轮次多族 B2：account.rounds.set —— 账户族集热写 ────────────────────
+        // 配置管理动词（与 account.venue.set 同族），不是 #568 否决的策略
+        // 运行时业务动词族。同一事务姿态：validate → persist 先行（失败两个
+        // 存储都不动）→ 内存。移除守卫在持久化之前整体拒绝（内存与磁盘都不
+        // 动）；通过后增族即挂、缩族软卸（产出侧丢弃，实例不杀）。
+        method::ACCOUNT_ROUNDS_SET => {
+            typed(params, |p: AccountRoundsSetParams| {
+                let core = core.clone();
+                async move {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    let id = AccountId::from(p.account_id.as_str());
+                    // Validate FIRST (the parser's own whitelist+dedup), so
+                    // a bad value refuses before anything is computed or
+                    // written. The validated set is the one every later
+                    // step sees.
+                    let new_rounds =
+                        crate::account::config::validate_rounds(Some(p.rounds.clone()))?;
+                    let mut c = core.lock().await;
+                    // The REMOVED families: old set minus new set (the
+                    // arithmetic runs on the validated new set). Added =
+                    // new minus old, for 增族即挂.
+                    let old_rounds: Vec<i64> = c
+                        .accounts()
+                        .account(&id)
+                        .map(|a| a.rounds.clone())
+                        // require() inside the write would also refuse an
+                        // unknown id, but the removed/added arithmetic and
+                        // the exposure guard need the account NOW — refuse
+                        // here with the standard unknown-account error.
+                        .ok_or_else(|| c.accounts().require(&id).unwrap_err())?;
+                    let removed: Vec<i64> = old_rounds
+                        .iter()
+                        .filter(|d| !new_rounds.contains(d))
+                        .copied()
+                        .collect();
+                    let added: Vec<i64> = new_rounds
+                        .iter()
+                        .filter(|d| !old_rounds.contains(d))
+                        .copied()
+                        .collect();
+                    // 移除守卫（整体拒绝）：any open position of THIS
+                    // account whose venue sits in one of the removed
+                    // families' venue dimension blocks the WHOLE write —
+                    // memory and disk stay exactly as they were. ponytail:
+                    // the guard is venue-scoped, not duration-exact — a
+                    // position on the removed family's VENUE refuses even
+                    // when its own round length differs (the position book
+                    // stamps `round_duration_sec`, but a 0 = legacy row
+                    // would slip a duration-exact check; the conservative
+                    // reading can never strand an exit. Refinement path:
+                    // compare `effective_round_duration_sec` per position
+                    // once every live row carries a non-zero stamp).
+                    if !removed.is_empty() {
+                        let removed_venues: std::collections::HashSet<String> = {
+                            let mut set = std::collections::HashSet::new();
+                            for a in c.accounts().account_list() {
+                                if !a.venue.is_empty() && a.rounds.iter().any(|d| removed.contains(d))
+                                {
+                                    set.insert(a.venue.clone());
+                                }
+                            }
+                            // An unbound account's removed family speaks
+                            // for every venue it trades: conservative
+                            // union with THIS account's own binding.
+                            set.extend(
+                                c.accounts()
+                                    .account_list()
+                                    .iter()
+                                    .filter(|a| !a.venue.is_empty() && a.id == id)
+                                    .map(|a| a.venue.clone()),
+                            );
+                            set
+                        };
+                        let blocking: Vec<String> = c
+                            .positions()
+                            .open_positions()
+                            .iter()
+                            .filter(|pos| pos.account_id == id)
+                            .filter(|pos| {
+                                pos.venue.is_empty() || removed_venues.contains(&pos.venue)
+                            })
+                            .map(|pos| pos.id.clone())
+                            .collect();
+                        if !blocking.is_empty() {
+                            return Err(CoreError::new(
+                                CoreErrorCode::InvalidParams,
+                                format!(
+                                    "account.rounds.set: removing families {removed:?} is refused — \
+                                     the account holds {} open position(s) ({}) in the removed \
+                                     families' venues; flatten them (or wait for expiry) before \
+                                     removing the family, exits are unaffected either way",
+                                    blocking.len(),
+                                    blocking.join(", ")
+                                ),
+                            ));
+                        }
+                    }
+                    // One transaction: persist FIRST (fail leaves both
+                    // stores untouched), then memory. Method-layer refusals
+                    // are all client faults, surfaced as INVALID_PARAMS
+                    // through the typed tail.
+                    c.set_account_rounds_persisting(
+                        &id,
+                        new_rounds.clone(),
+                        &actor,
+                        p.reason.as_deref().unwrap_or(""),
+                        now_ms(),
+                    )?;
+                    // The lock guard is dropped BEFORE the runtime mount
+                    // below: mounting re-enters the core THROUGH the host
+                    // (the same deadlock the venue.set arm documents).
+                    drop(c);
+                    // 运行时半边（增族即挂）：对每个 added 族组装挂载对 ——
+                    // 账户绑定 venue → (该 venue, dur)；未绑定 → 只挂已在
+                    // data_plane 挂载的 venue 上的 (v, dur)（运行时无 boot
+                    // 资产不能裸挂未启用 venue）。ponytail 顶棚：未启用
+                    // venue 的族要走 account.venue.set 的绑定流程（绑定即启
+                    // 用），这里不复制那半边。已挂对幂等跳过。
+                    let mut runtime_enabled = false;
+                    let account = if !added.is_empty() && data_plane.discovery_enabled {
+                        // The guard is dropped BEFORE the mount below reads
+                        // the account back — the mount re-enters the core
+                        // THROUGH the host (discovery.start feeds its round
+                        // markets on the same await), so holding the lock
+                        // across that await would deadlock the session
+                        // against itself (the venue.set arm's documented
+                        // hazard).
+                        core.lock().await.accounts().account(&id).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(account) = account {
+                        let mounted: std::collections::BTreeSet<(String, i64)> = data_plane
+                            .discovery_mounted
+                            .lock()
+                            .expect("data plane mounted set poisoned")
+                            .clone();
+                        let mut fams: Vec<(String, i64)> = Vec::new();
+                        for &dur in &added {
+                            let targets: Vec<String> = if account.venue.is_empty() {
+                                // Unbound: only venues this session
+                                // ALREADY runs (the runtime ceiling above).
+                                mounted
+                                    .iter()
+                                    .map(|(v, _)| v.clone())
+                                    .collect::<std::collections::BTreeSet<String>>()
+                                    .into_iter()
+                                    .collect()
+                            } else {
+                                vec![account.venue.clone()]
+                            };
+                            for v in targets {
+                                let pair = (v, dur);
+                                if !fams.contains(&pair) {
+                                    fams.push(pair);
+                                }
+                            }
+                        }
+                        fams.retain(|(v, d)| {
+                            !data_plane.discovery_mounted_at(v, *d)
+                        });
+                        if !fams.is_empty() {
+                            for (v, _) in &fams {
+                                if let Some(plugin) = registry.get(v) {
+                                    enable_venue_at_runtime(
+                                        plugin.as_ref(),
+                                        host.clone(),
+                                        data_plane.feed_ws_enabled,
+                                        data_plane.discovery_enabled,
+                                        &data_plane.discovery_assets,
+                                        data_plane.discovery_round_duration_sec,
+                                        &fams
+                                            .iter()
+                                            .filter(|(fv, _)| fv == v)
+                                            .cloned()
+                                            .collect::<Vec<_>>(),
+                                    )
+                                    .await;
+                                    for (_, d) in fams.iter().filter(|(fv, _)| fv == v) {
+                                        data_plane.mark_discovery_mounted(v, *d);
+                                    }
+                                    // The feed side keeps its per-venue
+                                    // guard (a re-declared family must not
+                                    // restart the feed).
+                                    data_plane.mark_mounted(v);
+                                    runtime_enabled = true;
+                                }
+                            }
+                        }
+                    }
+                    Ok(serde_json::to_value(AccountRoundsSetResult {
+                        account_id: id.as_str().to_string(),
+                        rounds: new_rounds,
+                        persisted: true,
+                        at_ms: now_ms(),
+                        actor,
+                        reason: p.reason,
+                        note: ACCOUNT_ROUNDS_SET_NOTE,
+                        runtime_enabled,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+
         // ── 账户交易开关 + 策略分配：account.trading.set / account.strategies.set
         // 「交易中/已停止」开关与「该账户跑哪些策略」编辑器的内核面。同
         // venue.set 的事务姿态：persist 先行（失败两个存储都不动），内存随后；
@@ -5035,6 +5393,9 @@ mod tests {
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
         let mut session = SessionState::default();
         serde_json::from_str(
@@ -5075,6 +5436,9 @@ mod tests {
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
         serde_json::from_str(
             &handle_line(
@@ -5211,6 +5575,9 @@ mod tests {
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
         let mut session = SessionState::default();
         serde_json::from_str(
@@ -6213,6 +6580,9 @@ mod tests {
             discovery_assets: Vec::new(),
             discovery_round_duration_sec: 0,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
         serde_json::from_str(
             &handle_line(
@@ -7190,6 +7560,9 @@ mod tests {
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
 
         let reply = rpc_with_data_plane(
@@ -7364,6 +7737,9 @@ mod tests {
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
         VENUE_LIVE_DISCOVERY_CFG
             .lock()
@@ -7446,6 +7822,711 @@ mod tests {
         );
     }
 
+    /// B2 (轮次多族): `account.rounds.set` at the wire — the ADD half. A set
+    /// of two families on a bound account mounts BOTH (venue, duration)
+    /// discovery instances at runtime (增族即挂), reports
+    /// `runtimeEnabled: true`, persists the rounds into the private
+    /// accounts.toml, and the account book reads the new set back. The
+    /// idempotence posture: a second write with the same set mounts nothing
+    /// (`runtimeEnabled: false` — every pair already live).
+    #[tokio::test]
+    async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
+        // A private accounts.toml — the persist half refuses without a
+        // config path, the same posture venue.set's mount test runs under.
+        let dir = std::env::temp_dir().join(format!("bk-rounds-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    // Bound to the plugin under test: added families mount
+                    // on THIS venue.
+                    venue: "roundsmount".to_string(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "roundsmount".to_string(),
+                },
+                name: "roundsmount".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        // Boot shape: roundslive never mounted (the whole point: the write
+        // must mount the ADDED families itself).
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert(("polymarket".to_string(), 900));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
+        };
+        VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .retain(|(tag, _)| tag != "roundsmount");
+
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[900,3600],"reason":"family add"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "the write must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "added families must mount at runtime: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["rounds"],
+            serde_json::json!([900, 3600]),
+            "the reply echoes the set in force: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["persisted"],
+            serde_json::json!(true),
+            "{reply}"
+        );
+        // BOTH families mounted with their own discovery instance.
+        {
+            let book = data_plane.discovery_mounted.lock().unwrap();
+            assert!(book.contains(&("roundsmount".to_string(), 900)), "{book:?}");
+            assert!(
+                book.contains(&("roundsmount".to_string(), 3600)),
+                "{book:?}"
+            );
+        }
+        let durations: Vec<i64> = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == "roundsmount")
+            .map(|(_, cfg)| cfg.round_duration_sec)
+            .collect();
+        assert!(
+            durations.contains(&900) && durations.contains(&3600),
+            "the mount started one discovery per added family: {durations:?}"
+        );
+        // The durable half: rounds are on disk, sibling fields intact.
+        let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+        assert!(
+            file.contains("rounds = [900, 3600]"),
+            "the declaration must land on disk: {file}"
+        );
+        assert!(
+            file.contains("name = \"paper\""),
+            "sibling field kept: {file}"
+        );
+        // And the in-memory book reads the new set.
+        {
+            let c = core.lock().await;
+            let account = c
+                .accounts()
+                .account(&AccountId::from("paper"))
+                .expect("account");
+            assert_eq!(account.rounds, vec![900, 3600], "memory moved too");
+        }
+
+        // Idempotence: a second write with the SAME set mounts nothing.
+        let mark = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == "roundsmount")
+            .count();
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[3600,900]}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "re-set must succeed: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "every family already mounted: {reply}"
+        );
+        assert_eq!(
+            VENUE_LIVE_DISCOVERY_CFG
+                .lock()
+                .expect("venue live discovery cfg poisoned")
+                .iter()
+                .filter(|(tag, _)| tag == "roundsmount")
+                .count(),
+            mark,
+            "the idempotent re-set started no discovery"
+        );
+    }
+
+    /// B2 (轮次多族): the REMOVAL guard — a set that would remove a family
+    /// while the account holds an open position in the removed families'
+    /// venues is refused WHOLE (INVALID_PARAMS naming the removed families),
+    /// and NEITHER store moves: the file keeps the old declaration, the
+    /// in-memory book keeps the old set, no discovery restarted.
+    #[tokio::test]
+    async fn rounds_set_refuses_a_removal_with_open_exposure_and_moves_nothing() {
+        let dir = std::env::temp_dir().join(format!("bk-rounds-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundslive\"\nrounds = [900, 3600]\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "roundslive".to_string(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: vec![900, 3600],
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            // The OPEN position that blocks the removal: an entry admitted
+            // under the 3600 family (the same way the account.remove guard
+            // test fabricates its open book row).
+            c.positions_mut().open(
+                crate::position::OpenParams {
+                    strategy: "spread_arb".into(),
+                    asset: "BTC".into(),
+                    direction: crate::model::SignalDirection::Up,
+                    token_id: "tok-up".into(),
+                    condition_id: "cond".into(),
+                    account_id: AccountId::from("paper"),
+                    venue: "roundslive".to_string(),
+                    partner_token_id: String::new(),
+                    entry_price: rust_decimal_macros::dec!(0.48),
+                    expires_at_ms: now_ms() + 3_600_000,
+                    was_maker: true,
+                    target_exit_price: None,
+                    round_duration_sec: 3600,
+                },
+                now_ms(),
+            );
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "roundslive".to_string(),
+                },
+                name: "roundslive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert(("roundslive".to_string(), 900));
+        mounted.insert(("roundslive".to_string(), 3600));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string()],
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
+        };
+        VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .retain(|(tag, _)| tag != "roundslive");
+
+        // And nothing mounted (the guard fired before any runtime half).
+        // A DELTA of zero, not absolute absence: the discovery config
+        // register is a process-wide shared cell, sibling tests legitimately
+        // add their own entries concurrently — what THIS refusal must pin
+        // is that it added none.
+        let before = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == "roundslive")
+            .count();
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[900]}}"#
+                .to_string(),
+        )
+        .await;
+        // The venue.set envelope: APPLICATION carrying coreCode
+        // INVALID_PARAMS — a client fault at heart, typed through the
+        // arm's CoreError tail.
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "the removal must be refused with INVALID_PARAMS: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[3600]"),
+            "the refusal must name the removed family: {reply}"
+        );
+        // NEITHER store moved: the file keeps both families, memory too.
+        let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+        assert!(
+            file.contains("rounds = [900, 3600]"),
+            "the file must be untouched: {file}"
+        );
+        {
+            let c = core.lock().await;
+            let account = c
+                .accounts()
+                .account(&AccountId::from("paper"))
+                .expect("account");
+            assert_eq!(account.rounds, vec![900, 3600], "memory must be untouched");
+        }
+        // And nothing mounted (the guard fired before any runtime half):
+        // the tag's entry count is exactly what it was before the refused
+        // write — the guard's move-nothing guarantee.
+        assert_eq!(
+            VENUE_LIVE_DISCOVERY_CFG
+                .lock()
+                .expect("venue live discovery cfg poisoned")
+                .iter()
+                .filter(|(tag, _)| tag == "roundslive")
+                .count(),
+            before,
+            "the refused write started no discovery"
+        );
+    }
+
+    /// B2 (轮次多族): the CLEAN removal — no exposure in the removed family —
+    /// lands on both stores, does NOT unmount the running discovery instance
+    /// (软卸: `discovery_mounted_at` stays true) and the poll-output gate
+    /// drops the soft-unloaded family's next batch, bumping the
+    /// `soft_unloaded_polling_instances` gauge.
+    #[tokio::test]
+    async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
+        let dir = std::env::temp_dir().join(format!("bk-rounds-soft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundssoft\"\nrounds = [900, 3600]\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "roundssoft".to_string(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: vec![900, 3600],
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueLivePlugin {
+                discovery: VenueLiveDiscovery {
+                    tag: "roundssoft".to_string(),
+                },
+                name: "roundssoft".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        // The SHARED concrete host — the same shape the assembly builds. The
+        // gate under test is `admit_poll_batch` itself (the assembly's
+        // closure wraps exactly this call): asserting its verdicts directly
+        // exercises the poll side without rebuilding the closure a second
+        // way.
+        let core_host = crate::market::host::CoreHost::new(core.clone());
+        core_host.set_active_plugin("roundssoft");
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> = Arc::new(core_host);
+        let mut mounted = std::collections::BTreeSet::new();
+        mounted.insert(("roundssoft".to_string(), 900));
+        mounted.insert(("roundssoft".to_string(), 3600));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            discovery_assets: vec!["BTC".to_string()],
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
+        };
+        VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .retain(|(tag, _)| tag != "roundssoft");
+        // A probe batch the 3600 family's instance would emit (its own slot
+        // grid: the span derived from slot×expiry reproduces 3600s).
+        let now = now_ms();
+        let slot3600 = now / 1000 / 3600;
+        let batch_3600 = vec![blitzkrieg_market_api::MarketDescriptor {
+            asset: "BTC".to_string(),
+            condition_id: "live-cond-3600".to_string(),
+            question_id: "live-q-3600".to_string(),
+            up_token_id: "live-up-3600".to_string(),
+            down_token_id: "live-down-3600".to_string(),
+            up_price: rust_decimal_macros::dec!(0.55),
+            down_price: rust_decimal_macros::dec!(0.45),
+            expires_at_ms: (slot3600 + 1) * 3600 * 1000,
+            round_slot: slot3600,
+            venue: "roundssoft".to_string(),
+            neg_risk: false,
+            question: "soft-unload probe".to_string(),
+        }];
+        // Pre-write: the 3600 family is ACTIVE (an account declares it) —
+        // the batch must be admitted.
+        assert!(
+            data_plane.admit_poll_batch(&core, &batch_3600).await,
+            "an active family's poll batch must be admitted"
+        );
+
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[900],"reason":"family shrink"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the shrink must land: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(false),
+            "a pure removal mounts nothing: {reply}"
+        );
+        // Both stores moved.
+        let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+        assert!(
+            file.contains("rounds = [900]") && !file.contains("3600"),
+            "the file must carry the shrunk set: {file}"
+        );
+        {
+            let c = core.lock().await;
+            let account = c
+                .accounts()
+                .account(&AccountId::from("paper"))
+                .expect("account");
+            assert_eq!(account.rounds, vec![900], "memory moved too");
+        }
+        // 软卸 does NOT unmount: the instance book still holds the pair.
+        assert!(
+            data_plane.discovery_mounted_at("roundssoft", 3600),
+            "the soft-unload must leave the running instance mounted"
+        );
+        // The poll side: the same batch is now DROPPED, gauge bumps.
+        assert!(
+            !data_plane.admit_poll_batch(&core, &batch_3600).await,
+            "the soft-unloaded family's poll batch must be dropped"
+        );
+        assert_eq!(
+            data_plane.soft_unloaded_count(),
+            1,
+            "the gauge counts the dropped batch"
+        );
+        // The ACTIVE family (900) still admits.
+        let slot900 = now / 1000 / 900;
+        let batch_900 = vec![blitzkrieg_market_api::MarketDescriptor {
+            asset: "BTC".to_string(),
+            condition_id: "live-cond-900".to_string(),
+            question_id: "live-q-900".to_string(),
+            up_token_id: "live-up-900".to_string(),
+            down_token_id: "live-down-900".to_string(),
+            up_price: rust_decimal_macros::dec!(0.55),
+            down_price: rust_decimal_macros::dec!(0.45),
+            expires_at_ms: (slot900 + 1) * 900 * 1000,
+            round_slot: slot900,
+            venue: "roundssoft".to_string(),
+            neg_risk: false,
+            question: "active probe".to_string(),
+        }];
+        assert!(
+            data_plane.admit_poll_batch(&core, &batch_900).await,
+            "the still-active family's batch must keep flowing"
+        );
+        assert_eq!(data_plane.soft_unloaded_count(), 1, "no double count");
+    }
+
+    /// B2 (轮次多族): the parametric refusals — a whitelist-foreign duration
+    /// refuses before anything is computed; an unknown account refuses with
+    /// the standard unknown-account error; a duplicate-carrying list is
+    /// deduplicated with first-seen order kept (900, 3600, 900 → [900,
+    /// 3600]); the EMPTY set removes the accounts.toml key entirely (missing
+    /// and `[]` are the same unrestricted spelling, the deleted key is the
+    /// cleaner one) and a NEW core reading the same file boots with the
+    /// unrestricted account (the persistence round-trip).
+    #[tokio::test]
+    async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() {
+        let dir = std::env::temp_dir().join(format!("bk-rounds-params-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundslive\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "roundslive".to_string(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            registry.register(Box::new(VenueStubPlugin {
+                name: "roundslive".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: false,
+            discovery_enabled: false,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
+        };
+
+        // Whitelist-foreign duration: refused before anything moved.
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[9000]}}"#
+                .to_string(),
+        )
+        .await;
+        // The venue.set envelope: APPLICATION carrying coreCode
+        // INVALID_PARAMS — a client fault at heart, typed through the
+        // arm's CoreError tail.
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "a foreign duration must refuse: {reply}"
+        );
+        // Unknown account: the standard unknown-account refusal.
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":2,"method":"account.rounds.set","params":{"accountId":"ghost","rounds":[900]}}"#
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["data"]["coreCode"],
+            serde_json::json!("INVALID_PARAMS"),
+            "{reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown account"),
+            "the standard unknown-account spelling: {reply}"
+        );
+        // Dedup with first-seen order kept: [900, 3600, 900] → [900, 3600].
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":3,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[900,3600,900]}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the dedup write must land: {reply}"
+        );
+        assert_eq!(
+            reply["result"]["rounds"],
+            serde_json::json!([900, 3600]),
+            "duplicates dropped, first-seen order kept: {reply}"
+        );
+        let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+        assert!(
+            file.contains("rounds = [900, 3600]"),
+            "the deduplicated set is what lands on disk: {file}"
+        );
+
+        // The EMPTY set: the key is REMOVED from the file (missing == []).
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":4,"method":"account.rounds.set","params":{"accountId":"paper","rounds":[]}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(
+            reply.get("error").is_none(),
+            "the empty set is the legal unrestricted write: {reply}"
+        );
+        assert_eq!(reply["result"]["rounds"], serde_json::json!([]), "{reply}");
+        let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+        assert!(
+            !file.contains("rounds ="),
+            // ("roundslive" the venue contains the substring — match the
+            // KEY spelling, not a bare substring.)
+            "the rounds key must be GONE from the file: {file}"
+        );
+        assert!(file.contains("name = \"paper\""), "siblings kept: {file}");
+
+        // Persistence round-trip: a NEW core reading the same file boots
+        // unrestricted (the deleted key parses as the empty set).
+        let reread = crate::account::config::load_account_ledgers(&accounts_path, now_ms())
+            .expect("the file the write produced must boot");
+        let account = reread.account(&AccountId::from("paper")).expect("account");
+        assert!(
+            account.rounds.is_empty(),
+            "the deleted key boots unrestricted: {:?}",
+            account.rounds
+        );
+    }
+
     /// 建户即绑定（#535 用户实录的内核半边）：一个带 venue 的 `account.create`
     /// 必须把该 venue 的 feed/discovery 挂进本会话 —— 否则新建账户的行情永远
     /// 停在「首行数据到达后渲染」。三条 observable 断言：回执 runtimeEnabled
@@ -7520,6 +8601,9 @@ mod tests {
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(mounted)),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
 
         let reply = rpc_with_data_plane(
@@ -7697,6 +8781,9 @@ mod tests {
             discovery_assets: vec!["BTC".to_string(), "ETH".to_string()],
             discovery_round_duration_sec: 900,
             discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
 
         // Unbind: the write lands, nothing mounts.

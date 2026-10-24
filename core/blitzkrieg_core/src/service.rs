@@ -3117,6 +3117,82 @@ impl Core {
         Ok(())
     }
 
+    /// The account round-FAMILY write (`account.rounds.set`, 轮次多族 B2):
+    /// validate → persist FIRST (a failure leaves both stores untouched) →
+    /// the in-memory book. The venue.set transaction posture, kept: the
+    /// persist happens FIRST (plan-and-persist before apply — the two stores
+    /// can never disagree), and a core without an
+    /// [`CoreConfig::accounts_config_path`] refuses instead of writing into
+    /// whatever checkout it happens to run from.
+    ///
+    /// Validation reuses [`crate::account::config::validate_rounds`] (the
+    /// SAME whitelist + dedup the parser runs — one spelling of the rule,
+    /// never two) over `Some(rounds)`; an empty list passes through as the
+    /// legal unrestricted set and REMOVES the file key (missing == `[]` at
+    /// the next boot; the deleted key is the cleaner spelling). The
+    /// open-exposure refusal for a shrinking set is the IPC arm's job — it
+    /// needs the position book AND the removed-family arithmetic, and its
+    /// refusal must move NOTHING (memory and disk exactly as they were).
+    pub fn set_account_rounds_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        rounds: Vec<i64>,
+        actor: &str,
+        reason: &str,
+        _now_ms: i64,
+    ) -> CoreResult<()> {
+        use crate::ipc::schema::ACCOUNT_ROUNDS_SET_NOTE;
+        // Existence first, with the standard unknown-account refusal, before
+        // anything touches disk.
+        self.accounts.require(id)?;
+        // One validation, the parser's own: whitelist + dedup, first-seen
+        // order kept. `Some(..)` (not `None`) — the wire asked for a set.
+        let rounds = crate::account::config::validate_rounds(Some(rounds))?;
+        let Some(path) = self.config.accounts_config_path.as_deref() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.rounds.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        crate::account::config::persist_account_rounds(
+            std::path::Path::new(path),
+            id.as_str(),
+            &rounds,
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.rounds.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
+        // The write-side re-check inside `set_rounds` runs again (same
+        // fail-closed posture at every door) — it cannot refuse what
+        // `validate_rounds` passed, but the door stays.
+        self.accounts.set_rounds(id, rounds.clone())?;
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            rounds = ?rounds,
+            reason = %reason,
+            "account round families written — the (venue, duration) admission \
+             gate reads the new set immediately{}; the declaration re-reads at \
+             next boot ({ACCOUNT_ROUNDS_SET_NOTE})",
+            if rounds.is_empty() {
+                " (empty set = unrestricted, key removed from accounts.toml)"
+            } else {
+                ""
+            },
+        );
+        Ok(())
+    }
+
     // ── 跨所套利弹窗 v2: the arb leg configuration surface ──────────────────
 
     /// The arb leg configuration in force (`arb.config.get`'s data source).
