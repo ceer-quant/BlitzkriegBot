@@ -557,6 +557,11 @@ pub struct MarketPluginRow {
     /// E27 (§8.3): readable names of the capability bits, in bit order.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// #604: the round families the plugin declares it can route (seconds);
+    /// absent = the plugin declares no restriction and the panel shows every
+    /// option. Older cores omit the key — the default keeps the full list.
+    #[serde(default)]
+    pub supported_round_secs: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

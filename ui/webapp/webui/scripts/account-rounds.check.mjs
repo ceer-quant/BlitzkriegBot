@@ -173,6 +173,10 @@ check('账户卡按声明筛档：档位渲染走 roundOptionsFor（声明面，
   assert.match(switcher, /v-for="opt in roundOptionsFor\(a\)"/, '编辑器档位未走声明筛 —— v-for 直接摸 ROUND_OPTIONS 会把该所服务不了的档位摆上桌')
   assert.doesNotMatch(switcher, /v-for="opt in ROUND_OPTIONS"/, '档位 v-for 裸用 ROUND_OPTIONS 回归 —— 4h@kalshi 零发现静默盲点的教训')
 })
+check('ui_kit 转译层保留声明键（内核 wire → 面板 snapshot 的中间层漏字段 = 声明面静默蒸发）', () => {
+  const types = read('..', '..', '..', 'ui', 'ui_kit', 'src', 'core', 'types.rs')
+  assert.match(types, /pub supported_round_secs: Option<Vec<i64>>/, 'MarketPluginRow 缺 supported_round_secs —— serde 会把内核带出的声明键在转译层丢掉，面板永远 undefined')
+})
 
 // ── 4c. 退出纪律 trailing 热配开关（issue 356 升格；risk.setExit）─────────────
 check('退出纪律卡有 trailingEnabled Switch（老内核缺字段 → 禁用降级，不造默认值）', () => {
