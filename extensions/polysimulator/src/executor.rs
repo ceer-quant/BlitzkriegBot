@@ -224,7 +224,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     // Seed the ledger from the venue so the reserve gate reflects real cash.
     match client.balance().await {
         Ok(b) => {
-            host.seed_balance(b.balance).await;
+            host.seed_balance("polysimulator", b.balance).await;
             eprintln!(
                 "polysimulator-extension: executor ready balance={}",
                 b.balance
@@ -537,7 +537,7 @@ async fn sweep(
 
     // Cash truth: re-align the ledger's free view every sweep.
     match client.balance().await {
-        Ok(b) => host.venue_free_balance(b.balance).await,
+        Ok(b) => host.venue_free_balance("polysimulator", b.balance).await,
         Err(e) => host.report_error(into_core_error(&e)).await,
     }
     Ok(())

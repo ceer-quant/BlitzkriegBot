@@ -241,7 +241,7 @@ pub(crate) async fn executor_loop(
     // Seed the ledger from the venue so the reserve gate reflects real cash.
     match client.balance().await {
         Ok(b) => {
-            host.seed_balance(b.balance).await;
+            host.seed_balance("predictfun", b.balance).await;
             eprintln!("predictfun-extension: executor ready balance={}", b.balance);
         }
         Err(e) => eprintln!("predictfun-extension: live balance fetch failed: {e}"),
@@ -553,7 +553,7 @@ async fn sweep(
 
     // Cash truth: re-align the ledger's free view every sweep.
     match client.balance().await {
-        Ok(b) => host.venue_free_balance(b.balance).await,
+        Ok(b) => host.venue_free_balance("predictfun", b.balance).await,
         Err(e) => host.report_error(into_core_error(&e)).await,
     }
     Ok(())

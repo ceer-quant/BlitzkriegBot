@@ -2924,10 +2924,86 @@ impl Core {
             }
             self.venue_free = Some((ts, b));
         }
-        // The venue realign targets the ACTIVE account's book (§9.5: the
-        // process-level default; 0.2 deployments have exactly one).
+        // The DRY seed targets the ACTIVE account's book (§9.5: the
+        // process-level default; 0.2 deployments have exactly one). Venue
+        // cash truth from an executor is routed by binding instead —
+        // [`Self::realign_venue_cash`].
         self.accounts.active_ledger_mut().set_balance(b);
     }
+
+    /// Fold one venue's reported cash into the account bound to that venue
+    /// (multi-account #532: a venue's balance belongs to the account that
+    /// trades it, NEVER to whoever is "active" — the single-account-era
+    /// routing here once wrote the PolySimulator's 100 USDC over the default
+    /// account's real 13.59). No active binding for the venue falls back to
+    /// the active ledger — the legacy single-account shape.
+    pub fn realign_venue_cash(&mut self, venue: &str, b: Decimal) {
+        let target = self.venue_cash_account(venue);
+        if self.config.mode == Mode::Live {
+            let ts = now_ms();
+            let previous = self
+                .accounts
+                .ledger_of(&target)
+                .map(|l| l.balance())
+                .unwrap_or_default();
+            if previous != b {
+                self.audit.last_realign = Some((ts, b - previous));
+                tracing::info!(
+                    account = %target.as_str(),
+                    venue = %venue,
+                    previous = %previous,
+                    reported = %b,
+                    "venue cash realigned into its bound account (no resting commitment)"
+                );
+            }
+            self.venue_free = Some((ts, b));
+        }
+        if let Ok(ledger) = self.accounts.get_mut(&target) {
+            ledger.set_balance(b);
+        }
+        tracing::debug!(account = %target.as_str(), venue = %venue, balance = %b, "venue cash routed");
+    }
+
+    /// The account a venue's cash truth belongs to: the first ACTIVE account
+    /// bound to the venue, falling back to the active ledger (legacy
+    /// single-account shape — an unbound deployment has exactly one book).
+    fn venue_cash_account(&self, venue: &str) -> crate::account::AccountId {
+        self.accounts
+            .account_for_venue(venue)
+            .map(|a| a.id.clone())
+            .unwrap_or_else(|| self.accounts.active_id().clone())
+    }
+
+    /// The periodic venue-cash fold (`venue_free_balance`): with no resting
+    /// commitments the venue's free cash IS the book's total (a fill the bot
+    /// missed shows up as cash that left with no fill event — the drift
+    /// killer); with resting orders the venue may or may not net them out of
+    /// the reported balance, so a wide gap is SURFACED, never auto-corrected
+    /// (double-counting risk). Comparison runs against the venue's own bound
+    /// account, not the active one.
+    pub fn fold_venue_free(&mut self, venue: &str, free: Decimal) {
+        let target = self.venue_cash_account(venue);
+        let Ok(ledger) = self.accounts.ledger_of(&target) else {
+            return;
+        };
+        let (balance, reserved) = (ledger.balance(), ledger.reserved());
+        if reserved == Decimal::ZERO {
+            if balance != free {
+                self.realign_venue_cash(venue, free);
+                eprintln!(
+                    "core: venue cash reconcile [{venue}]: ledger {balance} -> venue free {free}"
+                );
+            }
+        } else {
+            let expected_free = balance - reserved;
+            if (expected_free - free).abs() > Decimal::new(2, 2) {
+                eprintln!(
+                    "core: venue cash drift [{venue}]: ledger={balance} reserved={reserved} venue free={free} (resting orders; not auto-corrected)"
+                );
+            }
+        }
+    }
+
     /// The active account's ledger (§9.5). Views and callers with no order
     /// context read this; money-moving sites route by the order's own
     /// `account_id` instead.
@@ -18114,6 +18190,57 @@ mod tests {
             book,
         );
         (c, dir)
+    }
+
+    /// 场地现金真值必须落进绑定该 venue 的账户，而不是「active 账户」——
+    /// 单账户时代的路由曾把 PolySimulator 的 100 USDC 写到 default 账户上
+    /// （default 真 13.59 被冲掉，poly 面板还停在 journal 回放的 1000）。
+    #[test]
+    fn venue_cash_realign_routes_to_the_bound_account_not_active() {
+        let (mut c, dir) = two_account_reset_fixture("venue-cash-route");
+        // paper 账户绑 poly 模拟盘（journal 回放出的练习金）；default 是
+        // active、揣着自己的真钱。
+        c.accounts
+            .set_venue(
+                &crate::account::AccountId::from("paper"),
+                "polysimulator",
+                0,
+            )
+            .expect("venue binding lands");
+        c.accounts
+            .get_mut(&crate::account::AccountId::from("paper"))
+            .unwrap()
+            .set_balance(Decimal::from(1_000));
+        c.accounts
+            .get_mut(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .set_balance(Decimal::new(1359, 2));
+        // PolySimulator 场地报 100：落在 paper 的簿上，default 分文不动。
+        c.realign_venue_cash("polysimulator", Decimal::from(100));
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            Decimal::from(100)
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::new(1359, 2)
+        );
+        // 无绑定的 venue 回落 active 账户（旧单账户语义）。
+        c.realign_venue_cash("ghost-venue", Decimal::from(7));
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::from(7)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 铺一个已平仓交易到指定账户（生产路径：open → close() →

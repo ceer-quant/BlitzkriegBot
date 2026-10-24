@@ -421,6 +421,17 @@ impl AccountLedgers {
             .unwrap_or("")
     }
 
+    /// The first ACTIVE-status account bound to `venue` (#505 account↔venue
+    /// binding). Venue-scoped cash truth routes through here: a venue's
+    /// balance belongs to the account that trades it. None = no active
+    /// account carries that binding (the caller decides the fallback — the
+    /// legacy single-account routing lands on the active ledger).
+    pub fn account_for_venue(&self, venue: &str) -> Option<&Account> {
+        self.accounts
+            .values()
+            .find(|a| a.status == AccountStatus::Active && a.venue == venue)
+    }
+
     /// Re-point the display pointer (`display.account.set`'s memory half).
     /// The id must name a CONFIGURED account — the pointer's invariant; the
     /// ACTIVE-status check and the persistence are the CALLER's job (the

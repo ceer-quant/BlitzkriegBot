@@ -87,7 +87,7 @@ pub async fn spawn_if_configured(
     // Seed the ledger from the venue so the reserve gate reflects real cash.
     match venue.balance().await {
         Ok(b) => {
-            host.seed_balance(b).await;
+            host.seed_balance("polymarket", b).await;
             eprintln!(
                 "polymarket-extension: live bridge ready signer={signer} funder={funder} balance={b}"
             );
@@ -435,7 +435,7 @@ pub async fn spawn_if_configured(
                 // against the venue's free cash every sweep (the host gates
                 // the correction on its own reserved amount).
                 match venue.balance().await {
-                    Ok(free) => host.venue_free_balance(free).await,
+                    Ok(free) => host.venue_free_balance("polymarket", free).await,
                     Err(e) => host.report_error(e).await,
                 }
             }
