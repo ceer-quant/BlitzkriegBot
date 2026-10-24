@@ -950,9 +950,10 @@ pub async fn run(
     // in the run log without trusting that the running file matches current source.
     let ex = &config.positions.exit;
     eprintln!(
-        "exit tuning: stop_loss={}% take_profit={}% trail_min={}% trail_arm={}% min_time_left={}s force_exit={}s maker_timeout={}ms",
+        "exit tuning: stop_loss={}% take_profit={}% trailing={} trail_min={}% trail_arm={}% min_time_left={}s force_exit={}s maker_timeout={}ms",
         ex.stop_loss_pct,
         ex.take_profit_pct,
+        ex.trailing_enabled,
         ex.min_trail_pct,
         ex.trailing_min_high_pct,
         ex.min_time_left_sec,
@@ -1634,10 +1635,10 @@ async fn handle_line(
             Err(e) => Err((
                 Failure::INVALID_PARAMS,
                 format!(
-                    "{e} — nothing was applied; the three exit fields are \
+                    "{e} — nothing was applied; the exit fields are \
                          stopLossPct (percent of entry price, > 0), takeProfitPct \
                          (percent of entry price, > 0), forceExitSec (seconds, \
-                         0 = the guillotine is OFF)"
+                         0 = the guillotine is OFF), trailingEnabled (bool)"
                 ),
                 None,
             )),
@@ -5934,11 +5935,16 @@ mod tests {
         let (core, registry, peer) = hot_reload_fixture().await;
 
         // Arm all three fields at once; the reply names each old→new.
+        // trailingEnabled rides the same patch: the calibration default is
+        // OFF (issue 356: the proven operator never sells into profit), and
+        // the hot-write face is where an operator re-arms it without a
+        // restart — the single-entry behaviour this round's spread_arb
+        // losses exposed (peak +46.7% given back to a -13% stop).
         let applied = rpc(
             &core,
             &registry,
             &peer,
-            r#"{"jsonrpc":"2.0","id":1,"method":"risk.setExit","params":{"stopLossPct":"8","takeProfitPct":"90","forceExitSec":120,"reason":"tighten"}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"risk.setExit","params":{"stopLossPct":"8","takeProfitPct":"90","forceExitSec":120,"trailingEnabled":true,"reason":"tighten"}}"#.to_string(),
         )
         .await;
         assert!(
@@ -5982,6 +5988,11 @@ mod tests {
             Some(("0".into(), "120".into(), "live".into())),
             "the guillotine row carries old→new and live: {audit}"
         );
+        assert_eq!(
+            change_of("trailingEnabled"),
+            Some(("false".into(), "true".into(), "live".into())),
+            "the trailing row carries old→new and live — the calibration default OFF re-arms hot: {audit}"
+        );
 
         // The readout answers with the new values.
         let read = rpc(
@@ -6006,6 +6017,22 @@ mod tests {
             read["result"]["exit"]["forceExitSec"],
             serde_json::json!(120)
         );
+        assert_eq!(
+            read["result"]["exit"]["trailingEnabled"],
+            serde_json::json!(true),
+            "the readout carries the arming switch the panel renders"
+        );
+
+        // The write path is live, not just the receipt: the arming switch the
+        // exit sweep reads every tick moved with it (a flipped trailing flag
+        // without a config move would be a receipt lie).
+        {
+            let c = core.lock().await;
+            assert!(
+                c.config().positions.exit.trailing_enabled,
+                "the write phase must move the LIVE exit config"
+            );
+        }
 
         // forceExitSec: 0 is the documented OFF switch, accepted.
         let off = rpc(

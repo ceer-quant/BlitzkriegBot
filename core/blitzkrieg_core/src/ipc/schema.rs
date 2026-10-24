@@ -663,6 +663,7 @@ impl RiskLimitsResult {
                 stop_loss_pct: exit.stop_loss_pct,
                 take_profit_pct: exit.take_profit_pct,
                 force_exit_sec: exit.force_exit_sec,
+                trailing_enabled: exit.trailing_enabled,
             },
         }
     }
@@ -696,6 +697,10 @@ pub struct RiskExitView {
     #[serde(with = "crate::decimal")]
     pub take_profit_pct: Decimal,
     pub force_exit_sec: i64,
+    /// Trailing-stop arming switch, same live semantics as the triple
+    /// (hot-writable via `risk.setExit`). Incremental field — old panels
+    /// ignore it.
+    pub trailing_enabled: bool,
 }
 
 // ── E29 (§12.2) — K-line subscriptions ───────────────────────────────────────
@@ -1033,6 +1038,13 @@ pub struct SetExitParams {
     /// 校准值：旧的 120s 截止切掉了后来赔付的轮）。负值拒绝。
     #[serde(default)]
     pub force_exit_sec: Option<i64>,
+    /// 移动止盈总开关（trailing stop 是否武装）。**出厂 false** —— 10-02
+    /// #356 校准裁决（「操盘手从不卖进利润，全部持有到期 REDEEM」），但
+    /// spread_arb 一类「入场→坐山车→止损」的价差策略正是它该管的形态：
+    /// 单边持仓到期特征暴露了旧校准的局限，故升格为热配项。true/false
+    /// 都是合法值（bool 没有「非法值」可拒）。
+    #[serde(default)]
+    pub trailing_enabled: Option<bool>,
     /// Free-text note from the caller, echoed into the audit line.
     #[serde(default)]
     pub reason: Option<String>,
@@ -1045,6 +1057,7 @@ impl SetExitParams {
         self.stop_loss_pct.is_none()
             && self.take_profit_pct.is_none()
             && self.force_exit_sec.is_none()
+            && self.trailing_enabled.is_none()
     }
 }
 
