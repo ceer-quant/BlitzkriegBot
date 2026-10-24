@@ -154,15 +154,24 @@ const strategyArgs = [
 //
 // One measurement, one commit hash, never a widened tolerance. Tolerances
 // below are UNCHANGED.
+//
+// (3) RE-RECORDED 2026-10-24, at `9ad51ea`: #606 made `spread_arb` declare
+// `trailing_exit: true` in its manifest — the operator verdict that a spread
+// strategy selling into profit wants the trailing stop per-strategy, not a
+// session hot-write. With trailing armed, three windows close MORE positions
+// and exit via the trailing stop instead of riding profits down to the bare
+// stop-loss: the money moves because the EXITS moved, measured on the same
+// HEAD core (removing the declaration reproduced the (2) rows bit for bit).
+// Tolerances UNCHANGED.
 // ---------------------------------------------------------------------------
 const BASELINE = Object.freeze({
-  recorded: '2026-10-02',
-  commit: 'ea347172',
+  recorded: '2026-10-24',
+  commit: '9ad51ea',
   issue: 'https://github.com/ceer-quant/BlitzkriegBot/issues/272',
   windows: {
-    'trend-20260919T1000Z': { closed: 13, wins: 4, winRatePct: 30.77, netPnlUsd: 5.207 },
-    'range-20260919T1600Z': { closed: 12, wins: 2, winRatePct: 16.67, netPnlUsd: -0.2262 },
-    'trend-20260920T2100Z': { closed: 6, wins: 1, winRatePct: 16.67, netPnlUsd: -0.3556 },
+    'trend-20260919T1000Z': { closed: 13, wins: 4, winRatePct: 30.77, netPnlUsd: -4.8871 },
+    'range-20260919T1600Z': { closed: 17, wins: 7, winRatePct: 41.18, netPnlUsd: -4.7336 },
+    'trend-20260920T2100Z': { closed: 9, wins: 3, winRatePct: 33.33, netPnlUsd: -2.8141 },
     'range-20260920T2300Z': { closed: 13, wins: 0, winRatePct: 0, netPnlUsd: -11.0845 },
   },
 });
