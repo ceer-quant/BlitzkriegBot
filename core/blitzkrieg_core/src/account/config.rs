@@ -256,7 +256,7 @@ impl AccountFileEntry {
 /// WHOLE boot (fail-closed: a typo'd duration must not silently become
 /// "no restriction" — the operator believes the restriction is live).
 /// Duplicates are dropped with first-seen order kept.
-fn validate_rounds(rounds: Option<Vec<i64>>) -> Result<Vec<i64>, CoreError> {
+pub(crate) fn validate_rounds(rounds: Option<Vec<i64>>) -> Result<Vec<i64>, CoreError> {
     let Some(rounds) = rounds else {
         return Ok(Vec::new());
     };
@@ -813,6 +813,65 @@ pub fn persist_account_strategies(
     )
 }
 
+/// The persisted write of ONE account's round-length FAMILY set
+/// (`account.rounds.set`, 轮次多族 B2). Read-modify-write over the whole
+/// file, the exact posture [`persist_account_venue`] runs (a non-parsing
+/// file is REFUSED, never flattened; atomic same-directory temp + rename via
+/// [`write_accounts_file_atomic`]; the toml re-render does not carry the
+/// operator's comments — the same accepted trade-off, every FIELD
+/// round-trips because the parse is `deny_unknown_fields`).
+///
+/// An EMPTY (or already-deduplicated-to-empty) list REMOVES the `rounds`
+/// key — the file spells "no declared family set" by absence, the exact
+/// shape a pre-declaration file had; missing and `[]` parse identically at
+/// the next boot, and a deleted key is cleaner than a persisted empty array.
+/// The whitelist/dedup validation is the CALLER's job (the service layer
+/// reuses [`validate_rounds`] before it ever calls here); this layer only
+/// owns the file.
+pub fn persist_account_rounds(
+    path: &Path,
+    account_id: &str,
+    rounds: &[i64],
+) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the rounds write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the rounds write: {e}"),
+        )
+    })?;
+    let target = file
+        .account
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+            )
+        })?;
+    target.rounds = if rounds.is_empty() {
+        None
+    } else {
+        Some(rounds.to_vec())
+    };
+    write_accounts_file_atomic(
+        path,
+        &toml::to_string(&file).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml does not render: {e}"),
+            )
+        })?,
+        "rounds",
+    )
+}
+
 /// The persisted removal of ONE account (`account.remove`): drop the named
 /// `[[account]]` from the book — read-modify-write, the same fail-closed
 /// posture as every accounts.toml writer above. The CALLER owns the
@@ -1343,6 +1402,128 @@ venue = "kalshi"
 
         // A file that cannot even be read: refused with the same posture.
         let err = persist_account_venue(&dir.join("nope.toml"), "x", "polymarket")
+            .expect_err("unreadable file");
+        assert!(err.message.contains("unreadable"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_account_rounds_writes_back_and_every_sibling_field_survives() {
+        let dir = std::env::temp_dir().join(format!("bk-rounds-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // The write lands with every sibling field intact (the same
+        // read-modify-write guarantee the venue writer pins — one regression
+        // here would silently shrink the book at the next boot).
+        persist_account_rounds(&p, "default", &[900, 3600]).expect("the write lands");
+        let book = load_account_ledgers(&p, 3).expect("the file re-parses");
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().rounds,
+            vec![900, 3600],
+            "the declaration is what the next boot reads"
+        );
+        let d = book.account(&AccountId("default".into())).unwrap();
+        assert_eq!(d.name, "Poly Main");
+        assert_eq!(
+            d.credential_keys.api_key_env.as_deref(),
+            Some("POLY_API_KEY")
+        );
+        assert_eq!(d.credential_keys.secret_env.as_deref(), Some("POLY_SECRET"));
+        assert_eq!(
+            d.credential_keys.passphrase_env.as_deref(),
+            Some("POLY_PASSPHRASE")
+        );
+        assert_eq!(
+            d.credential_keys.private_key_env.as_deref(),
+            Some("POLY_PRIVATE")
+        );
+        // The sibling account's own state (status restriction + existing
+        // binding) rode through untouched.
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().venue,
+            "kalshi"
+        );
+        assert!(matches!(
+            book.account(&AccountId("paper".into())).unwrap().status,
+            AccountStatus::ReadOnly
+        ));
+
+        // Round two of the read-modify-write cycle: a rewrite over a file
+        // the writer itself produced keeps both accounts' declarations.
+        persist_account_rounds(&p, "paper", &[300]).expect("round two lands");
+        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().rounds,
+            vec![300]
+        );
+        assert_eq!(
+            book.account(&AccountId("default".into())).unwrap().rounds,
+            vec![900, 3600],
+            "the first write survived the second"
+        );
+
+        // The EMPTY set REMOVES the key — the file returns to the
+        // "unrestricted by absence" shape a pre-declaration file had; the
+        // deleted key parses exactly like a missing one.
+        persist_account_rounds(&p, "default", &[]).expect("the delete lands");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let default_block = text.split("[[account]]").nth(1).unwrap();
+        assert!(
+            !default_block.contains("rounds"),
+            "the unrestricted entry carries no rounds key: {text}"
+        );
+        let book = load_account_ledgers(&p, 5).expect("the deleted-key file re-parses");
+        assert!(
+            book.account(&AccountId("default".into()))
+                .unwrap()
+                .rounds
+                .is_empty(),
+            "absence loads as the unrestricted set"
+        );
+        assert_eq!(
+            book.account(&AccountId("paper".into())).unwrap().rounds,
+            vec![300],
+            "the other account's declaration survives the delete"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_account_rounds_refuses_unknown_ids_and_broken_files() {
+        let dir = std::env::temp_dir().join(format!("bk-rounds-persist2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let p = dir.join("accounts.toml");
+        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
+
+        // An id the file never declared: refused, and the file is untouched.
+        let before = std::fs::read_to_string(&p).unwrap();
+        let err = persist_account_rounds(&p, "ghost", &[900]).expect_err("unknown id");
+        assert!(
+            err.message.contains("no `[[account]]` with id `ghost`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
+
+        // A file that does not parse: refused fail-closed, never flattened.
+        std::fs::write(&p, "[[account]]\nid = \"x\"\nbogus = 1\n").unwrap();
+        let err = persist_account_rounds(&p, "x", &[900]).expect_err("does not parse");
+        assert!(
+            err.message.contains("does not parse; refusing"),
+            "{}",
+            err.message
+        );
+
+        // A file that cannot even be read: refused with the same posture.
+        let err = persist_account_rounds(&dir.join("nope.toml"), "x", &[900])
             .expect_err("unreadable file");
         assert!(err.message.contains("unreadable"), "{}", err.message);
         let _ = std::fs::remove_dir_all(&dir);
