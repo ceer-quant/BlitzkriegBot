@@ -524,6 +524,17 @@ impl SettlementBook {
             .fold(Decimal::ZERO, |a, c| a + c.payout_usd)
     }
 
+    /// The receivable of ONE account's claims (each claim carries the
+    /// `account_id` it was booked from — E28 §9.2): the accounting audit
+    /// compares THIS book's balance against THIS book's receivable; a sibling
+    /// account's pending redemption is a different wallet's money.
+    pub fn receivable_usd_for(&self, account: &str) -> Decimal {
+        self.claims
+            .values()
+            .filter(|c| c.account_id == account)
+            .fold(Decimal::ZERO, |a, c| a + c.payout_usd)
+    }
+
     pub fn claims(&self) -> impl Iterator<Item = &RedemptionClaim> {
         self.claims.values()
     }
@@ -1092,6 +1103,15 @@ impl SettlementBook {
     pub fn merge_receivable_usd(&self) -> Decimal {
         self.merges
             .values()
+            .fold(Decimal::ZERO, |a, m| a + m.pairs_usd)
+    }
+
+    /// ONE account's merge receivable (same principle as
+    /// [`Self::receivable_usd_for`]).
+    pub fn merge_receivable_usd_for(&self, account: &str) -> Decimal {
+        self.merges
+            .values()
+            .filter(|m| m.account_id == account)
             .fold(Decimal::ZERO, |a, m| a + m.pairs_usd)
     }
 

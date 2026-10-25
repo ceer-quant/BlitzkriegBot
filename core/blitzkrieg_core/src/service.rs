@@ -8559,8 +8559,12 @@ impl Core {
         // (issue #175). `mergeReceivableUsd` splits out #461's burned-pair
         // collateral waiting on its merge receipt — both are inside
         // `receivableUsd` (the identity telescopes over all receivables).
-        v["receivableUsd"] = dec_json(self.settlement.receivable_usd());
-        v["mergeReceivableUsd"] = dec_json(self.settlement.merge_receivable_usd());
+        // The view mirrors the AUDITED identity: the ACTIVE account's own
+        // receivable only (a sibling account's claim is a different wallet).
+        let active_account = self.accounts.active_id().as_str().to_string();
+        v["receivableUsd"] = dec_json(self.settlement.receivable_usd_for(&active_account));
+        v["mergeReceivableUsd"] =
+            dec_json(self.settlement.merge_receivable_usd_for(&active_account));
         v["summary"] = serde_json::json!(
             self.audit
                 .report
@@ -9265,21 +9269,36 @@ impl Core {
                     .unwrap_or(false)
             })
             .collect();
+        // E28 (§9.2): every fold below scopes to the ACTIVE account — the
+        // identity describes ONE book, so a sibling account's realized PnL,
+        // pending redemption, or open position must not move it (they once
+        // did: the global summary/global receivable/all-books positions fold
+        // made `trade_ledger_identity` drift by exactly what the sibling
+        // account traded).
         let (realized, seen_trades, has_trade_log) = match self.trade_db.as_ref() {
-            Some(db) => (
-                f64_to_decimal(db.summary().total_net_pnl),
-                db.summary().total_trades,
-                true,
-            ),
+            Some(db) => {
+                let s = db.summary_for(active_id.as_str());
+                (f64_to_decimal(s.total_net_pnl), s.total_trades, true)
+            }
             None => (Decimal::ZERO, 0, false),
         };
         let mut spent = Decimal::ZERO;
         let mut received = Decimal::ZERO;
-        for p in self.positions.open_positions() {
+        for p in self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == active_id)
+        {
             spent += p.flows.entry_cost_usd + p.flows.entry_fee_usd;
             received += p.flows.proceeds_usd - p.flows.exit_fee_usd;
         }
-        let open_positions = self.positions.open_positions().len();
+        let open_positions = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == active_id)
+            .count();
         // E28: the audit's cash identity describes the ACTIVE account's book
         // (§9.5). Cross-account isolation is asserted by the dedicated gate
         // (account-cross-isolation-check.mjs), not by widening this identity.
@@ -9300,9 +9319,11 @@ impl Core {
             live: self.config.mode == Mode::Live,
             identity: CashIdentity {
                 balance: active.balance(),
-                // Settled but not yet redeemed: owed to us, not in the wallet.
-                receivable: self.settlement.receivable_usd()
-                    + self.settlement.merge_receivable_usd(),
+                // Settled but not yet redeemed: owed to US — this book's us,
+                // not the process's (each claim carries the account it was
+                // booked from, E28 §9.2).
+                receivable: self.settlement.receivable_usd_for(active_id.as_str())
+                    + self.settlement.merge_receivable_usd_for(active_id.as_str()),
                 realized,
                 spent,
                 received,
@@ -18313,6 +18334,53 @@ mod tests {
         c.realign_venue_cash("polymarket", Decimal::new(1359, 2));
         let input = c.build_audit_input(now_ms());
         assert_eq!(input.venue_free, Some(Decimal::from(100)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 审计身份（realized/receivable/spent/received/seen_trades）只折 active
+    /// 账户自己的行——真线事故链的第三处：poly 账户平仓后，全局 summary 的
+    /// realized 曾把它的盈亏算进 default 的 trade_ledger_identity。
+    #[test]
+    fn audit_identity_scopes_to_the_active_account() {
+        let (mut c, dir) = two_account_reset_fixture("audit-identity-scope");
+        // paper 账户经生产平仓路径实现 -2（TradeDb/结算认领/持仓三处同折）。
+        seed_closed_trade(&mut c, "paper", "poly-1", Decimal::from(-2));
+        // active = default：paper 的盈亏与认领不得进入 default 的身份。
+        let input = c.build_audit_input(now_ms());
+        assert_eq!(
+            input.identity.realized,
+            Decimal::ZERO,
+            "sibling realized leaked"
+        );
+        assert_eq!(
+            input.identity.receivable,
+            Decimal::ZERO,
+            "sibling receivable leaked"
+        );
+        assert_eq!(input.seen_trades, 0, "sibling trade count leaked");
+        // 切 active 到 paper：它自己的行可见（realized = -2）。
+        c.accounts
+            .switch(&crate::account::AccountId::from("paper"))
+            .expect("switch");
+        let input = c.build_audit_input(now_ms());
+        let expected_realized = f64_to_decimal(
+            c.trade_db
+                .as_ref()
+                .unwrap()
+                .summary_for("paper")
+                .total_net_pnl,
+        );
+        assert!(expected_realized < Decimal::ZERO);
+        assert_eq!(input.identity.realized, expected_realized);
+        assert_eq!(input.seen_trades, 1);
+        // receivable 与该账户自己的结算簿一致（认领在，但只属于 paper）。
+        assert_eq!(
+            input.identity.receivable,
+            c.settlement.receivable_usd_for("paper")
+                + c.settlement.merge_receivable_usd_for("paper")
+        );
+        // default 的结算簿分文未动。
+        assert_eq!(c.settlement.receivable_usd_for("default"), Decimal::ZERO);
         let _ = std::fs::remove_dir_all(dir);
     }
 
