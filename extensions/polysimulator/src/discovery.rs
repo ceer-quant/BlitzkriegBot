@@ -83,15 +83,18 @@ pub(crate) fn spawn(
     poll_sec: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_slot = i64::MIN;
+        // The feed-once guard compares the CONTENT (condition-id set) of the
+        // last feed, NOT a wall-clock slot. The old wall-slot guard burned the
+        // whole round on a single poll that fed only long-interval rows (or
+        // raced the venue's own list roll): the wall slot advanced, the guard
+        // said "same round already fed", and the 15M row the venue published
+        // seconds later was never re-fed — the round clock froze at 00:00 for
+        // a quarter hour while prices kept streaming.
+        let mut last_fed: Option<std::collections::BTreeSet<String>> = None;
         let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
         loop {
             tick.tick().await;
             let now = now_ms();
-            let slot = now / 1000 / round_sec;
-            if slot == last_slot {
-                continue; // same round already fed
-            }
 
             let rows = match client.updown_markets(None, None).await {
                 Ok(r) => r,
@@ -157,20 +160,69 @@ pub(crate) fn spawn(
             if markets.is_empty() {
                 continue; // retry next tick (nothing open for the configured assets)
             }
-            last_slot = slot;
+            if !should_feed(&last_fed, &markets) {
+                continue; // same round already fed (nothing in the row set changed)
+            }
+            last_fed = Some(markets.iter().map(|m| m.condition_id.clone()).collect());
 
             let count = markets.len();
             // Registers the round with the engine AND subscribes the tokens
             // on the running data feed (both inside the host).
             host.on_round_markets(markets).await;
-            eprintln!("polysimulator-extension: discovered slot={slot} ({count} markets)");
+            eprintln!("polysimulator-extension: discovered round ({count} markets)");
         }
     })
+}
+
+/// The feed-once decision: feed when the row SET changed (a new round's rows
+/// published, one expired out, an interval added) — not when a wall-clock slot
+/// turned over. Idempotent on price drift: the signature is the condition-id
+/// set only.
+fn should_feed(
+    last_fed: &Option<std::collections::BTreeSet<String>>,
+    markets: &[MarketDescriptor],
+) -> bool {
+    let signature: std::collections::BTreeSet<String> =
+        markets.iter().map(|m| m.condition_id.clone()).collect();
+    last_fed.as_ref() != Some(&signature)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 喂一次守卫按内容（condition-id 集）判，不按墙钟 slot 判——真线事故：
+    /// 一拍只喂到长周期行就把墙钟守卫烧掉 15 分钟，场地晚发布的 15M 行永远
+    /// 补不上（轮钟冻在 00:00 而行情还在走）。
+    #[test]
+    fn feed_decision_follows_the_row_set_not_the_wall_clock() {
+        let mk = |cond: &str| MarketDescriptor {
+            asset: "BTC".into(),
+            condition_id: cond.into(),
+            question_id: String::new(),
+            up_token_id: "up".into(),
+            down_token_id: "down".into(),
+            up_price: Decimal::ONE / Decimal::from(2),
+            down_price: Decimal::ONE / Decimal::from(2),
+            expires_at_ms: 0,
+            round_slot: 0,
+            venue: "polysimulator".into(),
+            neg_risk: false,
+            question: String::new(),
+        };
+        let first = vec![mk("a"), mk("b")];
+        // 首拍：没喂过 → 喂。
+        assert!(should_feed(&None, &first));
+        let fed = Some(first.iter().map(|m| m.condition_id.clone()).collect());
+        // 同一行集（价格漂移不换 id）：不重喂。
+        assert!(!should_feed(&fed, &first));
+        // 行集变了（新一轮的行出现/旧行过期）：喂——这正是墙钟守卫漏掉的场景。
+        let second = vec![mk("a"), mk("c")];
+        assert!(should_feed(&fed, &second));
+        // 只喂到长周期行的拍（行集与已喂不同）：也喂——15M 行晚到必须补上。
+        let long_only = vec![mk("long-1h")];
+        assert!(should_feed(&fed, &long_only));
+    }
 
     #[test]
     fn iso_timestamps_parse_across_the_shapes_the_venue_sends() {
