@@ -15,15 +15,12 @@
 //!   * price — the core speaks 0..1 probabilities; this venue quotes dollars
 //!     0..1 too, so prices pass through. An off-tick limit is answered with
 //!     `INVALID_ORDER_MIN_TICK_SIZE` rather than silently reinterpreted.
-//!   * identity — the venue's NATIVE order form needs `(market_id, outcome
-//!     label)` while the core routes by CLOB token id. The bridge is the
-//!     venue's OWN resolver `GET /v1/markets-by-token/{token_id}` (a public
-//!     endpoint), consulted once per token and cached — never a guessed
-//!     outcome label.
-//!   * order character — `FillPolicy::Taker` places a `FAK` limit at the
-//!     order's price (fill what crosses, cancel the rest); `Maker` places a
-//!     `GTC` limit (rest until filled or cancelled); `MakerThenTaker` rests
-//!     `GTC` and lets the sweep's fills reconcile it either way.
+//!   * order form — the venue's NATIVE place is the `{"order":{tokenId,
+//!     side, makerAmount, takerAmount}}` envelope with 1e6-scaled integer
+//!     strings (price = maker/taker for BUY, inverted for SELL); outcome,
+//!     quantity and time-in-force do not exist as fields — the venue derives
+//!     them from the token and the amounts (verified live 2026-10-25: the
+//!     flat form is answered `VALIDATION_FAILED: missing order`).
 //!   * fills — `GET /v1/data/trades` reports PM-shape rows whose legs split
 //!     across `taker_order_id` (the marketable side) and `maker_orders` (the
 //!     resting ids consumed). OUR fill books under whichever of the two names
@@ -34,12 +31,11 @@ use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
 use crate::types::PlaceOrderBody;
 use blitzkrieg_market_api::{
-    CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillPolicy, FillStatus, MarketFill,
-    MarketHost, PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side,
-    VenueTradeInfo, net::now_ms,
+    CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillStatus, MarketFill, MarketHost,
+    PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side, VenueTradeInfo,
+    net::now_ms,
 };
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{MissedTickBehavior, interval};
@@ -73,15 +69,6 @@ fn rest_config() -> RestConfig {
         config.no_proxy = true;
     }
     config
-}
-
-/// The (market_id, outcome) pair a placement needs, resolved from the venue's
-/// own token registry and cached per token. A token the venue does not know
-/// is a routing bug — refused, never guessed.
-#[derive(Debug, Clone)]
-struct TokenIdentity {
-    market_id: String,
-    outcome: String,
 }
 
 /// Spawn the executor. Inert (Ok(None)) without credentials; otherwise a
@@ -162,48 +149,6 @@ async fn self_check(client: &PolySimRest) -> SelfCheckReport {
     }
 }
 
-/// Resolve a token's (market, outcome) through the venue's own registry, with
-/// a process-lifetime cache (a token's identity never changes within its
-/// market's life).
-async fn token_identity(
-    client: &PolySimRest,
-    token_id: &str,
-    cache: &mut HashMap<String, TokenIdentity>,
-) -> CoreResult<TokenIdentity> {
-    if let Some(hit) = cache.get(token_id) {
-        return Ok(hit.clone());
-    }
-    let resolved = match client.markets_by_token(token_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            let core = into_core_error(&e);
-            // A definitive "no such market" for a token the core routed here
-            // is a routing bug (InvalidParams); transient resolver failures
-            // keep their own semantics (timeout, venue error).
-            return Err(match core.code {
-                CoreErrorCode::MarketHalted | CoreErrorCode::UnknownOrder => CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!("token {token_id} is unknown to the venue registry"),
-                )
-                .with_raw(e.to_string()),
-                _ => core,
-            });
-        }
-    };
-    let outcome = resolved.outcome.ok_or_else(|| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("token {token_id} resolved without an outcome label"),
-        )
-    })?;
-    let identity = TokenIdentity {
-        market_id: resolved.condition_id,
-        outcome,
-    };
-    cache.insert(token_id.to_string(), identity.clone());
-    Ok(identity)
-}
-
 pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySimRest>) {
     let mut tick = interval(Duration::from_millis(EXECUTOR_TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -217,9 +162,6 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     // orphan sweep's grace window).
     let mut recent_placements: Vec<(String, i64)> = Vec::new();
     const ORPHAN_GRACE_MS: i64 = 30_000;
-    // token → (market_id, outcome) cache, filled from the venue's own
-    // markets-by-token resolver.
-    let mut identities: HashMap<String, TokenIdentity> = HashMap::new();
 
     // Seed the ledger from the venue so the reserve gate reflects real cash.
     match client.balance().await {
@@ -281,7 +223,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         //    drains only ITS venue's orders.
         if cancel_strikes == 0 {
             for order in host.take_pending_orders("polysimulator").await {
-                match place(&client, &order, &mut identities).await {
+                match place(&client, &order).await {
                     Ok(venue_id) => {
                         place_failures = 0;
                         recent_placements.push((venue_id.clone(), now_ms()));
@@ -337,48 +279,43 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     }
 }
 
-/// The venue's TIF spelling for a fill policy: taker = FAK (fill what
-/// crosses, cancel the rest), maker = GTC (rest). MakerThenTaker rests GTC —
-/// the sweep's fills reconcile it either way.
-fn tif_for(policy: FillPolicy) -> &'static str {
-    match policy {
-        FillPolicy::Taker => "FAK",
-        FillPolicy::Maker | FillPolicy::MakerThenTaker => "GTC",
+/// The venue's native body for one core order: side/amounts derived per the
+/// live contract (price = maker/taker BUY, taker/maker SELL; 1e6 scaling).
+/// Split from `place` so the scaling math is testable without a client.
+fn place_body_for(side: &Side, price: Decimal, shares: Decimal, token_id: &str) -> PlaceOrderBody {
+    let scale = Decimal::from(1_000_000u64);
+    let (maker_amount, taker_amount) = match side {
+        Side::Buy => (price * shares, shares),
+        Side::Sell => (shares, price * shares),
+    };
+    PlaceOrderBody {
+        token_id: token_id.to_string(),
+        side: match side {
+            Side::Buy => "BUY".to_string(),
+            Side::Sell => "SELL".to_string(),
+        },
+        maker_amount: (maker_amount * scale).trunc().to_string(),
+        taker_amount: (taker_amount * scale).trunc().to_string(),
     }
 }
 
-/// Submit one order. The core's `core_order_id` becomes the client order id
-/// (the venue's dedupe key), so a timeout can be reconciled by querying
-/// orders for it — never blindly retried.
-async fn place(
-    client: &PolySimRest,
-    order: &PendingOrder,
-    identities: &mut HashMap<String, TokenIdentity>,
-) -> CoreResult<String> {
+/// Submit one order. The venue's native form is (tokenId, side, makerAmount,
+/// takerAmount) — price = maker/taker for BUY and taker/maker for SELL,
+/// amounts 1e6-scaled integer strings. The core's `core_order_id` cannot ride
+/// along usefully: the venue accepts a `client_order_id` field but neither
+/// echoes nor dedupes on it (verified live 2026-10-25), so a timeout is
+/// reconciled through the orders list, never by blind retry. Outcome,
+/// quantity and time-in-force do not exist as fields — the venue derives them
+/// from the token and the amounts.
+async fn place(client: &PolySimRest, order: &PendingOrder) -> CoreResult<String> {
     if order.size < Decimal::ONE {
         return Err(CoreError::new(
             CoreErrorCode::InvalidParams,
             "polysimulator order size rounds to zero",
         ));
     }
-    // The venue order form needs (market_id, outcome label); both come from
-    // the venue's own markets-by-token resolver, cached per token. An unknown
-    // token is a routing bug — refused, never guessed into a wrong market.
-    let identity = token_identity(client, &order.token_id, identities).await?;
-    let quantity = format!("{}", order.size.trunc());
-    let body = PlaceOrderBody {
-        market_id: &identity.market_id,
-        side: match order.side {
-            Side::Buy => "BUY",
-            Side::Sell => "SELL",
-        },
-        outcome: &identity.outcome,
-        quantity: &quantity,
-        order_type: "limit",
-        price: &order.price.to_string(),
-        time_in_force: tif_for(order.fill_policy),
-        client_order_id: Some(&order.core_order_id),
-    };
+    let shares = order.size.trunc();
+    let body = place_body_for(&order.side, order.price, shares, &order.token_id);
     let ack = client
         .place_order(&body)
         .await
@@ -549,10 +486,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tif_spelling_follows_the_fill_policy() {
-        assert_eq!(tif_for(FillPolicy::Taker), "FAK");
-        assert_eq!(tif_for(FillPolicy::Maker), "GTC");
-        assert_eq!(tif_for(FillPolicy::MakerThenTaker), "GTC");
+    fn native_place_body_prices_scale_to_1e6_integer_strings() {
+        // BUY 5 shares at 0.435 → maker = 0.435·5 = 2.175 USDC = 2175000;
+        // taker = 5 shares = 5000000. price = maker/taker = 0.435.
+        let body = place_body_for(
+            &Side::Buy,
+            Decimal::from_str("0.435").unwrap(),
+            Decimal::from(5),
+            "tok-1",
+        );
+        assert_eq!(body.token_id, "tok-1");
+        assert_eq!(body.side, "BUY");
+        assert_eq!(body.maker_amount, "2175000");
+        assert_eq!(body.taker_amount, "5000000");
+
+        // SELL 5 shares at 0.90 → the pair inverts (price = taker/maker).
+        let body = place_body_for(
+            &Side::Sell,
+            Decimal::from_str("0.90").unwrap(),
+            Decimal::from(5),
+            "tok-2",
+        );
+        assert_eq!(body.side, "SELL");
+        assert_eq!(body.maker_amount, "5000000");
+        assert_eq!(body.taker_amount, "4500000");
     }
 
     fn trade_row(

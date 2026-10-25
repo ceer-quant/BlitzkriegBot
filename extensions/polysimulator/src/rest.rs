@@ -19,8 +19,9 @@
 use crate::error::PolySimError;
 use crate::rate_limit::{Class, RateLimit};
 use crate::types::{
-    BalanceBody, BookLevel, CancelOneBody, NativeOrder, OrderBookSnapshot, OrderResponse,
-    PendingOrdersEnvelope, PlaceOrderBody, PmTradesEnvelope, PositionRow, UpDownEnvelope,
+    BalanceBody, BookLevel, CancelAck, CancelOneBody, NativeOrder, OrderBookSnapshot,
+    OrderResponse, PendingOrdersEnvelope, PlaceOrderBody, PmTradesEnvelope, PositionRow,
+    UpDownEnvelope,
 };
 use rust_decimal::Decimal;
 use std::time::Duration;
@@ -205,31 +206,43 @@ impl PolySimRest {
         )))
     }
 
-    /// Place an order in the venue's NATIVE form. `time_in_force` decides
-    /// the character: `GTC` rests as a maker order, `FAK` crosses as an
-    /// immediate taker fill (venue default for market orders).
-    pub async fn place_order(
-        &self,
-        body: &PlaceOrderBody<'_>,
-    ) -> Result<OrderResponse, PolySimError> {
+    /// Place an order in the venue's native form (the `{"order": {…}}`
+    /// envelope of tokenId + 1e6-scaled maker/taker amounts — verified live
+    /// 2026-10-25). Non-marketable orders rest (the venue reports
+    /// `status:"live"`), marketable ones match immediately (`"matched"`).
+    pub async fn place_order(&self, body: &PlaceOrderBody) -> Result<OrderResponse, PolySimError> {
         self.require_key()?;
-        self.post_json(Class::Write, "/v1/order", body).await
+        self.post_json(Class::Write, "/v1/order", &Self::enveloped(body))
+            .await
     }
 
-    /// Cancel one order by venue id (the single-order form takes a body with
-    /// the venue's odd `orderID` capitalization).
-    pub async fn cancel_order(&self, order_id: &str) -> Result<OrderResponse, PolySimError> {
+    /// Cancel one order by venue id. The ack is a batch envelope — an id
+    /// absent from `canceled` (with its reason in `not_canceled`) is a failed
+    /// cancel, surfaced as UnknownOrder with the venue's own text.
+    pub async fn cancel_order(&self, order_id: &str) -> Result<String, PolySimError> {
         self.require_key()?;
         let body = CancelOneBody {
             order_id: order_id.to_string(),
         };
-        self.request_json(
-            Class::Write,
-            reqwest::Method::DELETE,
-            "/v1/order",
-            Some(&body),
-        )
-        .await
+        let ack: CancelAck = self
+            .request_json(
+                Class::Write,
+                reqwest::Method::DELETE,
+                "/v1/order",
+                Some(&body),
+            )
+            .await?;
+        if ack.cancelled_id(order_id).is_some() {
+            Ok(order_id.to_string())
+        } else {
+            let reason = ack.rejection(order_id).unwrap_or("not in the canceled set");
+            Err(PolySimError::Api {
+                code: "ORDER_NOT_FOUND".into(),
+                message: format!("cancel refused for {order_id}: {reason}"),
+                status: 200,
+                retry_after_ms: None,
+            })
+        }
     }
 
     /// Open (PENDING) orders, native envelope. Empty when nothing rests.
@@ -280,6 +293,13 @@ impl PolySimRest {
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────
+
+    /// The venue's POST /v1/order wrapper: the flat native fields ride an
+    /// `{"order": {…}}` envelope (a flat body is answered
+    /// `VALIDATION_FAILED: missing order`).
+    fn enveloped<T: serde::Serialize>(order: &T) -> impl serde::Serialize + use<'_, T> {
+        serde_json::json!({ "order": order })
+    }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,

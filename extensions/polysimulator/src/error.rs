@@ -123,14 +123,15 @@ fn map_api_code(code: &str) -> CoreErrorCode {
         "ORDER_NOT_FOUND" | "ORDER_ALREADY_CANCELED" | "ALREADY_CANCELED" => {
             CoreErrorCode::UnknownOrder
         }
-        "MARKET_CLOSED" | "MARKET_NOT_FOUND" | "MARKET_RESOLVED" | "NOT_FOUND" => {
-            CoreErrorCode::MarketHalted
-        }
+        "MARKET_CLOSED" | "MARKET_NOT_FOUND" | "MARKET_RESOLVED" | "NOT_FOUND"
+        | "TOKEN_NOT_FOUND" | "MARKET_EXPIRED" => CoreErrorCode::MarketHalted,
         "VALIDATION_FAILED"
         | "INVALID_ORDER_MIN_TICK_SIZE"
         | "INVALID_ORDER_EXPIRATION"
         | "INVALID_PRICE"
-        | "INVALID_QUANTITY" => CoreErrorCode::InvalidParams,
+        | "INVALID_QUANTITY"
+        | "INVALID_ORDER_MIN_SIZE"
+        | "INVALID_ORDER_PAYLOAD" => CoreErrorCode::InvalidParams,
         // Concurrency and quota are venue-side conditions, not caller bugs.
         "TRADE_IN_PROGRESS" | "FREE_TIER_DAILY_LIMIT" | "RATE_LIMITED" | "TOO_MANY_REQUESTS" => {
             CoreErrorCode::VenueError

@@ -3,11 +3,14 @@
 //! no real credential appears anywhere (the one credentialed call builds its
 //! key at runtime from inert fragments).
 //!
-//! The wire contract these tests pin comes from the venue's published spec
-//! (captured spec corpus: polysim-llms-full.txt + polysim-openapi.json):
-//! native `POST /v1/order` with a string price/quantity, `orderID`-capitalized
-//! cancel body, integer order ids, the PM-shape trades envelope with both leg
-//! fields, and the structured error body `{error, message}`.
+//! The wire contract these tests pin was re-verified against the LIVE venue
+//! 2026-10-25 (the delivery-time spec corpus had it wrong and flat places
+//! were answered `VALIDATION_FAILED: missing order` — see #630): native
+//! `POST /v1/order` as the `{"order":{tokenId, side, makerAmount,
+//! takerAmount}}` envelope with 1e6-scaled integer strings, camelCase
+//! `orderID` success acks, the `{"canceled":[…],"not_canceled":{…}}` batch
+//! cancel envelope, integer order ids, the PM-shape trades envelope with
+//! both leg fields, and the structured error body `{error, message}`.
 
 use blitzkrieg_market_api::CoreErrorCode;
 use blitzkrieg_polysimulator::types::PlaceOrderBody;
@@ -159,32 +162,53 @@ async fn place_order_sends_the_native_form_and_parses_the_integer_id() {
     // The mock echoes the request body back in a header-free channel — we
     // record bodies by serving a body that embeds nothing, then assert on a
     // second channel: the response must parse an INTEGER id into the string
-    // seam (the venue's ids are integers everywhere).
+    // seam (the venue's ids are integers everywhere). Ack = the live camel
+    // shape (orderID / status).
     let url = mock_server(vec![http_ok(
-        r#"{"order_id":6391,"status":"PENDING","price":"0.43","quantity":"10","fee":"0"}"#,
+        r#"{"orderID":6391,"status":"live","makingAmount":"2175000","takingAmount":"5000000","tradeIDs":null,"errorMsg":""}"#,
     )]);
     let client = client_with_key(&url);
     let body = PlaceOrderBody {
-        market_id: "0xcond-1",
-        side: "BUY",
-        outcome: "Up",
-        quantity: "10",
-        order_type: "limit",
-        price: "0.43",
-        time_in_force: "GTC",
-        client_order_id: Some("core-1"),
+        token_id: "71321".to_string(),
+        side: "BUY".to_string(),
+        maker_amount: "2175000".to_string(),
+        taker_amount: "5000000".to_string(),
     };
     let ack = client.place_order(&body).await.expect("order accepted");
     assert_eq!(ack.venue_id(), "6391", "integer id stringified at the seam");
-    assert_eq!(ack.status.as_deref(), Some("PENDING"));
+    assert_eq!(ack.status.as_deref(), Some("live"));
 }
 
 #[tokio::test]
-async fn cancel_order_parses_the_venue_ack() {
-    let url = mock_server(vec![http_ok(r#"{"order_id":6391,"status":"CANCELLED"}"#)]);
+async fn cancel_order_parses_the_batch_envelope() {
+    // Live shape: the single-cancel DELETE answers a batch envelope; success
+    // = our id inside `canceled`.
+    let url = mock_server(vec![http_ok(r#"{"canceled":["6391"],"not_canceled":{}}"#)]);
     let client = client_with_key(&url);
     let ack = client.cancel_order("6391").await.expect("cancel ok");
-    assert_eq!(ack.venue_id(), "6391");
+    assert_eq!(ack, "6391");
+}
+
+#[tokio::test]
+async fn cancel_order_refusal_maps_to_the_venue_reason() {
+    let url = mock_server(vec![http_ok(
+        r#"{"canceled":[],"not_canceled":{"6391":"Order not found or already cancelled/filled"}}"#,
+    )]);
+    let client = client_with_key(&url);
+    let err = client
+        .cancel_order("6391")
+        .await
+        .expect_err("id absent from canceled set");
+    match err {
+        PolySimError::Api { code, message, .. } => {
+            assert_eq!(code, "ORDER_NOT_FOUND");
+            assert!(
+                message.contains("6391") && message.contains("not found"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Api error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
