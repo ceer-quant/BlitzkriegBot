@@ -31,7 +31,8 @@ import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = process.env.BK_CORE_BIN || defaultBinaryPath();
 
-const { check, failures } = createChecks();
+const gate = createChecks();
+const check = gate.check;
 const cleanup = [];
 
 function makeCore(label, extraArgs = [], cwdOverride = null) {
@@ -147,16 +148,19 @@ try {
   check('an explicit --round-sec outranks the persisted cell',
     flagged.effectiveSec === 3600, JSON.stringify(flagged));
   check('the flagged readout names its source so the card can explain itself',
-    flagged.source === 'cli_or_env_or_toml', JSON.stringify(flagged));
+    // #499 renamed the source tier: TOML is a default FOR the card, not a
+    // veto over it, so a flag readout is exactly "cli_or_env" (the tier the
+    // boot site tests `!=` against before consulting the persisted cell).
+    flagged.source === 'cli_or_env', JSON.stringify(flagged));
   await core4.stop();
 
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? '\nround:duration — set/restart/flag precedence all hold over the real wire.'
-    : `\nround:duration — ${failures} assertion(s) failed.`);
-  process.exit(failures === 0 ? 0 : 1);
+    : `\nround:duration — ${gate.failures} assertion(s) failed.`);
+  process.exit(gate.failures === 0 ? 0 : 1);
 } catch (e) {
   check('harness error', false, e?.stack || e);
-  console.log(`round:duration — harness died, ${failures} assertion(s) had failed before it.`);
+  console.log(`round:duration — harness died, ${gate.failures} assertion(s) had failed before it.`);
   process.exit(1);
 } finally {
   for (const dir of cleanup) {

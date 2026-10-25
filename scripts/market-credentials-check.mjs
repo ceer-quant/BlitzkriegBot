@@ -29,7 +29,8 @@ import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = process.env.BK_CORE_BIN || defaultBinaryPath();
 
-const { check, failures } = createChecks();
+const gate = createChecks();
+const check = gate.check;
 const cleanup = [];
 
 function makeCore(label, extraArgs = [], cwdOverride = null) {
@@ -158,10 +159,10 @@ try {
     JSON.stringify(r2Sim));
   await core2.stop();
 
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? '\nmarket:credentials — status/set/plan-first/reset/boot-injection all hold over the real wire.'
-    : `\nmarket:credentials — ${failures} assertion(s) failed.`);
-  process.exit(failures === 0 ? 0 : 1);
+    : `\nmarket:credentials — ${gate.failures} assertion(s) failed.`);
+  process.exit(gate.failures === 0 ? 0 : 1);
 } finally {
   for (const c of cleanup) rmSync(c, { recursive: true, force: true });
 }
