@@ -140,6 +140,13 @@ pub struct TradeDb {
     jsonl_path: PathBuf,
     summary_path: PathBuf,
     summary: TradeSummary,
+    /// Per-account slices of the same fold (rows carry `account_id`, E28 §9.2).
+    /// The global summary mixes every book's realized PnL; the accounting audit
+    /// needs ONE book's realized to compare against THAT book's balance — a
+    /// sibling account's trade once shifted the audited identity of a book it
+    /// never touched. Rebuilt from the JSONL at open, folded alongside the
+    /// global summary on record, rebuilt from the kept rows on retract.
+    by_account: std::collections::HashMap<AccountId, TradeSummary>,
 }
 
 impl TradeDb {
@@ -155,44 +162,69 @@ impl TradeDb {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        // Boot scan: the per-account buckets are derived state (not persisted)
+        // — one pass over the JSONL the boot already knows how to read.
+        let mut by_account: std::collections::HashMap<AccountId, TradeSummary> =
+            std::collections::HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(&jsonl_path) {
+            for line in text.lines() {
+                if let Ok(rec) = serde_json::from_str::<TradeRecord>(line) {
+                    let bucket = by_account.entry(rec.account_id.clone()).or_default();
+                    Self::fold_into(bucket, &rec);
+                }
+            }
+        }
         Self {
             jsonl_path,
             summary_path,
             summary,
+            by_account,
         }
     }
 
     /// Append a closed trade and update the summary (best effort, never panics).
     pub fn record(&mut self, rec: &TradeRecord, now_ms: i64) {
         crate::jsonl::append(&self.jsonl_path, rec);
-        self.fold_summary(rec);
+        let bucket = self.by_account.entry(rec.account_id.clone()).or_default();
+        Self::fold_into(bucket, rec);
+        Self::fold_into(&mut self.summary, rec);
         self.summary.last_updated = now_ms;
         self.persist_summary();
     }
 
-    /// Fold one record into the running summary (record/retract share the
-    /// arithmetic so a retract is the exact inverse of its record).
-    fn fold_summary(&mut self, rec: &TradeRecord) {
+    /// The account's own slice of the fold — the realized/trade-count leg the
+    /// accounting audit compares against THAT account's book.
+    pub fn summary_for(&self, account: &str) -> TradeSummary {
+        self.by_account
+            .iter()
+            .find(|(k, _)| k.as_str() == account)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The arithmetic shared by the global summary and the per-account buckets
+    /// (a bucket fold is exactly the global fold restricted to one account).
+    fn fold_into(summary: &mut TradeSummary, rec: &TradeRecord) {
         let net = f64_of(rec.net_pnl_usd);
-        self.summary.total_trades += 1;
+        summary.total_trades += 1;
         if net >= 0.0 {
-            self.summary.wins += 1;
+            summary.wins += 1;
         } else {
-            self.summary.losses += 1;
+            summary.losses += 1;
         }
-        self.summary.win_rate = if self.summary.total_trades > 0 {
-            (self.summary.wins as f64 / self.summary.total_trades as f64) * 100.0
+        summary.win_rate = if summary.total_trades > 0 {
+            (summary.wins as f64 / summary.total_trades as f64) * 100.0
         } else {
             0.0
         };
-        self.summary.total_gross_pnl += f64_of(rec.gross_pnl_usd);
-        self.summary.total_fees += f64_of(rec.fees_usd);
-        self.summary.total_net_pnl += net;
-        let n = self.summary.total_trades as f64;
-        self.summary.avg_hold_time_sec =
-            ((self.summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
-        self.summary.best_trade_pnl = self.summary.best_trade_pnl.max(net);
-        self.summary.worst_trade_pnl = self.summary.worst_trade_pnl.min(net);
+        summary.total_gross_pnl += f64_of(rec.gross_pnl_usd);
+        summary.total_fees += f64_of(rec.fees_usd);
+        summary.total_net_pnl += net;
+        let n = summary.total_trades as f64;
+        summary.avg_hold_time_sec =
+            ((summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
+        summary.best_trade_pnl = summary.best_trade_pnl.max(net);
+        summary.worst_trade_pnl = summary.worst_trade_pnl.min(net);
     }
 
     fn persist_summary(&self) {
@@ -243,10 +275,14 @@ impl TradeDb {
         if !crate::jsonl::rewrite_atomic(&self.jsonl_path, out.as_bytes()) {
             return;
         }
-        // Rebuild the summary from what is actually on file now.
+        // Rebuild the summary — global and per-account buckets — from what is
+        // actually on file now.
         self.summary = TradeSummary::default();
+        self.by_account.clear();
         for r in &remaining {
-            self.fold_summary(r);
+            let bucket = self.by_account.entry(r.account_id.clone()).or_default();
+            Self::fold_into(bucket, r);
+            Self::fold_into(&mut self.summary, r);
         }
         self.summary.last_updated = now_ms;
         self.persist_summary();
@@ -268,6 +304,7 @@ impl TradeDb {
     pub fn reset(&mut self) {
         let _ = crate::jsonl::rewrite_atomic(&self.jsonl_path, b"");
         self.summary = TradeSummary::default();
+        self.by_account.clear();
         self.persist_summary();
     }
 
@@ -314,8 +351,11 @@ impl TradeDb {
             return 0;
         }
         self.summary = TradeSummary::default();
+        self.by_account.clear();
         for r in &kept {
-            self.fold_summary(r);
+            let bucket = self.by_account.entry(r.account_id.clone()).or_default();
+            Self::fold_into(bucket, r);
+            Self::fold_into(&mut self.summary, r);
         }
         self.summary.last_updated = now_ms;
         self.persist_summary();
@@ -422,6 +462,50 @@ mod tests {
         // read_recent returns them in order.
         let recent = read_recent(&path, 1);
         assert_eq!(recent.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 按账户分槽（E28 §9.2）：兄弟账户的成交不得移动这本账的 realized ——
+    /// 审计身份（trade_ledger_identity）曾因全局 summary 把别的账户的盈亏
+    /// 算进这本账。record 分桶、retract_account 撤桶、boot 扫描重建，三条
+    /// 路径同一断言。
+    #[test]
+    fn per_account_summaries_isolate_sibling_trades() {
+        let dir = std::env::temp_dir().join(format!("bktrade-acct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("trades.jsonl");
+        let mut db = TradeDb::new(&path);
+        // default 赢 1.97；poly 输 2.00。
+        let mut poly_row = TradeRecord::from_closed(&closed());
+        poly_row.id = "poly-1".into();
+        poly_row.account_id = AccountId::from("poly");
+        poly_row.net_pnl_usd = rust_decimal_macros::dec!(-2);
+        db.record(&TradeRecord::from_closed(&closed()), 100);
+        db.record(&poly_row, 200);
+
+        let default_view = db.summary_for("default");
+        assert_eq!(
+            default_view.total_trades, 1,
+            "sibling's row leaked into default's slice"
+        );
+        assert_eq!(default_view.total_net_pnl, 1.97);
+        let poly_view = db.summary_for("poly");
+        assert_eq!(poly_view.total_trades, 1);
+        assert_eq!(poly_view.total_net_pnl, -2.0);
+        // 全局口径仍是两行（面板的合计语义不变）。
+        assert_eq!(db.summary().total_trades, 2);
+
+        // 重启重建（boot 扫描）：分桶与全局一致。
+        let reopened = TradeDb::new(&path);
+        assert_eq!(reopened.summary_for("default").total_trades, 1);
+        assert_eq!(reopened.summary_for("poly").total_trades, 1);
+
+        // 账户维重置：撤 poly 的桶，default 原样（issue 561 语义 + 分桶）。
+        let mut db2 = reopened;
+        db2.retract_account("poly", 300);
+        assert_eq!(db2.summary_for("poly").total_trades, 0);
+        assert_eq!(db2.summary_for("default").total_trades, 1);
+        assert_eq!(db2.summary().total_trades, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
