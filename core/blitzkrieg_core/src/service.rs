@@ -26599,6 +26599,247 @@ mod trading_capability_tests {
         assert!(!c.is_killed());
     }
 
+    /// #624 acceptance, venue-scoped kill switch (2026-10-25 多场馆雪崩定谳):
+    /// ONE venue's failed probes freeze ONLY the accounts bound to it — the
+    /// sibling venue's account keeps trading and the GLOBAL kill switch stays
+    /// down. The fixture carries two ACTIVE accounts on different venues (the
+    /// injected-book constructor; no real accounts.toml is touched), then drives
+    /// both frozen-freeze routes through their real entry points:
+    ///
+    /// - a failed venue self-check freezes polymarket's account immediately;
+    /// - polymarket's reconcile-failure streak (3 in a row) must NOT disturb
+    ///   anything else — and MUST NOT re-freeze globally either;
+    /// - polysimulator's OWN streak must reach its own threshold from zero:
+    ///   2 failures freeze nothing (under SWEEP_FAILURE_FREEZE=3), the 3rd
+    ///   freezes polysimulator's account — per-venue streaks are independent.
+    #[test]
+    fn venue_scoped_freeze_does_not_touch_sibling_venues() {
+        let mut c = two_venue_book_fixture();
+        let polymarket_req = |key: &str| {
+            let mut r = pending_req(key, "s1");
+            r.account_id = crate::account::AccountId::from("poly-acct");
+            r
+        };
+        let polysim_req = |key: &str| {
+            let mut r = pending_req(key, "s1");
+            r.account_id = crate::account::AccountId::from("polysim-acct");
+            r
+        };
+        let sweep_err = || {
+            crate::model::CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::VenueError,
+                "sweep timed out",
+            )
+        };
+
+        // ── 1. A failed self-check on polymarket freezes ONLY its account ──
+        c.on_venue_self_check(
+            "polymarket",
+            blitzkrieg_market_api::SelfCheckReport {
+                ok: false,
+                ts_ms: 1_000,
+                items: vec![blitzkrieg_market_api::SelfCheckItem {
+                    name: "venue_balance".into(),
+                    ok: false,
+                    detail: "HTTP 401 unauthorized".into(),
+                }],
+            },
+        );
+        assert!(
+            c.account_freeze_reason("poly-acct")
+                .is_some_and(|r| r.contains("self-check failed on polymarket")),
+            "the failed polymarket self-check must freeze the account bound to it: {:?}",
+            c.account_freeze_reason("poly-acct")
+        );
+        assert!(
+            c.account_freeze_reason("polysim-acct").is_none(),
+            "the sibling venue's account must stay unbound by the failure"
+        );
+        assert!(
+            !c.is_killed(),
+            "a venue with bound accounts must NOT fire the global kill switch"
+        );
+        let stats = c.engine_stats();
+        assert_eq!(
+            stats["tradingFrozen"]["active"], false,
+            "the global freeze banner stays down: {stats}"
+        );
+        assert!(
+            stats["accountFreezes"]["poly-acct"]
+                .as_str()
+                .unwrap_or("")
+                .contains("self-check failed on polymarket"),
+            "the freeze book carries the reason for the panel: {stats}"
+        );
+        assert!(
+            stats["accountFreezes"].get("polysim-acct").is_none(),
+            "the sibling account is in no freeze book: {stats}"
+        );
+
+        // Teeth at the gate: the frozen account's NEW entry is refused with
+        // KillSwitchActive while the sibling places happily.
+        let e = c.place_pending(polymarket_req("pk1"), 1_100).unwrap_err();
+        assert_eq!(
+            e.code,
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+        );
+        assert!(e.message.contains("poly-acct"), "naming the account: {e}");
+        c.place_pending(polysim_req("ps1"), 1_200)
+            .unwrap_or_else(|e| panic!("an unbound-by-failure sibling keeps trading: {e}"));
+
+        // The #174 hatch is per account here exactly as it is globally: the
+        // frozen account's CLOSING intent passes.
+        let mut close = polymarket_req("pk2");
+        close.side = Side::Sell;
+        close.internal_key = "flatten:manual:tok".into();
+        c.place_pending(close, 1_300)
+            .unwrap_or_else(|e| panic!("a frozen account's close must flow: {e}"));
+
+        // ── 2. polymarket's reconcile streak: already frozen stays frozen, ──
+        //    the sibling stays untouched, nothing goes global.
+        for i in 0..3 {
+            c.on_venue_reconcile_failed("polymarket", sweep_err(), 2_000 + i);
+        }
+        assert!(
+            c.account_freeze_reason("poly-acct")
+                .is_some_and(|r| r.contains("self-check failed on polymarket")),
+            "freeze is idempotent: the first reason wins, the streak must not overwrite it"
+        );
+        assert!(
+            c.account_freeze_reason("polysim-acct").is_none(),
+            "three polymarket sweep failures must not freeze the sibling account"
+        );
+        assert!(
+            !c.is_killed(),
+            "a full polymarket streak with a bound account must not go global"
+        );
+        c.place_pending(polysim_req("ps2"), 2_500)
+            .unwrap_or_else(|e| panic!("the sibling still trades through the streak: {e}"));
+
+        // ── 3. polysimulator's OWN streak is independent: 2 of 3 freeze ──
+        //    nothing, the 3rd freezes exactly its account.
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_000);
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_100);
+        assert!(
+            c.account_freeze_reason("polysim-acct").is_none(),
+            "two failures are under the threshold of {SWEEP_FAILURE_FREEZE}: nothing freezes"
+        );
+        c.place_pending(polysim_req("ps3"), 3_200)
+            .unwrap_or_else(|e| panic!("under-threshold failures must not freeze: {e}"));
+
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_300);
+        assert!(
+            c.account_freeze_reason("polysim-acct").is_some_and(
+                |r| r.contains("reconciliation sweep failed 3 times in a row on polysimulator")
+            ),
+            "polysimulator's own 3rd failure must freeze ITS account: {:?}",
+            c.account_freeze_reason("polysim-acct")
+        );
+        // Both venues are now frozen per-account — and the global switch is
+        // STILL quiet: two account freezes are not a kill switch.
+        assert!(
+            c.account_freeze_reason("poly-acct").is_some(),
+            "the sibling venue's earlier freeze is untouched by polysimulator's streak"
+        );
+        assert!(
+            !c.is_killed(),
+            "two per-account freezes must not collapse into the global kill switch"
+        );
+        let e = c.place_pending(polysim_req("ps4"), 3_400).unwrap_err();
+        assert_eq!(
+            e.code,
+            blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+        );
+        let stats = c.engine_stats();
+        assert_eq!(
+            stats["tradingFrozen"]["active"], false,
+            "the panel's global freeze banner never lit: {stats}"
+        );
+
+        // ── 4. A successful sweep clears the per-venue streaks (E31-b) ──────
+        //    Without a bound-account freeze to lift automatically, the point is
+        //    the counter itself: after the clear, a fresh streak starts from 1,
+        //    so 2 more failures do NOT freeze — the pre-clear failures are
+        //    forgotten. (An already-frozen account stays frozen: only an
+        //    operator or a restart lifts a freeze — never a passing sweep.)
+        c.reconcile(crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 4_000,
+        })
+        .unwrap();
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 4_100);
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 4_200);
+        assert!(
+            !c.is_killed(),
+            "a cleared streak rebuilt from 1 must stay under the threshold"
+        );
+        assert!(
+            c.account_freeze_reason("polysim-acct")
+                .is_some_and(|r| r.contains("reconciliation sweep failed 3 times")),
+            "the earlier freeze is deliberate state, not streak fallout — it persists"
+        );
+        c.on_venue_reconcile_failed("polysimulator", sweep_err(), 4_300);
+        assert!(
+            c.account_freeze_reason("polysim-acct")
+                .is_some_and(|r| r
+                    .contains("sweep failed 3 times in a row on polysimulator: sweep timed out")),
+            "the freeze was idempotent from the first streak: the reason the operator saw first stands"
+        );
+        assert!(!c.is_killed(), "still account-scoped, never global");
+    }
+
+    /// The two-venue book this file's venue-scoped-freeze acceptance uses:
+    /// BOTH accounts are ACTIVE and each is bound to its own venue, so
+    /// `account_ids_bound_to_venue` has a routing table to work with.
+    fn two_venue_book_fixture() -> Core {
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("poly-acct"),
+                    name: "polymarket 主账户".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "polymarket".into(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("polysim-acct"),
+                    name: "polysimulator 练习账户".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "polysimulator".into(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("poly-acct"),
+        );
+        let cfg = CoreConfig {
+            mode: Mode::Dry,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            trade_log_path: None,
+            // Same discipline as `two_book_fixture`: the cwd-relative default
+            // order log must not collect these tests' orders.
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        Core::with_account_book(cfg, book)
+    }
+
     /// A venue sell on an order the OME never issued (a manual close made
     /// directly on the venue) must fold into the position book: the position
     /// disappears with a Manual close and the ledger receives the proceeds —
