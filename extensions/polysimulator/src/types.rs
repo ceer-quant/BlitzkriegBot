@@ -198,25 +198,55 @@ pub struct PositionRow {
     pub status: Option<String>,
 }
 
-/// Ack of `POST /v1/order` / `DELETE /v1/order`: the venue's OrderResponse.
+/// Ack of `POST /v1/order` (live shape 2026-10-25:
+/// `{"orderID":1404591,"status":"live"|"matched",…}` — camelCase, and a
+/// `matched` ack already carries the fill). The DELETE ack is a DIFFERENT
+/// envelope (`{"canceled":[…],"not_canceled":{…}}`, see `CancelAck`); this
+/// struct only parses the POST side.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderResponse {
+    #[serde(rename = "orderID")]
     pub order_id: i64,
     pub status: Option<String>,
-    pub order_type: Option<String>,
-    pub side: Option<String>,
-    pub outcome: Option<String>,
-    pub price: Option<Decimal>,
-    pub quantity: Option<Decimal>,
-    pub fee: Option<Decimal>,
-    pub client_order_id: Option<String>,
-    pub error: Option<String>,
-    pub error_message: Option<String>,
+    #[serde(rename = "errorMsg", default)]
+    pub error_msg: Option<String>,
+    #[serde(rename = "tradeIDs", default)]
+    pub trade_ids: Option<Vec<String>>,
 }
 
 impl OrderResponse {
     pub fn venue_id(&self) -> String {
         self.order_id.to_string()
+    }
+}
+
+/// Ack of `DELETE /v1/order` (live shape 2026-10-25: a batch envelope —
+/// `{"canceled":["1404785"],"not_canceled":{"1404525":"Order not found …"}}`.
+/// A single cancel succeeds when its id lands in `canceled`; `not_canceled`
+/// carries per-id reasons for the ones the venue refused or had already
+/// settled).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CancelAck {
+    #[serde(default)]
+    pub canceled: Vec<String>,
+    #[serde(default)]
+    pub not_canceled: std::collections::HashMap<String, String>,
+}
+
+impl CancelAck {
+    /// The cancelled id when OUR id is inside `canceled`; `None` otherwise —
+    /// the caller turns the remaining case into an UnknownOrder-style error
+    /// with the venue's own reason.
+    pub fn cancelled_id(&self, order_id: &str) -> Option<&str> {
+        self.canceled
+            .iter()
+            .find(|id| id.as_str() == order_id)
+            .map(|id| id.as_str())
+    }
+
+    /// The venue's per-id reason when our id landed in `not_canceled`.
+    pub fn rejection(&self, order_id: &str) -> Option<&str> {
+        self.not_canceled.get(order_id).map(|s| s.as_str())
     }
 }
 
@@ -228,24 +258,28 @@ pub struct CancelOneBody {
     pub order_id: String,
 }
 
-/// Body of `POST /v1/order` — PolySimulator's NATIVE order form. The
-/// PM-shape `POST /v1/clob/order` on-chain fields are accepted-but-ignored by
-/// this venue; the native form needs no signature layer at all.
+/// Body of `POST /v1/order` — the venue's NATIVE order form (verified against
+/// the live venue 2026-10-25; the flat form this struct replaced has never
+/// been accepted: the validator answers `VALIDATION_FAILED: missing order`).
+/// The order rides an `{"order": {…}}` envelope, prices/amounts are integer
+/// 1e6-scaled strings — `price = makerAmount/takerAmount` for BUY and
+/// `takerAmount/makerAmount` for SELL — and the venue derives outcome,
+/// quantity and time-in-force itself (no `outcome`/`quantity`/`order_type`
+/// fields exist; `time_in_force`/`client_order_id` are accepted and ignored,
+/// so dedupe stays the caller's job via the order's own idempotency).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PlaceOrderBody<'a> {
-    pub market_id: &'a str,
-    pub side: &'a str,
-    pub outcome: &'a str,
-    /// Shares as a string. Required for both market and limit orders.
-    pub quantity: &'a str,
-    pub order_type: &'a str,
-    /// Limit price as a string (the market-order slippage cap).
-    pub price: &'a str,
-    /// `GTC` for a resting maker order, `FAK` for an immediate taker one.
-    pub time_in_force: &'a str,
-    /// The core's own idempotency id (dedupe key on retries).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_order_id: Option<&'a str>,
+pub struct PlaceOrderBody {
+    /// CLOB token id (the same id the descriptors minted).
+    #[serde(rename = "tokenId")]
+    pub token_id: String,
+    /// `BUY` prices as `makerAmount/takerAmount`; `SELL` inverts.
+    pub side: String,
+    /// Cost side in 1e6-scaled integer-string form (BUY: cash out).
+    #[serde(rename = "makerAmount")]
+    pub maker_amount: String,
+    /// Share side in 1e6-scaled integer-string form.
+    #[serde(rename = "takerAmount")]
+    pub taker_amount: String,
 }
 
 /// Query results from `GET /v1/markets/updown`.
@@ -391,12 +425,50 @@ mod tests {
     }
 
     #[test]
-    fn order_response_order_id_is_integer() {
+    fn order_response_parses_the_live_camel_ack() {
+        // Live shape 2026-10-25: camelCase orderID, a matched ack already
+        // carries the fill ids.
         let ack: OrderResponse = serde_json::from_str(
-            r#"{"order_id": 42, "status": "FILLED", "price": "0.65", "quantity": "10", "fee": "0.16"}"#,
+            r#"{"orderID":1404591,"status":"matched","makingAmount":"4950000","takingAmount":"5000000","transactionsHashes":null,"tradeIDs":["1404591"],"errorMsg":""}"#,
         )
         .expect("ack parses");
-        assert_eq!(ack.venue_id(), "42");
-        assert_eq!(ack.fee, Some(Decimal::from_str("0.16").unwrap()));
+        assert_eq!(ack.venue_id(), "1404591");
+        assert_eq!(ack.status.as_deref(), Some("matched"));
+        assert_eq!(ack.trade_ids.as_deref(), Some(&["1404591".to_string()][..]));
+    }
+
+    #[test]
+    fn cancel_ack_reports_our_id_out_of_the_batch_envelope() {
+        // Live shape 2026-10-25: {"canceled":[…],"not_canceled":{id: reason}}.
+        let ack: CancelAck = serde_json::from_str(
+            r#"{"canceled":["1404785"],"not_canceled":{"1404525":"Order not found or already cancelled/filled"}}"#,
+        )
+        .expect("cancel ack parses");
+        assert_eq!(ack.cancelled_id("1404785"), Some("1404785"));
+        assert_eq!(ack.cancelled_id("1404525"), None);
+        assert_eq!(
+            ack.rejection("1404525"),
+            Some("Order not found or already cancelled/filled")
+        );
+        assert_eq!(ack.rejection("1404785"), None);
+    }
+
+    #[test]
+    fn place_body_serializes_the_native_envelope() {
+        let body = PlaceOrderBody {
+            token_id: "71321".to_string(),
+            side: "BUY".to_string(),
+            maker_amount: "2175000".to_string(),
+            taker_amount: "5000000".to_string(),
+        };
+        let wire = serde_json::to_value(&body).expect("serializes");
+        let wrapped = serde_json::json!({ "order": wire });
+        assert_eq!(
+            wrapped,
+            serde_json::json!({"order": {
+                "tokenId": "71321", "side": "BUY",
+                "makerAmount": "2175000", "takerAmount": "5000000"
+            }})
+        );
     }
 }

@@ -16,13 +16,13 @@
 //! 1. **no credentials → INERT** — the production spawn answers `Ok(None)`
 //!    and never opens a socket; dry-run keeps an honest `has_executor`
 //!    without order egress.
-//! 2. **place path** — a pending order the host hands over first resolves
-//!    the token through the venue's own `markets-by-token` registry, then
-//!    submits a native POST carrying (market_id, outcome, FAK/GTC, quantity,
-//!    price, client_order_id), and the venue's integer id comes back
-//!    through `on_order_accepted` stringified with the core's id preserved.
-//!    REMOVE the resolver mock and the assert on the recorded body goes red
-//!    (the executor refuses to guess an outcome label).
+//! 2. **place path** — a pending order the host hands over is submitted as
+//!    the venue's native envelope `{"order":{tokenId, side, makerAmount,
+//!    takerAmount}}` with 1e6-scaled integer strings (price = maker/taker
+//!    for BUY, inverted for SELL; verified against the live venue
+//!    2026-10-25 — the flat form is answered `VALIDATION_FAILED: missing
+//!    order`), and the venue's integer id comes back through
+//!    `on_order_accepted` stringified with the core's id preserved.
 //! 3. **reconcile sweep** — fills land in `ReconcileSnapshot` rows
 //!    attributed through BOTH leg sides (taker_order_id and maker_orders),
 //!    a venue-open id the core does not know (an orphan) is DELETEd, and
@@ -309,7 +309,18 @@ fn mock_server(routes: Routes) -> (String, Arc<StdMutex<Vec<Recorded>>>) {
                 }
                 ("POST", "/v1/order") => {
                     let ack = routes.place_acks.lock().unwrap().pop();
-                    http_ok(ack.as_deref().unwrap_or(r#"{"error":"no ack queued"}"#))
+                    let ack = ack.as_deref().unwrap_or(r#"{"error":"no ack queued"}"#);
+                    // A "NNN:" prefix models a non-200 venue answer with a
+                    // structured body (the refusal paths the plugin must
+                    // classify — a 200 body is parsed as a success ack).
+                    match ack.split_once(':') {
+                        Some((code, body))
+                            if code.len() == 3 && code.bytes().all(|b| b.is_ascii_digit()) =>
+                        {
+                            http_status(code.parse().unwrap(), body)
+                        }
+                        _ => http_ok(ack),
+                    }
                 }
                 ("DELETE", "/v1/order") => {
                     let ack = routes.cancel_acks.lock().unwrap().pop();
@@ -380,8 +391,9 @@ fn client_for(base_url: &str) -> Arc<PolySimRest> {
     Arc::new(PolySimRest::new(config, Some(test_credentials())).expect("client builds with creds"))
 }
 
-/// The venue registry answer for the token our pending orders carry: the
-/// resolver that the native order form's (market_id, outcome) must come from.
+/// The venue registry answer for the token our pending orders carry (the
+/// feed's book endpoint shape; the native order form itself needs no
+/// resolver — the venue derives market/outcome from the token id).
 const RESOLVE_BODY: &str = r#"{"condition_id":"0xcond-1","outcome":"Up","primary_token_id":"71321","secondary_token_id":"71322"}"#;
 
 fn pending_order(core_id: &str, token_id: &str, price: &str, size: &str) -> PendingOrder {
@@ -449,8 +461,9 @@ async fn a_pending_order_resolves_then_posts_the_native_mapping() {
         r#"{"data":[]}"#,
         RESOLVE_BODY,
         vec![
-            // First ack: the place POST. The venue id is an INTEGER on the wire.
-            r#"{"order_id":77,"status":"PENDING","client_order_id":"core-9"}"#.to_string(),
+            // First ack: the place POST. The venue id is an INTEGER on the
+            // wire, camelCase, live shape.
+            r#"{"orderID":77,"status":"live","makingAmount":"4350000","takingAmount":"10000000","tradeIDs":null,"errorMsg":""}"#.to_string(),
         ],
         vec![],
     ));
@@ -479,11 +492,11 @@ async fn a_pending_order_resolves_then_posts_the_native_mapping() {
         "the integer venue id must come back stringified with the core's id preserved"
     );
 
-    // The POST must have gone out with the venue's own registry answer:
-    // market_id + outcome label resolved from the token (NOT the raw token
-    // id and NOT a guessed label), Taker → FAK, and the core's id as the
-    // client order id (dedupe key). Cloned out of the std-mutex guard so no
-    // guard crosses an await point.
+    // The POST must have gone out in the venue's native envelope:
+    // {"order":{tokenId, side, makerAmount, takerAmount}} with 1e6-scaled
+    // integer strings — price = maker/taker for BUY (0.435·10 shares =
+    // 4.35 USDC → 4350000; 10 shares → 10000000). Cloned out of the
+    // std-mutex guard so no guard crosses an await point.
     let place_body = {
         let posts = recorded.lock().unwrap();
         posts
@@ -494,32 +507,31 @@ async fn a_pending_order_resolves_then_posts_the_native_mapping() {
             .clone()
     };
     for needle in [
-        r#""market_id":"0xcond-1""#,
+        r#""order":{"#,
+        r#""tokenId":"71321""#,
         r#""side":"BUY""#,
-        r#""outcome":"Up""#,
-        r#""quantity":"10""#,
-        r#""order_type":"limit""#,
-        r#""price":"0.435""#,
-        r#""time_in_force":"FAK""#,
-        r#""client_order_id":"core-9""#,
+        r#""makerAmount":"4350000""#,
+        r#""takerAmount":"10000000""#,
     ] {
         assert!(
             place_body.contains(needle),
             "place body missing {needle}; body was: {place_body}"
         );
     }
-    // Reverse acceptance: the outcome label must come from the venue's
-    // resolver, never from a plugin-side guess. Break the resolver mock and
-    // this test cannot reach an accepted order at all.
-    let resolve_seen = {
-        let gets = recorded.lock().unwrap();
-        gets.iter()
-            .any(|r| r.method == "GET" && r.path.starts_with("/v1/markets-by-token/71321"))
-    };
-    assert!(
-        resolve_seen,
-        "the token must have been resolved through the venue registry"
-    );
+    // The flat form the venue rejects (`VALIDATION_FAILED: missing order`)
+    // must not reappear: no market_id/outcome/quantity/price fields.
+    for banned in [
+        "market_id",
+        r#""outcome""#,
+        r#""quantity""#,
+        r#""order_type""#,
+        r#""time_in_force""#,
+    ] {
+        assert!(
+            !place_body.contains(banned),
+            "flat-form field {banned} must be gone; body was: {place_body}"
+        );
+    }
     // And the balance seed reached the host before anything was placed.
     assert!(
         sink.balances
@@ -548,7 +560,7 @@ async fn the_sweep_maps_fills_cancels_orphans_and_syncs_balance() {
         ]}"#,
         RESOLVE_BODY,
         vec![],
-        vec![r#"{"order_id":99,"status":"CANCELLED"}"#.to_string()],
+        vec![r#"{"canceled":["99"],"not_canceled":{}}"#.to_string()],
     ));
     let sink = ExecSink::default();
     sink.known_ids
@@ -631,8 +643,8 @@ async fn a_pending_cancel_is_sent_before_the_same_tick_s_new_order() {
         r#"{"orders":[]}"#,
         r#"{"data":[]}"#,
         RESOLVE_BODY,
-        vec![r#"{"order_id":55,"status":"PENDING","client_order_id":"core-11"}"#.to_string()],
-        vec![r#"{"order_id":54,"status":"CANCELLED"}"#.to_string()],
+        vec![r#"{"orderID":55,"status":"live","makingAmount":"2200000","takingAmount":"5000000","tradeIDs":null,"errorMsg":""}"#.to_string()],
+        vec![r#"{"canceled":["54"],"not_canceled":{}}"#.to_string()],
     ));
     let sink = ExecSink::default();
     sink.push_cancel("54").await;
@@ -680,18 +692,22 @@ async fn a_pending_cancel_is_sent_before_the_same_tick_s_new_order() {
 
 #[tokio::test]
 async fn an_unresolvable_token_is_rejected_not_guessed() {
-    let (url, recorded) = mock_server(Routes {
-        resolve_status: 404,
-        resolve_body: r#"{"error":"MARKET_NOT_FOUND","message":"no market for token"}"#.to_string(),
-        ..routes_for(
-            r#"{"balance":"100"}"#,
-            r#"{"orders":[]}"#,
-            r#"{"data":[]}"#,
-            "",
-            vec![],
-            vec![],
-        )
-    });
+    // The native form needs no registry lookup, but the venue itself is the
+    // final authority on a token: a place POST carrying a token the venue
+    // does not know is answered 404 TOKEN_NOT_FOUND (live shape) and the
+    // rejection flows back to the core — never a silent drop, never a
+    // guessed market.
+    let (url, recorded) = mock_server(routes_for(
+        r#"{"balance":"100"}"#,
+        r#"{"orders":[]}"#,
+        r#"{"data":[]}"#,
+        "",
+        vec![
+            "404:{\"error\":\"TOKEN_NOT_FOUND\",\"message\":\"Token id not found: 999999\"}"
+                .to_string(),
+        ],
+        vec![],
+    ));
     let sink = ExecSink::default();
     sink.push_pending(pending_order("core-404", "999999", "0.50", "10"))
         .await;
@@ -715,8 +731,8 @@ async fn an_unresolvable_token_is_rejected_not_guessed() {
     );
     assert_eq!(
         rejected.first().unwrap().1.as_ref().map(|e| e.code),
-        Some(CoreErrorCode::InvalidParams),
-        "an unresolvable token is a routing bug — refused as InvalidParams"
+        Some(CoreErrorCode::MarketHalted),
+        "a token the venue does not know maps TOKEN_NOT_FOUND → MarketHalted"
     );
     let posts = {
         let recorded = recorded.lock().unwrap();
@@ -726,8 +742,8 @@ async fn an_unresolvable_token_is_rejected_not_guessed() {
             .count()
     };
     assert_eq!(
-        posts, 0,
-        "no order may be placed when the outcome label cannot be resolved"
+        posts, 1,
+        "the place attempt reached the venue (the refusal is the venue's own)"
     );
 }
 
