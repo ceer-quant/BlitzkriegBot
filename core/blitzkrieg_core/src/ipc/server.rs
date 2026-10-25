@@ -11597,6 +11597,79 @@ mod tests {
     /// out, and the `round_slot == 0` legacy bridge is untouched.
     ///
     /// 偏移按 venue 单键（B1a 设计：venue 墙钟属性，同 venue 各族共用），
+    /// 多场馆同格网的向后批次（2026-10-25 poly 轮钟冻结定谳）：kalshi 迟喂
+    /// 一批「窗口已过期」的旧 slot——收下它会把 polymarket 已落好的新轮行
+    /// 拖掉（ping-pong 互相覆写，轮钟冻 00:00）。守卫丢过期批次、放行活窗口
+    /// 批次（未来档先落、当前轮后到的对抗性喂序由上面那三个测试钉住）。
+    #[tokio::test]
+    async fn a_stale_expired_batch_is_dropped_and_a_live_one_is_kept() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let round_sec = 900i64;
+        let now = now_ms();
+        let slot = now / 1000 / round_sec;
+        let live_end = (slot + 2) * round_sec * 1000; // the round being traded
+        let expired_end = slot * round_sec * 1000; // the previous slot's end — already past
+
+        let mk = |venue: &str, end_ms: i64| CryptoMarket {
+            asset: "BTC".to_string(),
+            condition_id: format!("cond-{venue}-{end_ms}"),
+            question_id: format!("q-{venue}-{end_ms}"),
+            up_token_id: format!("up-{venue}-{end_ms}"),
+            down_token_id: format!("down-{venue}-{end_ms}"),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / round_sec,
+            round_duration_sec: round_sec,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: "BTC up or down".to_string(),
+        };
+
+        {
+            let mut c = core.lock().await;
+            // polymarket 先落当前交易轮（活窗口）。
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("polymarket", live_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+            // kalshi 迟喂一批已过期 slot（ping-pong 的那一半）——必须被丢。
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("kalshi", expired_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"engine.round","params":{}}"#.to_string(),
+        )
+        .await;
+        let prices = reply["result"]["marketPrices"]
+            .as_array()
+            .expect("market prices array");
+        assert!(
+            prices.iter().any(|p| p["venue"] == "polymarket"),
+            "the live batch's markets stay registered: {prices:?}"
+        );
+        assert!(
+            !prices.iter().any(|p| p["venue"] == "kalshi"),
+            "the expired batch must not drag the table backward: {prices:?}"
+        );
+    }
+
     /// 同 venue 双族的声明偏移互踩是 B1a 既有形状——本牙用跨 venue 双族
     /// 隔开偏移，钉的是审计点「外族行在全局 900s 网格上永不等于
     /// trading_slot 而被整体滤没」，与行属于哪个 venue 无关（旧谓词对
