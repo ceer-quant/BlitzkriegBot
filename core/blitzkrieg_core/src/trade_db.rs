@@ -11,6 +11,22 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Default ledger path per run mode. The trade log is the ONE file dry and
+/// live share by name today, which is exactly how a live panel ends up
+/// rendering dry-era probe rows: `data/trades/trades.jsonl` holds only dry-run
+/// fills in every deployment so far, so the LIVE mode derives a separate
+/// default (`trades-live.jsonl`) while DRY/readonly keep the historical
+/// spelling — dry tooling (`scripts/dryrun-report.mjs`) and the 36 dry-era rows
+/// already on disk stay exactly where they are, no migration. An explicit
+/// `--trade-log` still wins over both defaults.
+pub fn default_trade_log_path(mode: crate::model::Mode) -> &'static str {
+    if mode.may_trade() {
+        "data/trades/trades-live.jsonl"
+    } else {
+        "data/trades/trades.jsonl"
+    }
+}
+
 /// One closed trade, wire-compatible with the Node `TradeRecord`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,10 +170,21 @@ impl TradeDb {
     /// `data/trades/trades.jsonl`; the summary sits beside it.
     pub fn new(jsonl_path: impl AsRef<Path>) -> Self {
         let jsonl_path = jsonl_path.as_ref().to_path_buf();
-        let summary_path = jsonl_path
-            .parent()
-            .map(|p| p.join("summary.json"))
-            .unwrap_or_else(|| PathBuf::from("summary.json"));
+        // The summary belongs to ITS ledger, not to the directory: two
+        // mode-split ledgers share `data/trades/`, and both writing
+        // `summary.json` would fold each mode's all-time totals into the other
+        // mode's panel (the exact cross-contamination this split exists to
+        // stop). The historical `trades.jsonl` keeps the Node-compatible
+        // `summary.json` name so existing dry-run tooling reads on unchanged;
+        // any other ledger (live's `trades-live.jsonl`, a renamed one) gets
+        // `<stem>.summary.json` beside it.
+        let summary_path = match jsonl_path.file_name() {
+            Some(name) if name == "trades.jsonl" => jsonl_path
+                .parent()
+                .map(|p| p.join("summary.json"))
+                .unwrap_or_else(|| PathBuf::from("summary.json")),
+            _ => jsonl_path.with_extension("summary.json"),
+        };
         let summary = std::fs::read_to_string(&summary_path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
@@ -506,6 +533,79 @@ mod tests {
         assert_eq!(db2.summary_for("poly").total_trades, 0);
         assert_eq!(db2.summary_for("default").total_trades, 1);
         assert_eq!(db2.summary().total_trades, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #trades-mode-split: the DEFAULT ledger path is derived from the run
+    /// mode — live derives `trades-live.jsonl`, dry/readonly keep the
+    /// historical `trades.jsonl`. The bug this fixes: one shared filename made
+    /// the live panel render the dry era's probe rows.
+    #[test]
+    fn default_trade_log_path_splits_by_mode() {
+        assert_eq!(
+            default_trade_log_path(crate::model::Mode::Live),
+            "data/trades/trades-live.jsonl"
+        );
+        assert_eq!(
+            default_trade_log_path(crate::model::Mode::Dry),
+            "data/trades/trades.jsonl"
+        );
+        assert_eq!(
+            default_trade_log_path(crate::model::Mode::ReadOnly),
+            "data/trades/trades.jsonl"
+        );
+    }
+
+    /// A live ledger started BESIDE a populated dry ledger reads none of its
+    /// rows: `read_recent` on the live default must come back empty while the
+    /// dry file still serves its own rows — the panel verb reads exactly one
+    /// path, so the path split IS the isolation.
+    #[test]
+    fn live_ledger_does_not_read_dry_rows() {
+        let dir = std::env::temp_dir().join(format!("bktrade-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The defaults are `data/trades/…` spellings — create the leaf so the
+        // fixture's dry row can be planted at the real relative shape.
+        std::fs::create_dir_all(dir.join("data/trades")).unwrap();
+        let dry_path = dir.join(default_trade_log_path(crate::model::Mode::Dry));
+        std::fs::write(
+            &dry_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&TradeRecord::from_closed(&closed())).unwrap()
+            ),
+        )
+        .unwrap();
+        let live_path = dir.join(default_trade_log_path(crate::model::Mode::Live));
+        // Nothing has traded live yet — the file may not even exist.
+        assert!(read_recent(&live_path, 50).is_empty());
+        assert!(!read_recent(&dry_path, 50).is_empty());
+        // One live trade lands in the LIVE file only; the dry row never
+        // crosses over in either direction.
+        let mut db = TradeDb::new(&live_path);
+        let mut rec = TradeRecord::from_closed(&closed());
+        rec.id = "live-1".into();
+        db.record(&rec, 100);
+        let live_rows = read_recent(&live_path, 50);
+        assert_eq!(live_rows.len(), 1);
+        assert_eq!(live_rows[0]["id"], "live-1");
+        assert_eq!(read_recent(&dry_path, 50).len(), 1);
+        // The two summaries stay apart: live's summary file is derived from
+        // its own ledger name (sibling of the live jsonl) and folds only the
+        // live row; dry's historical summary.json is never opened by the live
+        // db, so the dry fold stays wherever the dry tooling left it.
+        assert_eq!(db.summary().total_trades, 1);
+        let live_summary: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(live_path.with_extension("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(live_summary["totalTrades"], serde_json::json!(1));
+        assert!(
+            std::fs::read_to_string(dry_path.with_extension("summary.json"))
+                .unwrap_or_default()
+                .is_empty(),
+            "the live db must not write beside the dry ledger"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

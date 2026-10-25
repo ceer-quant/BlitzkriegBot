@@ -118,6 +118,8 @@ try {
   check('the trade summary is zeroed after the reset',
     Number(summary.totalTrades ?? 0) === 0, JSON.stringify(summary));
 
+  // The trade ledger is mode-split (#trades-mode-split): these cores are DRY,
+  // whose default ledger stays the historical `data/trades/trades.jsonl`.
   for (const f of ['data/orders/orders.jsonl', 'data/trades/trades.jsonl',
     'data/positions/positions.jsonl']) {
     let text = '';

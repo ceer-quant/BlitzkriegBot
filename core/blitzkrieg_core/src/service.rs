@@ -889,6 +889,13 @@ impl Default for CoreConfig {
             // test that wants isolation passes its own private path.
             execution_policy_audit_path: None,
             max_positions_per_asset: None,
+            // #trades-mode-split: THIS default is the zero-config DRY
+            // deployment's ledger — the historical `data/trades/trades.jsonl`
+            // the dry-era rows and dry tooling already own. A LIVE boot never
+            // reads this cell: the binary's `main` derives its default through
+            // `crate::trade_db::default_trade_log_path(mode)` (live →
+            // `trades-live.jsonl`) before the config is built. Keep the two
+            // spellings mirrored when the default tree changes.
             trade_log_path: Some("data/trades/trades.jsonl".to_string()),
             order_log_path: Some("data/orders/orders.jsonl".to_string()),
             position_log_path: Some("data/positions/positions.jsonl".to_string()),
@@ -18085,6 +18092,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ── #trades-mode-split: live 与 dry 的成交账本分文件 ─────────────────────
+
+    /// The end-to-end isolation the bug report asked for: a LIVE core whose
+    /// default ledger was derived the way the binary derives it
+    /// (`default_trade_log_path(Mode::Live)`) must not see rows in the DRY
+    /// ledger — the `recent_trades` panel verb reads exactly the one file, so
+    /// the path split IS the isolation. Mirrors production: the dry file
+    /// already holds 36 dry-era probe rows when live boots.
+    #[test]
+    fn live_recent_trades_do_not_read_the_dry_ledger() {
+        let dir = reset_audit_dir("trades-split");
+        let dry_path = dir.join(crate::trade_db::default_trade_log_path(Mode::Dry));
+        let live_path = dir.join(crate::trade_db::default_trade_log_path(Mode::Live));
+
+        // The dry era's leftover: one probe row in the historical ledger.
+        let dry_closed = crate::position::ClosedPosition {
+            id: "hft-probe-1".into(),
+            strategy: "kline_probe".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "tok".into(),
+            condition_id: "cond".into(),
+            entry_price: Decimal::ONE / Decimal::from(2),
+            exit_price: Decimal::ONE,
+            shares: Decimal::from(10),
+            cost_usd: Decimal::from(5),
+            was_maker_entry: true,
+            was_maker_exit: false,
+            entry_fee_pct: Decimal::ZERO,
+            exit_fee_pct: Decimal::ZERO,
+            pnl_usd: Decimal::from(5),
+            pnl_pct: Decimal::from(100),
+            net_pnl_usd: Decimal::ONE,
+            net_pnl_pct: Decimal::from(20),
+            high_pnl_pct: Decimal::ZERO,
+            low_pnl_pct: Decimal::ZERO,
+            hold_time_sec: 0,
+            exit_reason: crate::model::ExitReason::TakeProfit,
+            entered_at_ms: 0,
+            exited_at_ms: 1,
+            entry_role: crate::model::OrderRole::Maker,
+            exit_role: crate::model::OrderRole::Taker,
+            dust_shares: Decimal::ZERO,
+            account_id: crate::model::default_account_id(),
+            venue: "polymarket".into(),
+        };
+        crate::trade_db::TradeDb::new(&dry_path)
+            .record(&crate::trade_db::TradeRecord::from_closed(&dry_closed), 1);
+
+        // A live core, its trade log at the LIVE default — no explicit
+        // --trade-log, exactly the deployment shape from the bug report.
+        let mut live = Core::new(CoreConfig {
+            mode: Mode::Live,
+            trade_log_path: Some(live_path.to_string_lossy().into_owned()),
+            manual_ops_audit_path: Some(
+                dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+            ),
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        });
+        live.set_balance(Decimal::from(1_000));
+
+        // Boot view: the dry row is invisible. The fallback (in-memory closed
+        // positions) is empty too — the panel shows nothing, not dry history.
+        assert!(
+            live.recent_trades(50).is_empty(),
+            "live core saw the dry ledger's probe row: {:?}",
+            live.recent_trades(50)
+        );
+
+        // One live trade books into the LIVE ledger only.
+        let mut live_closed = dry_closed.clone();
+        live_closed.id = "live-1".into();
+        live_closed.strategy = "spread_arb".into();
+        live.trade_db
+            .as_mut()
+            .expect("trade_log_path set")
+            .record(&crate::trade_db::TradeRecord::from_closed(&live_closed), 2);
+        let rows = live.recent_trades(50);
+        assert_eq!(rows.len(), 1, "exactly the live row: {rows:?}");
+        assert_eq!(rows[0]["id"], serde_json::json!("live-1"));
+
+        // The dry ledger on disk is untouched by the live run.
+        let dry_text = std::fs::read_to_string(&dry_path).unwrap();
+        assert_eq!(dry_text.lines().count(), 1, "dry file must stay one row");
+        assert!(dry_text.contains("hft-probe-1"));
     }
 
     #[test]

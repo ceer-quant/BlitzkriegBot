@@ -21,6 +21,9 @@
  * the trailing window (default 7 = the acceptance's DryRun week); `--from
  * <ms|ISO>` / `--to <ms>` pin an explicit window instead. Exit code 0 always
  * (a report on empty data is a valid, honest report) unless a read fails.
+ * The default `--trades` path stays `data/trades/trades.jsonl` — the DRY
+ * ledger after #trades-mode-split (live derives `trades-live.jsonl`), so this
+ * report keeps reading the dry history it was built for.
  *
  * Usage:
  *   node scripts/dryrun-report.mjs [--days 7] [--trades data/trades/trades.jsonl]
