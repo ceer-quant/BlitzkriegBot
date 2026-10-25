@@ -26,8 +26,8 @@ use blitzkrieg_core::model::{
     OrderbookSnapshot, Side, SignalDirection,
 };
 use blitzkrieg_core::position::{
-    DailyLossState, EquityBasis, OpenParams, PositionConfig, PositionManager, StopSuppressionCause,
-    utc_day_index,
+    DailyLossFile, DailyLossState, EquityBasis, OpenParams, PositionConfig, PositionManager,
+    StopSuppressionCause, utc_day_index,
 };
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::{Core, CoreConfig};
@@ -870,7 +870,7 @@ fn realize(
 fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
     let mut pm = PositionManager::new(budget_config(Decimal::ZERO, dec!(20), None));
     let roll = pm
-        .roll_daily(NOW, dec!(100), EquityBasis::Dry)
+        .roll_daily("default", NOW, dec!(100), EquityBasis::Dry)
         .expect("the first tick stamps the day");
     assert_eq!(roll.day_index, utc_day_index(NOW));
     assert_eq!(roll.limit_usd, dec!(20), "20% of the $100 opening equity");
@@ -885,7 +885,7 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
         NOW + 1_000,
     );
     assert!(net < dec!(-10), "expected a real loss, got {net}");
-    assert!(!pm.daily_loss_tripped());
+    assert!(!pm.daily_loss_tripped_for("default"));
     assert!(pm.can_open("default", None, None, NOW + 2_000).is_ok());
 
     // A second one crosses it, and the freeze is immediate.
@@ -897,7 +897,7 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
         dec!(0.10),
         NOW + 3_000,
     );
-    assert!(pm.daily_loss_tripped(), "the cap must latch");
+    assert!(pm.daily_loss_tripped_for("default"), "the cap must latch");
     let err = pm
         .can_open("default", None, None, NOW + 4_000)
         .expect_err("a tripped cap must refuse new entries");
@@ -905,22 +905,25 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
 
     // Same day: a later tick does not clear it.
     assert!(
-        pm.roll_daily(NOW + 60_000, dec!(70), EquityBasis::Dry)
+        pm.roll_daily("default", NOW + 60_000, dec!(70), EquityBasis::Dry)
             .is_none()
     );
-    assert!(pm.daily_loss_tripped());
+    assert!(pm.daily_loss_tripped_for("default"));
 
     // A real UTC day boundary does — and re-bases the cap on the new equity.
     let roll = pm
-        .roll_daily(NOW + DAY_MS, dec!(70), EquityBasis::Dry)
+        .roll_daily("default", NOW + DAY_MS, dec!(70), EquityBasis::Dry)
         .expect("crossing midnight UTC must roll the budget");
     assert_eq!(roll.previous_day_index, Some(utc_day_index(NOW)));
     assert_eq!(roll.day_index, utc_day_index(NOW + DAY_MS));
     assert!(roll.previous_tripped, "the closed day's state is reported");
     assert!(roll.previous_realized_pnl_usd < dec!(-20));
     assert_eq!(roll.limit_usd, dec!(14), "20% of the new $70 equity");
-    assert_eq!(pm.daily_pnl(), Decimal::ZERO);
-    assert!(!pm.daily_loss_tripped(), "the new day starts clean");
+    assert_eq!(pm.daily_pnl_for("default"), Decimal::ZERO);
+    assert!(
+        !pm.daily_loss_tripped_for("default"),
+        "the new day starts clean"
+    );
     assert!(
         pm.can_open("default", None, None, NOW + DAY_MS + 1_000)
             .is_ok()
@@ -931,13 +934,16 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
 fn the_absolute_cap_still_wins_when_it_is_the_tighter_one() {
     // Absolute $5 against a 50% relative cap on $100 → $5.
     let mut pm = PositionManager::new(budget_config(dec!(5), dec!(50), None));
-    pm.roll_daily(NOW, dec!(100), EquityBasis::Dry);
-    assert_eq!(pm.effective_daily_loss_limit(), dec!(5));
+    pm.roll_daily("default", NOW, dec!(100), EquityBasis::Dry);
+    assert_eq!(pm.effective_daily_loss_limit_for_public("default"), dec!(5));
 
     // …and a generous absolute cap never raises the relative one.
     let mut pm = PositionManager::new(budget_config(dec!(500), dec!(10), None));
-    pm.roll_daily(NOW, dec!(100), EquityBasis::Dry);
-    assert_eq!(pm.effective_daily_loss_limit(), dec!(10));
+    pm.roll_daily("default", NOW, dec!(100), EquityBasis::Dry);
+    assert_eq!(
+        pm.effective_daily_loss_limit_for_public("default"),
+        dec!(10)
+    );
 }
 
 #[test]
@@ -950,7 +956,7 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
     );
 
     let mut first = PositionManager::new(cfg.clone());
-    first.roll_daily(NOW, dec!(100), EquityBasis::Dry);
+    first.roll_daily("default", NOW, dec!(100), EquityBasis::Dry);
     let net = realize(
         &mut first,
         "tok",
@@ -960,7 +966,7 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
         NOW + 1_000,
     );
     assert!(net < dec!(-1), "expected a loss past the cap, got {net}");
-    assert!(first.daily_loss_tripped());
+    assert!(first.daily_loss_tripped_for("default"));
     assert!(
         path.exists(),
         "the day's budget must be on disk, not only in memory"
@@ -969,9 +975,12 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
 
     // A fresh process (same file) must not be able to launder today's loss.
     let mut second = PositionManager::new(cfg);
-    assert_eq!(second.daily_state().day_index, Some(utc_day_index(NOW)));
+    assert_eq!(
+        second.daily_state_for("default").day_index,
+        Some(utc_day_index(NOW))
+    );
     assert!(
-        second.daily_loss_tripped(),
+        second.daily_loss_tripped_for("default"),
         "the restored budget is already spent"
     );
     let err = second
@@ -981,10 +990,10 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
 
     // The boundary still lifts it, restored budget and all.
     let roll = second
-        .roll_daily(NOW + DAY_MS, dec!(85), EquityBasis::Dry)
+        .roll_daily("default", NOW + DAY_MS, dec!(85), EquityBasis::Dry)
         .expect("the next UTC day resets it");
     assert!(roll.previous_tripped);
-    assert!(!second.daily_loss_tripped());
+    assert!(!second.daily_loss_tripped_for("default"));
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1011,8 +1020,8 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
     );
     c.tick(NOW + 5_000).unwrap();
 
-    assert!(c.positions().daily_pnl() < dec!(-1));
-    assert!(c.positions().daily_loss_tripped());
+    assert!(c.positions().daily_pnl_for("default") < dec!(-1));
+    assert!(c.positions().daily_loss_tripped_for("default"));
     let alerts = drain_alerts(&mut rx);
     assert!(
         alerts
@@ -1054,7 +1063,7 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
 
     // …and a restart does not give the day a second budget.
     let mut restarted = dry_core(positions);
-    assert!(restarted.positions().daily_loss_tripped());
+    assert!(restarted.positions().daily_loss_tripped_for("default"));
     let err = restarted
         .place(
             order(
@@ -1075,7 +1084,7 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     restarted.set_event_sink(tx2);
     restarted.tick(NOW + DAY_MS).unwrap();
-    assert!(!restarted.positions().daily_loss_tripped());
+    assert!(!restarted.positions().daily_loss_tripped_for("default"));
     let alerts = drain_alerts(&mut rx2);
     assert!(
         alerts.iter().any(|m| m.contains("daily loss budget")),
@@ -1267,6 +1276,15 @@ fn a_bare_thread_registering_a_callsite_first_must_not_silence_the_capture() {
 /// Read back what the day's budget persisted.
 fn persisted_daily(path: &std::path::Path) -> DailyLossState {
     let text = std::fs::read_to_string(path).expect("the day's budget must be on disk");
+    // The per-account envelope is the new shape; the legacy bare state (which
+    // some fixtures write on purpose) reads as-is — the default book's day.
+    if let Ok(file) = serde_json::from_str::<DailyLossFile>(&text) {
+        return file
+            .accounts
+            .get("default")
+            .cloned()
+            .expect("the default account's day is persisted");
+    }
     serde_json::from_str(&text).expect("the persisted budget must parse")
 }
 
@@ -1285,7 +1303,7 @@ fn a_same_day_dry_to_live_restart_rebases_the_cap_on_the_live_book() {
     // The seeded dry run stamps the day against the simulated book.
     let mut dry = PositionManager::new(cfg.clone());
     let roll = dry
-        .roll_daily(NOW, dec!(10_000), EquityBasis::Dry)
+        .roll_daily("default", NOW, dec!(10_000), EquityBasis::Dry)
         .expect("the first tick stamps the day");
     assert_eq!(roll.limit_usd, dec!(2_000), "20% of the simulated $10 000");
     drop(dry);
@@ -1299,19 +1317,23 @@ fn a_same_day_dry_to_live_restart_rebases_the_cap_on_the_live_book() {
 
     // Same UTC day, the operator switches to live on a $50 book.
     let mut live = PositionManager::new(cfg);
-    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live));
+    let (rolled, logs) =
+        with_logs(|| live.roll_daily("default", NOW + 60_000, dec!(50), EquityBasis::Live));
     assert!(
         rolled.is_none(),
         "a re-anchor is not a day boundary — nothing was closed"
     );
     assert_eq!(
-        live.daily_state().opening_equity_usd,
+        live.daily_state_for("default").opening_equity_usd,
         dec!(50),
         "the day's base now belongs to the live book"
     );
-    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
     assert_eq!(
-        live.effective_daily_loss_limit(),
+        live.daily_state_for("default").equity_basis,
+        Some(EquityBasis::Live)
+    );
+    assert_eq!(
+        live.effective_daily_loss_limit_for_public("default"),
         dec!(10),
         "20% of the live $50 — NOT the $2 000 the dry seed implied"
     );
@@ -1395,18 +1417,22 @@ fn a_legacy_state_file_with_no_basis_rebases_onto_the_live_book() {
 
     // Same UTC day, a live $50 book.
     let mut live = PositionManager::new(cfg);
-    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live));
+    let (rolled, logs) =
+        with_logs(|| live.roll_daily("default", NOW + 60_000, dec!(50), EquityBasis::Live));
     assert!(
         rolled.is_none(),
         "same UTC day: no day boundary was crossed"
     );
     assert_eq!(
-        live.effective_daily_loss_limit(),
+        live.effective_daily_loss_limit_for_public("default"),
         dec!(10),
         "50 x 20% — NOT the $2 000 the unattributable base implied"
     );
-    assert_eq!(live.daily_state().opening_equity_usd, dec!(50));
-    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
+    assert_eq!(live.daily_state_for("default").opening_equity_usd, dec!(50));
+    assert_eq!(
+        live.daily_state_for("default").equity_basis,
+        Some(EquityBasis::Live)
+    );
     assert!(
         logs.contains("opening equity 10000 (unrecorded) -> 50 (live)"),
         "an unrecorded basis must be named as such: {logs}"
@@ -1440,13 +1466,16 @@ fn a_legacy_state_file_rebases_where_a_recorded_one_would_not() {
         dec!(20),
         Some(labeled.to_string_lossy().into_owned()),
     ));
-    control.roll_daily(NOW + 60_000, dec!(150), EquityBasis::Live);
+    control.roll_daily("default", NOW + 60_000, dec!(150), EquityBasis::Live);
     assert_eq!(
-        control.daily_state().opening_equity_usd,
+        control.daily_state_for("default").opening_equity_usd,
         dec!(200),
         "a restarted live book keeps the day's base"
     );
-    assert_eq!(control.effective_daily_loss_limit(), dec!(40));
+    assert_eq!(
+        control.effective_daily_loss_limit_for_public("default"),
+        dec!(40)
+    );
 
     // The same numbers with no basis recorded: it re-anchors onto the live book.
     let mut legacy = PositionManager::new(budget_config(
@@ -1454,18 +1483,21 @@ fn a_legacy_state_file_rebases_where_a_recorded_one_would_not() {
         dec!(20),
         Some(unlabeled.to_string_lossy().into_owned()),
     ));
-    legacy.roll_daily(NOW + 60_000, dec!(150), EquityBasis::Live);
+    legacy.roll_daily("default", NOW + 60_000, dec!(150), EquityBasis::Live);
     assert_eq!(
-        legacy.daily_state().opening_equity_usd,
+        legacy.daily_state_for("default").opening_equity_usd,
         dec!(150),
         "an unattributable base re-anchors even inside the deviation band"
     );
     assert_eq!(
-        legacy.effective_daily_loss_limit(),
+        legacy.effective_daily_loss_limit_for_public("default"),
         dec!(30),
         "20% of the $150 book, not 20% of the $200 the file carried"
     );
-    assert_eq!(legacy.daily_state().equity_basis, Some(EquityBasis::Live));
+    assert_eq!(
+        legacy.daily_state_for("default").equity_basis,
+        Some(EquityBasis::Live)
+    );
 
     let _ = std::fs::remove_file(&labeled);
     let _ = std::fs::remove_file(&unlabeled);
@@ -1486,18 +1518,19 @@ fn a_legacy_state_file_never_loosens_the_cap_when_the_book_is_bigger() {
     );
 
     let mut live = PositionManager::new(cfg);
-    let (rolled, logs) = with_logs(|| live.roll_daily(NOW + 60_000, dec!(200), EquityBasis::Live));
+    let (rolled, logs) =
+        with_logs(|| live.roll_daily("default", NOW + 60_000, dec!(200), EquityBasis::Live));
     assert!(
         rolled.is_none(),
         "same UTC day: no day boundary was crossed"
     );
     assert_eq!(
-        live.daily_state().opening_equity_usd,
+        live.daily_state_for("default").opening_equity_usd,
         dec!(50),
         "the day keeps the tighter base it already had"
     );
     assert_eq!(
-        live.effective_daily_loss_limit(),
+        live.effective_daily_loss_limit_for_public("default"),
         dec!(10),
         "…so the cap stays $10, not the $40 the bigger book would allow"
     );
@@ -1521,7 +1554,7 @@ fn a_same_basis_restart_neither_rebases_the_day_nor_warns() {
     );
 
     let mut first = PositionManager::new(cfg.clone());
-    first.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    first.roll_daily("default", NOW, dec!(10_000), EquityBasis::Dry);
     let realized = realize(
         &mut first,
         "tok",
@@ -1538,18 +1571,21 @@ fn a_same_basis_restart_neither_rebases_the_day_nor_warns() {
     let (_, logs) = with_logs(|| {
         assert!(
             second
-                .roll_daily(NOW + 60_000, dec!(9_500), EquityBasis::Dry)
+                .roll_daily("default", NOW + 60_000, dec!(9_500), EquityBasis::Dry)
                 .is_none()
         );
     });
     assert_eq!(
-        second.daily_state().opening_equity_usd,
+        second.daily_state_for("default").opening_equity_usd,
         dec!(10_000),
         "the day's base is the day's"
     );
-    assert_eq!(second.effective_daily_loss_limit(), dec!(2_000));
     assert_eq!(
-        second.daily_pnl(),
+        second.effective_daily_loss_limit_for_public("default"),
+        dec!(2_000)
+    );
+    assert_eq!(
+        second.daily_pnl_for("default"),
         realized,
         "a restart must not disturb the day's realized loss"
     );
@@ -1574,18 +1610,24 @@ fn a_same_day_basis_change_rebases_even_when_the_books_are_the_same_size() {
     );
 
     let mut dry = PositionManager::new(cfg.clone());
-    dry.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    dry.roll_daily("default", NOW, dec!(10_000), EquityBasis::Dry);
     drop(dry);
 
     // Live on a $9 000 book: 10% smaller, so nothing but the basis moved.
     let mut live = PositionManager::new(cfg);
     let (_, logs) = with_logs(|| {
-        live.roll_daily(NOW + 60_000, dec!(9_000), EquityBasis::Live);
+        live.roll_daily("default", NOW + 60_000, dec!(9_000), EquityBasis::Live);
     });
-    assert_eq!(live.daily_state().opening_equity_usd, dec!(9_000));
-    assert_eq!(live.daily_state().equity_basis, Some(EquityBasis::Live));
     assert_eq!(
-        live.effective_daily_loss_limit(),
+        live.daily_state_for("default").opening_equity_usd,
+        dec!(9_000)
+    );
+    assert_eq!(
+        live.daily_state_for("default").equity_basis,
+        Some(EquityBasis::Live)
+    );
+    assert_eq!(
+        live.effective_daily_loss_limit_for_public("default"),
         dec!(1_800),
         "20% of the live $9 000 — the dry seed's number is not this book's"
     );
@@ -1608,16 +1650,16 @@ fn a_same_basis_but_rescaled_book_rebases_the_day_too() {
     );
 
     let mut first = PositionManager::new(cfg.clone());
-    first.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    first.roll_daily("default", NOW, dec!(10_000), EquityBasis::Dry);
     drop(first);
 
     // Same label, a hundredth of the book: `--seed-balance 50`.
     let mut second = PositionManager::new(cfg);
     let (_, logs) = with_logs(|| {
-        second.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Dry);
+        second.roll_daily("default", NOW + 60_000, dec!(50), EquityBasis::Dry);
     });
     assert_eq!(
-        second.effective_daily_loss_limit(),
+        second.effective_daily_loss_limit_for_public("default"),
         dec!(10),
         "the cap must follow the book that is actually trading"
     );
@@ -1641,17 +1683,20 @@ fn a_rebase_never_loosens_the_days_cap() {
 
     // A dry $100 day, then a live $50 000 book on the same UTC day.
     let mut first = PositionManager::new(cfg.clone());
-    first.roll_daily(NOW, dec!(100), EquityBasis::Dry);
+    first.roll_daily("default", NOW, dec!(100), EquityBasis::Dry);
     drop(first);
 
     let mut second = PositionManager::new(cfg);
-    second.roll_daily(NOW + 60_000, dec!(50_000), EquityBasis::Live);
+    second.roll_daily("default", NOW + 60_000, dec!(50_000), EquityBasis::Live);
     assert_eq!(
-        second.daily_state().opening_equity_usd,
+        second.daily_state_for("default").opening_equity_usd,
         dec!(100),
         "the day keeps the tighter base it already had"
     );
-    assert_eq!(second.effective_daily_loss_limit(), dec!(20));
+    assert_eq!(
+        second.effective_daily_loss_limit_for_public("default"),
+        dec!(20)
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1669,7 +1714,7 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
 
     // Dry, $10 000: a −$30 loss is deep inside the $2 000 cap.
     let mut dry = PositionManager::new(cfg.clone());
-    dry.roll_daily(NOW, dec!(10_000), EquityBasis::Dry);
+    dry.roll_daily("default", NOW, dec!(10_000), EquityBasis::Dry);
     let realized = realize(
         &mut dry,
         "tok",
@@ -1680,26 +1725,29 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
     );
     assert!(realized <= dec!(-30), "expected ≈ −$30, got {realized}");
     assert!(realized > dec!(-2_000), "…but inside the seeded cap");
-    assert!(!dry.daily_loss_tripped());
+    assert!(!dry.daily_loss_tripped_for("default"));
     assert!(dry.can_open("default", None, None, NOW + 2_000).is_ok());
     drop(dry);
 
     // Live, $50, same UTC day: the cap is now $10 and the day is already past it.
     let mut live = PositionManager::new(cfg.clone());
     let (_, logs) = with_logs(|| {
-        live.roll_daily(NOW + 60_000, dec!(50), EquityBasis::Live);
+        live.roll_daily("default", NOW + 60_000, dec!(50), EquityBasis::Live);
     });
-    assert_eq!(live.effective_daily_loss_limit(), dec!(10));
+    assert_eq!(
+        live.effective_daily_loss_limit_for_public("default"),
+        dec!(10)
+    );
     assert!(
-        live.daily_loss_tripped(),
+        live.daily_loss_tripped_for("default"),
         "a spent, tightened cap must freeze the day instead of healing it"
     );
     assert!(
-        live.daily_state().tripped,
+        live.daily_state_for("default").tripped,
         "…and the trip must be LATCHED on the spot, not left to be re-derived"
     );
     assert_eq!(
-        live.daily_state().tripped_limit_usd,
+        live.daily_state_for("default").tripped_limit_usd,
         dec!(10),
         "the frozen cap is the live one"
     );
@@ -1715,8 +1763,11 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
     // …and it is persisted: a further restart cannot launder it either.
     drop(live);
     let again = PositionManager::new(cfg);
-    assert!(again.daily_loss_tripped());
-    assert_eq!(again.effective_daily_loss_limit(), dec!(10));
+    assert!(again.daily_loss_tripped_for("default"));
+    assert_eq!(
+        again.effective_daily_loss_limit_for_public("default"),
+        dec!(10)
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1741,7 +1792,9 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
     let mut dry = dry_core_at(positions.clone(), dec!(10_000), &log_path);
     dry.tick(NOW).unwrap();
     assert_eq!(
-        dry.positions().daily_state().opening_equity_usd,
+        dry.positions()
+            .daily_state_for("default")
+            .opening_equity_usd,
         dec!(10_000)
     );
     open_long(
@@ -1759,12 +1812,12 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
         NOW + 2_000,
     );
     dry.tick(NOW + 2_000).unwrap();
-    let realized = dry.positions().daily_pnl();
+    let realized = dry.positions().daily_pnl_for("default");
     assert!(
         realized <= dec!(-30) && realized > dec!(-2_000),
         "a loss inside the seeded cap, past the live one: {realized}"
     );
-    assert!(!dry.positions().daily_loss_tripped());
+    assert!(!dry.positions().daily_loss_tripped_for("default"));
     open_long(
         &mut dry,
         "tokB",
@@ -1787,7 +1840,8 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
     );
     assert_eq!(c.ledger().balance(), dec!(50), "the live book is $50");
     assert_eq!(
-        c.positions().effective_daily_loss_limit(),
+        c.positions()
+            .effective_daily_loss_limit_for_public("default"),
         dec!(2_000),
         "before the first tick the day still carries the dry base"
     );
@@ -1797,14 +1851,21 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     c.set_event_sink(tx);
     c.tick(NOW + 60_000).unwrap();
-    assert_eq!(c.positions().effective_daily_loss_limit(), dec!(10));
-    assert_eq!(c.positions().daily_state().opening_equity_usd, dec!(50));
     assert_eq!(
-        c.positions().daily_state().equity_basis,
+        c.positions()
+            .effective_daily_loss_limit_for_public("default"),
+        dec!(10)
+    );
+    assert_eq!(
+        c.positions().daily_state_for("default").opening_equity_usd,
+        dec!(50)
+    );
+    assert_eq!(
+        c.positions().daily_state_for("default").equity_basis,
         Some(EquityBasis::Live)
     );
     assert!(
-        c.positions().daily_loss_tripped(),
+        c.positions().daily_loss_tripped_for("default"),
         "the day must be frozen, not quietly healed"
     );
     let alerts = drain_alerts(&mut rx);

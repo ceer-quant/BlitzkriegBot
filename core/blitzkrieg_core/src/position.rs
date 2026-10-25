@@ -454,8 +454,20 @@ impl SuppressedStopEvent {
 /// The durable side file holding the day's loss budget. Same convention as the
 /// position log's `.recon` watermark: one small file, best-effort writes, a
 /// missing/corrupt file never blocks startup (memory stays authoritative).
+///
+/// The file holds ONE envelope with every account's day (the daily budget is
+/// per-account — `max_daily_drawdown_usd` sits in the risk matrix's ACCOUNT
+/// family, and one account's losses must never burn a sibling's budget). A
+/// file written before per-account days holds a bare `DailyLossState`; that
+/// migrates to the `default` account's bucket on load.
 struct DailyLossStore {
     path: std::path::PathBuf,
+}
+
+/// The persisted envelope: account id → its day state.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct DailyLossFile {
+    pub accounts: std::collections::BTreeMap<String, DailyLossState>,
 }
 
 impl DailyLossStore {
@@ -465,8 +477,14 @@ impl DailyLossStore {
         }
     }
 
-    fn save(&self, st: &DailyLossState) {
-        match serde_json::to_string_pretty(st) {
+    fn save(&self, accounts: &std::collections::BTreeMap<AccountId, DailyLossState>) {
+        let file = DailyLossFile {
+            accounts: accounts
+                .iter()
+                .map(|(id, st)| (id.as_str().to_string(), st.clone()))
+                .collect(),
+        };
+        match serde_json::to_string_pretty(&file) {
             Ok(text) => {
                 // #463: atomic rewrite. This file IS the "restart cannot launder
                 // today's losses" guarantee — a truncate-in-place write is the
@@ -479,10 +497,27 @@ impl DailyLossStore {
         }
     }
 
-    fn load(&self) -> Option<DailyLossState> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
+    fn load(&self) -> std::collections::BTreeMap<AccountId, DailyLossState> {
+        let Some(text) = std::fs::read_to_string(&self.path).ok() else {
+            return Default::default();
+        };
+        // New envelope first; a bare pre-per-account state migrates into the
+        // `default` account's bucket (single-book deployments had exactly one).
+        if let Ok(file) = serde_json::from_str::<DailyLossFile>(&text) {
+            return file
+                .accounts
+                .into_iter()
+                .map(|(id, st)| (AccountId::from(id.as_str()), st))
+                .collect();
+        }
         match serde_json::from_str::<DailyLossState>(&text) {
-            Ok(st) => Some(st),
+            Ok(st) => {
+                tracing::info!(
+                    path = %self.path.display(),
+                    "daily-loss state migrated to per-account shape (default account)"
+                );
+                [(AccountId::from("default"), st)].into_iter().collect()
+            }
             Err(e) => {
                 // #463: unreadable is NOT "fresh day". A silent zero hands the
                 // full daily-loss budget back to a session whose earlier losses
@@ -498,7 +533,7 @@ impl DailyLossStore {
                      today's realized losses may exceed what this session can see. \
                      Repair or delete the file before trusting the loss budget."
                 );
-                None
+                Default::default()
             }
         }
     }
@@ -760,9 +795,14 @@ pub struct PositionManager {
     open: Vec<OpenPosition>,
     closed: Vec<ClosedPosition>,
     next_id: u64,
-    /// The day's realized-loss budget (P0 #173). `daily_pnl` is now a VIEW of
-    /// this state rather than a separate field, so persistence cannot drift.
-    daily: DailyLossState,
+    /// Each account's realized-loss budget for the UTC day (P0 #173). The
+    /// budget is PER-ACCOUNT (operator verdict 2026-10-25): the cap sits in
+    /// the risk matrix's ACCOUNT family (`max_daily_drawdown_usd`), and one
+    /// account's losses must never burn a sibling's budget — the single-slot
+    /// state counted the whole process's day against whichever account was
+    /// entering. `daily_pnl_for` is a view of this state rather than a
+    /// separate field, so persistence cannot drift.
+    daily_by_account: std::collections::BTreeMap<AccountId, DailyLossState>,
     daily_store: Option<DailyLossStore>,
     last_stop_loss_at: i64,
     exit_cooldowns: std::collections::HashMap<String, i64>,
@@ -841,16 +881,13 @@ impl PositionManager {
         // A persisted budget must gate entries BEFORE the first tick, so it is
         // loaded here rather than lazily: a restart on a day whose cap is
         // already spent must not accept one entry first.
-        let daily = daily_store
-            .as_ref()
-            .and_then(|s| s.load())
-            .unwrap_or_default();
+        let daily = daily_store.as_ref().map(|s| s.load()).unwrap_or_default();
         Self {
             config,
             open: Vec::new(),
             closed: Vec::new(),
             next_id: 1,
-            daily,
+            daily_by_account: daily,
             daily_store,
             last_stop_loss_at: 0,
             exit_cooldowns: Default::default(),
@@ -874,8 +911,8 @@ impl PositionManager {
             self.daily_store = self.config.daily_pnl_path.clone().map(DailyLossStore::new);
             // A different budget file is a different budget: re-seed from it,
             // keeping the in-memory state when the new file has none.
-            if let Some(loaded) = self.daily_store.as_ref().and_then(|s| s.load()) {
-                self.daily = loaded;
+            if let Some(loaded) = self.daily_store.as_ref().map(|s| s.load()) {
+                self.daily_by_account = loaded;
             }
         }
     }
@@ -964,8 +1001,39 @@ impl PositionManager {
         self.closed.push(closed);
     }
 
-    pub fn daily_pnl(&self) -> Decimal {
-        self.daily.realized_pnl_usd
+    /// The account's day-realized PnL (its OWN bucket — a sibling account's
+    /// day never moves this number).
+    pub fn daily_pnl_for(&self, account: &str) -> Decimal {
+        self.daily_bucket(account).realized_pnl_usd
+    }
+
+    /// The process-wide day realized — every account's bucket summed. This is
+    /// the SYSTEMIC fact (the `global_kill_switch_loss_usd` cap reads it); the
+    /// per-account caps read [`Self::daily_pnl_for`] instead.
+    pub fn daily_pnl_total(&self) -> Decimal {
+        self.daily_by_account
+            .values()
+            .map(|s| s.realized_pnl_usd)
+            .sum()
+    }
+
+    fn daily_bucket(&self, account: &str) -> &DailyLossState {
+        static EMPTY: std::sync::OnceLock<DailyLossState> = std::sync::OnceLock::new();
+        self.daily_by_account
+            .get(&AccountId::from(account))
+            .unwrap_or_else(|| EMPTY.get_or_init(DailyLossState::default))
+    }
+
+    /// The day's realized-loss budget as the panel/CLI report it — ONE
+    /// account's day (the caller names whose; the snapshot serves the display
+    /// account's and carries the whole map beside it).
+    pub fn daily_state_for(&self, account: &str) -> DailyLossState {
+        self.daily_bucket(account).clone()
+    }
+
+    /// Every account's day, for views that must show all books at once.
+    pub fn daily_states(&self) -> &std::collections::BTreeMap<AccountId, DailyLossState> {
+        &self.daily_by_account
     }
 
     /// #363: the account's net realized PnL over the TRAILING HOUR, read
@@ -982,11 +1050,6 @@ impl PositionManager {
             .filter(|c| c.account_id.as_str() == account_id && now_ms - c.exited_at_ms <= window)
             .map(|c| c.net_pnl_usd)
             .sum()
-    }
-
-    /// The day's realized-loss budget as the panel/CLI report it.
-    pub fn daily_state(&self) -> &DailyLossState {
-        &self.daily
     }
 
     /// The open positions' unrealized PnL (USD, negative = paper loss), each
@@ -1008,29 +1071,46 @@ impl PositionManager {
             .sum()
     }
 
+    /// ONE account's open book, same mark discipline as
+    /// [`Self::unrealized_pnl_usd`] — the per-account daily breaker judges its
+    /// own paper loss, never a sibling's.
+    pub fn unrealized_pnl_usd_for(&self, account: &str) -> Decimal {
+        self.open
+            .iter()
+            .filter(|p| p.account_id.as_str() == account)
+            .filter(|p| p.shares > Decimal::ZERO && p.current_price > Decimal::ZERO)
+            .map(|p| (p.current_price - p.entry_price) * p.shares)
+            .sum()
+    }
+
     /// The number the daily-loss breaker judges on (#464): the day's realized
     /// loss plus — when [`PositionConfig::daily_loss_marks_unrealized`] is on —
     /// the open book's unrealized loss. The realized-only reading ships OFF;
     /// setting that flag `false` reproduces the pre-#464 input exactly. The
     /// persisted [`DailyLossState::realized_pnl_usd`] is NOT this number: the
     /// unrealized half is a JUDGEMENT input, never an accounting entry.
-    fn daily_drawdown_input(&self) -> Decimal {
-        let realized = self.daily.realized_pnl_usd;
+    /// Per-account: the account's own realized, the account's own paper.
+    fn daily_drawdown_input(&self, account: &str) -> Decimal {
+        let realized = self.daily_bucket(account).realized_pnl_usd;
         if self.config.daily_loss_marks_unrealized {
-            realized + self.unrealized_pnl_usd()
+            realized + self.unrealized_pnl_usd_for(account)
         } else {
             realized
         }
     }
 
-    /// The effective daily-loss cap in USD: the TIGHTER of the absolute cap and
-    /// the percentage of the day's opening cash equity. `0` = no cap (both off,
-    /// or the percentage configured but the account size still unknown).
-    pub fn effective_daily_loss_limit(&self) -> Decimal {
+    /// The cap for ONE account's day (its own opening equity base).
+    pub fn effective_daily_loss_limit_for_public(&self, account: &str) -> Decimal {
+        self.effective_daily_loss_limit_for(account)
+    }
+
+    /// The cap for ONE account's day (its own opening equity base).
+    fn effective_daily_loss_limit_for(&self, account: &str) -> Decimal {
         let abs = self.config.max_daily_loss_usd;
         let pct = self.config.max_daily_loss_equity_pct;
-        let rel = if pct > Decimal::ZERO && self.daily.opening_equity_usd > Decimal::ZERO {
-            self.daily.opening_equity_usd * pct / Decimal::ONE_HUNDRED
+        let opening = self.daily_bucket(account).opening_equity_usd;
+        let rel = if pct > Decimal::ZERO && opening > Decimal::ZERO {
+            opening * pct / Decimal::ONE_HUNDRED
         } else {
             Decimal::ZERO
         };
@@ -1045,12 +1125,13 @@ impl PositionManager {
     /// True when the day's net loss (see [`Self::daily_drawdown_input`])
     /// reached the effective cap. Sticky for the rest of the day so a later
     /// winning trade cannot re-open entries.
-    pub fn daily_loss_tripped(&self) -> bool {
-        if self.daily.tripped {
+    pub fn daily_loss_tripped_for(&self, account: &str) -> bool {
+        let daily = self.daily_bucket(account);
+        if daily.tripped {
             return true;
         }
-        let limit = self.effective_daily_loss_limit();
-        limit > Decimal::ZERO && self.daily_drawdown_input() <= -limit
+        let limit = self.effective_daily_loss_limit_for(account);
+        limit > Decimal::ZERO && self.daily_drawdown_input(account) <= -limit
     }
 
     /// Roll the budget over when `now_ms` crosses into a new UTC day, seeding
@@ -1071,18 +1152,29 @@ impl PositionManager {
     /// by its own warning, and by the trip alert when it freezes the day.
     pub fn roll_daily(
         &mut self,
+        account: &str,
         now_ms: i64,
         equity_usd: Decimal,
         basis: EquityBasis,
     ) -> Option<DailyRoll> {
         let today = utc_day_index(now_ms);
-        if self.daily.day_index == Some(today) {
-            self.reconcile_same_day_base(now_ms, equity_usd, basis);
+        if self
+            .daily_by_account
+            .get(&AccountId::from(account))
+            .map(|d| d.day_index)
+            .unwrap_or(None)
+            == Some(today)
+        {
+            self.reconcile_same_day_base(account, now_ms, equity_usd, basis);
             return None;
         }
-        let previous_day_index = self.daily.day_index;
-        let previous_realized = self.daily.realized_pnl_usd;
-        let previous_tripped = self.daily.tripped;
+        let daily = self
+            .daily_by_account
+            .entry(AccountId::from(account))
+            .or_default();
+        let previous_day_index = daily.day_index;
+        let previous_realized = daily.realized_pnl_usd;
+        let previous_tripped = daily.tripped;
         let carried_pnl = if previous_day_index.is_none() {
             // First stamp of the day (fresh process, or before this field
             // existed): it only starts the clock. Whatever was realized before
@@ -1094,34 +1186,39 @@ impl PositionManager {
             Decimal::ZERO
         };
         let carried_trip = previous_day_index.is_none() && previous_tripped;
-        self.daily = DailyLossState {
+        let carried_at = daily.tripped_at_ms;
+        let carried_limit = daily.tripped_limit_usd;
+        *daily = DailyLossState {
             day_index: Some(today),
             realized_pnl_usd: carried_pnl,
             opening_equity_usd: equity_usd.max(Decimal::ZERO),
             equity_basis: Some(basis),
             tripped: carried_trip,
-            tripped_at_ms: if carried_trip {
-                self.daily.tripped_at_ms
-            } else {
-                0
-            },
+            tripped_at_ms: if carried_trip { carried_at } else { 0 },
             tripped_limit_usd: if carried_trip {
-                self.daily.tripped_limit_usd
+                carried_limit
             } else {
                 Decimal::ZERO
             },
             tripped_reported: false,
             opened_at_ms: now_ms,
         };
-        self.last_stop_loss_at = 0;
-        self.exit_cooldowns.clear();
+        // A REAL UTC-day boundary for this account refreshes the strategy
+        // cooldowns; a brand-new account's first stamp (previous_day_index
+        // None) must NOT — it would wipe siblings' same-day exit cooldowns
+        // mid-day. (The single-slot state cleared these unconditionally: one
+        // book, one day.)
+        if previous_day_index.is_some() {
+            self.last_stop_loss_at = 0;
+            self.exit_cooldowns.clear();
+        }
         self.persist_daily();
         Some(DailyRoll {
             day_index: today,
             previous_day_index,
             previous_realized_pnl_usd: previous_realized,
-            opening_equity_usd: self.daily.opening_equity_usd,
-            limit_usd: self.effective_daily_loss_limit(),
+            opening_equity_usd: self.daily_bucket(account).opening_equity_usd,
+            limit_usd: self.effective_daily_loss_limit_for(account),
             previous_tripped,
         })
     }
@@ -1149,18 +1246,28 @@ impl PositionManager {
     /// the very hole this closes. That is also why a same-basis restart at
     /// (roughly) the same equity changes nothing and says nothing: a restart
     /// must not disturb how much of the day's budget is already spent.
-    fn reconcile_same_day_base(&mut self, now_ms: i64, equity_usd: Decimal, basis: EquityBasis) {
+    fn reconcile_same_day_base(
+        &mut self,
+        account: &str,
+        now_ms: i64,
+        equity_usd: Decimal,
+        basis: EquityBasis,
+    ) {
         if equity_usd <= Decimal::ZERO {
             // No account size to measure against (a live process whose balance
             // has not arrived yet): keep whatever base the day has.
             return;
         }
-        let old_equity = self.daily.opening_equity_usd;
-        let old_basis = self.daily.equity_basis;
+        let daily = self
+            .daily_by_account
+            .entry(AccountId::from(account))
+            .or_default();
+        let old_equity = daily.opening_equity_usd;
+        let old_basis = daily.equity_basis;
         if old_equity <= Decimal::ZERO {
             // Stamped before the account size was known: adopt today's book.
-            self.daily.opening_equity_usd = equity_usd;
-            self.daily.equity_basis = Some(basis);
+            daily.opening_equity_usd = equity_usd;
+            daily.equity_basis = Some(basis);
             self.persist_daily();
             return;
         }
@@ -1174,10 +1281,12 @@ impl PositionManager {
             // so the day keeps the tighter base it already has.
             return;
         }
-        self.daily.opening_equity_usd = equity_usd;
-        self.daily.equity_basis = Some(basis);
-        let limit = self.effective_daily_loss_limit();
-        let breach = self.daily_drawdown_input();
+        daily.opening_equity_usd = equity_usd;
+        daily.equity_basis = Some(basis);
+        let day_index = daily.day_index.unwrap_or(0);
+        let realized = daily.realized_pnl_usd;
+        let limit = self.effective_daily_loss_limit_for(account);
+        let breach = self.daily_drawdown_input(account);
         let breached = limit > Decimal::ZERO && breach <= -limit;
         if breached {
             // The tightened cap is already spent. Latch the trip HERE rather
@@ -1185,21 +1294,24 @@ impl PositionManager {
             // as healthy in between, and re-arm the report: the number the
             // operator was shown has moved. Exits are untouched either way —
             // the trip freezes entries (see `can_open`).
-            if !self.daily.tripped {
-                self.daily.tripped = true;
-                self.daily.tripped_at_ms = now_ms;
+            if let Some(daily) = self.daily_by_account.get_mut(&AccountId::from(account)) {
+                if !daily.tripped {
+                    daily.tripped = true;
+                    daily.tripped_at_ms = now_ms;
+                }
+                daily.tripped_limit_usd = limit;
+                daily.tripped_reported = false;
             }
-            self.daily.tripped_limit_usd = limit;
-            self.daily.tripped_reported = false;
         }
         let old_basis_str = old_basis.map(EquityBasis::as_str).unwrap_or("unrecorded");
         tracing::warn!(
-            day = self.daily.day_index.unwrap_or(0),
+            account = %account,
+            day = day_index,
             old_equity = %old_equity,
             new_equity = %equity_usd,
             old_basis = old_basis_str,
             new_basis = basis.as_str(),
-            realized = %self.daily.realized_pnl_usd,
+            realized = %realized,
             limit = %limit,
             tripped = breached,
             "daily loss budget re-anchored within the UTC day: opening equity {} ({}) -> {} ({}){}",
@@ -1216,54 +1328,84 @@ impl PositionManager {
         self.persist_daily();
     }
 
-    /// The trip to report, consumed once per process (see
-    /// `DailyLossState::tripped_reported`). `None` while the day is healthy.
-    pub fn take_daily_trip(&mut self) -> Option<DailyTrip> {
-        if !self.daily_loss_tripped() {
-            return None;
+    /// Every account's un-announced trip, latched and consumed. The caller
+    /// announces one line per account — a sibling account's freeze must not
+    /// hide behind another's.
+    pub fn take_daily_trips(&mut self) -> Vec<(AccountId, DailyTrip)> {
+        let mut trips = Vec::new();
+        let accounts: Vec<AccountId> = self.daily_by_account.keys().cloned().collect();
+        for account in accounts {
+            if !self.daily_loss_tripped_for(account.as_str()) {
+                continue;
+            }
+            // The latch cap is computed BEFORE the mutable borrow (it reads
+            // the bucket's opening equity through the same map).
+            let latch_limit = self.effective_daily_loss_limit_for(account.as_str());
+            let (day_index, realized, opening, limit, at_ms) = {
+                let daily = self
+                    .daily_by_account
+                    .get_mut(&account)
+                    .expect("bucket exists (keys come from the map)");
+                if !daily.tripped {
+                    // Detected here rather than only in `close` (a restored budget can
+                    // arrive already breached): latch it so the panel agrees.
+                    daily.tripped = true;
+                    daily.tripped_at_ms = daily.opened_at_ms;
+                    daily.tripped_limit_usd = latch_limit;
+                }
+                if daily.tripped_reported {
+                    continue;
+                }
+                daily.tripped_reported = true;
+                (
+                    daily.day_index.unwrap_or(0),
+                    daily.realized_pnl_usd,
+                    daily.opening_equity_usd,
+                    daily.tripped_limit_usd,
+                    daily.tripped_at_ms,
+                )
+            };
+            self.persist_daily();
+            trips.push((
+                account,
+                DailyTrip {
+                    day_index,
+                    realized_pnl_usd: realized,
+                    limit_usd: limit,
+                    opening_equity_usd: opening,
+                    at_ms,
+                },
+            ));
         }
-        if !self.daily.tripped {
-            // Detected here rather than only in `close` (a restored budget can
-            // arrive already breached): latch it so the panel agrees.
-            self.daily.tripped = true;
-            self.daily.tripped_at_ms = self.daily.opened_at_ms;
-            self.daily.tripped_limit_usd = self.effective_daily_loss_limit();
-        }
-        if self.daily.tripped_reported {
-            return None;
-        }
-        self.daily.tripped_reported = true;
-        self.persist_daily();
-        Some(DailyTrip {
-            day_index: self.daily.day_index.unwrap_or(0),
-            realized_pnl_usd: self.daily.realized_pnl_usd,
-            limit_usd: self.daily.tripped_limit_usd,
-            opening_equity_usd: self.daily.opening_equity_usd,
-            at_ms: self.daily.tripped_at_ms,
-        })
+        trips
     }
 
     fn persist_daily(&self) {
         if let Some(store) = self.daily_store.as_ref() {
-            store.save(&self.daily);
+            store.save(&self.daily_by_account);
         }
     }
 
     /// Latch the breaker if the day's realized loss just reached the cap. Called
     /// from [`close`](Self::close) so the freeze and its persistence happen with
-    /// the loss, not one tick later.
-    fn note_daily_drawdown(&mut self, now_ms: i64) {
-        let limit = self.effective_daily_loss_limit();
-        if limit > Decimal::ZERO && self.daily_drawdown_input() <= -limit && !self.daily.tripped {
-            self.daily.tripped = true;
-            self.daily.tripped_at_ms = now_ms;
-            self.daily.tripped_limit_usd = limit;
+    /// the loss, not one tick later — against the CLOSED position's account.
+    fn note_daily_drawdown(&mut self, account: &str, now_ms: i64) {
+        let limit = self.effective_daily_loss_limit_for(account);
+        if limit > Decimal::ZERO
+            && self.daily_drawdown_input(account) <= -limit
+            && !self.daily_bucket(account).tripped
+            && let Some(daily) = self.daily_by_account.get_mut(&AccountId::from(account))
+        {
+            daily.tripped = true;
+            daily.tripped_at_ms = now_ms;
+            daily.tripped_limit_usd = limit;
             tracing::warn!(
-                day = self.daily.day_index.unwrap_or(0),
-                realized = %self.daily.realized_pnl_usd,
+                account = %account,
+                day = daily.day_index.unwrap_or(0),
+                realized = %daily.realized_pnl_usd,
                 limit = %limit,
-                equity = %self.daily.opening_equity_usd,
-                "daily loss limit reached — new entries frozen until the next UTC day"
+                equity = %daily.opening_equity_usd,
+                "daily loss limit reached — new entries frozen for this account until the next UTC day"
             );
         }
         self.persist_daily();
@@ -2155,7 +2297,12 @@ impl PositionManager {
         let exit_fee_pct = pct_of(exit_fee_usd, exit_notional);
         let hold_time_sec = (now_ms - pos.entered_at_ms) / 1000;
 
-        self.daily.realized_pnl_usd += net;
+        // The day's realized loss lands in the CLOSED position's account bucket
+        // (per-account budgets: one account's loss never burns a sibling's day).
+        self.daily_by_account
+            .entry(pos.account_id.clone())
+            .or_default()
+            .realized_pnl_usd += net;
         if reason == ExitReason::StopLoss {
             self.last_stop_loss_at = now_ms;
         }
@@ -2166,7 +2313,7 @@ impl PositionManager {
             self.asset_last_loss_at.insert(pos.asset.clone(), now_ms);
         }
         // The freeze and its durable record travel WITH the loss (P0 #173).
-        self.note_daily_drawdown(now_ms);
+        self.note_daily_drawdown(pos.account_id.as_str(), now_ms);
         self.last_suppression_at.remove(&pos.id);
         self.unpriceable_since.remove(&pos.id);
         // #390: the ladder ledger is keyed by position id; a closed id is
@@ -2352,9 +2499,13 @@ impl PositionManager {
         if self.open.iter().any(|p| p.id == pre_close.id) {
             return false;
         }
-        // The deploy line keeps the day's realized PnL inside `DailyLossState`
-        // (#173), so the reversal is the exact inverse of `close()`'s credit.
-        self.daily.realized_pnl_usd -= closed.net_pnl_usd;
+        // The deploy line keeps the day's realized PnL inside the account's
+        // `DailyLossState` (#173), so the reversal is the exact inverse of
+        // `close()`'s credit — into the SAME account's bucket.
+        self.daily_by_account
+            .entry(closed.account_id.clone())
+            .or_default()
+            .realized_pnl_usd -= closed.net_pnl_usd;
         if let Some(i) = self
             .closed
             .iter()
@@ -2399,16 +2550,17 @@ impl PositionManager {
         if live >= self.config.max_positions {
             return Err(format!("Max positions ({})", self.config.max_positions));
         }
-        if self.daily_loss_tripped() {
-            let limit = if self.daily.tripped_limit_usd > Decimal::ZERO {
-                self.daily.tripped_limit_usd
+        if self.daily_loss_tripped_for(account) {
+            let daily = self.daily_bucket(account);
+            let limit = if daily.tripped_limit_usd > Decimal::ZERO {
+                daily.tripped_limit_usd
             } else {
-                self.effective_daily_loss_limit()
+                self.effective_daily_loss_limit_for(account)
             };
             return Err(format!(
-                "Daily loss limit (${limit}; realized ${}, day {})",
-                self.daily.realized_pnl_usd,
-                self.daily.day_index.unwrap_or(0)
+                "Daily loss limit for account {account} (${limit}; realized ${}, day {})",
+                daily.realized_pnl_usd,
+                daily.day_index.unwrap_or(0)
             ));
         }
         if self.config.stop_loss_cooldown_sec > 0
@@ -2755,7 +2907,7 @@ mod tests {
         assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
         assert!(c.was_maker_entry);
         assert!(!c.was_maker_exit);
-        assert_eq!(pm.daily_pnl(), c.net_pnl_usd);
+        assert_eq!(pm.daily_pnl_for("default"), c.net_pnl_usd);
         // Net is the ledger's own arithmetic: proceeds − basis − both fees.
         let entry_fee = (c.entry_fee_pct / Decimal::ONE_HUNDRED) * c.entry_price * c.shares;
         let exit_fee = (c.exit_fee_pct / Decimal::ONE_HUNDRED) * c.exit_price * c.shares;
@@ -3068,10 +3220,62 @@ mod tests {
         );
         pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
             .unwrap();
-        assert!(pm.daily_pnl() < dec!(-1));
+        assert!(pm.daily_pnl_for("default") < dec!(-1));
         assert!(
             pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
                 .is_err()
+        );
+    }
+
+    /// 每账户日亏（2026-10-25 操作者裁决）：一个账户把日亏预算烧穿，兄弟
+    /// 账户的当天分文不动、进场照旧——单槽时代 poly 的亏损会冻结 default。
+    #[test]
+    fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
+        let cfg = PositionConfig {
+            max_daily_loss_usd: dec!(1),
+            asset_cooldown_sec: 0,
+            loss_cooldown_sec: 0,
+            stop_loss_cooldown_sec: 0,
+            ..Default::default()
+        };
+        let mut pm = PositionManager::new(cfg);
+        // default 账户亏穿 cap（entry 0.4 → exit 0.05 × 10 股 ≈ −3.5）。
+        let p = enter(
+            &mut pm,
+            params("BTC", SignalDirection::Up, dec!(0.4)),
+            OrderRole::Maker,
+            0,
+        );
+        pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
+            .unwrap();
+        assert!(pm.daily_loss_tripped_for("default"));
+        assert!(
+            pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
+                .is_err()
+        );
+        // poly 账户自己的一天：从零开始，进场不被兄弟的冻结拦住。
+        let mut poly_params = params("BTC", SignalDirection::Up, dec!(0.4));
+        poly_params.account_id = AccountId::from("poly");
+        let q = enter(&mut pm, poly_params, OrderRole::Maker, 2000);
+        assert!(pm.daily_pnl_for("poly") == Decimal::ZERO);
+        assert!(!pm.daily_loss_tripped_for("poly"));
+        assert!(
+            pm.can_open("poly", Some("ETH"), Some(SignalDirection::Up), 3000)
+                .is_ok(),
+            "a sibling's tripped budget must not freeze poly's entries"
+        );
+        // poly 自己也亏穿：只冻 poly。
+        pm.close(&q.id, dec!(0.05), ExitReason::StopLoss, false, 4000)
+            .unwrap();
+        assert!(pm.daily_loss_tripped_for("poly"));
+        assert!(
+            pm.can_open("poly", Some("ETH"), Some(SignalDirection::Up), 5000)
+                .is_err()
+        );
+        // 系统性事实（global_kill_switch 读数）= 两账户之和。
+        assert_eq!(
+            pm.daily_pnl_total(),
+            pm.daily_pnl_for("default") + pm.daily_pnl_for("poly")
         );
     }
 
@@ -3111,10 +3315,10 @@ mod tests {
         let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
         pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
             .unwrap();
-        let realized = pm.daily_pnl();
+        let realized = pm.daily_pnl_for("default");
         assert!(realized < Decimal::ZERO && realized > dec!(-10));
         assert!(
-            !pm.daily_loss_tripped(),
+            !pm.daily_loss_tripped_for("default"),
             "realized {realized} alone is inside the 10 cap"
         );
         // unrealized leg: 100 shares entered 0.40, marked 0.20 → −20 on paper.
@@ -3122,7 +3326,7 @@ mod tests {
         assert_eq!(pm.unrealized_pnl_usd(), dec!(-20));
         assert!(realized + pm.unrealized_pnl_usd() <= dec!(-10));
         assert!(
-            pm.daily_loss_tripped(),
+            pm.daily_loss_tripped_for("default"),
             "realized {realized} + unrealized −20 must breach the 10 cap"
         );
         assert!(
@@ -3149,14 +3353,14 @@ mod tests {
         let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
         pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
             .unwrap();
-        let realized = pm.daily_pnl();
+        let realized = pm.daily_pnl_for("default");
         assert!(realized + dec!(-20) <= dec!(-10));
         enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.20));
         // The paper loss still READS off the book (the panel shows it)…
         assert_eq!(pm.unrealized_pnl_usd(), dec!(-20));
         // …but the breaker must not judge on it.
         assert!(
-            !pm.daily_loss_tripped(),
+            !pm.daily_loss_tripped_for("default"),
             "realized-only: {realized} against a 10 cap is not a trip"
         );
         assert!(
@@ -3189,7 +3393,7 @@ mod tests {
         held.current_price = Decimal::ZERO;
         pm.restore_open(vec![held]);
         assert_eq!(pm.unrealized_pnl_usd(), Decimal::ZERO);
-        assert!(!pm.daily_loss_tripped());
+        assert!(!pm.daily_loss_tripped_for("default"));
     }
 
     // ── #267 / #268: the exit ladder must keep BOTH halves on a broken book ──
@@ -4247,21 +4451,42 @@ mod precision_tests {
             opened_at_ms: 1000,
             tripped_reported: false,
         };
-        store.save(&st);
-        let loaded = store.load().expect("the healthy state loads");
-        assert_eq!(loaded.realized_pnl_usd, dec!(-18.5));
+        let mut accounts = std::collections::BTreeMap::new();
+        accounts.insert(AccountId::from("default"), st.clone());
+        store.save(&accounts);
+        let loaded = store.load();
+        assert_eq!(
+            loaded
+                .get(&AccountId::from("default"))
+                .expect("the healthy state loads")
+                .realized_pnl_usd,
+            dec!(-18.5)
+        );
+
+        // Migration: a PRE-per-account file (bare state) reads as the default
+        // account's bucket — single-book deployments keep their spent budget.
+        let bare = serde_json::to_string(&st).unwrap();
+        std::fs::write(&path, bare).unwrap();
+        let migrated = store.load();
+        assert_eq!(
+            migrated
+                .get(&AccountId::from("default"))
+                .expect("bare state migrates to the default bucket")
+                .realized_pnl_usd,
+            dec!(-18.5)
+        );
 
         // The crash window: a half-written file.
         std::fs::write(&path, "{\"dayIndex\": 20400, \"realized").unwrap();
         assert!(
-            store.load().is_none(),
+            store.load().is_empty(),
             "a corrupt file yields no state — but the ERROR log is the contract"
         );
 
         // The atomic save never leaves a torn file behind in the first place:
         // the successful write above left valid JSON.
-        store.save(&st);
-        assert!(store.load().is_some());
+        store.save(&accounts);
+        assert!(!store.load().is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
