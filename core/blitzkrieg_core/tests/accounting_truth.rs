@@ -657,15 +657,21 @@ fn a_venue_ledger_correction_is_not_treated_as_local_drift() {
         audit_interval_sec: 30,
         ..persistent_config(&dir)
     });
+    // The venue's cash belongs to the account bound to it (#532/#614): bind the
+    // active book to the venue so its report and realigns are comparable to it.
+    let active_id = c.accounts().active_id().clone();
+    c.accounts_mut()
+        .set_venue(&active_id, "polymarket", 0)
+        .expect("bind the active account");
     // A LIVE core starts at zero and is seeded from the venue.
     assert_eq!(c.ledger().balance(), Decimal::ZERO);
-    c.set_balance(SEED);
+    c.realign_venue_cash("polymarket", SEED);
     c.tick(1_000).unwrap();
     assert!(!c.audit_blocks_entries());
     assert!(c.accounting_audit().unwrap().ok);
 
     // The venue reports 5 USD less than our records explain and the host realigns.
-    c.set_balance(SEED - dec!(5));
+    c.realign_venue_cash("polymarket", SEED - dec!(5));
     c.tick(31_000).unwrap();
 
     let report = c.accounting_audit().unwrap();
