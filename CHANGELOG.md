@@ -68,6 +68,17 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ### Fixed
 
+- **多账户风控与审计**：日亏预算按账户分桶——每账户独立日亏限额/触发面/快
+  照明细，systemic day_realized = Σ账户桶，旧全局单槽持久化自动迁移（#618）；
+  审计身份四字段按 active 账户切片 + daily roll 遍历 ACTIVE 账户（#616/
+  #617）；交易台账按账户分桶 + boot 扫描重建 + 结算应收分账户（#617）。
+- **PolySimulator 轮钟冻结根因链（四刀全闭合）**：discovery 墙钟守卫改内容
+  签名去重——condition-id 集比较，同轮重报不再被误吞（#619）；REST 客户端
+  浏览器形 UA——CF 1010 按 UA 波浪封非浏览器客户端导致 discovery/feed 瞬断
+  （#620）；发现过滤收口——start 未到批次跳过 + 窗口长度≠插件周期族跳过，
+  只喂当前窗口+周期族，目录 token 500+ 喂不饱 8s 新鲜度预算的根因（#621）；
+  引擎家族内陈旧批次守卫——slot 落后同族驻留且窗口已过期的迟到批次丢弃，
+  多插件交错喂轮 ping-pong 覆写的根因（#622）。
 - **账本**：场地现金真值按账户绑定路由——`seed_balance`/`venue_free_balance`
   带venue 名，落进绑定该 venue 的账户簿而非 active 账户（单账户时代路由曾把
   PolySimulator 的 100 USDC 写到 default 账户上冲掉真余额）（#614）。
