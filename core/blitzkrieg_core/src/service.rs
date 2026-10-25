@@ -8696,20 +8696,51 @@ impl Core {
         let scanner = engine.scanner();
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
-        scanner
+        let mut rows: Vec<AssetBooksView> = scanner
             .round_state(now)
             .markets
             .iter()
             .filter(|m| scanner.is_live_round_row(m, now))
             .filter(|m| seen.insert((m.venue.clone(), m.asset.clone())))
             .map(|m| AssetBooksView {
+                venue: m.venue.clone(),
                 asset: m.asset.clone(),
                 up_token_id: m.up_token_id.clone(),
                 down_token_id: m.down_token_id.clone(),
                 up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
                 down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
             })
-            .collect()
+            .collect();
+        // 镜像盘盘口行（#627 的显示簿契约延伸到 engine.books 面）：token
+        // 唯一键遮蔽了 PolySimulator 这类镜像所的表行 —— 钟已开口、
+        // books 行里却没有自己 venue 的行，盘口深度卡在该所视图下整卡
+        // 消失（价格卡走 engine.round 的合成行是活的，盘口卡走本视图，
+        // 两条装配线缺一不可）。从显示簿取它自己申报的批次补合成行：
+        // token 相同 → book_side_view 读的就是同一份 book，深度是真实
+        // 读数；is_live_round_row 同一谓词，不复活旧窗口。venue 直接填
+        // 行自身 —— server 端 handler 对带 venue 字段的行不再按 token
+        // 反查（反查会首中被镜像所，标签就错了）。仅显示面。
+        for (venue, duration) in scanner.observed_clock_keys() {
+            if rows.iter().any(|r| r.venue == venue) {
+                continue;
+            }
+            if let Some(shadow) = engine.shadow_markets_for(&venue, duration) {
+                for m in shadow.iter().filter(|m| scanner.is_live_round_row(m, now)) {
+                    if !seen.insert((venue.clone(), m.asset.clone())) {
+                        continue;
+                    }
+                    rows.push(AssetBooksView {
+                        venue: venue.clone(),
+                        asset: m.asset.clone(),
+                        up_token_id: m.up_token_id.clone(),
+                        down_token_id: m.down_token_id.clone(),
+                        up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
+                        down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
+                    });
+                }
+            }
+        }
+        rows
     }
 
     fn book_side_view(
@@ -16579,6 +16610,11 @@ pub struct MarketPriceView {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetBooksView {
+    /// 行自身的 venue 标签（镜像盘显示簿合成行，2026-10-25）：server 端
+    /// 按它打标签，不再按 token 反查 —— 镜像行与被镜像所共享 token，
+    /// `venue_of` 反查会首中被镜像所，标签就错了。
+    #[serde(rename = "venue")]
+    pub venue: String,
     pub asset: String,
     /// E29 (§12.2): the aggregator keys prediction-token bars by TOKEN id, so
     /// the panel needs the same key `feed_klines` was fed to ask
