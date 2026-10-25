@@ -7550,7 +7550,7 @@ impl Core {
                         .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
                 )
                 .sum(),
-            day_realized_usd: self.positions.daily_pnl(),
+            day_realized_usd: self.positions.daily_pnl_total(),
         }
     }
 
@@ -8379,19 +8379,55 @@ impl Core {
             // #173: the day's realized-loss budget as the panel reads it —
             // visible even when healthy, so "is the breaker armed, and against
             // what cap?" is answerable without grepping the startup log.
+            // The daily budget is PER-ACCOUNT (2026-10-25 verdict): the card
+            // mirrors the DISPLAY account's day (the panel follows the account
+            // everywhere since #592), and carries every account's day beside it
+            // so no book's freeze is invisible.
             "dailyLoss": {
-                "dayIndex": self.positions.daily_state().day_index,
-                "realizedPnlUsd": self.positions.daily_pnl(),
-                "limitUsd": self.positions.effective_daily_loss_limit(),
-                "openingEquityUsd": self.positions.daily_state().opening_equity_usd,
+                "account": self.accounts.display_id(),
+                "dayIndex": self.positions.daily_state_for(self.accounts.display_id()).day_index,
+                "realizedPnlUsd": self
+                    .positions
+                    .daily_pnl_for(self.accounts.display_id()),
+                "limitUsd": self
+                    .positions
+                    .effective_daily_loss_limit_for_public(self.accounts.display_id()),
+                "openingEquityUsd": self
+                    .positions
+                    .daily_state_for(self.accounts.display_id())
+                    .opening_equity_usd,
                 // P1 #235: WHICH book that base belongs to ("dry"/"live", null
                 // when the day predates the field). The cap is only as
                 // meaningful as the account it is a share of, and the panel
                 // used to show a self-consistent pair of numbers from two
                 // different books.
-                "equityBasis": self.positions.daily_state().equity_basis,
-                "tripped": self.positions.daily_loss_tripped(),
-                "trippedAtMs": self.positions.daily_state().tripped_at_ms,
+                "equityBasis": self
+                    .positions
+                    .daily_state_for(self.accounts.display_id())
+                    .equity_basis,
+                "tripped": self
+                    .positions
+                    .daily_loss_tripped_for(self.accounts.display_id()),
+                "trippedAtMs": self
+                    .positions
+                    .daily_state_for(self.accounts.display_id())
+                    .tripped_at_ms,
+                "anyTripped": self
+                    .positions
+                    .daily_states()
+                    .values()
+                    .any(|s| s.tripped),
+                "accounts": self
+                    .positions
+                    .daily_states()
+                    .iter()
+                    .map(|(id, s)| serde_json::json!({
+                        "account": id.as_str(),
+                        "realizedPnlUsd": s.realized_pnl_usd,
+                        "tripped": s.tripped,
+                        "dayIndex": s.day_index,
+                    }))
+                    .collect::<Vec<_>>(),
                 // #177: protective stops the wick guard withheld — "should have
                 // triggered" is a number on the panel, not a silent no-op.
                 "suppressedStops": self.positions.suppressed_stop_count(),
@@ -10163,7 +10199,7 @@ impl Core {
             account_id: closed.account_id.clone(),
             net_pnl_usd: closed.net_pnl_usd,
             net_pnl_pct: closed.net_pnl_pct,
-            daily_pnl_usd: self.positions.daily_pnl(),
+            daily_pnl_usd: self.positions.daily_pnl_for(closed.account_id.as_str()),
         });
         if tripped {
             self.emit(Event::RiskAlert {
@@ -12806,39 +12842,57 @@ impl Core {
     /// the boundary is already counted in the new day.
     fn roll_daily_budget(&mut self, now_ms: i64) {
         // `balance` is already gross of local reservations — adding `reserved`
-        // here would double-count resting BUY commitments. E28: the daily
-        // budget opens on the ACTIVE account's equity (the kernel-wide daily
-        // loss state stays global, §9.3 — per-account loss attribution is the
-        // position book's, not the ledger's).
-        let equity = self.accounts.active_ledger().balance();
-        if let Some(roll) = self
-            .positions
-            .roll_daily(now_ms, equity, self.equity_basis())
-        {
-            let message = match roll.previous_day_index {
-                Some(prev) => format!(
-                    "daily loss budget: UTC day {prev} closed at ${} realized{} — day {} opens with equity ${}, cap ${}",
-                    roll.previous_realized_pnl_usd,
-                    if roll.previous_tripped {
-                        " (TRIPPED: entries were frozen)"
-                    } else {
-                        ""
-                    },
-                    roll.day_index,
-                    roll.opening_equity_usd,
-                    roll.limit_usd
-                ),
-                None => format!(
-                    "daily loss budget: UTC day {} opens with equity ${}, cap ${} (realized loss resets at the UTC day boundary)",
-                    roll.day_index, roll.opening_equity_usd, roll.limit_usd
-                ),
-            };
-            if roll.previous_tripped {
-                tracing::warn!(day = roll.day_index, "{}", message);
-            } else {
-                tracing::info!(day = roll.day_index, "{}", message);
+        // here would double-count resting BUY commitments. The daily budget is
+        // PER-ACCOUNT (operator verdict 2026-10-25, overriding the old §9.3
+        // global reading): each account's day opens on ITS OWN ledger equity,
+        // and one account's losses never burn a sibling's budget.
+        let accounts: Vec<(crate::account::AccountId, Decimal)> = self
+            .accounts
+            .account_list()
+            .iter()
+            .filter(|a| a.status == crate::account::AccountStatus::Active)
+            .map(|a| {
+                (a.id.clone(), {
+                    self.accounts
+                        .ledger_of(&a.id)
+                        .map(|l| l.balance())
+                        .unwrap_or_default()
+                })
+            })
+            .collect();
+        for (id, equity) in accounts {
+            if let Some(roll) =
+                self.positions
+                    .roll_daily(id.as_str(), now_ms, equity, self.equity_basis())
+            {
+                let message = match roll.previous_day_index {
+                    Some(prev) => format!(
+                        "daily loss budget: UTC day {prev} closed at ${} realized{} — day {} opens with equity ${}, cap ${}",
+                        roll.previous_realized_pnl_usd,
+                        if roll.previous_tripped {
+                            " (TRIPPED: entries were frozen)"
+                        } else {
+                            ""
+                        },
+                        roll.day_index,
+                        roll.opening_equity_usd,
+                        roll.limit_usd
+                    ),
+                    None => format!(
+                        "daily loss budget: UTC day {} opens with equity ${}, cap ${} (realized loss resets at the UTC day boundary)",
+                        roll.day_index, roll.opening_equity_usd, roll.limit_usd
+                    ),
+                };
+                if roll.previous_tripped {
+                    tracing::warn!(day = roll.day_index, account = %id.as_str(), "{}", message);
+                } else {
+                    tracing::info!(day = roll.day_index, account = %id.as_str(), "{}", message);
+                }
+                self.emit_risk_alert(
+                    CoreErrorCode::RiskRejected,
+                    format!("[{}] {}", id.as_str(), message),
+                );
             }
-            self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
         }
     }
 
@@ -12865,26 +12919,27 @@ impl Core {
     /// close, so the freeze is visible at the moment it happens and again after
     /// a restart restored an already-breached budget.
     fn emit_daily_trip(&mut self) {
-        let Some(t) = self.positions.take_daily_trip() else {
-            return;
-        };
-        let message = format!(
-            "DAILY LOSS LIMIT REACHED: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries are frozen until the next UTC day (positions still exit normally)",
-            t.realized_pnl_usd,
-            self.positions.unrealized_pnl_usd(),
-            t.realized_pnl_usd + self.positions.unrealized_pnl_usd(),
-            t.limit_usd,
-            self.config.positions.max_daily_loss_equity_pct,
-            t.opening_equity_usd
-        );
-        tracing::warn!(
-            day = t.day_index,
-            realized = %t.realized_pnl_usd,
-            limit = %t.limit_usd,
-            "{}",
-            message
-        );
-        self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
+        let trips = self.positions.take_daily_trips();
+        for (account, t) in trips {
+            let message = format!(
+                "DAILY LOSS LIMIT REACHED for account {account}: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",
+                t.realized_pnl_usd,
+                self.positions.unrealized_pnl_usd_for(account.as_str()),
+                t.realized_pnl_usd + self.positions.unrealized_pnl_usd_for(account.as_str()),
+                t.limit_usd,
+                self.config.positions.max_daily_loss_equity_pct,
+                t.opening_equity_usd
+            );
+            tracing::warn!(
+                day = t.day_index,
+                account = %account.as_str(),
+                realized = %t.realized_pnl_usd,
+                limit = %t.limit_usd,
+                "{}",
+                message
+            );
+            self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
+        }
     }
 
     /// Report every exit withheld from becoming an order (P0 #177, F6): the
@@ -15269,7 +15324,7 @@ impl Core {
                     .filter(|p| p.asset == req.asset)
                     .map(|p| p.cost_usd)
                     .sum(),
-                day_realized_usd: self.positions.daily_pnl(),
+                day_realized_usd: self.positions.daily_pnl_total(),
             };
             let bound_stop_pct = crate::exit_policy::effective_stop_pct(
                 self.config.positions.exit.stop_loss_pct,
@@ -19162,7 +19217,7 @@ mod tests {
             1_800_000 - 1_000,
         );
         c.tick(1_800_000 - 100).unwrap();
-        assert!(c.positions().daily_pnl() < dec!(-1));
+        assert!(c.positions().daily_pnl_for("default") < dec!(-1));
         let e = c
             .place(
                 order(FillPolicy::Taker, dec!(0.40), dec!(5), "k2"),
@@ -22796,7 +22851,7 @@ mod strategy_dispatch_tests {
         );
         c.tick(1_800_000 - 100_000).unwrap();
         assert!(
-            c.positions().daily_pnl() < Decimal::ZERO,
+            c.positions().daily_pnl_for("default") < Decimal::ZERO,
             "expected a realized loss"
         );
 
@@ -28980,7 +29035,7 @@ mod audit_fix_tests {
         assert_eq!(c.positions().open_positions().len(), 0);
         assert_eq!(c.positions().closed_positions().len(), 0);
         assert_eq!(c.ledger().balance(), SEED, "no position, no booking");
-        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+        assert_eq!(c.positions().daily_pnl_for("default"), Decimal::ZERO);
 
         // (b) hold 10 shares @ 0.40 (maker entry, cost 4, no fee).
         open_maker_position(&mut c, dec!(0.40), dec!(10), 4_000);
@@ -29009,7 +29064,7 @@ mod audit_fix_tests {
             bal_after_entry + dec!(4),
             "the ledger received exactly the attributable proceeds"
         );
-        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+        assert_eq!(c.positions().daily_pnl_for("default"), Decimal::ZERO);
         // Strategy accounting: a flat close is NOT a +36 win.
         let acc = c
             .strategy_accounting
@@ -29055,7 +29110,7 @@ mod audit_fix_tests {
         let closed = &c.positions().closed_positions()[0];
         assert_eq!(closed.net_pnl_usd, dec!(4));
         assert_eq!(c.ledger().balance(), SEED + dec!(4));
-        assert_eq!(c.positions().daily_pnl(), dec!(4));
+        assert_eq!(c.positions().daily_pnl_for("default"), dec!(4));
         {
             let acc = c
                 .strategy_accounting
@@ -29099,7 +29154,7 @@ mod audit_fix_tests {
         );
         // Cash refunded to post-entry; profit reversed.
         assert_eq!(c.ledger().balance(), SEED - dec!(4));
-        assert_eq!(c.positions().daily_pnl(), Decimal::ZERO);
+        assert_eq!(c.positions().daily_pnl_for("default"), Decimal::ZERO);
         {
             let acc = c
                 .strategy_accounting
@@ -29171,7 +29226,7 @@ mod audit_fix_tests {
         assert_eq!(acc.net_pnl_usd, dec!(-2));
 
         // Daily PnL sees it too, and the PositionClosed event fired.
-        assert_eq!(c.positions().daily_pnl(), dec!(-2));
+        assert_eq!(c.positions().daily_pnl_for("default"), dec!(-2));
         let position_closed = {
             let mut found = false;
             while let Ok(ev) = rx.try_recv() {
