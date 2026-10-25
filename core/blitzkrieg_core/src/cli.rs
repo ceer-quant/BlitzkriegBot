@@ -520,9 +520,11 @@ pub const FLAGS: &[FlagSpec] = &[
     risky(
         "--trade-log",
         "<path>",
-        "Trade ledger JSONL (default `data/trades/trades.jsonl`).",
-        "trades go to the DEFAULT ledger path (`data/trades/trades.jsonl`), not the \
-         file you named",
+        "Trade ledger JSONL (default derived from the mode: \
+         `data/trades/trades-live.jsonl` live, `data/trades/trades.jsonl` dry/readonly).",
+        "trades go to the DEFAULT ledger path for the mode \
+         (`data/trades/trades-live.jsonl` live, `data/trades/trades.jsonl` \
+         dry/readonly), not the file you named",
     ),
     risky(
         "--no-trade-log",

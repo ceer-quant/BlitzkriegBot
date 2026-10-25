@@ -2780,18 +2780,20 @@ async fn main() -> anyhow::Result<()> {
         args.near_miss_path.clone()
     };
 
-    // Trade log destination. Defaults to the relative `data/trades/trades.jsonl`;
-    // `--trade-log <path>` overrides it (used by tests to keep synthetic trades out
-    // of the production ledger) and `--no-trade-log` disables persistence entirely.
-    let trade_log_path = if args.no_trade_log {
-        None
-    } else {
-        Some(
-            args.trade_log
-                .clone()
-                .unwrap_or_else(|| "data/trades/trades.jsonl".to_string()),
-        )
-    };
+    // Trade log destination. The DEFAULT is derived from the resolved run
+    // mode (`crate::trade_db::default_trade_log_path`): live derives
+    // `data/trades/trades-live.jsonl`, dry/readonly keep the historical
+    // `data/trades/trades.jsonl` (dry tooling + the dry-era rows stay put).
+    // `--trade-log <path>` overrides both (tests pin their own file) and
+    // `--no-trade-log` disables persistence entirely.
+    let trade_log_path =
+        if args.no_trade_log {
+            None
+        } else {
+            Some(args.trade_log.clone().unwrap_or_else(|| {
+                blitzkrieg_core::trade_db::default_trade_log_path(mode).to_string()
+            }))
+        };
 
     // Order log: durable tracked-order storage for crash recovery + orphan sweep.
     let order_log_path = if args.no_order_log {
@@ -3391,9 +3393,12 @@ async fn main() -> anyhow::Result<()> {
     // trades.jsonl" assumption goes wrong: the trade summary, the fill/audit/
     // settlement journals and the daily-loss state all live in the same
     // directories, so a latch on the log file alone would not describe the
-    // footprint. Naming them here keeps the banner honest about the set.
+    // footprint. Naming them here keeps the banner honest about the set. The
+    // mode-split ledger renames the live trade summary, so the banner spells
+    // the rule instead of one filename.
     eprintln!(
-        "blitzkrieg-core: side files: summary.json beside the trade log; applied-fills.jsonl / \
+        "blitzkrieg-core: side files: <trade-log stem>.summary.json beside the trade log \
+         (the historical `trades.jsonl` keeps `summary.json`); applied-fills.jsonl / \
          reconcile.jsonl / settlements.jsonl beside the order log; <position-log>.daily-loss.json \
          beside the position log"
     );
