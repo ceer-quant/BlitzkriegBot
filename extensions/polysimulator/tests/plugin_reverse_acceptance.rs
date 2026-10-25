@@ -139,12 +139,14 @@ impl MarketHost for BookSink {
     }
     fn on_reconcile_failed(
         &self,
+        _: &str,
         _: blitzkrieg_market_api::CoreError,
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_self_check(
         &self,
+        _: &str,
         _: blitzkrieg_market_api::SelfCheckReport,
     ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})

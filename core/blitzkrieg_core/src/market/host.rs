@@ -491,17 +491,25 @@ impl MarketHost for CoreHost {
         })
     }
 
-    fn on_reconcile_failed(&self, error: api::CoreError) -> BoxFuture<'_, ()> {
+    fn on_reconcile_failed<'a>(
+        &'a self,
+        venue: &'a str,
+        error: api::CoreError,
+    ) -> BoxFuture<'a, ()> {
         let e = error_from_api(&error);
         Box::pin(async move {
             let mut c = self.core.lock().await;
-            c.on_reconcile_failed(e, now_ms());
+            c.on_venue_reconcile_failed(venue, e, now_ms());
         })
     }
 
-    fn on_self_check(&self, report: api::SelfCheckReport) -> BoxFuture<'_, ()> {
+    fn on_self_check<'a>(
+        &'a self,
+        venue: &'a str,
+        report: api::SelfCheckReport,
+    ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            self.core.lock().await.on_self_check(report);
+            self.core.lock().await.on_venue_self_check(venue, report);
         })
     }
 

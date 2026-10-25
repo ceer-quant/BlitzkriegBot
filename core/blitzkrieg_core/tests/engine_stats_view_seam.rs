@@ -179,15 +179,18 @@ fn every_engine_stats_key_is_carried_or_explicitly_waived() {
         CoreError::new(CoreErrorCode::VenueError, "sweep timed out"),
         NOW + 4,
     );
-    c.on_self_check(SelfCheckReport {
-        ok: false,
-        ts_ms: NOW + 5,
-        items: vec![SelfCheckItem {
-            name: "venue_balance".into(),
+    c.on_venue_self_check(
+        "polymarket",
+        SelfCheckReport {
             ok: false,
-            detail: "HTTP 401 unauthorized".into(),
-        }],
-    });
+            ts_ms: NOW + 5,
+            items: vec![SelfCheckItem {
+                name: "venue_balance".into(),
+                ok: false,
+                detail: "HTTP 401 unauthorized".into(),
+            }],
+        },
+    );
     assert!(
         c.is_killed(),
         "fixture: the failed self-check froze trading"
@@ -363,22 +366,25 @@ fn a_freeze_reaches_the_panel_through_the_view_type() {
 #[test]
 fn a_failed_self_check_reaches_the_panel_through_the_view_type() {
     let mut c = dry_core();
-    c.on_self_check(SelfCheckReport {
-        ok: false,
-        ts_ms: NOW,
-        items: vec![
-            SelfCheckItem {
-                name: "venue_balance".into(),
-                ok: false,
-                detail: "HTTP 401 unauthorized".into(),
-            },
-            SelfCheckItem {
-                name: "reconcile_sweep".into(),
-                ok: true,
-                detail: "ok".into(),
-            },
-        ],
-    });
+    c.on_venue_self_check(
+        "polymarket",
+        SelfCheckReport {
+            ok: false,
+            ts_ms: NOW,
+            items: vec![
+                SelfCheckItem {
+                    name: "venue_balance".into(),
+                    ok: false,
+                    detail: "HTTP 401 unauthorized".into(),
+                },
+                SelfCheckItem {
+                    name: "reconcile_sweep".into(),
+                    ok: true,
+                    detail: "ok".into(),
+                },
+            ],
+        },
+    );
 
     let raw = c.engine_stats();
     assert_eq!(raw["selfCheck"]["ok"], serde_json::json!(false));

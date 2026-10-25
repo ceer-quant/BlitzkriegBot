@@ -271,7 +271,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<KalshiR
     if !report.ok {
         eprintln!("kalshi-extension: startup self-check FAILED");
     }
-    host.on_self_check(report).await;
+    host.on_self_check("kalshi", report).await;
 
     // Startup orphan sweep: anything resting at the venue the core does not
     // know about is cancelled before trading resumes.
@@ -334,7 +334,8 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<KalshiR
                         host.report_error(e).await;
                         if place_failures >= PLACE_FAILURE_PROBE {
                             place_failures = 0;
-                            host.on_self_check(self_check(&client).await).await;
+                            host.on_self_check("kalshi", self_check(&client).await)
+                                .await;
                         }
                     }
                 }
@@ -361,7 +362,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<KalshiR
                 sweep_failures += 1;
                 eprintln!("kalshi-extension: sweep failed ({sweep_failures}): {e}");
                 if sweep_failures >= SWEEP_FAILURE_FREEZE {
-                    host.on_reconcile_failed(e).await;
+                    host.on_reconcile_failed("kalshi", e).await;
                 } else {
                     host.report_error(e).await;
                 }

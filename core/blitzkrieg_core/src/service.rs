@@ -1538,6 +1538,10 @@ pub struct Core {
     /// Reaching the threshold freezes trading — a blind safety net is the
     /// failure mode that lets ghosts and orphans accumulate (E31-b).
     consecutive_sweep_failures: u32,
+    /// Per-venue streak of the same (venue-scoped freeze, 2026-10-25): each
+    /// plugin's sweep reports under its own name, so one venue's failures no
+    /// longer ride the global counter nor freeze its siblings' accounts.
+    consecutive_sweep_failures_by_venue: HashMap<String, u32>,
     /// Last error of any kind recorded this session (venue refusal, failed
     /// self-check or reconcile sweep, kill switch, kernel-side order refusal),
     /// surfaced to the panel as `engine.stats.lastError`. Session-scoped: a
@@ -2354,6 +2358,7 @@ impl Core {
             consecutive_venue_rejects_by_account: HashMap::new(),
             account_freezes: HashMap::new(),
             consecutive_sweep_failures: 0,
+            consecutive_sweep_failures_by_venue: HashMap::new(),
             last_error: None,
             recon_watermark_ms: 0,
             boot_replayed_journal,
@@ -9544,12 +9549,27 @@ impl Core {
     /// failed report freezes trading — the probe exercised the venue paths a
     /// live order shares (authenticated balance, reconciliation sweep), so
     /// failing them means order egress cannot work either.
-    pub fn on_self_check(&mut self, report: blitzkrieg_market_api::SelfCheckReport) {
+    ///
+    /// 2026-10-25 多场馆雪崩定谳：the freeze is VENUE-SCOPED — the failing
+    /// probes are one venue's transport, so only the accounts bound to that
+    /// venue stop entering. A global freeze here let polymarket's network
+    /// blip veto a healthy polysimulator account's entries for the rest of
+    /// the session (the two venues "took turns" being alive — each one's
+    /// failure froze the other's survivors). The legacy global
+    /// `freeze_trading` stays for causes with no venue dimension (audit
+    /// halt, or a venue with no bound account); the `engine.stats.selfCheck`
+    /// readout carries the last report regardless of which venue filed it.
+    pub fn on_venue_self_check(
+        &mut self,
+        venue: &str,
+        report: blitzkrieg_market_api::SelfCheckReport,
+    ) {
         let ok = report.ok;
         let ts = report.ts_ms;
         for item in &report.items {
             eprintln!(
-                "core: self-check {}: {} ({})",
+                "core: self-check [{}] {}: {} ({})",
+                venue,
                 item.name,
                 if item.ok { "ok" } else { "FAIL" },
                 item.detail
@@ -9572,11 +9592,16 @@ impl Core {
                 })
                 .unwrap_or_default();
             let message = if failed.is_empty() {
-                "trading self-check failed (venue unreachable or credentials rejected)".to_string()
+                format!(
+                    "trading self-check failed on {venue} (venue unreachable or credentials rejected)"
+                )
             } else {
-                format!("trading self-check failed: {}", failed.join("; "))
+                format!(
+                    "trading self-check failed on {venue}: {}",
+                    failed.join("; ")
+                )
             };
-            tracing::error!(detail = %message, "trading self-check failed");
+            tracing::error!(detail = %message, venue = %venue, "trading self-check failed");
             // Root cause into the one slot (code VENUE_ERROR, not the freeze's
             // own wording) — this path has no other carrier of its own.
             self.note_error(
@@ -9586,6 +9611,17 @@ impl Core {
                 ),
                 ts,
             );
+            // The freeze lands on the venue's bound accounts (multi-account
+            // #532 routing): same contract as `freeze_account` — new entries
+            // refused, closes keep flowing.
+            for account in self.accounts.account_ids_bound_to_venue(venue) {
+                self.freeze_account(&account, message.clone());
+            }
+            // No bound account (unbound deployments, dry tests): keep the
+            // legacy global freeze so the failure is never silently dropped.
+            if !self.accounts.account_ids_bound_to_venue(venue).is_empty() {
+                return;
+            }
             self.freeze_trading(message, ts);
         }
     }
@@ -9594,6 +9630,68 @@ impl Core {
     /// The sweep is the safety net that repairs missed fills, retires ghosts
     /// and cancels orphans; a blind sweep lets the book drift silently, so
     /// trading freezes until the operator or a restart re-probes the channel.
+    ///
+    /// VENUE-SCOPED (2026-10-25 多场馆雪崩定谳): `venue` names the reporting
+    /// plugin; the freeze lands on the accounts bound to it. The per-venue
+    /// streak lives in `consecutive_sweep_failures_by_venue` — a healthy
+    /// sibling venue's sweeps keep resetting nothing here, and their accounts
+    /// keep trading. The legacy global counter/`freeze_trading` path survives
+    /// only for callers with no venue attribution (the in-kernel dry sweep).
+    pub fn on_venue_reconcile_failed(
+        &mut self,
+        venue: &str,
+        err: crate::model::CoreError,
+        now_ms: i64,
+    ) {
+        let streak = self
+            .consecutive_sweep_failures_by_venue
+            .entry(venue.to_string())
+            .or_default();
+        *streak = streak.saturating_add(1);
+        let streak = *streak;
+        let message = format!("reconciliation sweep failed ({streak}): {}", err.message);
+        // #184: the safety net reporting on itself is an ops-critical line, and it
+        // belongs at error level from the FIRST failure — not only when the third
+        // one finally freezes trading. The streak and the threshold ride along so
+        // one line answers "how bad is this and what happens next".
+        tracing::error!(
+            venue = %venue,
+            streak,
+            threshold = SWEEP_FAILURE_FREEZE,
+            code = ?err.code,
+            "{}",
+            message
+        );
+        self.note_error(
+            &crate::model::CoreError::new(err.code, message.clone()),
+            now_ms,
+        );
+        if streak >= SWEEP_FAILURE_FREEZE {
+            let accounts = self.accounts.account_ids_bound_to_venue(venue);
+            if accounts.is_empty() {
+                self.freeze_trading(
+                    format!(
+                        "reconciliation sweep failed {streak} times in a row on {venue}: {}",
+                        err.message
+                    ),
+                    now_ms,
+                );
+                return;
+            }
+            for account in accounts {
+                self.freeze_account(
+                    &account,
+                    format!(
+                        "reconciliation sweep failed {streak} times in a row on {venue}: {}",
+                        err.message
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Legacy global form kept for callers with no venue attribution. The
+    /// in-kernel dry sweep and any pre-plugin path land here.
     pub fn on_reconcile_failed(&mut self, err: crate::model::CoreError, now_ms: i64) {
         self.consecutive_sweep_failures = self.consecutive_sweep_failures.saturating_add(1);
         let streak = self.consecutive_sweep_failures;
@@ -10585,8 +10683,12 @@ impl Core {
     ) -> CoreResult<crate::reconcile::ReconcileReport> {
         let report = crate::reconcile::reconcile(&mut self.ome, &snap)?;
         // The sweep channel just proved itself alive — a failed-sweep streak
-        // only counts failures in a row (E31-b).
+        // only counts failures in a row (E31-b). The per-venue table clears
+        // with it (the snapshot does not carry the reporting venue; one
+        // successful sweep anywhere is evidence the transport fabric is
+        // alive, and a fresh failure just rebuilds its own streak).
         self.consecutive_sweep_failures = 0;
+        self.consecutive_sweep_failures_by_venue.clear();
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
             crate::reconcile::ReconcileAction::FilledGap { delta, .. } => Some(delta.clone()),
@@ -26471,15 +26573,22 @@ mod trading_capability_tests {
     #[test]
     fn failed_self_check_freezes_trading() {
         let mut c = core();
-        c.on_self_check(blitzkrieg_market_api::SelfCheckReport {
-            ok: false,
-            ts_ms: 1_000,
-            items: vec![blitzkrieg_market_api::SelfCheckItem {
-                name: "balance".into(),
+        c.on_venue_self_check(
+            "polymarket",
+            blitzkrieg_market_api::SelfCheckReport {
                 ok: false,
-                detail: "401 unauthorized".into(),
-            }],
-        });
+                ts_ms: 1_000,
+                items: vec![blitzkrieg_market_api::SelfCheckItem {
+                    name: "balance".into(),
+                    ok: false,
+                    detail: "401 unauthorized".into(),
+                }],
+            },
+        );
+        // The failing probe is polymarket's: the freeze lands on the accounts
+        // bound to that venue. The in-process `core()` has no bound accounts,
+        // so the fallback keeps the legacy global freeze — the assertion is
+        // unchanged.
         assert!(c.is_killed());
         let stats = c.engine_stats();
         assert_eq!(stats["selfCheck"]["ok"], false);

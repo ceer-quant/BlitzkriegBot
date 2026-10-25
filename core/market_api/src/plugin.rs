@@ -99,10 +99,23 @@ pub trait MarketHost: Send + Sync {
     /// row: the safety net is blind (auth, venue down or a dead sweep
     /// transport). The core freezes trading on this — unreconciled drift is
     /// how ghost positions and orphans accumulate (E31-b).
-    fn on_reconcile_failed(&self, error: CoreError) -> BoxFuture<'_, ()>;
+    ///
+    /// `venue` names the reporting plugin (the caller's own `self.name()`):
+    /// the freeze lands on the accounts BOUND to that venue, not the whole
+    /// book — polymarket going dark must not freeze a healthy polysimulator
+    /// account trading the same kernel (the 2026-10-25 cross-venue avalanche:
+    /// one venue's network blip froze every account's entries for the
+    /// remaining session). Multi-venue kernels route by the caller; a
+    /// single-venue kernel resolves the same account the old global freeze
+    /// guarded.
+    fn on_reconcile_failed<'a>(&'a self, venue: &'a str, error: CoreError) -> BoxFuture<'a, ()>;
     /// Report of a trading-capability self-check run by the executor. A failed
     /// report freezes trading (kill switch) — the core decides once, here.
-    fn on_self_check(&self, report: SelfCheckReport) -> BoxFuture<'_, ()>;
+    ///
+    /// `venue` routes the freeze exactly like [`Self::on_reconcile_failed`]:
+    /// the failing probe is one venue's transport, so one venue's accounts
+    /// stop entering while siblings keep trading.
+    fn on_self_check<'a>(&'a self, venue: &'a str, report: SelfCheckReport) -> BoxFuture<'a, ()>;
     /// Seed the core's cash ledger from the venue's reported balance at startup.
     /// `venue` names the reporting plugin — the cash belongs to the account
     /// bound to that venue, never to whoever is "active" (multi-account #532).

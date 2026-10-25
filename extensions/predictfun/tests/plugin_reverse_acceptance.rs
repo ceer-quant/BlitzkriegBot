@@ -112,10 +112,18 @@ impl MarketHost for BookSink {
     fn on_reconcile(&self, _: ReconcileSnapshot) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_reconcile_failed(&self, _: CoreError) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_reconcile_failed(
+        &self,
+        _: &str,
+        _: CoreError,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_self_check(&self, _: SelfCheckReport) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_self_check(
+        &self,
+        _: &str,
+        _: SelfCheckReport,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {

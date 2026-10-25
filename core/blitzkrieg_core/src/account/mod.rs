@@ -442,6 +442,19 @@ impl AccountLedgers {
             .find(|a| a.status == AccountStatus::Active && a.venue == venue)
     }
 
+    /// Every ACTIVE-status account bound to `venue` — the venue-scoped
+    /// freeze's routing table (2026-10-25 多场馆雪崩定谳): one venue's failed
+    /// sweep/self-check freezes the accounts that trade it, never the whole
+    /// book. Empty = nobody trades this venue (the caller decides the
+    /// fallback — the legacy global freeze keeps unbound deployments loud).
+    pub fn account_ids_bound_to_venue(&self, venue: &str) -> Vec<String> {
+        self.accounts
+            .values()
+            .filter(|a| a.status == AccountStatus::Active && a.venue == venue)
+            .map(|a| a.id.to_string())
+            .collect()
+    }
+
     /// Re-point the display pointer (`display.account.set`'s memory half).
     /// The id must name a CONFIGURED account — the pointer's invariant; the
     /// ACTIVE-status check and the persistence are the CALLER's job (the
