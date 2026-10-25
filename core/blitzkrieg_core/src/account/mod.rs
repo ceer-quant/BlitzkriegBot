@@ -421,6 +421,16 @@ impl AccountLedgers {
             .unwrap_or("")
     }
 
+    /// The ACTIVE account's venue binding — the one venue whose cash report is
+    /// comparable to the active book in the accounting audit (a sibling
+    /// venue's cash is a different book's truth). Empty = unbound.
+    pub fn active_venue(&self) -> &str {
+        self.accounts
+            .get(&self.active)
+            .map(|a| a.venue.as_str())
+            .unwrap_or("")
+    }
+
     /// The first ACTIVE-status account bound to `venue` (#505 account↔venue
     /// binding). Venue-scoped cash truth routes through here: a venue's
     /// balance belongs to the account that trades it. None = no active

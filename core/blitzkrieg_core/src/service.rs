@@ -1233,11 +1233,13 @@ struct AuditRuntime {
     failures: u64,
     /// Where each audit appends its verdict (None = no persistence).
     audit_log_path: Option<String>,
-    /// The last time the ledger's cash was SET from the venue rather than moved
-    /// by a fill: `(at_ms, delta)`. The plugin host does this deliberately when
-    /// nothing rests, so the trade-leg check can tell the venue's own correction
-    /// from a local inconsistency instead of halting entries over it.
-    last_realign: Option<(i64, Decimal)>,
+    /// The last time each venue's cash was SET from that venue rather than
+    /// moved by a fill: venue → `(at_ms, delta)`. The plugin host does this
+    /// deliberately when nothing rests, so the trade-leg check can tell the
+    /// venue's own correction from a local inconsistency instead of halting
+    /// entries over it. Keyed by venue: a realign explains a residual only on
+    /// the book that venue's cash belongs to.
+    last_realign: std::collections::HashMap<String, (i64, Decimal)>,
 }
 
 /// The kernel's last recorded error, as `engine.stats.lastError` exposes it.
@@ -1565,9 +1567,11 @@ pub struct Core {
     /// resolves its own markets and simulates the redemption; in live mode the
     /// venue plugin answers and redeems.
     settlement: SettlementBook,
-    /// Last free-cash figure the venue reported, as `(at_ms, free)` — the venue
-    /// leg of the audit compares against it.
-    venue_free: Option<(i64, Decimal)>,
+    /// Last free-cash figure each venue reported, as venue → `(at_ms, free)` —
+    /// the audit's venue leg reads ONLY the report of the venue the audited
+    /// (active) account is bound to; a sibling venue's cash is a different
+    /// book's truth.
+    venue_free_by_venue: std::collections::HashMap<String, (i64, Decimal)>,
     /// F4: close-accounting credentials for fill-driven full closes, keyed by
     /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
     /// strategy PnL / breaker immediately; if the venue later reports that same
@@ -2362,7 +2366,7 @@ impl Core {
                 ..Default::default()
             },
             settlement,
-            venue_free: None,
+            venue_free_by_venue: std::collections::HashMap::new(),
             close_credentials: std::collections::VecDeque::new(),
             close_credential_log,
             next_id: 1,
@@ -2899,35 +2903,11 @@ impl Core {
         fee_quote(price)
     }
 
-    /// Set/realign the ledger's cash from the venue (startup seed and the periodic
-    /// free-cash sync both land here).
-    ///
-    /// In LIVE the figure is remembered as the venue leg of the accounting audit
-    /// (issue #189) — an audit compares it against what the ledger believes is
-    /// free, and a mismatch that survives the venue's own retry is drift.
+    /// Seed the ACTIVE account's ledger cash (the boot `dry_seed_balance` and
+    /// the reset paths land here). This is the process-default book's funding —
+    /// NOT a venue report: venue cash truth flows through
+    /// [`Self::realign_venue_cash`], which is where the audit's venue leg is fed.
     pub fn set_balance(&mut self, b: Decimal) {
-        if self.config.mode == Mode::Live {
-            let ts = now_ms();
-            let previous = self.accounts.active_ledger().balance();
-            if previous != b {
-                // The host realigns the ledger to the venue when there are no
-                // resting commitments, so a change between two reports is either
-                // a real fill or cash that moved without a fill event. The move is
-                // recorded so the audit's anchored identity can separate the two
-                // instead of reporting the venue's own correction as local drift.
-                self.audit.last_realign = Some((ts, b - previous));
-                tracing::info!(
-                    previous = %previous,
-                    reported = %b,
-                    "ledger cash set from the venue (no resting commitment)"
-                );
-            }
-            self.venue_free = Some((ts, b));
-        }
-        // The DRY seed targets the ACTIVE account's book (§9.5: the
-        // process-level default; 0.2 deployments have exactly one). Venue
-        // cash truth from an executor is routed by binding instead —
-        // [`Self::realign_venue_cash`].
         self.accounts.active_ledger_mut().set_balance(b);
     }
 
@@ -2947,7 +2927,13 @@ impl Core {
                 .map(|l| l.balance())
                 .unwrap_or_default();
             if previous != b {
-                self.audit.last_realign = Some((ts, b - previous));
+                // The move is recorded PER VENUE so the audit's trade-leg check
+                // can name the venue's own correction on ITS book only — a
+                // sibling venue's realign must never explain this book's
+                // residual.
+                self.audit
+                    .last_realign
+                    .insert(venue.to_string(), (ts, b - previous));
                 tracing::info!(
                     account = %target.as_str(),
                     venue = %venue,
@@ -2956,7 +2942,7 @@ impl Core {
                     "venue cash realigned into its bound account (no resting commitment)"
                 );
             }
-            self.venue_free = Some((ts, b));
+            self.venue_free_by_venue.insert(venue.to_string(), (ts, b));
         }
         if let Ok(ledger) = self.accounts.get_mut(&target) {
             ledger.set_balance(b);
@@ -9298,6 +9284,17 @@ impl Core {
         // (§9.5). Cross-account isolation is asserted by the dedicated gate
         // (account-cross-isolation-check.mjs), not by widening this identity.
         let active = self.accounts.active_ledger();
+        // The venue report comparable to THIS book is the report of the venue
+        // the active account is BOUND to (#505): a sibling venue's cash is a
+        // different book's truth, and comparing across books once produced a
+        // phantom `venue_free_cash` drift of exactly (other venue's cash −
+        // this book's balance).
+        let active_venue = self.accounts.active_venue().to_string();
+        let venue_free = self
+            .venue_free_by_venue
+            .get(&active_venue)
+            .map(|(t, b)| (*t, *b));
+        let ledger_realigned = self.audit.last_realign.get(&active_venue).copied();
         AuditInput {
             now_ms,
             live: self.config.mode == Mode::Live,
@@ -9316,9 +9313,9 @@ impl Core {
             open_buy_notional,
             open_buys,
             stray_reservations,
-            venue_free: self.venue_free.map(|(_, b)| b),
-            venue_free_at_ms: self.venue_free.map(|(t, _)| t),
-            ledger_realigned: self.audit.last_realign,
+            venue_free: venue_free.map(|(_, b)| b),
+            venue_free_at_ms: venue_free.map(|(t, _)| t),
+            ledger_realigned,
             open_positions,
             seen_trades,
             has_trade_log,
@@ -18240,6 +18237,82 @@ mod tests {
                 .balance(),
             Decimal::from(7)
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 审计的 venue 报告只读 active 账户所绑 venue 的那份——真线事故：poly
+    /// 场地报 100、active 是 default（13.59），单槽 venue_free 让
+    /// `venue_free_cash` 检查比出 drift 86.403094（= 100 − 13.59，逐位吻合）
+    /// 并封锁新开仓。分槽后兄弟 venue 的现金不再是这本书的「真相」。
+    #[test]
+    fn audit_venue_report_scopes_to_the_active_accounts_venue() {
+        let dir = reset_audit_dir("audit-venue-scope");
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let book = crate::account::AccountLedgers::new(
+            vec![
+                crate::account::Account {
+                    id: crate::account::AccountId::from("default"),
+                    name: "default".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "polymarket".into(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: 0,
+                },
+                crate::account::Account {
+                    id: crate::account::AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: crate::account::AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: "polysimulator".into(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: 0,
+                },
+            ],
+            crate::account::AccountId::from("default"),
+        );
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Live,
+                manual_ops_audit_path: Some(
+                    dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+                ),
+                trade_log_path: log("trades.jsonl"),
+                order_log_path: log("orders.jsonl"),
+                position_log_path: log("positions.jsonl"),
+                dry_seed_balance: Decimal::from(1_000),
+                ..Default::default()
+            },
+            book,
+        );
+        c.accounts
+            .get_mut(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .set_balance(Decimal::new(1359, 2));
+        // poly 场地报 100（route 到 paper 的簿）。
+        c.realign_venue_cash("polysimulator", Decimal::from(100));
+        // active = default（绑 polymarket）：poly 的报告不可比 —— 无 venue 报告。
+        let input = c.build_audit_input(now_ms());
+        assert_eq!(
+            input.venue_free, None,
+            "sibling venue's cash leaked into default's audit"
+        );
+        // 切 active 到 paper（绑 polysimulator）：poly 的报告可比。
+        c.accounts
+            .switch(&crate::account::AccountId::from("paper"))
+            .expect("switch to paper");
+        let input = c.build_audit_input(now_ms());
+        assert_eq!(input.venue_free, Some(Decimal::from(100)));
+        // polymarket 场地报它自己的真值：只进 default 的槽，paper 的审计仍看 100。
+        c.realign_venue_cash("polymarket", Decimal::new(1359, 2));
+        let input = c.build_audit_input(now_ms());
+        assert_eq!(input.venue_free, Some(Decimal::from(100)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
