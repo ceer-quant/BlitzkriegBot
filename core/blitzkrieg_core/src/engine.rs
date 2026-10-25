@@ -533,6 +533,20 @@ pub struct Engine {
     /// effective account_id 相同 ⇒ 拒绝声明）。Core 转 APPLICATION 错误
     /// 事件（点名字段）；被拒声明对应的腿声明不产出（订单路径照旧）。
     pair_refusals: Vec<String>,
+    /// 镜像盘显示簿（2026-10-25 poly 轮钟冻结定谳）：PolySimulator 镜像
+    /// Polymarket —— 同窗口的 condition/token id 逐字节相同（生产档案
+    /// 证实）。scanner 表按 token 唯一键行走（`market_for_token`/
+    /// `venue_of` 都是一查即中），两家的行不能并存 —— 后到的那家批次在
+    /// merge 臂被判「全是已知 token」吞掉，它的 (venue, duration) 轮钟
+    /// 与行情行双双落不了地，面板切到该所账户永远「加载中」。
+    ///
+    /// 处置：交易面保持单行（镜像即同一市场，表里一份就够）；显示面把
+    /// 被遮蔽 venue 自己声明的批次存进这张簿 —— 键 (venue, duration)，
+    /// 值该所最近一次申报的整批行。只有行情装配层（ENGINE_ROUND）读它，
+    /// 给「钟已开口但表里没有自己的行」的 venue 合成带它标签的行情行
+    /// （token 相同 → 共享同一份 book，价格是真实读数）。交易面零接触：
+    /// 入场门、token→市场查询、结算对侧证据都不查这张簿。
+    shadow_markets: HashMap<(String, i64), Vec<CryptoMarket>>,
 }
 
 /// RFC 568 阶段一：一条过了 scope 门的配对声明（engine → Core 的提交伴生
@@ -588,6 +602,7 @@ impl Engine {
             arb_leg_config: None,
             pair_declarations: Vec::new(),
             pair_refusals: Vec::new(),
+            shadow_markets: HashMap::new(),
         }
     }
 
@@ -834,6 +849,16 @@ impl Engine {
         &self.scanner
     }
 
+    /// 镜像盘显示簿的只读视图（行情装配层专用）：该 (venue, duration) 族
+    /// 的批次被 token 唯一键遮蔽时，这里能取到该所自己申报的整批行。交易
+    /// 面没有任何路径读它 —— 镜像盘与被镜像所共享 token，一份表行就是全
+    /// 部交易事实。
+    pub fn shadow_markets_for(&self, venue: &str, duration_sec: i64) -> Option<&[CryptoMarket]> {
+        self.shadow_markets
+            .get(&(venue.to_string(), duration_sec))
+            .map(Vec::as_slice)
+    }
+
     /// The scanner market a token belongs to (either side), if any. Multi-plugin
     /// callers (the rollover taker-kill) need the VENUE of a leg's token.
     pub fn market_for_token(&self, token: &str) -> Option<&crate::model::CryptoMarket> {
@@ -1054,6 +1079,15 @@ impl Engine {
                                 == feed_duration
                     });
                 if scanner_holds_slot {
+                    // The batch's own venue tag + its expiry, read BEFORE the
+                    // fresh filter consumes the list — the fresh-empty path
+                    // below still needs both (a mirror venue's batch carries
+                    // its identity and declaration even when every token is
+                    // already known).
+                    let batch_venue_tag =
+                        markets.first().map(|m| m.venue.clone()).unwrap_or_default();
+                    let batch_first_expiry =
+                        markets.first().map(|m| m.expires_at_ms).unwrap_or_default();
                     let known: std::collections::HashSet<&str> = self
                         .scanner
                         .markets()
@@ -1061,14 +1095,49 @@ impl Engine {
                         .flat_map(|m| [m.up_token_id.as_str(), m.down_token_id.as_str()])
                         .collect();
                     let fresh: Vec<CryptoMarket> = markets
-                        .into_iter()
+                        .iter()
                         .filter(|m| {
                             !known.contains(m.up_token_id.as_str())
                                 && !known.contains(m.down_token_id.as_str())
                         })
+                        .cloned()
                         .collect();
                     if fresh.is_empty() {
                         // Pure duplicate: nothing to add, nothing to restart.
+                        //
+                        // 镜像盘（2026-10-25 poly 轮钟冻结定谳）：「全已知」
+                        // 不等于「同一家的重复申报」——PolySimulator 镜像
+                        // Polymarket，同窗口 token 逐字节相同；PM 批先落，
+                        // 这批就被判成纯重复。两条不可再吞的伴生事实：
+                        // ① 轮钟——该 (venue, duration) 若还没开口，这次
+                        //   申报就是它唯一的发言机会（它的 next feed 在
+                        //   下个窗口，仍是 merge 路径），静默 return 会让
+                        //   venueRounds 永远缺行、面板倒计时绑不上；observed
+                        //   幂等检查挡掉真正的同 venue 重复申报。
+                        // ② 显示簿——表按 token 唯一，它的行进不了表，把
+                        //   整批存进 shadow_markets：行情装配层据此给该所
+                        //   合成带自己标签的行情行。交易面不读这张簿。
+                        //
+                        // observe 无条件照写（同换轮臂的信任序：批次自带的
+                        // 申报就是该所自己的权威，越界值由 observe 内部的
+                        // 2 轮 guard 拒收）——不按「已开口」跳过：上窗口的
+                        // 开口挡不住本窗口的新申报，跳过会把钟永远钉在旧
+                        // 轮。同所真重复申报重写同一个值，状态逐字节不变。
+                        self.scanner.observe_end_time_for(
+                            &batch_venue_tag,
+                            feed_duration,
+                            batch_first_expiry,
+                            now_ms,
+                        );
+                        let has_own_rows = self.scanner.markets().iter().any(|m| {
+                            m.venue == batch_venue_tag
+                                && row_family_duration(m.round_duration_sec, global_duration_sec)
+                                    == feed_duration
+                        });
+                        if !has_own_rows {
+                            self.shadow_markets
+                                .insert((batch_venue_tag, feed_duration), markets);
+                        }
                         return Vec::new();
                     }
                     // Seed the genuinely new tokens from any book that has
@@ -3538,6 +3607,144 @@ mod tests {
                 .expires_at_ms
                 > 0,
             "the sibling venue's clock slot survives the kalshi rollover"
+        );
+    }
+
+    /// 2026-10-25 poly 轮钟冻结定谳（生产档案取证）：PolySimulator 镜像
+    /// Polymarket —— 同窗口 condition/token id 逐字节相同。PM 批先落表，
+    /// poly 批同 slot 到达时 merge 臂的 fresh 集为空 → 旧代码静默 return，
+    /// (polysimulator, 900) 轮钟永不落地（venueRounds 缺行、面板倒计时
+    /// 永远绑不上、切账户永久「加载中」）、poly 行也永远进不了表。
+    /// 修复语义：fresh 空的 merge 批次仍要 (a) 给自己的 (venue, duration)
+    /// 钟开口（observed 幂等检查挡真正的同所重复申报），(b) 把整批存进
+    /// 镜像显示簿，行情装配层据此合成带它标签的行情行。表保持 token 唯一
+    /// —— 镜像即同一市场，交易面一份行就够。
+    fn mirror_market(end_ms: i64, venue: &str) -> CryptoMarket {
+        // Same tokens for both venues — the mirror property itself.
+        CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-mirror".into(),
+            question_id: "q-mirror".into(),
+            up_token_id: "mirror-up".into(),
+            down_token_id: "mirror-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / 900,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: venue.into(),
+            neg_risk: false,
+            question: "BTC up or down".into(),
+        }
+    }
+
+    #[test]
+    fn a_mirror_venues_same_slot_batch_still_opens_its_clock_and_display_rows() {
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000; // slot 2
+        // Polymarket lands first: a rollover puts its row in the table and
+        // speaks its clock.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        assert_eq!(e.scanner.markets().len(), 1);
+
+        // The mirror venue declares the SAME round — byte-identical tokens,
+        // a different venue tag. Its batch is a same-slot merge whose fresh
+        // set is EMPTY (every token already known).
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 61_000,
+        });
+        // The table stays token-unique — no duplicate mirror row.
+        assert_eq!(
+            e.scanner.markets().len(),
+            1,
+            "mirror tokens are one market; the table must not grow a second row"
+        );
+        // ...but the mirror venue's clock MUST have spoken: the panel's
+        // venueRounds row and the countdown rebind wait for it.
+        assert!(
+            e.scanner()
+                .observed_clock_keys()
+                .iter()
+                .any(|(v, d)| v == "polysimulator" && *d == 900),
+            "a mirror venue's same-slot batch must open its own (venue, duration) clock \
+             even when every token is already known"
+        );
+        // ...and its batch lands in the display book for the assembly to
+        // synthesize its tagged rows.
+        let shadow = e.shadow_markets_for("polysimulator", 900).expect(
+            "the mirror batch must reach the display book (the table cannot carry its rows)",
+        );
+        assert_eq!(shadow.len(), 1);
+        assert_eq!(shadow[0].venue, "polysimulator");
+
+        // A genuine duplicate re-feed of the SAME venue does not disturb
+        // anything: the clock is already open, no re-observe, no shadow churn.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 91_000,
+        });
+        assert!(e.shadow_markets_for("polysimulator", 900).is_some());
+        assert_eq!(e.scanner.markets().len(), 1);
+
+        // The next window: PM rolls over (real rows move), the mirror venue's
+        // new-window batch again merges fresh-empty — its clock re-speaks for
+        // the new expiry and the shadow rows refresh.
+        let next_end = 2_700_000; // slot 3
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polymarket")],
+            now_ms: 1_800_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polysimulator")],
+            now_ms: 1_800_001,
+        });
+        assert_eq!(
+            e.scanner.markets()[0].round_slot,
+            next_end / 1000 / 900,
+            "the table tracks the live window"
+        );
+        assert_eq!(
+            e.scanner
+                .round_timing_for("polysimulator", 900, 1_800_001)
+                .expires_at_ms,
+            next_end,
+            "the mirror venue's clock follows its own new-window declaration"
+        );
+        assert_eq!(
+            e.shadow_markets_for("polysimulator", 900).unwrap()[0].expires_at_ms,
+            next_end,
+            "the display book carries the live window's rows, not the stale ones"
+        );
+    }
+
+    #[test]
+    fn a_mirror_venue_shadow_rows_never_leak_into_trading_lookups() {
+        // The display book is display-only: token→market lookups (the venue
+        // admission chain reads these) must see exactly the table's rows —
+        // the mirror table row is the first venue's.
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 61_000,
+        });
+        let m = e
+            .scanner
+            .market_for_token("mirror-up")
+            .expect("the mirror token resolves through the table");
+        assert_eq!(
+            m.venue, "polymarket",
+            "token lookups stay single-sourced on the table's row (first venue wins), \
+             never on the display book"
         );
     }
 
