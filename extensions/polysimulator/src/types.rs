@@ -10,13 +10,20 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 /// One up/down interval round as `GET /v1/markets/updown` reports it.
+///
+/// `asset` is nullable on the wire (2026-10-26 live): the venue's stock /
+/// equities daily rows (AAPL, …) carry `"asset": null` — no crypto symbol
+/// exists for them. Modeling it as a required String made the WHOLE 500-row
+/// query fail serde every sweep, blinding round discovery; a null-asset row
+/// is meaningless to this plugin (the engine can only price what its
+/// strategies have a spot reference for) and is skipped in discovery.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpDownRow {
     pub event_id: String,
     pub condition_id: String,
     pub slug: Option<String>,
     pub title: Option<String>,
-    pub asset: String,
+    pub asset: Option<String>,
     pub interval: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -371,7 +378,7 @@ mod tests {
             }"#,
         )
         .expect("updown row parses");
-        assert_eq!(row.asset, "BTC");
+        assert_eq!(row.asset.as_deref(), Some("BTC"));
         let (up, down) = row.parse_token_ids().expect("token ids parse");
         assert!(up.starts_with('7'));
         assert!(down.starts_with('8'));
@@ -379,6 +386,39 @@ mod tests {
         assert_eq!(up_price, Decimal::from_str("0.55").unwrap());
         assert_eq!(down_price, Decimal::from_str("0.45").unwrap());
         assert!(row.is_open());
+    }
+
+    #[test]
+    fn updown_row_with_null_asset_parses_stock_daily_rows() {
+        // Live wire 2026-10-26: the venue's equities daily rows carry
+        // `"asset": null`. A required String made the whole 500-row query fail
+        // serde every poll (discovery blind); the field is Option and a null
+        // row still parses — discovery then skips it by asset.
+        let row: UpDownRow = serde_json::from_str(
+            r#"{
+                "event_id": "1240301",
+                "condition_id": "0x4579",
+                "slug": "aapl-up-or-down-on-october-26-2026",
+                "title": "Apple (AAPL) Up or Down on October 26?",
+                "asset": null,
+                "interval": "daily",
+                "active": true,
+                "closed": false,
+                "resolved": false,
+                "markets": [{
+                    "outcomes": "[\"Up\", \"Down\"]",
+                    "outcome_prices": "[\"0.5\", \"0.5\"]",
+                    "token_ids": "[\"111\", \"222\"]"
+                }]
+            }"#,
+        )
+        .expect("null-asset row parses");
+        assert_eq!(row.asset, None);
+        assert!(row.is_open());
+        assert_eq!(
+            row.parse_token_ids().expect("tokens"),
+            ("111".into(), "222".into())
+        );
     }
 
     #[test]
