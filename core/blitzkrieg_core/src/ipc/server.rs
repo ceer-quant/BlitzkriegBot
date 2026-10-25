@@ -3103,7 +3103,7 @@ async fn handle_line(
                     let scanner = e.scanner();
                     let mut seen: std::collections::HashSet<(String, String)> =
                         std::collections::HashSet::new();
-                    scanner
+                    let mut rows: Vec<serde_json::Value> = scanner
                         .round_state(now)
                         .markets
                         .iter()
@@ -3127,7 +3127,45 @@ async fn handle_line(
                                 "venue": m.venue,
                             })
                         })
-                        .collect()
+                        .collect();
+                    // 镜像盘合成行（2026-10-25 poly 轮钟冻结定谳）：token
+                    // 唯一键遮蔽了 PolySimulator 这类镜像所的表行 —— 它的
+                    // 批次行进不了 scanner，行情页切到该所账户时永远等不到
+                    // 带它标签的行（加载中）。钟已开口、行情行里却没有自己
+                    // 标签的 venue，从显示簿取它自己申报的批次合成行情行：
+                    // token 相同 → book 快照读的就是同一份盘口，价格是真
+                    // 实读数；is_live_round_row 同一谓词过滤，不会复活旧
+                    // 窗口的行。仅显示面 —— 交易门的 token→市场查询不查
+                    // 显示簿。
+                    for (venue, duration) in scanner.observed_clock_keys() {
+                        if rows.iter().any(|r| r["venue"] == venue) {
+                            continue;
+                        }
+                        if let Some(shadow) = e.shadow_markets_for(&venue, duration) {
+                            for m in shadow.iter().filter(|m| scanner.is_live_round_row(m, now)) {
+                                if !seen.insert((venue.clone(), m.asset.clone())) {
+                                    continue;
+                                }
+                                let up = e
+                                    .book_snapshot(&m.up_token_id)
+                                    .map(|b| b.mid_price)
+                                    .filter(|p| *p > Decimal::ZERO)
+                                    .unwrap_or(m.up_price);
+                                let down = e
+                                    .book_snapshot(&m.down_token_id)
+                                    .map(|b| b.mid_price)
+                                    .filter(|p| *p > Decimal::ZERO)
+                                    .unwrap_or(m.down_price);
+                                rows.push(serde_json::json!({
+                                    "asset": m.asset,
+                                    "up": up,
+                                    "down": down,
+                                    "venue": venue,
+                                }));
+                            }
+                        }
+                    }
+                    rows
                 })
                 .unwrap_or_default();
             doc["marketPrices"] = serde_json::json!(markets);
