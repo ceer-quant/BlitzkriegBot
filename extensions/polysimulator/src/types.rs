@@ -119,10 +119,14 @@ pub struct BalanceBody {
 
 /// A resting or filled order from `GET /v1/orders` (native envelope).
 ///
-/// `order_id` is an INTEGER on this venue — stringified at the seam so the
-/// core's venue-order-id contract (strings) holds everywhere.
+/// `order_id` is an integer on this venue — stringified at the seam so the
+/// core's venue-order-id contract (strings) holds everywhere. The venue's
+/// id encoding swings between number and quoted string across endpoints
+/// (the place ack answered `"1407256"` where others answer `1404591`), so
+/// the same tolerant reader as the place ack applies here.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NativeOrder {
+    #[serde(deserialize_with = "deserialize_order_id")]
     pub order_id: i64,
     pub market_id: String,
     pub side: Option<String>,
@@ -190,6 +194,7 @@ pub struct PendingOrdersEnvelope {
 /// market_id, outcome, quantity, avg_entry_price, status).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PositionRow {
+    #[serde(deserialize_with = "deserialize_order_id")]
     pub id: i64,
     pub market_id: String,
     pub outcome: Option<String>,
@@ -200,18 +205,46 @@ pub struct PositionRow {
 
 /// Ack of `POST /v1/order` (live shape 2026-10-25:
 /// `{"orderID":1404591,"status":"live"|"matched",…}` — camelCase, and a
-/// `matched` ack already carries the fill). The DELETE ack is a DIFFERENT
+/// `matched` ack already carries the fill). The id is UNDETERMINISTICALLY
+/// typed across the venue's own responses — numeric in some acks, a quoted
+/// string in others (`"orderID":"1407256"` rejected the first i64 typing in
+/// production) — so the seam accepts both. The DELETE ack is a DIFFERENT
 /// envelope (`{"canceled":[…],"not_canceled":{…}}`, see `CancelAck`); this
 /// struct only parses the POST side.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderResponse {
-    #[serde(rename = "orderID")]
+    #[serde(rename = "orderID", deserialize_with = "deserialize_order_id")]
     pub order_id: i64,
     pub status: Option<String>,
     #[serde(rename = "errorMsg", default)]
     pub error_msg: Option<String>,
     #[serde(rename = "tradeIDs", default)]
     pub trade_ids: Option<Vec<String>>,
+}
+
+/// The venue ids are integers everywhere — but not always encoded as JSON
+/// numbers. Accept number-or-string, refuse anything else.
+fn deserialize_order_id<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OrderId;
+    impl serde::de::Visitor<'_> for OrderId {
+        type Value = i64;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an integer order id (number or string)")
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<i64, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<i64, E> {
+            i64::try_from(v).map_err(serde::de::Error::custom)
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<i64, E> {
+            v.trim().parse::<i64>().map_err(serde::de::Error::custom)
+        }
+    }
+    deserializer.deserialize_any(OrderId)
 }
 
 impl OrderResponse {
@@ -435,6 +468,20 @@ mod tests {
         assert_eq!(ack.venue_id(), "1404591");
         assert_eq!(ack.status.as_deref(), Some("matched"));
         assert_eq!(ack.trade_ids.as_deref(), Some(&["1404591".to_string()][..]));
+    }
+
+    #[test]
+    fn order_response_id_type_is_undeterministic_across_acks() {
+        // Production 2026-10-25: the venue answered a QUOTED id where the
+        // probe acks had numeric ones — the seam accepts both spellings.
+        let ack: OrderResponse = serde_json::from_str(
+            r#"{"orderID":"1407256","status":"live","makingAmount":"217500","takingAmount":"500000","tradeIDs":null,"errorMsg":""}"#,
+        )
+        .expect("string id parses");
+        assert_eq!(ack.venue_id(), "1407256");
+        let ack: OrderResponse =
+            serde_json::from_str(r#"{"orderID":42,"status":"live"}"#).expect("numeric id parses");
+        assert_eq!(ack.venue_id(), "42");
     }
 
     #[test]
