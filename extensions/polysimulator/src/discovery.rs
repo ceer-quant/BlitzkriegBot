@@ -21,9 +21,13 @@
 //!   * round_slot — derived from the row's own `end_date` (`end_ms / 1000 /
 //!     round_sec`), so a market that closes mid-slot is never filed under a
 //!     slot it does not belong to.
-//!   * rows whose window has already passed (start <= now < end fails) are
-//!     skipped — the venue's list is "active", but a trailing row may sit at
-//!     its final seconds; the expiry check keeps the engine clean.
+//!   * only rows LIVE right now pass (`start <= now < end`, both halves
+//!     enforced) AND rows whose own window length equals the configured
+//!     round length (the 15M family when round_sec=900). The venue lists
+//!     every interval × asset × future round — feeding all of it once
+//!     subscribed 500+ tokens the feed's request budget could not rotate
+//!     inside the scanner's freshness window (the 2026-10-25 round-clock
+//!     freeze).
 
 use crate::rest::PolySimRest;
 use blitzkrieg_market_api::net::now_ms;
@@ -121,6 +125,29 @@ pub(crate) fn spawn(
                 };
                 if end_ms <= now {
                     continue; // the window has already closed
+                }
+                // The doc always promised `start <= now < end`; the start half
+                // was missing from the code. Without it every FUTURE round's
+                // rows (5M/15M/1H/4H/daily × 8 assets) were subscribed at
+                // once — the feed's token rotation outran the venue's request
+                // budget, each book's turn fell far outside the scanner's
+                // freshness window, and the round clock froze.
+                let Some(start_ms) = row.start_ms() else {
+                    tracing::warn!(
+                        condition = %row.condition_id,
+                        "polysimulator discovery: unreadable start_date"
+                    );
+                    continue;
+                };
+                if start_ms > now {
+                    continue; // a future round — feed it when its window opens
+                }
+                // The configured round FAMILY: a row's own window length is
+                // its interval. 5M/1H/4H/daily rows carry windows of other
+                // lengths; feeding them subscribes books the scanner's
+                // (venue, round_sec) family never judges on.
+                if end_ms - start_ms != round_sec * 1000 {
+                    continue; // another interval's round
                 }
                 let Some((up_token, down_token)) = row.parse_token_ids() else {
                     tracing::warn!(
