@@ -1011,6 +1011,42 @@ impl Engine {
                     markets.first().map(|m| m.round_duration_sec).unwrap_or(0),
                     global_duration_sec,
                 );
+                // 多场馆同格网（2026-10-25 poly 轮钟冻结定谳）：每个插件的
+                // discovery 按自己的节奏喂自己的轮。一类批次必须丢：**slot
+                // 落后于同族驻留 slot、且自身窗口已经过期**——那是「迟到喂的
+                // 已过期轮」，收下它会把整张表拖回旧轮，抹掉另一个 venue 的
+                // discovery 已经落好的新轮行（A 场馆迟喂过期轮 ↔ B 场馆喂
+                // 新轮，ping-pong 互相覆写，轮钟冻在 00:00）。只落后但窗口
+                // 还活着的批次要收：未来档先落、当前交易轮后到是生产 discovery
+                // 的正常形状（对抗性喂序测试钉的就是它）。同 slot 走下面的
+                // 合流，更新 slot 走下面的 rollover。单族语料 slot 单调且
+                // 批次窗口未过期，此守卫恒不触发——回放逐字节不变。
+                let resident_family_slot = self
+                    .scanner
+                    .markets()
+                    .iter()
+                    .filter(|m| {
+                        row_family_duration(m.round_duration_sec, global_duration_sec)
+                            == feed_duration
+                    })
+                    .map(|m| m.round_slot)
+                    .max()
+                    .unwrap_or(0);
+                let batch_expired = markets
+                    .iter()
+                    .map(|m| m.expires_at_ms)
+                    .min()
+                    .map(|end| end <= now_ms)
+                    .unwrap_or(false);
+                if resident_family_slot > slot && batch_expired {
+                    tracing::warn!(
+                        venue = %feeding_venue,
+                        batch_slot = slot,
+                        resident_slot = resident_family_slot,
+                        "stale round batch dropped — an expired slot behind the resident family"
+                    );
+                    return Vec::new();
+                }
                 let scanner_holds_slot = slot != 0
                     && self.scanner.markets().iter().any(|m| {
                         m.round_slot == slot
