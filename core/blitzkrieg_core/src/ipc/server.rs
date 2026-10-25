@@ -3211,16 +3211,22 @@ async fn handle_line(
             let mut view = serde_json::to_value(c.books_view(15, now_ms())).unwrap_or(Value::Null);
             if let Some(rows) = view.as_array_mut() {
                 for row in rows.iter_mut() {
-                    let venue = row
-                        .get("upTokenId")
-                        .and_then(Value::as_str)
-                        .map(|tok| {
-                            c.engine
-                                .as_ref()
-                                .and_then(|e| e.venue_of(tok))
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
+                    // 行自带 venue（books_view 填的，含镜像盘合成行）就用
+                    // 行的；只有无标签行（老语料/旧路径）才按 token 反查。
+                    // 镜像行与被镜像所共享 token，反查会首中被镜像所。
+                    let venue = match row.get("venue").and_then(Value::as_str) {
+                        Some(v) if !v.is_empty() => v.to_string(),
+                        _ => row
+                            .get("upTokenId")
+                            .and_then(Value::as_str)
+                            .map(|tok| {
+                                c.engine
+                                    .as_ref()
+                                    .and_then(|e| e.venue_of(tok))
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default(),
+                    };
                     row["venue"] = serde_json::json!(venue);
                 }
             }
@@ -11618,6 +11624,117 @@ mod tests {
             kalshi_up,
             format!("up-kalshi-BTC-{trading_end}"),
             "the depth view must expose the trading round's tokens"
+        );
+    }
+
+    /// 镜像盘的盘口行（2026-10-25 poly 永加载 #627 的同族缺口）：PM 批先
+    /// 落表，poly 镜像批（同 token）在 merge 臂 fresh 空进不了表 —— 价格
+    /// 卡走 engine.round 的合成行是活的，盘口卡走 books_view，缺合成行就
+    /// 整卡消失。契约：① books_view 给「钟已开口但表无自己行」的 venue
+    /// 合成带它标签的行；② venue 标签是行自带的（books_view 填），handler
+    /// 不按 token 反查 —— 反查 venue_of 首中 PM，标签就错了；③ 合成行与
+    /// PM 行共享同一 token → 同一份 book，深度是真实读数；④ 表行与合成
+    /// 行 (venue,asset) 不重复。
+    #[tokio::test]
+    async fn a_mirror_venue_gets_books_rows_from_the_display_shelf() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let round_sec = 900i64;
+        let now = now_ms();
+        let slot = now / 1000 / round_sec;
+        let trading_end = (slot + 2) * round_sec * 1000;
+
+        // 镜像性质本身：两所同窗口 token 逐字节相同（生产 09:30:02 批次
+        // 实证的形状），conditionId 同理。
+        let mk = |venue: &str, end_ms: i64| CryptoMarket {
+            asset: "BTC".to_string(),
+            condition_id: format!("cond-{end_ms}"),
+            question_id: format!("q-{end_ms}"),
+            up_token_id: "mirror-up".to_string(),
+            down_token_id: "mirror-down".to_string(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: end_ms,
+            round_slot: end_ms / 1000 / round_sec,
+            round_duration_sec: round_sec,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: "BTC up or down".to_string(),
+        };
+        // PM 批先落表（rollover 臂，全新 token）；poly 批后到（merge 臂
+        // fresh 空 → 被遮蔽进显示簿）。
+        {
+            let mut c = core.lock().await;
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("polymarket", trading_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("polysimulator", trading_end)],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+
+        // 同一份 book 打到共享 token 上：镜像盘的「自己的」深度就是它。
+        {
+            let mut c = core.lock().await;
+            c.engine_on_data(
+                crate::engine::DataEvent::Book {
+                    token_id: "mirror-up".to_string(),
+                    bids: vec![(dec!(0.46), dec!(100))],
+                    asks: vec![(dec!(0.54), dec!(200))],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"engine.books","params":{}}"#.to_string(),
+        )
+        .await;
+        let rows = reply["result"].as_array().expect("books array");
+        let poly_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r["venue"] == "polysimulator")
+            .collect();
+        assert_eq!(
+            poly_rows.len(),
+            1,
+            "the mirror venue must get its own depth row from the display shelf: {rows:?}"
+        );
+        assert_eq!(
+            poly_rows[0]["upTokenId"], "mirror-up",
+            "the mirror row exposes the SHARED token — same market, same book"
+        );
+        let pm_rows: Vec<_> = rows.iter().filter(|r| r["venue"] == "polymarket").collect();
+        assert_eq!(
+            pm_rows.len(),
+            1,
+            "the mirrored venue keeps exactly its own row: {rows:?}"
+        );
+        // 标签是行自带的：venue_of("mirror-up") 首中 PM，反查会把 poly 行
+        // 标成 polymarket —— 盘口卡在 poly 视图下照样空。
+        assert_eq!(
+            poly_rows[0]["venue"], "polysimulator",
+            "the tag comes from the row itself, not a token reverse-lookup"
+        );
+        // 共享 book 的真实读数：合成行的深度与 PM 行逐位同。
+        assert_eq!(
+            poly_rows[0]["up"]["bestBid"], pm_rows[0]["up"]["bestBid"],
+            "the mirror row reads the same shared book — real depth, both sides"
         );
     }
 
