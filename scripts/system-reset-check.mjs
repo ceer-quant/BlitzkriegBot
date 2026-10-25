@@ -28,7 +28,8 @@ import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = process.env.BK_CORE_BIN || defaultBinaryPath();
 
-const { check, failures } = createChecks();
+const gate = createChecks();
+const check = gate.check;
 const cleanup = [];
 
 function makeCore(label, extraArgs = []) {
@@ -153,13 +154,13 @@ try {
 
   await core.stop();
 
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? '\nsystem:reset — confirm gate, wipe+reseed, audit and self-check all hold over the real wire.'
-    : `\nsystem:reset — ${failures} assertion(s) failed.`);
-  process.exit(failures === 0 ? 0 : 1);
+    : `\nsystem:reset — ${gate.failures} assertion(s) failed.`);
+  process.exit(gate.failures === 0 ? 0 : 1);
 } catch (e) {
   check('harness error', false, e?.stack || e);
-  console.log(`system:reset — harness died, ${failures} assertion(s) had failed before it.`);
+  console.log(`system:reset — harness died, ${gate.failures} assertion(s) had failed before it.`);
   process.exit(1);
 } finally {
   for (const dir of cleanup) {

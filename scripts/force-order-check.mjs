@@ -26,7 +26,8 @@ import { createChecks } from './lib/gate-harness.mjs';
 
 const BIN = process.env.BK_CORE_BIN || defaultBinaryPath();
 
-const { check, failures } = createChecks();
+const gate = createChecks();
+const check = gate.check;
 const cleanup = [];
 
 // Scratch 根：本机铁律只写 /Volumes/Hard Disk；CI（Linux runner）没有该卷，
@@ -177,13 +178,13 @@ try {
 
   await core2.stop();
 
-  console.log(failures === 0
+  console.log(gate.failures === 0
     ? '\norders:force_close — live-round refusal, terminal refusal, sweep closure, audit line all hold.'
-    : `\norders:force_close — ${failures} assertion(s) failed.`);
-  process.exit(failures === 0 ? 0 : 1);
+    : `\norders:force_close — ${gate.failures} assertion(s) failed.`);
+  process.exit(gate.failures === 0 ? 0 : 1);
 } catch (e) {
   check('harness error', false, e?.stack || e);
-  console.log(`orders:force_close — harness died, ${failures} assertion(s) had failed before it.`);
+  console.log(`orders:force_close — harness died, ${gate.failures} assertion(s) had failed before it.`);
   process.exit(1);
 } finally {
   for (const dir of cleanup) {
