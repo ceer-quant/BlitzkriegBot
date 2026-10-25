@@ -103,7 +103,7 @@ pub async fn spawn_if_configured(
             if !report.ok {
                 eprintln!("polymarket-extension: startup self-check FAILED");
             }
-            host.on_self_check(report).await;
+            host.on_self_check("polymarket", report).await;
         }
         Err(e) => eprintln!("polymarket-extension: startup self-check failed to run: {e}"),
     }
@@ -232,7 +232,7 @@ pub async fn spawn_if_configured(
                             if place_failures >= 3 && now_ms() >= next_probe_ok_ms {
                                 next_probe_ok_ms = now_ms() + PROBE_COOLDOWN_MS;
                                 match venue.self_check().await {
-                                    Ok(report) => host.on_self_check(report).await,
+                                    Ok(report) => host.on_self_check("polymarket", report).await,
                                     Err(e) => host.report_error(e).await,
                                 }
                             }
@@ -424,7 +424,7 @@ pub async fn spawn_if_configured(
                         sweep_failures = sweep_failures.saturating_add(1);
                         eprintln!("polymarket-extension: sweep failed ({sweep_failures}): {e}");
                         if sweep_failures >= SWEEP_FAILURE_FREEZE {
-                            host.on_reconcile_failed(e.clone()).await;
+                            host.on_reconcile_failed("polymarket", e.clone()).await;
                         } else {
                             host.report_error(e).await;
                         }

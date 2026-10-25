@@ -156,10 +156,18 @@ impl MarketHost for ExecSink {
             self.reconciles.lock().await.push(snapshot);
         })
     }
-    fn on_reconcile_failed(&self, _: CoreError) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_reconcile_failed(
+        &self,
+        _: &str,
+        _: CoreError,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_self_check(&self, report: SelfCheckReport) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_self_check(
+        &self,
+        _: &str,
+        report: SelfCheckReport,
+    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.self_checks.lock().await.push(report);
         })
