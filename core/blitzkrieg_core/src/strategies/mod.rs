@@ -416,6 +416,19 @@ pub trait EngineStrategy: Send + Sync {
         false
     }
 
+    /// #642: the strategy's pair-declaration DEFAULT — the `{key, leg}` label
+    /// pair attached to every entry whose own declaration is absent. The Lua
+    /// side carries it per-entry (`entries` 行的可选 `pair` 表，经
+    /// lua_loader 透传为 `TradeSignal::pair`)；cdylib 侧经
+    /// `bk_strategy_entry_pair`（缺省 default）+ evaluate JSON 的 per-entry
+    /// `pair` 字段两通道表达，字段语义逐字对齐：`key` 是策略自报的可读标
+    /// 签（防重不依赖它 —— 内核按 (owner 实例, asset, slot) 经济身份判定），
+    /// `leg` 是腿标签（仅可读，方向不入经济键）。Default: `None` — every
+    /// existing strategy keeps the unpaired (bit-identical) path.
+    fn entry_pair(&self) -> Option<crate::signal::TradePairDecl> {
+        None
+    }
+
     /// Close intents accumulated since the last drain. The host resolves each
     /// token to a live position and routes it through the SAME exit submission
     /// path as an automated/policy exit (live-sell dedup, `sell_shares`, risk +

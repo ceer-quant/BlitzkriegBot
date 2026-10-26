@@ -66,6 +66,11 @@ jobs:
       # strategies ship as Lua packages (no cdylib to build).
       - name: Build the reference strategy cdylib (standalone workspace)
         run: (cd user_layer/parity_strategy && cargo build --release --locked)
+      # #642's optional-symbol fixture: a second standalone-workspace cdylib
+      # (hand-written ABI declaring all four new symbols) that
+      # tests/foreign_optional_symbols_check.rs drives through the real loader.
+      - name: Build the optional-capability fixture cdylib (standalone workspace)
+        run: (cd user_layer/optional_capability_fixture && cargo build --release --locked)
       - name: Build (release)
         run: cargo build --release --workspace --locked
       # Size budget (E10-d), BLOCKING. The [profile.release] settings in the root

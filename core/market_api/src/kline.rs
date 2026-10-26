@@ -63,6 +63,42 @@ impl KlineInterval {
     pub fn bucket_close_ms(self, bucket_open_ms: i64) -> i64 {
         bucket_open_ms + self.secs() * 1000 - 1
     }
+
+    /// The wire spelling of the interval: the serde `snake_case` names
+    /// (`sec1` … `day1`), which are the SAME strings the Lua `bk_on_kline`
+    /// table and the C-ABI `bk_strategy_on_kline` view carry. ONE mapping so
+    /// every runtime spells a bar's interval identically.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Sec1 => "sec1",
+            Self::Sec5 => "sec5",
+            Self::Sec15 => "sec15",
+            Self::Min1 => "min1",
+            Self::Min5 => "min5",
+            Self::Min15 => "min15",
+            Self::Hour1 => "hour1",
+            Self::Hour4 => "hour4",
+            Self::Day1 => "day1",
+        }
+    }
+
+    /// Inverse of [`Self::wire_name`] (the strategy-API shell parses the
+    /// borrowed view back into the shared type with it). Unknown strings are
+    /// `None`, never a guessed default.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "sec1" => Some(Self::Sec1),
+            "sec5" => Some(Self::Sec5),
+            "sec15" => Some(Self::Sec15),
+            "min1" => Some(Self::Min1),
+            "min5" => Some(Self::Min5),
+            "min15" => Some(Self::Min15),
+            "hour1" => Some(Self::Hour1),
+            "hour4" => Some(Self::Hour4),
+            "day1" => Some(Self::Day1),
+            _ => None,
+        }
+    }
 }
 
 /// One OHLCV bar.

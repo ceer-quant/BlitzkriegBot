@@ -68,6 +68,19 @@ pub struct LoadedLibrary {
     /// OPTIONAL `bk_strategy_settlement_holds`: hold-to-settlement declaration
     /// (expiry redemption instead of the exit ladder). None = "no declaration".
     settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
+    /// OPTIONAL `bk_strategy_on_kline` (#642): the CLOSED-bar hook. None =
+    /// the library is never driven by the K-line path (the old default).
+    on_kline_fn: Option<blitzkrieg_strategy_api::BkOnKlineFn>,
+    /// OPTIONAL `bk_strategy_entry_pair` (#642): the pair-declaration default
+    /// applied to entries without their own per-entry `pair`. None = no
+    /// default (the old behaviour).
+    entry_pair_fn: Option<blitzkrieg_strategy_api::BkEntryPairFn>,
+    /// OPTIONAL `bk_strategy_trailing_exit` (#642): three-state trailing
+    /// verdict (-1 follow kernel / 1 trail / 0 never). None = follow kernel.
+    trailing_exit_fn: Option<blitzkrieg_strategy_api::BkTrailingExitFn>,
+    /// OPTIONAL `bk_strategy_atomic_batch` (#642): the E-VA batch
+    /// declaration. None / 0 = the per-order path.
+    atomic_batch_fn: Option<blitzkrieg_strategy_api::BkAtomicBatchFn>,
 }
 
 impl LoadedLibrary {
@@ -85,6 +98,10 @@ impl LoadedLibrary {
         bind_eval_ctx_fn: Option<blitzkrieg_strategy_api::BkBindEvalCtxFn>,
         config_view_fn: Option<blitzkrieg_strategy_api::BkConfigViewFn>,
         settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
+        on_kline_fn: Option<blitzkrieg_strategy_api::BkOnKlineFn>,
+        entry_pair_fn: Option<blitzkrieg_strategy_api::BkEntryPairFn>,
+        trailing_exit_fn: Option<blitzkrieg_strategy_api::BkTrailingExitFn>,
+        atomic_batch_fn: Option<blitzkrieg_strategy_api::BkAtomicBatchFn>,
     ) -> Arc<Self> {
         Arc::new(Self {
             lib,
@@ -95,6 +112,10 @@ impl LoadedLibrary {
             bind_eval_ctx_fn,
             config_view_fn,
             settlement_holds_fn,
+            on_kline_fn,
+            entry_pair_fn,
+            trailing_exit_fn,
+            atomic_batch_fn,
         })
     }
 
@@ -327,6 +348,18 @@ pub struct ForeignStrategy {
     /// OPTIONAL hold-to-settlement symbol (copied from the shared library
     /// record).
     settlement_holds_fn: Option<blitzkrieg_strategy_api::BkSettlementHoldsFn>,
+    /// OPTIONAL closed-bar hook (#642). None = never driven by K-lines.
+    on_kline_fn: Option<blitzkrieg_strategy_api::BkOnKlineFn>,
+    /// OPTIONAL pair-declaration default (#642): the `{key, leg}` pair read
+    /// once at load (a property of the library build, like the knobs) and
+    /// attached by `adopt_eval_json` to entries without their own per-entry
+    /// `pair`. None = no default.
+    entry_pair: Option<crate::signal::TradePairDecl>,
+    /// OPTIONAL three-state trailing verdict (#642): None = follow the
+    /// kernel-wide value, Some(bool) = the strategy's own override.
+    wants_trailing_exit: Option<bool>,
+    /// OPTIONAL atomic-batch declaration (#642). false = the per-order path.
+    atomic_batch: bool,
 
     // Outputs accumulated during evaluate(), drained by the host.
     exit_intents: Vec<StrategyExitIntent>,
@@ -365,6 +398,9 @@ impl ForeignStrategy {
         let bind_eval_ctx_fn = lib.bind_eval_ctx_fn;
         let config_view_fn = lib.config_view_fn;
         let settlement_holds_fn = lib.settlement_holds_fn;
+        let on_kline_fn = lib.on_kline_fn;
+        let trailing_exit_fn = lib.trailing_exit_fn;
+        let atomic_batch_fn = lib.atomic_batch_fn;
         let mut s = Self {
             lib,
             vtable,
@@ -379,6 +415,25 @@ impl ForeignStrategy {
             bind_eval_ctx_fn,
             config_view_fn,
             settlement_holds_fn,
+            on_kline_fn,
+            // Provisional None: reading it needs `&self` (the deallocator),
+            // same shape as read_knobs below.
+            entry_pair: None,
+            wants_trailing_exit: trailing_exit_fn.and_then(|f| {
+                // SAFETY: valid handle; the symbol is a pure integer read.
+                // Any value outside {-1, 0, 1} reads as -1 ("no declaration").
+                match unsafe { f(handle) } {
+                    1 => Some(true),
+                    0 => Some(false),
+                    _ => None,
+                }
+            }),
+            atomic_batch: atomic_batch_fn
+                .map(|f| -> bool {
+                    // SAFETY: valid handle; a pure integer read.
+                    unsafe { f(handle) != 0 }
+                })
+                .unwrap_or(false),
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -388,6 +443,9 @@ impl ForeignStrategy {
         // Read the declaration once: it is a load-time property, and the load
         // report must be able to state it (E2-c: "not evolvable" is explicit).
         s.knobs = s.read_knobs();
+        // #642: the pair-declaration default, same read-once rule. Absent
+        // symbol / null / malformed JSON = no default (never a guess).
+        s.entry_pair = s.read_entry_pair();
         s
     }
 
@@ -465,6 +523,24 @@ impl ForeignStrategy {
             Some(t) => KnobDeclaration::parse(&t).knobs,
             None => Vec::new(),
         }
+    }
+
+    /// #642: read the OPTIONAL `bk_strategy_entry_pair` declaration — the
+    /// pair-declaration DEFAULT applied by [`adopt_eval_json`] to entries
+    /// without their own per-entry `pair`. Absent symbol / NULL return /
+    /// malformed JSON / missing fields = `None` ("no default", the old
+    /// behaviour), never a partially trusted declaration.
+    fn read_entry_pair(&self) -> Option<crate::signal::TradePairDecl> {
+        let f = self.lib.entry_pair_fn?;
+        // SAFETY: valid handle; the returned JSON is owned by the library and
+        // freed through its own deallocator by take_json.
+        let v = unsafe { self.take_json(f(self.handle)) }?;
+        let obj = v.as_object()?;
+        // Both labels are readable strings carried verbatim; a wrong-typed
+        // field degrades to "no default" (never a guessed label).
+        let key = obj.get("key").and_then(|k| k.as_str())?.to_string();
+        let leg = obj.get("leg").and_then(|l| l.as_str())?.to_string();
+        Some(crate::signal::TradePairDecl { key, leg })
     }
 
     /// Push a parameter set to the library's `on_hot_params`, deduplicating
@@ -620,6 +696,28 @@ impl EngineStrategy for ForeignStrategy {
         unsafe { f(self.handle) != 0 }
     }
 
+    /// #642: the three-state trailing verdict, read ONCE at load (a property
+    /// of the library build). Absent symbol = `None` = follow the kernel-wide
+    /// `risk.setExit` trailingEnabled value, bit-identically to every existing
+    /// library.
+    fn wants_trailing_exit(&self) -> Option<bool> {
+        self.wants_trailing_exit
+    }
+
+    /// #642: the E-VA atomic-batch declaration, read ONCE at load. Absent
+    /// symbol = false = the per-order path, bit-identically to every existing
+    /// library.
+    fn atomic_batch(&self) -> bool {
+        self.atomic_batch
+    }
+
+    /// #642: the pair-declaration DEFAULT read once at load (see the field
+    /// doc). Applied by [`adopt_eval_json`] to entries that carry no
+    /// per-entry `pair`; `None` = no default = the old unpaired path.
+    fn entry_pair(&self) -> Option<crate::signal::TradePairDecl> {
+        self.entry_pair.clone()
+    }
+
     fn on_book(&mut self, token_id: &str, snap: &OrderbookSnapshot, now_ms: i64) {
         let Some(f) = self.vtable.on_book else { return };
         // on_book carries only a token; label the view with the asset resolved
@@ -653,6 +751,43 @@ impl EngineStrategy for ForeignStrategy {
             // SAFETY: valid handle + borrowed round for the call.
             unsafe { f(self.handle, &round) };
         }
+    }
+
+    /// #642: forward CLOSED bars through the OPTIONAL `bk_strategy_on_kline`
+    /// symbol — the same dispatch the Lua side gets (§10.4: CLOSED bars only,
+    /// in closure order; the engine's on_kline path already guarantees both).
+    /// The view is a borrowed decimal-STRING mirror of the shared `Kline` the
+    /// Lua `bk_on_kline` table sees; missing symbol = never called.
+    fn on_kline(&mut self, kline: &crate::kline::Kline) {
+        let Some(f) = self.on_kline_fn else {
+            return;
+        };
+        let cs = |d: Decimal| CString::new(d.to_string()).unwrap_or_default();
+        let Ok(symbol) = CString::new(kline.symbol.as_str()) else {
+            return;
+        };
+        let interval = CString::new(kline.interval.wire_name()).unwrap_or_default();
+        let open = cs(kline.open);
+        let high = cs(kline.high);
+        let low = cs(kline.low);
+        let close = cs(kline.close);
+        let volume = cs(kline.volume);
+        let view = blitzkrieg_strategy_api::BkKlineView {
+            symbol: symbol.as_ptr(),
+            interval: interval.as_ptr(),
+            open_time_ms: kline.open_time_ms,
+            close_time_ms: kline.close_time_ms,
+            open: open.as_ptr(),
+            high: high.as_ptr(),
+            low: low.as_ptr(),
+            close: close.as_ptr(),
+            volume: volume.as_ptr(),
+            trade_count: kline.trade_count,
+            is_closed: u8::from(kline.is_closed),
+        };
+        // SAFETY: valid handle + a borrowed view whose backing outlives the
+        // call (every CString above lives to the end of this function).
+        unsafe { f(self.handle, &view) };
     }
 
     fn take_breaks(&mut self) -> Vec<(String, Decimal)> {
@@ -776,6 +911,7 @@ impl EngineStrategy for ForeignStrategy {
             ctx,
             &mut self.exit_intents,
             &mut self.breaks,
+            self.entry_pair.as_ref(),
         )
     }
 
@@ -913,6 +1049,40 @@ pub struct ForeignShadowFactory {
     knobs: Vec<KnobSpec>,
 }
 
+impl ForeignShadowFactory {
+    /// Read the pair-declaration default from a JUST-CREATED twin handle: the
+    /// live instance's `read_entry_pair` runs on ITS handle, and a twin owns a
+    /// different one, so the declaration is re-read per instance (the same
+    /// instance-per-handle rule `take_json`'s deallocator pairing demands).
+    /// None on any absence/malformation, exactly like the live read.
+    fn read_twin_entry_pair(&self, handle: BkHandle) -> Option<crate::signal::TradePairDecl> {
+        let f = self.lib.entry_pair_fn?;
+        // SAFETY: the twin handle was created by this library's own create()
+        // above; the JSON it returns is freed through the library's own
+        // deallocator (resolved once, shared by every instance).
+        let raw = unsafe { f(handle) };
+        let v = if raw.is_null() {
+            return None;
+        } else {
+            // SAFETY: pointer came from this library's CString::into_raw; copy
+            // then free once via the matching allocator.
+            let parsed = unsafe { CStr::from_ptr(raw) }
+                .to_str()
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            if let Some(free) = self.lib.free_string {
+                // SAFETY: same provenance as above.
+                unsafe { free(raw) };
+            }
+            parsed?
+        };
+        let obj = v.as_object()?;
+        let key = obj.get("key").and_then(|k| k.as_str())?.to_string();
+        let leg = obj.get("leg").and_then(|l| l.as_str())?.to_string();
+        Some(crate::signal::TradePairDecl { key, leg })
+    }
+}
+
 impl ShadowFactory for ForeignShadowFactory {
     fn strategy(&self) -> String {
         self.name.clone()
@@ -943,6 +1113,27 @@ impl ShadowFactory for ForeignShadowFactory {
             bind_eval_ctx_fn: self.lib.bind_eval_ctx_fn,
             config_view_fn: self.lib.config_view_fn,
             settlement_holds_fn: self.lib.settlement_holds_fn,
+            on_kline_fn: self.lib.on_kline_fn,
+            // The twin is a second instance of the SAME library, so it reads
+            // the SAME declarations from its own handle — one instance per
+            // declaration read keeps every handle's own deallocator in play.
+            entry_pair: self.read_twin_entry_pair(handle),
+            wants_trailing_exit: self.lib.trailing_exit_fn.and_then(|f| {
+                // SAFETY: valid twin handle; a pure integer read.
+                match unsafe { f(handle) } {
+                    1 => Some(true),
+                    0 => Some(false),
+                    _ => None,
+                }
+            }),
+            atomic_batch: self
+                .lib
+                .atomic_batch_fn
+                .map(|f| -> bool {
+                    // SAFETY: valid twin handle; a pure integer read.
+                    unsafe { f(handle) != 0 }
+                })
+                .unwrap_or(false),
             exit_intents: Vec::new(),
             breaks: Vec::new(),
             params: None,
@@ -1002,6 +1193,14 @@ fn parse_breaks(v: &serde_json::Value) -> Vec<(String, Decimal)> {
 /// reserved-key seal (warn + drop, entry otherwise untouched) must be
 /// provable without a dylib, and its inputs are exactly the strategy name,
 /// the JSON value and the round context.
+///
+/// #642 (RFC 568): `pair_default` is the library's OPTIONAL
+/// `bk_strategy_entry_pair` declaration. An entry's own `"pair":{"key","leg"}`
+/// JSON field (the Lua `entries` 行的 `pair` 表镜像) wins over it; an entry
+/// with neither carries `pair: None` — the pre-existing behaviour
+/// bit-for-bit. A present-but-malformed per-entry `pair` degrades to the
+/// same fallback chain the `shares` field already uses (never reject the
+/// entry), so a typo cannot cost a signal.
 fn adopt_eval_json(
     strategy_name: &str,
     scope: &str,
@@ -1009,6 +1208,7 @@ fn adopt_eval_json(
     ctx: &StrategyCtx<'_>,
     exit_intents: &mut Vec<StrategyExitIntent>,
     breaks_out: &mut Vec<(String, Decimal)>,
+    pair_default: Option<&crate::signal::TradePairDecl>,
 ) -> Vec<TradeSignal> {
     if let Some(serde_json::Value::Array(exits)) = v.get("exits") {
         for e in exits {
@@ -1083,6 +1283,22 @@ fn adopt_eval_json(
             .get("shares")
             .and_then(|s| s.as_str())
             .and_then(|s| Decimal::from_str(s).ok());
+        // #642 (RFC 568): the per-entry `pair` field — the Lua mirror.
+        // Per-entry wins over the library's load-time default; both absent
+        // (or the per-entry one malformed) = None = 旧行为逐位不变. Labels
+        // are readable strings carried verbatim (方向不入经济键).
+        let pair_decl = e
+            .get("pair")
+            .and_then(|p| p.as_object())
+            .and_then(|p| {
+                let key = p.get("key").and_then(|k| k.as_str())?;
+                let leg = p.get("leg").and_then(|l| l.as_str())?;
+                Some(crate::signal::TradePairDecl {
+                    key: key.to_string(),
+                    leg: leg.to_string(),
+                })
+            })
+            .or_else(|| pair_default.cloned());
         let reason = e
             .get("reason")
             .and_then(|r| r.as_str())
@@ -1102,7 +1318,7 @@ fn adopt_eval_json(
                     price,
                     reason: reason.clone(),
                     shares,
-                    pair: None,
+                    pair: pair_decl.clone(),
                 });
                 break;
             }
@@ -1117,7 +1333,7 @@ fn adopt_eval_json(
                     price,
                     reason: reason.clone(),
                     shares,
-                    pair: None,
+                    pair: pair_decl.clone(),
                 });
                 break;
             }
@@ -1236,6 +1452,7 @@ mod reserved_key_tests {
                 &ctx,
                 &mut exits,
                 &mut breaks,
+                None,
             );
             let without = adopt_eval_json(
                 "probe",
@@ -1244,6 +1461,7 @@ mod reserved_key_tests {
                 &ctx,
                 &mut exits,
                 &mut breaks,
+                None,
             );
             (with, without)
         });
