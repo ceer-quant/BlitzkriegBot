@@ -340,12 +340,17 @@ impl MarketHost for CoreHost {
         Box::pin(async move {
             let c = self.core.lock().await;
             // Per-venue executor drain (multi-plugin): each executor pulls only
-            // the orders whose token's round market names ITS venue. An order
-            // whose token belongs to no live labelled market is UNTAGGED and
-            // routes to the ACTIVE plugin's drain — the single-plugin fallback
-            // the task pins. When no active plugin was ever set (hosts that
-            // skipped `set_active_plugin`, most in-process tests), the legacy
-            // "" bucket takes ALL orders: the exact pre-routing behaviour.
+            // the orders whose EXECUTION venue names ITS plugin — the token's
+            // table row venue, overridden by the placing account's binding
+            // when the venue's own shadow batch carries the token (mirror
+            // venues: PolySimulator's tokens carry the Polymarket row in the
+            // table, so keying on the row alone would hand the poly account's
+            // order to the REAL venue's executor). An order whose execution
+            // venue resolves to nothing is UNTAGGED and routes to the ACTIVE
+            // plugin's drain — the single-plugin fallback the task pins. When
+            // no active plugin was ever set (hosts that skipped
+            // `set_active_plugin`, most in-process tests), the legacy ""
+            // bucket takes ALL orders: the exact pre-routing behaviour.
             // Single pass over `live_orders()` order, so the drain order the
             // historical bridge saw is untouched.
             let active = self
@@ -357,7 +362,7 @@ impl MarketHost for CoreHost {
             c.pending_unbound()
                 .iter()
                 .filter(|o| {
-                    let venue = c.venue_of_token(&o.token_id);
+                    let venue = c.execution_venue_of(o.account_id.as_str(), &o.token_id);
                     legacy_all || venue == plugin || (venue.is_empty() && plugin == active)
                 })
                 .map(pending_to_api)
@@ -763,6 +768,82 @@ mod tests {
                 .map(|o| o.core_order_id.as_str())
                 .collect::<Vec<_>>(),
             vec![kal_id.as_str()]
+        );
+    }
+
+    /// Mirror routing at the production drain seam: a mirror token's table
+    /// row names the mirrored venue, but the EXECUTOR that must pull the
+    /// order is the placing account's own venue — a polysimulator account's
+    /// poly-up order can never land on the real polymarket drain (nor the
+    /// reverse).
+    #[tokio::test]
+    async fn mirror_tokens_drain_to_the_placing_account_venue() {
+        let mut c = two_venue_live_core();
+        // The simulator's batch declares the SAME tokens polymarket already
+        // listed: same-slot merge, rows to the shadow book. The table row
+        // stays tagged polymarket.
+        let now: i64 = 1_000_001;
+        let slot = now / 1000 / 900;
+        let sim = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-polymarket".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-up".into(),
+            down_token_id: "poly-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: "polysimulator".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![sim],
+                now_ms: now,
+            },
+            now,
+        );
+        // A second account bound to the mirror venue places on poly-up.
+        let book = crate::account::Account {
+            id: crate::account::AccountId::from("sim"),
+            name: "sim".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: crate::account::AccountStatus::Active,
+            credential_keys: crate::account::CredentialKeys::default(),
+            venue: "polysimulator".into(),
+            trading_enabled: true,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            updated_at_ms: 0,
+        };
+        c.accounts_mut().insert(book).unwrap();
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("sim"))
+            .unwrap()
+            .set_balance(dec!(10));
+        c.engine_evaluate(now + 1);
+        let mut order = live_order("poly-up", "sim-1");
+        order.account_id = crate::account::AccountId::from("sim");
+        let (sim_id, _) = c.place(order, 0, 2).unwrap();
+
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        host.set_active_plugin("polysimulator");
+
+        // The simulator executor takes its account's order; the REAL venue's
+        // executor does not — this is the live-money misroute the table-row
+        // drain would have made.
+        assert_eq!(
+            host.take_pending_orders("polysimulator")
+                .await
+                .iter()
+                .map(|o| o.core_order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![sim_id.as_str()],
+            "the mirror account's order drains to polysimulator, not the real venue"
         );
     }
 

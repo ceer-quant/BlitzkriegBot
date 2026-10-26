@@ -7785,7 +7785,7 @@ impl Core {
                     .unwrap_or_default();
                 let mut refusal: Option<String> = None;
                 for leg in &legs {
-                    let venue = self.venue_of_token(&leg.token);
+                    let venue = self.execution_venue_of(&leg.account, &leg.token);
                     // tag 腿的 venue 插件必需凭证必须全部可解析（env 优先、
                     // 持久格次之，与 market::credentials_status 同一谓词）；
                     // untagged 腿不阻断——scope 门对无标签语料同样放行。
@@ -7814,10 +7814,13 @@ impl Core {
                 }
             }
             // (b) scope — the leg's STAMPED account's binding judges its own
-            // leg (the v2 stamp precedes the gates intrinsically: 钉2).
+            // leg (the v2 stamp precedes the gates intrinsically: 钉2). The
+            // venue read is the leg's EXECUTION venue: a mirror token's table
+            // row names the mirrored venue, and a mirror-bound leg account
+            // must be judged against its OWN binding, not the row's.
             let mut refusal: Option<String> = None;
             for leg in &legs {
-                let venue = self.venue_of_token(&leg.token);
+                let venue = self.execution_venue_of(&leg.account, &leg.token);
                 let bound = self
                     .accounts
                     .account(&AccountId::from(leg.account.as_str()))
@@ -10674,19 +10677,39 @@ impl Core {
     }
 
     /// [`Self::pending_unbound`] filtered to ONE venue: the multi-plugin
-    /// executor drain. A pending order's venue is read off the token's
-    /// CURRENT round market (the same lookup the position book's Venue column
-    /// uses); an order whose token belongs to no live market, or to a market
-    /// with no venue label, is UNTAGGED and routes to the requested plugin
-    /// only when it is the host's active plugin — the single-plugin
-    /// behaviour, unchanged. With the lookup empty (engine down, replay
-    /// corpora) every order is untagged, so each executor sees all of them
-    /// exactly as the pre-routing bridge did.
+    /// executor drain. The routing truth is the ORDER'S OWN execution venue
+    /// (`execution_venue_for`: the token's table row venue, overridden by the
+    /// placing account's mirror binding when the venue's shadow batch carries
+    /// the token) — a mirror token's table row always names the mirrored
+    /// venue, and keying the drain on the table alone would hand the mirror
+    /// account's live order to the real venue's executor. An order whose
+    /// execution venue resolves to nothing, or to a market with no venue
+    /// label, is UNTAGGED and routes to the requested plugin only when it is
+    /// the host's active plugin — the single-plugin behaviour, unchanged.
+    /// With the lookup empty (engine down, replay corpora) every order is
+    /// untagged, so each executor sees all of them exactly as the
+    /// pre-routing bridge did.
     pub fn pending_unbound_for_venue(&self, venue: &str) -> Vec<TrackedOrder> {
         self.pending_unbound()
             .into_iter()
-            .filter(|o| self.venue_of_token(&o.token_id) == venue)
+            .filter(|o| self.execution_venue_of(o.account_id.as_str(), &o.token_id) == venue)
             .collect()
+    }
+
+    /// The venue that should execute this order: the placing account's
+    /// binding rides through [`Engine::execution_venue_for`] — for mirror
+    /// tokens (PolySimulator ↔ Polymarket, byte-identical ids) the account's
+    /// OWN venue is the executor, the table row's venue is not. `""` when
+    /// the engine is down or the token belongs to no market: UNTAGGED, never
+    /// "venue empty-string" — callers route untagged work to the active
+    /// plugin instead of guessing. Fallbacks to the plain table lookup when
+    /// the engine is down (same empty answer, kept total for the host's
+    /// drain seam, which cannot go through the engine handle).
+    pub fn execution_venue_of(&self, account: &str, token_id: &str) -> String {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.execution_venue_for(account, token_id))
+            .unwrap_or_default()
     }
 
     /// The venue a token belongs to under the live round list, `""` when the
@@ -11594,7 +11617,7 @@ impl Core {
             self.fast_orders_dirty = true;
         }
         if was_live && let Some(vid) = order.venue_order_id {
-            let venue = self.venue_of_token(&order.token_id);
+            let venue = self.execution_venue_of(order.account_id.as_str(), &order.token_id);
             self.queue_venue_cancel(venue, vid);
         }
         tracing::warn!(
@@ -13244,8 +13267,12 @@ impl Core {
     /// unbound account (`venue == ""`, the zero-config default) trades
     /// anywhere, and an order whose token belongs to no labelled market (the
     /// engine down, a legacy corpus) carries no venue evidence to judge. The
-    /// token→venue lookup is the SAME one the executor drain and the panels'
-    /// Venue column use.
+    /// venue read is the ORDER'S EXECUTION VENUE (`execution_venue_of`):
+    /// mirror tokens (PolySimulator ↔ Polymarket, byte-identical ids) carry
+    /// the mirrored venue's row in the table, and judging on the table alone
+    /// would refuse every order a mirror-bound account legitimately places —
+    /// the same mirror blindness the engine's `scope_admits_token` carried
+    /// before its shadow-batch lookup.
     fn refuse_cross_venue_order(&self, req: &OrderRequest) -> CoreResult<()> {
         let Some(account) = self.accounts.account(&req.account_id) else {
             // Unknown accounts are refused by the ledger lookup right after;
@@ -13256,7 +13283,7 @@ impl Core {
         if bound.is_empty() {
             return Ok(());
         }
-        let token_venue = self.venue_of_token(&req.token_id);
+        let token_venue = self.execution_venue_of(req.account_id.as_str(), &req.token_id);
         if token_venue.is_empty() || token_venue == bound {
             return Ok(());
         }
@@ -13356,7 +13383,11 @@ impl Core {
             // behaviour for every account until B1d wires the real set.
             return Ok(());
         }
-        let token_venue = self.venue_of_token(&req.token_id);
+        // The venue read is the ORDER'S EXECUTION VENUE: a mirror token's
+        // table row names the mirrored venue, and a subscription spelled in
+        // the mirror account's own venue never matches the row's — the same
+        // mirror blindness the venue guard shed above.
+        let token_venue = self.execution_venue_of(req.account_id.as_str(), &req.token_id);
         if token_venue.is_empty() {
             // No labelled market, no family evidence — same stance as the
             // venue guard's untagged-token pass.
@@ -14218,7 +14249,7 @@ impl Core {
         // bridge for a real cancel. Nothing to cancel when the venue never
         // acknowledged the order (no id — the venue never heard of it).
         if was_live && let Some(vid) = order.venue_order_id {
-            let venue = self.venue_of_token(&order.token_id);
+            let venue = self.execution_venue_of(order.account_id.as_str(), &order.token_id);
             self.queue_venue_cancel(venue, vid);
         }
         self.emit_order(id);
@@ -29993,6 +30024,158 @@ mod audit_fix_tests {
         assert!(
             out.is_ok() || !out.unwrap_err().message.contains("cross-venue"),
             "an untagged token is not venue evidence"
+        );
+    }
+
+    /// The mirror account (`venue = "polysimulator"`) trades tokens whose
+    /// table row names `polymarket` (byte-identical ids, PM's batch lands
+    /// first). The venue guard must judge the order's EXECUTION venue — the
+    /// account's own binding via the shadow batch — or it refuses every
+    /// legitimate mirror order.
+    #[test]
+    fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
+        let mut c = venue_bound_core();
+        // The polysimulator batch declares the SAME token pair polymarket
+        // already listed: a same-slot merge, the rows land in the shadow
+        // book (#629's display-only path).
+        let now = 1_000_000;
+        let slot = now / 1000 / 900;
+        let sim = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-polymarket".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-up".into(),
+            down_token_id: "poly-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: "polysimulator".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![sim],
+                now_ms: now + 1,
+            },
+            now + 1,
+        );
+        // A poly-sim account bound to polysimulator: its mirror-token order
+        // must pass the venue guard (the shadow batch carries poly-up).
+        c.accounts_mut()
+            .insert(crate::account::Account {
+                id: crate::account::AccountId::from("sim"),
+                name: "sim".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polysimulator".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("sim"))
+            .unwrap()
+            .set_balance(dec!(10));
+        // The book's binding reaches the engine's scope map on the evaluate
+        // tick (engine_evaluate re-pushes every account's venue) — the same
+        // sync the runtime relies on.
+        c.engine_evaluate(now + 2);
+        let mut order = bound_order("poly-up", "sim-1");
+        order.account_id = crate::account::AccountId::from("sim");
+        c.place(order, 0, 1).unwrap();
+        assert_eq!(c.list_orders().len(), 1, "the mirror order passes");
+
+        // And the execution venue reads the binding, not the table row —
+        // the same fact the executor drain and the cancel queue key on.
+        assert_eq!(
+            c.execution_venue_of("sim", "poly-up"),
+            "polysimulator",
+            "execution follows the placing account's binding through the shadow batch"
+        );
+        assert_eq!(
+            c.execution_venue_of("default", "poly-up"),
+            "polymarket",
+            "the PM-bound account keeps the plain table lookup"
+        );
+
+        // The kalshi token has no polysimulator shadow declaration: the sim
+        // account still cannot reach it.
+        let mut kal = bound_order("kal-up", "sim-2");
+        kal.account_id = crate::account::AccountId::from("sim");
+        let err = c.place(kal, 0, 2).unwrap_err();
+        assert!(err.message.contains("cross-venue order refused"), "{err}");
+    }
+
+    /// The cancel queue tags by EXECUTION venue: a live mirror order
+    /// cancelled by its polysimulator account must land in the
+    /// polysimulator executor's drain, never the real venue's.
+    #[tokio::test]
+    async fn a_mirror_order_cancel_queues_to_the_mirror_executor() {
+        let mut c = venue_bound_core();
+        let now = 1_000_000;
+        let slot = now / 1000 / 900;
+        let sim = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-polymarket".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-up".into(),
+            down_token_id: "poly-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: "polysimulator".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![sim],
+                now_ms: now + 1,
+            },
+            now + 1,
+        );
+        c.accounts_mut()
+            .insert(crate::account::Account {
+                id: crate::account::AccountId::from("sim"),
+                name: "sim".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polysimulator".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("sim"))
+            .unwrap()
+            .set_balance(dec!(10));
+        c.engine_evaluate(now + 2);
+        let mut order = bound_order("poly-up", "sim-1");
+        order.account_id = crate::account::AccountId::from("sim");
+        let (id, _) = c.place(order, 0, 1).unwrap();
+        c.bind_venue(&id, "sim-v1".into(), 2).unwrap();
+        c.cancel(&id, 3).unwrap();
+        assert_eq!(
+            c.take_pending_venue_cancels_for_venue("polysimulator", false),
+            vec!["sim-v1".to_string()],
+            "the mirror order's cancel rides the polysimulator drain"
+        );
+        assert!(
+            c.take_pending_venue_cancels_for_venue("polymarket", false)
+                .is_empty()
         );
     }
 
