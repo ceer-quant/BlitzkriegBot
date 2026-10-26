@@ -4550,6 +4550,25 @@ impl Core {
         self.plugin_modes = modes;
     }
 
+    /// Feed every active plugin's static mirror declaration into the engine
+    /// (the parasitic shape: PolySimulator declares no rounds of its own, so
+    /// its mirror admission/routing evidence must come from this declaration,
+    /// not from a shadow batch its dead discovery would have produced). The
+    /// boot calls this once next to `set_plugin_modes` — the declaration is
+    /// the plugin's identity, it never changes at runtime.
+    pub fn apply_plugin_mirrors(
+        &mut self,
+        plugins: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
+    ) {
+        for p in plugins {
+            if let Some(source) = p.mirror_of()
+                && let Some(e) = self.engine.as_mut()
+            {
+                e.set_venue_mirror(p.name(), source);
+            }
+        }
+    }
+
     /// Test-only: record a declaration for a strategy the loader would have
     /// registered (the test adapters carry no C ABI declaration of their
     /// own). Same map the real load path fills.
@@ -8723,6 +8742,34 @@ impl Core {
         // 读数；is_live_round_row 同一谓词，不复活旧窗口。venue 直接填
         // 行自身 —— server 端 handler 对带 venue 字段的行不再按 token
         // 反查（反查会首中被镜像所，标签就错了）。仅显示面。
+        // 静态镜像臂（寄生形态）：镜像插件自己不再申报任何轮次 ——
+        // observed_clock_keys() 里永远没有它的钟行（钟由 RoundMarkets 开口），
+        // shadow 批也不会存在。直接按镜像声明遍历：镜像源的表行就是它的行，
+        // token 逐字节同，深度读数同源；is_live_round_row 同一谓词，不复活
+        // 旧窗口。行 venue 填镜像所自己（handler 对带 venue 字段的行不反查）。
+        for (mirror, source) in engine.mirror_pairs() {
+            if rows.iter().any(|r| r.venue == mirror) {
+                continue;
+            }
+            for m in scanner
+                .round_state(now)
+                .markets
+                .iter()
+                .filter(|m| m.venue == source && scanner.is_live_round_row(m, now))
+            {
+                if !seen.insert((mirror.clone(), m.asset.clone())) {
+                    continue;
+                }
+                rows.push(AssetBooksView {
+                    venue: mirror.clone(),
+                    asset: m.asset.clone(),
+                    up_token_id: m.up_token_id.clone(),
+                    down_token_id: m.down_token_id.clone(),
+                    up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
+                    down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
+                });
+            }
+        }
         for (venue, duration) in scanner.observed_clock_keys() {
             if rows.iter().any(|r| r.venue == venue) {
                 continue;
@@ -10103,14 +10150,16 @@ impl Core {
                             // E28 (§9.2): the position belongs to the account
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
-                            // #427: the venue is a field read off the market the
-                            // token belongs to — the panels' Venue column, never
-                            // a decision input.
-                            venue: self
-                                .engine
-                                .as_ref()
-                                .and_then(|e| e.venue_of(&d.token_id))
-                                .unwrap_or_default(),
+                            // #427: the panels' Venue column, never a decision
+                            // input. The stamp is the ORDER'S EXECUTION venue
+                            // (the same fact list_orders tags and the executor
+                            // drain routes by) — for a mirror token the market
+                            // table row names the mirrored venue (PM registers
+                            // first), and stamping the table row here left the
+                            // position/trade rows carrying a venue tag the
+                            // account-bound venue filter then hid: the history
+                            // badge counted a trade no row ever showed.
+                            venue: self.execution_venue_of(d.account_id.as_str(), &d.token_id),
                             // The condition's other token, stamped from the
                             // SAME market lookup: the dry settlement ladder's
                             // counter-evidence key. Empty when no market is
@@ -30183,8 +30232,184 @@ mod audit_fix_tests {
             "the PM-bound account keeps the plain table lookup"
         );
 
+        // The position (and the trade row it closes into) stamps the same
+        // EXECUTION venue: a mirror fill opened under a venue-bound account
+        // must not inherit the market table row's venue (polymarket), or the
+        // panel's account-bound venue filter hides the row the badge counted.
+        let sim_id = c.ome().all()[0].order_id.clone();
+        c.ingest_fill(
+            crate::model::Fill {
+                order_id: sim_id,
+                trade_id: Some("sim-t1".into()),
+                token_id: "poly-up".into(),
+                side: Side::Buy,
+                price: dec!(0.6),
+                size: dec!(5),
+                status: FillStatus::Confirmed,
+                ts_ms: now + 3,
+                tx_hash: None,
+                maker: Some(false),
+                account_id: crate::account::AccountId::from("sim"),
+            },
+            now + 4,
+        )
+        .unwrap();
+        let opened = c.positions().open_positions();
+        assert_eq!(opened.len(), 1, "the mirror fill opened the position");
+        assert_eq!(
+            opened[0].venue, "polysimulator",
+            "the position stamps the execution venue, not the table row"
+        );
+
         // The kalshi token has no polysimulator shadow declaration: the sim
         // account still cannot reach it.
+        let mut kal = bound_order("kal-up", "sim-2");
+        kal.account_id = crate::account::AccountId::from("sim");
+        let err = c.place(kal, 0, 2).unwrap_err();
+        assert!(err.message.contains("cross-venue order refused"), "{err}");
+    }
+
+    /// The boot assembly seam itself: `apply_plugin_mirrors` must read each
+    /// active plugin's own `mirror_of` declaration into the engine (the
+    /// parasitic shape's only constructive evidence — no rounds, no shadow
+    /// batch). A plugin WITHOUT a declaration must not touch the engine's
+    /// mirror map.
+    #[test]
+    fn apply_plugin_mirrors_pushes_each_declaring_plugin_into_the_engine() {
+        struct MirrorDeclaringPlugin {
+            name: String,
+            source: String,
+        }
+        impl blitzkrieg_market_api::MarketPlugin for MirrorDeclaringPlugin {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+                blitzkrieg_market_api::MarketType::Prediction
+            }
+            fn mirror_of(&self) -> Option<&str> {
+                Some(&self.source)
+            }
+        }
+        struct PlainPlugin {
+            name: String,
+        }
+        impl blitzkrieg_market_api::MarketPlugin for PlainPlugin {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+                blitzkrieg_market_api::MarketType::Prediction
+            }
+        }
+
+        let mut c = venue_bound_core();
+        c.apply_plugin_mirrors(&[
+            std::sync::Arc::new(MirrorDeclaringPlugin {
+                name: "polysimulator".into(),
+                source: "polymarket".into(),
+            }) as std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>,
+            std::sync::Arc::new(PlainPlugin {
+                name: "kalshi".into(),
+            }) as std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>,
+        ]);
+        let e: &mut crate::engine::Engine = c.engine.as_mut().expect("engine");
+        assert_eq!(
+            e.mirror_source_of("polysimulator"),
+            Some("polymarket"),
+            "the declaring plugin's mirror lands in the engine"
+        );
+        assert_eq!(
+            e.mirror_source_of("kalshi"),
+            None,
+            "a non-declaring plugin leaves no mirror entry"
+        );
+        assert_eq!(
+            e.mirror_source_of("polymarket"),
+            None,
+            "the source venue is not itself a mirror"
+        );
+
+        // And the pushed declaration carries the SCOPE teeth: a scope bound
+        // to the mirror venue admits the source's row (the same verdict boot
+        // relies on). The table row is polymarket-tagged (venue_bound_core's
+        // poly-up/poly-down); the bound polysimulator scope must get through
+        // on the declaration alone.
+        e.set_account_venue("paper", "polysimulator");
+        assert!(
+            e.scope_admits_token("paper", "poly-up"),
+            "the applied declaration admits the mirrored row through the bound scope"
+        );
+        assert!(
+            e.execution_venue_for("paper", "poly-up") == Some("polysimulator".into()),
+            "routing follows the binding under the applied declaration"
+        );
+    }
+
+    /// The venue guard under the PARASITIC mirror shape (static declaration
+    /// only — the mirror venue declares no rounds, no shadow batch exists):
+    /// the guard reads `execution_venue_of`, so a polysimulator-bound account
+    /// places mirror-token orders whose table row names polymarket (its own
+    /// binding rides through the static declaration), while another venue's
+    /// token is still refused. The DEFAULT account's execution venue for the
+    /// same token stays the table row (polymarket) — the two readings are the
+    /// per-account semantics the guard must never collapse.
+    #[test]
+    fn a_mirror_bound_account_places_orders_under_the_static_mirror_declaration() {
+        let mut c = venue_bound_core();
+        // The CONSTRUCTIVE shape: the polysimulator row never arrives — only
+        // the boot-assembled static declaration exists (apply_plugin_mirrors
+        // in production).
+        if let Some(e) = c.engine.as_mut() {
+            e.set_venue_mirror("polysimulator", "polymarket");
+        }
+        c.accounts_mut()
+            .insert(crate::account::Account {
+                id: crate::account::AccountId::from("sim"),
+                name: "sim".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polysimulator".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("sim"))
+            .unwrap()
+            .set_balance(dec!(10));
+        // The book's binding reaches the engine's scope map on the evaluate
+        // tick (engine_evaluate re-pushes every account's venue) — the same
+        // sync the runtime relies on.
+        c.engine_evaluate(1_000_001);
+        let mut order = bound_order("poly-up", "sim-1");
+        order.account_id = crate::account::AccountId::from("sim");
+        c.place(order, 0, 1).unwrap();
+        assert_eq!(
+            c.list_orders().len(),
+            1,
+            "the mirror-bound account's order passes the venue guard on the static declaration"
+        );
+
+        // The guard's venue read stays per-account: the sim account executes
+        // on its binding, the PM-bound default on the plain table lookup —
+        // neither collapses onto the other.
+        assert_eq!(
+            c.execution_venue_of("sim", "poly-up"),
+            "polysimulator",
+            "the mirror account's execution venue is its binding (declaration-routed)"
+        );
+        assert_eq!(
+            c.execution_venue_of("default", "poly-up"),
+            "polymarket",
+            "the PM-bound account keeps the plain table lookup"
+        );
+
+        // And the guard keeps its teeth: a token of another venue is still
+        // refused for the mirror account.
         let mut kal = bound_order("kal-up", "sim-2");
         kal.account_id = crate::account::AccountId::from("sim");
         let err = c.place(kal, 0, 2).unwrap_err();

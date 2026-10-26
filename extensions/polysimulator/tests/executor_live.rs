@@ -32,6 +32,10 @@
 //! 5. **unknown token → rejection, never a guessed placement** — a token
 //!    the registry does not answer is refused with InvalidParams and no
 //!    POST is sent.
+//! 6. **capability declaration is the transport contract** (§7.2) — the
+//!    plugin declares exactly `SIMULATED` and nothing else: the parasitic
+//!    form carries no data feed of its own, so a `LEVEL2_SNAPSHOT` bit would
+//!    be a lie about the seam this plugin actually exercises.
 
 use blitzkrieg_market_api::{
     BookUpdate, CoreError, CoreErrorCode, FillPolicy, MarketFill, MarketHost, MarketResolution,
@@ -408,9 +412,9 @@ fn client_for(base_url: &str) -> Arc<PolySimRest> {
     Arc::new(PolySimRest::new(config, Some(test_credentials())).expect("client builds with creds"))
 }
 
-/// The venue registry answer for the token our pending orders carry (the
-/// feed's book endpoint shape; the native order form itself needs no
-/// resolver — the venue derives market/outcome from the token id).
+/// The venue registry answer the mock serves for token lookups; the native
+/// order form itself needs no resolver — the venue derives market/outcome
+/// from the token id.
 const RESOLVE_BODY: &str = r#"{"condition_id":"0xcond-1","outcome":"Up","primary_token_id":"71321","secondary_token_id":"71322"}"#;
 
 fn pending_order(core_id: &str, token_id: &str, price: &str, size: &str) -> PendingOrder {
@@ -907,5 +911,39 @@ async fn a_filled_row_for_an_unknown_order_is_never_booked() {
             .iter()
             .all(|s| s.trades.is_empty()),
         "no synthetic trade may enter the reconcile snapshot for an unknown order"
+    );
+}
+
+// ── 8. capability declaration = the transport contract (§7.2) ───────────
+
+/// The parasitic plugin owns exactly one channel: the executor's REST
+/// polling. The declaration must say so — exactly `SIMULATED`, no
+/// `LEVEL2_SNAPSHOT` (the data feed that polled book snapshots is gone, and
+/// a declared bit that names a transport this plugin no longer exercises is
+/// a lie about the seam; §7.2: declare what THIS extension uses, not what
+/// the venue advertises). The `simulated` bit is also the only thing standing
+/// between the UI and presenting a simulator as a live venue, with no
+/// venue-name branch anywhere to catch it.
+#[test]
+fn the_plugin_declares_exactly_simulated() {
+    let plugin = blitzkrieg_polysimulator::PolySimulatorPlugin::new();
+    let modes = blitzkrieg_market_api::MarketPlugin::declare_modes(&plugin);
+    assert_eq!(modes.len(), 1, "one mode: the binary outcome wheel");
+    let caps = modes[0].capabilities;
+    assert_eq!(
+        caps,
+        blitzkrieg_market_api::MarketCapabilities::SIMULATED,
+        "the declaration is the transport contract: executor-only means \
+         exactly the simulated bit, no feed bits"
+    );
+    // And the declared names must include the badge key the UI renders.
+    let names: Vec<&str> = blitzkrieg_market_api::modes::CAPABILITY_NAMES
+        .iter()
+        .filter(|(bit, _)| caps.0 & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    assert!(
+        names.contains(&"simulated"),
+        "capability names must render 'simulated' for the declared bit; got {names:?}"
     );
 }

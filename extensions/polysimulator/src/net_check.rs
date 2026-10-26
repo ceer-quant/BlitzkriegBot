@@ -14,7 +14,7 @@
 //!
 //! Paths:
 //!   * `venue-rest` — `POLYSIM_API_URL` (default the production REST root):
-//!     book polling, discovery, and in live mode orders + balance.
+//!     the executor's REST surface, and in live mode orders + balance.
 //!   * `auth-reachability` — deliberately NOT probed: a net check that fails
 //!     whenever the API key is missing would be indistinguishable from one
 //!     failing because the network is down.

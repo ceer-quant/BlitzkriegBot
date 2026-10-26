@@ -95,8 +95,7 @@ pub async fn spawn_if_configured(
 /// Test-only entry for the executor integration suite: drive the REAL
 /// production loop against a mock server with an explicit client (env-var
 /// plumbing stays out of the test's control, and no credential is fixed in
-/// source). Not part of the public surface, exactly like the feed's
-/// `feed_tests_only_spawn`.
+/// source). Not part of the public surface.
 #[doc(hidden)]
 pub fn executor_tests_only_spawn(host: Arc<dyn MarketHost>, client: Arc<PolySimRest>) {
     tokio::spawn(executor_loop(host, client));
@@ -288,7 +287,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         //    list does not name or has not resolved yet answers nothing — the
         //    core re-asks on its own cadence, and payouts are never invented.
         //    Full page on purpose: settlement needs the whole list as its
-        //    bottom line (traffic diet lives in discovery, #637).
+        //    bottom line.
         let queries = host.take_settlement_queries().await;
         if queries.is_empty() {
             continue;
@@ -571,7 +570,7 @@ async fn sweep(
             let ts_ms = o
                 .filled_at
                 .as_deref()
-                .and_then(crate::discovery::iso_to_ms)
+                .and_then(crate::types::iso_to_ms)
                 .unwrap_or_else(now_ms);
             matched.push(VenueTradeInfo {
                 venue_order_id: vid,

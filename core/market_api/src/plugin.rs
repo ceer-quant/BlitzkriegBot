@@ -254,6 +254,18 @@ pub trait MarketPlugin: Send + Sync {
         }
     }
 
+    /// The venue this plugin MIRRORS, if it does: a mirror venue trades its
+    /// source's tokens (byte-identical ids) through its own executor while
+    /// the source's feed owns the scanner table rows. The engine reads this
+    /// as CONSTRUCTIVE admission/routing evidence (`scope_admits_token` /
+    /// `execution_venue_for`) — it must be a fact of the venue's own
+    /// identity (PolySimulator IS a Polymarket simulator), never a runtime
+    /// observation, so it survives the mirror plugin declaring no rounds of
+    /// its own. `None` = not a mirror.
+    fn mirror_of(&self) -> Option<&str> {
+        None
+    }
+
     /// The market modes this plugin declares (§7.3). Empty = undeclared: the
     /// handshake then treats the plugin as ONE implicit market_type-only mode
     /// (its `market_type()`, no structure, no capabilities — the server

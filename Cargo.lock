@@ -1261,8 +1261,6 @@ dependencies = [
 name = "blitzkrieg-polysimulator"
 version = "0.4.1"
 dependencies = [
- "anyhow",
- "async-trait",
  "blitzkrieg-market-api",
  "mime",
  "reqwest",
@@ -1271,7 +1269,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tracing",
  "url",
 ]
 

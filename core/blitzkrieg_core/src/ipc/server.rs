@@ -474,6 +474,7 @@ impl DataPlaneRuntime {
 /// live egress for a late-bound venue is the next batch's contract, and the
 /// boot-derived set already covers every venue bound BEFORE the process
 /// started.
+#[allow(clippy::too_many_arguments)]
 async fn enable_venue_at_runtime(
     plugin: &dyn blitzkrieg_market_api::MarketPlugin,
     host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
@@ -482,8 +483,24 @@ async fn enable_venue_at_runtime(
     discovery_assets: &[String],
     discovery_round_duration_sec: i64,
     families: &[(String, i64)],
+    core: &Arc<AsyncMutex<Core>>,
 ) {
     let name = plugin.name();
+    // The mirror declaration rides the runtime enablement too: a venue bound
+    // AFTER boot (account.venue.set / account.create's 绑定即启用 half) must
+    // land its plugin's mirror fact in the engine the same way boot's
+    // `apply_plugin_mirrors` lands the boot actives' — otherwise a
+    // runtime-bound PolySimulator has NO admission/routing evidence (the
+    // parasitic shape declares no rounds, so no shadow batch can ever back
+    // it) and its account trades nothing until the next boot. Idempotent:
+    // set_venue_mirror is a map write, re-pushing the same declaration is a
+    // no-op, and the declaration is the plugin's identity (never changes).
+    if let Some(source) = plugin.mirror_of()
+        && let Some(c) = core.lock().await.engine.as_mut()
+    {
+        c.set_venue_mirror(name, source);
+        eprintln!("blitzkrieg-core: {name} mirrors {source} (runtime enablement)");
+    }
     if feed_ws_enabled {
         match plugin.data_feed() {
             Some(feed) => {
@@ -676,6 +693,10 @@ pub async fn run(
             .map(|p| crate::market::compat::PluginModes::for_plugin(p.as_ref()))
             .collect(),
     );
+    // The parasitic mirror (PolySimulator⇒Polymarket) rides the plugins' own
+    // declarations into the engine: admission and routing evidence that does
+    // not depend on the mirror plugin ever declaring a round.
+    core.apply_plugin_mirrors(&actives);
 
     if config.engine_enabled {
         // A refusal here (the #265 startup self-check: an explicit
@@ -3641,6 +3662,7 @@ async fn handle_line(
                                 &data_plane.discovery_assets,
                                 data_plane.discovery_round_duration_sec,
                                 &fams,
+                                &core,
                             )
                             .await;
                             for (_, d) in &fams {
@@ -3848,6 +3870,7 @@ async fn handle_line(
                                             .filter(|(fv, _)| fv == v)
                                             .cloned()
                                             .collect::<Vec<_>>(),
+                                        &core,
                                     )
                                     .await;
                                     for (_, d) in fams.iter().filter(|(fv, _)| fv == v) {
@@ -4097,6 +4120,7 @@ async fn handle_line(
                                 &data_plane.discovery_assets,
                                 data_plane.discovery_round_duration_sec,
                                 &fams,
+                                &core,
                             )
                             .await;
                             for (_, d) in &fams {
@@ -5082,6 +5106,26 @@ mod tests {
         }
         fn market_type(&self) -> blitzkrieg_market_api::MarketType {
             blitzkrieg_market_api::MarketType::Prediction
+        }
+    }
+
+    /// [`VenueStubPlugin`] with a STATIC mirror declaration (`mirror_of`) —
+    /// the runtime-enablement mirror tests' subject: the declaration is the
+    /// plugin's identity, pushed into the engine wherever the venue is
+    /// enabled (boot or runtime bind).
+    struct VenueMirrorStubPlugin {
+        name: String,
+        mirror_of: String,
+    }
+    impl blitzkrieg_market_api::MarketPlugin for VenueMirrorStubPlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+            blitzkrieg_market_api::MarketType::Prediction
+        }
+        fn mirror_of(&self) -> Option<&str> {
+            Some(&self.mirror_of)
         }
     }
 
@@ -7745,6 +7789,166 @@ mod tests {
             reply["result"]["runtimeEnabled"],
             serde_json::json!(false),
             "an already-mounted venue must not be re-mounted: {reply}"
+        );
+    }
+
+    /// The runtime half of the mirror push (绑定即启用 at runtime): a venue
+    /// bound AFTER boot whose plugin declares `mirror_of` must land that
+    /// declaration in the engine at the bind, not just at boot — otherwise a
+    /// runtime-bound PolySimulator (parasitic: no rounds, no shadow batch)
+    /// has zero admission evidence and its account trades nothing until the
+    /// next boot. Pinned through the SAME observable the engine test pins:
+    /// `scope_admits_token` / `execution_venue_for` after the bind, with
+    /// only the SOURCE venue's round market in the scanner.
+    #[tokio::test]
+    async fn a_runtime_bound_mirror_venue_pushes_its_declaration_into_the_engine() {
+        use crate::engine::DataEvent;
+        use rust_decimal_macros::dec;
+
+        let dir = std::env::temp_dir().join(format!("bk-venue-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let (core, registry, peer) = {
+            let now = now_ms();
+            let book = crate::account::AccountLedgers::new(
+                vec![crate::account::Account {
+                    id: AccountId::from("paper"),
+                    name: "paper".into(),
+                    market_type: blitzkrieg_market_api::MarketType::Prediction,
+                    status: AccountStatus::Active,
+                    credential_keys: crate::account::CredentialKeys::default(),
+                    venue: String::new(),
+                    trading_enabled: true,
+                    strategies: Vec::new(),
+                    rounds: Vec::new(),
+                    updated_at_ms: now,
+                }],
+                AccountId::from("paper"),
+            );
+            let cfg = CoreConfig {
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                engine_enabled: true,
+                round_duration_sec: 900,
+                trade_log_path: None,
+                order_log_path: None,
+                position_log_path: None,
+                ..Default::default()
+            };
+            let mut c = Core::with_account_book(cfg, book);
+            c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+            let registry = crate::market::registry::MarketPluginRegistry::new();
+            // The mirror venue registers with a mirror_of declaration; the
+            // SOURCE (polymarket) is never registered — the mount must work
+            // off the MIRROR plugin's own identity, exactly like boot's
+            // apply_plugin_mirrors reads each active plugin's declaration.
+            registry.register(Box::new(VenueMirrorStubPlugin {
+                name: "simvenue".to_string(),
+                mirror_of: "polymarket".to_string(),
+            }));
+            (
+                Arc::new(AsyncMutex::new(c)),
+                registry,
+                PeerAuth::SameUid { uid: own_uid() },
+            )
+        };
+        // The source's round market is ALREADY in the scanner (PM registered
+        // first, the parasitic shape's table) — nothing tags the mirror
+        // venue, and no shadow batch exists for it.
+        let now = now_ms();
+        let round_sec = 900i64;
+        let slot = now / 1000 / round_sec;
+        let trading_end = (slot + 2) * round_sec * 1000;
+        core.lock().await.engine_on_data(
+            DataEvent::RoundMarkets {
+                markets: vec![crate::model::CryptoMarket {
+                    asset: "BTC".to_string(),
+                    condition_id: format!("cond-{trading_end}"),
+                    question_id: format!("q-{trading_end}"),
+                    up_token_id: "mirror-up".to_string(),
+                    down_token_id: "mirror-down".to_string(),
+                    up_price: dec!(0.5),
+                    down_price: dec!(0.5),
+                    expires_at_ms: trading_end,
+                    round_slot: trading_end / 1000 / round_sec,
+                    round_duration_sec: round_sec,
+                    archive_verdict: false,
+                    venue: "polymarket".to_string(),
+                    neg_risk: false,
+                    question: "BTC up or down".to_string(),
+                }],
+                now_ms: now,
+            },
+            now,
+        );
+        // PRE-condition: before the bind, a polysimulator-bound scope refuses
+        // the mirrored row — no evidence yet.
+        {
+            let mut c = core.lock().await;
+            let engine = c.engine.as_mut().expect("engine");
+            engine.set_account_venue("paper", "simvenue");
+            assert!(
+                !engine.scope_admits_token("paper", "mirror-up"),
+                "pre-condition: without the runtime mirror push the bound scope refuses"
+            );
+            engine.set_account_venue("paper", "");
+        }
+
+        let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+            Arc::new(crate::market::host::CoreHost::new(core.clone()));
+        // The mount flags are ON (the arm's gate reads them) — the stub
+        // declares no feed/discovery, so the mount arms are harmless no-ops
+        // and only the mirror push has an observable effect.
+        let data_plane = DataPlaneRuntime {
+            feed_ws_enabled: true,
+            discovery_enabled: true,
+            discovery_assets: Vec::new(),
+            discovery_round_duration_sec: 900,
+            discovery_mounted: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            soft_unloaded_polling_instances: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
+        };
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            r#"{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{"accountId":"paper","venue":"simvenue","reason":"runtime mirror"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(reply.get("error").is_none(), "the bind must land: {reply}");
+
+        // The book's binding reaches the engine's scope map on the evaluate
+        // tick (engine_evaluate re-pushes every account's venue — the same
+        // sync the runtime relies on); run one tick so the assertions below
+        // judge a BOUND scope, not the unbound short-circuit.
+        {
+            let mut c = core.lock().await;
+            c.engine_evaluate(now);
+        }
+
+        // The declaration landed: the mirror-bound scope now ADMITS the
+        // source's row and routes it to its OWN venue — the constructive
+        // evidence, without any shadow batch.
+        let c = core.lock().await;
+        let engine = c.engine.as_ref().expect("engine");
+        assert!(
+            engine.scope_admits_token("paper", "mirror-up"),
+            "the runtime-bound mirror venue's declaration admits the mirrored row: {:?}",
+            engine.scanner().round_state(now).markets
+        );
+        assert!(
+            engine.execution_venue_for("paper", "mirror-up") == Some("simvenue".into()),
+            "execution follows the runtime binding under the pushed declaration"
         );
     }
 
@@ -11736,6 +11940,81 @@ mod tests {
             poly_rows[0]["up"]["bestBid"], pm_rows[0]["up"]["bestBid"],
             "the mirror row reads the same shared book — real depth, both sides"
         );
+    }
+
+    /// The PARASITIC shape (#637 follow-up): the mirror plugin declares no
+    /// rounds at all, so its shadow batch never exists — the display row is
+    /// synthesized from the STATIC mirror declaration instead (the source's
+    /// own table rows, retagged with the mirror venue's name).
+    #[tokio::test]
+    async fn a_static_mirror_display_row_survives_without_any_shadow_batch() {
+        use crate::model::CryptoMarket;
+        use rust_decimal_macros::dec;
+
+        let (core, registry, peer) = hot_reload_fixture().await;
+        let round_sec = 900i64;
+        let now = now_ms();
+        let slot = now / 1000 / round_sec;
+        let trading_end = (slot + 2) * round_sec * 1000;
+        let mk = |venue: &str| CryptoMarket {
+            asset: "BTC".to_string(),
+            condition_id: format!("cond-{trading_end}"),
+            question_id: format!("q-{trading_end}"),
+            up_token_id: "mirror-up".to_string(),
+            down_token_id: "mirror-down".to_string(),
+            up_price: dec!(0.5),
+            down_price: dec!(0.5),
+            expires_at_ms: trading_end,
+            round_slot: trading_end / 1000 / round_sec,
+            round_duration_sec: round_sec,
+            archive_verdict: false,
+            venue: venue.to_string(),
+            neg_risk: false,
+            question: "BTC up or down".to_string(),
+        };
+        {
+            let mut c = core.lock().await;
+            // Only the SOURCE declares: the mirror plugin never does (parasitic).
+            c.engine_on_data(
+                crate::engine::DataEvent::RoundMarkets {
+                    markets: vec![mk("polymarket")],
+                    now_ms: now,
+                },
+                now,
+            );
+            // The static declaration replaces the shadow batch entirely.
+            if let Some(e) = c.engine.as_mut() {
+                e.set_venue_mirror("polysimulator", "polymarket");
+            }
+            c.engine_on_data(
+                crate::engine::DataEvent::Book {
+                    token_id: "mirror-up".to_string(),
+                    bids: vec![(dec!(0.46), dec!(100))],
+                    asks: vec![(dec!(0.54), dec!(200))],
+                    now_ms: now,
+                },
+                now,
+            );
+        }
+
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"engine.books","params":{}}"#.to_string(),
+        )
+        .await;
+        let rows = reply["result"].as_array().expect("books array");
+        let poly_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r["venue"] == "polysimulator")
+            .collect();
+        assert_eq!(
+            poly_rows.len(),
+            1,
+            "the static mirror declaration synthesizes the display row without a shadow batch: {rows:?}"
+        );
+        assert_eq!(poly_rows[0]["upTokenId"], "mirror-up");
     }
 
     // ── E2（多族漏网 ③④）：读面过滤按行自身族钟 ─────────────────────────
