@@ -1,4 +1,4 @@
-//! PolySimulator market plugin (#454).
+//! PolySimulator market plugin (#454) — parasitic form.
 //!
 //! Bundles the market-plugin components behind the generic `MarketPlugin`
 //! contract, with the network probe wired to [`crate::net_check`]. Everything
@@ -12,23 +12,24 @@
 //! the plugin panel included — can label it honestly without any venue-named
 //! special case (venue is data, #427).
 //!
-//! Components: the orderbook feed, round discovery and the order executor,
-//! all REST-polling. The executor is inert without credentials, exactly like
-//! the sibling plugins: [`crate::executor::spawn_if_configured`] returns
+//! Parasitic shape: this plugin registers NO data feed and NO round
+//! discovery of its own. Market data and rounds come from the polymarket
+//! plugin's feed and discovery (this venue mirrors Polymarket's token ids
+//! byte for byte — `mirror_of = Some("polymarket")` is the engine's
+//! admission/routing evidence); what remains here is the order executor plus
+//! the settlement sweep. The executor is inert without credentials, exactly
+//! like the sibling plugins: [`crate::executor::spawn_if_configured`] returns
 //! `Ok(None)` when the environment carries no `POLYSIM_API_KEY`, so dry-run
 //! and read-only builds stay honest.
 //!
 //! Capabilities declared from what THIS extension exercises, not what the
-//! venue advertises (§7.2): the feed polls REST snapshots (so
-//! `LEVEL2_SNAPSHOT`, not `WEBSOCKET_FEED` — the bit describes the delivery
-//! contract at the seam), discovery is round-list polling, and the venue is
-//! simulated (`SIMULATED`).
+//! venue advertises (§7.2: the declaration IS the transport contract at the
+//! seam): the only remaining channel is the executor's REST polling, so the
+//! plugin declares `SIMULATED` and nothing else.
 
-use crate::rest::{Credentials, PolySimRest, RestConfig};
 use blitzkrieg_market_api::{
-    BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
-    ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
-    MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,
+    BoxFuture, CoreResult, ExecutorConfig, MarketCapabilities, MarketHost, MarketMode,
+    MarketPlugin, MarketStructure, MarketType, NetCheckReport, OrderExecutor,
 };
 use std::sync::Arc;
 
@@ -46,27 +47,6 @@ impl Default for PolySimulatorPlugin {
     }
 }
 
-/// Build the shared REST client for the plugin's components. Unauthenticated
-/// (market data works without credentials); the executor builds its own
-/// credentialed client.
-pub fn rest_client() -> Result<Arc<PolySimRest>, CoreError> {
-    let mut config = RestConfig::default();
-    // The feed and discovery poll from a long-lived task; respect an operator's
-    // explicit no-proxy wish if the client environment asks for it (same env
-    // contract as the trading client).
-    if std::env::var("POLYSIM_NO_PROXY").is_ok_and(|v| v == "1" || v == "true") {
-        config.no_proxy = true;
-    }
-    PolySimRest::new(config, None::<Credentials>)
-        .map(Arc::new)
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::VenueError,
-                format!("polysimulator client: {e}"),
-            )
-        })
-}
-
 impl MarketPlugin for PolySimulatorPlugin {
     fn name(&self) -> &str {
         "polysimulator"
@@ -74,27 +54,30 @@ impl MarketPlugin for PolySimulatorPlugin {
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
     }
-    /// One mode: prediction on the binary outcome wheel, REST-poll snapshots,
-    /// on a SIMULATED venue. The `simulated` bit is what lets any surface
-    /// label this plugin "模拟盘" without a venue-named branch.
+    /// One mode: prediction on the binary outcome wheel, on a SIMULATED
+    /// venue. The `simulated` bit is what lets any surface label this plugin
+    /// "模拟盘" without a venue-named branch.
     fn declare_modes(&self) -> Vec<MarketMode> {
         vec![MarketMode {
             market_type: MarketType::Prediction,
             structure: Some(MarketStructure::BinaryOutcomeWheel),
-            capabilities: MarketCapabilities::LEVEL2_SNAPSHOT | MarketCapabilities::SIMULATED,
+            capabilities: MarketCapabilities::SIMULATED,
         }]
     }
-    /// Undeclared on purpose: the simulator replays the configured round
-    /// length whatever it is (see its discovery), so no duration is wrong
-    /// to offer. `None` = the panel filters nothing.
+    /// Undeclared on purpose: this plugin feeds no rounds of its own (the
+    /// polymarket plugin's discovery owns the table rows), so no duration is
+    /// wrong to offer. `None` = the panel filters nothing.
     fn supported_round_secs(&self) -> Option<Vec<i64>> {
         None
     }
-    fn data_feed(&self) -> Option<&dyn DataFeed> {
-        Some(&POLYSIM_DATA_FEED)
-    }
-    fn discovery(&self) -> Option<&dyn MarketDiscovery> {
-        Some(&POLYSIM_DISCOVERY)
+    /// Constructive fact of this venue's identity: PolySimulator IS a
+    /// Polymarket simulator — its token ids are Polymarket's byte for byte.
+    /// The engine reads this as the mirror admission/routing evidence that
+    /// does not depend on this plugin declaring any rounds of its own (the
+    /// parasitic shape: Polymarket's feed owns the table rows, this plugin
+    /// trades through them).
+    fn mirror_of(&self) -> Option<&str> {
+        Some("polymarket")
     }
     fn executor(&self) -> Option<&dyn OrderExecutor> {
         Some(&POLYSIM_EXECUTOR)
@@ -129,74 +112,3 @@ impl OrderExecutor for PolySimExecutor {
         })
     }
 }
-
-// ── Data feed ────────────────────────────────────────────────────────────────
-
-struct PolySimDataFeed;
-
-static POLYSIM_DATA_FEED: PolySimDataFeed = PolySimDataFeed;
-
-impl DataFeed for PolySimDataFeed {
-    fn name(&self) -> &str {
-        "polysimulator-orderbook"
-    }
-
-    fn start<'a>(
-        &'a self,
-        host: Arc<dyn MarketHost>,
-        _config: DataFeedConfig,
-        initial_tokens: Vec<TokenId>,
-    ) -> BoxFuture<'a, CoreResult<()>> {
-        Box::pin(async move {
-            let client = rest_client()?;
-            // Register the handle so later `subscribe_tokens` calls (round
-            // rollovers from discovery) reach the poll loop.
-            let handle = crate::feed::spawn_feed_with(host.clone(), client, initial_tokens, 0);
-            host.install_subscription_control("polysimulator", Arc::new(handle))
-                .await;
-            Ok(())
-        })
-    }
-}
-
-// ── Discovery ────────────────────────────────────────────────────────────────
-
-struct PolySimDiscovery;
-
-static POLYSIM_DISCOVERY: PolySimDiscovery = PolySimDiscovery;
-
-impl MarketDiscovery for PolySimDiscovery {
-    fn name(&self) -> &str {
-        "polysimulator-events"
-    }
-
-    fn start<'a>(
-        &'a self,
-        host: Arc<dyn MarketHost>,
-        config: DiscoveryConfig,
-    ) -> BoxFuture<'a, CoreResult<()>> {
-        Box::pin(async move {
-            let client = rest_client()?;
-            crate::discovery::spawn(
-                host,
-                client,
-                config.assets,
-                config.round_duration_sec,
-                config.poll_sec,
-            );
-            Ok(())
-        })
-    }
-}
-
-/// Sanity: the plugin's poll cadence constants stay in a sane band.
-const _: () = {
-    assert!(
-        crate::feed::MIN_POLL_MS < crate::feed::DEFAULT_POLL_MS,
-        "the floor must not override the default"
-    );
-    assert!(
-        crate::feed::MAX_POLL_MS > crate::feed::DEFAULT_POLL_MS,
-        "the ceiling must not override the default"
-    );
-};

@@ -38,7 +38,7 @@ export function onboardSteps(input: OnboardInput): OnboardStep[] {
     {
       id: 'market', index: 0, done: marketDone, target: 'plugins', cta: '去插件页',
       title: '① 绑定账户交易所',
-      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 等；PolySimulator 是第三方模拟盘，只用于演练）。绑定即启用：在右上角账户切换器里给账户绑定交易所，对应行情插件即自动接入——没有全局「活跃源」开关。',
+      body: '行情插件提供盘口数据（Polymarket / Kalshi / predict.fun 等；PolySimulator 是第三方模拟执行插件，行情跟随 Polymarket，只用于演练）。绑定即启用：在右上角账户切换器里给账户绑定交易所，对应行情插件即自动接入——没有全局「活跃源」开关。',
     },
     {
       id: 'strategy', index: 1, done: strategyDone, target: 'strategies', cta: '去策略页',

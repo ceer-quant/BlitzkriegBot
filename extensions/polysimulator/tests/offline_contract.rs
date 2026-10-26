@@ -89,8 +89,6 @@ fn client_with_key(base_url: &str) -> PolySimRest {
 
 // ── market data shapes ──────────────────────────────────────────────────
 
-const BOOK_JSON: &str = r#"{"bids":[{"price":"0.43","size":"150"}],"asks":[{"price":"0.57","size":"120"}],"timestamp":"1773583200000"}"#;
-
 const UPDOWN_JSON: &str = r#"{"markets":[{
     "event_id":"ev-1","condition_id":"0xevent-cond","asset":"BTC","interval":"15m",
     "start_date":"2026-03-15T13:00:00Z","end_date":"2026-03-15T14:00:00Z","active":true,
@@ -122,37 +120,6 @@ async fn updown_rows_parse_with_the_nested_json_strings() {
     assert!(rows[0].is_open());
     assert_eq!(rows[0].end_ms(), Some(1_773_583_200_000));
     assert_eq!(rows[0].start_ms(), Some(1_773_579_600_000));
-}
-
-#[tokio::test]
-async fn book_snapshot_parses_with_decimal_levels() {
-    let url = mock_server(vec![http_ok(
-        r#"{"bids":[{"price":"0.43","size":"150"},{"price":"0.42","size":"80"}],
-            "asks":[{"price":"0.57","size":"120"},{"price":"0.58","size":"60"}],
-            "timestamp":"1773583200000"}"#,
-    )]);
-    let book = client_for(&url).book("71321").await.expect("book parses");
-    let bids = book.bids.unwrap();
-    assert_eq!(bids.len(), 2);
-    assert_eq!(bids[0].price, Decimal::from_str("0.43").unwrap());
-    assert_eq!(bids[1].size, Decimal::from(80));
-    assert_eq!(
-        book.asks.unwrap()[0].price,
-        Decimal::from_str("0.57").unwrap()
-    );
-}
-
-#[tokio::test]
-async fn markets_by_token_returns_the_registry_answer() {
-    let url = mock_server(vec![http_ok(
-        r#"{"condition_id":"0xcond-9","outcome":"Down","primary_token_id":"71322"}"#,
-    )]);
-    let resolved = client_for(&url)
-        .markets_by_token("71322")
-        .await
-        .expect("registry answers");
-    assert_eq!(resolved.condition_id, "0xcond-9");
-    assert_eq!(resolved.outcome.as_deref(), Some("Down"));
 }
 
 // ── trading: the native order form ──────────────────────────────────────
@@ -407,9 +374,9 @@ async fn venue_429_defaults_to_the_documented_one_second_without_a_header() {
 #[tokio::test]
 async fn transport_error_is_retried_then_succeeds() {
     // First attempt: immediate EOF (transport error). Second: a good body.
-    // With max_retries=1 the client recovers. (The public book endpoint —
+    // With max_retries=1 the client recovers. (The public updown endpoint —
     // no key required, so the local auth short-circuit stays out of the way.)
-    let url = mock_server(vec![Vec::new(), http_ok(BOOK_JSON)]);
+    let url = mock_server(vec![Vec::new(), http_ok(UPDOWN_JSON)]);
     let config = RestConfig {
         base_url: url,
         no_proxy: true,
@@ -419,11 +386,12 @@ async fn transport_error_is_retried_then_succeeds() {
         ..RestConfig::default()
     };
     let client = PolySimRest::new(config, None).expect("client");
-    let book = client.book("71321").await.expect("retry recovers a blip");
-    assert_eq!(
-        book.bids.unwrap()[0].price,
-        Decimal::from_str("0.43").unwrap()
-    );
+    let rows = client
+        .updown_markets(Some("BTC"), Some("15m"))
+        .await
+        .expect("retry recovers a blip");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event_id, "ev-1");
 }
 
 #[tokio::test]
@@ -439,7 +407,10 @@ async fn retry_budget_is_bounded() {
         ..RestConfig::default()
     };
     let client = PolySimRest::new(config, None).expect("client");
-    let err = client.book("71321").await.expect_err("all attempts dead");
+    let err = client
+        .updown_markets(Some("BTC"), Some("15m"))
+        .await
+        .expect_err("all attempts dead");
     assert!(matches!(err, PolySimError::Transport(_)));
 }
 
@@ -463,7 +434,10 @@ async fn deadline_is_enforced_against_a_silent_server() {
         ..RestConfig::default()
     };
     let client = PolySimRest::new(config, None).expect("client");
-    let err = client.book("71321").await.expect_err("deadline must fire");
+    let err = client
+        .updown_markets(Some("BTC"), Some("15m"))
+        .await
+        .expect_err("deadline must fire");
     assert!(matches!(err, PolySimError::Timeout { .. }), "got {err:?}");
 }
 

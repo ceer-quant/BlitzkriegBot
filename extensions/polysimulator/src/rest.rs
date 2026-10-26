@@ -19,11 +19,9 @@
 use crate::error::PolySimError;
 use crate::rate_limit::{Class, RateLimit};
 use crate::types::{
-    BalanceBody, BookLevel, CancelAck, CancelOneBody, NativeOrder, OrderBookSnapshot,
-    OrderResponse, PendingOrdersEnvelope, PlaceOrderBody, PmTradesEnvelope, PositionRow,
-    UpDownEnvelope,
+    BalanceBody, CancelAck, CancelOneBody, NativeOrder, OrderResponse, PendingOrdersEnvelope,
+    PlaceOrderBody, PmTradesEnvelope, UpDownEnvelope,
 };
-use rust_decimal::Decimal;
 use std::time::Duration;
 
 /// Production API root.
@@ -115,10 +113,9 @@ impl PolySimRest {
         let mut builder = reqwest::Client::builder()
             .timeout(config.timeout)
             // The venue sits behind Cloudflare, whose bot rule 1010s
-            // non-browser User-Agents on the book path in waves (live
+            // non-browser User-Agents on market-data paths in waves (live
             // 2026-10-25: reqwest's own UA 403×4 while a browser UA passed
-            // 200×2, same IP, same minute) — the feed starved on zero ticks
-            // and the round clock froze. A browser-shaped UA is the
+            // 200×2, same IP, same minute). A browser-shaped UA is the
             // compatibility knob; revisit if the venue re-scopes its WAF to
             // admit API clients.
             .user_agent(BROWSER_UA);
@@ -180,9 +177,8 @@ impl PolySimRest {
 
     /// [`Self::updown_markets`] with an explicit `limit`. `None` keeps the
     /// venue default (500) — the settlement sweep keeps the full page as its
-    /// bottom line; discovery passes a small cap (the open rounds of one
-    /// interval family sit at the head of the venue's list, which drops the
-    /// 4.2MB page to a few hundred KB).
+    /// bottom line; a `Some` cap narrows the page for callers that only need
+    /// the head of the list.
     pub async fn updown_markets_bounded(
         &self,
         asset: Option<&str>,
@@ -193,12 +189,6 @@ impl PolySimRest {
             .get_json(Class::Read, &updown_path(asset, interval, limit))
             .await?;
         Ok(body.markets.unwrap_or_default())
-    }
-
-    /// Full-depth L2 book for one CLOB token.
-    pub async fn book(&self, token_id: &str) -> Result<OrderBookSnapshot, PolySimError> {
-        let path = format!("/v1/clob/book/{}", urlencode(token_id));
-        self.get_json(Class::Read, &path).await
     }
 
     // ── trading (authenticated) ──────────────────────────────────────────
@@ -293,26 +283,6 @@ impl PolySimRest {
     pub async fn balance(&self) -> Result<BalanceBody, PolySimError> {
         self.require_key()?;
         self.get_json(Class::Read, "/v1/account/balance").await
-    }
-
-    /// Open positions (the reconcile surface for crash recovery).
-    pub async fn positions(&self) -> Result<Vec<PositionRow>, PolySimError> {
-        self.require_key()?;
-        let path = "/v1/account/positions?status=OPEN&limit=100";
-        let rows: Vec<PositionRow> = self.get_json(Class::Read, path).await?;
-        Ok(rows)
-    }
-
-    /// Resolve a CLOB token id to `(market_id, outcome label)` — the two
-    /// fields the native order form needs that a token id does not carry.
-    /// Public endpoint (no API key), the venue's own answer, so the executor
-    /// never guesses an outcome label.
-    pub async fn markets_by_token(
-        &self,
-        token_id: &str,
-    ) -> Result<crate::types::MarketByToken, PolySimError> {
-        let path = format!("/v1/markets-by-token/{}", urlencode(token_id));
-        self.get_json(Class::Read, &path).await
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────
@@ -497,9 +467,9 @@ fn classify_send_error(e: reqwest::Error, configured: Duration) -> PolySimError 
 
 /// The `GET /v1/markets/updown` query string. `limit=None` pins the venue's
 /// page default (500) so the settlement sweep sees the same full list it
-/// always did; a `Some` cap is how the discovery loop keeps its 5-second
-/// poll off the 4MB full page. `pub(crate)` so the discovery-side tests can
-/// pin the exact wire shape their parameters produce.
+/// always did; a `Some` cap narrows the page for callers that do not need
+/// every row. `pub(crate)` so tests can pin the exact wire shape their
+/// parameters produce.
 pub(crate) fn updown_path(
     asset: Option<&str>,
     interval: Option<&str>,
@@ -532,21 +502,13 @@ fn urlencode(input: &str) -> String {
     out
 }
 
-/// Re-export for the book feed: the level type the snapshot carries.
-pub type BookLevelPair = (Decimal, Decimal);
-
-/// One (price, size) pair from a book side.
-pub fn level_pair(l: &BookLevel) -> (Decimal, Decimal) {
-    (l.price, l.size)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The updown query path: default page (the settlement sweep's full-list
-    /// bottom line) vs the discovery poll's narrowed 15m request (the ~91%
-    /// traffic diet, #637) — filters ride the query string in this exact shape.
+    /// The updown query path: the settlement sweep's full-list bottom line
+    /// (venue-default 500) vs a narrowed request with explicit filters —
+    /// filters ride the query string in this exact shape.
     #[test]
     fn updown_query_path_encodes_default_and_narrowed_pages() {
         assert_eq!(

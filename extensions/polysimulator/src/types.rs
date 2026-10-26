@@ -9,14 +9,44 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
+/// Parse an ISO-8601 timestamp into epoch millis. The venue sends both
+/// `2026-03-15T13:00:00+00:00` and `2026-03-15T14:00:00Z` shapes; the parse
+/// is deliberately narrow (a wrong shape is a skipped market + a log line,
+/// never a panic).
+pub(crate) fn iso_to_ms(raw: &str) -> Option<i64> {
+    // Hand-rolled to keep the dependency surface flat: YYYY-MM-DDTHH:MM:SS
+    // with an optional fractional part and an optional offset suffix.
+    let b = raw.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let num =
+        |from: usize, to: usize| -> Option<i64> { raw.get(from..to)?.trim().parse::<i64>().ok() };
+    let year = num(0, 4)?;
+    let month = num(5, 7)?;
+    let day = num(8, 10)?;
+    let hour = num(11, 13)?;
+    let min = num(14, 16)?;
+    let sec = num(17, 19)?;
+    // Days since civil epoch (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((((days * 24 + hour) * 60 + min) * 60 + sec) * 1000)
+}
+
 /// One up/down interval round as `GET /v1/markets/updown` reports it.
 ///
 /// `asset` is nullable on the wire (2026-10-26 live): the venue's stock /
 /// equities daily rows (AAPL, …) carry `"asset": null` — no crypto symbol
 /// exists for them. Modeling it as a required String made the WHOLE 500-row
-/// query fail serde every sweep, blinding round discovery; a null-asset row
-/// is meaningless to this plugin (the engine can only price what its
-/// strategies have a spot reference for) and is skipped in discovery.
+/// query fail serde every fetch, blinding every consumer of this list; a
+/// null-asset row is meaningless to this plugin (the engine can only price
+/// what its strategies have a spot reference for) and carries no action.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpDownRow {
     pub event_id: String,
@@ -74,12 +104,12 @@ impl UpDownRow {
 
     /// Parse the ISO-8601 `end_date` into epoch millis — the round's expiry.
     pub fn end_ms(&self) -> Option<i64> {
-        super::discovery::iso_to_ms(self.end_date.as_deref()?)
+        iso_to_ms(self.end_date.as_deref()?)
     }
 
     /// Parse `start_date` into epoch millis.
     pub fn start_ms(&self) -> Option<i64> {
-        super::discovery::iso_to_ms(self.start_date.as_deref()?)
+        iso_to_ms(self.start_date.as_deref()?)
     }
 
     /// True when the venue reports the round open and unresolved.
@@ -88,30 +118,6 @@ impl UpDownRow {
             && !self.closed.unwrap_or(false)
             && !self.resolved.unwrap_or(false)
     }
-}
-
-/// One price level as the CLOB book endpoint quotes it (strings).
-#[derive(Debug, Clone, Deserialize)]
-pub struct BookLevel {
-    pub price: Decimal,
-    pub size: Decimal,
-}
-
-/// L2 book snapshot from `GET /v1/clob/book/{token_id}`.
-///
-/// The venue's arrays are ordered ascending bids / descending asks (best =
-/// LAST element on each side). The kernel's `apply_snapshot` replaces B-tree
-/// levels, so ordering is irrelevant downstream; nothing here reorders.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OrderBookSnapshot {
-    pub token_id: Option<String>,
-    pub bids: Option<Vec<BookLevel>>,
-    pub asks: Option<Vec<BookLevel>>,
-    /// Venue timestamp, milliseconds as a STRING.
-    pub timestamp: Option<String>,
-    pub tick_size: Option<Decimal>,
-    pub neg_risk: Option<bool>,
-    pub stale: Option<bool>,
 }
 
 /// Account balance from `GET /v1/account/balance` (strings).
@@ -339,17 +345,6 @@ pub struct ApiErrorBody {
     pub message: Option<String>,
 }
 
-/// Answer of `GET /v1/markets-by-token/{token_id}`: the (market, outcome)
-/// pair the native order form needs. `outcome` is the venue's own label
-/// ("Yes"/"Up"/custom) — the executor never guesses it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MarketByToken {
-    pub condition_id: String,
-    pub outcome: Option<String>,
-    pub primary_token_id: Option<String>,
-    pub secondary_token_id: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,8 +387,8 @@ mod tests {
     fn updown_row_with_null_asset_parses_stock_daily_rows() {
         // Live wire 2026-10-26: the venue's equities daily rows carry
         // `"asset": null`. A required String made the whole 500-row query fail
-        // serde every poll (discovery blind); the field is Option and a null
-        // row still parses — discovery then skips it by asset.
+        // serde on every fetch (settlement sweep blind); the field is Option
+        // and a null row still parses.
         let row: UpDownRow = serde_json::from_str(
             r#"{
                 "event_id": "1240301",
@@ -419,32 +414,6 @@ mod tests {
             row.parse_token_ids().expect("tokens"),
             ("111".into(), "222".into())
         );
-    }
-
-    #[test]
-    fn book_snapshot_keeps_venue_ordering_verbatim() {
-        // best bid = LAST element of bids (ascending); best ask = LAST of asks
-        // (descending). The kernel replaces B-tree levels so ordering does not
-        // matter; this pin documents the venue's documented quirk.
-        let book: OrderBookSnapshot = serde_json::from_str(
-            r#"{
-                "token_id": "71321",
-                "bids": [{"price": "0.54", "size": "100"}, {"price": "0.55", "size": "80"}],
-                "asks": [{"price": "0.57", "size": "90"}, {"price": "0.56", "size": "70"}],
-                "timestamp": "1770706800000",
-                "tick_size": "0.01",
-                "neg_risk": false,
-                "stale": false
-            }"#,
-        )
-        .expect("book parses");
-        let bids = book.bids.expect("bids");
-        let asks = book.asks.expect("asks");
-        assert_eq!(bids[0].price, Decimal::from_str("0.54").unwrap());
-        assert_eq!(bids[1].price, Decimal::from_str("0.55").unwrap());
-        assert_eq!(asks[0].price, Decimal::from_str("0.57").unwrap());
-        assert_eq!(asks[1].price, Decimal::from_str("0.56").unwrap());
-        assert_eq!(book.timestamp.as_deref(), Some("1770706800000"));
     }
 
     #[test]
