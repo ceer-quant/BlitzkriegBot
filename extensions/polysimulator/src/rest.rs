@@ -175,14 +175,23 @@ impl PolySimRest {
         asset: Option<&str>,
         interval: Option<&str>,
     ) -> Result<Vec<crate::types::UpDownRow>, PolySimError> {
-        let mut path = String::from("/v1/markets/updown?limit=500");
-        if let Some(a) = asset {
-            path.push_str(&format!("&asset={}", urlencode(a)));
-        }
-        if let Some(i) = interval {
-            path.push_str(&format!("&interval={}", urlencode(i)));
-        }
-        let body: UpDownEnvelope = self.get_json(Class::Read, &path).await?;
+        self.updown_markets_bounded(asset, interval, None).await
+    }
+
+    /// [`Self::updown_markets`] with an explicit `limit`. `None` keeps the
+    /// venue default (500) — the settlement sweep keeps the full page as its
+    /// bottom line; discovery passes a small cap (the open rounds of one
+    /// interval family sit at the head of the venue's list, which drops the
+    /// 4.2MB page to a few hundred KB).
+    pub async fn updown_markets_bounded(
+        &self,
+        asset: Option<&str>,
+        interval: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::types::UpDownRow>, PolySimError> {
+        let body: UpDownEnvelope = self
+            .get_json(Class::Read, &updown_path(asset, interval, limit))
+            .await?;
         Ok(body.markets.unwrap_or_default())
     }
 
@@ -486,6 +495,30 @@ fn classify_send_error(e: reqwest::Error, configured: Duration) -> PolySimError 
     PolySimError::Transport(e.to_string())
 }
 
+/// The `GET /v1/markets/updown` query string. `limit=None` pins the venue's
+/// page default (500) so the settlement sweep sees the same full list it
+/// always did; a `Some` cap is how the discovery loop keeps its 5-second
+/// poll off the 4MB full page. `pub(crate)` so the discovery-side tests can
+/// pin the exact wire shape their parameters produce.
+pub(crate) fn updown_path(
+    asset: Option<&str>,
+    interval: Option<&str>,
+    limit: Option<u32>,
+) -> String {
+    let mut path = String::from("/v1/markets/updown?limit=");
+    match limit {
+        Some(n) => path.push_str(&n.to_string()),
+        None => path.push_str("500"),
+    }
+    if let Some(a) = asset {
+        path.push_str(&format!("&asset={}", urlencode(a)));
+    }
+    if let Some(i) = interval {
+        path.push_str(&format!("&interval={}", urlencode(i)));
+    }
+    path
+}
+
 fn urlencode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
@@ -510,6 +543,25 @@ pub fn level_pair(l: &BookLevel) -> (Decimal, Decimal) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The updown query path: default page (the settlement sweep's full-list
+    /// bottom line) vs the discovery poll's narrowed 15m request (the ~91%
+    /// traffic diet, #637) — filters ride the query string in this exact shape.
+    #[test]
+    fn updown_query_path_encodes_default_and_narrowed_pages() {
+        assert_eq!(
+            updown_path(None, None, None),
+            "/v1/markets/updown?limit=500"
+        );
+        assert_eq!(
+            updown_path(None, Some("15m"), Some(50)),
+            "/v1/markets/updown?limit=50&interval=15m"
+        );
+        assert_eq!(
+            updown_path(Some("BTC"), Some("1h"), Some(7)),
+            "/v1/markets/updown?limit=7&asset=BTC&interval=1h"
+        );
+    }
 
     #[test]
     fn base_url_requires_https_outside_loopback() {

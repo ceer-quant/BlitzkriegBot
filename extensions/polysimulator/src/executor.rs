@@ -287,6 +287,8 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         //    fetch per sweep cycle, only when there ARE queries; a query the
         //    list does not name or has not resolved yet answers nothing — the
         //    core re-asks on its own cadence, and payouts are never invented.
+        //    Full page on purpose: settlement needs the whole list as its
+        //    bottom line (traffic diet lives in discovery, #637).
         let queries = host.take_settlement_queries().await;
         if queries.is_empty() {
             continue;
