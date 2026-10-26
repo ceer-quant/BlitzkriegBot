@@ -693,33 +693,36 @@ pub async fn run(
             .map(|p| crate::market::compat::PluginModes::for_plugin(p.as_ref()))
             .collect(),
     );
-    // The parasitic mirror (PolySimulator⇒Polymarket) rides the plugins' own
-    // declarations into the engine: admission and routing evidence that does
-    // not depend on the mirror plugin ever declaring a round. The push walks
-    // the WHOLE registry, not the boot actives: a mirror declaration is the
-    // plugin's identity, but the active seat is a single-slot datum — in the
-    // shipped deployment polymarket owns it while polysimulator sits
-    // registered-enabled-inactive, so an actives-only walk left the engine
-    // with NO mirror fact and a parasitic account refused every mirror token
-    // (found live: `engine.books` carried no polysimulator rows and
-    // `scope_admits_token` rejected them). Executors/feeds stay mounted from
-    // `actives` only — a mirror declaration routes orders to the mirror's
-    // executor, it does not grant the plugin a data plane.
-    let registry_plugins: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> = registry
-        .names()
-        .iter()
-        .filter_map(|n| registry.get(n))
-        .collect();
-    core.apply_plugin_mirrors(&registry_plugins);
 
     if config.engine_enabled {
         // A refusal here (the #265 startup self-check: an explicit
-        // `--enable-strategy` that resolved to nothing) ends the boot BEFORE the
-        // socket is bound or a feed is started — the failure mode is a kernel
-        // that looks healthy and trades none of what it was told to run.
+        // `--enable-strategy` that resolved to nothing) ends the boot BEFORE
+        // the socket is bound or a feed is started — the failure mode is a
+        // kernel that looks healthy and trades none of what it was told to run.
         if let Err(why) = config.install_engine(&mut core) {
             anyhow::bail!("{why}");
         }
+        // The parasitic mirror (PolySimulator⇒Polymarket) rides the plugins'
+        // own declarations into the engine: admission and routing evidence
+        // that does not depend on the mirror plugin ever declaring a round.
+        // The push walks the WHOLE registry, not the boot actives: a mirror
+        // declaration is the plugin's identity, but the active seat is a
+        // single-slot datum — in the shipped deployment polymarket owns it
+        // while polysimulator sits registered-enabled-inactive. It MUST run
+        // after `install_engine`: the push lands via `engine.as_mut()`, and
+        // placed before the engine exists it was a silent no-op (found live
+        // on a860636: `engine.books` still carried no polysimulator rows —
+        // the whole-registry walk fixed WHO pushes, not WHEN). Executors/
+        // feeds stay mounted from `actives` only — a mirror declaration
+        // routes orders to the mirror's executor, it does not grant the
+        // plugin a data plane.
+        let registry_plugins: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> =
+            registry
+                .names()
+                .iter()
+                .filter_map(|n| registry.get(n))
+                .collect();
+        core.apply_plugin_mirrors(&registry_plugins);
         // The accounts file's strategy assignments, applied at boot: every
         // account with a non-empty `strategies` key gets those scopes
         // instantiated AND enabled (assignment IS enablement). The one-time
