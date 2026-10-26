@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "41baf911826b54f05630cbae524a99c81e8c2fd94124cc6da9aede5b943677d2",
+  "sha256": "ece8f44b5bb98ce7f494e7364dc2d9bc927b8a9a0b3faf38a0f24243d78a0ae7",
   "author": "BlitzkriegBot",
   "description": "Pair-discount collector for binary rounds (@almach mechanism): when ask_UP + ask_DOWN + entry taker fees < max_pair_cost, buy BOTH legs at their asks with EQUAL declared share counts and collect by merging the complete pairs into $1.00/pair of collateral. Profit is locked at entry; the exit is a collection, not a decision — the kernel intercepts the strategy's merge intents before the sell ladder. v1.1 adds the GAP-FILL loop: a partially-filled leg is topped up at its current ask (shortfall = counterpart holding − held, priced ask+fee vs $1 via max_top_up_cost) so partial fills no longer strand a naked remainder at settlement. Fees priced from bk.fees(); no schedule in force means no entries. Signal-only: the kernel adjudicates, sizes, gates, merges and settles every intent.",
   "holds_to_settlement": true,

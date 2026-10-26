@@ -122,6 +122,18 @@ local function dec_fmt(d)
   return (neg and "-" or "") .. digits
 end
 
+--- The shared alignment cap of dec_add/dec_sub/dec_cmp. The fee curve is the
+--- live path here: `fee_per_share` MULTIPLIES scales (rate.s + 2·2·p.s), so a
+--- 4-decimal ask (the venues' real quote grid, e.g. 0.3450) against the
+--- legacy rate's 3 puts the fee at scale 19 and an unclamped alignment would
+--- rescale both operands past POW10[18] — the mantissa wraps NEGATIVE
+--- (9.9e18 > i64 max) before `POW10[total.s]` is even indexed, and the
+--- wrapped total would slip every `< max_pair_cost` test. Truncation past
+--- the 18th significant digit costs at most 1e-18 USD — orders of magnitude
+--- below every threshold compared here (the tightest sits at the 3rd
+--- decimal, max_pair_cost = 0.995).
+local DEC_MAX_SCALE = 18
+
 local function dec_rescale(d, s)
   -- Total: the host's rust_decimal fields (obi, spread_pct, depth sums) are
   -- DIVISION results carrying up to 28 significant digits, so s can sit
@@ -132,30 +144,28 @@ local function dec_rescale(d, s)
   return d.m // POW10[d.s - s]
 end
 
-local DEC_CMP_MAX_SCALE = 18
-
-local function dec_cmp(a, b)
-  -- Cap the common scale: aligning a 28-digit obi against a 2-digit
-  -- threshold would want POW10[26], which does not exist. Truncation past
-  -- the 18th significant digit cannot flip a comparison whose tightest
-  -- threshold sits at the 2nd decimal.
-  local s = math.max(math.min(a.s, DEC_CMP_MAX_SCALE), math.min(b.s, DEC_CMP_MAX_SCALE))
-  local am, bm = dec_rescale(a, s), dec_rescale(b, s)
-  if am < bm then return -1 elseif am > bm then return 1 else return 0 end
-end
-
 local function dec_add(a, b)
-  local s = math.max(a.s, b.s)
+  local s = math.max(math.min(a.s, DEC_MAX_SCALE), math.min(b.s, DEC_MAX_SCALE))
   return { m = dec_rescale(a, s) + dec_rescale(b, s), s = s }
 end
 
 local function dec_sub(a, b)
-  local s = math.max(a.s, b.s)
+  local s = math.max(math.min(a.s, DEC_MAX_SCALE), math.min(b.s, DEC_MAX_SCALE))
   return { m = dec_rescale(a, s) - dec_rescale(b, s), s = s }
 end
 
 local function dec_mul(a, b)
   return { m = a.m * b.m, s = a.s + b.s }
+end
+
+local function dec_cmp(a, b)
+  -- Cap the common scale (DEC_MAX_SCALE above): aligning a 28-digit obi
+  -- against a 2-digit threshold would want POW10[26], which does not exist.
+  -- Truncation past the 18th significant digit cannot flip a comparison
+  -- whose tightest threshold sits at the 2nd decimal.
+  local s = math.max(math.min(a.s, DEC_MAX_SCALE), math.min(b.s, DEC_MAX_SCALE))
+  local am, bm = dec_rescale(a, s), dec_rescale(b, s)
+  if am < bm then return -1 elseif am > bm then return 1 else return 0 end
 end
 
 --- Floor to the venue's 0.01 share grid (sizes are positive; integer

@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "d7c0e6ab1297b494eed83546ee30f978ce599e6c6dc5833edb2513c610206f07",
+  "sha256": "08a93d2c8cea7e875f298a6e3f49ddd936aea0514340f211706d07ac39e2a701",
   "author": "BlitzkriegBot",
-  "description": "Cross-venue pair collector (#427 blueprint): when a confirmed unified mapping (zero discrepancies, status paired) prices the same bet on two venues and ask_UP@cheaper + ask_DOWN@other + BOTH legs' taker fees costs less than $1.00 by more than spread_open_pct, buy BOTH legs at their own asks with EQUAL declared share counts \u2014 capacity = the SMALLER leg's visible ask depth (\u4e24\u5e73\u53f0\u5404\u81ea\u6df1\u5ea6\u7684\u6700\u5c0f\u503c), named in every reason line. spread_close_pct is the release valve: a held pair whose all-in cost has fallen back within Y% of the money is offered back via exits at its own bids. Fees priced from bk.fees(); no schedule in force means no suggestions. Venue is data (cheapest listing wins the leg) \u2014 no branch on venue identity anywhere. Signal-only: the kernel adjudicates, sizes, gates and settles every intent. Atomic batch: both legs reserve the virtual pot as ONE ticket (E-VA) \u2014 an over-cap pot cancels the whole pair with zero legs out.",
+  "description": "Cross-venue pair collector (#427 blueprint): when a confirmed unified mapping (zero discrepancies, status paired) prices the same bet on two venues and ask_UP@cheaper + ask_DOWN@other + BOTH legs' taker fees costs less than $1.00 by more than spread_open_pct, buy BOTH legs at their own asks with EQUAL declared share counts — capacity = the SMALLER leg's visible ask depth (两平台各自深度的最小值), named in every reason line. spread_close_pct is the release valve: a held pair whose all-in cost has fallen back within Y% of the money is offered back via exits at its own bids. Fees priced from bk.fees(); no schedule in force means no suggestions. Venue is data (cheapest listing wins the leg) — no branch on venue identity anywhere. Signal-only: the kernel adjudicates, sizes, gates and settles every intent. Atomic batch: both legs reserve the virtual pot as ONE ticket (E-VA) — an over-cap pot cancels the whole pair with zero legs out.",
   "gate_exemptions": {
     "timing": true,
     "momentum": true,
