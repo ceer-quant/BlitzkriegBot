@@ -496,6 +496,21 @@ jobs:
           node scripts/lua-sandbox-check.mjs
           node scripts/no-venue-branch-check.mjs
           node scripts/lua-decimal-check.mjs
+      # #644: the contract-ledger gate. `docs/rust-core/INTERFACES.md` §2 claims
+      # to be the single source of truth for the IPC surface; schema.rs IS the
+      # compiled one. When they drift the documentation quietly stops being a
+      # contract — the 2026-10-26 audit found 79 constants against 36 documented
+      # rows, with money-sensitive verbs (`risk.setExit`) living outside the
+      # ledger. This gate extracts every `pub const *_METHOD` from schema.rs's
+      # `pub mod method` and requires a §2 table row for each (plus the ghost
+      # direction: a §2 first-column method in a family the schema never
+      # declared reddens too). Pure text, millisecond-fast, no binary needed;
+      # --teeth proves it reddens on a synthetic undocumented method before the
+      # real verdict runs (§A.4, same order as every other v0.3 gate above).
+      - name: Interfaces methods ledger gate (#644)
+        run: |
+          node scripts/interfaces-methods-check.mjs --teeth
+          node scripts/interfaces-methods-check.mjs
       # Assorted one-off invariants kept cheap.
       - name: Assorted gates (plugin selection / trade-log flag / TUI demo)
         run: |
