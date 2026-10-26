@@ -783,14 +783,42 @@ impl Engine {
     /// there is nothing to disagree with the binding about — refusing those
     /// made any venue-bound account go silent on every pre-tag corpus (the
     /// exit-economics fixture first tripped it: signals 89975→0, closes 13→0).
+    ///
+    /// 镜像盘（PolySimulator 镜像 Polymarket，token 逐字节相同）：交易表按
+    /// token 唯一存行，先到的 PM 批占住行、镜像所批次被判纯重复只落
+    /// `shadow_markets`（#629 的「交易面零接触」）——镜像 token 的表行
+    /// 永远标着被镜像所。绑镜像所的账户查表必得「别所的行」，每条候选
+    /// 静默出局（真线：signals=0 / blocked=0，连遥测都不留）。此处补
+    /// mirror admission：表查不到**自己 venue** 的行时，反查该所自己申报
+    /// 的 shadow 批次——命中即该所真实在交易的 token（共享同一份 book，
+    /// 价格与深度都是真实读数），放行。对称免费：反向轮次（镜像所批次
+    /// 先到）救的是绑定被镜像所的账户。
     fn scope_admits_token(&self, account: &str, token: &str) -> bool {
         let Some(bound) = self.venue_by_account.get(account).filter(|v| !v.is_empty()) else {
             return true;
         };
         match self.scanner.market_for_token(token) {
-            None => false,
-            Some(m) => m.venue.is_empty() || m.venue == *bound,
+            None => self.shadow_admits_token(bound, token),
+            Some(m) => {
+                m.venue.is_empty()
+                    || m.venue == *bound
+                    // 表行的 venue 是被镜像所、绑定是镜像所：token 在该所
+                    // 的 shadow 批次里 = 该所真实在交易它，放行。
+                    || (m.venue != *bound && self.shadow_admits_token(bound, token))
+            }
         }
+    }
+
+    /// Does the bound venue's OWN shadow batch (its discovery's declaration,
+    /// kept for the display plane) carry this token? Only meaningful for
+    /// mirror venues — a shadow batch exists exactly when the venue's round
+    /// feed was merged away as all-known tokens.
+    fn shadow_admits_token(&self, bound: &str, token: &str) -> bool {
+        self.shadow_markets.values().any(|batch| {
+            batch
+                .iter()
+                .any(|m| m.venue == bound && (m.up_token_id == token || m.down_token_id == token))
+        })
     }
 
     /// The open-position snapshot the NEXT evaluation's ctx carries (the pair
@@ -2124,6 +2152,28 @@ impl Engine {
             .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
             .map(|m| m.venue.clone())
             .filter(|v| !v.is_empty())
+    }
+
+    /// The venue that should EXECUTE `token` for `account`. The table row's
+    /// venue, with one override: an account bound to a venue whose OWN shadow
+    /// batch carries the token (mirror token — the table row belongs to the
+    /// mirrored venue, the bound venue trades it through its declaration).
+    /// The executor drain's routing truth: per-venue drains key on this, so a
+    /// mirror token's two accounts each reach their OWN executor and the
+    /// poly account's live order can never land on the real venue (nor the
+    /// reverse). Unbound accounts and non-mirror tokens ride the plain
+    /// table lookup, byte-identical with the pre-mirror routing.
+    pub fn execution_venue_for(&self, account: &str, token_id: &str) -> Option<String> {
+        let table = self.venue_of(token_id);
+        match (
+            table,
+            self.venue_by_account.get(account).filter(|v| !v.is_empty()),
+        ) {
+            (Some(v), Some(b)) if v != *b && self.shadow_admits_token(b, token_id) => {
+                Some(b.clone())
+            }
+            (other, _) => other,
+        }
     }
 
     /// The condition's OTHER outcome token, read off the current round's
@@ -4223,6 +4273,89 @@ mod tests {
         assert!(
             e.scope_admits_token("unbound", "kalshi-up"),
             "an unbound scope admits everything, as before"
+        );
+    }
+
+    #[test]
+    fn a_mirror_bound_scope_admits_through_the_shadow_batch() {
+        // The polysimulator account's zero-signal root cause: the table is
+        // token-unique and the PM batch lands first, so the mirror token's
+        // row is tagged `polymarket` forever — a polysimulator-bound scope
+        // looked the row up, saw "another venue", and silently dropped every
+        // candidate (signals=0, blocked=0). The venue's OWN shadow batch is
+        // the evidence it really trades the token: it admits.
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 61_000,
+        });
+        e.set_account_venue("poly", "polysimulator");
+        e.set_account_venue("pm", "polymarket");
+
+        assert!(
+            e.scope_admits_token("poly", "mirror-up"),
+            "the mirror-bound scope admits through the venue's own shadow batch"
+        );
+        assert!(
+            e.scope_admits_token("pm", "mirror-up"),
+            "the mirrored venue's own row admits its binding, as before"
+        );
+        assert!(
+            !e.scope_admits_token("poly", "polymarket-up"),
+            "a NON-mirror token of another venue still refuses (venue_market has no \
+             polysimulator shadow batch)"
+        );
+        assert!(
+            e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
+            "execution follows the placing account's binding, not the table row"
+        );
+        assert!(
+            e.execution_venue_for("pm", "mirror-up") == Some("polymarket".into()),
+            "the mirrored venue's binding reads its own row, unchanged"
+        );
+        assert_eq!(
+            e.execution_venue_for("unbound", "mirror-up"),
+            Some("polymarket".into()),
+            "an unbound account rides the plain table lookup"
+        );
+    }
+
+    #[test]
+    fn a_mirror_bound_scope_still_refuses_when_the_shadow_batch_goes_away() {
+        // The shadow batch is the ONLY mirror evidence: when the mirror
+        // venue's feed stops (plugin dead, credentials expired), its batch
+        // drops out of the display book and the bound scope must go back to
+        // refusing the mirrored row — no stale admission on dead declarations.
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 61_000,
+        });
+        e.set_account_venue("poly", "polysimulator");
+        assert!(e.scope_admits_token("poly", "mirror-up"));
+
+        // The mirror venue rolls over alone is not reachable in the mirror
+        // shape (same slot), so the decay is forced directly: clear the
+        // display book and re-check.
+        e.shadow_markets.clear();
+        assert!(
+            !e.scope_admits_token("poly", "mirror-up"),
+            "without the shadow batch the mirror-bound scope refuses again"
+        );
+        assert_eq!(
+            e.execution_venue_for("poly", "mirror-up"),
+            Some("polymarket".into()),
+            "routing falls back to the table row when the mirror declaration is gone"
         );
     }
 
