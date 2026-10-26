@@ -3030,6 +3030,13 @@ async fn main() -> anyhow::Result<()> {
         // like every other `data/` writer). Always on for a real process —
         // the backtester builds its own CoreConfig with None.
         runtime_config_path: Some("data/runtime/config.json".to_string()),
+        // The single persistent credential home (`market.credentials.set`
+        // upserts here). cwd-relative — the same file the launcher loads at
+        // start (`ui_kit_panel::env_file` reads `<cwd>/.env`), so a UI write
+        // and the launcher read never disagree about which file is the truth.
+        // Always on for a real process; the backtester builds None and the
+        // credentials write path refuses.
+        env_file_path: Some(".env".to_string()),
         // ④ 统一映射账本（cwd-relative）。confirmed 的跨所映射跨重启存活；
         // 自动配对只提议、操作员 confirm 才写这里。回测/测试 None = 纯内存。
         unified_ledger_path: Some("data/runtime/unified-mapping.json".to_string()),
@@ -3498,41 +3505,32 @@ async fn main() -> anyhow::Result<()> {
         config.round_duration_source = "runtime";
     }
 
-    // The credentials cell (`market.credentials.set`, data/runtime/config.json):
-    // inject each stored value into THIS process's environment before the server
-    // builds the plugin components — `exec.start` reads the vars once, so a
-    // cell write is next-session by construction. A real environment variable
-    // (e.g. from the launcher's .env) outranks the cell: only a name the process
-    // does not already carry is injected. Names were validated against the
-    // plugin tables at write time; values never appear in the log.
-    if let Some(path) = config.runtime_config_path.as_deref() {
-        for (plugin, vars) in blitzkrieg_core::ipc::runtime_config::load_credentials_from(
-            std::path::Path::new(path),
-            None,
+    // The legacy credentials cell (`market.credentials.set`,
+    // data/runtime/config.json) is retired: `.env` is the single persistent
+    // credential home (operator ruling). One shot at boot — drain any legacy
+    // cell values into the configured `.env`, then strip the key so a later
+    // sibling-cell write cannot resurrect it. The launcher applies `.env` at
+    // the next start (this process already carries its own load), so the
+    // migration is next-session by construction, exactly like the old cell.
+    // Values never appear in the log; the migrated KEY names do.
+    if let (Some(config_path), Some(env_path)) = (
+        config.runtime_config_path.as_deref(),
+        config.env_file_path.as_deref(),
+    ) {
+        match blitzkrieg_core::ipc::runtime_config::migrate_credentials_cell_to_env(
+            std::path::Path::new(config_path),
+            std::path::Path::new(env_path),
         ) {
-            let mut injected: Vec<&str> = Vec::new();
-            for (name, value) in &vars {
-                if value.is_empty() {
-                    continue;
-                }
-                if std::env::var_os(name).is_some_and(|v| !v.is_empty()) {
-                    continue;
-                }
-                // SAFETY: single-threaded process setup — the server that spawns
-                // every plugin task starts below, so nothing reads the
-                // environment concurrently while the cell is applied.
-                unsafe { std::env::set_var(name, value) };
-                injected.push(name.as_str());
-            }
-            if !injected.is_empty() {
-                injected.sort_unstable();
-                eprintln!(
-                    "blitzkrieg-core: credentials injected from the persisted cell \
-                     (plugin '{plugin}'): {} — a real environment variable outranks \
-                     the cell (market.credentials.set)",
-                    injected.join(", ")
-                );
-            }
+            Ok(0) => {}
+            Ok(_) => eprintln!(
+                "blitzkrieg-core: legacy credentials cell migrated into {env_path} — \
+                 restart (the launcher re-reads .env) to apply; market.credentials.set \
+                 now writes .env directly"
+            ),
+            Err(e) => eprintln!(
+                "blitzkrieg-core: legacy credentials cell migration failed: {e} — \
+                 the cell stays in place; market.credentials.set writes .env directly"
+            ),
         }
     }
 

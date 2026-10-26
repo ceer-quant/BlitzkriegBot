@@ -1756,15 +1756,12 @@ async fn handle_line(
             .await
         }
 
-        // 凭据状态：每个注册插件需要哪些环境变量、当前解析到没有（真实 env
-        // 或持久格），executor 就绪与否。只读，值永不过线。
-        method::MARKET_CREDENTIALS_STATUS => {
-            let c = core.lock().await;
-            Ok(
-                serde_json::to_value(crate::market::credentials_status(registry, &c))
-                    .unwrap_or(Value::Null),
-            )
-        }
+        // 凭据状态：每个注册插件需要哪些环境变量、当前解析到没有（进程
+        // 环境 = 启动器加载的 .env），executor 就绪与否。只读，值永不过线。
+        method::MARKET_CREDENTIALS_STATUS => Ok(serde_json::to_value(
+            crate::market::credentials_status(registry),
+        )
+        .unwrap_or(Value::Null)),
 
         // 凭据 next_session 写路径：plan-first（未注册插件名/表外变量名在写盘
         // 前拒绝）+ 原子持久格写入。executor 在 boot 时一次性读环境，本会话

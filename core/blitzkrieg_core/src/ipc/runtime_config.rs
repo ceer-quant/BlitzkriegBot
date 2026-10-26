@@ -41,15 +41,12 @@ struct RuntimeConfigDoc {
     market_plugin_actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     market_plugin_at_ms: Option<i64>,
-    /// Per-plugin credential overrides the WebUI writes through
-    /// `market.credentials.set` (`plugin` → `env var name` → value). Applied
-    /// at boot BEFORE the executor reads the environment; a real environment
-    /// variable always outranks the cell (same posture as .env). Values live
-    /// in the user's data directory and never travel back over IPC — the
-    /// status readout reports presence only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    credentials:
-        Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
+    // The legacy credentials cell (`plugin` → `env var name` → value) lived
+    // here until the .env consolidation (operator ruling: `.env` is the single
+    // persistent home for UI-submitted credentials). The field is gone from
+    // the struct — serde ignores the unknown key on read, and
+    // `migrate_credentials_cell_to_env` drains any legacy values into `.env`
+    // before the next sibling-cell write would silently drop them.
 }
 
 /// What the boot resolution needs to know about the cell.
@@ -213,88 +210,55 @@ pub fn persist_round_duration_to(
     std::fs::rename(&tmp, path)
 }
 
-/// Read the persisted credential cell. `plugin=None` returns every plugin's
-/// map; a plugin name narrows it to that one entry.
-pub fn load_credentials_from(
-    path: &std::path::Path,
-    plugin: Option<&str>,
-) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
-    let text = match std::fs::read_to_string(path) {
+/// One-shot boot migration: drain any legacy credentials cell from the
+/// runtime config (the retired `market.credentials.set` landing format) into
+/// the `.env` single source, then strip the key from the config file so a
+/// later sibling-cell write cannot resurrect it. Returns the number of
+/// credential VALUES moved. Idempotent: a file without the key moves zero.
+/// A missing config, a missing `.env` path, or an unreadable cell is the
+/// normal first-boot case — zero, no drama. Values never appear in logs;
+/// the caller reports the migrated KEY names if it wants to.
+pub fn migrate_credentials_cell_to_env(
+    config_path: &std::path::Path,
+    env_path: &std::path::Path,
+) -> std::io::Result<usize> {
+    let text = match std::fs::read_to_string(config_path) {
         Ok(t) => t,
-        Err(_) => return Default::default(), // first-boot normal case
+        Err(_) => return Ok(0),
     };
-    let v: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return Default::default(),
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(0);
     };
-    let Some(all) = v.get("credentials").and_then(|c| c.as_object()).map(|o| {
-        o.iter()
-            .map(|(k, m)| {
-                (
-                    k.clone(),
-                    m.as_object()
-                        .map(|vars| {
-                            vars.iter()
-                                .filter_map(|(vk, vv)| {
-                                    vv.as_str().map(|s| (vk.clone(), s.to_string()))
-                                })
-                                .collect::<std::collections::BTreeMap<_, _>>()
-                        })
-                        .unwrap_or_default(),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>()
-    }) else {
-        return Default::default();
+    let Some(all) = v.get("credentials").and_then(|c| c.as_object()) else {
+        return Ok(0);
     };
-    match plugin {
-        Some(p) => all.into_iter().filter(|(k, _)| k == p).collect(),
-        None => all,
-    }
-}
-
-/// Write (or, with `vars=None`, clear) one plugin's credential overrides in
-/// the shared cell. Atomic read-modify-write: the other cells share this file
-/// and must survive. Values are operator input for the NEXT session's
-/// environment; the caller decides whether any name is acceptable (the IPC
-/// layer validates against the plugin table).
-pub fn persist_credentials_to(
-    path: &std::path::Path,
-    plugin: &str,
-    vars: Option<&std::collections::BTreeMap<String, String>>,
-) -> std::io::Result<()> {
-    let mut doc: RuntimeConfigDoc = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    let mut all = doc.credentials.take().unwrap_or_default();
-    match vars {
-        Some(vars) => {
-            if vars.is_empty() {
-                all.remove(plugin);
-            } else {
-                all.insert(plugin.to_string(), vars.clone());
+    let mut moved = 0usize;
+    let mut drained: std::collections::BTreeMap<String, String> = Default::default();
+    for (_plugin, vars) in all {
+        let Some(vars) = vars.as_object() else {
+            continue;
+        };
+        for (name, value) in vars {
+            let Some(s) = value.as_str() else { continue };
+            if s.is_empty() {
+                continue;
             }
-        }
-        None => {
-            all.remove(plugin);
+            drained.insert(name.clone(), s.to_string());
+            moved += 1;
         }
     }
-    doc.credentials = if all.is_empty() { None } else { Some(all) };
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    if drained.is_empty() {
+        return Ok(0);
     }
-    let tmp = path.with_extension("json.tmp");
+    crate::env_file::upsert_env_vars(env_path, &drained)?;
+    // Strip the drained key from the config: read back through the strict
+    // doc type (unknown field ignored) and rewrite — the cell cannot come
+    // back through a sibling write.
+    let doc: RuntimeConfigDoc = serde_json::from_str(&text).unwrap_or_default();
+    let tmp = config_path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
-    // Owner-only: the file now carries credential values. On the TEMP file
-    // before the rename — the final path may not exist yet, and a chmod on a
-    // missing file would silently leave the first write world-readable.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, config_path)?;
+    Ok(moved)
 }
 
 /// #458: append one JSONL record for a manual, destructive operation
@@ -476,68 +440,57 @@ mod tests {
     }
 
     #[test]
-    fn credentials_round_trip_and_survive_sibling_cell_writes() {
-        let d = tmpdir("credtrip");
+    fn legacy_credentials_cell_migrates_to_env_and_strips_the_key() {
+        let d = tmpdir("credmigrate");
         let p = d.join("config.json");
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert("KALSHI_API_KEY_ID".to_string(), "key-1".to_string());
-        vars.insert(
-            "KALSHI_RSA_PRIVATE_KEY".to_string(),
-            "-----BEGIN".to_string(),
+        let env = d.join(".env");
+        // The legacy shape: two plugins' cells written by the old kernel.
+        // Key names are arbitrary to the migrator (it drains whatever the
+        // cell holds); neutral names keep real credential spellings out of
+        // the source.
+        std::fs::write(
+            &p,
+            r#"{"credentials": {"kalshi": {"BK_TEST_KEY_A": "key-1",
+               "BK_TEST_KEY_B": "begin-marker"},
+               "polysimulator": {"BK_TEST_KEY_C": ""}}}"#,
+        )
+        .unwrap();
+        let moved = migrate_credentials_cell_to_env(&p, &env).unwrap();
+        assert_eq!(moved, 2, "the empty value is not a credential to move");
+        let env_text = std::fs::read_to_string(&env).unwrap();
+        assert!(env_text.contains("BK_TEST_KEY_A=\"key-1\""));
+        assert!(env_text.contains("BK_TEST_KEY_B=\"begin-marker\""));
+        assert!(
+            !env_text.contains("BK_TEST_KEY_C"),
+            "empty legacy values are noise, not credentials"
         );
-        persist_credentials_to(&p, "kalshi", Some(&vars)).unwrap();
-        // 600 is off the round-duration union; arm a legal one.
+        // The config key is stripped — the migration is one-shot.
+        let stripped = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !stripped.contains("credentials"),
+            "the drained key must not survive: {stripped}"
+        );
+        assert_eq!(migrate_credentials_cell_to_env(&p, &env).unwrap(), 0);
+        // The sibling cells still work on the rewritten file.
         persist_round_duration_to(&p, Some(900), "uid:test", 2_000).unwrap();
-        // The sibling cell write must not clobber the credentials…
-        let got = load_credentials_from(&p, Some("kalshi"));
-        assert_eq!(got["kalshi"]["KALSHI_API_KEY_ID"], "key-1");
-        assert_eq!(got["kalshi"]["KALSHI_RSA_PRIVATE_KEY"], "-----BEGIN");
         assert_eq!(
             load_round_duration_from(&p, TEST_ALLOWED),
             Some(RoundDurationCell { duration_sec: 900 })
         );
-        // …and a round-duration write must not clobber the credentials.
-        persist_round_duration_to(&p, Some(300), "uid:test", 3_000).unwrap();
-        assert_eq!(load_credentials_from(&p, None)["kalshi"].len(), 2);
     }
 
     #[test]
-    fn credentials_reset_removes_only_that_plugin() {
-        let d = tmpdir("credreset");
+    fn a_config_without_the_credentials_cell_migrates_zero() {
+        let d = tmpdir("credzero");
         let p = d.join("config.json");
-        let mut a = std::collections::BTreeMap::new();
-        a.insert("KALSHI_API_KEY_ID".to_string(), "k".to_string());
-        persist_credentials_to(&p, "kalshi", Some(&a)).unwrap();
-        let mut b = std::collections::BTreeMap::new();
-        b.insert("POLYSIM_API_KEY".to_string(), "s".to_string());
-        persist_credentials_to(&p, "polysimulator", Some(&b)).unwrap();
-        persist_credentials_to(&p, "kalshi", None).unwrap(); // reset arm
-        let got = load_credentials_from(&p, None);
-        assert!(!got.contains_key("kalshi"));
-        assert_eq!(got["polysimulator"]["POLYSIM_API_KEY"], "s");
-        // Clearing the last plugin drops the key entirely.
-        persist_credentials_to(&p, "polysimulator", None).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            !text.contains("credentials"),
-            "empty map must not arm the key: {text}"
+        std::fs::write(&p, r#"{"marketPlugin": "polymarket"}"#).unwrap();
+        assert_eq!(
+            migrate_credentials_cell_to_env(&p, &d.join(".env")).unwrap(),
+            0
         );
-    }
-
-    #[test]
-    fn credentials_file_is_owner_only_after_write() {
-        let d = tmpdir("credperm");
-        let p = d.join("config.json");
-        let mut v = std::collections::BTreeMap::new();
-        v.insert("POLYSIM_API_KEY".to_string(), "secret".to_string());
-        persist_credentials_to(&p, "polysimulator", Some(&v)).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "credential values demand owner-only");
-        }
-        #[cfg(not(unix))]
-        let _ = p;
+        assert!(
+            !d.join(".env").exists(),
+            "zero moved must not create a .env"
+        );
     }
 }

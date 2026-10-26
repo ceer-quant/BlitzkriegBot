@@ -571,21 +571,14 @@ pub fn plugin_credential_vars(plugin: &str) -> &'static [&'static str] {
 }
 
 /// `market.credentials.status`: for every registered plugin, which of its
-/// required vars will resolve for the NEXT session — environment first, the
-/// persisted cell second (the cell never outranks the environment, matching
-/// .env posture). Values never leave the process; names and presence only.
+/// required vars will resolve for the NEXT session — judged against this
+/// process's environment (the launcher loads `.env` before spawning the
+/// kernel; the config.json credentials cell is retired, `.env` is the single
+/// persistent home). Values never leave the process; names and presence only.
 pub fn credentials_status(
     registry: &registry::MarketPluginRegistry,
-    core: &crate::service::Core,
 ) -> crate::ipc::schema::CredentialsStatus {
     use crate::ipc::schema::{CredentialsStatus, PluginCredentialRow};
-    let cell = core
-        .config()
-        .runtime_config_path
-        .as_deref()
-        .map(std::path::Path::new)
-        .map(|p| crate::ipc::runtime_config::load_credentials_from(p, None))
-        .unwrap_or_default();
     let rows = registry
         .list()
         .iter()
@@ -596,12 +589,7 @@ pub fn credentials_status(
                 .collect();
             let resolved: Vec<String> = required
                 .iter()
-                .filter(|v| {
-                    std::env::var_os(v).is_some_and(|s| !s.is_empty())
-                        || cell
-                            .get(&p.name)
-                            .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty()))
-                })
+                .filter(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
                 .cloned()
                 .collect();
             let ready = !required.is_empty() && resolved.len() == required.len();
@@ -617,44 +605,34 @@ pub fn credentials_status(
 }
 
 /// RFC #541 方案 2a-i 挂钩 B（原型）的凭证谓词：`plugin` 的全部必需凭证变量
-/// 是否都能解析——与 [`credentials_status`] 逐变量同一谓词（env `var_os`
-/// 非空，或 `cell` 里该插件该变量非空），同一持久格（`runtime_config_path`
-/// load 的产物直接传入，避免本函数再读一次盘）。需要的插件变量表为空 ⇒
+/// 是否都能从本进程环境解析——与 [`credentials_status`] 逐变量同一谓词。
+/// 需要的插件变量表为空 ⇒
 /// 视为就绪（数据面无凭证的插件没有可失败的维度——`credentials_status` 的
 /// `ready = !required.is_empty()` 语义只属于面板行，这里不能把一个无凭证
 /// 插件的 venue 判成永远未就绪）。
-pub fn venue_credentials_ready(
-    plugin: &str,
-    cell: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-) -> bool {
-    venue_credentials_missing(plugin, cell).is_empty()
+pub fn venue_credentials_ready(plugin: &str) -> bool {
+    venue_credentials_missing(plugin).is_empty()
 }
 
 /// The refusal-diagnosis half of [`venue_credentials_ready`]: WHICH of the
-/// plugin's required vars do not resolve (env empty/absent AND the persisted
-/// cell empty), in the plugin's declared order. RFC #541 边界三（拒绝可见性）：
+/// plugin's required vars do not resolve from the process environment, in the
+/// plugin's declared order. RFC #541 边界三（拒绝可见性）：
 /// an operator must be able to fix a wholesale batch refusal from the log line
 /// alone — "kalshi 缺 KALSHI_RSA_PRIVATE_KEY"，不是笼统的"批校验失败"。
-pub fn venue_credentials_missing(
-    plugin: &str,
-    cell: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-) -> Vec<&'static str> {
+pub fn venue_credentials_missing(plugin: &str) -> Vec<&'static str> {
     plugin_credential_vars(plugin)
         .iter()
         .copied()
-        .filter(|v| {
-            !(std::env::var_os(v).is_some_and(|s| !s.is_empty())
-                || cell
-                    .get(plugin)
-                    .is_some_and(|m| m.get(*v).is_some_and(|s| !s.is_empty())))
-        })
+        .filter(|v| !std::env::var_os(v).is_some_and(|s| !s.is_empty()))
         .collect()
 }
 
 /// `market.credentials.set`: validate every var name against the plugin's
 /// requirement table (a typo must fail now, not as a silently inert
-/// executor), then persist atomically. next_session only — the executor
-/// reads the environment once at boot.
+/// executor), then upsert the values into the configured `.env` — the single
+/// persistent home for UI-submitted credentials. next_session only — the
+/// launcher re-reads `.env` at the next start, and the executor reads the
+/// environment once at boot.
 pub async fn apply_credentials_set(
     registry: &registry::MarketPluginRegistry,
     core: &tokio::sync::Mutex<crate::service::Core>,
@@ -681,19 +659,19 @@ pub async fn apply_credentials_set(
         .lock()
         .await
         .config()
-        .runtime_config_path
+        .env_file_path
         .clone()
         .ok_or_else(|| {
             CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "market.credentials.set: no runtime config path configured — \
+                "market.credentials.set: no .env path configured — \
                  persistence is disabled for this core (backtests and \
                  in-process tests); nothing was applied"
                     .to_string(),
             )
         })?;
 
-    let mut vars = patch.vars.clone();
+    let vars = patch.vars.clone();
     for name in vars.keys() {
         if !allowed.contains(&name.as_str()) {
             let known: Vec<&str> = allowed.to_vec();
@@ -711,28 +689,30 @@ pub async fn apply_credentials_set(
     } else {
         vars.keys().cloned().collect()
     };
+    let env_path = std::path::Path::new(&path);
     if patch.reset {
-        vars.clear();
+        crate::env_file::remove_env_vars(env_path, allowed).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("market.credentials.set: .env write failed, nothing changed: {e}"),
+            )
+        })?;
+    } else {
+        crate::env_file::upsert_env_vars(env_path, &vars).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("market.credentials.set: .env write failed, nothing changed: {e}"),
+            )
+        })?;
     }
-    crate::ipc::runtime_config::persist_credentials_to(
-        std::path::Path::new(&path),
-        plugin,
-        Some(&vars),
-    )
-    .map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("market.credentials.set: persist failed, nothing changed: {e}"),
-        )
-    })?;
     tracing::info!(
         target: "risk",
         actor = %actor,
         reason = patch.reason.as_deref().unwrap_or(""),
         plugin = %plugin,
         vars = ?written,
-        "credential cell written — next session injects it at boot \
-         ({CREDENTIALS_SET_NOTE})"
+        "credential keys written to .env — the launcher applies them at next \
+         start ({CREDENTIALS_SET_NOTE})"
     );
     Ok(CredentialsUpdate {
         plugin: plugin.to_string(),

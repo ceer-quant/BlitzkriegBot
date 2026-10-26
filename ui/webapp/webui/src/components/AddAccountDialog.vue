@@ -195,7 +195,7 @@ async function submit(): Promise<void> {
               </div>
             </div>
             <p class="mt-1.5 text-[11px] text-faint-fg">
-              值保存到内核持久格（仅属主可读），重启后注入进程环境；.env 里的真实环境变量始终优先。如何申请见
+              值写入 .env（唯一持久凭据格，仅属主可读），启动器下次启动时加载；.env 里已手工写的同名变量始终优先。如何申请见
               <span class="text-primary">设置页 → 如何创建 API</span>。
             </p>
           </div>

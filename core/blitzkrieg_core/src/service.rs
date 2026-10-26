@@ -66,6 +66,17 @@ pub struct CoreConfig {
     /// checkout the caller happens to run from (the same posture as
     /// `strategy_state_path`).
     pub runtime_config_path: Option<String>,
+    /// The `.env` file the launcher loads at start (`<cwd>/.env` in
+    /// production) — the write half of `market.credentials.set` upserts
+    /// validated credential keys HERE (the single persistent home for
+    /// UI-submitted credentials; the config.json cell is retired). `None`
+    /// disables the write path — the backtester and most in-process tests
+    /// run with `None`, and a `market.credentials.set` then refuses with
+    /// "persist is disabled" (the same posture as `runtime_config_path`).
+    /// The READ side never consults this field: the kernel's own environment
+    /// already carries the launcher's `.env` load, so every predicate reads
+    /// `std::env` directly.
+    pub env_file_path: Option<String>,
     /// The account book's own file (`user_layer/configs/accounts.toml` in
     /// production) — the write half of `account.venue.set` persists the
     /// binding HERE, read back at the next boot. `None` disables the write
@@ -863,6 +874,7 @@ impl Default for CoreConfig {
             allowed_round_secs: Vec::new(),
             round_duration_source: "default",
             runtime_config_path: None,
+            env_file_path: None,
             accounts_config_path: None,
             manual_ops_audit_path: None,
             unified_ledger_path: None,
@@ -7867,26 +7879,22 @@ impl Core {
         }
         for (strategy, legs) in cycles {
             // (a) credentials — venue-scoped, judged across the WHOLE cycle
-            // once (the persisted cell loads at most one time per cycle).
+            // once. The kernel's environment IS the credential truth (the
+            // launcher loads `.env` before spawning this process; the old
+            // config.json cell is retired), so the predicate reads `std::env`
+            // directly — no per-cycle file load.
             if self.config.mode.may_trade() {
-                let cell = self
-                    .config
-                    .runtime_config_path
-                    .as_deref()
-                    .map(std::path::Path::new)
-                    .map(|p| crate::ipc::runtime_config::load_credentials_from(p, None))
-                    .unwrap_or_default();
                 let mut refusal: Option<String> = None;
                 for leg in &legs {
                     let venue = self.execution_venue_of(&leg.account, &leg.token);
-                    // tag 腿的 venue 插件必需凭证必须全部可解析（env 优先、
-                    // 持久格次之，与 market::credentials_status 同一谓词）；
+                    // tag 腿的 venue 插件必需凭证必须全部可解析（进程环境，
+                    // 与 market::credentials_status 同一谓词）；
                     // untagged 腿不阻断——scope 门对无标签语料同样放行。
-                    if !venue.is_empty() && !venue_credentials_ready(&venue, &cell) {
+                    if !venue.is_empty() && !venue_credentials_ready(&venue) {
                         // RFC #541 边界三（拒绝可见性）：the refusal names the
                         // leg, the venue, and the EXACT unresolved vars — the
                         // operator fixes the batch from this line alone.
-                        let missing = venue_credentials_missing(&venue, &cell).join(",");
+                        let missing = venue_credentials_missing(&venue).join(",");
                         refusal = Some(format!(
                             "credentials.notReady: leg {} (token {}) venue `{venue}` has \
                              unresolved executor credentials: missing [{missing}]",

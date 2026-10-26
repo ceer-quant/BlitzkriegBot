@@ -909,8 +909,8 @@ export const api = {
   marketCredentials: () => request<CredentialsStatusDoc>('/market-credentials'),
   /**
    * 行情插件凭据的写路径（`market.credentials.set`）：next_session ——
-   * executor 在 boot 时一次性读环境，写入只落持久格（data/runtime/
-   * config.json 的 credentials），重启后 boot 注入（真实 env 仍 outrank）。
+   * 值 upsert 进 .env（唯一持久凭据格，仅属主可读），启动器下次启动时
+   * 加载（进程环境里已有的同名变量始终 outrank 文件）。
    * 未注册插件名 / 需求表外变量名在内核 plan-first 拒绝。
    */
   marketCredentialsSet: (body: {
