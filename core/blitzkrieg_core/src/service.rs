@@ -14825,6 +14825,23 @@ impl Core {
         self.settlement.take_redemptions(now_ms)
     }
 
+    /// #647: the per-venue redemption drain for the host's multi-plugin
+    /// executor pulls. Each request carries its own venue (the claim's
+    /// position-side execution-venue stamp), and this returns exactly the
+    /// claims of `venue` — plus the UNTAGGED claims when `untagged_fallback`
+    /// (the requesting plugin is the host's active one), matching the orders
+    /// drain's single-plugin fallback. A sibling executor never sees a claim
+    /// this drain handed out (the dispatch stamp is take-once).
+    pub fn take_pending_redemptions_for_venue(
+        &mut self,
+        venue: &str,
+        untagged_fallback: bool,
+        now_ms: i64,
+    ) -> Vec<blitzkrieg_market_api::RedemptionRequest> {
+        self.settlement
+            .take_redemptions_for_venue(venue, untagged_fallback, now_ms)
+    }
+
     /// A redemption attempt came back.
     ///
     /// Success is the exact instant the payout becomes cash: the claim leaves the
@@ -14941,6 +14958,21 @@ impl Core {
     /// forgotten. Mirrors `take_pending_redemptions`.
     pub fn take_pending_merges(&mut self, now_ms: i64) -> Vec<blitzkrieg_market_api::MergeRequest> {
         self.settlement.take_merges(now_ms)
+    }
+
+    /// #647: the per-venue merge drain for the host's multi-plugin executor
+    /// pulls. Routed exactly like
+    /// [`Self::take_pending_redemptions_for_venue`] — own-venue claims, plus
+    /// untagged claims when `untagged_fallback` — so a second venue's executor
+    /// can never drain a foreign bridge's merge.
+    pub fn take_pending_merges_for_venue(
+        &mut self,
+        venue: &str,
+        untagged_fallback: bool,
+        now_ms: i64,
+    ) -> Vec<blitzkrieg_market_api::MergeRequest> {
+        self.settlement
+            .take_merges_for_venue(venue, untagged_fallback, now_ms)
     }
 
     /// #461: a merge attempt came back. The SAME instant semantics as a
@@ -15925,6 +15957,11 @@ impl Core {
                 let claim_id = self.settlement.note_merge_burned(
                     &outcome.condition_id,
                     outcome.account_id.as_str(),
+                    // #647: the venue the burned pairs sit on — the legs' own
+                    // execution-venue stamp, so the merge request drains to
+                    // the executor that can run this CTF merge (and to no
+                    // sibling's bridge).
+                    &outcome.venue,
                     neg_risk,
                     outcome.pairs_merged,
                     now_ms,
@@ -28682,6 +28719,7 @@ mod settlement_service_tests {
                 condition_id: "cond".into(),
                 neg_risk: false,
                 pairs_usd: dec!(5),
+                venue: String::new(),
             },
             "RPC connect failed",
             false,
@@ -28708,6 +28746,7 @@ mod settlement_service_tests {
                 condition_id: "cond".into(),
                 neg_risk: false,
                 pairs_usd: dec!(5),
+                venue: String::new(),
             },
             "neg-risk merge is not automated",
             true,
@@ -28743,6 +28782,7 @@ mod settlement_service_tests {
                 condition_id: "ghost".into(),
                 neg_risk: false,
                 pairs_usd: dec!(9),
+                venue: String::new(),
             },
             "0xdeadbeef",
             Some(42),

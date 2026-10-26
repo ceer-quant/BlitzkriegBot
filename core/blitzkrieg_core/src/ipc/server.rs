@@ -803,7 +803,7 @@ pub async fn run(
     // soft-unloaded instance keeps polling, its output never reaches the
     // engine. The closure carries the data plane's gauge + active-family
     // computation and the Core handle.
-    let host: Arc<dyn blitzkrieg_market_api::MarketHost> = {
+    let concrete_host = {
         let h = crate::market::host::CoreHost::new(core.clone());
         // Untagged round lists (legacy corpora / Node bridge) route their
         // orderbook subscription to the active plugin — the historical
@@ -830,8 +830,13 @@ pub async fn run(
                 }
             }));
         }
-        Arc::new(h)
+        h
     };
+    // The trait-erased handle every feed/discovery/session share. The
+    // settlement-drain bucket it carries is the assembly's active-plugin
+    // answer (the shared data-plane default); the executor loop below
+    // re-buckets per plugin with `for_plugin` handles.
+    let host: Arc<dyn blitzkrieg_market_api::MarketHost> = Arc::new(concrete_host.clone());
 
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
@@ -918,11 +923,14 @@ pub async fn run(
     // each future edit could widen back open.
     if config.mode.may_trade() {
         // Multi-plugin: EVERY selected plugin with an executor starts its own
-        // instance, and its `take_pending_orders(<name>)` drain is venue-routed
-        // (CoreHost filters the pending queue by the order token's round-list
-        // venue; untagged orders fall back to the active plugin). Cancel /
-        // settlement drains stay global this batch — see the CoreHost comment
-        // on `take_pending_cancels`.
+        // instance. Orders/cancels drain venue-routed by their `plugin`
+        // argument; the settlement drains carry no caller name (frozen ABI),
+        // so the executor gets a `for_plugin` host handle whose bucket cell
+        // names ITSELF (#647) — the redemption/merge queues inside the host
+        // are venue-bucketed and this handle pulls only its own venue's
+        // claims (plus untagged ones, the single-plugin fallback). Data-plane
+        // handles keep the shared assembly default; only the executor is
+        // re-bucketed.
         for p in &actives {
             if let Some(exec) = p.executor() {
                 // `markets` is the operator's global `--market` condition-id
@@ -931,7 +939,10 @@ pub async fn run(
                 let cfg = blitzkrieg_market_api::ExecutorConfig {
                     markets: config.markets.clone(),
                 };
-                match exec.start(host.clone(), cfg).await {
+                match exec
+                    .start(Arc::new(concrete_host.for_plugin(p.name())), cfg)
+                    .await
+                {
                     Ok(()) => {
                         eprintln!(
                             "blitzkrieg-core: live order executor started for {}",

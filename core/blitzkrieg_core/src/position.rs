@@ -735,6 +735,11 @@ pub struct MergeOutcome {
     /// E28 (§9.2): the account whose wallet owned the pair — the collateral
     /// credit lands here, never in another book.
     pub account_id: AccountId,
+    /// #647: the venue the burned pairs sit on — carried from the legs' own
+    /// execution-venue stamp (the same fact the executor drain routes by), so
+    /// the merge request reaches the executor that can run the CTF merge.
+    /// Empty when the legs were opened untagged (the pre-routing world).
+    pub venue: String,
     /// Complete share-pairs merged (the smaller side's share count).
     pub pairs_merged: Decimal,
     /// Collateral collected: `pairs_merged` × $1.00.
@@ -2412,6 +2417,10 @@ impl PositionManager {
         // bookkeeping: a merge is collateral collection, not a market exit).
         let merge_leg_price = Decimal::new(5, 1); // $0.50 per share
         let account_id = up.account_id.clone();
+        // #647: the legs' own venue stamp — both legs are one account's tokens
+        // on one condition, so one venue; empty when opened untagged. Read
+        // before the burn moves the legs.
+        let venue = up.venue.clone();
         let mut closed = Vec::new();
         for leg in [up, down] {
             let remaining = self.apply_exit_fill(
@@ -2458,6 +2467,7 @@ impl PositionManager {
         let outcome = MergeOutcome {
             condition_id: condition_id.to_string(),
             account_id,
+            venue,
             pairs_merged: pairs,
             cash_credited_usd: pairs, // $1.00 per pair
             closed,

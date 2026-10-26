@@ -742,6 +742,7 @@ mod tests {
             outcome_shares: vec![dec!(5), Decimal::ZERO],
             expected_payout_usd: dec!(5),
             winning_token_id: "tok".to_string(),
+            venue: String::new(),
         };
         let ok = to_result(
             &request,

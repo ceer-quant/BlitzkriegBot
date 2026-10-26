@@ -181,6 +181,25 @@ impl CoreHost {
             .expect("core host active plugin lock poisoned") = name.to_string();
     }
 
+    /// #647: a handle naming ONE plugin for the settlement drains. The
+    /// settlement queues are venue-bucketed inside the host, and the trait's
+    /// `take_pending_redemptions`/`take_pending_merges` carry no caller name
+    /// (frozen ABI — the signature stays), so the session assembly hands each
+    /// executor a handle whose bucket cell names ITS OWN plugin: the executor
+    /// drains only the claims whose request venue names that plugin (plus the
+    /// untagged ones, the single-plugin fallback the orders drain uses). The
+    /// cell is per-handle (a fresh `RwLock`), unlike the shared cell a plain
+    /// `clone` re-sees, so sibling executors never inherit each other's
+    /// bucket; data-plane handles (`clone`, the assembly default) keep the
+    /// assembly's active-plugin answer exactly as before.
+    pub fn for_plugin(&self, name: &str) -> Self {
+        Self {
+            core: Arc::clone(&self.core),
+            active_plugin: std::sync::Arc::new(std::sync::RwLock::new(name.to_string())),
+            poll_admission: std::sync::Arc::clone(&self.poll_admission),
+        }
+    }
+
     /// B2 (轮次多族 软卸): install the discovery poll-output gate. Called once
     /// by the session assembly AFTER the data plane exists; the default
     /// (never called) is admit-everything — the historical shape.
@@ -577,20 +596,31 @@ impl MarketHost for CoreHost {
     }
 
     fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<api::RedemptionRequest>> {
-        // Multi-plugin note (left for the next batch, deliberately): the
-        // request carries only condition_id/neg_risk/outcome_shares — no venue
-        // field — so a per-venue split needs an ABI addition, not just a
-        // filter. Today it is SAFE to leave global: only the polymarket bridge
-        // consumes this queue (single consumer), the CTF redeem burns the
-        // caller's OWN tokens (a wrong-venue request cannot move another
-        // venue's collateral), and a foreign condition_id fails its bytes32
-        // parse or mines a no-op whose zero payout the receipt audit refuses
-        // (`paid_to_holder == 0 < expected`) — a harmless failure, retried on
-        // backoff, never a mis-directed transfer.
+        // #647: the request now carries its own venue, and this drain hands
+        // out only ITS bucket — the handle's plugin name (set at assembly:
+        // each executor gets a `for_plugin` handle naming itself, the shared
+        // data-plane handle names the active plugin). Legacy hosts that never
+        // set a bucket name take ALL claims: the pre-routing single-consumer
+        // behaviour, byte-identical. A sibling executor can therefore never
+        // redeem a foreign venue's claim (the old global-queue cross-post
+        // burned only a retry — the bytes32 parse or zero-payout audit refused
+        // it — but the retry-and-alert churn is exactly what this split ends).
         Box::pin(async move {
             let now = now_ms();
+            let bucket = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
             let mut c = self.core.lock().await;
-            c.take_pending_redemptions(now)
+            if bucket.is_empty() {
+                c.take_pending_redemptions(now)
+            } else {
+                // The handle's own bucket is also the untagged fallback: a
+                // claim stamped before the venue labels existed (legacy
+                // journal) drains to the single active plugin, as before.
+                c.take_pending_redemptions_for_venue(&bucket, true, now)
+            }
         })
     }
 
@@ -603,17 +633,24 @@ impl MarketHost for CoreHost {
     }
 
     fn take_pending_merges(&self) -> BoxFuture<'_, Vec<api::MergeRequest>> {
-        // Multi-plugin note (left for the next batch, deliberately): same
-        // verdict as `take_pending_redemptions` — the request carries no venue
-        // field (ABI addition needed for a real split), the only consumer is
-        // the polymarket bridge, and a merge of a foreign condition_id burns
-        // nothing (the CTF `mergePositions` reverts with no pairs held or
-        // mines a no-op), reported as a failed claim and retried — no
-        // collateral can land on the wrong venue.
+        // #647: same verdict as `take_pending_redemptions` — the request
+        // carries its own venue, this drain hands out only its bucket (the
+        // handle's plugin name; empty = legacy all-take), and a foreign
+        // condition_id merge (burned nothing, reverts no-op) can no longer be
+        // handed to a sibling venue's bridge at all.
         Box::pin(async move {
             let now = now_ms();
+            let bucket = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
             let mut c = self.core.lock().await;
-            c.take_pending_merges(now)
+            if bucket.is_empty() {
+                c.take_pending_merges(now)
+            } else {
+                c.take_pending_merges_for_venue(&bucket, true, now)
+            }
         })
     }
 
@@ -927,6 +964,94 @@ mod tests {
         );
         assert!(host.take_pending_cancels("polymarket").await.is_empty());
         assert!(host.take_pending_cancels("kalshi").await.is_empty());
+    }
+
+    /// #647: two plugins hold settlement claims at once (each on its OWN
+    /// venue's collateral), and each executor's `for_plugin` handle drains
+    /// ONLY its own claims — the redemption and merge queues can no longer
+    /// hand a claim to a foreign venue's bridge (the cross-post the old
+    /// global queue made: harmless there, but it burned retries and alerts).
+    /// A handle with no bucket name (the legacy shape) keeps the all-take.
+    #[tokio::test]
+    async fn settlement_queues_drain_per_venue_bucket() {
+        let mut c = two_venue_live_core();
+        let now: i64 = 1_000_000;
+        // One filled entry per venue: the fill's position stamps the entry
+        // market's venue (the same `execution_venue_of` read the order drain
+        // routes by), so each settled claim belongs to its own executor. Each
+        // order rides its own market's condition — two claims, never one folded.
+        let mut poly_order = live_order("poly-up", "s1");
+        poly_order.condition_id = "cond-polymarket".into();
+        let mut kal_order = live_order("kal-up", "s2");
+        kal_order.condition_id = "cond-kalshi".into();
+        let (poly_id, _) = c.place(poly_order, 0, now + 1).unwrap();
+        let (kal_id, _) = c.place(kal_order, 0, now + 2).unwrap();
+        let fill = |order_id: &str, token: &str, trade: &str| crate::model::Fill {
+            order_id: order_id.into(),
+            trade_id: Some(trade.into()),
+            token_id: token.into(),
+            side: crate::model::Side::Buy,
+            price: dec!(0.40),
+            size: dec!(2),
+            status: crate::model::FillStatus::Confirmed,
+            ts_ms: now + 3,
+            tx_hash: None,
+            maker: Some(true),
+            account_id: crate::model::default_account_id(),
+        };
+        c.ingest_fill(fill(&poly_id, "poly-up", "t1"), now + 4)
+            .unwrap();
+        c.ingest_fill(fill(&kal_id, "kal-up", "t2"), now + 5)
+            .unwrap();
+        assert_eq!(c.positions().open_positions().len(), 2);
+        assert_eq!(
+            c.positions()
+                .open_positions()
+                .iter()
+                .find(|p| p.token_id == "poly-up")
+                .unwrap()
+                .venue,
+            "polymarket"
+        );
+        // Round end passes; the core watches both markets for a verdict.
+        c.on_market_resolution(resolution_for("cond-polymarket", "poly-up"), now + 4_000);
+        c.on_market_resolution(resolution_for("cond-kalshi", "kal-up"), now + 4_000);
+        assert_eq!(c.take_pending_redemptions(now + 4_500).len(), 2);
+
+        // Each executor's own handle takes exactly ITS venue's request.
+        let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        let poly_exec = host.for_plugin("polymarket");
+        let kal_exec = host.for_plugin("kalshi");
+        let poly_due = poly_exec.take_pending_redemptions().await;
+        assert_eq!(
+            poly_due.len(),
+            1,
+            "the polymarket executor takes only its claim"
+        );
+        assert_eq!(poly_due[0].venue, "polymarket");
+        let kal_due = kal_exec.take_pending_redemptions().await;
+        assert_eq!(kal_due.len(), 1, "the kalshi executor takes only its claim");
+        assert_eq!(kal_due[0].venue, "kalshi");
+        // Take-once per dispatch stamp: the re-drain is empty, and neither
+        // handle ever re-sees the sibling's request.
+        assert!(poly_exec.take_pending_redemptions().await.is_empty());
+        assert!(kal_exec.take_pending_redemptions().await.is_empty());
+        // The legacy shape (no bucket name — the pre-#647 hosts) still takes
+        // everything in one drain.
+        let legacy = host.take_pending_redemptions().await;
+        assert!(legacy.is_empty(), "both were dispatched above");
+    }
+
+    /// The resolution a venue would report for one of the two test markets:
+    /// the named token wins at 1.00/share.
+    fn resolution_for(condition: &str, winner: &str) -> blitzkrieg_market_api::MarketResolution {
+        blitzkrieg_market_api::MarketResolution {
+            condition_id: condition.into(),
+            resolved: true,
+            payouts: vec![(winner.to_string(), dec!(1)), ("x-never".into(), dec!(0))],
+            neg_risk: false,
+            source: "test".into(),
+        }
     }
 
     /// Pins the drain's market-lookup wiring: a token whose round market
