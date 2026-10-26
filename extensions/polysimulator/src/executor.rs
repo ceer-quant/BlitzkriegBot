@@ -463,6 +463,58 @@ async fn sweep(
             }
         }
     }
+
+    // FILLED-orders attribution (live venue 2026-10-26): the trade rows' leg
+    // fields NEVER name our orders here — `taker_order_id` repeats the trade's
+    // own id and `maker_orders` is absent — so the stream above cannot match a
+    // single fill on this venue. The FILLED orders list does: each row names
+    // its own order id, executed price and fill time. Every FILLED row whose
+    // id the core knows becomes a synthetic reconcile trade; dedup key
+    // `fill:{order_id}` (a limit order fills once at `fill_price`, so the
+    // order id alone identifies the fill event).
+    if let Ok(filled) = client.filled_orders().await {
+        for o in &filled {
+            let vid = o.venue_id();
+            let key = format!("fill:{}", vid);
+            if !known.contains(&vid) || seen_trades.contains(&key) {
+                continue;
+            }
+            seen_trades.insert(key);
+            let (Some(price), Some(size)) = (o.fill_price, o.quantity) else {
+                eprintln!(
+                    "polysimulator-extension: FILLED order {} lacks fill_price/quantity — skipped",
+                    vid
+                );
+                continue;
+            };
+            if size <= Decimal::ZERO || price <= Decimal::ZERO || price >= Decimal::ONE {
+                eprintln!(
+                    "polysimulator-extension: FILLED order {} out-of-band price/size ({price}×{size}) — skipped",
+                    vid
+                );
+                continue;
+            }
+            let ts_ms = o
+                .filled_at
+                .as_deref()
+                .and_then(crate::discovery::iso_to_ms)
+                .unwrap_or_else(now_ms);
+            matched.push(VenueTradeInfo {
+                venue_order_id: vid,
+                trade_id: format!("fill:{}", o.venue_id()),
+                token_id: o.market_id.clone(),
+                side: match o.side.as_deref().map(str::to_ascii_uppercase).as_deref() {
+                    Some("SELL") => Side::Sell,
+                    _ => Side::Buy,
+                },
+                size,
+                price,
+                ts_ms,
+                tx_hash: None,
+                maker: Some(false),
+            });
+        }
+    }
     let snapshot = ReconcileSnapshot {
         open_order_ids: open.iter().map(|o| o.venue_id()).collect(),
         trades: matched.clone(),

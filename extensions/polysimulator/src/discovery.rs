@@ -113,7 +113,13 @@ pub(crate) fn spawn(
                 if !row.is_open() {
                     continue;
                 }
-                let Some(asset) = asset_matches(&row.asset, &assets) else {
+                // Stock/equity daily rows carry `"asset": null` on the wire —
+                // no crypto symbol, never priceable by the engine's spot
+                // references. Skipped, not an error.
+                let Some(row_asset) = row.asset.as_deref() else {
+                    continue;
+                };
+                let Some(asset) = asset_matches(row_asset, &assets) else {
                     continue;
                 };
                 let Some(end_ms) = row.end_ms() else {
@@ -163,10 +169,13 @@ pub(crate) fn spawn(
                         Decimal::ONE / Decimal::from(2),
                     ),
                 };
-                let question = row
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| format!("{} {} Up/Down", row.asset, row.interval));
+                let question = row.title.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} {} Up/Down",
+                        row.asset.as_deref().unwrap_or("?"),
+                        row.interval
+                    )
+                });
                 markets.push(MarketDescriptor {
                     asset: asset.clone(),
                     condition_id: row.condition_id.clone(),

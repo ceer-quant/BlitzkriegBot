@@ -257,6 +257,7 @@ struct Recorded {
 struct Routes {
     balance_body: String,
     orders_body: String,
+    filled_orders_body: String,
     trades_body: String,
     resolve_body: String,
     resolve_status: u16,
@@ -296,9 +297,24 @@ fn mock_server(routes: Routes) -> (String, Arc<StdMutex<Vec<Recorded>>>) {
             });
 
             let starts_with = |p: &str| path.starts_with(p);
+            // The orders endpoint is split by the status the caller asked for:
+            // PENDING (the orphan sweep's open list) vs FILLED (the fill
+            // attribution fallback). The raw query survives in `raw`.
+            let query = raw
+                .split(' ')
+                .nth(1)
+                .unwrap_or("")
+                .split_once('?')
+                .map(|(_, q)| q.to_string())
+                .unwrap_or_default();
+            let orders_body = if query.contains("status=FILLED") {
+                &routes.filled_orders_body
+            } else {
+                &routes.orders_body
+            };
             let response = match (method.as_str(), path.as_str()) {
                 ("GET", "/v1/account/balance") => http_ok(&routes.balance_body),
-                ("GET", "/v1/orders") => http_ok(&routes.orders_body),
+                ("GET", "/v1/orders") => http_ok(orders_body),
                 ("GET", "/v1/data/trades") => http_ok(&routes.trades_body),
                 ("GET", _p) if starts_with("/v1/markets-by-token/") => {
                     if routes.resolve_status == 200 {
@@ -363,6 +379,7 @@ fn routes_for(
     Routes {
         balance_body: balance.to_string(),
         orders_body: orders.to_string(),
+        filled_orders_body: r#"{"orders":[]}"#.to_string(),
         trades_body: trades.to_string(),
         resolve_body: resolve.to_string(),
         resolve_status: 200,
@@ -776,5 +793,119 @@ async fn an_unreadable_fill_row_is_skipped_not_forwarded() {
     assert!(
         sink.errors.lock().await.is_empty(),
         "a skipped row is a log line, not a reported kernel error"
+    );
+}
+
+// ── 7. FILLED-orders attribution (the live venue's only working channel) ──
+
+#[tokio::test]
+async fn filled_order_rows_book_our_fills_when_trade_legs_cannot() {
+    // Live venue 2026-10-25/26: trade rows' `taker_order_id` repeats the
+    // TRADE's own id and `maker_orders` is absent, so the trades stream can
+    // never name our orders. The FILLED orders list does — each row carries
+    // order_id + fill_price + quantity + filled_at. A FILLED row whose id the
+    // core knows must become a reconcile trade + an on_fill, with the fill
+    // price the VENUE executed at (not our limit) and the venue's fill time.
+    let filled_row = r#"{"order_id":1410921,"market_id":"0xcc2cdf","side":"BUY","outcome":"Up","order_type":"limit","limit_price":"0.3700","quantity":"10.0000","time_in_force":"GTC","status":"FILLED","client_order_id":"pm-747fedc584644b02","created_at":"2026-10-25T19:06:37.239652+00:00","filled_at":"2026-10-25T19:06:39.812886+00:00","fill_price":"0.3650"}"#;
+    // The trades stream carries a row whose legs name NOTHING of ours — the
+    // live shape that used to swallow every fill.
+    let trades_body = r#"{"data":[{"id":"446934","market":"0xcc2cdf","asset_id":"71321","side":"BUY","outcome":"Up","price":"0.365","size":"10","taker_order_id":"446934","status":"MATCHED"}]}"#;
+    let (url, _recorded) = mock_server(Routes {
+        filled_orders_body: format!(r#"{{"orders":[{filled_row}]}}"#),
+        ..routes_for(
+            r#"{"balance":"100"}"#,
+            r#"{"orders":[]}"#,
+            trades_body,
+            RESOLVE_BODY,
+            vec![],
+            vec![],
+        )
+    });
+    let sink = ExecSink::default();
+    // The core knows order 1410921 (placed before the fill) — the FILLED row
+    // attributes to it. A venue id the core does NOT know must not book.
+    sink.known_ids.lock().await.push(String::from("1410921"));
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    wait_until(10_000, || {
+        sink.fills
+            .try_lock()
+            .map(|f| !f.is_empty())
+            .unwrap_or(false)
+    })
+    .await;
+    let fills = sink.fills.lock().await;
+    assert_eq!(fills.len(), 1, "exactly the known order's fill books");
+    let f = &fills[0];
+    assert_eq!(f.order_id, "1410921");
+    assert_eq!(
+        f.price,
+        Decimal::from_str("0.3650").unwrap(),
+        "the fill carries the venue's executed price, not our 0.37 limit"
+    );
+    assert_eq!(f.size, Decimal::from_str("10.0000").unwrap());
+    assert_eq!(f.trade_id.as_deref(), Some("fill:1410921"));
+    assert_eq!(
+        f.ts_ms, 1_792_955_199_000,
+        "filled_at ISO parses to epoch millis (2026-10-25T19:06:39Z; sub-second dropped)"
+    );
+    drop(fills);
+
+    // And the reconcile snapshot carries the same attribution so the core's
+    // sweep books it even when on_fill raced a restart.
+    let snaps = sink.reconciles.lock().await;
+    let attributed: Vec<_> = snaps
+        .iter()
+        .flat_map(|s| s.trades.iter())
+        .filter(|t| t.venue_order_id == "1410921")
+        .collect();
+    assert_eq!(
+        attributed.len(),
+        1,
+        "the reconcile snapshot must carry the FILLED-row trade exactly once"
+    );
+    assert_eq!(attributed[0].size, Decimal::from_str("10.0000").unwrap());
+}
+
+#[tokio::test]
+async fn a_filled_row_for_an_unknown_order_is_never_booked() {
+    // The orphan path must stay closed: a FILLED row whose order id the core
+    // has never issued (someone else's fill on the venue) books NOTHING —
+    // the core's manual-fill folding is the only consumer for those, and it
+    // must not be fed synthetic rows for orders that were never ours.
+    let (url, _recorded) = {
+        let routes = Routes {
+            filled_orders_body: r#"{"orders":[{"order_id":1419999,"market_id":"0xcc2cdf","side":"BUY","outcome":"Up","order_type":"limit","limit_price":"0.37","quantity":"10","status":"FILLED","fill_price":"0.365","filled_at":"2026-10-25T19:06:39Z"}]}"#.to_string(),
+            ..routes_for(
+                r#"{"balance":"100"}"#,
+                r#"{"orders":[]}"#,
+                r#"{"data":[]}"#,
+                RESOLVE_BODY,
+                vec![],
+                vec![],
+            )
+        };
+        mock_server(routes)
+    };
+    let sink = ExecSink::default();
+    sink.known_ids.lock().await.push(String::from("1410000"));
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        sink.fills.lock().await.is_empty(),
+        "a FILLED row the core does not know must never book a fill"
+    );
+    assert!(
+        sink.reconciles
+            .lock()
+            .await
+            .iter()
+            .all(|s| s.trades.is_empty()),
+        "no synthetic trade may enter the reconcile snapshot for an unknown order"
     );
 }

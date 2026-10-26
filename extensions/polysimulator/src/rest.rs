@@ -254,6 +254,20 @@ impl PolySimRest {
         Ok(body.orders.unwrap_or_default())
     }
 
+    /// Recently FILLED orders, native envelope — the fill-attribution
+    /// fallback. The venue's trade rows DO NOT carry our order id
+    /// (`taker_order_id` holds the trade's own id, `maker_orders` is absent —
+    /// verified live 2026-10-25/26), so the trades stream can never be matched
+    /// to our orders. The FILLED orders list does: each row names its
+    /// `order_id` + `fill_price` + `filled_at` + `quantity`.
+    pub async fn filled_orders(&self) -> Result<Vec<NativeOrder>, PolySimError> {
+        self.require_key()?;
+        let body: PendingOrdersEnvelope = self
+            .get_json(Class::Read, "/v1/orders?status=FILLED&limit=100")
+            .await?;
+        Ok(body.orders.unwrap_or_default())
+    }
+
     /// Recent executed trades, PM-shape envelope (the reconcile unit). The
     /// `next_cursor` paging of the venue is not followed here: the sweep
     /// dedupes by trade id, and one page is far more than a sweep cadence
