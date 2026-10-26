@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "25f08b1e9211d0187902b6aa4095de3e5e3df35c60607a589f5eef2134fc6092",
+  "sha256": "b4e5e058f8b3dce19f4cfde6e94aa07b865f757c6f17114da438d12264669f04",
   "author": "BlitzkriegBot",
   "description": "Calibration probe for the measurement layer, not a strategy: rests one unconditional maker bid at entry_price on the round's UP token, every round, no gates and no exits. Booked PnL must match the closed-form expectation built into the synthetic corpus (scripts/lib/oracle-ruler.mjs); any disagreement is a measurement-layer defect, by construction.",
   "tunables": {
