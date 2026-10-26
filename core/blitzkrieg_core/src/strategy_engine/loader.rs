@@ -52,10 +52,10 @@
 
 #[cfg(feature = "strategy-loading")]
 use blitzkrieg_strategy_api::{
-    BK_ABI_VERSION, BK_BIND_EVAL_CTX_SYMBOL, BK_CONFIG_VIEW_SYMBOL, BK_CREATE_SYMBOL,
-    BK_DECLARE_MODES_SYMBOL, BK_EVOLVABLE_KNOBS_SYMBOL, BK_FREE_STRING_SYMBOL,
-    BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_VERSION_SYMBOL, BkStrategyVtable,
-    bk_strategy_free_string,
+    BK_ABI_VERSION, BK_ATOMIC_BATCH_SYMBOL, BK_BIND_EVAL_CTX_SYMBOL, BK_CONFIG_VIEW_SYMBOL,
+    BK_CREATE_SYMBOL, BK_DECLARE_MODES_SYMBOL, BK_ENTRY_PAIR_SYMBOL, BK_EVOLVABLE_KNOBS_SYMBOL,
+    BK_FREE_STRING_SYMBOL, BK_GATE_EXEMPTIONS_SYMBOL, BK_MIN_ABI_VERSION, BK_ON_KLINE_SYMBOL,
+    BK_TRAILING_EXIT_SYMBOL, BK_VERSION_SYMBOL, BkStrategyVtable, bk_strategy_free_string,
 };
 use std::path::{Path, PathBuf};
 
@@ -716,6 +716,24 @@ pub struct LoadedForeign {
     /// is every 0.2 library's state. An INVALID payload never reaches here:
     /// the load is refused earlier with the validator's `index`/`got` error.
     pub declared_modes: Vec<blitzkrieg_strategy_api::StrategyMode>,
+    /// RFC 568 pair-declaration default (#642), read through the OPTIONAL
+    /// `bk_strategy_entry_pair` symbol: the `{key, leg}` label pair attached
+    /// to every entry whose evaluate JSON carries no per-entry `pair` of its
+    /// own. `None` = no symbol / NULL / malformed payload = no default —
+    /// exactly the pre-existing behaviour of a library without the symbol.
+    /// The core `TradePairDecl` (the same type the Lua pass-through carries),
+    /// not a mirror.
+    pub entry_pair: Option<crate::signal::TradePairDecl>,
+    /// Three-state trailing-stop verdict (#642), read through the OPTIONAL
+    /// `bk_strategy_trailing_exit` symbol. `None` = no symbol (or the -1
+    /// return) = follow the kernel-wide `risk.setExit` trailingEnabled value,
+    /// which is every existing library's behaviour byte-identically.
+    pub wants_trailing_exit: Option<bool>,
+    /// E-VA atomic-batch declaration (#642), read through the OPTIONAL
+    /// `bk_strategy_atomic_batch` symbol. `false` = no symbol (or the 0
+    /// return) = the per-order path, unchanged. Arms nothing by itself: the
+    /// pot comes from `CoreConfig::virtual_limits`.
+    pub atomic_batch: bool,
 }
 
 /// Load and negotiate a v2 strategy library, returning it boxed as the full
@@ -887,6 +905,33 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
             .ok()
             .map(|s| *s);
 
+    // 4f) OPTIONAL closed-bar hook (#642). Absent = the library is never
+    // driven by the K-line path — exactly the pre-existing default, so no ABI
+    // bump and older libraries keep loading unchanged.
+    let on_kline_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkOnKlineFn>(BK_ON_KLINE_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+    // 4g) OPTIONAL pair-declaration default (#642, RFC 568). Absent = no
+    // default; entries without their own per-entry `pair` field then carry
+    // None, byte-identically to today.
+    let entry_pair_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkEntryPairFn>(BK_ENTRY_PAIR_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+    // 4h) OPTIONAL three-state trailing verdict (#642). Absent = follow the
+    // kernel-wide `risk.setExit` trailingEnabled value.
+    let trailing_exit_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkTrailingExitFn>(BK_TRAILING_EXIT_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+    // 4i) OPTIONAL atomic-batch declaration (#642, E-VA). Absent = the
+    // per-order path. Arms nothing by itself (the pot is host config).
+    let atomic_batch_fn =
+        unsafe { lib.get::<blitzkrieg_strategy_api::BkAtomicBatchFn>(BK_ATOMIC_BATCH_SYMBOL) }
+            .ok()
+            .map(|s| *s);
+
     let name = unsafe { cstr_to_string(vtable.name) }.unwrap_or_else(|| "unnamed".into());
     let version = unsafe { cstr_to_string(vtable.version) }.unwrap_or_else(|| "0.0.0".into());
 
@@ -988,6 +1033,10 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
             bind_eval_ctx_fn,
             config_view_fn,
             settlement_holds_fn,
+            on_kline_fn,
+            entry_pair_fn,
+            trailing_exit_fn,
+            atomic_batch_fn,
         )
     };
 
@@ -1007,6 +1056,12 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
     let gate_exemptions = crate::strategies::EngineStrategy::gate_exemptions(&strategy);
     let evolvable_knobs = crate::strategies::EngineStrategy::evolvable_knobs(&strategy);
     let holds_to_settlement = crate::strategies::EngineStrategy::holds_to_settlement(&strategy);
+    // #642: the four capability declarations read through the trait, whose
+    // impls degrade to the pre-existing defaults when the symbol is absent
+    // (no pair default / follow-kernel trailing / per-order batching).
+    let entry_pair = crate::strategies::EngineStrategy::entry_pair(&strategy);
+    let wants_trailing_exit = crate::strategies::EngineStrategy::wants_trailing_exit(&strategy);
+    let atomic_batch = crate::strategies::EngineStrategy::atomic_batch(&strategy);
 
     Ok(LoadedForeign {
         strategy,
@@ -1016,6 +1071,9 @@ pub fn load_foreign(path: &Path) -> Result<LoadedForeign, LoadOutcome> {
         evolvable_knobs,
         holds_to_settlement,
         declared_modes,
+        entry_pair,
+        wants_trailing_exit,
+        atomic_batch,
     })
 }
 

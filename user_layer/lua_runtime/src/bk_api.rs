@@ -376,20 +376,11 @@ impl BkState {
 pub const ENTRY_POINTS: [&str; 4] = ["bk_evaluate", "bk_on_book", "bk_on_round", "bk_on_kline"];
 
 /// snake_case wire name of an interval (the `bk.kline(sym, interval)` key
-/// spelling, §6.4 table). Lives here because both the `bk.kline` reader and
-/// the `on_kline` pusher must agree on ONE spelling of "min1".
+/// spelling, §6.4 table). Delegates to the shared type's ONE mapping
+/// (`KlineInterval::wire_name`) so the Lua table and the C-ABI
+/// `bk_strategy_on_kline` view can never disagree on "min1".
 pub fn interval_name(interval: KlineInterval) -> &'static str {
-    match interval {
-        KlineInterval::Sec1 => "sec1",
-        KlineInterval::Sec5 => "sec5",
-        KlineInterval::Sec15 => "sec15",
-        KlineInterval::Min1 => "min1",
-        KlineInterval::Min5 => "min5",
-        KlineInterval::Min15 => "min15",
-        KlineInterval::Hour1 => "hour1",
-        KlineInterval::Hour4 => "hour4",
-        KlineInterval::Day1 => "day1",
-    }
+    interval.wire_name()
 }
 
 /// `{slot=, time_left_sec=, now_ms=}` — the `RoundInfo` table.

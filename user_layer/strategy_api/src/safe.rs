@@ -345,6 +345,40 @@ pub trait SafeStrategy: Send + 'static {
     /// pushed here — a strategy that forgot to check `is_closed` would fire a
     /// repeated signal on every trade. Default: no-op.
     fn on_kline(&mut self, _kline: &Kline) {}
+
+    /// The strategy's own trailing-stop verdict, THREE-STATE (issue 642):
+    /// `None` = follow the kernel-wide value (`risk.setExit`
+    /// trailingEnabled); `Some(true)` = bank profit on give-back even when
+    /// the kernel value is off; `Some(false)` = never trail even when it is
+    /// on. Emitted through the OPTIONAL `bk_strategy_trailing_exit` symbol.
+    /// NOT a safety bypass: the protective stop, take-profit, time exits,
+    /// force exit and every quota still apply. Default `None` (follow the
+    /// kernel), which is every existing strategy's behaviour byte-identically.
+    fn wants_trailing_exit(&self) -> Option<bool> {
+        None
+    }
+
+    /// E-VA: declare this strategy's entry candidates in one evaluation
+    /// cycle ONE economic ticket (a pair's two legs) whose virtual quota must
+    /// be reserved as a whole (OPTIONAL `bk_strategy_atomic_batch` symbol).
+    /// Arms nothing by itself: the pot comes from the host's virtual-limit
+    /// configuration. Default false — the per-order path, unchanged.
+    fn atomic_batch(&self) -> bool {
+        false
+    }
+
+    /// RFC 568: the pair declaration `{ key, leg }` attached to every entry
+    /// this strategy emits that carries no per-entry `pair` of its own
+    /// (OPTIONAL `bk_strategy_entry_pair` symbol; an entry's own `pair`
+    /// field in the evaluate JSON always wins). `key` is a readable pair
+    /// label (dedup NEVER depends on it — the kernel derives the economic
+    /// identity from (owner instance, asset, slot)); `leg` is the readable
+    /// leg tag. A library emitting BOTH legs of one pair with different leg
+    /// tags uses the per-entry JSON field instead of this default.
+    /// Default `None` = undeclared = pre-existing behaviour.
+    fn entry_pair(&self) -> Option<EntryPairDecl> {
+        None
+    }
 }
 
 // ── shell plumbing (strategy authors never see any of this) ──────────────────
@@ -475,6 +509,43 @@ pub unsafe fn parse_eval_ctx(ctx: *const crate::BkEvalCtx) -> Vec<(String, Fresh
         .collect()
 }
 
+/// Parse the OPTIONAL borrowed kline view into the shared [`Kline`] type —
+/// the same type `SafeStrategy::on_kline` receives, so a macro-shell strategy
+/// and an in-tree strategy see one shape. An unknown `interval` spelling (or
+/// an unparseable decimal, which the ABI rule makes impossible for a
+/// well-formed library) yields `None`, never a guessed bar.
+///
+/// # Safety
+/// `k` must be a valid borrowed `BkKlineView` (or null), live for the call.
+pub unsafe fn parse_kline(k: *const crate::BkKlineView) -> Option<Kline> {
+    if k.is_null() {
+        return None;
+    }
+    // SAFETY: the host's borrowed view is valid for this call.
+    let view = unsafe { &*k };
+    let interval = unsafe { cstr(view.interval) }
+        .as_deref()
+        .and_then(crate::KlineInterval::from_wire)?;
+    let d = |p: *const c_char| -> Option<rust_decimal::Decimal> {
+        unsafe { field(p) }
+            .as_deref()
+            .and_then(|s| rust_decimal::Decimal::from_str_exact(s.trim()).ok())
+    };
+    Some(Kline {
+        symbol: unsafe { cstr(view.symbol) }.unwrap_or_default(),
+        interval,
+        open_time_ms: view.open_time_ms,
+        close_time_ms: view.close_time_ms,
+        open: d(view.open)?,
+        high: d(view.high)?,
+        low: d(view.low)?,
+        close: d(view.close)?,
+        volume: d(view.volume)?,
+        trade_count: view.trade_count,
+        is_closed: view.is_closed != 0,
+    })
+}
+
 /// Expose a [`SafeStrategy`] as a full Blitzkrieg C ABI v2 dylib.
 ///
 /// Usage — one line at crate root, after the `impl SafeStrategy` (the struct
@@ -494,7 +565,10 @@ pub unsafe fn parse_eval_ctx(ctx: *const crate::BkEvalCtx) -> Vec<(String, Fresh
 /// - `#[no_mangle]` exports `bk_strategy_create`, `bk_strategy_abi_version`,
 ///   `bk_strategy_free_string`, `bk_strategy_gate_exemptions`,
 ///   `bk_strategy_evolvable_knobs`, `bk_strategy_bind_eval_ctx`,
-///   `bk_strategy_config_view`, `bk_strategy_settlement_holds` — the
+///   `bk_strategy_config_view`, `bk_strategy_settlement_holds`,
+///   `bk_strategy_declare_modes`, `bk_strategy_on_kline`,
+///   `bk_strategy_entry_pair`, `bk_strategy_trailing_exit`,
+///   `bk_strategy_atomic_batch` — the
 ///   optional-symbol exports always exist and degrade to "nothing declared"
 ///   when the strategy returns nothing, which the kernel reads exactly like a
 ///   hand-rolled library without the symbol.
@@ -504,10 +578,10 @@ macro_rules! export_strategy {
         #[allow(non_snake_case)]
         mod __bk_export {
             type Strategy = $type;
-            use $crate::shell::{cstr, json_out, parse_book, parse_eval_ctx, parse_params};
+            use $crate::shell::{cstr, json_out, parse_book, parse_eval_ctx, parse_kline, parse_params};
             use $crate::{
-                BkBookView, BkEvalCtx, BkHandle, BkRoundView, BkStrategyVtable, FreshBook,
-                SafeStrategy, BK_ABI_VERSION, BK_MIN_ABI_VERSION,
+                BkBookView, BkEvalCtx, BkHandle, BkKlineView, BkRoundView, BkStrategyVtable,
+                FreshBook, SafeStrategy, BK_ABI_VERSION, BK_MIN_ABI_VERSION,
             };
             use core::ffi::c_char;
             use std::collections::HashMap;
@@ -613,6 +687,12 @@ macro_rules! export_strategy {
                     };
                 let ctx = $crate::RoundContext { round, markets };
                 let intents = s.inner.evaluate(&ctx);
+                // RFC 568 pair channel (issue 642): an entry's own `pair`
+                // field wins; the load-time `entry_pair` default fills the
+                // rest. Written only when declared, so a strategy that
+                // declares neither emits byte-identical JSON to the pre-pair
+                // envelope (the `shares` rule).
+                let default_pair = s.inner.entry_pair();
                 let entries: Vec<_> = intents
                     .entries
                     .iter()
@@ -620,7 +700,7 @@ macro_rules! export_strategy {
                         // `shares` is written only when declared, so a strategy
                         // that never sets it emits byte-identical JSON to the
                         // pre-shares envelope (kernel sizing stays untouched).
-                        match &e.shares {
+                        let mut obj = match &e.shares {
                             Some(n) => serde_json::json!({
                                 "token": e.token,
                                 "price": e.price,
@@ -632,7 +712,11 @@ macro_rules! export_strategy {
                                 "price": e.price,
                                 "reason": e.reason,
                             }),
+                        };
+                        if let Some(p) = e.pair.as_ref().or(default_pair.as_ref()) {
+                            obj["pair"] = serde_json::json!({ "key": p.key, "leg": p.leg });
                         }
+                        obj
                     })
                     .collect();
                 let exits: Vec<_> = intents
@@ -748,6 +832,59 @@ macro_rules! export_strategy {
                     return core::ptr::null_mut();
                 }
                 json_out($crate::modes::modes_payload_json(&modes))
+            }
+            /// OPTIONAL symbol `bk_strategy_on_kline` (#642): CLOSED bars
+            /// only, forwarded through the shared [`parse_kline`] into the
+            /// strategy's `on_kline`. A null handle is a no-op, never a crash.
+            unsafe extern "C" fn on_kline(handle: BkHandle, kline: *const BkKlineView) {
+                if handle.is_null() {
+                    return;
+                }
+                let s = unsafe { &mut *(handle as *mut Shell) };
+                // SAFETY: the host's borrowed view is valid for this call.
+                if let Some(k) = unsafe { parse_kline(kline) } {
+                    s.inner.on_kline(&k);
+                }
+            }
+            /// OPTIONAL symbol `bk_strategy_entry_pair` (#642): the pair
+            /// default applied by the shell's evaluate to entries without
+            /// their own `pair`. `None`/null = "no default" (omitted
+            /// upstream), never a crash.
+            extern "C" fn entry_pair(handle: BkHandle) -> *mut c_char {
+                if handle.is_null() {
+                    return core::ptr::null_mut();
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                match s.inner.entry_pair() {
+                    Some(p) => json_out(
+                        serde_json::json!({ "key": p.key, "leg": p.leg }).to_string(),
+                    ),
+                    None => core::ptr::null_mut(),
+                }
+            }
+            /// OPTIONAL symbol `bk_strategy_trailing_exit` (#642): the
+            /// THREE-STATE verdict as -1 (follow the kernel) / 1 (trail) /
+            /// 0 (never). A null handle also reads -1 ("no declaration").
+            extern "C" fn trailing_exit(handle: BkHandle) -> i32 {
+                if handle.is_null() {
+                    return -1;
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                match s.inner.wants_trailing_exit() {
+                    None => -1,
+                    Some(true) => 1,
+                    Some(false) => 0,
+                }
+            }
+            /// OPTIONAL symbol `bk_strategy_atomic_batch` (#642): 1 when the
+            /// strategy's per-cycle entries are ONE economic ticket, 0
+            /// otherwise. A null handle also reads 0 ("no declaration").
+            extern "C" fn atomic_batch(handle: BkHandle) -> i32 {
+                if handle.is_null() {
+                    return 0;
+                }
+                let s = unsafe { &*(handle as *const Shell) };
+                i32::from(s.inner.atomic_batch())
             }
             unsafe extern "C" fn on_config(handle: BkHandle, json: *const c_char) -> i32 {
                 let Some(j) = (unsafe { cstr(json) }) else { return 1 };
@@ -914,6 +1051,30 @@ macro_rules! export_strategy {
                 // safe surface, empty → NULL ("symbol present, declares
                 // nothing").
                 declare_modes(handle)
+            }
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn bk_strategy_on_kline(
+                handle: BkHandle,
+                kline: *const BkKlineView,
+            ) {
+                // SAFETY: the exported body is itself unsafe (borrowed view).
+                unsafe { on_kline(handle, kline) }
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_entry_pair(handle: BkHandle) -> *mut c_char {
+                // Same reasoning as config_view: a plain read serialized to
+                // JSON — safe surface, None → NULL ("no default").
+                entry_pair(handle)
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_trailing_exit(handle: BkHandle) -> i32 {
+                // Same reasoning: a plain three-state integer read, not unsafe.
+                trailing_exit(handle)
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn bk_strategy_atomic_batch(handle: BkHandle) -> i32 {
+                // Same reasoning: a plain i32 read, not unsafe.
+                atomic_batch(handle)
             }
         }
     };

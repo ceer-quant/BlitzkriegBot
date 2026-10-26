@@ -1,0 +1,16 @@
+[package]
+name = "optional_capability_fixture"
+version = "0.1.0"
+edition = "2024"
+description = "Test fixture for tests/foreign_optional_symbols_check.rs (issue 642) — NOT a reference example."
+
+[lib]
+name = "optional_capability_fixture"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+blitzkrieg-strategy-api = { path = "../strategy_api" }
+serde_json = "1"
+
+[workspace]

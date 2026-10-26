@@ -50,6 +50,10 @@
 //! void  bk_strategy_bind_eval_ctx(void* h, const BkEvalCtx*);  // fresh-book gate
 //! char* bk_strategy_config_view(void* handle);        // config in force, JSON
 //! char* bk_strategy_declare_modes(void* handle);      // {"modes":[{market_type,structure?,capabilities}]}
+//! void  bk_strategy_on_kline(void* h, const BkKlineView*);     // CLOSED bars only
+//! char* bk_strategy_entry_pair(void* handle);         // {"key":..,"leg":..} attached to every entry
+//! int   bk_strategy_trailing_exit(void* handle);      // -1 follow kernel / 1 trail / 0 never
+//! int   bk_strategy_atomic_batch(void* handle);       // 1 = entries are ONE economic ticket
 //! ```
 
 use core::ffi::{c_char, c_void};
@@ -189,6 +193,126 @@ pub const BK_DECLARE_MODES_SYMBOL: &[u8] = b"bk_strategy_declare_modes\0";
 
 /// Signature of the optional [`BK_DECLARE_MODES_SYMBOL`] entry point.
 pub type BkDeclareModesFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
+
+/// Symbol name for the OPTIONAL closed-bar hook (#642):
+/// `void bk_strategy_on_kline(void* handle, const BkKlineView* kline)`.
+///
+/// Closes the LAST capability gap between a Lua package and a cdylib (issue
+/// 642): the engine already dispatches CLOSED bars to in-tree strategies and
+/// Lua packages (`engine.rs` §10.4, lua_loader's `on_kline`), but no ABI
+/// surface carried them. The view is the borrowed-`char*` mirror of the SAME
+/// `Kline` type the Lua table (`bk_on_kline`) and `SafeStrategy::on_kline`
+/// already see: decimal fields cross as the decimal STRINGS every other ABI
+/// numeric field uses (no float rounding), `interval` as the shared
+/// `KlineInterval` wire spelling (`min1` … `day1`).
+///
+/// Same ABI-evolution rule as every optional symbol before it: the kernel
+/// copies `BkStrategyVtable` BY VALUE, so a new slot would change `sizeof` and
+/// break every existing library — the capability arrives as a symbol resolved
+/// by name at load instead. A library that does not export it (or an older
+/// kernel that never calls it) keeps the plain v2 contract: no bar is ever
+/// delivered, which is exactly the pre-existing default.
+///
+/// CLOSED bars only: the host never pushes a growing bar here (`is_closed`
+/// is always true in practice; the field is carried so a strategy can assert
+/// the invariant rather than trust it). Borrowed input, valid for the call.
+pub const BK_ON_KLINE_SYMBOL: &[u8] = b"bk_strategy_on_kline\0";
+
+/// Signature of the optional [`BK_ON_KLINE_SYMBOL`] entry point. `kline` is
+/// borrowed for the call.
+pub type BkOnKlineFn = unsafe extern "C" fn(handle: BkHandle, kline: *const BkKlineView);
+
+/// The borrowed wire view of ONE K-line bar — the C-ABI mirror of the
+/// `bk_on_kline` Lua table (`kline_to_lua`) and of [`crate::safe::SafeStrategy::on_kline`]'s
+/// shared `Kline`. Decimals are NUL-terminated decimal STRINGS (the ABI's
+/// numeric rule); `interval` is the `KlineInterval` wire spelling. Borrowed:
+/// valid only for the duration of the call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BkKlineView {
+    /// Token/asset the bar aggregates (borrowed).
+    pub symbol: *const c_char,
+    /// Bar width, `KlineInterval` wire spelling (`min1` … `day1`; borrowed).
+    pub interval: *const c_char,
+    pub open_time_ms: i64,
+    /// Always `open_time_ms + interval_secs * 1000 - 1` (the shared type's
+    /// derived invariant, restated on the wire).
+    pub close_time_ms: i64,
+    pub open: *const c_char,
+    pub high: *const c_char,
+    pub low: *const c_char,
+    pub close: *const c_char,
+    pub volume: *const c_char,
+    pub trade_count: u64,
+    /// True exactly once — when the bar CLOSED. The host pushes CLOSED bars
+    /// only; the field lets a strategy assert that instead of trusting it.
+    pub is_closed: u8,
+}
+
+/// Symbol name for the OPTIONAL pair declaration default (#642, RFC 568):
+/// `char* bk_strategy_entry_pair(void* handle)` returning
+/// `{"key":..,"leg":..}` — the pair label and leg label attached to every
+/// entry the library's `evaluate` produces that carries no per-entry `pair`
+/// of its own.
+///
+/// Semantics are byte-aligned with the Lua side (lua_loader's pass-through):
+/// `key` is the strategy's own readable pair label (dedup NEVER depends on it
+/// — the kernel derives the economic identity from (owner instance, asset,
+/// slot)), `leg` is the readable leg tag ("up"/"down"-style); both are
+/// carried verbatim into `TradeSignal::pair` after the arb_precheck gate.
+/// Two channels, one meaning:
+///
+/// 1. **Per-entry** (the Lua mirror): an entry object in the evaluate JSON
+///    MAY carry `"pair":{"key":..,"leg":..}` — the same optional field the
+///    Lua `entries` rows carry. This is how a library emitting BOTH legs of
+///    one pair declares two different leg tags.
+/// 2. **Load-time default** (this symbol): one declaration for the common
+///    single-pair library, applied to every entry lacking its own field. The
+///    per-entry field always wins.
+///
+/// Absent symbol / NULL / malformed JSON = no default; an entry without a
+/// `pair` field then carries `None` = the pre-existing behaviour
+/// bit-for-bit. Libraries that predate this symbol keep loading unchanged.
+pub const BK_ENTRY_PAIR_SYMBOL: &[u8] = b"bk_strategy_entry_pair\0";
+
+/// Signature of the optional [`BK_ENTRY_PAIR_SYMBOL`] entry point.
+pub type BkEntryPairFn = unsafe extern "C" fn(handle: BkHandle) -> *mut c_char;
+
+/// Symbol name for the OPTIONAL trailing-stop declaration (#642):
+/// `int bk_strategy_trailing_exit(void* handle)` returning the THREE-STATE
+/// verdict the Lua manifest's `trailing_exit` key carries:
+/// `-1` = no declaration (follow the kernel-wide `risk.setExit`
+/// trailingEnabled value), `1` = trail even when the kernel value is off,
+/// `0` = never trail even when it is on.
+///
+/// Same authority shape as [`BK_SETTLEMENT_HOLDS_SYMBOL`] and the Lua
+/// manifest key: NOT a safety bypass — the protective stop, take-profit,
+/// time exits, force exit and every quota still apply; this only arms or
+/// disarms the ONE profit-trail rule for THIS strategy. Absent symbol = -1 =
+/// follow the kernel value, which is every existing library's behaviour
+/// byte-identically. The three states map onto the trait's
+/// `Option<bool>` (`None` / `Some(true)` / `Some(false)`); `i32` keeps the
+/// symbol a single integer read like `bk_strategy_settlement_holds`.
+pub const BK_TRAILING_EXIT_SYMBOL: &[u8] = b"bk_strategy_trailing_exit\0";
+
+/// Signature of the optional [`BK_TRAILING_EXIT_SYMBOL`] entry point.
+/// Return -1 / 0 / 1 (any other value reads as -1, "no declaration").
+pub type BkTrailingExitFn = unsafe extern "C" fn(handle: BkHandle) -> i32;
+
+/// Symbol name for the OPTIONAL atomic-batch declaration (#642, E-VA):
+/// `int bk_strategy_atomic_batch(void* handle)` returning 1 when the
+/// strategy's entry candidates in one evaluation cycle are ONE economic
+/// ticket (a pair's two legs) that must reserve its virtual quota as a
+/// whole — an over-cap pot cancels the batch with zero legs out.
+///
+/// Byte-aligned with the Lua manifest's `atomic_batch` key: arms nothing by
+/// itself (the pot comes from the host's virtual-limit configuration), and
+/// absent symbol = 0 = the per-order path, which is every existing
+/// library's behaviour bit-for-bit.
+pub const BK_ATOMIC_BATCH_SYMBOL: &[u8] = b"bk_strategy_atomic_batch\0";
+
+/// Signature of the optional [`BK_ATOMIC_BATCH_SYMBOL`] entry point.
+pub type BkAtomicBatchFn = unsafe extern "C" fn(handle: BkHandle) -> i32;
 
 /// One price/size level of the order book. Both are decimal strings.
 #[repr(C)]
@@ -425,5 +549,7 @@ pub use modes::StrategyMode;
 /// Shell helpers the generated `__bk_export` module imports via `$crate::shell`.
 #[doc(hidden)]
 pub mod shell {
-    pub use crate::safe::{cstr, field, json_out, parse_book, parse_eval_ctx, parse_params};
+    pub use crate::safe::{
+        cstr, field, json_out, parse_book, parse_eval_ctx, parse_kline, parse_params,
+    };
 }
