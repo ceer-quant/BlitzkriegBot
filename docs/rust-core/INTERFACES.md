@@ -54,6 +54,8 @@
 | `orders.reconcile` | `{ openOrderIds?, trades? }` | `{ filled, markedFilled, markedCancelled, ghostIds }` |
 | `positions.list` | `{}` | `{ "positions": [PositionView...] }` |
 | `positions.exit` | `{ positionId? }` | `{ "closed": <n> }` |
+| `trades.history` | `{ limit? }` —— 缺省 50 | `{ "version": "1.1", "trades": [TradeRecord...] }` —— 已平仓历史（Node 兼容记录；`--trade-log` 在时优先读记录文件尾部，否则内存平仓簿尾部），最旧 → 最新 |
+| `trades.summary` | `{ accountId? }` —— 缺省 = 全局累计 | `{ "version": "1.1", "summary": <TradeSummary> }` —— 持久化 `summary.json` 的**全期**累计（与窗口式 history 不同）；带 `accountId` 时把该账户行现场折叠成同形状汇总（pre-E28 行 accountId 为空归 default），旧核忽略该字段 |
 | `ledger.balance` | `{}` | `{ balance, reserved, available }` |
 
 ### 2.2.1 账户（E28 · v1.1）
@@ -127,6 +129,141 @@
    不新增事件类型、不新增审计文件。
 
 `risk.kill` / `risk.resume` 仍是进程级冻结；本方法只动限额，不改 kill 状态。
+
+#### 2.5.1 生效风控热写：risk.setSystemic / risk.setExit（2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `risk.setSystemic` | `{ maxSingleLossUsd?, maxDailyDrawdownUsd?, maxPositionSize?, maxConsecutiveLosses?, cooldownMinutes?, maxTotalPosition?, maxTotalExposureUsd?, maxCorrelationUsd?, globalKillSwitchLossUsd?, reason? }` —— 九项系统性限额，全部可选（只改点名的字段），金额/股数走 decimal-STRING（`"0"` = off） | `SystemicLimitUpdate`：`{ applied: [{field, from, to, effect}], atMs, actor, reason?, persisted: false, note }` —— `effect` ∈ `live`（六项限额，逐笔入场现场判读）/ `next_session`（回撤预算 + 连亏/冷静期对，启动才武装）；`persisted` 恒 `false`（热写只活本进程）。空 patch（不点任何字段）拒绝 |
+| `risk.setExit` | `{ stopLossPct?, takeProfitPct?, forceExitSec?, trailingEnabled?, reason? }` —— Gate 4 逐笔绑定的退出三项 + trailing 总开关。百分比走 decimal-STRING 且必须 > 0（≤0 拒绝）；`forceExitSec: 0` = **关闭强平**（合法的出厂开关位，负值拒绝） | `ExitSetUpdate`：`{ applied: [{field, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 三项对**新入场**立即生效（Gate 4 每意图现场绑定），退出扫描读同一活配置，已开仓位同步跟随；`persisted` 恒 `false`，重启回落启动 flag/env/TOML |
+| `risk.limits` | `{}` | `{ version, account: {id, limits}, global: {limits}, exit: {stopLossPct, takeProfitPct, forceExitSec, trailingEnabled} }` —— 生效矩阵 + 来源披露（E26 §4.4）。**取 Core 锁**逐次从活 risk config 组装（`risk.setLimits`/`risk.setSystemic` 热写矩阵，boot 冻结快照会答出已不在生效的值），非只读锁免 |
+
+#### 2.5.2 轮次时间周期 / 行情插件 / 凭据：设置卡三对读写（next_session 族，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `round_duration.get` | `{}` | `{ effectiveSec, source: "cli"\|"env"\|"runtime"\|"toml"\|"default", allowed: [{sec, label?}], nextSessionSec, persisted }` —— 白名单档位（`5m`/`15m`/`1h`/`4h`/`daily`；非标值 `label:null` 照列）；`nextSessionSec` = 持久格若有则格值（无论本会话 source），否则生效值 |
+| `round_duration.set` | `{ durationSec?, reset?, reason? }` —— 二选一：`durationSec` 必须是白名单档位（300/900/3600/14400/86400）；`reset` 清格回落启动解析 | `{ nextSessionSec, reset, atMs, actor, reason?, note }` —— **next_session**：轮次网格是坐标系（`round_slot` = UTC 网格索引），热切会错解存量订单的过期时间；只写持久格 `data/runtime/config.json`，本会话网格不动。显式 `--round-sec` outrank 持久格 |
+| `market.plugin.get` | `{}` | `{ activePlugin, registered: [{name, type, active}], nextSessionPlugin, persisted, flagPinned, source: "flag"\|"accounts"\|"persisted"\|"fallback", derivedVenues[] }` —— `source` 披露本会话启用集的四层解析；`accounts` 层生效时（绑定即启用）`derivedVenues` 列出派生集合 |
+| `market.plugin.set` | `{ name?, reset?, reason? }` —— 二选一：`name` 必须是**已注册**插件名（plan-first，注册表编译在内核里）；`reset` 清格 | `{ nextSessionPlugin, reset, atMs, actor, reason?, note }` —— **next_session**：feed/discovery/executor 生命周期都绑启动选择，热切架构上不可行。**绑定即启用 guard**：本会话启用集由账户 venue 绑定派生（`source=accounts`）时**整体拒绝**（持久格是死格，错误点名编辑面是 `account.venue.set`）；显式 `--market-plugin` outrank 持久格 |
+| `market.credentials.status` | `{}` | `{ rows: [{plugin, requiredVars[], resolvedVars[], ready}] }` —— 每个注册插件需要的 env 变量名 + 下一会话是否齐全（真实 env 或持久格，格输给 env）。**只有变量名，值永不过线**（§9.4） |
+| `market.credentials.set` | `{ plugin, vars?, reset?, reason? }` —— `vars` 是 env 变量名 → 值的映射；变量名按插件需求表 plan-first 校验（表外名字拒绝，typo 不允许静默变成惰性 executor）；`reset: true` 清该插件的格项；空 `vars` = 清项 | `{ plugin, written[], reset, atMs, actor, reason?, note }` —— **值只落格不上行、回执永不回显**；executor 在 boot 时一次性读环境，本会话不动，重启后 boot 注入（真实 env 优先） |
+
+#### 2.5.3 订单处置补遗（E31-c / #457，2026-10-26 补册）
+
+与 `orders.cancel` 同形三兄弟 —— 各自独立成方法，为的是 ops 轨迹里读得出**操作意图**的差别：
+
+| method | params | result |
+|:---|:---|:---|
+| `orders.cancel_remaining` | `{ orderId }` | `{ "success": true }` —— E31-c：撤掉部分成交单仍在挂的剩余量，已成交股数不动 |
+| `orders.close_filled` | `{ orderId }` | `{ "closed": <0\|1> }` —— E31-c：只平掉该单**已成交累积**的持仓；定价、定寸、风控、提交 SELL 都是内核做，策略只点名订单 |
+| `orders.force_close` | `{ orderId }` | `{ "success": true }` —— #457：对 GHOST 单（轮次已过期、永不成交、诚实终态回执未到）做内核侧强平；**活轮拒绝**（那是 `orders.cancel` 的活），审计记 `ForceClosed` 使「我们撤回」与「我们放弃等待」可区分 |
+
+#### 2.5.4 策略热参数（Issue #481，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `strategy.params.get` | `{ name }` | `{ name, found, tunables: [{name, type?, value, min, max}], evolvable, paramsAttached, note? }` —— schema 源是策略**自己的**旋钮声明（Lua manifest `tunables`），内核不发明域；数字全部 decimal-STRING；`tunables: []` = 该策略不可进化（不是错误状态）；`paramsAttached: false` = 写路径仍可用但值要等内核下次 set 的 attach 才上台 |
+| `strategy.params.set` | `{ name, params: { <knob>: <decimal-string>, … }, reason? }` | `{ name, applied: [{knob, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 逐旋钮对照声明域校验（plan first, write later）；多旋钮 patch **原子**（一个坏值整体拒绝、什么都不动）；热生效：策略下个 evaluate 周期合并 registry cell；重启回落 manifest 缺省（+已采纳的进化晋升） |
+| `strategy.unload` | `{ name }` | 文本回执：`"<name> unloaded (engine dispatch removed); library freed"` / `"not found: …"` / `"rejected: …"`（仍启用、in-tree 或仍有持仓时拒绝） |
+| `strategy.reload` | `{ name, path }` | 文本回执（E9-b 原子换装）：先装新库、同名字解析成功才卸旧实例；失败旧实例原样活着 —— 坏构建永远不能把在跑的 dispatch 洗白 |
+
+#### 2.5.5 统一映射确认面（RFC 568 · ④ 操作员裁决，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `unified.list` | `{}` | `{ version, events: [<已确认映射>...] }` —— 每事件：`id`/`title`/`status`/`settlementSource`/`venues`（持腿方）/偏差标记。只读快照，面板配对视图数据源 |
+| `unified.candidates` | `{}` | `{ version, candidates: [{a, b, score, expiryDeltaMs}] }` —— 本轮跨所配对候选（自动匹配提议、操作员裁决），只读；`a`/`b` 是 `PlatformListing` 原样（confirm 往返不改字节） |
+| `unified.confirm` | `{ title, listings: [PlatformListing…≥2], actor? }` —— `listings` 必须来自**不同** venue；`actor` 缺省 `"panel"` | `{ version, event: {id, title, status, venues[]} }` —— 账本侧全部重校验（标题、资产、一挂牌一事件）；被拒的 confirm 原样报错、不动任何东西 |
+| `unified.revoke` | `{ eventId, actor? }` | `{ version, revoked: "<eventId>" }` —— 撤回已确认映射（账本审计 + Engine 副本同步移除，策略立即看不见） |
+
+#### 2.5.6 跨所套利腿配置：arb.config.set / arb.config.get（Wire contract v1，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `arb.config.set` | `{ version: 1, legAVenue, legAAccount, legBVenue, legBAccount, pairs: [asset…], actor? }` —— fail-closed 逐字段校验：`version` 必须为 1、四腿字段非空、两 venue 必须不同、账户必须存在且（绑定时）覆盖本腿 venue、`pairs` 非空；每条拒绝都是 APPLICATION 错误**点名**出错字段 | `{ version, configured: true }` —— 写入 = accounts.toml `[cross_venue_arb]` + 内存镜像 + engine push **同一事务**（被拒的写什么都不动）；下次 boot 重读文件（手改坏文件 fail-closed） |
+| `arb.config.get` | `{}` | 配置态：`{ version, configured: true, legAVenue, legAAccount, legBVenue, legBAccount, pairs }`；未配置态：`{ version, configured: false, legAVenue: null, legAAccount: null, legBVenue: null, legBAccount: null, pairs: [] }` —— **永无部分形状** |
+
+### 2.10 账户簿运行时管理 + 显示指针（2026-10-26 补册）
+
+账户配置面在 §2.2.1（E28 三读一换）之外的全部写路径 + 钱包流水读面：
+
+| method | params | result |
+|:---|:---|:---|
+| `account.create` | `{ id, name?, venue?, actor?, reason? }` —— `default` 保留拒绝（零配置部署与 active 回退格共同持有它）、空 id 拒绝、重复 id 拒绝；非空 `venue` 必须是已注册插件（plan-first）；**无任何凭据字段**（§9.4：凭据建户后走 `market.credentials.set` 的 env 名路径） | `{ id, persisted: true, atMs, actor, reason?, note, runtimeEnabled }` —— 身份落内存簿 AND accounts.toml（persist 先行，落盘失败整体拒绝）；状态恒 `active`（运行时铸一个受限账户 = 变相放宽，收紧是 `account.status` 的活）；`runtimeEnabled` = 绑定即启用的运行时半边：带 venue 建户即绑定，该 venue 的 feed/discovery 同请求挂进本会话 |
+| `account.remove` | `{ id, actor?, reason? }` | `{ id, persisted: true, atMs, actor, reason?, note }` —— 实现裁决：**`default` 可删**（零配置回退下次 boot 自再派生），但**最后一个账户**与**仍有持仓**的账户拒绝；删进程级 active 账户时回退首本存活账户；同名重建是新账本（流水文件随删，旧文件残留会幽灵回放上一世流水） |
+| `account.freeze` | `{ accountId, frozen, reason? }` | `{ accountId, frozen, reason?, note }` —— 账户级急停：`frozen: true` 拒该账户**新订单**（手动 + 策略入场，引擎丢弃其候选），EXIT 照常流动；**会话级**（自动冻结的解除同在内存，重启清零重探测）；重复冻结保留**首个** reason |
+| `account.trading.set` | `{ accountId, enabled, reason? }` | `{ accountId, enabled, persisted: true, atMs, reason?, note }` —— `false` = 该账户**新开仓**拒绝、既有仓位继续策略管理到平（EXIT 照常）；落 accounts.toml，重启重读 |
+| `account.strategies.set` | `{ accountId, strategies: [name…], reason? }` —— 名字对**已注册**集合 plan-first 校验 | `{ accountId, strategies, keptExitsOnly: [name…], persisted: true, atMs, reason?, note }` —— 集合点名哪些 (strategy, account) scope 在跑；被移出但仍有持仓的策略进 `keptExitsOnly`，exits-only 跑到平仓（移除策略永不孤儿化持仓） |
+| `account.rounds.set` | `{ accountId, rounds: [sec…], reason? }` —— **整集替换**（不是增量），白名单校验 + 去重；空集 = 从 accounts.toml 移除该键（无限制拼写） | `{ accountId, rounds, persisted: true, atMs, actor, reason?, note, runtimeEnabled }` —— 轮次多族 B2：写 (venue, duration) 族集，**一个事务**（persist 先行）；删除仍有持仓的族**整体拒绝**；无暴露的删除软卸该族产出；新增族运行时即挂 discovery 实例（`runtimeEnabled: true`） |
+| `account.venue.get` | `{ accountId? }` —— 缺省/空 = 全部账户 | `{ version, venues: [{accountId, venue, updatedAtMs, actor}], active }` —— 绑定读数；空 `venue` = 未绑定（可交易任何 venue）；从未重绑的行 `actor: "boot"`；`active` = 本连接缺省账户（§9.5 链） |
+| `account.venue.set` | `{ accountId, venue, reason? }` —— 非 `venue` 空串必须是已注册插件（plan-first）；空串 = 解绑；同一 venue 绑多账户是部署模型（一所多 API 套件），**不查唯一性** | `{ accountId, venue, persisted: true, atMs, actor, reason?, note, runtimeEnabled }` —— 绑定落内存 AND accounts.toml 一事务；此绑定门 `orders.place` 跨所（拒跨所单守卫读内存格）；`runtimeEnabled` = 本会话 feed/discovery 挂载事实（已挂/解绑时 `false`） |
+| `display.account.set` | `{ accountId, reason? }` | `{ accountId, displayVenue, persisted: true, atMs, reason?, note }` —— **纯展示指针**：把快照 `displayAccount`/`displayVenue` 指向指定账户；不接 active/记账/策略启用轴，无任何交易语义；内核校验账户存在且 `active`（展示一本不能交易的账户 = 撒谎的快照），落 accounts.toml 顶层 `display_account` 键 |
+| `account.journal` | `{ accountId?, limit? }` —— 缺省账户 = 本连接缺省（§9.5 链）；`limit` 缺省 100、夹取 1..=500 | `{ accountId, rows: [{atMs, kind, amount, balanceAfter, ref}], truncated }` —— #509 流水读面：append-only `JournalEntry` 尾窗（升序，内存窗口不碰文件）；`truncated: true` = 窗口不是全史 |
+
+### 2.11 执行策略 #363（execution policy，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `execution_policy.list` | `{}` | `{ loaded, defaults: <section-view\|null>, accounts: [{accountId, section}] }` —— 每账户 section + 生效全局缺省（自身 override 折叠过 globals 后的**生效视图**）。只读 |
+| `execution_policy.get` | `{ accountId }` | 生效 section 视图（`{budgetRatio?, minBudgetUsd?, maxBudgetUsd?, minEquityUsd?, maxPositionsPerAsset, rules?}`，decimal 走 string 最短规则）；无 section 且无 policy → `INVALID_PARAMS` |
+| `execution_policy.set` | `{ accountId, budgetRatio?, minBudgetUsd?, maxBudgetUsd?, minEquityUsd?, maxPositionsPerAsset?, rules? }` —— `null` 字段继承 globals；`rules` 出现即**整组替换**（`[]` = 清空）；`cooldownSec` 是账户常备冷却 | `{ accountId }` —— section-replace 写 TOML（不重写其他账户）→ 内存 full-reload → 一行审计。文件 re-parse 失败时内存保**最后好策略**（fail-closed：坏写永不裸奔交易）并答 `INVALID_PARAMS` |
+| `execution_policy.reset` | `{ accountId }` | `{ accountId }` —— 移除该账户 section（回落 globals）、full-reload、审计 |
+| `execution_policy.history` | `{ accountId? }` —— 缺省 = 全部 | `[<PolicyAuditRecord>...]`：`[{tsMs, actor, action, accountId, before?, after?, error?}]` |
+| `execution_policy.preview` | `{ accountId }` | `{ considered, skipped, avgBudgetUsd?, rows: [{tsMs, symbol, balance, price, verdict, detail?}] }` —— #364：当前 section 在该账户近 100 笔已平仓上重放（`evaluate` 本尊裁决，预览永不与内核分歧）；`verdict` ∈ `place`/`skip`/`cooldown`/`refused`。只读、无审计行 |
+
+### 2.12 回测作业面 #353（backtest jobs，2026-10-26 补册）
+
+六臂全部前置内核内作业注册表：WebUI 只点名数据集/资产/策略名——**永不触碰本地文件系统、永不点名可执行代码**（硬边界）。作业是本进程内的 tokio 任务；作业表在内存（随进程死），数据集与报告 sidecar 落盘可跨重启。
+
+| method | params | result |
+|:---|:---|:---|
+| `backtest.onchain.pull` | `{ wallet, start, end, assets?, market? }` —— `start`/`end` 是 `YYYY-MM-DD`（UTC，end 含）或 epoch 秒；空 `assets` = 该钱包全部交易（一个 pull）；点名资产各扇出一个**可续传、缓存寻址**的 pull（每资产一个 jobId） | `{ jobIds: [<id>…] }` —— 异步起作业；输出根是内核数据集目录，**不是调用方参数**（WebUI 可达面无任意路径写） |
+| `backtest.onchain.list` | `{}` | `{ outDir, datasets: [{dataset, eventsPath, manifest}] }` —— 数据集根全量清单（CLI pull 同布局同根），最旧在前；半写 manifest 跳过 |
+| `backtest.run` | `{ archive, mode?, verifyLatencyMs?, slippageTicks?, tickMs?, tailMs?, strategies? }` —— `archive` 必须是 pull 产出的数据集（内核数据集目录下）；`mode` ∈ `mine`（缺省）\|`verify`\|`sweep`（#351 阶梯）；`slippageTicks` 低于 1 拒绝（诚实摩擦下限）；`strategies` 只收**名字**（未知名是作业失败信息，永不 shell） | `{ jobId }` —— 回放用活内核 config 的**快照**驱动独立 replay 实例（交易侧继续跑，无 #199 ledger-dir 争用） |
+| `backtest.status` | `{ id }` | `JobView`（`{jobId, kind, state, phase, detail, progress, startedAtMs, finishedAtMs?, error?}`）+ 完成时附 `result` —— `state` ∈ `running`/`done`/`failed`；pull 的 `phase` ∈ trades/markets/prices/convert/done，回放恒 `replay` |
+| `backtest.result` | `{ id }` | 完整结果文档（pull：`{asset, trades, events, cacheHit, tradesPath, eventsPath, manifestPath}`；回测：含 `archive` 的报告 JSON）；未完成作业报错并提示轮询 status |
+| `backtest.export` | `{ id }` | `{ fileName: "<stem>.report.json", content: <pretty JSON 字符串> }` —— 命名报告文档，浏览器负责保存（WebUI 本身不碰文件系统） |
+
+### 2.13 蓝图编辑器面 #362/#393（blueprint，2026-10-26 补册）
+
+WebUI 画布产出蓝图 JSON，一切碰盘的动作都请内核做——UI 永不直接触文件系统（仓库铁律）：
+
+| method | params | result |
+|:---|:---|:---|
+| `blueprint.compile` | `{ json }` —— 蓝图文档以 **STRING** 过线（不是嵌套对象），编译错误才能引用编辑器发来的精确字节 | `{ lua }` —— 生成的 Lua 源码原文；拒绝即编译器错误（自带 node id），wire 类 `INVALID_PARAMS` |
+| `blueprint.save` | `{ name, json, overwrite? }` —— `name` 是包身份（目录名 = manifest 名）；内核**现场重编译**（调用方发陈旧 `lua` 不是东西）；`overwrite` 必须显式才能替换 loader 已扫描的包（静默覆盖可能换掉操作员以为认识的策略） | `{ name, packageDir, blueprintPath, luaPath, manifestPath, luaSha256, bytes: [bp, lua, manifest], tunables? }` —— 路径全部**相对**内核策略根；`luaSha256` 与 manifest 内同源（回执可对文件复核）；包落 `blueprint.json` + `strategy.lua` + `manifest.json`，下次启动照常发现 |
+| `blueprint.load` | `{ name }` | `{ name, blueprintPath, json }` —— #393 存档包的蓝图文档原样读回（编辑器 preload），只读；名字过 save 同款闸门（读不出策略根） |
+| `blueprint.loadSource` | `{ name }` | `{ name, packageDir, luaPath, manifestPath, lua, sha256, manifest }` —— 手写包「在蓝图中打开」（用户裁决：编辑入口必须能开所有 Lua 包）：入口文件原样 + manifest 元数据（`modes`/`author`/`description` 走原样 JSON 供往返）；`sha256` 是当前入口文件的 manifest 摘要 |
+| `blueprint.saveSource` | `{ name, lua, overwrite? }` —— 目标包必须**已存在**（编辑不创建，创建走 blueprint.save）；`overwrite` 显式，与 save 同裁决 | `{ name, packageDir, luaPath, manifestPath, luaSha256, bytes: [lua, manifest] }` —— 写回后 sha256 现场重算进 manifest（装载器照常验字节） |
+
+### 2.14 自更新与交易环境重置（#379 / #458，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `system.update.configure` | `{ checkEnabled?, autoUpdate? }` | `{ checkEnabled, autoUpdate }` —— 更新开关读写（§7.4）；写落审计记录**且必须持久化**（静默回退的开关是撒谎的开关），持久化失败如实报错 |
+| `system.update.check` | `{}` | `system.version` 同形状 payload —— 手动检查一次；`checkEnabled=false` 时拒绝（开关含义是「可以出去查」，不是「可以自动装」）；结论**持久化**（手动臂历史上跳过落盘，失败检查重启即蒸发——已修）；失败明细进 `data/update/audit.jsonl` |
+| `system.update.stage` | `{}` | `StageState`：`{phase, detail?, version?, asset?, sha256?, stagedAtMs?}` —— #379：下载+校验新版到 `data/update/staging/`；`autoUpdate=false` 时拒绝（调度器与手动调用同一开关）；**替换是 launcher 的活**（§7.5）——本臂只推进状态机到 restart-ready，永不触碰在跑的二进制 |
+| `system.reset_trading` | `{ confirm: "RESET", reason?, accountId? }` —— `confirm` 必须逐字 `"RESET"`（自由文本确认门，不是勾选框）；`accountId` 缺省 = 本连接缺省账户（§9.5 链，与 `orders.place` 同一解析），显式 id 照字面 | `ResetTradingResult`：`{ disabledStrategies[], cancelledOrders, clearedOpenPositions, clearedClosedTrades, accountId, balances: [[id, seed]…], preSummary: {orderLogLines, tradeLogLines, positionLogLines, openPositions, liveOrders, balance}, atMs, actor, reason? }` —— 停用策略、撤挂单、清该账户的订单/成交/持仓记录与内存盘口、现金重置为 seed；**Live 模式拒绝**（真金白银记录是 append-only 证据）；每次调用追加 manual-ops 审计行 |
+
+### 2.15 零散补册（费用报价 / 盘口深度 / 影子进化工作流，2026-10-26 补册）
+
+| method | params | result |
+|:---|:---|:---|
+| `core.feeQuote` | `{ price? }` —— 缺省 0.5（费率表最宽处） | `{ model, rate, exponent, price, feePerShare, feePctOfPrice, makerFeePerShare: 0, modelMatches }` —— #182：内核实收 taker 费率表的只读报价；门禁脚本不再自带费率公式副本（副本察觉不到内核换默认）；`modelMatches: false` = 仓库钉死的参数与实收曲线分裂（分裂是**上报**的，不静默糊掉） |
+| `engine.books` | `{}` | `[<AssetBooksView>…]`：`[{venue, asset, upTokenId, downTokenId, up: <BookSideView>, down: <BookSideView>}]`，`BookSideView = {bids[], asks[], bestBid?, bestAsk?, midPrice?, obi?, spread?, spreadPct?}` —— 引擎实盘同款 L2 深度读数（纯观察、零副作用，盘口深度卡数据源）；全部指标无盘口时 `null`（从不假装 0）；行带 venue 标签（含镜像盘合成行） |
+| `shadow_evolution.proposals` | `{ limit? }` —— 缺省 100 | `{ version, proposals: [<EvolutionProposal>…] }` —— E13：全部已知提案的最新态（UI 对比表数据源） |
+| `shadow_evolution.decide` | `{ id, decision }` —— `decision` ∈ `accept`/`reject`/`defer` | `{ decision: "accepted"\|"rejected"\|"deferred", proposal }` —— 操作员对单个被 HOLD 提案的裁决；热路径零改动 |
+| `shadow_evolution.set_auto` | `{ enabled: <bool> }` | `{ autoEvolve: <bool> }` —— 自动进化开关（**持久化**，重启保持所择模式） |
+
+### 2.16 版本对账门禁（2026-10-26，Issue #644）
+
+`scripts/interfaces-methods-check.mjs` 是本表与实现的**结构对账门禁**：从
+`core/blitzkrieg_core/src/ipc/schema.rs` 的 `pub mod method` 提取全部 `pub const *_METHOD` 常量
+（`EVENT_METHOD` 与错误码 i32 常量除外），从本文件 §2 提取已记载方法名，差集非空即
+exit 1 并点名缺失清单——schema.rs 新增方法常量而 INTERFACES.md 没有对应表格行的
+PR 直接红。接入 `.github/workflows/ci.yml` 的 `core-gates`（§A.4 反向验收风格：
+先红后绿的静态门禁，无需内核二进制）。
 
 ### 2.6 扩展与市场插件（P0.5 / P0.6）
 | method | params | result |
@@ -282,9 +419,9 @@ bar；无引擎（或该序列无数据）时回**空 `klines` 列表**，信封
 
 | 变更 | 归属 Epic | 契约位置 |
 |:---|:---|:---|
-| `account.list` / `account.switch` / `account.status`（`AccountView`） | E28 | §12.1 |
+| `account.list` / `account.switch` / `account.status`（`AccountView`） | E28 | §12.1（其余账户管理写路径已落地：§2.10） |
 | ~~`kline.subscribe` / `kline.unsubscribe`（**会话级**，断连自动退订）~~ **✅ E29 已落地**（§2.9.3） | E29 | §12.2 |
-| `risk.limits`（生效值 + `source` 四值 `default/toml/env/flag`） | E26 | §12.4、§4.4 |
+| `risk.limits`（生效值 + `source` 四值 `default/toml/env/flag`） | E26 | §12.4、§4.4（**✅ 已落地**，读数记档：§2.5.1；`source` 来源披露现由 `round_duration.get` / `market.plugin.get` 各自承载，见 §2.5.2） |
 | `market.list` 加 `structure`/`capabilities`/`capabilitiesBits`；`strategy.list` 加 `modes`/`compatible`/`incompatibleReason`；`strategy.load` 回执加 `; API 1.0 (line protocol 2)` | E27 / E24 | §12.5 |
 | `positions.list` / `orders.list` 行加 `accountId`；`orders.place` / `ledger.balance` 加可选 `accountId`；`engine.stats` 加 ~~`accounts`~~/`kline`（**`kline` ✅ E29 已落地**：聚合器计数器 `{symbols, liveBars, closedBars, droppedOutOfOrder, noDataBars, intervals[]}`，无引擎为 `null`）；`core.ready` 加 `apiVersion`/`accountId` | E28 / E26 / E29 | §12.6 |
 
@@ -355,3 +492,4 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | v0.3 E24 — BlitzkriegStrategy API 1.0 封口（#330）：① `strategy.load` 成功回执**追加** ` ; API 1.0 (line protocol 2)`（保留既有文本不替换）；② 可选符号 `bk_strategy_declare_modes` 的载荷由 §7.4 校验器验证，**非法 → 拒载**，错误含 `index` 与 `got`（`{"modes":[]}` = `Empty` 非法，不是「未声明」；未导出符号 / NULL = 未声明）；③ 三个保留键 `suggested_stop_loss` / `suggested_take_profit` / `suggested_max_hold_sec` **封口**（从未存在于 0.2 代码）：intent 解析遇键 → `warn!(target:"strategy")` 记录策略名/键名/token 并**丢弃该键**、不拒单；④ 门禁 `strategy:no-stop-loss-check`（策略源码零止损逻辑 + intent 零保留键）与 `strategy:declaration-check`（合法 3 例 / 非法 5 例，真实内核）接入 `core-gates`；⑤ 官方 Rust 示例 `user_layer/examples/momentum_alpha/`（嵌套 workspace，声明 `prediction/binary_outcome_wheel` + websocket_feed/level2_snapshot，零止损逻辑）。协议加项，向后兼容，`BK_ABI_VERSION=2` 不变 |
 | 1.1 | v0.3 E28 — 多市场多账户一等公民（§2.2.1）：新增 `account.list` / `account.switch` / `account.status` 三方法（§9.3-9.5：`AccountLedgers` 每账户独立账本；`account.switch` 只写**会话级** active，进程级不动；`account.status` **只能收紧**，loosen 拒 `INVALID_PARAMS`）。`accounts.toml` 缺省 → 单一 `default`（0.2 部署零改动）；`orders.place` 未带 `accountId` 时注入本连接默认（显式 id 永远获胜）；`positions.list` 每行增 `accountId`；Gate 2 按账户姿态放行（`permits_order`），跨账户平仓显式拒绝（从不改道）。协议加项，向后兼容，版本号不变 |
 | 1.1 | v0.3 E29 — K 线聚合器与呈现（§12.2/§10）：① 内核内置 `KlineAggregator`（§10.3：数据驱动闭合、乱序输入丢弃且计数 `droppedOutOfOrder`、静默空桶计 `noDataBars`、闭合历史有界 deque 上限 1000 对齐 `kline.history` 上限）；喂入源=既有数据通路（`engine.book`/`books.*` 臂按盘口 mid 喂 token、`spot.price` 喂 asset；价格 ≤0 跳过）。② `EngineStrategy` 增 `on_kline(&Kline)` 默认方法——只推**闭合** bar（§10.4），默认 no-op；Lua 适配层同步转发（E30 的 `bk_on_kline` 由此得数据）。③ 新增 `kline.subscribe` / `kline.unsubscribe`（会话级，断连自动退订；§2.9.3）+ `KLINE_UPDATE` 事件（唯一 OPT-IN 事件：闭合 bar 永不节流、未闭合预览 ≤1/s/(symbol,interval)）。④ `kline.history` 从 Wave-0 空信封换成真实尾部（信封不变）；`engine.stats` 增 `kline` 聚合器计数器。⑤ 门禁 `kline-aggregation-check`（--teeth 6 变异 + 真跑 11 断言）接入 core-gates。协议加项，向后兼容，版本号不变 |
+| 1.1 | 2026-10-26 对账（Issue #644）：本表与 `schema.rs` 的方法差集一次性清零（对账基线 102/102 全记载，新增 §2.5.1–§2.5.6、§2.10–§2.16）。E29 之后积压未入册的面全部补齐：生效风控热写 `risk.setSystemic` / `risk.setExit`（含 trailing 开关的资金敏感三态语义，以实现记档）、`risk.limits` 读数；设置卡三对 `round_duration.*` / `market.plugin.*` / `market.credentials.*`（next_session 族 + 绑定即启用 guard）；E31-c/#457 的 `orders.cancel_remaining` / `close_filled` / `force_close`；#481 的 `strategy.params.get/set` 与 E9-b 的 `strategy.reload/unload`；RFC 568 的 `unified.list/candidates/confirm/revoke` 与跨所腿配置 `arb.config.get/set`；账户簿运行时管理九臂（`account.create/remove/freeze/trading.set/strategies.set/rounds.set/venue.get/venue.set/journal`）+ `display.account.set`；#363 执行策略六臂；#353 回测作业六臂；#362/#393 蓝图五臂（含 `blueprint.loadSource`/`saveSource`）；#379/#458 的 `system.update.check/configure/stage` 与 `system.reset_trading`；#182 `core.feeQuote`、`engine.books`、E13 影子进化工作流三臂（`shadow_evolution.proposals/decide/set_auto`）。**本票只补文档，零 wire/行为改动**；文档与实现如有语义出入以实现记档（见 PR 正文「语义存疑清单」）。新增结构对账门禁 `scripts/interfaces-methods-check.mjs`（schema.rs 方法常量 ↔ §2 表行差集，接入 core-gates；§2.16） |
