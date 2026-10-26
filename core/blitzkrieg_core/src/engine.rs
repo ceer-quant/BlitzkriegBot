@@ -555,7 +555,9 @@ pub struct Engine {
     /// 值该所最近一次申报的整批行。只有行情装配层（ENGINE_ROUND）读它，
     /// 给「钟已开口但表里没有自己的行」的 venue 合成带它标签的行情行
     /// （token 相同 → 共享同一份 book，价格是真实读数）。交易面零接触：
-    /// 入场门、token→市场查询、结算对侧证据都不查这张簿。
+    /// 入场门、token→市场查询、结算对侧证据都不查这张簿（#643 收口：
+    /// #634 短暂把 shadow 批次接进 scope 放行与执行路由，已撤——镜像
+    /// 归属以 `mirror_of` 自声明为唯一交易真值）。
     shadow_markets: HashMap<(String, i64), Vec<CryptoMarket>>,
 }
 
@@ -736,10 +738,12 @@ impl Engine {
 
     /// Declare a static mirror relationship: `mirror` trades its `source`'s
     /// tokens (byte-identical ids) through its own executor while the source's
-    /// feed owns the table rows. The admission/routing twin of the shadow
-    /// batch, but CONSTRUCTIVE — it survives the mirror venue going quiet
-    /// (the parasitic PolySimulator never declares rounds), where the #634
-    /// shadow-batch evidence fails closed.
+    /// feed owns the table rows. THE admission/routing evidence: scope
+    /// admission (`scope_admits_token`) and execution routing
+    /// (`execution_venue_for`) read this declaration and nothing else — it
+    /// survives the mirror venue going quiet (the parasitic PolySimulator
+    /// never declares rounds), where runtime observation would wobble with
+    /// the feed (#643 retired the shadow-batch fallback).
     pub fn set_venue_mirror(&mut self, mirror: &str, source: &str) {
         if mirror.is_empty() || source.is_empty() || mirror == source {
             self.mirror_of.remove(mirror);
@@ -826,14 +830,13 @@ impl Engine {
     /// exit-economics fixture first tripped it: signals 89975→0, closes 13→0).
     ///
     /// 镜像盘（PolySimulator 镜像 Polymarket，token 逐字节相同）：交易表按
-    /// token 唯一存行，先到的 PM 批占住行、镜像所批次被判纯重复只落
-    /// `shadow_markets`（#629 的「交易面零接触」）——镜像 token 的表行
-    /// 永远标着被镜像所。绑镜像所的账户查表必得「别所的行」，每条候选
-    /// 静默出局（真线：signals=0 / blocked=0，连遥测都不留）。此处补
-    /// mirror admission：表查不到**自己 venue** 的行时，反查该所自己申报
-    /// 的 shadow 批次——命中即该所真实在交易的 token（共享同一份 book，
-    /// 价格与深度都是真实读数），放行。对称免费：反向轮次（镜像所批次
-    /// 先到）救的是绑定被镜像所的账户。
+    /// token 唯一存行，先到的 PM 批占住行，镜像 token 的表行永远标着被镜像
+    /// 所。绑镜像所的账户查表必得「别所的行」，每条候选静默出局（真线：
+    /// signals=0 / blocked=0，连遥测都不留）。mirror admission 只读插件的
+    /// 自声明（`mirror_of`，#638 的构造性事实，boot/绑定时推入）：绑定所
+    /// 声明镜像表行所属的所即放行。声明是交易面的唯一镜像证据 —— 显示簿
+    /// （`shadow_markets`）不是：运行时观测随 feed 时效摆动（feed 断则放
+    /// 行消失），声明不会（#643 把 shadow 批次退出交易裁决）。
     /// crate-visible so the IPC runtime-enablement tests can pin the wire
     /// behaviour the admission gate actually answers.
     pub(crate) fn scope_admits_token(&self, account: &str, token: &str) -> bool {
@@ -841,30 +844,13 @@ impl Engine {
             return true;
         };
         match self.scanner.market_for_token(token) {
-            None => self.shadow_admits_token(bound, token),
+            None => false,
             Some(m) => {
                 m.venue.is_empty()
                     || m.venue == *bound
-                    // 表行的 venue 是被镜像所、绑定是镜像所：静态镜像声明
-                    // （parasitic 插件的构造性事实）或该所自己的 shadow 批次
-                    // （#634 的运行时证据）任一成立即放行。
-                    || (m.venue != *bound
-                        && (self.mirror_source_of(bound) == Some(m.venue.as_str())
-                            || self.shadow_admits_token(bound, token)))
+                    || self.mirror_source_of(bound) == Some(m.venue.as_str())
             }
         }
-    }
-
-    /// Does the bound venue's OWN shadow batch (its discovery's declaration,
-    /// kept for the display plane) carry this token? Only meaningful for
-    /// mirror venues — a shadow batch exists exactly when the venue's round
-    /// feed was merged away as all-known tokens.
-    fn shadow_admits_token(&self, bound: &str, token: &str) -> bool {
-        self.shadow_markets.values().any(|batch| {
-            batch
-                .iter()
-                .any(|m| m.venue == bound && (m.up_token_id == token || m.down_token_id == token))
-        })
     }
 
     /// The open-position snapshot the NEXT evaluation's ctx carries (the pair
@@ -926,7 +912,7 @@ impl Engine {
     /// 镜像盘显示簿的只读视图（行情装配层专用）：该 (venue, duration) 族
     /// 的批次被 token 唯一键遮蔽时，这里能取到该所自己申报的整批行。交易
     /// 面没有任何路径读它 —— 镜像盘与被镜像所共享 token，一份表行就是全
-    /// 部交易事实。
+    /// 部交易事实；镜像归属裁决读 `mirror_of` 自声明（#643）。
     pub fn shadow_markets_for(&self, venue: &str, duration_sec: i64) -> Option<&[CryptoMarket]> {
         self.shadow_markets
             .get(&(venue.to_string(), duration_sec))
@@ -2201,16 +2187,17 @@ impl Engine {
     }
 
     /// The venue that should EXECUTE `token` for `account`. The table row's
-    /// venue, with two overrides: an account bound to a venue whose OWN shadow
-    /// batch carries the token (#634's runtime evidence), or whose STATIC
+    /// venue, with one override: an account bound to a venue whose STATIC
     /// mirror declaration names the row's venue (the constructive fact — a
-    /// parasitic mirror plugin never declares rounds, so the shadow batch is
-    /// gone; PolySimulator's token ids ARE Polymarket's by construction). The
-    /// executor drain's routing truth: per-venue drains key on this, so a
-    /// mirror token's two accounts each reach their OWN executor and the
-    /// poly account's live order can never land on the real venue (nor the
-    /// reverse). Unbound accounts and non-mirror tokens ride the plain
-    /// table lookup, byte-identical with the pre-mirror routing.
+    /// parasitic mirror plugin never declares rounds; PolySimulator's token
+    /// ids ARE Polymarket's by construction). The executor drain's routing
+    /// truth: per-venue drains key on this, so a mirror token's two accounts
+    /// each reach their OWN executor and the poly account's live order can
+    /// never land on the real venue (nor the reverse). Unbound accounts and
+    /// non-mirror tokens ride the plain table lookup, byte-identical with
+    /// the pre-mirror routing. The display book (`shadow_markets`) is NOT
+    /// routing evidence (#643): runtime observation wobbles with the feed,
+    /// the declaration does not.
     pub fn execution_venue_for(&self, account: &str, token_id: &str) -> Option<String> {
         let table = self.venue_of(token_id);
         match (
@@ -2218,9 +2205,7 @@ impl Engine {
             self.venue_by_account.get(account).filter(|v| !v.is_empty()),
         ) {
             (Some(v), Some(b)) if v != *b => {
-                let static_mirror = self.mirror_source_of(b) == Some(v.as_str());
-                let shadow_admits = self.shadow_admits_token(b, token_id);
-                if static_mirror || shadow_admits {
+                if self.mirror_source_of(b) == Some(v.as_str()) {
                     Some(b.clone())
                 } else {
                     Some(v.clone())
@@ -4331,13 +4316,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_bound_scope_admits_through_the_shadow_batch() {
+    fn a_mirror_bound_scope_admits_through_the_mirror_declaration() {
         // The polysimulator account's zero-signal root cause: the table is
         // token-unique and the PM batch lands first, so the mirror token's
         // row is tagged `polymarket` forever — a polysimulator-bound scope
         // looked the row up, saw "another venue", and silently dropped every
-        // candidate (signals=0, blocked=0). The venue's OWN shadow batch is
-        // the evidence it really trades the token: it admits.
+        // candidate (signals=0, blocked=0). The plugin's OWN `mirror_of`
+        // declaration is the evidence it really trades the token: it admits.
+        // The display book (shadow_markets) is NOT consulted — #643 retired
+        // the shadow-batch fallback, admission reads the declaration table.
         let mut e = Engine::new(cfg());
         let end = 1_800_000;
         e.on_data(DataEvent::RoundMarkets {
@@ -4348,12 +4335,13 @@ mod tests {
             markets: vec![mirror_market(end, "polysimulator")],
             now_ms: 61_000,
         });
+        e.set_venue_mirror("polysimulator", "polymarket");
         e.set_account_venue("poly", "polysimulator");
         e.set_account_venue("pm", "polymarket");
 
         assert!(
             e.scope_admits_token("poly", "mirror-up"),
-            "the mirror-bound scope admits through the venue's own shadow batch"
+            "the mirror-bound scope admits through the venue's mirror_of declaration"
         );
         assert!(
             e.scope_admits_token("pm", "mirror-up"),
@@ -4361,8 +4349,7 @@ mod tests {
         );
         assert!(
             !e.scope_admits_token("poly", "polymarket-up"),
-            "a NON-mirror token of another venue still refuses (venue_market has no \
-             polysimulator shadow batch)"
+            "a NON-mirror token of another venue still refuses (no declaration names it)"
         );
         assert!(
             e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
@@ -4380,12 +4367,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_bound_scope_still_refuses_when_the_shadow_batch_goes_away() {
-        // WITHOUT a static mirror declaration the shadow batch remains the
-        // only mirror evidence: when the mirror venue's feed stops (plugin
-        // dead, credentials expired), its batch drops out of the display
-        // book and the bound scope must go back to refusing the mirrored
-        // row — no stale admission on dead declarations.
+    fn a_shadow_batch_without_a_mirror_declaration_never_admits_or_reroutes() {
+        // #643's contract, pinned in reverse: WITHOUT a mirror_of declaration
+        // the shadow batch (the display book — the mirror venue's feed was
+        // merged away as all-known tokens) must NOT open the scope gate nor
+        // swing the execution routing, however fresh the observation is.
+        // Runtime observation wobbles with the feed (plugin dead, credentials
+        // expired → the batch drops out); the declaration does not. The
+        // display book's rows stay display-only here, exactly as they are in
+        // the books_view arm.
         let mut e = Engine::new(cfg());
         let end = 1_800_000;
         e.on_data(DataEvent::RoundMarkets {
@@ -4397,27 +4387,35 @@ mod tests {
             now_ms: 61_000,
         });
         e.set_account_venue("poly", "polysimulator");
-        assert!(e.scope_admits_token("poly", "mirror-up"));
-
-        // The mirror venue rolls over alone is not reachable in the mirror
-        // shape (same slot), so the decay is forced directly: clear the
-        // display book and re-check.
-        e.shadow_markets.clear();
+        // Pre-condition: the display book actually carries the shadow batch —
+        // the refusal below is judged against live display evidence, not an
+        // empty book.
+        assert!(
+            e.shadow_markets_for("polysimulator", 900).is_some(),
+            "the fixture must have the shadow batch in the display book"
+        );
         assert!(
             !e.scope_admits_token("poly", "mirror-up"),
-            "without the shadow batch the mirror-bound scope refuses again"
+            "the shadow batch alone must not admit the mirror-bound scope"
         );
         assert_eq!(
             e.execution_venue_for("poly", "mirror-up"),
             Some("polymarket".into()),
-            "routing falls back to the table row when the mirror declaration is gone"
+            "routing stays on the table row — no shadow-batch override"
+        );
+        // Routing is not perturbed for the other bindings either: the display
+        // book changes nothing about who executes the token.
+        e.set_account_venue("pm", "polymarket");
+        assert!(
+            e.execution_venue_for("pm", "mirror-up") == Some("polymarket".into()),
+            "the mirrored venue's binding keeps its plain table routing"
         );
 
-        // WITH the static declaration (the plugin's own `mirror_of` fact,
-        // pushed at assembly) the evidence is CONSTRUCTIVE: it survives the
-        // shadow batch going away entirely — the parasitic shape, where the
-        // mirror plugin declares no rounds at all and the shadow batch can
-        // never exist.
+        // The declaration is the ONLY key that opens the gate: with it (the
+        // plugin's own `mirror_of` fact, pushed at assembly) the evidence is
+        // CONSTRUCTIVE — it survives the shadow batch going away entirely
+        // (the parasitic shape, where the mirror plugin declares no rounds at
+        // all and the shadow batch can never exist).
         e.set_venue_mirror("polysimulator", "polymarket");
         assert!(
             e.scope_admits_token("poly", "mirror-up"),
@@ -4431,6 +4429,11 @@ mod tests {
             !e.scope_admits_token("poly", "polymarket-up"),
             "a NON-mirror token of another venue still refuses under the static declaration"
         );
+        e.shadow_markets.clear();
+        assert!(
+            e.scope_admits_token("poly", "mirror-up"),
+            "the declaration admits with the display book gone — constructive, not observed"
+        );
 
         // The declaration is the plugin's identity: clearing it (or a
         // self-mirror/empty spelling) removes the evidence again.
@@ -4438,6 +4441,11 @@ mod tests {
         assert!(
             !e.scope_admits_token("poly", "mirror-up"),
             "an empty mirror spelling clears the declaration"
+        );
+        assert_eq!(
+            e.execution_venue_for("poly", "mirror-up"),
+            Some("polymarket".into()),
+            "routing falls back to the table row once the declaration is gone"
         );
     }
 

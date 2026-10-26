@@ -781,9 +781,14 @@ mod tests {
         let mut c = two_venue_live_core();
         // The simulator's batch declares the SAME tokens polymarket already
         // listed: same-slot merge, rows to the shadow book. The table row
-        // stays tagged polymarket.
+        // stays tagged polymarket. The plugin's mirror_of declaration (boot's
+        // apply_plugin_mirrors) is the routing evidence — #643: the display
+        // book is never consulted.
         let now: i64 = 1_000_001;
         let slot = now / 1000 / 900;
+        if let Some(e) = c.engine.as_mut() {
+            e.set_venue_mirror("polysimulator", "polymarket");
+        }
         let sim = crate::model::CryptoMarket {
             asset: "BTC".into(),
             condition_id: "cond-polymarket".into(),

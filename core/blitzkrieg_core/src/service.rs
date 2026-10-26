@@ -10810,16 +10810,17 @@ impl Core {
     /// [`Self::pending_unbound`] filtered to ONE venue: the multi-plugin
     /// executor drain. The routing truth is the ORDER'S OWN execution venue
     /// (`execution_venue_for`: the token's table row venue, overridden by the
-    /// placing account's mirror binding when the venue's shadow batch carries
-    /// the token) — a mirror token's table row always names the mirrored
-    /// venue, and keying the drain on the table alone would hand the mirror
-    /// account's live order to the real venue's executor. An order whose
-    /// execution venue resolves to nothing, or to a market with no venue
-    /// label, is UNTAGGED and routes to the requested plugin only when it is
-    /// the host's active plugin — the single-plugin behaviour, unchanged.
-    /// With the lookup empty (engine down, replay corpora) every order is
-    /// untagged, so each executor sees all of them exactly as the
-    /// pre-routing bridge did.
+    /// placing account's mirror binding when the binding's venue statically
+    /// declares the row's venue — `mirror_of`, the constructive fact #643
+    /// made the sole routing evidence) — a mirror token's table row always
+    /// names the mirrored venue, and keying the drain on the table alone
+    /// would hand the mirror account's live order to the real venue's
+    /// executor. An order whose execution venue resolves to nothing, or to
+    /// a market with no venue label, is UNTAGGED and routes to the requested
+    /// plugin only when it is the host's active plugin — the single-plugin
+    /// behaviour, unchanged. With the lookup empty (engine down, replay
+    /// corpora) every order is untagged, so each executor sees all of them
+    /// exactly as the pre-routing bridge did.
     pub fn pending_unbound_for_venue(&self, venue: &str) -> Vec<TrackedOrder> {
         self.pending_unbound()
             .into_iter()
@@ -30393,16 +30394,21 @@ mod audit_fix_tests {
     /// The mirror account (`venue = "polysimulator"`) trades tokens whose
     /// table row names `polymarket` (byte-identical ids, PM's batch lands
     /// first). The venue guard must judge the order's EXECUTION venue — the
-    /// account's own binding via the shadow batch — or it refuses every
-    /// legitimate mirror order.
+    /// account's own binding via the plugin's `mirror_of` declaration — or
+    /// it refuses every legitimate mirror order.
     #[test]
     fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
         let mut c = venue_bound_core();
         // The polysimulator batch declares the SAME token pair polymarket
         // already listed: a same-slot merge, the rows land in the shadow
-        // book (#629's display-only path).
+        // book (#629's display-only path). The plugin's mirror_of
+        // declaration (boot's apply_plugin_mirrors) is the admission
+        // evidence — #643: the display book is never consulted.
         let now = 1_000_000;
         let slot = now / 1000 / 900;
+        if let Some(e) = c.engine.as_mut() {
+            e.set_venue_mirror("polysimulator", "polymarket");
+        }
         let sim = crate::model::CryptoMarket {
             asset: "BTC".into(),
             condition_id: "cond-polymarket".into(),
@@ -30427,7 +30433,8 @@ mod audit_fix_tests {
             now + 1,
         );
         // A poly-sim account bound to polysimulator: its mirror-token order
-        // must pass the venue guard (the shadow batch carries poly-up).
+        // must pass the venue guard (the mirror_of declaration rides the
+        // binding through execution_venue_of).
         c.accounts_mut()
             .insert(crate::account::Account {
                 id: crate::account::AccountId::from("sim"),
@@ -30460,7 +30467,7 @@ mod audit_fix_tests {
         assert_eq!(
             c.execution_venue_of("sim", "poly-up"),
             "polysimulator",
-            "execution follows the placing account's binding through the shadow batch"
+            "execution follows the placing account's binding through the mirror declaration"
         );
         assert_eq!(
             c.execution_venue_of("default", "poly-up"),
@@ -30497,8 +30504,8 @@ mod audit_fix_tests {
             "the position stamps the execution venue, not the table row"
         );
 
-        // The kalshi token has no polysimulator shadow declaration: the sim
-        // account still cannot reach it.
+        // The kalshi token is in no mirror declaration: the sim account
+        // still cannot reach it.
         let mut kal = bound_order("kal-up", "sim-2");
         kal.account_id = crate::account::AccountId::from("sim");
         let err = c.place(kal, 0, 2).unwrap_err();
@@ -30660,6 +30667,12 @@ mod audit_fix_tests {
         let mut c = venue_bound_core();
         let now = 1_000_000;
         let slot = now / 1000 / 900;
+        // The plugin's mirror_of declaration (boot's apply_plugin_mirrors)
+        // is the routing evidence — #643: the display book is never
+        // consulted.
+        if let Some(e) = c.engine.as_mut() {
+            e.set_venue_mirror("polysimulator", "polymarket");
+        }
         let sim = crate::model::CryptoMarket {
             asset: "BTC".into(),
             condition_id: "cond-polymarket".into(),
