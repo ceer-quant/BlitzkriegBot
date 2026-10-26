@@ -33,6 +33,10 @@ pub mod cli;
 pub mod config;
 pub mod data_lock;
 pub mod data_source;
+/// The kernel-side `.env` writer (market.credentials.set landing). The read
+/// side is the launcher's `ui_kit_panel::env_file` — same file format, one
+/// contract.
+pub mod env_file;
 pub use blitzkrieg_market_api::decimal;
 pub mod engine;
 /// #363: the account-isolated execution policy rule engine. Strategy emits

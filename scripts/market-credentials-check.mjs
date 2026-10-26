@@ -2,25 +2,27 @@
 /**
  * 行情插件凭据（market.credentials.status / market.credentials.set）端到端
  * 验收 —— 真内核 spawn，真 UDS wire，dry 模式，零网络。一切写入都在脚本
- * 自己的 scratch cwd —— 不碰仓库、不碰生产 data/。
+ * 自己的 scratch cwd —— 不碰仓库、不碰生产 data/、不碰操作者的 .env。
  *
- * 钉住的事实（每个都对应一条 user-facing 承诺）：
+ * 钉住的事实（.env 单源合同，每个都对应一条 user-facing 承诺）：
  *
  *   1. status：每个注册插件一行，required_vars 与插件需求表一致，
- *      ready=false（沙盒里没有任何凭据），值永不出现在读数里。
- *   2. 写路径：market.credentials.set 落进 data/runtime/config.json；
- *      回执 written 列出变量名；status 的 resolved 立即反映下一会话
- *      （cell 已在格），但本会话 executor 不动。
- *   3. plan-first：未注册插件名 / 需求表外的变量名都拒绝，且格不动。
- *   4. reset 清该插件条目，别的插件条目不动。
- *   5. 重启注入：重启后的内核 boot 把 cell 注入环境（boot 行可见），
- *      executor 因凭据齐全而就绪（kalshi：API key id + RSA key）。
- *   6. 真实环境变量 outrank 格：带 env 启动的内核注入行不再出现（env
- *      已有该名，cell 跳过）。
+ *      ready=false（干净沙盒进程环境无凭据），值永不出现在读数里。
+ *   2. 写路径：market.credentials.set 把值 upsert 进 scratch cwd 的
+ *      .env（唯一持久格，config.json 里不再有 credentials 键）；回执
+ *      written 列变量名；status 在本会话仍不就绪（next_session ——
+ *      启动器下次启动才加载 .env，内核 boot 不再注入任何东西）。
+ *   3. plan-first：未注册插件名 / 需求表外的变量名都拒绝，且盘面零写入。
+ *   4. reset 从 .env 删该插件的键，别的插件的行逐字保留。
+ *   5. 启动器角色：把 scratch .env 灌进环境再启动（gate 模拟 launcher
+ *      的加载——本仓库由 blitzkrieg 启动器做这一步），status 就绪；
+ *      内核 stderr 不再有任何 "credentials injected" 注入行。
+ *   6. 迁移：旧 config.json credentials 格在 boot 一次性排空进 .env
+ *      并剥键（stderr 有迁移行），幂等。
  *
  * Usage: node scripts/market-credentials-check.mjs   (needs target/release/blitzkrieg-core)
  */
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { CoreClient, defaultBinaryPath } from './lib/core-client.mjs';
@@ -33,10 +35,33 @@ const gate = createChecks();
 const check = gate.check;
 const cleanup = [];
 
-function makeCore(label, extraArgs = [], cwdOverride = null) {
-  // The cell is cwd-relative (data/runtime/config.json), so a "restart" MUST
-  // reuse the SAME cwd the previous core ran in — a real deployment restarts
-  // in place.
+// The launcher's read side (ui_kit_panel::env_file::parse_env_file), restated
+// minimally: KEY=VALUE, one optional matching-quote layer. Keep in sync.
+function parseEnvText(text) {
+  const out = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const stripped = line.startsWith('export ') ? line.slice(7).trimStart() : line;
+    const eq = stripped.indexOf('=');
+    if (eq <= 0) continue;
+    const key = stripped.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = stripped.slice(eq + 1).trim();
+    if (value.length >= 2
+      && ((value.startsWith('"') && value.endsWith('"'))
+        || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function makeCore(label, extraArgs = [], cwdOverride = null, envExtra = null) {
+  // `.env` is cwd-relative (the launcher loads <cwd>/.env), so a "restart"
+  // MUST reuse the SAME cwd the previous core ran in — a real deployment
+  // restarts in place.
   const cwd = cwdOverride ?? mkdtempSync(join(tmpdir(), `blitzkrieg-cred-${label}-`));
   if (!cwdOverride) cleanup.push(cwd);
   return new CoreClient({
@@ -52,8 +77,14 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
     noOrderLog: true,
     noPositionLog: true,
     extraArgs,
+    envExtra,
   });
 }
+
+const envFile = (cwd) => join(cwd, '.env');
+const readEnv = (cwd) => {
+  try { return parseEnvText(readFileSync(envFile(cwd), 'utf8')); } catch { return {}; }
+};
 
 try {
   const core = makeCore('main');
@@ -98,8 +129,11 @@ try {
   }
   check('a name outside the requirement table is refused',
     badVar?.message?.includes('not a credential'), JSON.stringify(badVar));
+  check('a refused write touches no disk at all',
+    !existsSync(envFile(core.cwd)), envFile(core.cwd));
 
-  // 2. The write lands; the reply names what was written, values stay local.
+  // 2. The write lands in `.env`; the reply names what was written, values
+  //    stay local; the config.json cell is gone from the contract.
   const set = await core.request('market.credentials.set', {
     plugin: 'kalshi',
     vars: { KALSHI_API_KEY_ID: 'gate-key', KALSHI_RSA_PRIVATE_KEY: 'gate-secret' },
@@ -113,54 +147,79 @@ try {
   check('the audit trail names the actor', typeof set.actor === 'string' && set.actor.startsWith('uid:'),
     JSON.stringify(set));
 
+  const envText = (() => { try { return readFileSync(envFile(core.cwd), 'utf8'); } catch { return ''; } })();
+  check('the values land in the scratch cwd .env (single persistent home)',
+    envText.includes('KALSHI_API_KEY_ID="gate-key"')
+      && envText.includes('KALSHI_RSA_PRIVATE_KEY="gate-secret"'),
+    JSON.stringify(envText));
   const cellFile = join(core.cwd, 'data/runtime/config.json');
-  let cellText = '';
-  try { cellText = readFileSync(cellFile, 'utf8'); } catch { /* checked below */ }
-  check('the cell file lands in the scratch cwd',
-    cellText.includes('KALSHI_API_KEY_ID'), cellFile);
+  let cellText = existsSync(cellFile) ? readFileSync(cellFile, 'utf8') : '';
+  check('the config.json credentials cell is gone from the write path',
+    !cellText.includes('credentials'), cellFile);
 
   const mid = await core.request('market.credentials.status', {});
   const midKalshi = (mid.rows ?? []).find((r) => r.plugin === 'kalshi');
-  check('the status reflects the NEXT session (cell resolves, ready)',
-    midKalshi?.ready === true
-      && JSON.stringify(midKalshi?.resolvedVars) === JSON.stringify(['KALSHI_API_KEY_ID', 'KALSHI_RSA_PRIVATE_KEY']),
+  check('the same session stays unready (next_session: the launcher applies .env at next start)',
+    midKalshi?.ready === false && (midKalshi?.resolvedVars ?? []).length === 0,
     JSON.stringify(midKalshi));
 
-  // 4. reset clears only that plugin's entries.
+  // 4. reset removes only that plugin's lines from .env.
   await core.request('market.credentials.set', {
     plugin: 'polysimulator', vars: { POLYSIM_API_KEY: 'sim-secret' },
   });
   const reset = await core.request('market.credentials.set', { plugin: 'kalshi', reset: true });
   check('reset clears the plugin and names its whole table',
     reset.reset === true && reset.written.length === 2, JSON.stringify(reset));
-  const afterReset = await core.request('market.credentials.status', {});
-  const arKalshi = (afterReset.rows ?? []).find((r) => r.plugin === 'kalshi');
-  const arSim = (afterReset.rows ?? []).find((r) => r.plugin === 'polysimulator');
-  check('the reset plugin lost its resolution',
-    arKalshi?.ready === false && (arKalshi?.resolvedVars ?? []).length === 0, JSON.stringify(arKalshi));
-  check('a sibling plugin keeps its entries through another plugin\'s reset',
-    arSim?.ready === true, JSON.stringify(arSim));
+  const afterResetEnv = readEnv(core.cwd);
+  check('the reset plugin\'s keys are gone from .env',
+    !('KALSHI_API_KEY_ID' in afterResetEnv) && !('KALSHI_RSA_PRIVATE_KEY' in afterResetEnv),
+    JSON.stringify(afterResetEnv));
+  check('a sibling plugin keeps its lines through another plugin\'s reset',
+    afterResetEnv.POLYSIM_API_KEY === 'sim-secret', JSON.stringify(afterResetEnv));
 
   await core.stop();
 
-  // 5. The restart injects the cell into the boot environment — visible in
-  //    the run log (names, never values) and effective for the executor
-  //    (polysimulator reports ready from its env, not from any env var).
-  const core2 = makeCore('restart', [], core.cwd);
+  // 5. The launcher's role: load the scratch .env into the child environment
+  //    (the `blitzkrieg` launcher does this in production) — the kernel then
+  //    resolves credentials from its environment, and injects NOTHING itself.
+  const loaded = readEnv(core.cwd);
+  const core2 = makeCore('restart', [], core.cwd, loaded);
   await core2.start();
   const inj = core2.lastStderr ?? '';
-  check('a restart injects the cell at boot (names in the log)',
-    inj.includes('credentials injected') && inj.includes('POLYSIM_API_KEY'),
-    inj.split('\n').filter((l) => l.includes('credential') || l.includes('injected')).join(' | '));
+  check('the kernel no longer injects credentials at boot (the environment is the input)',
+    !inj.includes('credentials injected'),
+    inj.split('\n').filter((l) => l.includes('credential') || l.includes('inject')).join(' | '));
   const after2 = await core2.request('market.credentials.status', {});
   const r2Sim = (after2.rows ?? []).find((r) => r.plugin === 'polysimulator');
-  check('after restart the injected plugin resolves from the environment',
+  const r2Kal = (after2.rows ?? []).find((r) => r.plugin === 'kalshi');
+  check('after a launcher-style start the surviving plugin resolves from the environment',
     r2Sim?.ready === true && (r2Sim?.resolvedVars ?? []).includes('POLYSIM_API_KEY'),
     JSON.stringify(r2Sim));
+  check('the reset plugin stays unready (its keys left .env)',
+    r2Kal?.ready === false, JSON.stringify(r2Kal));
   await core2.stop();
 
+  // 6. The legacy-cell migration: a pre-consolidation config.json drains into
+  //    .env at boot, the key is stripped, the run is loud about it.
+  const cwd3 = mkdtempSync(join(tmpdir(), 'blitzkrieg-cred-migrate-'));
+  cleanup.push(cwd3);
+  mkdirSync(join(cwd3, 'data/runtime'), { recursive: true });
+  writeFileSync(join(cwd3, 'data/runtime/config.json'),
+    '{"credentials":{"kalshi":{"KALSHI_API_KEY_ID":"legacy-k"}}}');
+  const core3 = makeCore('migrate', [], cwd3);
+  await core3.start();
+  const mig = core3.lastStderr ?? '';
+  check('a legacy cell migrates loudly at boot',
+    mig.includes('legacy credentials cell migrated'), mig.split('\n').filter((l) => l.includes('migrat')).join(' | '));
+  check('the migrated value lands in .env',
+    readEnv(cwd3).KALSHI_API_KEY_ID === 'legacy-k', JSON.stringify(readEnv(cwd3)));
+  const stripped = readFileSync(join(cwd3, 'data/runtime/config.json'), 'utf8');
+  check('the migrated cell key is stripped from config.json',
+    !stripped.includes('credentials'), stripped);
+  await core3.stop();
+
   console.log(gate.failures === 0
-    ? '\nmarket:credentials — status/set/plan-first/reset/boot-injection all hold over the real wire.'
+    ? '\nmarket:credentials — status/set/plan-first/reset/.env-landing/launcher-role/migration all hold over the real wire.'
     : `\nmarket:credentials — ${gate.failures} assertion(s) failed.`);
   process.exit(gate.failures === 0 ? 0 : 1);
 } finally {

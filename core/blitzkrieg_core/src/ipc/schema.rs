@@ -1433,9 +1433,9 @@ pub struct CredentialsUpdate {
 }
 
 /// [`CredentialsUpdate::note`] — one spelling, used by the reply and the log.
-pub const CREDENTIALS_SET_NOTE: &str = "next session: the executor reads its credentials from the environment at \
-     boot, so a write takes effect after a restart; a real environment \
-     variable (e.g. from .env) still outranks this setting";
+pub const CREDENTIALS_SET_NOTE: &str = "the values are upserted into .env (the single persistent \
+     credential home); the launcher applies them at the next start, and a \
+     value already in the operator's environment still outranks the file";
 
 // ── system.reset_trading (#458) ─────────────────────────────────────────────
 

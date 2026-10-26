@@ -83,6 +83,10 @@ export class CoreClient {
     this.noOrderLog = opts.noOrderLog ?? false;
     this.noPositionLog = opts.noPositionLog ?? false;
     this.marketPlugin = opts.marketPlugin;
+    // Extra environment for the spawned core — the .env gate uses it to play
+    // the launcher's role (load the scratch `.env` into the child's env),
+    // since the kernel itself no longer injects anything at boot.
+    this.envExtra = opts.envExtra ?? null;
     this.onEvent = null;
     this.onError = null;
     this.onFatal = null;
@@ -150,7 +154,7 @@ export class CoreClient {
     // client never passes keys explicitly.
     const child = spawn(this.binaryPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env: this.envExtra ? { ...process.env, ...this.envExtra } : process.env,
       ...(this.cwd ? { cwd: this.cwd } : {}),
     });
     this.proc = child;

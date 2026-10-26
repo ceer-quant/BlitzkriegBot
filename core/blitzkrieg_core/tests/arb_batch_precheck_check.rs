@@ -589,16 +589,14 @@ fn credentials_not_ready_refuses_the_whole_batch_then_both_legs_pass() {
     // (declared order); the predicate seam is unit-pinned here, and the
     // Err-string format that interpolates it is the same surface the
     // `batch rejected: … reason={reason}` log line renders.
-    let empty_cell = Default::default();
-    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &empty_cell);
+    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI);
     assert_eq!(
         missing,
         vec!["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
         "the diagnosis helper names exactly the unresolved vars, in declared order"
     );
     set_env("KALSHI_API_KEY_ID", "test-key");
-    let cell_one = Default::default();
-    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &cell_one);
+    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI);
     assert_eq!(
         missing_one,
         vec!["KALSHI_RSA_PRIVATE_KEY"],
