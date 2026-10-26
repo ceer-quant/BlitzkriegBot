@@ -145,14 +145,19 @@ pub trait MarketHost: Send + Sync {
     fn on_market_resolution(&self, resolution: MarketResolution) -> BoxFuture<'_, ()>;
     /// Settled positions whose collateral has not been redeemed on-chain yet,
     /// with any retry backoff already elapsed. The plugin performs the redeem
-    /// and reports back through [`MarketHost::on_redemption_result`].
+    /// and reports back through [`MarketHost::on_redemption_result`]. Each
+    /// request carries its own venue (#647): the host's multi-plugin drain
+    /// hands a request only to the executor of THAT venue, so a sibling
+    /// venue's executor never drains a foreign claim.
     fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<RedemptionRequest>>;
     /// The outcome of one redemption: a mined tx hash + block, or a failure.
     fn on_redemption_result(&self, result: RedemptionResult) -> BoxFuture<'_, ()>;
     /// #461: complete share-pair merges the core has already burned from its
     /// books — the venue executes the CTF merge and reports back through
     /// [`MarketHost::on_merge_result`]. Dispatch semantics mirror the
-    /// redemption path (the core stamps each dispatch's backoff).
+    /// redemption path (the core stamps each dispatch's backoff), and each
+    /// request carries its own venue (#647), routed per venue like
+    /// [`MarketHost::take_pending_redemptions`].
     fn take_pending_merges(&self) -> BoxFuture<'_, Vec<MergeRequest>>;
     /// The outcome of one merge: a mined tx hash + block, or a failure.
     fn on_merge_result(&self, result: MergeResult) -> BoxFuture<'_, ()>;

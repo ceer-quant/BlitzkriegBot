@@ -95,6 +95,11 @@ pub struct SettlementBooking {
     /// E28 §9.2: the account the position belongs to — the redemption claim
     /// (and its eventual payout) lands in THIS account's book.
     pub account_id: String,
+    /// #647: the position's own execution venue — the redemption claim
+    /// (and its request) carries it so the multi-plugin drain routes the
+    /// redeem to the venue that holds the collateral. Empty = untagged (the
+    /// pre-routing world: the request drains to the host's active plugin).
+    pub venue: String,
     /// Index of the position's token in the resolution's outcome order, when the
     /// resolution names it (drives the NegRisk redeem amounts).
     pub outcome_index: Option<usize>,
@@ -136,6 +141,10 @@ pub fn booking_for(p: &OpenPosition, resolution: &MarketResolution) -> Option<Se
         payout_usd: shares * payout_per_share,
         winning: payout_per_share > Decimal::ZERO,
         account_id: p.account_id.as_str().to_string(),
+        // #647: the venue this position trades on, stamped at entry from the
+        // SAME execution-venue lookup the executor drain routes by — the
+        // claim's redeem request must reach the venue holding the collateral.
+        venue: p.venue.clone(),
         outcome_index,
         claim_id: String::new(),
     })
@@ -180,6 +189,12 @@ pub struct SettlementRecord {
     /// book, the 0.3 behaviour.
     #[serde(default)]
     pub account_id: String,
+    /// #647: the venue whose collateral the claim redeems, carried so a
+    /// restart's claim replay restores the routing attribution the same way
+    /// `account_id` does. Empty on journal lines written before the field
+    /// existed — the request then rides the active-plugin fallback.
+    #[serde(default)]
+    pub venue: String,
     pub applied_at_ms: i64,
 }
 
@@ -197,6 +212,11 @@ pub struct RedemptionClaim {
     /// `MergeClaim.account_id` already lives by). A claim redeems into
     /// exactly one book.
     pub account_id: String,
+    /// #647: the venue whose on-chain collateral this claim redeems —
+    /// carried from the position's execution venue at booking time (the same
+    /// stamp the executor drain routes orders by). Empty = untagged: the
+    /// request drains to the host's active plugin, the pre-#647 behaviour.
+    pub venue: String,
     pub neg_risk: bool,
     pub winning_token_id: String,
     /// Shares held per outcome, aligned to the resolution's outcome order: the
@@ -227,6 +247,7 @@ impl RedemptionClaim {
             outcome_shares: self.outcome_shares.clone(),
             expected_payout_usd: self.payout_usd,
             winning_token_id: self.winning_token_id.clone(),
+            venue: self.venue.clone(),
         }
     }
 }
@@ -243,6 +264,11 @@ pub struct MergeClaim {
     pub id: String,
     pub condition_id: String,
     pub account_id: String,
+    /// #647: the venue the burned pairs sit on — carried from the merging
+    /// legs' execution venue, so the merge request drains to the executor
+    /// that can actually run the CTF merge. Empty = untagged (active-plugin
+    /// fallback, the pre-#647 behaviour).
+    pub venue: String,
     /// The market settles through the NegRisk adapter (drives the merge call).
     pub neg_risk: bool,
     /// Complete pairs burned = the USDC collateral due (1.00 per pair).
@@ -264,6 +290,7 @@ impl MergeClaim {
             condition_id: self.condition_id.clone(),
             neg_risk: self.neg_risk,
             pairs_usd: self.pairs_usd,
+            venue: self.venue.clone(),
         }
     }
 }
@@ -321,6 +348,10 @@ enum JournalLine {
         claim_id: String,
         condition_id: String,
         account_id: String,
+        /// #647: the venue the burned pairs sit on (empty on journals written
+        /// before the field existed — the replayed claim drains untagged).
+        #[serde(default)]
+        venue: String,
         neg_risk: bool,
         #[serde(with = "crate::decimal")]
         pairs_usd: Decimal,
@@ -425,6 +456,11 @@ impl SettlementBook {
                             // the credit path routes that to the active book
                             // exactly as 0.3 did).
                             account_id: record.account_id.clone(),
+                            // #647: the venue the claim redeems on — same
+                            // restore-or-empty rule as `account_id`: journals
+                            // written before the field existed replay untagged
+                            // and drain to the active plugin as before.
+                            venue: record.venue.clone(),
                             neg_risk: record.neg_risk,
                             winning_token_id: record.winning_token_id.clone(),
                             outcome_shares: Vec::new(),
@@ -449,6 +485,11 @@ impl SettlementBook {
                     claim.payout_usd += record.payout_usd;
                     claim.position_ids.push(record.position_id.clone());
                     claim.neg_risk = record.neg_risk;
+                    // #647: same empty-inherits-first-stamp rule as the live
+                    // fold, so a replayed claim routes like the original.
+                    if claim.venue.is_empty() {
+                        claim.venue = record.venue.clone();
+                    }
                     if claim.winning_token_id.is_empty() {
                         claim.winning_token_id = record.winning_token_id.clone();
                     }
@@ -471,6 +512,7 @@ impl SettlementBook {
                 claim_id,
                 condition_id,
                 account_id,
+                venue,
                 neg_risk,
                 pairs_usd,
                 at_ms,
@@ -484,6 +526,9 @@ impl SettlementBook {
                         id: claim_id.clone(),
                         condition_id: condition_id.clone(),
                         account_id,
+                        // #647: empty on journals written before the field
+                        // existed — the replayed claim drains untagged.
+                        venue,
                         neg_risk,
                         pairs_usd,
                         created_at_ms: at_ms,
@@ -792,6 +837,7 @@ impl SettlementBook {
             claim_id: claim_id.unwrap_or_default(),
             source: resolution.source.clone(),
             account_id: booking.account_id.clone(),
+            venue: booking.venue.clone(),
             applied_at_ms: now_ms,
         };
         self.applied.insert(record.key.clone(), record.clone());
@@ -830,6 +876,7 @@ impl SettlementBook {
                 id: claim_id.to_string(),
                 condition_id: booking.condition_id.clone(),
                 account_id: booking.account_id.clone(),
+                venue: booking.venue.clone(),
                 neg_risk: resolution.neg_risk,
                 winning_token_id: winning_token_id.to_string(),
                 outcome_shares: Vec::new(),
@@ -856,6 +903,13 @@ impl SettlementBook {
         claim.payout_usd += booking.payout_usd;
         claim.position_ids.push(booking.position_id.clone());
         claim.neg_risk = resolution.neg_risk;
+        // #647: a claim folded from an untagged leg stays routable — the venue
+        // stamp rides the same "empty inherits the first stamp" rule the
+        // winning token uses, so every leg of one claim is one venue's
+        // collateral (the drain hands it to exactly one executor).
+        if claim.venue.is_empty() {
+            claim.venue = booking.venue.clone();
+        }
         if claim.winning_token_id.is_empty() {
             claim.winning_token_id = winning_token_id.to_string();
         }
@@ -926,6 +980,40 @@ impl SettlementBook {
             .claims
             .values()
             .filter(|c| !c.manual && c.next_attempt_ms <= now_ms)
+            .map(|c| c.id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in due {
+            if let Some(c) = self.claims.get_mut(&id) {
+                c.attempts += 1;
+                c.next_attempt_ms = now_ms + backoff_ms(c.attempts);
+                out.push(c.request());
+            }
+        }
+        out
+    }
+
+    /// #647: the per-venue drain — every due claim whose request names
+    /// `venue`, plus the UNTAGGED (`""`-venue) claims when `untagged_fallback`
+    /// (the requested plugin is the host's active one). Take-once on the
+    /// dispatch stamp: a sibling executor never sees a claim this drain
+    /// handed out, and a second venue's redeem is never mis-routed to a
+    /// foreign bridge. Same dispatch semantics as [`Self::take_redemptions`]
+    /// (each handed-out claim is stamped with its backoff immediately).
+    pub fn take_redemptions_for_venue(
+        &mut self,
+        venue: &str,
+        untagged_fallback: bool,
+        now_ms: i64,
+    ) -> Vec<RedemptionRequest> {
+        let due: Vec<String> = self
+            .claims
+            .values()
+            .filter(|c| {
+                !c.manual
+                    && c.next_attempt_ms <= now_ms
+                    && (c.venue == venue || (untagged_fallback && c.venue.is_empty()))
+            })
             .map(|c| c.id.clone())
             .collect();
         let mut out = Vec::new();
@@ -1029,11 +1117,14 @@ impl SettlementBook {
     /// are now on-chain collateral the wallet has NOT received yet: the claim
     /// goes into the receivable, and cash is credited only when the venue's
     /// merge transaction is confirmed. Durable via the journal, so a restart
-    /// between the burn and the receipt never loses the $1/pair.
+    /// between the burn and the receipt never loses the $1/pair. `venue` is
+    /// #647's routing attribution — the venue the burned pairs sit on, so the
+    /// request drains to that venue's executor.
     pub fn note_merge_burned(
         &mut self,
         condition_id: &str,
         account_id: &str,
+        venue: &str,
         neg_risk: bool,
         pairs: Decimal,
         now_ms: i64,
@@ -1050,19 +1141,22 @@ impl SettlementBook {
                 next,
                 condition_id,
                 account_id,
+                venue,
                 neg_risk,
                 pairs,
                 now_ms,
             );
         }
-        self.note_merge_burned_inner(id, condition_id, account_id, neg_risk, pairs, now_ms)
+        self.note_merge_burned_inner(id, condition_id, account_id, venue, neg_risk, pairs, now_ms)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn note_merge_burned_inner(
         &mut self,
         id: String,
         condition_id: &str,
         account_id: &str,
+        venue: &str,
         neg_risk: bool,
         pairs: Decimal,
         now_ms: i64,
@@ -1074,6 +1168,7 @@ impl SettlementBook {
                 id: id.clone(),
                 condition_id: condition_id.to_string(),
                 account_id: account_id.to_string(),
+                venue: venue.to_string(),
                 neg_risk,
                 pairs_usd,
                 created_at_ms: now_ms,
@@ -1091,6 +1186,7 @@ impl SettlementBook {
                 claim_id: id.clone(),
                 condition_id: condition_id.to_string(),
                 account_id: account_id.to_string(),
+                venue: venue.to_string(),
                 neg_risk,
                 pairs_usd,
             });
@@ -1126,6 +1222,38 @@ impl SettlementBook {
             .merges
             .values()
             .filter(|m| !m.manual && m.next_attempt_ms <= now_ms)
+            .map(|m| m.id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in due {
+            if let Some(m) = self.merges.get_mut(&id) {
+                m.attempts += 1;
+                m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
+                out.push(m.request());
+            }
+        }
+        out
+    }
+
+    /// #647: the per-venue drain — every due merge whose request names
+    /// `venue`, plus the UNTAGGED (`""`-venue) merges when `untagged_fallback`
+    /// (the requested plugin is the host's active one). Same dispatch
+    /// semantics as [`Self::take_merges`]; a sibling executor never sees a
+    /// merge this drain handed out.
+    pub fn take_merges_for_venue(
+        &mut self,
+        venue: &str,
+        untagged_fallback: bool,
+        now_ms: i64,
+    ) -> Vec<blitzkrieg_market_api::MergeRequest> {
+        let due: Vec<String> = self
+            .merges
+            .values()
+            .filter(|m| {
+                !m.manual
+                    && m.next_attempt_ms <= now_ms
+                    && (m.venue == venue || (untagged_fallback && m.venue.is_empty()))
+            })
             .map(|m| m.id.clone())
             .collect();
         let mut out = Vec::new();
@@ -1270,6 +1398,14 @@ mod tests {
         resolution(vec![("up", dec!(1)), ("down", dec!(0))])
     }
 
+    /// `win()` for another condition: the winner pays 1.00/share on the named
+    /// token, the way a second venue's market resolves on its own.
+    fn win_for(condition_id: &str, winner: &str) -> MarketResolution {
+        let mut r = resolution(vec![(winner, dec!(1)), ("down", dec!(0))]);
+        r.condition_id = condition_id.into();
+        r
+    }
+
     fn book_with_journal() -> (SettlementBook, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "bksettle-{}-{:?}",
@@ -1401,6 +1537,159 @@ mod tests {
         assert_eq!(claim.outcome_shares, vec![dec!(10), dec!(4)]);
         assert_eq!(claim.payout_usd, dec!(10));
         assert_eq!(claim.position_ids, vec!["hft-1", "hft-2"]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // ── #647: per-venue settlement queues ───────────────────────────────────
+
+    /// A position whose entry stamped a venue (the live path writes the
+    /// position's execution venue at open) books a claim of THAT venue.
+    fn position_on_venue(
+        id: &str,
+        token: &str,
+        shares: Decimal,
+        entered_ms: i64,
+        venue: &str,
+    ) -> OpenPosition {
+        let mut p = position(id, token, shares, entered_ms);
+        p.venue = venue.into();
+        p
+    }
+
+    /// Two plugins hold settlement claims at once (each on its OWN venue's
+    /// collateral): each venue's drain takes only its own request, take-once —
+    /// a sibling executor never redeems (or merges) a foreign venue's claim.
+    /// This is the mis-post the audit's P1-1 predicted for the second venue
+    /// holding an on-chain settlement position.
+    #[test]
+    fn per_venue_drains_take_only_their_own_claims() {
+        let (mut book, path) = book_with_journal();
+        // polymarket holds a settled win; kalshi holds the same on ITS market.
+        let mut poly = position_on_venue("hft-1", "up", dec!(10), 1_000, "polymarket");
+        poly.condition_id = "cond-poly".into();
+        let r_poly = win_for("cond-poly", "up");
+        let bu = booking_for(&poly, &r_poly).unwrap();
+        assert_eq!(
+            bu.venue, "polymarket",
+            "the booking carries the position's venue"
+        );
+        book.book(&bu, &r_poly, 10).unwrap();
+
+        let mut kal = position_on_venue("hft-2", "kal-up", dec!(4), 1_100, "kalshi");
+        kal.condition_id = "cond-kal".into();
+        let r_kal = win_for("cond-kal", "kal-up");
+        let bk = booking_for(&kal, &r_kal).unwrap();
+        book.book(&bk, &r_kal, 11).unwrap();
+
+        // Each drain hands out exactly its own venue's request…
+        let poly_due = book.take_redemptions_for_venue("polymarket", true, 100);
+        assert_eq!(poly_due.len(), 1);
+        assert_eq!(poly_due[0].condition_id, "cond-poly");
+        assert_eq!(poly_due[0].venue, "polymarket");
+        let kal_due = book.take_redemptions_for_venue("kalshi", true, 100);
+        assert_eq!(kal_due.len(), 1);
+        assert_eq!(kal_due[0].condition_id, "cond-kal");
+        assert_eq!(kal_due[0].venue, "kalshi");
+        // …and the dispatch stamp is take-once: neither drain re-sees a claim.
+        assert!(
+            book.take_redemptions_for_venue("polymarket", true, 100)
+                .is_empty()
+        );
+        assert!(
+            book.take_redemptions_for_venue("kalshi", true, 100)
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The untagged fallback: a claim stamped before venue labels existed
+    /// (empty venue — a legacy journal) drains to the host's single ACTIVE
+    /// plugin (the `untagged_fallback` arm) and to no sibling. The untagged
+    /// world keeps the pre-#647 behaviour byte-identically.
+    #[test]
+    fn untagged_claims_drain_to_the_active_plugin_fallback_only() {
+        let (mut book, path) = book_with_journal();
+        let legacy = position("hft-1", "up", dec!(10), 1_000);
+        assert!(booking_for(&legacy, &win()).unwrap().venue.is_empty());
+        book.book(&booking_for(&legacy, &win()).unwrap(), &win(), 10)
+            .unwrap();
+
+        // The active plugin's drain takes the untagged claim…
+        let due = book.take_redemptions_for_venue("polymarket", true, 100);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].venue, "", "the request itself stays untagged");
+        // …the sibling does not…
+        assert!(
+            book.take_redemptions_for_venue("kalshi", true, 100)
+                .is_empty()
+        );
+        // …and a no-fallback drain (a handle whose bucket names no plugin,
+        // e.g. a named executor that is not the active one) never dispatches
+        // the untagged claim either — a second drain stamps nothing.
+        let attempts = book.claim("cond-1").unwrap().attempts;
+        assert!(
+            book.take_redemptions_for_venue("kalshi", false, 6_000)
+                .is_empty()
+        );
+        assert_eq!(
+            book.claim("cond-1").unwrap().attempts,
+            attempts,
+            "no-fallback never dispatched the untagged claim"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The venue attribution survives a restart: a claim booked with a venue
+    /// replays from the journal still naming it, so post-restart dispatches
+    /// land on the same executor as pre-restart ones.
+    #[test]
+    fn a_claim_venue_survives_a_journal_replay() {
+        let (mut book, path) = book_with_journal();
+        let p = position_on_venue("hft-1", "up", dec!(10), 1_000, "polymarket");
+        book.book(&booking_for(&p, &win()).unwrap(), &win(), 10)
+            .unwrap();
+        drop(book);
+
+        let mut reopened = SettlementBook::new(Some(&path));
+        let due = reopened.take_redemptions_for_venue("polymarket", true, 100);
+        assert_eq!(due.len(), 1, "the replayed claim still routes to its venue");
+        assert_eq!(due[0].venue, "polymarket");
+        // Journals written before the field existed replay untagged: the same
+        // restore-or-empty rule the account attribution lives by.
+        let mut old = SettlementBook::new(None);
+        let legacy = position("hft-2", "up", dec!(3), 2_000);
+        old.book(&booking_for(&legacy, &win()).unwrap(), &win(), 20)
+            .unwrap();
+        assert_eq!(
+            old.take_redemptions_for_venue("polymarket", true, 100)
+                .len(),
+            1,
+            "an untagged claim rides the active-plugin fallback"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The merge queue is bucketed by venue the same way: a merge burned on
+    /// polymarket's pairs drains to polymarket's executor only.
+    #[test]
+    fn merge_claims_drain_to_their_own_venue() {
+        let (mut book, path) = book_with_journal();
+        book.note_merge_burned("cond-poly", "default", "polymarket", false, dec!(5), 10);
+        book.note_merge_burned("cond-kal", "default", "kalshi", false, dec!(3), 11);
+
+        let poly = book.take_merges_for_venue("polymarket", true, 100);
+        assert_eq!(poly.len(), 1);
+        assert_eq!(poly[0].condition_id, "cond-poly");
+        assert_eq!(poly[0].venue, "polymarket");
+        let kal = book.take_merges_for_venue("kalshi", true, 100);
+        assert_eq!(kal.len(), 1);
+        assert_eq!(kal[0].condition_id, "cond-kal");
+        assert_eq!(kal[0].venue, "kalshi");
+        assert!(
+            book.take_merges_for_venue("polymarket", true, 100)
+                .is_empty()
+        );
+        assert!(book.take_merges_for_venue("kalshi", true, 100).is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

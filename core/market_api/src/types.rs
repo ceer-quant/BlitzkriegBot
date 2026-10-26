@@ -599,6 +599,16 @@ pub struct RedemptionRequest {
     pub expected_payout_usd: Decimal,
     /// The outcome token this claim expects to be paid for.
     pub winning_token_id: TokenId,
+    /// #647: the venue whose settlement position this claim redeems — the
+    /// requesting account's own execution venue, stamped at booking time. The
+    /// host's multi-plugin drain hands a request only to the executor of THIS
+    /// venue (an untagged `""` — legacy journals, hosts that never labelled
+    /// markets — drains to the active plugin as before); a sibling executor
+    /// never sees it, so a second venue's bridge can no longer be handed a
+    /// foreign condition id. `#[serde(default)]` keeps old consumers loading:
+    /// a wire line without the field reads as the untagged historical world.
+    #[serde(default)]
+    pub venue: String,
 }
 
 /// Why a redemption attempt did not land. `manual` marks the failures no retry
@@ -650,6 +660,13 @@ pub struct MergeRequest {
     /// USDC collateral due: `pairs × 1.00`.
     #[serde(with = "crate::decimal")]
     pub pairs_usd: Decimal,
+    /// #647: the venue whose burned pairs this merge completes — the owning
+    /// account's own execution venue, stamped at burn time. Routed by the
+    /// host's multi-plugin drain exactly like [`RedemptionRequest::venue`]
+    /// (untagged `""` = the active-plugin fallback). `#[serde(default)]`
+    /// keeps old consumers loading unchanged.
+    #[serde(default)]
+    pub venue: String,
 }
 
 /// The outcome of one [`MergeRequest`].
