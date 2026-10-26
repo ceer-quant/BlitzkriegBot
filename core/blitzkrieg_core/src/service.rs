@@ -4554,8 +4554,12 @@ impl Core {
     /// (the parasitic shape: PolySimulator declares no rounds of its own, so
     /// its mirror admission/routing evidence must come from this declaration,
     /// not from a shadow batch its dead discovery would have produced). The
-    /// boot calls this once next to `set_plugin_modes` — the declaration is
-    /// the plugin's identity, it never changes at runtime.
+    /// declaration is the plugin's identity, it never changes at runtime.
+    /// ORDERING: the boot must call this AFTER the engine exists
+    /// (`install_engine`) — the landing is `engine.as_mut()`, so a push made
+    /// while the engine slot is still `None` is a silent no-op (found live:
+    /// the pre-a860636 placement next to `set_plugin_modes` never landed a
+    /// single declaration).
     pub fn apply_plugin_mirrors(
         &mut self,
         plugins: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
