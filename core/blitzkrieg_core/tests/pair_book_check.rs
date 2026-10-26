@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
 use blitzkrieg_core::account::{Account, AccountStatus, CredentialKeys};
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::ipc::schema::Event;
@@ -561,8 +562,9 @@ fn the_pair_book_never_feeds_back_into_judgment_paths() {
         virtual_limits,
         ..Default::default()
     };
-    let book = blitzkrieg_core::account::config::load_account_ledgers(&path, NOW)
-        .expect("accounts fixture parses");
+    let book =
+        blitzkrieg_core::account::config::load_account_ledgers(&path, NOW, TEST_ALLOWED_ROUNDS)
+            .expect("accounts fixture parses");
     let mut c = Core::with_account_book(config, book);
     let cfg = c.config().engine_config();
     let mut eng = blitzkrieg_core::engine::Engine::new(cfg.clone());

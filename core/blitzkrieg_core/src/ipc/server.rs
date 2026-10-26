@@ -3683,12 +3683,16 @@ async fn handle_line(
                         _ => "uid:unknown".to_string(),
                     };
                     let id = AccountId::from(p.account_id.as_str());
-                    // Validate FIRST (the parser's own whitelist+dedup), so
-                    // a bad value refuses before anything is computed or
-                    // written. The validated set is the one every later
-                    // step sees.
-                    let new_rounds =
-                        crate::account::config::validate_rounds(Some(p.rounds.clone()))?;
+                    // Validate FIRST (the parser's own union+dedup), so a
+                    // bad value refuses before anything is computed or
+                    // written. The union comes from the core's config (the
+                    // boot's registry report). The validated set is the one
+                    // every later step sees.
+                    let allowed_round_secs = core.lock().await.config().allowed_round_secs.clone();
+                    let new_rounds = crate::account::config::validate_rounds(
+                        Some(p.rounds.clone()),
+                        &allowed_round_secs,
+                    )?;
                     let mut c = core.lock().await;
                     // The REMOVED families: old set minus new set (the
                     // arithmetic runs on the validated new set). Added =
@@ -5575,6 +5579,10 @@ mod tests {
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
+            // The historical kernel whitelist, spelled as the plugins'
+            // declared union (the registry union this build would report):
+            // the round-duration arms below judge against it.
+            allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
             ..Default::default()
         };
         let mut c = Core::new(cfg.clone());
@@ -6168,6 +6176,10 @@ mod tests {
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
+                // The plugins' declared union as a test fixture (the values
+                // the shipped plugins declare): the readout's label check
+                // below judges against it.
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 ..Default::default()
             };
             let mut c = Core::new(cfg.clone());
@@ -6180,7 +6192,7 @@ mod tests {
         };
 
         // The readout before any write: effective 900 from the compiled
-        // default, nothing persisted, the whitelist with its labels.
+        // default, nothing persisted, the declared union with its labels.
         let read = rpc(
             &core,
             &registry,
@@ -6243,9 +6255,11 @@ mod tests {
         }
         // The cell content, read back through the SAME loader a restart
         // would use — the write and the boot read agree by construction.
-        let cell =
-            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str))
-                .expect("the cell must load");
+        let cell = crate::ipc::runtime_config::load_round_duration_from(
+            std::path::Path::new(&cell_str),
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the cell must load");
         assert_eq!(cell.duration_sec, 300);
 
         // The readout now reports the cell as the next session's value while
@@ -6274,13 +6288,16 @@ mod tests {
             bad["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("not on the whitelist"),
+                .contains("not declared by any market plugin"),
             "an off-whitelist value is refused by name: {bad}"
         );
         assert_eq!(
-            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str))
-                .unwrap()
-                .duration_sec,
+            crate::ipc::runtime_config::load_round_duration_from(
+                std::path::Path::new(&cell_str),
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap()
+            .duration_sec,
             300,
             "a refused write leaves the cell exactly as it was"
         );
@@ -6319,7 +6336,10 @@ mod tests {
             "after a reset the next session re-resolves to the effective value: {reset}"
         );
         assert_eq!(
-            crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(&cell_str)),
+            crate::ipc::runtime_config::load_round_duration_from(
+                std::path::Path::new(&cell_str),
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            ),
             None,
             "the cell holds nothing after a reset"
         );
@@ -7607,6 +7627,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -7789,6 +7810,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -7950,6 +7972,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -8130,6 +8153,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -8294,6 +8318,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -8435,7 +8460,7 @@ mod tests {
         assert_eq!(data_plane.soft_unloaded_count(), 1, "no double count");
     }
 
-    /// B2 (轮次多族): the parametric refusals — a whitelist-foreign duration
+    /// B2 (轮次多族): the parametric refusals — a union-foreign duration
     /// refuses before anything is computed; an unknown account refuses with
     /// the standard unknown-account error; a duplicate-carrying list is
     /// deduplicated with first-seen order kept (900, 3600, 900 → [900,
@@ -8476,6 +8501,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -8601,8 +8627,12 @@ mod tests {
 
         // Persistence round-trip: a NEW core reading the same file boots
         // unrestricted (the deleted key parses as the empty set).
-        let reread = crate::account::config::load_account_ledgers(&accounts_path, now_ms())
-            .expect("the file the write produced must boot");
+        let reread = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            now_ms(),
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the file the write produced must boot");
         let account = reread.account(&AccountId::from("paper")).expect("account");
         assert!(
             account.rounds.is_empty(),
@@ -8653,6 +8683,7 @@ mod tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 engine_enabled: true,
                 round_duration_sec: 900,
+                allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
                 trade_log_path: None,
                 order_log_path: None,
                 position_log_path: None,
@@ -9066,8 +9097,12 @@ mod tests {
         // The persist: a FRESH load_account_ledgers over the file — the same
         // call the next boot makes — sees BOTH bindings and every sibling
         // field (the name rode through untouched).
-        let book = crate::account::config::load_account_ledgers(&accounts_path, 1)
-            .expect("the written file re-parses");
+        let book = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            1,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the written file re-parses");
         assert_eq!(
             book.account(&AccountId::from("paper")).unwrap().venue,
             "polysimulator"
@@ -9102,8 +9137,12 @@ mod tests {
         )
         .await;
         assert_eq!(reply["result"]["venues"][0]["venue"], serde_json::json!(""));
-        let book = crate::account::config::load_account_ledgers(&accounts_path, 2)
-            .expect("the unbound file re-parses");
+        let book = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            2,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the unbound file re-parses");
         assert_eq!(book.account(&AccountId::from("paper")).unwrap().venue, "");
         assert_eq!(
             book.account(&AccountId::from("default")).unwrap().venue,
@@ -9495,8 +9534,12 @@ mod tests {
         assert_eq!(accounts.len(), 3);
 
         // The FILE: a fresh load — the boot's own call — sees the row.
-        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
-            .expect("the written file re-parses");
+        let book = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            5,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the written file re-parses");
         let created = book.account(&AccountId::from("poly-main")).unwrap();
         assert!(matches!(created.status, AccountStatus::Active));
         assert!(matches!(
@@ -9658,8 +9701,12 @@ mod tests {
         assert_eq!(accounts[0]["id"], serde_json::json!("default"));
 
         // The FILE: a fresh load agrees.
-        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
-            .expect("the written file re-parses");
+        let book = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            5,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the written file re-parses");
         assert!(book.account(&AccountId::from("paper")).is_none());
         assert!(book.account(&AccountId::from("default")).is_some());
 
@@ -9885,8 +9932,12 @@ mod tests {
             reply["result"]["active"], "pinned",
             "the active cell never dangles: it re-activates the first survivor"
         );
-        let book = crate::account::config::load_account_ledgers(&accounts_path, 5)
-            .expect("the written file re-parses");
+        let book = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            5,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .expect("the written file re-parses");
         assert!(book.account(&AccountId::from("default")).is_none());
         assert!(book.account(&AccountId::from("pinned")).is_some());
         let scratch = accounts_path

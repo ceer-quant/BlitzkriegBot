@@ -558,21 +558,27 @@ impl AccountLedgers {
     /// persists into accounts.toml beside this write — the venue.set
     /// transaction posture). Unknown ids refuse (the book never mints an
     /// implicit account). The value arrives parse-validated and
-    /// deduplicated; the set path re-checks the whitelist so an IPC caller
-    /// cannot bypass what the parser enforces (same fail-closed posture at
-    /// every door).
-    pub fn set_rounds(&mut self, id: &AccountId, rounds: Vec<i64>) -> CoreResult<()> {
+    /// deduplicated; the set path re-checks the plugins' DECLARED union
+    /// (`allowed` — the registry union the Core threads through) so an IPC
+    /// caller cannot bypass what the parser enforces (same fail-closed
+    /// posture at every door; an empty union refuses every value).
+    pub fn set_rounds(
+        &mut self,
+        id: &AccountId,
+        rounds: Vec<i64>,
+        allowed: &[i64],
+    ) -> CoreResult<()> {
         let account = self
             .accounts
             .get_mut(id)
             .ok_or_else(|| unknown_account(id))?;
         for sec in &rounds {
-            if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(sec) {
+            if !allowed.contains(sec) {
                 return Err(crate::model::CoreError::new(
                     crate::model::CoreErrorCode::InvalidParams,
                     format!(
-                        "rounds value {sec}s is not an allowed round duration (allowed: {:?})",
-                        crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                        "rounds value {sec}s is not declared by any market plugin \
+                         (declared union: {allowed:?})"
                     ),
                 ));
             }

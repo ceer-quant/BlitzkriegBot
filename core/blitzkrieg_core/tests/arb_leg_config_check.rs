@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
 use blitzkrieg_core::account::config::load_account_ledgers;
 use blitzkrieg_core::engine::{DataEvent, Engine};
 use blitzkrieg_core::model::{CryptoMarket, default_account_id};
@@ -171,7 +172,8 @@ fn arb_core_atomic(accounts_path: &Path, virtual_pot: bool, atomic: bool) -> Cor
         virtual_limits,
         ..Default::default()
     };
-    let book = load_account_ledgers(accounts_path, NOW).expect("accounts fixture parses");
+    let book = load_account_ledgers(accounts_path, NOW, TEST_ALLOWED_ROUNDS)
+        .expect("accounts fixture parses");
     let mut c = Core::with_account_book(config, book);
     let cfg = c.config().engine_config();
     let mut eng = Engine::new(cfg.clone());
@@ -249,7 +251,8 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
             c.arb_leg_config().is_none(),
             "a fresh book boots unconfigured"
         );
-        let book = load_account_ledgers(&path, now).expect("the untouched file parses");
+        let book = load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS)
+            .expect("the untouched file parses");
         assert!(
             blitzkrieg_core::account::config::read_cross_venue_arb(&path)
                 .expect("read")
@@ -378,7 +381,7 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
             "\n[cross_venue_arb]\nleg_a_venue = \"polymarket\"\nleg_a_account = \"default\"\nleg_b_venue = \"polymarket\"\nleg_b_account = \"arb-b\"\npairs = [\"BTC\"]\n",
         );
         std::fs::write(&path, text).expect("hand-edited bad section");
-        let err = load_account_ledgers(&path, now)
+        let err = load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS)
             .expect_err("identical venues in the file refuse the boot");
         assert!(
             err.message.contains("[cross_venue_arb]"),

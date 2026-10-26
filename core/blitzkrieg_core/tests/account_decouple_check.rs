@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
 use blitzkrieg_core::account::config::load_account_ledgers;
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::ipc::schema::Event;
@@ -290,7 +291,8 @@ fn decouple_core(accounts_path: Option<&Path>, pot: Option<Decimal>, enable_defa
     };
     let mut c = match accounts_path {
         Some(p) => {
-            let book = load_account_ledgers(p, NOW).expect("accounts fixture parses");
+            let book =
+                load_account_ledgers(p, NOW, TEST_ALLOWED_ROUNDS).expect("accounts fixture parses");
             Core::with_account_book(config, book)
         }
         None => Core::new(config),
@@ -1007,7 +1009,8 @@ fn account_removal_is_delete_all_but_the_last_account() {
         "paper",
         "the active cell never dangles: it re-activates the first survivor"
     );
-    let book = load_account_ledgers(&path, now).expect("the written file re-parses");
+    let book =
+        load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
     assert!(
         book.account(&default_account_id()).is_none(),
         "the `default` row leaves accounts.toml (the next boot re-derives it)"
@@ -1057,7 +1060,8 @@ fn account_removal_is_delete_all_but_the_last_account() {
 fn the_factory_accounts_file_binds_venues_and_never_pins_strategies() {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs/accounts.toml");
-    let book = load_account_ledgers(&path, NOW).expect("the factory file parses");
+    let book =
+        load_account_ledgers(&path, NOW, TEST_ALLOWED_ROUNDS).expect("the factory file parses");
 
     let rows = book.account_list();
     let mut ids: Vec<String> = rows.iter().map(|a| a.id.to_string()).collect();

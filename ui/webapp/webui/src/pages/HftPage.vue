@@ -781,6 +781,23 @@ const roundDurLabel = computed(() => {
  */
 const roundSwitch = useRoundDuration()
 
+// 倒计时卡的周期切换按当前账户 venue 的插件声明筛档（2026-10-26 操作者
+// 指令，与账户卡 AccountSwitcher.declaredRoundSecs 同一声明面、同一宽容
+// 语义）：未声明（predictfun / 寄生 polysimulator / 老内核缺字段）不筛，
+// 面板不发明 venue→周期表；声明唯一档（仅一档的交易所）时切换器退化为
+// 静态档位标签 —— 无档可切，即「锁定在唯一支持的轮次」。
+const venueRoundSecs = computed(
+  () => store.plugins?.marketPlugins.find((p) => p.name === activeVenue.value)?.supportedRoundSecs,
+)
+const switcherSegments = computed(() => {
+  const declared = venueRoundSecs.value
+  if (!declared) return roundSwitch.segments.value
+  return roundSwitch.segments.value.filter((s) => declared.includes(Number(s.id)))
+})
+const switcherLocked = computed(
+  () => venueRoundSecs.value !== undefined && switcherSegments.value.length <= 1,
+)
+
 /**
  * What the two controls can actually do here.
  *
@@ -1112,7 +1129,11 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           <!-- 全局复盘坐标系（不是账户的交易周期！）：账户各跑各的周期族在
                账户卡配置（account.rounds.set，热生效）；这个单值只服务复盘
                坐标系与未配置账户的回落 —— 语义剥离防「切换交易周期」误用。 -->
+          <!-- 2026-10-26：档位集合按当前账户 venue 的插件声明筛（与账户卡
+               同一 supportedRoundSecs 声明面）。声明唯一档的交易所无档可切，
+               切换器退化为静态档位标签（switcherLocked）。 -->
           <Tooltip
+            v-if="!switcherLocked"
             :content="roundSwitch.flagLocked.value
               ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
               : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换写入下次会话（重启生效，改动影响历史回测的 slot 索引）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
@@ -1121,10 +1142,19 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
               <Timer class="size-3.5 text-faint-fg" />
               <SegmentedControl
                 v-model="roundSwitch.value.value"
-                :segments="roundSwitch.segments.value"
+                :segments="switcherSegments"
                 size="sm"
                 :disabled="roundSwitch.busy.value || roundSwitch.flagLocked.value"
               />
+            </div>
+          </Tooltip>
+          <Tooltip
+            v-else
+            :content="`该交易所（${activeVenue}）只支持 ${roundDurLabel} 轮次，已锁定 —— 全局轮次坐标系与账户实时周期族由声明面决定，无档可切。`"
+          >
+            <div class="flex items-center gap-1.5">
+              <Timer class="size-3.5 text-faint-fg" />
+              <span class="text-[12px] font-medium tabular-nums text-faint-fg">{{ roundDurLabel }}</span>
             </div>
           </Tooltip>
           <Button

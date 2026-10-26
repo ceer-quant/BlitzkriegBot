@@ -147,7 +147,8 @@ check('轮次周期切换入口在行情页倒计时卡（共享 composable 单�
   assert.match(lib, /onMounted\(load\)/, 'composable 缺装载 —— 卡面挂着就要读数')
   // 行情页：入口在场 + 消费 composable + 语义钉死。
   assert.match(hft, /useRoundDuration\(\)/, 'HftPage 缺 useRoundDuration —— 周期切换入口没进倒计时卡')
-  assert.match(hft, /v-model="roundSwitch\.value\.value"[\s\S]*?:segments="roundSwitch\.segments\.value"/, '倒计时卡缺 SegmentedControl 切换控件')
+  assert.match(hft, /v-model="roundSwitch\.value\.value"[\s\S]*?:segments="switcherSegments"/, '倒计时卡缺 SegmentedControl 切换控件（档位绑定必须走声明筛 switcherSegments）')
+  assert.match(hft, /switcherLocked/, '倒计时卡缺声明唯一档锁定分支 —— 交易所只声明一档时切换器必须退化为静态标签（venue 是数据不是逻辑）')
   assert.match(hft, /roundSwitch\.flagLocked\.value/, '倒计时卡未消费 flagLocked —— 显式启动参数在管时必须禁用切换')
   assert.match(hft, /roundSwitch\.restart\.counting\.value/, '倒计时卡缺重启倒计时条 —— next_session 写入后无生效路径可见')
   // 设置页保留同源卡面（第二入口），且不许再私藏一份独立写路径。
