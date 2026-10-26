@@ -42,6 +42,18 @@ pub struct CoreConfig {
     pub breaker_cooldown_sec: i64,
     /// Round length used to derive a position's expiry from its round slot.
     pub round_duration_sec: i64,
+    /// The round lengths switchable this session: the DECLARED UNION of the
+    /// registered market plugins' `supported_round_secs` (`MarketPluginRegistry
+    /// ::allowed_round_secs`), computed once at boot — which durations may be
+    /// armed is venue knowledge, so the kernel keeps no hardcoded list; this
+    /// field only mirrors what the plugins declared. EVERY consumer
+    /// (`round_duration.get` readout, `round_duration.set`, the persisted-cell
+    /// reader, the accounts.toml parser, `account.rounds.set`) admits a value
+    /// only when this union contains it, and an EMPTY union refuses EVERY
+    /// value (fail-closed: with no plugin claiming a family, accepting any
+    /// value would be the kernel inventing knowledge the declaration face
+    /// never made — not "allow everything").
+    pub allowed_round_secs: Vec<i64>,
     /// Where the effective round length came from — one of `cli` / `env` /
     /// `runtime` / `toml` / `default`. The boot resolution owns the spelling;
     /// `round_duration.get` surfaces it so the UI can say "an explicit flag
@@ -843,6 +855,12 @@ impl Default for CoreConfig {
             max_consecutive_losses: 3,
             breaker_cooldown_sec: 300,
             round_duration_sec: 900,
+            // Empty = no plugin's declaration is on file, so every
+            // round-duration admission refuses (fail-closed). The production
+            // boot overwrites this from the registry; in-process tests with
+            // no market concern keep the historical behaviour through the
+            // TEST_ALLOWED_ROUNDS helper.
+            allowed_round_secs: Vec::new(),
             round_duration_source: "default",
             runtime_config_path: None,
             accounts_config_path: None,
@@ -1063,20 +1081,29 @@ pub fn round_duration_readout(core: &Core) -> crate::ipc::schema::RoundDurationR
     use crate::ipc::schema::{RoundDurationOption, RoundDurationResult};
     let effective = core.config().round_duration_sec;
     let cell = core.config().runtime_config_path.as_deref().and_then(|p| {
-        crate::ipc::runtime_config::load_round_duration_from(std::path::Path::new(p))
+        crate::ipc::runtime_config::load_round_duration_from(
+            std::path::Path::new(p),
+            &core.config().allowed_round_secs,
+        )
     });
     let next_session = cell.map(|c| c.duration_sec).unwrap_or(effective);
-    let mut allowed: Vec<RoundDurationOption> = crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+    // The declared union the plugins own — the kernel hardcodes nothing
+    // (whichever durations appear are exactly what the plugins claimed).
+    let mut allowed: Vec<RoundDurationOption> = core
+        .config()
+        .allowed_round_secs
         .iter()
         .map(|&sec| RoundDurationOption {
             sec,
             label: crate::scanner::duration_label_for(sec),
         })
         .collect();
-    // A non-standard boot value (e.g. a test's 60s) is not on the whitelist —
-    // list it too, unlabeled, so the card can name what is actually running
-    // instead of silently showing the nearest allowed value.
-    if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&effective) {
+    // A non-standard boot value (e.g. a test's 60s) is not in the declared
+    // union — list it too, unlabeled, so the card can name what is actually
+    // running instead of silently showing the nearest allowed value (and an
+    // EMPTY union still answers with the effective value: the truth is
+    // reported, even though every set would refuse).
+    if !core.config().allowed_round_secs.contains(&effective) {
         allowed.push(RoundDurationOption {
             sec: effective,
             label: None,
@@ -2018,6 +2045,7 @@ impl Core {
         let accounts = crate::account::config::load_account_ledgers(
             std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH),
             now_ms(),
+            &config.allowed_round_secs,
         )
         .unwrap_or_else(|e| {
             panic!(
@@ -3219,9 +3247,11 @@ impl Core {
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
-        // One validation, the parser's own: whitelist + dedup, first-seen
-        // order kept. `Some(..)` (not `None`) — the wire asked for a set.
-        let rounds = crate::account::config::validate_rounds(Some(rounds))?;
+        // One validation, the parser's own: the plugins' declared union +
+        // dedup, first-seen order kept. `Some(..)` (not `None`) — the wire
+        // asked for a set.
+        let rounds =
+            crate::account::config::validate_rounds(Some(rounds), &self.config.allowed_round_secs)?;
         let Some(path) = self.config.accounts_config_path.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -3248,7 +3278,8 @@ impl Core {
         // The write-side re-check inside `set_rounds` runs again (same
         // fail-closed posture at every door) — it cannot refuse what
         // `validate_rounds` passed, but the door stays.
-        self.accounts.set_rounds(id, rounds.clone())?;
+        self.accounts
+            .set_rounds(id, rounds.clone(), &self.config.allowed_round_secs)?;
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -12388,9 +12419,10 @@ impl Core {
         if !patch.reset && sec.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "round_duration.set needs durationSec (one of 300/900/3600/14400/86400) \
-                 or reset: true"
-                    .to_string(),
+                format!(
+                    "round_duration.set needs durationSec (one of {:?}) or reset: true",
+                    self.config.allowed_round_secs
+                ),
             ));
         }
 
@@ -12438,18 +12470,19 @@ impl Core {
             });
         }
 
-        // 写路径：白名单校验（一格越界值就是一台没人能解读的网格），然后
-        // 原子写持久格。
+        // 写路径：声明并集校验（一格越界值就是一台没人能解读的网格），然后
+        // 原子写持久格。并集来自插件申报（`supported_round_secs`），不是内核
+        // 知识；空并集 = 没有插件申报任何档 = 全拒（fail-closed）。
         let Some(sec) = sec else {
             unreachable!("the reset path returned above; a write path has a durationSec");
         };
-        if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&sec) {
+        if !self.config.allowed_round_secs.contains(&sec) {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "round_duration.set: {sec} is not on the whitelist \
-                     {:?} — nothing was applied",
-                    crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                    "round_duration.set: {sec} is not declared by any market plugin \
+                     (declared union: {:?}) — nothing was applied",
+                    self.config.allowed_round_secs
                 ),
             ));
         }
@@ -20800,7 +20833,12 @@ mod strategy_dispatch_tests {
                 ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         let probe = crate::account::AccountId::from("probe2");
         c.create_account_persisting(
@@ -20851,7 +20889,12 @@ mod strategy_dispatch_tests {
                 ledger_journal_dir: Some(journal_dir_live.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path_live, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path_live,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         let probe_live = crate::account::AccountId::from("probe3");
         live.create_account_persisting(&probe_live, None, None, "test", "mint live", 6)
@@ -20894,7 +20937,12 @@ mod strategy_dispatch_tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         // Boot default: the loader's first-ACTIVE rule points at `default`.
         assert_eq!(c.accounts.display_id(), "default");
@@ -20904,7 +20952,12 @@ mod strategy_dispatch_tests {
         c.set_display_account_persisting(&crate::account::AccountId::from("paper"), "test", "")
             .expect("the re-point lands");
         assert_eq!(c.accounts.display_id(), "paper");
-        let reloaded = crate::account::config::load_account_ledgers(&accounts_path, 2).unwrap();
+        let reloaded = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            2,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .unwrap();
         assert_eq!(reloaded.display_id(), "paper", "the pointer is durable");
         // The top-level key survived the render next to both rows' fields.
         let text = std::fs::read_to_string(&accounts_path).unwrap();
@@ -20936,7 +20989,12 @@ mod strategy_dispatch_tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c2.set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
             .expect("a frozen account is a legal display target (issue 561)");
@@ -20945,7 +21003,12 @@ mod strategy_dispatch_tests {
             "frozen1",
             "display follows a frozen book — view-only, posture gates the orders"
         );
-        let reloaded2 = crate::account::config::load_account_ledgers(&accounts_path, 2).unwrap();
+        let reloaded2 = crate::account::config::load_account_ledgers(
+            &accounts_path,
+            2,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .unwrap();
         assert_eq!(reloaded2.display_id(), "frozen1", "durable across boot");
 
         // 持久化关（无 accounts_config_path 的内核 — 回测/进程内测试）：整体
@@ -20982,7 +21045,12 @@ mod strategy_dispatch_tests {
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host(
@@ -21097,7 +21165,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21145,7 +21218,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: None,
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c2.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21204,7 +21282,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21273,7 +21356,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21340,7 +21428,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c2.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21394,7 +21487,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -21434,7 +21532,12 @@ mod strategy_dispatch_tests {
                 strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c2.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -25098,7 +25201,12 @@ then = { action = "skip" }
                 accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            crate::account::config::load_account_ledgers(&accounts_path, 1).unwrap(),
+            crate::account::config::load_account_ledgers(
+                &accounts_path,
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
         );
         c.enable_engine(Engine::new(EngineConfig::default()));
         crate::strategies::test_support::host_disabled(
@@ -30674,7 +30782,11 @@ mod audit_fix_tests {
         // `default` is bound to polymarket; declare ONLY the 900s family —
         // every poly market in this fixture IS 900s, so its orders sail.
         c.accounts_mut()
-            .set_rounds(&crate::account::AccountId::from("default"), vec![900])
+            .set_rounds(
+                &crate::account::AccountId::from("default"),
+                vec![900],
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
             .unwrap();
         c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
         assert_eq!(c.list_orders().len(), 1, "the declared family passes");
@@ -30710,7 +30822,11 @@ mod audit_fix_tests {
         // Declaring the 1h family too re-opens it — the assembly is the
         // declaration's product, venue × every listed duration.
         c.accounts_mut()
-            .set_rounds(&crate::account::AccountId::from("default"), vec![900, 3600])
+            .set_rounds(
+                &crate::account::AccountId::from("default"),
+                vec![900, 3600],
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
             .unwrap();
         c.place(bound_order("poly-1h-up", "k3"), 0, 3).unwrap();
         assert_eq!(c.list_orders().len(), 2);
@@ -30725,7 +30841,11 @@ mod audit_fix_tests {
         let mut c = venue_bound_core();
         // `paper` is unbound; it declares 900s only.
         c.accounts_mut()
-            .set_rounds(&crate::account::AccountId::from("paper"), vec![900])
+            .set_rounds(
+                &crate::account::AccountId::from("paper"),
+                vec![900],
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
             .unwrap();
         // Both live venues carry 900s markets: both are admitted.
         let mut p1 = bound_order("poly-up", "k1");
@@ -30768,7 +30888,11 @@ mod audit_fix_tests {
         // A bound account with an EMPTY rounds set stays unrestricted —
         // the historical shape (no declaration = no gate).
         c.accounts_mut()
-            .set_rounds(&crate::account::AccountId::from("default"), Vec::new())
+            .set_rounds(
+                &crate::account::AccountId::from("default"),
+                Vec::new(),
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
             .unwrap();
         c.place(bound_order("poly-1h-up", "k4"), 0, 4).unwrap();
         assert_eq!(c.list_orders().len(), 3);

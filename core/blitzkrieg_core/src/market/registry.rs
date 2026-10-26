@@ -74,6 +74,33 @@ impl MarketPluginRegistry {
         g.order.clone()
     }
 
+    /// The DECLARED union of round lengths (轮次多族): every registered
+    /// plugin's `info().supported_round_secs`, deduplicated and ascending.
+    ///
+    /// This is a report of what the plugins CLAIM, not kernel knowledge — the
+    /// same posture as `names()`/`list()`: which durations can be routed is
+    /// venue knowledge and lives in the plugins, never in a hardcoded core
+    /// constant. `None` (undeclared) and empty declarations contribute
+    /// nothing.
+    ///
+    /// An EMPTY return (no plugin declares anything) means the caller must
+    /// refuse EVERY round duration (fail-closed): with no plugin claiming a
+    /// family, accepting any value would be the kernel inventing knowledge
+    /// the declaration face never made — not "allow everything".
+    pub fn allowed_round_secs(&self) -> Vec<i64> {
+        let g = self.inner.lock().expect("market registry poisoned");
+        let mut out: Vec<i64> = g
+            .order
+            .iter()
+            .filter_map(|name| g.plugins.get(name))
+            .filter_map(|p| p.info().supported_round_secs)
+            .flatten()
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Capability + state report for `market.list`.
     pub fn list(&self) -> Vec<PluginInfo> {
         let g = self.inner.lock().expect("market registry poisoned");

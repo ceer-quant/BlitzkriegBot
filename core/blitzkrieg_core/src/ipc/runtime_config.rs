@@ -11,13 +11,6 @@
 
 use std::path::PathBuf;
 
-/// The switchable whitelist. ONE decoder lives in
-/// [`crate::scanner::duration_label_for`]; this list names exactly the values
-/// that decoder labels, so the UI can never offer a duration the kernel
-/// cannot print (and a new label there must be mirrored here — the compile
-/// does not force it, the `round_duration` gate does).
-pub const ALLOWED_ROUND_DURATIONS: &[i64] = &[300, 900, 3600, 14400, 86400];
-
 /// cwd-relative, like every other `data/` writer.
 fn state_path() -> PathBuf {
     PathBuf::from("data/runtime/config.json")
@@ -67,14 +60,24 @@ pub struct RoundDurationCell {
 
 /// Read the persisted round duration, if the cell holds one. A missing or
 /// broken file is the normal first-boot case → `None`, no drama (the same
-/// posture as `version::load_from`). An out-of-whitelist value is IGNORED
-/// with a warning — a hand-edited cell must not be able to arm a duration
-/// the kernel cannot label.
+/// posture as `version::load_from`).
+///
+/// Which durations are legal is NOT this layer's business: the declared union
+/// of the market plugins' `supported_round_secs` (`MarketPluginRegistry::
+/// allowed_round_secs`) owns that, and the config layer cannot see the
+/// registry — the market-plugin cell below follows the same split. This
+/// reader therefore only reports what the cell holds; the boot caller
+/// (`main.rs`) passes the union in as `allowed` and applies the admission
+/// rule itself (out-of-union values are ignored with a warning — a
+/// hand-edited cell must not be able to arm a duration no plugin declared).
 pub fn load_round_duration() -> Option<RoundDurationCell> {
-    load_round_duration_from(&state_path())
+    load_round_duration_from(&state_path(), &[])
 }
 
-pub fn load_round_duration_from(path: &std::path::Path) -> Option<RoundDurationCell> {
+pub fn load_round_duration_from(
+    path: &std::path::Path,
+    allowed: &[i64],
+) -> Option<RoundDurationCell> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
@@ -90,10 +93,10 @@ pub fn load_round_duration_from(path: &std::path::Path) -> Option<RoundDurationC
     let Some(sec) = sec else {
         return None; // cell present but holds no round duration — not an error
     };
-    if !ALLOWED_ROUND_DURATIONS.contains(&sec) {
+    if !allowed.contains(&sec) {
         tracing::warn!(
-            "{} holds roundDurationSec={sec}, which is not on the whitelist \
-             {ALLOWED_ROUND_DURATIONS:?} — the cell is ignored",
+            "{} holds roundDurationSec={sec}, which is not in the market plugins' \
+             declared round-duration union {allowed:?} — the cell is ignored",
             path.display()
         );
         return None;
@@ -101,11 +104,12 @@ pub fn load_round_duration_from(path: &std::path::Path) -> Option<RoundDurationC
     Some(RoundDurationCell { duration_sec: sec })
 }
 
-/// The market-plugin cell the boot resolution reads back. Unlike the
-/// round-duration whitelist, the valid names belong to the compiled-in
-/// registry — which the config layer cannot see — so the caller (boot, in
-/// `main.rs`) validates the name against `MarketPluginRegistry::names()`
-/// itself; this reader only reports what the cell holds.
+/// The market-plugin cell the boot resolution reads back. The valid names
+/// belong to the compiled-in registry — which the config layer cannot see —
+/// so the caller (boot, in `main.rs`) validates the name against
+/// `MarketPluginRegistry::names()` itself; this reader only reports what the
+/// cell holds (the same reader-reports/caller-validates split the
+/// round-duration cell above runs against the plugins' declared union).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketPluginCell {
     pub plugin: String,
@@ -331,6 +335,11 @@ pub fn count_jsonl_lines(path: &std::path::Path) -> u64 {
 mod tests {
     use super::*;
 
+    /// The historical kernel whitelist, now spelled as the plugins' declared
+    /// union (polymarket's five families ∪ kalshi's 900). Test-fixture only:
+    /// the assertion semantics stay exactly what they were.
+    const TEST_ALLOWED: &[i64] = &[300, 900, 3600, 14400, 86400];
+
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("bk-runtime-cfg-{name}"));
         let _ = std::fs::remove_dir_all(&d);
@@ -341,7 +350,10 @@ mod tests {
     #[test]
     fn a_missing_file_loads_as_none() {
         let d = tmpdir("missing");
-        assert_eq!(load_round_duration_from(&d.join("state.json")), None);
+        assert_eq!(
+            load_round_duration_from(&d.join("state.json"), TEST_ALLOWED),
+            None
+        );
     }
 
     #[test]
@@ -350,7 +362,7 @@ mod tests {
         let p = d.join("config.json");
         persist_round_duration_to(&p, Some(300), "uid:test", 1_000).unwrap();
         assert_eq!(
-            load_round_duration_from(&p),
+            load_round_duration_from(&p, TEST_ALLOWED),
             Some(RoundDurationCell { duration_sec: 300 })
         );
     }
@@ -361,7 +373,7 @@ mod tests {
         let p = d.join("config.json");
         persist_round_duration_to(&p, Some(300), "uid:test", 1_000).unwrap();
         persist_round_duration_to(&p, None, "uid:test", 2_000).unwrap();
-        assert_eq!(load_round_duration_from(&p), None);
+        assert_eq!(load_round_duration_from(&p, TEST_ALLOWED), None);
     }
 
     #[test]
@@ -373,7 +385,15 @@ mod tests {
             r#"{"roundDurationSec": 60, "roundDurationActor": "hand-edit"}"#,
         )
         .unwrap();
-        assert_eq!(load_round_duration_from(&p), None);
+        assert_eq!(load_round_duration_from(&p, TEST_ALLOWED), None);
+        // An EMPTY allowed set (no plugin declared anything) refuses every
+        // value — fail-closed, never "allow everything".
+        std::fs::write(
+            &p,
+            r#"{"roundDurationSec": 300, "roundDurationActor": "hand-edit"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_round_duration_from(&p, &[]), None);
     }
 
     #[test]
@@ -381,10 +401,10 @@ mod tests {
         let d = tmpdir("broken");
         let p = d.join("config.json");
         std::fs::write(&p, "{not json").unwrap();
-        assert_eq!(load_round_duration_from(&p), None);
+        assert_eq!(load_round_duration_from(&p, TEST_ALLOWED), None);
         persist_round_duration_to(&p, Some(900), "uid:test", 3_000).unwrap();
         assert_eq!(
-            load_round_duration_from(&p),
+            load_round_duration_from(&p, TEST_ALLOWED),
             Some(RoundDurationCell { duration_sec: 900 })
         );
     }
@@ -424,7 +444,7 @@ mod tests {
         persist_market_plugin_to(&p, Some("predictfun"), "uid:test", 2_000).unwrap();
         // The later market-plugin write must NOT erase the round duration…
         assert_eq!(
-            load_round_duration_from(&p),
+            load_round_duration_from(&p, TEST_ALLOWED),
             Some(RoundDurationCell { duration_sec: 300 })
         );
         // …and a later round-duration reset must NOT erase the plugin.
@@ -438,7 +458,7 @@ mod tests {
         // A plugin reset clears its own fields and leaves the other cell.
         persist_market_plugin_to(&p, None, "uid:test", 4_000).unwrap();
         assert_eq!(load_market_plugin_from(&p), None);
-        assert_eq!(load_round_duration_from(&p), None);
+        assert_eq!(load_round_duration_from(&p, TEST_ALLOWED), None);
     }
 
     #[test]
@@ -466,14 +486,14 @@ mod tests {
             "-----BEGIN".to_string(),
         );
         persist_credentials_to(&p, "kalshi", Some(&vars)).unwrap();
-        // 600 is off the round-duration whitelist; arm a legal one.
+        // 600 is off the round-duration union; arm a legal one.
         persist_round_duration_to(&p, Some(900), "uid:test", 2_000).unwrap();
         // The sibling cell write must not clobber the credentials…
         let got = load_credentials_from(&p, Some("kalshi"));
         assert_eq!(got["kalshi"]["KALSHI_API_KEY_ID"], "key-1");
         assert_eq!(got["kalshi"]["KALSHI_RSA_PRIVATE_KEY"], "-----BEGIN");
         assert_eq!(
-            load_round_duration_from(&p),
+            load_round_duration_from(&p, TEST_ALLOWED),
             Some(RoundDurationCell { duration_sec: 900 })
         );
         // …and a round-duration write must not clobber the credentials.

@@ -5,8 +5,9 @@
  *
  * 钉住的事实（每个都对应一条 user-facing 承诺）：
  *
- *   1. readout：effectiveSec 来自出厂默认（900），source=default，白名单带
- *      scanner 的 5m/15m/1h/4h/daily 标签，nextSessionSec 无格时回落生效值。
+ *   1. readout：effectiveSec 来自出厂默认（900），source=default，可切换档位
+ *      （插件声明并集）带 scanner 的 5m/15m/1h/4h/daily 标签，nextSessionSec
+ *      无格时回落生效值。
  *   2. 写路径（next_session）：round_duration.set {durationSec:300} 落进
  *      data/runtime/config.json；回执 nextSessionSec=300；**本会话的网格一个
  *      字节不动**（effectiveSec 仍是 900）。
@@ -14,7 +15,7 @@
  *      outranks 出厂默认，新网格从干净状态开始。
  *   4. 显式旗标优先：--round-sec 3600 启动时，即使格里有 300，生效值仍是
  *      3600 —— 逐位复现的回放基线永远不被 UI 设置劫持。
- *   5. 白名单外拒绝：durationSec:60 拒绝且格不动。
+ *   5. 声明并集外拒绝：durationSec:60 拒绝且格不动。
  *   6. reset 清格：回落启动解析（旗标测试内核随后 readout persisted=false）。
  *   7. 回执 actor 带 uid:（审计）。
  *
@@ -63,14 +64,15 @@ try {
   await core.start();
 
   // 1. The pre-write readout: compiled default, nothing persisted, the
-  //    whitelist with its labels.
+  //    declared union (the market plugins' supported_round_secs) with its
+  //    labels.
   const before = await core.request('round_duration.get', {});
   check('readout answers the effective value from the compiled default',
     before.effectiveSec === 900 && before.source === 'default', JSON.stringify(before));
   check('no cell means the next session re-resolves to the effective value',
     before.nextSessionSec === 900 && before.persisted === false, JSON.stringify(before));
   const labels = Object.fromEntries((before.allowed ?? []).map((o) => [o.sec, o.label]));
-  check('the whitelist carries the scanner labels',
+  check('the declared union carries the scanner labels',
     labels[300] === '5m' && labels[900] === '15m' && labels[86400] === 'daily',
     JSON.stringify(labels));
 
@@ -87,15 +89,16 @@ try {
     mid.effectiveSec === 900 && mid.nextSessionSec === 300 && mid.persisted === true,
     JSON.stringify(mid));
 
-  // 5. An off-whitelist value is refused and the cell is untouched.
+  // 5. A value outside the plugins' declared union is refused and the cell
+  //    is untouched.
   let refused = null;
   try {
     refused = await core.request('round_duration.set', { durationSec: 60 });
   } catch (e) {
     refused = { message: e?.message ?? String(e) };
   }
-  check('an off-whitelist value is refused by name',
-    refused?.message?.includes('not on the whitelist'), JSON.stringify(refused));
+  check('a value no plugin declared is refused by name',
+    refused?.message?.includes('not declared by any market plugin'), JSON.stringify(refused));
   const afterBad = await core.request('round_duration.get', {});
   check('a refused write leaves the cell exactly as it was',
     afterBad.nextSessionSec === 300 && afterBad.effectiveSec === 900, JSON.stringify(afterBad));

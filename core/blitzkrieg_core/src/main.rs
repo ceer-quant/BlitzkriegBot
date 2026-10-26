@@ -3455,6 +3455,24 @@ async fn main() -> anyhow::Result<()> {
     // caller that wants programmatic shutdown.
     let _shutdown_tx = tx;
 
+    // The round-duration admission set: the market plugins' DECLARED union
+    // (`supported_round_secs`), reported by the registry — which durations may
+    // be armed is venue knowledge, so the kernel hardcodes no list; this is a
+    // report of what the compiled-in plugins claim. Computed once here and
+    // stored in the config (every admission consumer reads it from there); a
+    // runtime enable flip stays within the registered set, so the union cannot
+    // change after boot. An EMPTY union refuses every duration (fail-closed).
+    config.allowed_round_secs = {
+        let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
+        blitzkrieg_core::market::register_builtin_markets(&registry);
+        registry.allowed_round_secs()
+    };
+    eprintln!(
+        "blitzkrieg-core: declared round durations {:?} (market plugins' \
+         supported_round_secs union)",
+        config.allowed_round_secs
+    );
+
     // The round-duration UI card's persisted cell (data/runtime/config.json):
     // outranks the TOML/default tiers — applied whenever no explicit CLI flag
     // or BK_* env var spoke (round_duration_source != "cli_or_env"; the
@@ -3464,7 +3482,10 @@ async fn main() -> anyhow::Result<()> {
     // `round_duration.set` write can never move the running session's grid.
     if config.round_duration_source != "cli_or_env"
         && let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
-            blitzkrieg_core::ipc::runtime_config::load_round_duration_from(std::path::Path::new(p))
+            blitzkrieg_core::ipc::runtime_config::load_round_duration_from(
+                std::path::Path::new(p),
+                &config.allowed_round_secs,
+            )
         })
         && cell.duration_sec != config.round_duration_sec
     {

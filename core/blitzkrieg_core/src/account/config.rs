@@ -90,8 +90,8 @@ struct AccountFileEntry {
     /// not a subtracted one, so an empty list must never lock an account
     /// out of trading — the zero-config spellings and the explicit one
     /// converge on the same verdict. Values are validated against the
-    /// kernel's allowed-duration whitelist AT PARSE (fail-closed, the
-    /// same discipline every other key here runs: a typo'd 9000 must not
+    /// market plugins' declared round-duration union AT PARSE (fail-closed,
+    /// the same discipline every other key here runs: a typo'd 9000 must not
     /// silently become "no restriction"); duplicates are removed with
     /// first-seen order kept (a stable diff reads better than a
     /// canonical sort). A non-empty set does NOT clip the global chain:
@@ -214,7 +214,7 @@ impl CrossVenueArbConfig {
 }
 
 impl AccountFileEntry {
-    fn into_account(self, now_ms: i64) -> Result<Account, CoreError> {
+    fn into_account(self, now_ms: i64, allowed: &[i64]) -> Result<Account, CoreError> {
         if self.id.trim().is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -242,35 +242,48 @@ impl AccountFileEntry {
             venue: self.venue.unwrap_or_default(),
             trading_enabled: self.trading_enabled.unwrap_or(true),
             strategies: self.strategies.unwrap_or_default(),
-            rounds: validate_rounds(self.rounds)?,
+            rounds: validate_rounds(self.rounds, allowed)?,
             updated_at_ms: now_ms,
         })
     }
 }
 
+/// Test-fixture helper: the historical kernel whitelist, now spelled as the
+/// plugins' declared union (polymarket's five families ∪ kalshi's 900). Tests
+/// pass this where production threads the registry union through
+/// [`load_account_ledgers`] / [`validate_rounds`], so no test invents new
+/// assertion semantics — the values are exactly what the shipped plugins
+/// declare. `pub` (not `pub(crate)`) because the integration tests are
+/// external crates; `#[doc(hidden)]` keeps it out of the documented API.
+#[doc(hidden)]
+pub const TEST_ALLOWED_ROUNDS: &[i64] = &[300, 900, 3600, 14400, 86400];
+
 /// The parse-side validation of one account's `rounds` declaration
 /// (轮次多族). `None`/empty both come out as an EMPTY vec — the gate's
 /// "no family restriction declared" reading (rounds is a permission axis:
 /// an empty declaration must never lock the account out of trading).
-/// Values outside the kernel's allowed-duration whitelist refuse the
+/// Values outside the market plugins' DECLARED union (`allowed` — the
+/// registry's `allowed_round_secs` the boot threads through) refuse the
 /// WHOLE boot (fail-closed: a typo'd duration must not silently become
 /// "no restriction" — the operator believes the restriction is live).
 /// Duplicates are dropped with first-seen order kept.
-pub(crate) fn validate_rounds(rounds: Option<Vec<i64>>) -> Result<Vec<i64>, CoreError> {
+pub(crate) fn validate_rounds(
+    rounds: Option<Vec<i64>>,
+    allowed: &[i64],
+) -> Result<Vec<i64>, CoreError> {
     let Some(rounds) = rounds else {
         return Ok(Vec::new());
     };
     let mut out: Vec<i64> = Vec::with_capacity(rounds.len());
     for sec in rounds {
-        if !crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS.contains(&sec) {
+        if !allowed.contains(&sec) {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "accounts.toml: `rounds` names {sec}s, which is not an allowed round \
-                     duration (allowed: {:?}) — fix the value or delete the key (fail-closed: \
-                     a declared set that cannot be honoured must not degrade into \
-                     \"no restriction\")",
-                    crate::ipc::runtime_config::ALLOWED_ROUND_DURATIONS
+                    "accounts.toml: `rounds` names {sec}s, which is not declared by any \
+                     market plugin (declared union: {allowed:?}) — fix the value or delete \
+                     the key (fail-closed: a declared set that cannot be honoured must not \
+                     degrade into \"no restriction\")"
                 ),
             ));
         }
@@ -286,7 +299,17 @@ pub(crate) fn validate_rounds(rounds: Option<Vec<i64>>) -> Result<Vec<i64>, Core
 /// empty, or duplicated-id file is a hard error (fail-closed) — the caller
 /// refuses the boot rather than trading with a book that is not what the
 /// operator wrote.
-pub fn load_account_ledgers(path: &Path, now_ms: i64) -> Result<AccountLedgers, CoreError> {
+///
+/// `allowed` is the market plugins' DECLARED round-duration union (the
+/// registry's `allowed_round_secs` the boot threads through) — the parse side
+/// refuses an account `rounds` row naming a duration no plugin declared, but
+/// judges nothing on its own: which durations are legal is venue knowledge
+/// (§7.2), reported by the declaration face, not a kernel constant.
+pub fn load_account_ledgers(
+    path: &Path,
+    now_ms: i64,
+    allowed: &[i64],
+) -> Result<AccountLedgers, CoreError> {
     if !path.exists() {
         return Ok(AccountLedgers::single_default(now_ms));
     }
@@ -296,12 +319,12 @@ pub fn load_account_ledgers(path: &Path, now_ms: i64) -> Result<AccountLedgers, 
             format!("accounts.toml unreadable: {e}"),
         )
     })?;
-    from_str(&text, now_ms)
+    from_str(&text, now_ms, allowed)
 }
 
 /// Parse the toml text into the book. Split from [`load_account_ledgers`] so
 /// tests (and a future CLI override) can feed strings directly.
-pub fn from_str(text: &str, now_ms: i64) -> Result<AccountLedgers, CoreError> {
+pub fn from_str(text: &str, now_ms: i64, allowed: &[i64]) -> Result<AccountLedgers, CoreError> {
     let file: AccountsFile = toml::from_str(text).map_err(|e| {
         CoreError::new(
             CoreErrorCode::InvalidParams,
@@ -317,7 +340,7 @@ pub fn from_str(text: &str, now_ms: i64) -> Result<AccountLedgers, CoreError> {
     }
     let mut accounts = Vec::new();
     for entry in file.account {
-        let mut account = entry.into_account(now_ms)?;
+        let mut account = entry.into_account(now_ms, allowed)?;
         // E28 (§9.4): the kernel probes ITS OWN environment at load time so
         // `account.list` can answer `credentialsLoaded` as a boolean. The
         // values themselves never enter any struct.
@@ -825,7 +848,7 @@ pub fn persist_account_strategies(
 /// key — the file spells "no declared family set" by absence, the exact
 /// shape a pre-declaration file had; missing and `[]` parse identically at
 /// the next boot, and a deleted key is cleaner than a persisted empty array.
-/// The whitelist/dedup validation is the CALLER's job (the service layer
+/// The union/dedup validation is the CALLER's job (the service layer
 /// reuses [`validate_rounds`] before it ever calls here); this layer only
 /// owns the file.
 pub fn persist_account_rounds(
@@ -1038,8 +1061,12 @@ mod tests {
 
     #[test]
     fn missing_file_yields_the_single_default_account() {
-        let book = load_account_ledgers(Path::new("/nonexistent/bk-accounts/none.toml"), 5)
-            .expect("a missing file is the zero-config deployment");
+        let book = load_account_ledgers(
+            Path::new("/nonexistent/bk-accounts/none.toml"),
+            5,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect("a missing file is the zero-config deployment");
         assert_eq!(book.account_list().len(), 1);
         assert_eq!(book.active_id().as_str(), "default");
     }
@@ -1064,6 +1091,7 @@ market_type = "prediction"
 status = "read_only"
 "#,
             7,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("the design example must parse");
         assert_eq!(book.account_list().len(), 2);
@@ -1084,7 +1112,8 @@ status = "read_only"
 
     #[test]
     fn a_missing_status_defaults_to_active_and_a_missing_name_to_the_id() {
-        let book = from_str("[[account]]\nid = \"solo\"\n", 1).expect("a minimal entry parses");
+        let book = from_str("[[account]]\nid = \"solo\"\n", 1, TEST_ALLOWED_ROUNDS)
+            .expect("a minimal entry parses");
         let a = book.account(&AccountId("solo".into())).unwrap();
         assert!(matches!(a.status, Active));
         assert_eq!(a.name, "solo");
@@ -1102,6 +1131,7 @@ id = "multi"
 rounds = [3600, 900, 3600, 86_400]
 "#,
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("a rounds declaration parses");
         let a = book.account(&AccountId("multi".into())).unwrap();
@@ -1113,15 +1143,20 @@ rounds = [3600, 900, 3600, 86_400]
         // Missing key: the legacy shape. Explicit empty: the same verdict —
         // rounds is a permission axis; an empty declaration must never lock
         // the account out of trading.
-        let book =
-            from_str("[[account]]\nid = \"a\"\nrounds = []\n", 1).expect("an empty rounds parses");
+        let book = from_str(
+            "[[account]]\nid = \"a\"\nrounds = []\n",
+            1,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect("an empty rounds parses");
         assert!(
             book.account(&AccountId("a".into()))
                 .unwrap()
                 .rounds
                 .is_empty()
         );
-        let book2 = from_str("[[account]]\nid = \"b\"\n", 1).expect("absent rounds parses");
+        let book2 = from_str("[[account]]\nid = \"b\"\n", 1, TEST_ALLOWED_ROUNDS)
+            .expect("absent rounds parses");
         assert!(
             book2
                 .account(&AccountId("b".into()))
@@ -1133,11 +1168,15 @@ rounds = [3600, 900, 3600, 86_400]
 
     #[test]
     fn a_rounds_value_outside_the_whitelist_refuses_the_boot() {
-        let err = from_str("[[account]]\nid = \"x\"\nrounds = [9000]\n", 1)
-            .expect_err("a typo'd duration is fail-closed");
+        let err = from_str(
+            "[[account]]\nid = \"x\"\nrounds = [9000]\n",
+            1,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect_err("a typo'd duration is fail-closed");
         assert!(err.message.contains("9000"), "{}", err.message);
         assert!(
-            err.message.contains("allowed round duration"),
+            err.message.contains("not declared by any market plugin"),
             "{}",
             err.message
         );
@@ -1146,7 +1185,8 @@ rounds = [3600, 900, 3600, 86_400]
     #[test]
     fn a_malformed_file_is_refused_not_silently_defaulted() {
         let p = write_temp("[[account]]\nid = \"x\"\nbogus_field = 1\n");
-        let err = load_account_ledgers(&p, 1).expect_err("deny_unknown_fields");
+        let err =
+            load_account_ledgers(&p, 1, TEST_ALLOWED_ROUNDS).expect_err("deny_unknown_fields");
         assert!(err.message.contains("does not parse"), "{}", err.message);
     }
 
@@ -1155,19 +1195,25 @@ rounds = [3600, 900, 3600, 86_400]
         // A truly EMPTY document fails at the TOML layer (missing field) —
         // refused either way; the code's own empty-book diagnostic speaks for
         // a document that PARSES but declares no account (`account = []`).
-        let empty_file = from_str("", 1).expect_err("no accounts at all");
+        let empty_file = from_str("", 1, TEST_ALLOWED_ROUNDS).expect_err("no accounts at all");
         assert!(
             empty_file.message.contains("does not parse")
                 || empty_file.message.contains("no [[account]]"),
             "{}",
             empty_file.message
         );
-        let err = from_str("account = []\n", 1).expect_err("parses but no [[account]]");
+        let err = from_str("account = []\n", 1, TEST_ALLOWED_ROUNDS)
+            .expect_err("parses but no [[account]]");
         assert!(err.message.contains("no [[account]]"), "{}", err.message);
-        let dup = from_str("[[account]]\nid = \"a\"\n\n[[account]]\nid = \"a\"\n", 1)
-            .expect_err("duplicate id");
+        let dup = from_str(
+            "[[account]]\nid = \"a\"\n\n[[account]]\nid = \"a\"\n",
+            1,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect_err("duplicate id");
         assert!(dup.message.contains("twice"), "{}", dup.message);
-        let blank = from_str("[[account]]\nid = \"  \"\n", 1).expect_err("blank id");
+        let blank =
+            from_str("[[account]]\nid = \"  \"\n", 1, TEST_ALLOWED_ROUNDS).expect_err("blank id");
         assert!(blank.message.contains("empty id"), "{}", blank.message);
     }
 
@@ -1176,6 +1222,7 @@ rounds = [3600, 900, 3600, 86_400]
         let book = from_str(
             "[[account]]\nid = \"a\"\nstatus = \"frozen\"\n\n[[account]]\nid = \"b\"\nstatus = \"suspended\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("snake_case statuses parse");
         assert!(matches!(
@@ -1190,6 +1237,7 @@ rounds = [3600, 900, 3600, 86_400]
         let with_reason = from_str(
             "[[account]]\nid = \"c\"\nstatus = { suspended = { reason = \"ops review\" } }\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("map-form suspended parses");
         assert!(matches!(
@@ -1197,8 +1245,12 @@ rounds = [3600, 900, 3600, 86_400]
             AccountStatus::Suspended { reason } if reason == "ops review"
         ));
         // A typo'd spelling is refused, never parsed as something permissive.
-        let typo = from_str("[[account]]\nid = \"d\"\nstatus = \"actve\"\n", 1)
-            .expect_err("unknown spelling");
+        let typo = from_str(
+            "[[account]]\nid = \"d\"\nstatus = \"actve\"\n",
+            1,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect_err("unknown spelling");
         assert!(
             typo.message.contains("unknown account status"),
             "{}",
@@ -1212,6 +1264,7 @@ rounds = [3600, 900, 3600, 86_400]
         let bound = from_str(
             "[[account]]\nid = \"poly\"\nvenue = \"polymarket\"\n\n[[account]]\nid = \"kal\"\nvenue = \"kalshi\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("venue bindings parse");
         assert_eq!(
@@ -1223,7 +1276,8 @@ rounds = [3600, 900, 3600, 86_400]
             "kalshi"
         );
         // …a missing field is UNBOUND (the 0.2 behaviour)…
-        let unbound = from_str("[[account]]\nid = \"solo\"\n", 1).expect("minimal entry");
+        let unbound = from_str("[[account]]\nid = \"solo\"\n", 1, TEST_ALLOWED_ROUNDS)
+            .expect("minimal entry");
         assert_eq!(
             unbound.account(&AccountId("solo".into())).unwrap().venue,
             ""
@@ -1297,7 +1351,8 @@ venue = "kalshi"
         // the same call the boot makes — sees the binding plus EVERY sibling
         // field of BOTH accounts.
         persist_account_venue(&p, "default", "polymarket").expect("the write lands");
-        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let book =
+            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
         assert_eq!(
             book.account(&AccountId("default".into())).unwrap().venue,
             "polymarket",
@@ -1336,7 +1391,7 @@ venue = "kalshi"
         // guarantees on a file the writer itself produced (round two of the
         // read-modify-write cycle).
         persist_account_venue(&p, "paper", "polymarket").expect("rebind lands");
-        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("round two re-parses");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().venue,
             "polymarket"
@@ -1355,7 +1410,8 @@ venue = "kalshi"
             !text.contains("paper") || !text.split("[[account]]").nth(2).unwrap().contains("venue"),
             "the unbound entry carries no venue key: {text}"
         );
-        let book = load_account_ledgers(&p, 5).expect("the unbound file re-parses");
+        let book =
+            load_account_ledgers(&p, 5, TEST_ALLOWED_ROUNDS).expect("the unbound file re-parses");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().venue,
             "",
@@ -1419,7 +1475,7 @@ venue = "kalshi"
         // read-modify-write guarantee the venue writer pins — one regression
         // here would silently shrink the book at the next boot).
         persist_account_rounds(&p, "default", &[900, 3600]).expect("the write lands");
-        let book = load_account_ledgers(&p, 3).expect("the file re-parses");
+        let book = load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the file re-parses");
         assert_eq!(
             book.account(&AccountId("default".into())).unwrap().rounds,
             vec![900, 3600],
@@ -1454,7 +1510,7 @@ venue = "kalshi"
         // Round two of the read-modify-write cycle: a rewrite over a file
         // the writer itself produced keeps both accounts' declarations.
         persist_account_rounds(&p, "paper", &[300]).expect("round two lands");
-        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("round two re-parses");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().rounds,
             vec![300]
@@ -1475,7 +1531,8 @@ venue = "kalshi"
             !default_block.contains("rounds"),
             "the unrestricted entry carries no rounds key: {text}"
         );
-        let book = load_account_ledgers(&p, 5).expect("the deleted-key file re-parses");
+        let book = load_account_ledgers(&p, 5, TEST_ALLOWED_ROUNDS)
+            .expect("the deleted-key file re-parses");
         assert!(
             book.account(&AccountId("default".into()))
                 .unwrap()
@@ -1542,6 +1599,7 @@ venue = "kalshi"
         let explicit = from_str(
             "display_account = \"b\"\n\n[[account]]\nid = \"a\"\n\n[[account]]\nid = \"b\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("an explicit display_account parses");
         assert_eq!(explicit.display_id(), "b");
@@ -1551,6 +1609,7 @@ venue = "kalshi"
         let defaulted = from_str(
             "[[account]]\nid = \"a\"\nstatus = \"read_only\"\n\n[[account]]\nid = \"b\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("a file without the key parses");
         assert_eq!(
@@ -1565,6 +1624,7 @@ venue = "kalshi"
         let no_active = from_str(
             "[[account]]\nid = \"a\"\nstatus = \"read_only\"\n\n[[account]]\nid = \"b\"\nstatus = \"frozen\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect("a book with no active entry parses");
         assert_eq!(no_active.display_id(), "a");
@@ -1585,6 +1645,7 @@ venue = "kalshi"
         let err = from_str(
             "display_account = \"ghost\"\n\n[[account]]\nid = \"a\"\n",
             1,
+            TEST_ALLOWED_ROUNDS,
         )
         .expect_err("unknown display id");
         assert!(
@@ -1595,7 +1656,14 @@ venue = "kalshi"
         // An EMPTY id names no configured account either — the same
         // fail-closed refusal (the file spells "follow the default" by
         // deleting the key, never by an empty string).
-        assert!(from_str("display_account = \"\"\n\n[[account]]\nid = \"a\"\n", 1).is_err());
+        assert!(
+            from_str(
+                "display_account = \"\"\n\n[[account]]\nid = \"a\"\n",
+                1,
+                TEST_ALLOWED_ROUNDS
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1616,7 +1684,8 @@ venue = "kalshi"
             !first_row.contains("display_account = \"paper\""),
             "the key is top-level, not inside the first [[account]] block: {text}"
         );
-        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let book =
+            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
         assert_eq!(book.display_id(), "paper", "the new pointer is durable");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().venue,
@@ -1634,7 +1703,7 @@ venue = "kalshi"
         // Re-point at the OTHER account: the read-modify-write cycle holds
         // round two, the first write survives.
         persist_display_account(&p, "default").expect("the re-point lands");
-        let book = load_account_ledgers(&p, 4).expect("round two re-parses");
+        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("round two re-parses");
         assert_eq!(book.display_id(), "default");
 
         // A file that does not parse: refused fail-closed, never flattened.
@@ -1668,7 +1737,8 @@ venue = "kalshi"
         // unbound) plus EVERY sibling field of BOTH old accounts.
         persist_account_create(&p, "poly-main", Some("Poly Main 2"), Some("polymarket"))
             .expect("the create lands");
-        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let book =
+            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
         let created = book.account(&AccountId("poly-main".into())).unwrap();
         assert!(
             matches!(created.status, Active),
@@ -1693,7 +1763,7 @@ venue = "kalshi"
         // A create with neither name nor venue: the row is the bare id, the
         // name falls back to the id and the binding is unbound.
         persist_account_create(&p, "bare", None, None).expect("the bare create lands");
-        let book = load_account_ledgers(&p, 4).expect("re-parses");
+        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("re-parses");
         let bare = book.account(&AccountId("bare".into())).unwrap();
         assert_eq!(bare.name, "bare");
         assert_eq!(bare.venue, "");
@@ -1731,7 +1801,8 @@ venue = "kalshi"
 
         // OFF writes an explicit key; a fresh load reads it as false.
         persist_account_trading(&p, "default", false).expect("the off write lands");
-        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let book =
+            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
         assert!(
             !book
                 .account(&AccountId("default".into()))
@@ -1755,7 +1826,7 @@ venue = "kalshi"
             !default_row.contains("trading_enabled"),
             "ON is spelled by absence: {text}"
         );
-        let book = load_account_ledgers(&p, 4).expect("re-parses");
+        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("re-parses");
         assert!(
             book.account(&AccountId("default".into()))
                 .unwrap()
@@ -1767,7 +1838,7 @@ venue = "kalshi"
         // whole (the file is the durable half of the 启用按钮).
         persist_account_strategies(&p, "paper", &["spread_arb".into(), "mad_dog".into()])
             .expect("the enablement write lands");
-        let book = load_account_ledgers(&p, 5).expect("re-parses");
+        let book = load_account_ledgers(&p, 5, TEST_ALLOWED_ROUNDS).expect("re-parses");
         assert_eq!(
             book.account(&AccountId("paper".into())).unwrap().strategies,
             vec!["spread_arb".to_string(), "mad_dog".to_string()],
@@ -1805,7 +1876,8 @@ venue = "kalshi"
         // Remove: the row leaves, the survivor keeps every field, and the
         // fresh load (the boot's call) agrees.
         persist_account_remove(&p, "paper").expect("the remove lands");
-        let book = load_account_ledgers(&p, 3).expect("the written file re-parses");
+        let book =
+            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
         assert!(book.account(&AccountId("paper".into())).is_none());
         let d = book.account(&AccountId("default".into())).unwrap();
         assert_eq!(d.name, "Poly Main");
