@@ -2955,10 +2955,16 @@ impl Core {
     /// (multi-account #532: a venue's balance belongs to the account that
     /// trades it, NEVER to whoever is "active" — the single-account-era
     /// routing here once wrote the PolySimulator's 100 USDC over the default
-    /// account's real 13.59). No active binding for the venue falls back to
-    /// the active ledger — the legacy single-account shape.
+    /// account's real 13.59). #646: with several books on file an UNBOUND
+    /// venue's report is REFUSED (warn + risk alert, nothing written) — an
+    /// unowned money fact must not silently land on whoever is active. A
+    /// single-account deployment keeps the legacy shape: its one book IS the
+    /// active ledger, so the report lands there exactly as before.
     pub fn realign_venue_cash(&mut self, venue: &str, b: Decimal) {
-        let target = self.venue_cash_account(venue);
+        let Some(target) = self.venue_cash_account(venue) else {
+            self.refuse_unbound_venue_cash(venue, b, "realign");
+            return;
+        };
         if self.config.mode == Mode::Live {
             let ts = now_ms();
             let previous = self
@@ -2991,13 +2997,43 @@ impl Core {
     }
 
     /// The account a venue's cash truth belongs to: the first ACTIVE account
-    /// bound to the venue, falling back to the active ledger (legacy
-    /// single-account shape — an unbound deployment has exactly one book).
-    fn venue_cash_account(&self, venue: &str) -> crate::account::AccountId {
-        self.accounts
-            .account_for_venue(venue)
-            .map(|a| a.id.clone())
-            .unwrap_or_else(|| self.accounts.active_id().clone())
+    /// bound to the venue. #646: no binding falls back to the active ledger
+    /// only while the book holds EXACTLY ONE account (the legacy
+    /// single-account shape — that one book is the active ledger, so the
+    /// fallback is the same destination the report always had); with several
+    /// books on file an unbound venue has no owner and this returns None —
+    /// the callers refuse the report instead of writing into whoever is
+    /// active (an unowned money fact never lands on any book).
+    fn venue_cash_account(&self, venue: &str) -> Option<crate::account::AccountId> {
+        if let Some(a) = self.accounts.account_for_venue(venue).map(|a| a.id.clone()) {
+            return Some(a);
+        }
+        // Legacy single-account shape: one book, it is the active ledger.
+        (self.accounts.account_list().len() == 1).then(|| self.accounts.active_id().clone())
+    }
+
+    /// #646: an unbound venue's cash report in a multi-account deployment —
+    /// refused, loudly. Nothing is written (no ledger, no realign/venue-free
+    /// slot): the money fact has no owner, and writing it into the account
+    /// that happens to be active would let one venue's report mutate a
+    /// sibling book's risk input. The operator fixes it by binding the venue
+    /// (`account.venue.set`); the data plane recovers on the next report.
+    fn refuse_unbound_venue_cash(&self, venue: &str, reported: Decimal, path: &str) {
+        tracing::warn!(
+            venue = %venue,
+            reported = %reported,
+            path = %path,
+            "venue cash report REFUSED: no account bound to this venue — \
+             bind one with account.venue.set; nothing written"
+        );
+        self.emit(Event::RiskAlert {
+            code: CoreErrorCode::Internal,
+            message: format!(
+                "venue cash report [{venue}] refused: no account bound to this \
+                 venue (multi-account deployment) — bind one with \
+                 account.venue.set; nothing written ({path})"
+            ),
+        });
     }
 
     /// The periodic venue-cash fold (`venue_free_balance`): with no resting
@@ -3008,7 +3044,10 @@ impl Core {
     /// (double-counting risk). Comparison runs against the venue's own bound
     /// account, not the active one.
     pub fn fold_venue_free(&mut self, venue: &str, free: Decimal) {
-        let target = self.venue_cash_account(venue);
+        let Some(target) = self.venue_cash_account(venue) else {
+            self.refuse_unbound_venue_cash(venue, free, "fold");
+            return;
+        };
         let Ok(ledger) = self.accounts.ledger_of(&target) else {
             return;
         };
@@ -18633,8 +18672,8 @@ mod tests {
     /// 场地现金真值必须落进绑定该 venue 的账户，而不是「active 账户」——
     /// 单账户时代的路由曾把 PolySimulator 的 100 USDC 写到 default 账户上
     /// （default 真 13.59 被冲掉，poly 面板还停在 journal 回放的 1000）。
-    #[test]
-    fn venue_cash_realign_routes_to_the_bound_account_not_active() {
+    #[tokio::test]
+    async fn venue_cash_realign_routes_to_the_bound_account_not_active() {
         let (mut c, dir) = two_account_reset_fixture("venue-cash-route");
         // paper 账户绑 poly 模拟盘（journal 回放出的练习金）；default 是
         // active、揣着自己的真钱。
@@ -18669,19 +18708,96 @@ mod tests {
                 .balance(),
             Decimal::new(1359, 2)
         );
-        // 无绑定的 venue 回落 active 账户（旧单账户语义）。
+        // 无绑定的 venue（多账户部署）：拒绝 + 告警，分文不落任何簿（#646
+        // —— 旧 fallback 曾把 7 写进 active 的 default 簿）。
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
         c.realign_venue_cash("ghost-venue", Decimal::from(7));
         assert_eq!(
             c.accounts
                 .ledger_of(&crate::account::AccountId::from("default"))
                 .unwrap()
                 .balance(),
-            Decimal::from(7)
+            Decimal::new(1359, 2),
+            "an unbound venue's report must not touch the active book"
+        );
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("paper"))
+                .unwrap()
+                .balance(),
+            Decimal::from(100),
+            "an unbound venue's report must not touch any sibling book"
+        );
+        let mut alerts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::RiskAlert { message, .. } = ev {
+                alerts.push(message);
+            }
+        }
+        assert!(
+            alerts.iter().any(|m| m.contains("ghost-venue")
+                && m.contains("refused")
+                && m.contains("no account bound")),
+            "the refusal must surface as a risk alert: {alerts:?}"
+        );
+        // fold 路径同样拒绝（drift killer 的周期性入口）。
+        c.fold_venue_free("ghost-venue", Decimal::from(9));
+        assert_eq!(
+            c.accounts
+                .ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::new(1359, 2),
+            "the fold path must refuse an unbound venue too"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 审计的 venue 报告只读 active 账户所绑 venue 的那份——真线事故：poly
+    /// #646 回归钉：default 单账户部署（零配置形态 —— accounts.toml 缺失时
+    /// `load_account_ledgers` 返回的同一本 `single_default` 簿）的行为与改前
+    /// 逐字节一致：无绑定 venue 的余额上报仍落 default/active 那本唯一的簿，
+    /// fold 的 drift killer 仍自动校正，且不得触发 #646 的拒绝告警。
+    #[tokio::test]
+    async fn single_account_deployment_keeps_the_legacy_venue_cash_fallback() {
+        let dir = reset_audit_dir("venue-cash-single-default");
+        let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        let mut c = Core::with_account_book(
+            CoreConfig {
+                mode: Mode::Live,
+                manual_ops_audit_path: Some(
+                    dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+                ),
+                trade_log_path: log("trades.jsonl"),
+                order_log_path: log("orders.jsonl"),
+                position_log_path: log("positions.jsonl"),
+                dry_seed_balance: Decimal::from(1_000),
+                ..Default::default()
+            },
+            crate::account::AccountLedgers::single_default(0),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.set_event_sink(tx);
+        // 无绑定的 venue 上报：单账户形态回落 active（= default = 唯一簿），
+        // 与旧 fallback 落点相同；venue_free 槽照旧入账（Live 分支原样）。
+        c.realign_venue_cash("polysimulator", Decimal::from(100));
+        assert_eq!(c.ledger().balance(), Decimal::from(100));
+        // fold drift killer：无 resting、余额对不上时仍自动校正（旧语义）。
+        c.fold_venue_free("polysimulator", Decimal::from(90));
+        assert_eq!(c.ledger().balance(), Decimal::from(90));
+        // 全程零告警 —— 拒绝路径在单账户形态下绝不触发。
+        let mut alerts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::RiskAlert { message, .. } = ev {
+                alerts.push(message);
+            }
+        }
+        assert!(
+            alerts.is_empty(),
+            "the single-account fallback must stay silent: {alerts:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
     /// 场地报 100、active 是 default（13.59），单槽 venue_free 让
     /// `venue_free_cash` 检查比出 drift 86.403094（= 100 − 13.59，逐位吻合）
     /// 并封锁新开仓。分槽后兄弟 venue 的现金不再是这本书的「真相」。
