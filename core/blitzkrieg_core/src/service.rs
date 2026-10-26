@@ -10766,6 +10766,21 @@ impl Core {
         // on the venue): fold them into the position book so the position
         // cannot haunt the exit rules forever.
         self.apply_external_fills(&report.unknown_fills, snap.now_ms);
+        // A terminal status the sweep just stamped (filled-without-gap,
+        // vanished→cancelled, ghost→force-closed) must reach orders.jsonl the
+        // same way every other status change does — otherwise a restart
+        // re-adopts terminal orders as LIVE and force-closes them all over
+        // again. emit_order already persists; these mutations bypass it.
+        for id in report.actions.iter().filter_map(|a| match a {
+            crate::reconcile::ReconcileAction::MarkedFilled { core_order_id }
+            | crate::reconcile::ReconcileAction::MarkedCancelled { core_order_id }
+            | crate::reconcile::ReconcileAction::MarkedForceClosed { core_order_id } => {
+                Some(core_order_id.as_str())
+            }
+            crate::reconcile::ReconcileAction::FilledGap { .. } => None,
+        }) {
+            self.persist_order(id);
+        }
         // #462: retire place-timeout orders the venue never gave evidence for
         // (see `resolve_place_timeouts`).
         self.resolve_place_timeouts(&snap);
@@ -19291,6 +19306,69 @@ mod tests {
             !c.risk.is_killed(),
             "streak must count CONSECUTIVE failures only"
         );
+    }
+
+    /// A terminal status the sweep stamps (ghost vanished → force-closed) must
+    /// land in orders.jsonl in the same pass, or a restart restores the dead
+    /// order as LIVE and force-closes it all over again — the zombie revival
+    /// the polysimulator upgrade restart exhibited (live_7/9/11 resurrected,
+    /// re-force-closed 14s after boot).
+    #[test]
+    fn sweep_marked_terminal_orders_are_persisted() {
+        let dir = std::env::temp_dir().join(format!("bk-recon-persist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("orders.jsonl");
+        let mut c = Core::new(CoreConfig {
+            order_log_path: Some(log.to_string_lossy().into_owned()),
+            risk: RiskConfig {
+                max_order_notional: dec!(3),
+                ..Default::default()
+            },
+            dry_seed_balance: Decimal::from(10_000),
+            ..Default::default()
+        });
+        // A live order bound to a venue id; the snapshot's open list omits it,
+        // so the sweep marks it ForceClosed (ghost).
+        let (id, _) = c
+            .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+            .unwrap();
+        c.bind_venue(&id, "venue-1".to_string(), 2).expect("bind");
+        let snap = crate::reconcile::VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 3,
+        };
+        let report = c.reconcile(snap).unwrap();
+        assert_eq!(
+            report
+                .actions
+                .iter()
+                .filter(|a| matches!(
+                    a,
+                    crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
+                ))
+                .count(),
+            1,
+            "the ghost was force-closed"
+        );
+        // The persisted tail must say terminal NOW — not only after some other
+        // code path happens to persist the order later.
+        let rows: Vec<crate::model::TrackedOrder> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let last = rows
+            .iter()
+            .rev()
+            .find(|o| o.order_id == id)
+            .expect("order was persisted");
+        assert_eq!(
+            last.status,
+            OrderStatus::ForceClosed,
+            "terminal status reached orders.jsonl in the sweep pass"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

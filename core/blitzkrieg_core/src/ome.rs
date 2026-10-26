@@ -585,12 +585,18 @@ impl Ome {
         }
     }
 
-    /// Venue order ids the OME currently believes are resting (for orphan
-    /// detection: any venue-open id NOT in this set is unknown to us).
+    /// Venue order ids the OME tracks — live AND terminal — for orphan
+    /// detection and fill back-attribution: any venue-open id NOT in this set
+    /// is unknown to us. Terminal ids must stay in the set: a fill that lands
+    /// on the venue after our order went terminal (force-closed at round end,
+    /// ghost-closed by reconcile, cancelled) still has to attribute through the
+    /// FILLED-orders channel, and `apply_fill_report` absorbs it as a late
+    /// fill. This is safe for the orphan sweep: a terminal order is not
+    /// venue-open, so its id never appears in the venue's open list — and if
+    /// it did, cancelling it would be correct anyway.
     pub fn known_venue_ids(&self) -> std::collections::HashSet<String> {
         self.orders
             .values()
-            .filter(|o| o.status.is_live())
             .filter_map(|o| o.venue_order_id.clone())
             .collect()
     }
@@ -1474,6 +1480,36 @@ mod tests {
             .is_none()
         );
         assert_eq!(ome.get("o1").unwrap().filled_size, dec!(5));
+    }
+
+    /// A terminal order's venue id stays in `known_venue_ids`: a fill that
+    /// lands on the venue AFTER the core order went terminal (force-close,
+    /// ghost-close, cancel) must still be forwarded by the plugin's
+    /// FILLED-orders back-attribution channel — `apply_fill_report` absorbs
+    /// it as a late fill. Live-only ids here made those fills invisible.
+    #[test]
+    fn known_venue_ids_include_terminal_orders() {
+        let mut ome = Ome::new();
+        ome.submit(SubmitParams {
+            order_id: "o1".into(),
+            request: req("k1", dec!(10)),
+            submitted_at_ms: 1,
+            decision_at_ms: 1,
+            execute_at_ms: 1,
+            report_at_ms: 1,
+            maker_timeout_ms: 0,
+            round_duration_sec: 0,
+        })
+        .unwrap();
+        ome.mark_live("o1", 1).unwrap();
+        ome.bind_venue("o1", "venue-1".into(), 2).unwrap();
+        assert!(ome.known_venue_ids().contains("venue-1"));
+
+        ome.mark_terminal("o1", OrderStatus::Cancelled, 3).unwrap();
+        assert!(
+            ome.known_venue_ids().contains("venue-1"),
+            "terminal venue id must stay known for late-fill attribution"
+        );
     }
 
     /// A venue that reports more than the order could hold is capped today (that

@@ -29,11 +29,11 @@
 
 use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
-use crate::types::PlaceOrderBody;
+use crate::types::{PlaceOrderBody, UpDownRow};
 use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillStatus, MarketFill, MarketHost,
-    PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side, VenueTradeInfo,
-    net::now_ms,
+    MarketResolution, PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport,
+    SettlementQuery, Side, VenueTradeInfo, net::now_ms,
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -276,6 +276,40 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
                 }
             }
         }
+
+        // 4) Settlements (root cause C): the core asks what happened to every
+        //    market it still holds a position in; without an answer a
+        //    held-to-expiry position stays a ghost (proceeds 0, expiry past),
+        //    the exit ladder keeps re-emitting SELLs for a dead token, the
+        //    venue rejects with "Insufficient position", and the rejection
+        //    streak freezes the account. The updown list already carries the
+        //    verdict: resolved=true with terminal 1/0 outcome prices. One
+        //    fetch per sweep cycle, only when there ARE queries; a query the
+        //    list does not name or has not resolved yet answers nothing — the
+        //    core re-asks on its own cadence, and payouts are never invented.
+        let queries = host.take_settlement_queries().await;
+        if queries.is_empty() {
+            continue;
+        }
+        match client.updown_markets(None, None).await {
+            Ok(rows) => {
+                for query in &queries {
+                    if let Some(resolution) = resolution_for(query, &rows) {
+                        eprintln!(
+                            "polysimulator-extension: settlement {} payouts={:?}",
+                            resolution.condition_id, resolution.payouts
+                        );
+                        host.on_market_resolution(resolution).await;
+                    }
+                }
+            }
+            // Loud, but never fatal: a failed fetch must not stop trading,
+            // and the core alerts on its own once it has waited too long.
+            Err(e) => eprintln!(
+                "polysimulator-extension: settlement query ({}) fetch failed: {e}",
+                queries.len()
+            ),
+        }
     }
 }
 
@@ -376,7 +410,17 @@ fn to_venue_trade(
         side,
         size,
         price,
-        ts_ms: row.match_time.unwrap_or_else(now_ms),
+        // Live venue (2026-10-26) reports match_time in SECONDS since epoch
+        // (e.g. 1792995878 for a 2026-10-26 fill); every ts_ms consumer treats
+        // this field as MILLISECONDS. Normalize seconds → ms at the boundary;
+        // a value already in ms passes through unchanged. Without this the
+        // kernel's external-fill watermark (kept in ms) never advances past
+        // these fills and they re-fold as external fills on every sweep.
+        ts_ms: match row.match_time {
+            Some(t) if t >= 1_000_000_000_000 => t,
+            Some(t) => t.saturating_mul(1_000),
+            None => now_ms(),
+        },
         tx_hash: row.transaction_hash.clone(),
         maker: Some(maker),
     })
@@ -395,6 +439,34 @@ fn to_fill(order_id: &str, trade: &VenueTradeInfo) -> MarketFill {
         tx_hash: trade.tx_hash.clone(),
         maker: trade.maker,
     }
+}
+
+/// The venue's verdict for one settlement query, read off the updown rows:
+/// a query whose condition_id matches a RESOLVED row pays its outcome prices
+/// (a binary market pays 1/0); a query still open, unknown to the list, or
+/// carrying unreadable / not-yet-0-or-1 prices answers NOTHING — the core
+/// keeps watching and re-asks on its own cadence, and nothing is fabricated.
+/// Split from the loop so the mapping is testable without a client.
+fn resolution_for(query: &SettlementQuery, rows: &[UpDownRow]) -> Option<MarketResolution> {
+    let row = rows.iter().find(|r| r.condition_id == query.condition_id)?;
+    if !row.resolved.unwrap_or(false) {
+        return None; // still live: the core re-queries
+    }
+    let (up_token, down_token) = row.parse_token_ids()?;
+    let (up_price, down_price) = row.parse_outcome_prices()?;
+    // Resolved means terminal prices: exactly 1 and 0. Anything else
+    // (mid-round snapshot, half-parse) is not a verdict — answer nothing.
+    let terminal = |p: Decimal| p == Decimal::ZERO || p == Decimal::ONE;
+    if !terminal(up_price) || !terminal(down_price) {
+        return None;
+    }
+    Some(MarketResolution {
+        condition_id: query.condition_id.clone(),
+        resolved: true,
+        payouts: vec![(up_token, up_price), (down_token, down_price)],
+        neg_risk: false,
+        source: "polysimulator".to_string(),
+    })
 }
 
 /// One reconciliation pass: open orders + new trades + orphan cleanup + free
@@ -666,6 +738,112 @@ mod tests {
             to_venue_trade(&no_token, "41".into(), false).is_none(),
             "no asset_id"
         );
+    }
+
+    /// Build one updown row from its wire JSON (the same double-encoded
+    /// nested strings the venue sends).
+    fn updown_row(condition: &str, resolved: bool, up: &str, down: &str) -> UpDownRow {
+        serde_json::from_str(&format!(
+            r#"{{
+                "event_id": "evt_1",
+                "condition_id": "{condition}",
+                "asset": "BTC",
+                "interval": "15m",
+                "active": true,
+                "closed": {resolved},
+                "resolved": {resolved},
+                "markets": [{{
+                    "condition_id": "{condition}",
+                    "outcomes": "[\"Up\", \"Down\"]",
+                    "outcome_prices": "[\"{up}\", \"{down}\"]",
+                    "token_ids": "[\"tok-up\", \"tok-down\"]"
+                }}]
+            }}"#
+        ))
+        .expect("updown row parses")
+    }
+
+    fn query(condition: &str) -> SettlementQuery {
+        SettlementQuery {
+            condition_id: condition.to_string(),
+            token_ids: vec!["tok-up".to_string(), "tok-down".to_string()],
+            expires_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn settlement_answers_only_resolved_rows_with_terminal_payouts() {
+        // Resolved row (up won): payouts 1/0 keyed by the parsed token ids.
+        let rows = vec![updown_row("0xres", true, "1", "0")];
+        let res = resolution_for(&query("0xres"), &rows).expect("resolved row answers");
+        assert_eq!(res.condition_id, "0xres");
+        assert!(res.resolved);
+        assert_eq!(
+            res.payouts,
+            vec![
+                ("tok-up".to_string(), Decimal::ONE),
+                ("tok-down".to_string(), Decimal::ZERO)
+            ]
+        );
+        assert_eq!(res.source, "polysimulator");
+        assert!(!res.neg_risk);
+
+        // Down won is symmetrical.
+        let rows = vec![updown_row("0xdown", true, "0", "1")];
+        let res = resolution_for(&query("0xdown"), &rows).expect("down-win answers");
+        assert_eq!(
+            res.payouts,
+            vec![
+                ("tok-up".to_string(), Decimal::ZERO),
+                ("tok-down".to_string(), Decimal::ONE)
+            ]
+        );
+
+        // Still live (resolved=false, prices mid-round): answer nothing —
+        // the core re-queries on its own cadence.
+        let rows = vec![updown_row("0xlive", false, "0.55", "0.45")];
+        assert!(
+            resolution_for(&query("0xlive"), &rows).is_none(),
+            "unresolved row answers nothing"
+        );
+
+        // Resolved flag set but prices not yet terminal: not a verdict,
+        // answer nothing (payouts are never guessed).
+        let rows = vec![updown_row("0xhalf", true, "0.9", "0.1")];
+        assert!(
+            resolution_for(&query("0xhalf"), &rows).is_none(),
+            "non-terminal prices answer nothing"
+        );
+
+        // A condition the updown list does not name: skip silently, never
+        // fabricate.
+        let rows = vec![updown_row("0xother", true, "1", "0")];
+        assert!(
+            resolution_for(&query("0xunknown"), &rows).is_none(),
+            "unknown condition answers nothing"
+        );
+    }
+
+    #[test]
+    fn match_time_in_seconds_is_normalized_to_ms() {
+        // Live venue (2026-10-26) reports match_time in SECONDS since epoch;
+        // ts_ms consumers (incl. the kernel's external-fill watermark) expect
+        // MILLISECONDS. A seconds-valued row must be scaled ×1000, and an
+        // already-millisecond value must pass through untouched.
+        let mut row = trade_row("tx-3", Some("41"), None, "BUY", Some("0.55"), Some("71321"));
+
+        row.match_time = Some(1_792_995_878); // seconds: 2026-10-26T06:24:38Z
+        let trade = to_venue_trade(&row, "41".into(), false).expect("seconds row maps");
+        assert_eq!(trade.ts_ms, 1_792_995_878_000, "seconds scaled to ms");
+
+        row.match_time = Some(1_773_583_200_000); // already ms
+        let trade = to_venue_trade(&row, "41".into(), false).expect("ms row maps");
+        assert_eq!(trade.ts_ms, 1_773_583_200_000, "ms passes through");
+
+        row.match_time = None;
+        let now = now_ms();
+        let trade = to_venue_trade(&row, "41".into(), false).expect("absent row maps");
+        assert!(trade.ts_ms >= now, "absent match_time falls back to now_ms");
     }
 
     /// Test helper: rebuild a row with a zero size (struct has no builder).
