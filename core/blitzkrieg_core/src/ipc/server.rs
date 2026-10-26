@@ -489,7 +489,7 @@ async fn enable_venue_at_runtime(
     // The mirror declaration rides the runtime enablement too: a venue bound
     // AFTER boot (account.venue.set / account.create's 绑定即启用 half) must
     // land its plugin's mirror fact in the engine the same way boot's
-    // `apply_plugin_mirrors` lands the boot actives' — otherwise a
+    // `apply_plugin_mirrors` lands the whole registry's — otherwise a
     // runtime-bound PolySimulator has NO admission/routing evidence (the
     // parasitic shape declares no rounds, so no shadow batch can ever back
     // it) and its account trades nothing until the next boot. Idempotent:
@@ -695,8 +695,22 @@ pub async fn run(
     );
     // The parasitic mirror (PolySimulator⇒Polymarket) rides the plugins' own
     // declarations into the engine: admission and routing evidence that does
-    // not depend on the mirror plugin ever declaring a round.
-    core.apply_plugin_mirrors(&actives);
+    // not depend on the mirror plugin ever declaring a round. The push walks
+    // the WHOLE registry, not the boot actives: a mirror declaration is the
+    // plugin's identity, but the active seat is a single-slot datum — in the
+    // shipped deployment polymarket owns it while polysimulator sits
+    // registered-enabled-inactive, so an actives-only walk left the engine
+    // with NO mirror fact and a parasitic account refused every mirror token
+    // (found live: `engine.books` carried no polysimulator rows and
+    // `scope_admits_token` rejected them). Executors/feeds stay mounted from
+    // `actives` only — a mirror declaration routes orders to the mirror's
+    // executor, it does not grant the plugin a data plane.
+    let registry_plugins: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> = registry
+        .names()
+        .iter()
+        .filter_map(|n| registry.get(n))
+        .collect();
+    core.apply_plugin_mirrors(&registry_plugins);
 
     if config.engine_enabled {
         // A refusal here (the #265 startup self-check: an explicit
@@ -7949,6 +7963,92 @@ mod tests {
         assert!(
             engine.execution_venue_for("paper", "mirror-up") == Some("simvenue".into()),
             "execution follows the runtime binding under the pushed declaration"
+        );
+    }
+
+    /// The boot half of the mirror push must walk the WHOLE registry, not
+    /// just the boot actives: the active seat is a single-slot datum, and in
+    /// the shipped deployment polymarket owns it while the parasitic
+    /// polysimulator sits registered-enabled-INACTIVE — an actives-only walk
+    /// left the engine with no mirror fact at all, so a parasitic account
+    /// refused every mirrored token (found live: `engine.books` carried no
+    /// polysimulator rows). Pinned at the seam the boot actually uses:
+    /// `active_market_plugins` selects the data plane, and the registry walk
+    /// feeds `apply_plugin_mirrors` — the test proves the mirror plugin is
+    /// absent from the former and present in the latter, with the engine
+    /// outcome of the full walk asserted through the same service method
+    /// boot calls.
+    #[tokio::test]
+    async fn a_registered_but_inactive_mirror_plugin_still_pushes_its_declaration_at_boot() {
+        let now = now_ms();
+        let book = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: AccountId::from("paper"),
+                name: "paper".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "simvenue".to_string(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: now,
+            }],
+            AccountId::from("paper"),
+        );
+        let cfg = CoreConfig {
+            engine_enabled: true,
+            round_duration_sec: 900,
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let mut c = Core::with_account_book(cfg, book);
+        c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+        // Both plugins registered; the SOURCE is boot-active, the MIRROR is
+        // not — the exact shipped shape (polymarket active, polysimulator
+        // registered-enabled-inactive).
+        let registry = crate::market::registry::MarketPluginRegistry::new();
+        registry.register(Box::new(VenueMirrorStubPlugin {
+            name: "sourcevenue".to_string(),
+            mirror_of: String::new(),
+        }));
+        registry.register(Box::new(VenueMirrorStubPlugin {
+            name: "simvenue".to_string(),
+            mirror_of: "sourcevenue".to_string(),
+        }));
+        registry.set_enabled("sourcevenue", true);
+        registry.set_enabled("simvenue", true);
+
+        // The boot actives (what mounts the data plane) hold ONLY the source:
+        let actives = crate::market::active_market_plugins(&registry, Some("sourcevenue"));
+        assert_eq!(actives.len(), 1, "one active seat");
+        assert_eq!(actives[0].name(), "sourcevenue");
+        assert!(
+            !actives.iter().any(|p| p.name() == "simvenue"),
+            "the mirror plugin must NOT be in the boot actives — that is the bug's shape"
+        );
+
+        // The mirror push walks the REGISTRY (the fix), and the declaration
+        // lands despite the plugin never being active:
+        let registry_plugins: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> =
+            registry
+                .names()
+                .iter()
+                .filter_map(|n| registry.get(n))
+                .collect();
+        c.apply_plugin_mirrors(&registry_plugins);
+        c.engine_evaluate(now);
+
+        let engine = c.engine.as_ref().expect("engine");
+        assert!(
+            engine.mirror_source_of("simvenue") == Some("sourcevenue"),
+            "the inactive mirror plugin's declaration must land in the engine"
+        );
+        assert!(
+            engine.mirror_source_of("sourcevenue").is_none(),
+            "a plugin without a declaration pushes nothing"
         );
     }
 
