@@ -36,6 +36,14 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Page cap the 15m discovery poll asks for. The venue keeps the open rounds
+/// at the list head and prunes resolved ones server-side (live check
+/// 2026-10-26: a 5-row request still returns the active round), and one
+/// 15m window holds at most 8 assets' rounds plus the next window's early
+/// publications — 50 leaves a wide margin while cutting the 4.2MB full page
+/// to ~0.4MB.
+pub(crate) const DISCOVERY_UPDOWN_LIMIT: u32 = 50;
+
 /// Parse an ISO-8601 timestamp into epoch millis. The venue sends both
 /// `2026-03-15T13:00:00+00:00` and `2026-03-15T14:00:00Z` shapes; the parse
 /// is deliberately narrow (a wrong shape is a skipped market + a log line,
@@ -77,6 +85,18 @@ pub(crate) fn asset_matches(row_asset: &str, assets: &[String]) -> Option<String
         .then_some(upper)
 }
 
+/// The (interval, limit) the discovery poll requests. Only the 15m family is
+/// ever feedable here (the row filter keeps rows whose window equals
+/// `round_sec`, and the engine configures 900s), so asking the venue to
+/// filter server-side (`interval=15m`) plus a page cap drops ~91% of the
+/// response bytes; `None` for either keeps the venue default (full page).
+pub(crate) fn discovery_query(round_sec: i64) -> (Option<&'static str>, Option<u32>) {
+    match round_sec {
+        900 => (Some("15m"), Some(DISCOVERY_UPDOWN_LIMIT)),
+        _ => (None, None),
+    }
+}
+
 /// Spawn the discovery loop. Returns immediately; the loop runs until the
 /// process ends.
 pub(crate) fn spawn(
@@ -100,7 +120,17 @@ pub(crate) fn spawn(
             tick.tick().await;
             let now = now_ms();
 
-            let rows = match client.updown_markets(None, None).await {
+            // The engine only ever runs this venue's 15m family, so the poll
+            // asks for that family by name and caps the page: the venue prunes
+            // resolved rounds server-side and keeps the open ones at the list
+            // head, so 50 rows still cover every live + upcoming 15m round
+            // while cutting the response from ~4.2MB to ~0.4MB (-91%, live
+            // 2026-10-26) on a 5-second cadence (~71GB/day → ~6GB/day). Any
+            // other round length keeps the venue-default full page — an
+            // interval filter for a family this plugin cannot feed would only
+            // starve discovery silently.
+            let (interval, limit) = discovery_query(round_sec);
+            let rows = match client.updown_markets_bounded(None, interval, limit).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "polysimulator discovery: updown query failed");
@@ -284,5 +314,26 @@ mod tests {
         assert_eq!(asset_matches("SOL", &assets), None);
         // Prose must NOT match: the venue gives a structured field.
         assert_eq!(asset_matches("Will Bitcoin go up", &assets), None);
+    }
+
+    /// 流量瘦身（#637）：引擎只跑本场地的 15m 轮次族，discovery 的 5 秒轮询
+    /// 必须让场地在服务端就把 interval 过滤掉并封页（4.2MB 全页 → ~0.4MB，
+    /// 实测 -91%）；其余轮次长度拿不到过滤，只能回退全页，宁可多拉也不能
+    /// 静默饿死发现。
+    #[test]
+    fn discovery_poll_narrows_to_the_configured_interval_family() {
+        // The family the engine configures: server-side filter + page cap.
+        let (interval, limit) = discovery_query(900);
+        assert_eq!(interval, Some("15m"));
+        assert_eq!(limit, Some(DISCOVERY_UPDOWN_LIMIT));
+        // Any other round length: venue defaults (full page), never a filter
+        // for a family discovery cannot feed.
+        assert_eq!(discovery_query(300), (None, None));
+        assert_eq!(discovery_query(3600), (None, None));
+        // The narrowed poll composes into the exact wire path.
+        assert_eq!(
+            crate::rest::updown_path(None, interval, limit),
+            "/v1/markets/updown?limit=50&interval=15m"
+        );
     }
 }
