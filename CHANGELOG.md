@@ -108,6 +108,24 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   策略开关读代理失败信封——HTTP 200 {error} 不再弹绿色假成功（#564）；进化文
   件唯一可信源——开关写回 toml、废除面板独立态（#578）；账户删除文案汉化
   （#534）；reset 语义收口 + 倒计时卡随所（#556）。
+- **PolySimulator 镜像盘三刀**：PolySimulator 内容镜像 Polymarket（同窗口
+  token 逐字节相同），scanner 表按 token 唯一键首中即返使 poly 批被静默吞——
+  merge fresh 空臂无条件补写 (venue,duration) 轮钟申报（#627）+ 显示簿
+  `shadow_markets` 合成带自己 venue 标签的行情行（仅装配层可读、交易面零接
+  触）+ `books_view` 兄弟装配线同族缺口补齐、盘口行直接填行自带 venue 字段
+  杜绝反查错标（#628 顺修 5 个门禁 destructured getter 快照 0 的死计数器——
+  断言 FAIL 也 exit 0，#629）。
+- **PolySimulator 下单/成交合同 live 三修（live 探针逐字节复现后收口）**：
+  下单合同原生化——场地只收 `{"order":{tokenId,side,makerAmount,takerAmount}}`
+  1e6 缩放信封（BUY price=maker/taker、SELL 反向），平铺表单恒被
+  `VALIDATION_FAILED: missing order` 拒绝（#630）；场地 orderID 数字/引号串
+  跨 ack 摇摆——三处接缝宽容解析（#631）；成交归属 FILLED 行反查——场地
+  trades 行 `taker_order_id`=trade 自身 id 且 `maker_orders` 恒缺使 `our_leg`
+  永不命中，每笔真实成交整行丢弃、已成交订单反被判幽灵强平（API 盈利但 UI
+  零订单零记录）——`GET /v1/orders?status=FILLED`（自带 order_id/fill_price/
+  quantity/filled_at）合成归属走既有 reconcile 管道（#632）；轮次发现 asset
+  空值容忍——股票类 daily 行 `"asset": null` 使 500 行查询每 5s serde 炸、
+  poly 轮次发现瘫痪（#632）。
 - **安全**：面板认证加固——无凭据写面封死 + token 查询通道废除 + 内核只读
   防御（#460/#465）；持久化加固——原子重写统一 + 损坏 fail-loud +
   close_credentials 跨重启（#463/#466）。
