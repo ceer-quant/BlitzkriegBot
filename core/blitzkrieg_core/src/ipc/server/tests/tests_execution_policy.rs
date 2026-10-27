@@ -55,7 +55,7 @@ async fn policy_journals_are_private_per_fixture() {
             .parent()
             .expect("scratch root")
             .join("data/audit/execution_policy.jsonl");
-        assert!(journal.is_file(), "private journal exists: {journal:?}");
+        assert!(journal.is_file(), "private journal exists");
     }
     let _ = std::fs::remove_dir_all(path_a.parent().unwrap());
     let _ = std::fs::remove_dir_all(path_b.parent().unwrap());
