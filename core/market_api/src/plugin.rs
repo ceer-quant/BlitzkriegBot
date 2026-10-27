@@ -261,6 +261,7 @@ pub trait MarketPlugin: Send + Sync {
         PluginInfo {
             name: self.name().to_string(),
             supported_round_secs: self.supported_round_secs(),
+            feed_source: self.feed_source().map(str::to_string),
             market_type: self.market_type(),
             structure,
             capabilities,

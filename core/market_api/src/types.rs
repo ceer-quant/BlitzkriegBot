@@ -756,6 +756,13 @@ pub struct PluginInfo {
     /// cores omit it, old panels ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_round_secs: Option<Vec<i64>>,
+    /// RFC-661 M2: the plugin's declared feed reuse — whose upstream feed and
+    /// discovery streams this plugin consumes as a parasite consumer. `None`
+    /// = the plugin owns its own upstream (or declares none). Readout only
+    /// (the probe's「组件集合 ⊆ 原生 venue 集合」assertion keys off it);
+    /// incremental field: old cores omit it, old panels ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_source: Option<String>,
     pub market_type: MarketType,
     pub has_data_feed: bool,
     pub has_discovery: bool,

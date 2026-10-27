@@ -14,36 +14,86 @@ use tokio::sync::Mutex as AsyncMutex;
 
 // ── RFC-661 M2: the feed_source reuse fan-out ────────────────────────────────
 
-/// The venue that owns an upstream batch AND every consumer venue re-registering
-/// it under their own identity. A `FeedEvent::Books`/`on_book` carries no batch
-/// owner (the token id is the only key), so the registry's WHO list is what the
-/// data-plane fan-out replays updates against: the source's own venue plus every
-/// declared `feed_source` consumer. One upstream event ⇒ one application per
-/// venue, each landing under its own `(venue, token)` identity.
-pub type VenueFanout = std::sync::Arc<std::sync::RwLock<Vec<String>>>;
+/// One declared data-topology edge: CONSUMER's market data eats SOURCE's
+/// upstream feed/discovery stream (`MarketPlugin::feed_source`). A list of
+/// these — not a flat venue list — is the fan-out's fact shape: two
+/// independent consumer→source pairs must never re-register each other's
+/// batches (a flat list keyed only on "is the upstream in the set" would
+/// fan source A's batch out to consumer B, a venue whose token space A
+/// shares nothing with).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedReuseEdge {
+    pub consumer: String,
+    pub source: String,
+}
 
 /// The multiplexed data plane's shared bookkeeping (RFC-661 M2). The host's
 /// `on_round_markets` consults it to re-register an upstream round batch under
 /// every CONSUMING venue's own identity, so a parasitic plugin gains its own
 /// scanner rows / books / position venue stamps without the OME ever seeing a
-/// mirror fact. `venues` is the fan-out list: source venue + every declared
-/// consumer. `count` counts UPSTREAM connection mounts the assembly attempted
-/// for the source's stream — one mount serves every consumer (the reuse
-/// pipeline's falsifiable claim: the number stays 1, not 1-per-venue).
+/// mirror fact. `edges` is the declared consumer→source list (boot actives +
+/// runtime binds); `mounts` counts UPSTREAM connection mounts the assembly
+/// attempted for reused streams — one mount serves every consumer of that
+/// stream (the reuse pipeline's falsifiable claim: the count stays 1 per
+/// source stream, not 1-per-venue).
 ///
 /// Field lock discipline: each cell is an independent short critical section,
 /// never held across an await — the same shape as `active_plugin`/`poll_admission`.
 #[derive(Clone, Default)]
 pub struct FeedReuse {
-    /// Who receives each upstream batch: the source venue itself plus every
-    /// plugin whose `feed_source` names it (registration order — the order
-    /// `run`'s actives walk plus later runtime binds append).
-    pub venues: VenueFanout,
-    /// Every attempt to mount the SOURCE venue's upstream components (feed and
-    /// discovery separately). A consumer-only enablement mounts the source's
-    /// data plane through this path too (data-plane self-sufficiency), so this
-    /// counter is the reuse pipeline's observable: N venues enabled ⇒ still 1.
+    /// Who eats whose stream, from the plugins' own declarations (the session
+    /// assembly resolves them once; runtime binds append through
+    /// [`FeedReuse::add_edge`]). Order = registration order.
+    pub edges: std::sync::Arc<std::sync::RwLock<Vec<FeedReuseEdge>>>,
+    /// Every attempt to mount a SOURCE's upstream components (feed and
+    /// discovery separately) through the REUSE pipeline. A consumer-only
+    /// enablement mounts the source's data plane through this path too
+    /// (data-plane self-sufficiency), so this counter is the reuse pipeline's
+    /// observable: N venues enabled ⇒ still 1 per source stream.
     pub mounts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FeedReuse {
+    /// Append a declared edge (idempotent — the same declaration re-bound is
+    /// a no-op). Returns true when the edge was newly added.
+    pub fn add_edge(&self, consumer: &str, source: &str) -> bool {
+        let mut edges = self
+            .edges
+            .write()
+            .expect("feed reuse edges lock poisoned");
+        if edges
+            .iter()
+            .any(|e| e.consumer == consumer && e.source == source)
+        {
+            return false;
+        }
+        edges.push(FeedReuseEdge {
+            consumer: consumer.to_string(),
+            source: source.to_string(),
+        });
+        true
+    }
+
+    /// The consumers whose declaration names `source` (registration order).
+    /// Empty when none — the caller forwards once, the historical shape.
+    pub fn consumers_of(&self, source: &str) -> Vec<String> {
+        self.edges
+            .read()
+            .expect("feed reuse edges lock poisoned")
+            .iter()
+            .filter(|e| e.source == source)
+            .map(|e| e.consumer.clone())
+            .collect()
+    }
+
+    /// Whether `consumer`'s declaration names `source`.
+    pub fn consumes(&self, consumer: &str, source: &str) -> bool {
+        self.edges
+            .read()
+            .expect("feed reuse edges lock poisoned")
+            .iter()
+            .any(|e| e.consumer == consumer && e.source == source)
+    }
 }
 
 // ── DTO ↔ core-model conversions ─────────────────────────────────────────────
@@ -229,8 +279,9 @@ impl CoreHost {
 
     /// RFC-661 M2: install the `feed_source` fan-out. Called once by the
     /// session assembly AFTER it resolved the enablement graph (boot actives
-    /// and any later runtime bind appends consumers through [`Self::add_feed_consumer`]).
-    /// The default (never called) is None — every path stays the historical
+    /// seed the declared edges; any later runtime bind appends consumers
+    /// through [`FeedReuse::add_edge`] on the SAME shared cell). The default
+    /// (never called) is None — every path stays the historical
     /// single-registration shape.
     pub fn set_feed_reuse(&self, reuse: FeedReuse) {
         *self
@@ -239,49 +290,25 @@ impl CoreHost {
             .expect("core host feed reuse lock poisoned") = Some(reuse);
     }
 
-    /// RFC-661 M2: a runtime bind of a `feed_source` consumer appends its
-    /// venue to the fan-out (idempotent — the same declaration re-bound is a
-    /// no-op). Returns true when the venue was newly added.
-    pub fn add_feed_consumer(&self, venue: &str) -> bool {
-        let guard = self
-            .feed_reuse
+    /// The fan-out cell for callers that must append a runtime-declared edge
+    /// (`enable_venue_at_runtime`'s consumer arm). `None` when the assembly
+    /// never installed one — a session with no reuse plane keeps the
+    /// historical mounts and registers nothing.
+    pub fn feed_reuse(&self) -> Option<FeedReuse> {
+        self.feed_reuse
             .lock()
-            .expect("core host feed reuse lock poisoned");
-        let Some(reuse) = guard.as_ref() else {
-            return false;
-        };
-        let mut venues = reuse
-            .venues
-            .write()
-            .expect("feed reuse venues lock poisoned");
-        if venues.iter().any(|v| v == venue) {
-            return false;
-        }
-        venues.push(venue.to_string());
-        true
+            .expect("core host feed reuse lock poisoned")
+            .clone()
     }
 
-    /// The fan-out list for an upstream batch from `source`: itself plus every
-    /// declared consumer (in registration order). Empty when the reuse cell is
-    /// absent — the caller forwards once, the historical shape.
+    /// The consumer venues whose declaration names `source`'s stream — the
+    /// list one upstream round batch re-registers under. Empty when the reuse
+    /// cell is absent or nothing consumes `source`: the caller forwards once,
+    /// the historical shape.
     fn feed_fanout_for(&self, source: &str) -> Vec<String> {
-        let guard = self
-            .feed_reuse
-            .lock()
-            .expect("core host feed reuse lock poisoned");
-        let Some(reuse) = guard.as_ref() else {
-            return Vec::new();
-        };
-        let venues = reuse
-            .venues
-            .read()
-            .expect("feed reuse venues lock poisoned");
-        if !venues.iter().any(|v| v == source) {
-            // The upstream venue is not part of this fan-out (a plain native
-            // plugin): forward once, no re-registration.
-            return Vec::new();
-        }
-        venues.clone()
+        self.feed_reuse()
+            .map(|r| r.consumers_of(source))
+            .unwrap_or_default()
     }
 
     /// #647: a handle naming ONE plugin for the settlement drains. The
@@ -450,10 +477,15 @@ impl MarketHost for CoreHost {
             // same-slot merge then admits the consumer's batch as fresh rows
             // (its venue tag differs, its tokens as byte strings are already
             // known but its venue identity is its own). The consumer's tokens
-            // subscribe on the SOURCE's feed control (one upstream connection
-            // carries every consumer's tokens; the feed polls a union set).
+            // subscribe on ITS OWN feed control when it somehow carries one
+            // (an inert no-op for the parasitic shape, which mounts none —
+            // the subscription rides the source's upstream); the source's
+            // control is deliberately NOT re-poked here: its set_tokens is
+            // REPLACE semantics, and a consumer's token copy would evict the
+            // source's own set (one upstream connection serving one union —
+            // the source re-subscribes on its own rollovers).
             let fanout = self.feed_fanout_for(plugin);
-            for consumer in fanout.iter().filter(|v| *v != plugin) {
+            for consumer in fanout {
                 let mut re_tagged: Vec<api::MarketDescriptor> = markets.clone();
                 for d in re_tagged.iter_mut() {
                     d.venue = consumer.clone();
@@ -469,9 +501,7 @@ impl MarketHost for CoreHost {
                     },
                     now,
                 );
-                // The consumer has no upstream of its own: its token set rides
-                // the source feed's control (one connection, one poll loop).
-                self.subscribe_tokens(plugin, consumer_tokens).await;
+                self.subscribe_tokens(&consumer, consumer_tokens).await;
             }
         })
     }
