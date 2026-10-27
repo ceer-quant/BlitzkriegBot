@@ -79,3 +79,13 @@ M1 与 M2 可独立开 PR、独立回滚；M3 必须在 M1 稳定一个发布周
 
 - 禁止产出触碰 `EngineStrategy` trait 签名 / `EngineConfig` 字段 / service.rs ARB_STRATEGY 分流点 / foreign.rs marshal 层的实现 PR。
 - 文档类 PR（INTERFACES.md 记档、SDK 指南标注）不受限，但不得预设方案 A 已被采纳。
+
+## 决议（2026-10-27，操作者）
+
+1. **选型：A（声明驱动）采纳**；B/C 否决。
+2. 声明面走 **Rust trait 默认方法**（`EngineStrategy` 内部面，不碰 vtable）；cdylib 侧统计声明待真实第三方 pair 策略出现时再按 #654 同型补可选符号（YAGNI）。
+3. **冒领收紧采纳**：受理校验 = 须声明 `atomic_batch` 且 PairBook 有本策略条目。
+4. **JSON golden 基线认可**：`foreign.rs:998-1026` 现有 camelCase 拼写，wire 逐位不变，测试钉死。
+5. **M3 等待期 = 一个发布周期**，期间名字分支保留 + deprecation 日志。
+
+实现按 §四迁移序 M1（声明面 + 受理校验 + on_config 泛化）→ M2（名字分支 deprecation 日志）开工；M3 一个发布周期后另行。本决议即时生效，「门禁条款」转为**实现期纪律**：改动只落 §四列出的文件与测试。
