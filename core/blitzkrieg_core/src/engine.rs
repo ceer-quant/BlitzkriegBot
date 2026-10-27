@@ -48,6 +48,12 @@ pub const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub scanner: ScannerConfig,
+    /// The trend knobs' in-memory carrier. RFC-645 A-2 retired the concrete
+    /// types from the STRATEGY face (`EngineStrategy::on_config` is opaque
+    /// JSON now) — the field stays: the kernel's own config mapping
+    /// (`CoreConfig::engine_config`) needs a typed home for the builtin
+    /// strategies' knobs, and [`engine_strategy_config_json`] is the JSON
+    /// projection strategies actually receive.
     pub trend: TrendConfig,
     pub spread_arb: SpreadArbConfig,
     /// Max orderbook staleness before we refuse to price off it (#205).
@@ -130,6 +136,45 @@ pub struct EffectiveSizing {
     pub strategy_scoped: bool,
     /// The weight in force (`None` = unweighted).
     pub size_weight: Option<Decimal>,
+}
+
+/// The strategy config push's JSON projection (RFC-645 A-2, 决议④): the
+/// kernel-side marshal that used to live in `ForeignStrategy::on_config`
+/// (strategies/foreign.rs), now the ONE sink — every hosted strategy, builtin
+/// adapter or foreign library alike, receives the SAME bytes through
+/// [`EngineStrategy::on_config`].
+///
+/// GOLDEN CONTRACT (决议④, wire 逐位不变): the camelCase spelling and the
+/// decimal-as-STRING shapes below are the dylib wire contract the foreign
+/// marshal layer has shipped for the whole life of the v2 ABI — pinned
+/// byte-for-byte by `engine_strategy_config_json_is_the_foreign_marshal_golden`
+/// (strategies/test_support.rs). Drift here is a wire break, not a refactor.
+pub fn engine_strategy_config_json(
+    trend: &TrendConfig,
+    spread_arb: &SpreadArbConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trend": {
+            "confirmSec": trend.confirm_sec,
+            "minPrice": trend.min_price.to_string(),
+            "brokenPrice": trend.broken_price.to_string(),
+            "ratio": trend.ratio.to_string(),
+            "windowFloorMs": trend.window_floor_ms,
+        },
+        "spreadArb": {
+            "trendMinPrice": spread_arb.trend_min_price.to_string(),
+            "trendConfirmSec": spread_arb.trend_confirm_sec,
+            "trendBrokenPrice": spread_arb.trend_broken_price.to_string(),
+            "trendEntryPrice": spread_arb.trend_entry_price.to_string(),
+            "trendEntryFactor": spread_arb.trend_entry_factor.to_string(),
+            "trendMaxEntryPrice": spread_arb.trend_max_entry_price.to_string(),
+            "entryMinObi": spread_arb.entry_min_obi.to_string(),
+            "entryMaxSpreadPct": spread_arb.entry_max_spread_pct.to_string(),
+            "entryDipMaxPct": spread_arb.entry_dip_max_pct.to_string(),
+            "entryBounceMinPct": spread_arb.entry_bounce_min_pct.to_string(),
+            "entryBounceWindowSec": spread_arb.entry_bounce_window_sec,
+        }
+    })
 }
 
 impl Default for EngineConfig {
