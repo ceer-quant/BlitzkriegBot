@@ -530,19 +530,18 @@ impl MarketHost for CoreHost {
         Box::pin(async move {
             let c = self.core.lock().await;
             // Per-venue executor drain (multi-plugin): each executor pulls only
-            // the orders whose EXECUTION venue names ITS plugin — the token's
-            // table row venue, overridden by the placing account's binding
-            // when the venue's own shadow batch carries the token (mirror
-            // venues: PolySimulator's tokens carry the Polymarket row in the
-            // table, so keying on the row alone would hand the poly account's
-            // order to the REAL venue's executor). An order whose execution
-            // venue resolves to nothing is UNTAGGED and routes to the ACTIVE
-            // plugin's drain — the single-plugin fallback the task pins. When
-            // no active plugin was ever set (hosts that skipped
-            // `set_active_plugin`, most in-process tests), the legacy ""
-            // bucket takes ALL orders: the exact pre-routing behaviour.
-            // Single pass over `live_orders()` order, so the drain order the
-            // historical bridge saw is untouched.
+            // the orders whose EXECUTION venue names ITS plugin — the placing
+            // account's binding resolves its OWN (venue, token) dual-key row
+            // (RFC-661 M1: a shared token carries one row per venue, so the
+            // account dimension is what keeps the poly account's order off
+            // the REAL venue's executor, and the reverse). An order whose
+            // execution venue resolves to nothing is UNTAGGED and routes to
+            // the ACTIVE plugin's drain — the single-plugin fallback the
+            // task pins. When no active plugin was ever set (hosts that
+            // skipped `set_active_plugin`, most in-process tests), the
+            // legacy "" bucket takes ALL orders: the exact pre-routing
+            // behaviour. Single pass over `live_orders()` order, so the
+            // drain order the historical bridge saw is untouched.
             let active = self
                 .active_plugin
                 .read()

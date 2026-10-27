@@ -2145,7 +2145,11 @@ impl Engine {
     /// byte-identical with the single-venue routing. The executor drain's
     /// routing truth: per-venue drains key on this, so a shared token's two
     /// accounts each reach their OWN executor and the poly account's live
-    /// order can never land on the real venue (nor the reverse).
+    /// order can never land on the real venue (nor the reverse). The account
+    /// parameter is the AMBIGUITY DISCRIMINATOR — on a shared token a
+    /// token-only read refuses (`venue_of` → None), so it stays (the M4 map
+    /// conjectured it was redundant; the pinned drain contract says
+    /// otherwise).
     pub fn execution_venue_for(&self, account: &str, token_id: &str) -> Option<String> {
         let bound = self.venue_by_account.get(account).filter(|v| !v.is_empty());
         if let Some(b) = bound {
