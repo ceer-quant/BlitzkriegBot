@@ -8423,6 +8423,18 @@ impl Core {
     /// their source is a `HashSet`, whose iteration order is randomised per
     /// process, and a report that shuffles between runs cannot be diffed.
     pub fn engine_stats_at(&self, as_of_ms: i64) -> serde_json::Value {
+        // P0 #670: fd 配额使用率——EMFILE 自旋（accept 刷日志写满磁盘）的
+        // 前夜观测。只在本次 stats 求值时算一次（面板轮询频率），不在数据/
+        // 订单路径上。open/usagePct 在 macOS 上为 null（无 procfs），
+        // critical 随之恒 false。
+        let probe_fd = crate::probe::fd_usage();
+        let probe_fd_json = serde_json::json!({
+            "soft": probe_fd.as_ref().map(|u| u.soft),
+            "hard": probe_fd.as_ref().map(|u| u.hard),
+            "open": probe_fd.as_ref().and_then(|u| u.open),
+            "usagePct": probe_fd.as_ref().and_then(|u| u.usage_pct()),
+            "critical": probe_fd.as_ref().is_some_and(|u| u.critical()),
+        });
         let mut confirmed = self
             .engine
             .as_ref()
@@ -8666,6 +8678,7 @@ impl Core {
             // * tickHealth: 最近 10s 汇总（窗口 tick 数/零 tick token/最长
             //   静默/断流 warn 计数）
             // * spot: 停更监控（最近更新时刻/停更时长/warn 计数）
+            // * fd: P0 #670 的 fd 配额使用率（函数开头算好的 probe_fd_json）。
             "probe": serde_json::json!({
                 "ntp": {
                     "synced": self.probe_ntp.last_offset_ms.is_some(),
@@ -8689,6 +8702,7 @@ impl Core {
                     "staleMs": self.probe_last_spot_stale_ms,
                     "staleWarnings": self.probe_spot.stale_warnings,
                 },
+                "fd": probe_fd_json,
             }),
         })
     }
