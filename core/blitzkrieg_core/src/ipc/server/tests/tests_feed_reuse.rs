@@ -1242,8 +1242,7 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
     let account = reread.account(&AccountId::from("paper")).expect("account");
     assert!(
         account.rounds.is_empty(),
-        "the deleted key boots unrestricted: {:?}",
-        account.rounds
+        "the deleted key boots unrestricted"
     );
 }
 
