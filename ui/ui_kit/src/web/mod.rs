@@ -421,6 +421,10 @@ pub fn render_json_full(
                 "ageSec": v.age_sec, "timeLeftSec": v.time_left_sec }))
                 .collect::<Vec<_>>() })),
         "positions": s.positions.iter().map(|p| serde_json::json!({
+            // The stable position id (hft-N) — the 持仓 card's per-row 强平
+            // button flattens by it (`flatten <id>`); without it the panel
+            // sent the literal `flatten undefined` and the click died silently.
+            "id": p.id,
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
             "strategy": p.strategy, "shares": p.shares,
@@ -3293,6 +3297,12 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["accountId"], serde_json::json!(""));
         assert_eq!(rows[1]["accountId"], serde_json::json!("paper"));
+        // The id rides through too (#678 follow-up): the 持仓 card's per-row
+        // 强平 flattens by it. A json!-literal omission here is exactly how
+        // the panel ended up sending the literal `flatten undefined` — the
+        // core always wrote the field, the gateway dropped it in re-assembly.
+        assert_eq!(rows[0]["id"], serde_json::json!("p1"));
+        assert_eq!(rows[1]["id"], serde_json::json!("p2"));
     }
 
     /// 账户↔venue 解耦（本轮）：the typed re-assembly in `render_json_full`
