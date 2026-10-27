@@ -43,7 +43,7 @@ const connBanner = computed(() => connectionBanner(snap.value))
 const freeze = computed(() => freezeBanner(stats.value))
 const lastError = computed(() => lastErrorBanner(stats.value, freeze.value !== null))
 const selfCheck = computed(() => selfCheckBanner(stats.value))
-// issue #669: the event archive stopped recording — the kernel's stop was a
+// issue 669: the event archive stopped recording — the kernel's stop was a
 // single journal line, so an operator found days of missing backtest corpus by
 // hand. The reading rule lives in lib/safety.ts like the other banners; this
 // one stays up on EVERY snapshot while `stats.archive.recording` is false.

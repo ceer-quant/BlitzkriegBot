@@ -1775,7 +1775,7 @@ export interface EngineStats {
   /** Trading freeze (kill switch) state. Older cores omit. */
   tradingFrozen?: { active: boolean; reason?: string } | null
   /**
-   * The market-data event archive's status (issue #669), mirrored from the
+   * The market-data event archive's status (issue 669), mirrored from the
    * kernel's `ArchiveStatus` (data_source.rs, camelCase on the wire). `null` =
    * no archive configured, or an older core. The stopped-recording banner
    * reads `recording` + `stoppedReason`.
