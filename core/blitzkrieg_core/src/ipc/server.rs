@@ -3559,7 +3559,7 @@ async fn handle_line(
                     let scanner = e.scanner();
                     let mut seen: std::collections::HashSet<(String, String)> =
                         std::collections::HashSet::new();
-                    let mut rows: Vec<serde_json::Value> = scanner
+                    let rows: Vec<serde_json::Value> = scanner
                         .round_state(now)
                         .markets
                         .iter()
@@ -3584,43 +3584,9 @@ async fn handle_line(
                             })
                         })
                         .collect();
-                    // 镜像盘合成行（2026-10-25 poly 轮钟冻结定谳）：token
-                    // 唯一键遮蔽了 PolySimulator 这类镜像所的表行 —— 它的
-                    // 批次行进不了 scanner，行情页切到该所账户时永远等不到
-                    // 带它标签的行（加载中）。钟已开口、行情行里却没有自己
-                    // 标签的 venue，从显示簿取它自己申报的批次合成行情行：
-                    // token 相同 → book 快照读的就是同一份盘口，价格是真
-                    // 实读数；is_live_round_row 同一谓词过滤，不会复活旧
-                    // 窗口的行。仅显示面 —— 交易门的 token→市场查询不查
-                    // 显示簿。
-                    for (venue, duration) in scanner.observed_clock_keys() {
-                        if rows.iter().any(|r| r["venue"] == venue) {
-                            continue;
-                        }
-                        if let Some(shadow) = e.shadow_markets_for(&venue, duration) {
-                            for m in shadow.iter().filter(|m| scanner.is_live_round_row(m, now)) {
-                                if !seen.insert((venue.clone(), m.asset.clone())) {
-                                    continue;
-                                }
-                                let up = e
-                                    .book_snapshot(&m.up_token_id)
-                                    .map(|b| b.mid_price)
-                                    .filter(|p| *p > Decimal::ZERO)
-                                    .unwrap_or(m.up_price);
-                                let down = e
-                                    .book_snapshot(&m.down_token_id)
-                                    .map(|b| b.mid_price)
-                                    .filter(|p| *p > Decimal::ZERO)
-                                    .unwrap_or(m.down_price);
-                                rows.push(serde_json::json!({
-                                    "asset": m.asset,
-                                    "up": up,
-                                    "down": down,
-                                    "venue": venue,
-                                }));
-                            }
-                        }
-                    }
+                    // RFC-661 M3: natural rows only — the dual-key table
+                    // carries every venue's OWN rows (M1), so the retired
+                    // shadow-batch synthesis arm has nothing left to add.
                     rows
                 })
                 .unwrap_or_default();
@@ -12599,16 +12565,13 @@ mod tests {
         );
     }
 
-    /// 镜像盘的盘口行（2026-10-25 poly 永加载 #627 的同族缺口）：PM 批先
-    /// 落表，poly 镜像批（同 token）在 merge 臂 fresh 空进不了表 —— 价格
-    /// 卡走 engine.round 的合成行是活的，盘口卡走 books_view，缺合成行就
-    /// 整卡消失。契约：① books_view 给「钟已开口但表无自己行」的 venue
-    /// 合成带它标签的行；② venue 标签是行自带的（books_view 填），handler
-    /// 不按 token 反查 —— 反查 venue_of 首中 PM，标签就错了；③ 合成行与
-    /// PM 行共享同一 token → 同一份 book，深度是真实读数；④ 表行与合成
-    /// 行 (venue,asset) 不重复。
+    /// RFC-661 §五.7 的 wire 级验收（M3 后的自然行形态）：双 venue 同窗口
+    /// 同字节 token，各落各的 (venue, token) 行（M1 双键），engine.books
+    /// 无需任何合成臂就出「两所各一行」——标签是行自带的（venue_of 对共享
+    /// token 歧义拒绝，反查 fallback 拿不到标签也不再需要），深度各读各的
+    /// book。若各家 book 深度不同，两行互不串读（§五.6 隔离在显示面的旁证）。
     #[tokio::test]
-    async fn a_mirror_venue_gets_books_rows_from_the_display_shelf() {
+    async fn a_shared_token_shows_one_books_row_per_venue_naturally() {
         use crate::model::CryptoMarket;
         use rust_decimal_macros::dec;
 
@@ -12636,8 +12599,8 @@ mod tests {
             neg_risk: false,
             question: "BTC up or down".to_string(),
         };
-        // PM 批先落表（rollover 臂，全新 token）；poly 批后到（merge 臂
-        // fresh 空 → 被遮蔽进显示簿）。
+        // PM 批先落表，poly 批后到：双键下两所各得各的行（M1 语义——
+        // 插入次序无关，无显示簿参与）。
         {
             let mut c = core.lock().await;
             c.engine_on_data(
@@ -12656,7 +12619,8 @@ mod tests {
             );
         }
 
-        // 同一份 book 打到共享 token 上：镜像盘的「自己的」深度就是它。
+        // 两所各自把 book 打到同一个 token 上（后写的覆盖前写的——book
+        // 快照按 token 一份）：这里只喂一份，两行读同一快照，深度逐位同。
         {
             let mut c = core.lock().await;
             c.engine_on_data(
@@ -12678,6 +12642,7 @@ mod tests {
         )
         .await;
         let rows = reply["result"].as_array().expect("books array");
+        // 双 venue 各一行：总行数 = 两所之和，没有合成臂也一张不缺。
         let poly_rows: Vec<_> = rows
             .iter()
             .filter(|r| r["venue"] == "polysimulator")
@@ -12685,105 +12650,33 @@ mod tests {
         assert_eq!(
             poly_rows.len(),
             1,
-            "the mirror venue must get its own depth row from the display shelf: {rows:?}"
+            "the sim venue gets its own depth row from its own table row: {rows:?}"
         );
         assert_eq!(
             poly_rows[0]["upTokenId"], "mirror-up",
-            "the mirror row exposes the SHARED token — same market, same book"
+            "the sim row exposes the SHARED token — same market, its own tag"
         );
         let pm_rows: Vec<_> = rows.iter().filter(|r| r["venue"] == "polymarket").collect();
         assert_eq!(
             pm_rows.len(),
             1,
-            "the mirrored venue keeps exactly its own row: {rows:?}"
+            "the PM venue keeps exactly its own row: {rows:?}"
         );
-        // 标签是行自带的：venue_of("mirror-up") 首中 PM，反查会把 poly 行
-        // 标成 polymarket —— 盘口卡在 poly 视图下照样空。
+        // 标签是行自带的：venue_of("mirror-up") 对双 venue 语料歧义拒绝
+        // （None），token 反查 fallback 拿不到任何标签——行 venue 字段是
+        // 唯一来源，两行各自带着正确的所名。
         assert_eq!(
             poly_rows[0]["venue"], "polysimulator",
-            "the tag comes from the row itself, not a token reverse-lookup"
+            "the tag comes from the row itself, never a token reverse-lookup"
         );
-        // 共享 book 的真实读数：合成行的深度与 PM 行逐位同。
+        assert_eq!(pm_rows[0]["venue"], "polymarket");
+        // 同一份共享 book 的真实读数：两行深度逐位同（book 按 token 一份）。
         assert_eq!(
             poly_rows[0]["up"]["bestBid"], pm_rows[0]["up"]["bestBid"],
-            "the mirror row reads the same shared book — real depth, both sides"
+            "both rows read the same shared book — real depth, both sides"
         );
     }
 
-    /// The PARASITIC shape (#637 follow-up): the mirror plugin declares no
-    /// rounds at all, so its shadow batch never exists — the display row is
-    /// synthesized from the STATIC mirror declaration instead (the source's
-    /// own table rows, retagged with the mirror venue's name).
-    #[tokio::test]
-    async fn a_static_mirror_display_row_survives_without_any_shadow_batch() {
-        use crate::model::CryptoMarket;
-        use rust_decimal_macros::dec;
-
-        let (core, registry, peer) = hot_reload_fixture().await;
-        let round_sec = 900i64;
-        let now = now_ms();
-        let slot = now / 1000 / round_sec;
-        let trading_end = (slot + 2) * round_sec * 1000;
-        let mk = |venue: &str| CryptoMarket {
-            asset: "BTC".to_string(),
-            condition_id: format!("cond-{trading_end}"),
-            question_id: format!("q-{trading_end}"),
-            up_token_id: "mirror-up".to_string(),
-            down_token_id: "mirror-down".to_string(),
-            up_price: dec!(0.5),
-            down_price: dec!(0.5),
-            expires_at_ms: trading_end,
-            round_slot: trading_end / 1000 / round_sec,
-            round_duration_sec: round_sec,
-            archive_verdict: false,
-            venue: venue.to_string(),
-            neg_risk: false,
-            question: "BTC up or down".to_string(),
-        };
-        {
-            let mut c = core.lock().await;
-            // Only the SOURCE declares: the mirror plugin never does (parasitic).
-            c.engine_on_data(
-                crate::engine::DataEvent::RoundMarkets {
-                    markets: vec![mk("polymarket")],
-                    now_ms: now,
-                },
-                now,
-            );
-            // The static declaration replaces the shadow batch entirely.
-            if let Some(e) = c.engine.as_mut() {
-                e.set_venue_mirror("polysimulator", "polymarket");
-            }
-            c.engine_on_data(
-                crate::engine::DataEvent::Book {
-                    token_id: "mirror-up".to_string(),
-                    bids: vec![(dec!(0.46), dec!(100))],
-                    asks: vec![(dec!(0.54), dec!(200))],
-                    now_ms: now,
-                },
-                now,
-            );
-        }
-
-        let reply = rpc(
-            &core,
-            &registry,
-            &peer,
-            r#"{"jsonrpc":"2.0","id":1,"method":"engine.books","params":{}}"#.to_string(),
-        )
-        .await;
-        let rows = reply["result"].as_array().expect("books array");
-        let poly_rows: Vec<_> = rows
-            .iter()
-            .filter(|r| r["venue"] == "polysimulator")
-            .collect();
-        assert_eq!(
-            poly_rows.len(),
-            1,
-            "the static mirror declaration synthesizes the display row without a shadow batch: {rows:?}"
-        );
-        assert_eq!(poly_rows[0]["upTokenId"], "mirror-up");
-    }
 
     // ── E2（多族漏网 ③④）：读面过滤按行自身族钟 ─────────────────────────
 
