@@ -432,7 +432,15 @@ const statTile = read('src', 'components', 'ui', 'stat', 'StatTile.vue')
 const statRow = read('src', 'components', 'ui', 'stat', 'StatRow.vue')
 
 /** Strip CSS and template comments so prose about a rule cannot trip a rule. */
-const code = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+const code = (s) => {
+  let prev
+  let out = s
+  do {
+    prev = out
+    out = out.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+  } while (out !== prev)
+  return out
+}
 
 check('a number rendered as text is a rolling number', () => {
   // The whole point of the sweep: a figure that changes under the reader should
