@@ -444,16 +444,6 @@ pub struct Engine {
     /// IN THE ENGINE — cheaper than a place-time refusal and it keeps the
     /// rejection-cooldown book free of entries that were never tradable.
     venue_by_account: HashMap<String, String>,
-    /// Static mirror relationships between venues: `mirror_of[mirror] =
-    /// source` — the mirror venue trades its source's tokens (byte-identical
-    /// ids) through its own executor while the source's feed owns the table
-    /// rows. PolySimulator is a CONSTRUCTIVE mirror of Polymarket (its token
-    /// ids ARE Polymarket's by construction), so its admission/routing
-    /// evidence no longer depends on its own round declarations surviving a
-    /// merge (the #634 shadow batch — which dies when the parasitic plugin
-    /// stops declaring rounds). Written by the host from the plugin's
-    /// declared mirror relationship; absent = not a mirror.
-    mirror_of: HashMap<String, String>,
     /// Signals the equity-relative sizing produced NO ticket for (#202) —
     /// a budget that cannot buy one whole share. Counted rather than silent:
     /// "why is nothing trading?" must be answerable from the stats snapshot.
@@ -488,18 +478,6 @@ pub struct Engine {
     /// effective account_id 相同 ⇒ 拒绝声明）。Core 转 APPLICATION 错误
     /// 事件（点名字段）；被拒声明对应的腿声明不产出（订单路径照旧）。
     pair_refusals: Vec<String>,
-    /// 镜像盘显示簿（2026-10-25 poly 轮钟冻结定谳）：PolySimulator 镜像
-    /// Polymarket —— 同窗口的 condition/token id 逐字节相同（生产档案
-    /// 证实）。scanner 表按 token 唯一键行走（`market_for_token`/
-    /// `venue_of` 都是一查即中），两家的行不能并存 —— 后到的那家批次在
-    /// merge 臂被判「全是已知 token」吞掉，它的 (venue, duration) 轮钟
-    /// 与行情行双双落不了地，面板切到该所账户永远「加载中」。
-    ///
-    /// RFC-661 M1 更新：写路径已退役（双键表让每个 venue 的行自然落表，
-    /// fresh-empty 臂只对同 venue 真重复申报触发，此刻 `has_own_rows`
-    /// 恒真，insert 分支永不可达）。结构壳（字段 + `shadow_markets_for`
-    /// 读视图 + 消费端合成臂）留给 M3 拆除；当前簿恒空。
-    shadow_markets: HashMap<(String, i64), Vec<CryptoMarket>>,
 }
 
 /// RFC 568 阶段一：一条过了 scope 门的配对声明（engine → Core 的提交伴生
@@ -549,14 +527,12 @@ impl Engine {
             trading_by_account: HashMap::new(),
             frozen_by_account: HashMap::new(),
             venue_by_account: HashMap::new(),
-            mirror_of: HashMap::new(),
             size_pct_skipped: 0,
             klines: crate::kline::KlineAggregator::with_default_intervals(),
             unified_mappings: std::collections::BTreeMap::new(),
             arb_leg_config: None,
             pair_declarations: Vec::new(),
             pair_refusals: Vec::new(),
-            shadow_markets: HashMap::new(),
         }
     }
 
@@ -675,40 +651,6 @@ impl Engine {
     pub fn set_account_venue(&mut self, account: &str, venue: &str) {
         self.venue_by_account
             .insert(account.to_string(), venue.to_string());
-    }
-
-    /// Declare a static mirror relationship: `mirror` trades its `source`'s
-    /// tokens (byte-identical ids) through its own executor while the source's
-    /// feed owns the table rows. THE transitional admission/routing evidence
-    /// (RFC-661 M1 keeps the mirror table for the parasitic shape — M3
-    /// retires it with the whole bridge): a binding whose venue holds NO own
-    /// dual-key row rides the token-only unique-candidate lookup, and the
-    /// declaration routes it. It survives the mirror venue going quiet (the
-    /// parasitic PolySimulator never declares rounds), where runtime
-    /// observation would wobble with the feed (#643 retired the shadow-batch
-    /// fallback).
-    pub fn set_venue_mirror(&mut self, mirror: &str, source: &str) {
-        if mirror.is_empty() || source.is_empty() || mirror == source {
-            self.mirror_of.remove(mirror);
-            return;
-        }
-        self.mirror_of
-            .insert(mirror.to_string(), source.to_string());
-    }
-
-    /// The venue `mirror` statically mirrors (`None` when it declares none).
-    pub(crate) fn mirror_source_of<'a>(&'a self, mirror: &str) -> Option<&'a str> {
-        self.mirror_of.get(mirror).map(|s| s.as_str())
-    }
-
-    /// Every static mirror declaration as (mirror, source) pairs — the
-    /// display plane's synthesis loop iterates these (a parasitic mirror
-    /// venue has NO observed clock of its own to loop over).
-    pub(crate) fn mirror_pairs(&self) -> Vec<(String, String)> {
-        self.mirror_of
-            .iter()
-            .map(|(m, s)| (m.clone(), s.clone()))
-            .collect()
     }
 
     /// The equity a scope's sizing reads: the account's own pushed book for
@@ -844,16 +786,6 @@ impl Engine {
 
     pub fn scanner(&self) -> &Scanner {
         &self.scanner
-    }
-
-    /// 镜像盘显示簿的只读视图（行情装配层专用）：该 (venue, duration) 族
-    /// 的批次被 token 唯一键遮蔽时，这里能取到该所自己申报的整批行。交易
-    /// 面没有任何路径读它 —— 镜像盘与被镜像所共享 token，一份表行就是全
-    /// 部交易事实；镜像归属裁决读 `mirror_of` 自声明（#643）。
-    pub fn shadow_markets_for(&self, venue: &str, duration_sec: i64) -> Option<&[CryptoMarket]> {
-        self.shadow_markets
-            .get(&(venue.to_string(), duration_sec))
-            .map(Vec::as_slice)
     }
 
     /// The scanner market a token belongs to (either side), if any. Multi-plugin
@@ -1162,17 +1094,16 @@ impl Engine {
                         // (venue, duration) clock re-speaks (observe is
                         // idempotent for a same-venue re-declaration — the
                         // same value rewrites the same key, state
-                        // byte-identical).
-                        //
-                        // RFC-661 M1 note: this arm is reachable ONLY for a
-                        // same-venue re-feed now — a sibling venue's batch
+                        // byte-identical). #550: the re-speak IS the clock
+                        // opening for this (venue, duration) family — a
+                        // duplicate re-feed whose clock never spoke would
+                        // strand the panel countdown at 00:00 on an account
+                        // switch. RFC-661 M1: this arm is reachable ONLY for
+                        // a same-venue re-feed now — a sibling venue's batch
                         // (byte-identical tokens included) carries fresh
-                        // tokens for ITS venue and lands its own rows below.
-                        // The #638 shadow_markets display book is retired as
-                        // a WRITE target (M1 keeps the struct for M3 to tear
-                        // out): the dual-key table carries every venue's
-                        // rows naturally, so there is no "shadowed venue"
-                        // left to synthesize display rows for.
+                        // tokens for ITS venue and lands its own rows below;
+                        // the dual-key table carries every venue's rows
+                        // naturally (the #638 display book is gone).
                         self.scanner.observe_end_time_for(
                             &batch_venue_tag,
                             feed_duration,
@@ -3978,9 +3909,7 @@ mod tests {
         // 显示簿 —— #627「token 全局唯一一份行」不变式被 §4.3 双键正面废
         // 除）：同字节 token 在两个 venue 下是两个独立标的。PM 批先落，
         // poly 批同 slot 到达时按 (venue, token) 双键各落各的行 —— 插入
-        // 次序无关；shadow_markets 作为写目标同步退役（M1 停写，M3 拆
-        // 壳）：双键表天然承载每个 venue 的行，没有「被遮蔽所」再需要
-        // 合成显示行。
+        // 次序无关；M3 拆壳后双键表是唯一市场存储，没有「被遮蔽所」。
         let mut e = Engine::new(cfg());
         let end = 1_800_000; // slot 2
         // Polymarket lands first: a rollover puts its row in the table and
@@ -4025,13 +3954,6 @@ mod tests {
                 .any(|(v, d)| v == "polysimulator" && *d == 900),
             "the second venue's same-slot batch must open its own (venue, duration) clock"
         );
-        // The retired write path: the display book never fills again — the
-        // dual-key table is the only market store (M3 removes the struct).
-        assert!(
-            e.shadow_markets_for("polysimulator", 900).is_none(),
-            "shadow_markets is retired as a write target: the dual-key table carries the rows"
-        );
-
         // A genuine duplicate re-feed of the SAME venue stays idempotent —
         // the same-venue merge semantics survive verbatim: no third row, no
         // churn.
@@ -4317,10 +4239,6 @@ mod tests {
                 .iter()
                 .any(|(v, d)| v == "polymarket" && *d == 900),
             "the second venue's same-slot batch opened its own (venue, duration) clock"
-        );
-        assert!(
-            e.shadow_markets_for("polymarket", 900).is_none(),
-            "the display book never fills, in either landing order"
         );
         assert!(
             e.scanner.market_for_token("mirror-up").is_none(),

@@ -12677,7 +12677,6 @@ mod tests {
         );
     }
 
-
     // ── E2（多族漏网 ③④）：读面过滤按行自身族钟 ─────────────────────────
 
     /// A daily (86400s) family rides the SAME scanner beside the 15m family
