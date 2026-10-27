@@ -1,0 +1,19 @@
+[package]
+name = "blitzkrieg-onchain-pull"
+version.workspace = true
+edition = "2024"
+description = "#352 offline on-chain data pull + conversion: Polymarket Data/Gamma/CLOB APIs -> backtest JSONL. Moved verbatim out of the kernel crate (issue #648 C): the kernel keeps the --onchain-pull flag, this crate is the implementation."
+
+[dependencies]
+# The replay-stream data contract (DataEvent + event_to_json) — the leaf the
+# core itself uses, so the puller produces byte-identical archives.
+blitzkrieg-data-model = { path = "../../core/data_model" }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rust_decimal = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }

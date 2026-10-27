@@ -9,9 +9,11 @@
 //! fail-closed before anything spawns.
 //!
 //! Job kinds:
-//! - `pull`     — one [`crate::onchain::pull_and_convert`] (per asset filter;
-//!                an empty `assets` list is one unfiltered pull). Resumable and
-//!                cached exactly like the #352 CLI.
+//! - `pull`     — one [`blitzkrieg_onchain_pull::pull_and_convert`] (per asset
+//!                filter; an empty `assets` list is one unfiltered pull).
+//!                Resumable and cached exactly like the #352 CLI. The pull
+//!                implementation lives in the `blitzkrieg-onchain-pull` crate
+//!                (#648 C); this registry only drives it.
 //! - `backtest` — one replay (or a #351 latency ladder for `sweep`): open the
 //!                dataset, drive [`EventBacktester`], file the report JSON
 //!                next to the dataset so it survives a core restart (the job
@@ -25,8 +27,8 @@ use crate::backtest::{
     BacktestConfig, Backtester, EventBacktester, latency_verdict, mode_rung_model, mode_rungs,
 };
 use crate::data_source::open_replay_all;
-use crate::onchain::{self, HttpFetcher, PullProgress, PullRequest};
 use crate::service::CoreConfig;
+use blitzkrieg_onchain_pull::{HttpFetcher, PullProgress, PullRequest};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -284,8 +286,10 @@ impl BacktestJobs {
         if p.wallet.len() < 40 || !p.wallet.starts_with("0x") {
             return Err(format!("`{}` is not a 0x… wallet address", p.wallet));
         }
-        let start_sec = onchain::parse_time_arg(&p.start).map_err(|e| format!("start: {e}"))?;
-        let end_sec = onchain::parse_time_arg(&p.end).map_err(|e| format!("end: {e}"))?;
+        let start_sec =
+            blitzkrieg_onchain_pull::parse_time_arg(&p.start).map_err(|e| format!("start: {e}"))?;
+        let end_sec =
+            blitzkrieg_onchain_pull::parse_time_arg(&p.end).map_err(|e| format!("end: {e}"))?;
         if end_sec <= start_sec {
             return Err(format!("empty window [{} → {}]", p.start, p.end));
         }
@@ -331,7 +335,7 @@ impl BacktestJobs {
             tokio::spawn(async move {
                 let fetcher = HttpFetcher::new(150);
                 let cb = |prog: &PullProgress| jobs.note_pull(&id2, prog);
-                match onchain::pull_and_convert(&fetcher, &req, &cb).await {
+                match blitzkrieg_onchain_pull::pull_and_convert(&fetcher, &req, &cb).await {
                     Ok(out) => {
                         let label = asset.unwrap_or_default();
                         jobs.finish(

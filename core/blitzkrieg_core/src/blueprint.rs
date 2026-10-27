@@ -34,7 +34,7 @@
 //! capability names. Every suggestion the kernel adopts still runs the same
 //! adjudication, sizing and gating seal as a handwritten strategy's.
 //!
-//! Errors are `String` in the onchain.rs house style: each one names the node
+//! Errors are `String` in the onchain-pull house style: each one names the node
 //! id (and the offending value) so a blueprint author can fix the JSON
 //! without a debugger.
 
