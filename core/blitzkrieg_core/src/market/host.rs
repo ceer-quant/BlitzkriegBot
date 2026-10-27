@@ -1357,4 +1357,182 @@ mod tests {
             MarketType::Prediction
         }
     }
+
+    // ── RFC-661 M2: the feed_source reuse fan-out (the host half) ───────────
+
+    /// One upstream round batch from `source`, tagged for the wire exactly as
+    /// a discovery hands it over. Tokens are the SAME byte strings every
+    /// consumer re-registers — the reuse premise (shared token space). The
+    /// expiry rides the REAL clock's current 900s window: the scanner's clock
+    /// guard refuses a declaration more than two rounds from `now_ms()`, so a
+    /// fixed fixture timestamp would silently open no round clock.
+    fn reuse_batch(source: &str, up: &str, down: &str) -> Vec<blitzkrieg_market_api::MarketDescriptor> {
+        let slot = blitzkrieg_market_api::net::now_ms() / 1000 / 900;
+        vec![blitzkrieg_market_api::MarketDescriptor {
+            asset: "BTC".to_string(),
+            condition_id: format!("cond-{up}"),
+            question_id: "q".to_string(),
+            up_token_id: up.to_string(),
+            down_token_id: down.to_string(),
+            up_price: dec!(0.55),
+            down_price: dec!(0.45),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            venue: source.to_string(),
+            neg_risk: false,
+            question: "reuse batch".to_string(),
+        }]
+    }
+
+    /// The scanner rows a token holds, as (venue, up_token) pairs — the
+    /// dual-key read the fan-out assertions walk.
+    fn rows_for(c: &Core, token: &str) -> Vec<(String, String)> {
+        c.engine
+            .as_ref()
+            .map(|e| {
+                e.scanner()
+                    .markets()
+                    .iter()
+                    .filter(|m| m.up_token_id == token || m.down_token_id == token)
+                    .map(|m| (m.venue.clone(), m.up_token_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// M2 §4.1: ONE upstream round batch re-registers under every declared
+    /// consumer's OWN venue identity — the source keeps its row, the consumer
+    /// gains its own `(venue, token)` row (M1's dual-key table), and the
+    /// engine reads both as native.
+    #[tokio::test]
+    async fn a_feed_source_consumer_re_registers_the_source_batch_under_its_own_venue() {
+        let c = two_venue_live_core();
+        let core = std::sync::Arc::new(tokio::sync::Mutex::new(c));
+        let host = CoreHost::new(core.clone());
+        host.set_active_plugin("polymarket");
+        let reuse = FeedReuse::default();
+        reuse.add_edge("polymarket", "polymarket"); // the source speaks too
+        reuse.add_edge("simspace", "polymarket"); // the declared consumer
+        host.set_feed_reuse(reuse);
+
+        host.on_round_markets(reuse_batch("polymarket", "share-up", "share-down")).await;
+
+        let c = core.lock().await;
+        let rows = rows_for(&c, "share-up");
+        assert_eq!(
+            rows.len(),
+            2,
+            "the byte-identical token holds TWO rows after the fan-out: {rows:?}"
+        );
+        let mut venues: Vec<&str> = rows.iter().map(|(v, _)| v.as_str()).collect();
+        venues.sort_unstable();
+        assert_eq!(
+            venues,
+            vec!["polymarket", "simspace"],
+            "each venue's row carries ITS OWN identity: {rows:?}"
+        );
+        // The M1 read-back: each venue resolves the token to ITS OWN row, and
+        // the token-only legacy lookup refuses as ambiguous (never first-hit).
+        assert_eq!(c.venue_of_token("share-down"), "");
+        let scanner = c.engine.as_ref().expect("engine").scanner();
+        assert!(scanner.market_for_token_on_venue("simspace", "share-up").is_some());
+        assert!(scanner.market_for_token_on_venue("polymarket", "share-up").is_some());
+        assert!(
+            scanner.market_for_token("share-up").is_none(),
+            "two venues hold the token: the token-only lookup must refuse, not first-hit"
+        );
+        // The consumer's own round clock opened (its row spoke its own expiry).
+        let clocks = c
+            .engine
+            .as_ref()
+            .expect("engine")
+            .scanner()
+            .observed_venue_keys();
+        assert!(
+            clocks.iter().any(|v| v == "simspace"),
+            "the consumer's re-registered row opens its own round clock: {clocks:?}"
+        );
+    }
+
+    /// M2 §4.1 (fan-out shape): two INDEPENDENT consumer→source edges never
+    /// re-register each other's batches — source A's batch fans out ONLY to
+    /// A's consumers, source B's only to B's (a flat venue list would cross
+    /// the two token spaces). All declared, none hardcoded: the edges are the
+    /// plugins' declarations replayed through the host.
+    #[tokio::test]
+    async fn two_consumer_source_edges_never_re_register_each_others_batches() {
+        let c = two_venue_live_core();
+        let core = std::sync::Arc::new(tokio::sync::Mutex::new(c));
+        let host = CoreHost::new(core.clone());
+        host.set_active_plugin("polymarket");
+        let reuse = FeedReuse::default();
+        reuse.add_edge("polymarket", "polymarket");
+        reuse.add_edge("cons_a", "src_a");
+        reuse.add_edge("cons_b", "src_b");
+        host.set_feed_reuse(reuse);
+
+        // Source A's batch: only cons_a may re-register it.
+        host.on_round_markets(reuse_batch("src_a", "a-up", "a-down")).await;
+        // Source B's batch: only cons_b may re-register it.
+        host.on_round_markets(reuse_batch("src_b", "b-up", "b-down")).await;
+
+        let c = core.lock().await;
+        let a_rows = rows_for(&c, "a-up");
+        let a_venues: Vec<&str> = a_rows.iter().map(|(v, _)| v.as_str()).collect();
+        assert!(
+            a_venues.contains(&"cons_a") && !a_venues.contains(&"cons_b"),
+            "A's batch re-registers under cons_a ONLY: {a_rows:?}"
+        );
+        let b_rows = rows_for(&c, "b-up");
+        let b_venues: Vec<&str> = b_rows.iter().map(|(v, _)| v.as_str()).collect();
+        assert!(
+            b_venues.contains(&"cons_b") && !b_venues.contains(&"cons_a"),
+            "B's batch re-registers under cons_b ONLY: {b_rows:?}"
+        );
+    }
+
+    /// M2 (数据面归属): the consumer's row is a REAL row — a follow-up book
+    /// on the shared token prices the consumer's OWN market read, and the
+    /// upstream repricing lands on both rows (one connection, two venues'
+    /// views). Books stay token-keyed (one upstream event applies once); the
+    /// per-venue rows read the same book.
+    #[tokio::test]
+    async fn consumer_rows_read_the_reused_stream_and_stay_venue_distinct() {
+        let c = two_venue_live_core();
+        let core = std::sync::Arc::new(tokio::sync::Mutex::new(c));
+        let host = CoreHost::new(core.clone());
+        host.set_active_plugin("polymarket");
+        let reuse = FeedReuse::default();
+        reuse.add_edge("polymarket", "polymarket");
+        reuse.add_edge("simspace", "polymarket");
+        host.set_feed_reuse(reuse);
+
+        host.on_round_markets(reuse_batch("polymarket", "flow-up", "flow-down")).await;
+        // The upstream book, once (ONE connection feeding both venues).
+        host.on_book(blitzkrieg_market_api::BookUpdate {
+            token_id: "flow-up".to_string(),
+            bids: vec![(dec!(0.51), dec!(10))],
+            asks: vec![(dec!(0.55), dec!(10))],
+            ts_ms: 20_000,
+        })
+        .await;
+
+        let c = core.lock().await;
+        // Both rows survived the book (a merge would have dropped one).
+        let rows = rows_for(&c, "flow-up");
+        assert_eq!(rows.len(), 2, "the book application must keep both rows: {rows:?}");
+        // The book snapshot is readable THROUGH each venue's own row: same
+        // bytes, two owners — the OME cannot tell the consumer from a native.
+        for venue in ["polymarket", "simspace"] {
+            let m = c
+                .engine
+                .as_ref()
+                .expect("engine")
+                .scanner()
+                .market_for_token_on_venue(venue, "flow-up")
+                .expect("the venue's own row");
+            assert_eq!(m.venue, venue, "each read resolves to the venue's own row");
+        }
+        assert_eq!(c.venue_of_token("flow-up"), "");
+    }
 }

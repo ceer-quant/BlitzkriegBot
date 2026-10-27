@@ -287,11 +287,15 @@ impl DataPlaneRuntime {
     /// duration (the historical single-instance posture), and every account
     /// `rounds` family gains its own discovery instance — the boot half of
     /// 轮次多族's instance pool. Feed mounts stay per-venue and are visible
-    /// through [`Self::venue_mounted`].
+    /// through [`Self::venue_mounted`]. The reuse cell installs here seeded
+    /// with the BOOT-ACTIVE consumers' declared edges only — an inactive
+    /// plugin never gains a data-plane face (a later runtime bind appends
+    /// its edge through [`Self::feed_reuse`]).
     fn at_boot(
         config: &CoreConfig,
         actives: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
         accounts: &[crate::account::Account],
+        registry: &crate::market::registry::MarketPluginRegistry,
     ) -> Self {
         let global = config.round_duration_sec;
         let mut pairs = std::collections::BTreeSet::new();
@@ -311,6 +315,20 @@ impl DataPlaneRuntime {
                 }
             }
         }
+        // RFC-661 M2: the boot-seeded reuse edges — every boot-ACTIVE plugin
+        // whose `feed_source` names a COMPILED-IN plugin. A declaration whose
+        // plugin is not enabled this boot registers NOTHING (inactive plugins
+        // get no data plane); the runtime mount path appends the edge when an
+        // account actually binds the consumer.
+        let feed_reuse = crate::market::host::FeedReuse::default();
+        for p in actives {
+            if let Some(src) = p
+                .feed_source()
+                .filter(|src| registry.get(src).is_some())
+            {
+                feed_reuse.add_edge(p.name(), src);
+            }
+        }
         Self {
             feed_ws_enabled: config.feed_ws_enabled,
             discovery_enabled: config.engine_enabled && config.discovery_enabled,
@@ -320,7 +338,7 @@ impl DataPlaneRuntime {
             soft_unloaded_polling_instances: std::sync::Arc::new(
                 std::sync::atomic::AtomicUsize::new(0),
             ),
-            feed_reuse: None,
+            feed_reuse: Some(feed_reuse),
         }
     }
 
@@ -365,19 +383,19 @@ impl DataPlaneRuntime {
         self.feed_reuse.as_ref()
     }
 
-    /// Every declared consumer→source edge this session can name (boot
-    /// actives seed it; runtime binds append). The source-mapped registry
-    /// walk: a plugin whose `feed_source` names a COMPILED-IN plugin is an
-    /// edge; a declaration naming nothing registered is inert (the consumer
-    /// then runs its own mounts — the declaration's absence-of-upstream
-    /// contract simply has no upstream to reuse).
+    /// Every declared consumer→source edge among `plugins` (the boot actives;
+    /// a runtime bind appends its own edge through [`FeedReuse::add_edge`]).
+    /// A plugin whose `feed_source` names a COMPILED-IN plugin is an edge; a
+    /// declaration naming nothing registered is inert (the consumer then runs
+    /// its own mounts — the declaration's absence-of-upstream contract simply
+    /// has no upstream to reuse). An INACTIVE plugin appears in no edge list:
+    /// it gets no data-plane face until an account binds it.
     fn declared_feed_edges(
+        plugins: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
         registry: &crate::market::registry::MarketPluginRegistry,
     ) -> Vec<crate::market::host::FeedReuseEdge> {
-        let mut edges: Vec<crate::market::host::FeedReuseEdge> = registry
-            .names()
+        let mut edges: Vec<crate::market::host::FeedReuseEdge> = plugins
             .iter()
-            .filter_map(|n| registry.get(n))
             .filter_map(|p| {
                 p.feed_source()
                     .filter(|src| registry.get(src).is_some())
@@ -579,7 +597,7 @@ async fn enable_venue_at_runtime(
         let reuse = data_plane.feed_reuse();
         // The declared edge (idempotent): a re-bind of the same consumer
         // appends nothing.
-        let added = match reuse {
+        match reuse {
             Some(r) => r.add_edge(name, src),
             None => false,
         };
@@ -588,45 +606,75 @@ async fn enable_venue_at_runtime(
             .as_ref()
             .map(|sp| data_plane.venue_mounted(sp.name()))
             .unwrap_or(false);
-        if let Some(sp) = source_plugin.filter(|_| !source_enabled) {
-            // The source's data plane must run for the consumer to eat: mount
-            // it exactly once (the venue_mounted set dedupes concurrent
-            // binds — the same guard the (venue, duration) pairs use).
-            if feed_ws_enabled && sp.data_feed().is_some() {
-                let feed = sp.data_feed().expect("checked above");
-                let cfg = blitzkrieg_market_api::DataFeedConfig::default();
-                let ok = match feed.start(host.clone(), cfg, Vec::new()).await {
-                    Err(e) => {
-                        eprintln!("blitzkrieg-core: data feed start failed for {src}: {e}");
-                        false
+        if let Some(sp) = source_plugin {
+            // Whether the SOURCE's feed actually started this bind — the
+            // venue-mounted mark at the bottom fires only on a real start,
+            // so a failed start stays retryable by the next consumer bind.
+            let mut feed_started = false;
+            // The source's FEED mounts only when the source is not already
+            // venue-mounted (boot actives / an earlier bind): the per-venue
+            // guard keeps the upstream at ONE feed for any number of
+            // consumers and re-binds.
+            if !source_enabled {
+                if feed_ws_enabled {
+                    match sp.data_feed() {
+                        Some(feed) => {
+                            let cfg = blitzkrieg_market_api::DataFeedConfig::default();
+                            let ok = match feed.start(host.clone(), cfg, Vec::new()).await {
+                                Err(e) => {
+                                    eprintln!(
+                                        "blitzkrieg-core: data feed start failed for {src}: {e}"
+                                    );
+                                    false
+                                }
+                                Ok(()) => true,
+                            };
+                            if ok {
+                                feed_started = true;
+                                if let Some(r) = reuse {
+                                    r.mounts
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                eprintln!(
+                                    "blitzkrieg-core: feed started for {src} (consumer {name}'s \
+                                     upstream; no executor mounted)"
+                                );
+                                // NOT mark_mounted here: the mount set is shared by
+                                // the feed guard (`venue_mounted`) and the discovery
+                                // guard (`discovery_mounted_at`) — marking the source
+                                // now would insert (src, global) and make the
+                                // discovery loop below read every family as
+                                // already-mounted, skipping the source's discovery
+                                // entirely.
+                            }
+                        }
+                        None => {
+                            eprintln!(
+                                "blitzkrieg-core: {src} declares no data feed — nothing to mount"
+                            );
+                        }
                     }
-                    Ok(()) => true,
-                };
-                if ok {
-                    if let Some(r) = reuse {
-                        r.mounts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    eprintln!(
-                        "blitzkrieg-core: feed started for {src} (consumer {name}'s upstream; \
-                         no executor mounted)"
-                    );
-                    data_plane.mark_mounted(src);
                 }
+            } else {
+                eprintln!(
+                    "blitzkrieg-core: {name} consumes {src}'s stream (already mounted — no second \
+                     upstream)"
+                );
             }
             if discovery_enabled {
                 for (_, duration) in families {
-                    let Some(disc) = sp.discovery() else {
-                        eprintln!(
-                            "blitzkrieg-core: {src} declares no discovery — nothing to mount"
-                        );
-                        continue;
-                    };
                     // Per-(source, family) idempotence: the same guard the
                     // venue's own mount uses — a consumer binding onto an
                     // already-mounted family must not duplicate the instance.
                     if data_plane.discovery_mounted_at(src, *duration) {
                         continue;
                     }
+                    let Some(disc) = sp.discovery() else {
+                        eprintln!(
+                            "blitzkrieg-core: {src} declares no discovery — nothing to mount"
+                        );
+                        continue;
+                    };
                     let cfg = blitzkrieg_market_api::DiscoveryConfig {
                         assets: discovery_assets.to_vec(),
                         round_duration_sec: *duration,
@@ -653,11 +701,18 @@ async fn enable_venue_at_runtime(
                     }
                 }
             }
-        } else if !added {
-            eprintln!(
-                "blitzkrieg-core: {name} consumes {src}'s stream (already mounted — no second \
-                 upstream)"
-            );
+            // The feed's idempotence mark lands AFTER the discovery loop:
+            // the first bind mounts the feed and every family, THEN records
+            // the source as venue-mounted — a later consumer bind (or a
+            // re-bind) reads `venue_mounted(src)` == true and skips both
+            // arms entirely. Marking before the loop would poison the
+            // discovery guard (same set, same key shape); marking on a
+            // FAILED start would wedge the source unmounted-but-marked.
+            // No feed declared → nothing to retry: mark so the source still
+            // counts as mounted (its discovery is the only component).
+            if feed_started || (feed_ws_enabled && sp.data_feed().is_none()) {
+                data_plane.mark_mounted(src);
+            }
         }
         // The consumer's OWN data components never start: the fan-out is its
         // registrar. Fall through — the historical mounts below are skipped.
@@ -1007,23 +1062,19 @@ pub async fn run(
         .into_iter()
         .cloned()
         .collect();
-    let data_plane = DataPlaneRuntime::at_boot(&config, &actives, &account_families);
+    let data_plane = DataPlaneRuntime::at_boot(&config, &actives, &account_families, &registry);
 
-    // RFC-661 M2: the feed_source reuse plane. Any plugin whose `feed_source`
-    // names a COMPILED-IN plugin is a declared consumer; the host re-registers
-    // its source's upstream round batches under the consumer's own venue
-    // identity. The cell lives on the data plane (the runtime mount path and
-    // this boot share one truth); the concrete host gets an Arc-shared clone
-    // below so its `on_round_markets` fan-out reads the same edges the mount
-    // path writes. `mounts` counts every REUSED-stream mount attempt — the
-    // falsifiable claim「上游连接一份」reads it (one per source stream, N
-    // consumers notwithstanding).
-    let declared_edges = DataPlaneRuntime::declared_feed_edges(&registry);
+    // RFC-661 M2: the feed_source reuse plane. The cell lives on the data
+    // plane (`at_boot` seeded it with the boot-ACTIVE consumers' declared
+    // edges — an inactive plugin registers nothing); the concrete host gets
+    // an Arc-shared clone below so its `on_round_markets` fan-out reads the
+    // same edges the mount path writes. `mounts` counts every REUSED-stream
+    // mount attempt — the falsifiable claim「上游连接一份」reads it (one per
+    // source stream, N consumers notwithstanding). A later runtime bind
+    // appends its edge through `enable_venue_at_runtime` on the SAME cell.
     {
         let feed_reuse = data_plane.feed_reuse().expect("boot installs the cell");
-        for e in &declared_edges {
-            feed_reuse.add_edge(&e.consumer, &e.source);
-        }
+        let declared_edges = DataPlaneRuntime::declared_feed_edges(&actives, &registry);
         if !declared_edges.is_empty() {
             let edges = feed_reuse
                 .edges
@@ -4091,15 +4142,23 @@ async fn handle_line(
                                 &data_plane,
                             )
                             .await;
-                            for (_, d) in &fams {
-                                data_plane.mark_discovery_mounted(venue, *d);
+                            // A feed_source consumer owns NO components: the
+                            // mounts inside `enable_venue_at_runtime` were the
+                            // SOURCE's (keyed by the source's name). Marking
+                            // the consumer's name here would fabricate a data
+                            // plane it does not have — its re-bind idempotence
+                            // lives entirely in the source-side guards.
+                            if plugin.feed_source().is_none() {
+                                for (_, d) in &fams {
+                                    data_plane.mark_discovery_mounted(venue, *d);
+                                }
+                                // The feed side keeps its per-venue guard: mark the
+                                // venue mounted even when every family was already
+                                // live (a re-bind must not restart the feed).
+                                data_plane.mark_mounted(venue);
                             }
+                            runtime_enabled = true;
                         }
-                        // The feed side keeps its per-venue guard: mark the
-                        // venue mounted even when every family was already
-                        // live (a re-bind must not restart the feed).
-                        data_plane.mark_mounted(venue);
-                        runtime_enabled = true;
                     }
                     Ok(serde_json::to_value(AccountVenueSetResult {
                         account_id: id.as_str().to_string(),
@@ -4305,13 +4364,20 @@ async fn handle_line(
                                         &data_plane,
                                     )
                                     .await;
-                                    for (_, d) in fams.iter().filter(|(fv, _)| fv == v) {
-                                        data_plane.mark_discovery_mounted(v, *d);
+                                    // A feed_source consumer owns NO components
+                                    // (same posture as the venue.set arm): the
+                                    // mounts above were keyed by the SOURCE's
+                                    // name inside `enable_venue_at_runtime`, so
+                                    // the consumer's name is never marked.
+                                    if plugin.feed_source().is_none() {
+                                        for (_, d) in fams.iter().filter(|(fv, _)| fv == v) {
+                                            data_plane.mark_discovery_mounted(v, *d);
+                                        }
+                                        // The feed side keeps its per-venue
+                                        // guard (a re-declared family must not
+                                        // restart the feed).
+                                        data_plane.mark_mounted(v);
                                     }
-                                    // The feed side keeps its per-venue
-                                    // guard (a re-declared family must not
-                                    // restart the feed).
-                                    data_plane.mark_mounted(v);
                                     runtime_enabled = true;
                                 }
                             }
@@ -4557,12 +4623,21 @@ async fn handle_line(
                                 &data_plane,
                             )
                             .await;
-                            for (_, d) in &fams {
-                                data_plane.mark_discovery_mounted(v, *d);
+                            // A feed_source consumer owns NO components (same
+                            // posture as the venue.set arm): the mounts above
+                            // were keyed by the SOURCE's name inside
+                            // `enable_venue_at_runtime`, so the consumer's name
+                            // is never marked.
+                            if plugin.feed_source().is_none() {
+                                for (_, d) in &fams {
+                                    data_plane.mark_discovery_mounted(v, *d);
+                                }
+                                // The feed side keeps its per-venue guard (a
+                                // re-bind must not restart the feed).
+                                data_plane.mark_mounted(v);
                             }
+                            runtime_enabled = true;
                         }
-                        data_plane.mark_mounted(v);
-                        runtime_enabled = true;
                     }
                     Ok(serde_json::to_value(AccountCreateResult {
                         id: id.as_str().to_string(),
@@ -5625,6 +5700,50 @@ mod tests {
         }
     }
 
+    /// Every `start` the countable feed has received, keyed by the OWNER name
+    /// the test registered it under (a process-global log — the same shape as
+    /// `VENUE_LIVE_DISCOVERY_CFG`; parallel tests filter their own slice).
+    /// The reuse pipeline's「不重订」observable: a source's feed start count
+    /// stays 1 across consumer re-binds, unbinds and re-binds.
+    static COUNTED_FEED_STARTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// A feed stub that LOGS each start under `owner` and installs the
+    /// subscription control under the SOURCE venue name the test picks — the
+    /// consumer-only mount path starts the SOURCE plugin's feed, so the
+    /// control must land under the source's key for the reuse fan-out's
+    /// token subscriptions to route.
+    struct CountedFeed {
+        owner: String,
+        control_key: String,
+    }
+    impl blitzkrieg_market_api::DataFeed for CountedFeed {
+        fn name(&self) -> &str {
+            "counted-feed"
+        }
+        fn start<'a>(
+            &'a self,
+            host: std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+            _config: blitzkrieg_market_api::DataFeedConfig,
+            initial_tokens: Vec<blitzkrieg_market_api::TokenId>,
+        ) -> blitzkrieg_market_api::BoxFuture<'a, Result<(), blitzkrieg_market_api::CoreError>>
+        {
+            Box::pin(async move {
+                COUNTED_FEED_STARTS
+                    .lock()
+                    .expect("counted feed starts poisoned")
+                    .push(self.owner.clone());
+                host.install_subscription_control(
+                    self.control_key.as_str(),
+                    std::sync::Arc::new(VenueLiveControl {
+                        tokens: std::sync::Mutex::new(initial_tokens),
+                    }),
+                )
+                .await;
+                Ok(())
+            })
+        }
+    }
+
     /// On start, registers one round market tagged with the plugin's venue —
     /// exactly what a real discovery does at its first poll. The received
     /// config is recorded so tests can pin the boot-shape contract: a runtime
@@ -5635,6 +5754,15 @@ mod tests {
     /// (a process-global capture without the tag raced two mount tests).
     struct VenueLiveDiscovery {
         tag: String,
+    }
+    /// The venue tag the stub discovery stamps its round market with. The
+    /// reuse tests register the SAME discovery instance type under a source
+    /// venue name — the batch must carry the SOURCE's tag (the host's
+    /// fan-out reads `markets.first().venue` to resolve whose upstream this
+    /// is), so the tag is the owning plugin's name, parametrizable. Default
+    /// keeps every existing mount test's `venuelive` spelling.
+    fn venue_live_discovery_batch_venue(tag: &str) -> String {
+        tag.to_string()
     }
     /// Every (plugin-name, DiscoveryConfig) the start call has received, in
     /// order (B1d family mounts start ONE discovery per (venue, duration);
@@ -5668,7 +5796,11 @@ mod tests {
                     down_price: dec!(0.45),
                     expires_at_ms: now_ms() + 900_000,
                     round_slot: now_ms() / 1000 / 900,
-                    venue: "venuelive".to_string(),
+                    // The batch carries the OWNING plugin's venue tag (the
+                    // host resolves whose upstream a batch is from it). Every
+                    // existing mount test names its plugin `venuelive`, so
+                    // the wire shape there is unchanged.
+                    venue: venue_live_discovery_batch_venue(&self.tag),
                     neg_risk: false,
                     question: "runtime mount market".to_string(),
                 }])
@@ -8256,6 +8388,357 @@ mod tests {
             reply["result"]["runtimeEnabled"],
             serde_json::json!(false),
             "an already-mounted venue must not be re-mounted: {reply}"
+        );
+    }
+
+    // ── RFC-661 M2: the feed_source reuse pipeline, at the wire ─────────────
+
+    // The generic declaration face, no venue names hardcoded: the tests below
+    // register a source/consumer pair under arbitrary names and the pipeline
+    // works off the declarations only. The source is VenueLive-shaped (its
+    // feed/discovery really start and reach the core); the consumer declares
+    // NEITHER component (the parasitic shape) and its feed_source names the
+    // source.
+    impl blitzkrieg_market_api::MarketPlugin for CountedSourcePlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+            blitzkrieg_market_api::MarketType::Prediction
+        }
+        fn data_feed(&self) -> Option<&dyn blitzkrieg_market_api::DataFeed> {
+            Some(&self.feed)
+        }
+        fn discovery(&self) -> Option<&dyn blitzkrieg_market_api::MarketDiscovery> {
+            Some(&self.discovery)
+        }
+    }
+    struct CountedSourcePlugin {
+        name: String,
+        feed: CountedFeed,
+        discovery: VenueLiveDiscovery,
+    }
+    impl blitzkrieg_market_api::MarketPlugin for CountedConsumerPlugin {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+            blitzkrieg_market_api::MarketType::Prediction
+        }
+        fn feed_source(&self) -> Option<&str> {
+            Some(&self.source)
+        }
+    }
+    struct CountedConsumerPlugin {
+        name: String,
+        source: String,
+    }
+
+    /// The reuse-pipeline fixture the three wire tests share. Engine on; a
+    /// registered source+consumer pair (the GENERIC declaration face — the
+    /// tests never name polymarket/polysimulator); boot actives =
+    /// `boot_active` only. Returns `(core, registry, peer, host, data_plane,
+    /// source_name, consumer_name)`. The concrete host shares the data
+    /// plane's reuse cell (installed BEFORE erasure — the production
+    /// assembly's order), so the host's fan-out reads the edges the mount
+    /// path writes.
+    #[allow(clippy::type_complexity)]
+    async fn reuse_fixture(
+        tag: &str,
+        boot_active: &[&str],
+    ) -> (
+        Arc<AsyncMutex<Core>>,
+        crate::market::registry::MarketPluginRegistry,
+        PeerAuth,
+        Arc<dyn blitzkrieg_market_api::MarketHost>,
+        DataPlaneRuntime,
+        String,
+        String,
+    ) {
+        let dir = std::env::temp_dir().join(format!("bk-reuse-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let accounts_path = dir.join("accounts.toml");
+        std::fs::write(
+            &accounts_path,
+            "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        )
+        .expect("fixture");
+
+        let now = now_ms();
+        let book = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: AccountId::from("paper"),
+                name: "paper".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: now,
+            }],
+            AccountId::from("paper"),
+        );
+        let cfg = CoreConfig {
+            accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let mut c = Core::with_account_book(cfg, book);
+        c.enable_engine(crate::engine::Engine::new(c.config().engine_config()));
+        let source = format!("src-{tag}");
+        let consumer = format!("cons-{tag}");
+        let registry = crate::market::registry::MarketPluginRegistry::new();
+        registry.register(Box::new(CountedSourcePlugin {
+            feed: CountedFeed {
+                owner: source.clone(),
+                control_key: source.clone(),
+            },
+            discovery: VenueLiveDiscovery {
+                tag: source.clone(),
+            },
+            name: source.clone(),
+        }));
+        registry.register(Box::new(CountedConsumerPlugin {
+            source: source.clone(),
+            name: consumer.clone(),
+        }));
+        registry.set_enabled(&source, true);
+        registry.set_enabled(&consumer, true);
+
+        // The boot data plane: only `boot_active`'s venues pre-recorded; the
+        // reuse cell seeds the ACTIVE consumers' declared edges — the same
+        // `at_boot` walk production runs (a consumer-only boot seeds NO edge;
+        // the runtime bind appends it).
+        let actives: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> =
+            boot_active.iter().filter_map(|n| registry.get(n)).collect();
+        let data_plane = DataPlaneRuntime::at_boot(
+            &CoreConfig {
+                feed_ws_enabled: true,
+                engine_enabled: true,
+                discovery_enabled: true,
+                round_duration_sec: 900,
+                assets: vec!["BTC".to_string()],
+                ..Default::default()
+            },
+            &actives,
+            &[],
+            &registry,
+        );
+        let core: Arc<AsyncMutex<Core>> = Arc::new(AsyncMutex::new(c));
+        let concrete = crate::market::host::CoreHost::new(Arc::clone(&core));
+        if let Some(reuse) = data_plane.feed_reuse() {
+            concrete.set_feed_reuse(reuse.clone());
+        }
+        (
+            core,
+            registry,
+            PeerAuth::SameUid { uid: own_uid() },
+            Arc::new(concrete),
+            data_plane,
+            source,
+            consumer,
+        )
+    }
+
+    /// M2 wire test 1 — COLD consumer-only boot. The consumer never booted
+    /// (boot actives are empty); binding its account at runtime must (a)
+    /// land the bind, (b) mount the SOURCE's data plane through the reuse
+    /// path, (c) mount NOTHING for the consumer itself (no feed control
+    /// under the consumer's key — the fan-out is its registrar), and (d)
+    /// count exactly the ONE upstream stream's components. The source's
+    /// EXECUTOR is never in question: enable_venue_at_runtime never mounts
+    /// executors, and the source reaches it as a data-only registry fetch.
+    #[tokio::test]
+    async fn a_consumer_only_bind_mounts_the_source_data_plane_once_and_never_the_consumer() {
+        let (core, registry, peer, host, data_plane, source, consumer) =
+            reuse_fixture("cold", &[]).await;
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{{"accountId":"paper","venue":"{consumer}","reason":"consumer bind"}}}}"#
+        );
+        let reply = rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, line).await;
+        assert!(reply.get("error").is_none(), "the bind must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "the consumer's enablement mounted its upstream: {reply}"
+        );
+
+        // (b) the source's feed really started — its subscription control is
+        // reachable under the SOURCE's key.
+        core.lock()
+            .await
+            .subscribe_feed_tokens(&source, vec!["tok-a".to_string()])
+            .await;
+        // (d) exactly one upstream feed mount for the reused stream. The
+        // start log is a process-global shared cell (sibling tests add their
+        // own entries concurrently) — read only THIS fixture's slice: the
+        // CountedFeed logs under its owner (= the source's unique tag).
+        let starts = COUNTED_FEED_STARTS
+            .lock()
+            .expect("counted feed starts poisoned")
+            .iter()
+            .filter(|o| **o == source)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            starts,
+            vec![source.clone()],
+            "the reused stream's feed mounts EXACTLY once, under the source: {starts:?}"
+        );
+        // The discovery family rides the source too (feed + discovery are
+        // the two components of the ONE upstream stream) — one family (the
+        // boot's global 900s), tagged with the source.
+        let disc = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == &source)
+            .count();
+        assert_eq!(
+            disc, 1,
+            "the ONE upstream stream's discovery family mounts once: {disc}"
+        );
+        // (c) the consumer mounted no component of its own.
+        assert!(
+            !data_plane.venue_mounted(&consumer),
+            "the consumer's own data plane must never mount — the fan-out is its registrar"
+        );
+        // The reuse cell carries the declared edge, and the mount counter
+        // reads 2 (one feed + one discovery family — the ONE stream's two
+        // components). The counter is per-fixture (each test assembles its
+        // own cell), so the absolute read is safe.
+        let reuse = data_plane.feed_reuse().expect("the boot cell");
+        assert!(
+            reuse.consumes(&consumer, &source),
+            "the runtime bind appended the declared edge"
+        );
+        assert_eq!(
+            reuse.mounts.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "one feed + one discovery = the ONE upstream stream's components"
+        );
+    }
+
+    /// M2 wire test 2 — RUNTIME bind onto a RUNNING source. The source
+    /// booted (its components are live); binding a consumer must append the
+    /// declared edge and NOT restart anything: the feed start count stays at
+    /// its boot value, no new discovery instance appears (the per-(source,
+    /// family) guard), and the enablement still lands.
+    #[tokio::test]
+    async fn a_runtime_bound_consumer_on_a_running_source_re_subscribes_nothing() {
+        let (core, registry, peer, host, data_plane, source, consumer) =
+            reuse_fixture("warm", &[&"src-warm"]).await;
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{{"accountId":"paper","venue":"{consumer}","reason":"consumer bind onto running source"}}}}"#
+        );
+        let reply = rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, line).await;
+        assert!(reply.get("error").is_none(), "the bind must land: {reply}");
+        assert_eq!(
+            reply["result"]["runtimeEnabled"],
+            serde_json::json!(true),
+            "the consumer's enablement is recorded: {reply}"
+        );
+
+        // The running source was NOT restarted: the boot's feed start (if the
+        // log even captured it — the fixture mounts at_boot, before this test
+        // can observe) is followed by ZERO new starts for this source, and
+        // zero new discovery instances. The log is a process-global shared
+        // cell — filter to THIS fixture's tag.
+        let starts = COUNTED_FEED_STARTS
+            .lock()
+            .expect("counted feed starts poisoned")
+            .iter()
+            .filter(|o| **o == source)
+            .count();
+        assert!(
+            starts <= 1,
+            "a consumer bind onto a running source must not restart the upstream: {starts}"
+        );
+        let disc = VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .expect("venue live discovery cfg poisoned")
+            .iter()
+            .filter(|(tag, _)| tag == &source)
+            .count();
+        assert_eq!(
+            disc, 0,
+            "no discovery instance may re-mount (the fixture's at_boot pre-records the family \
+             without starting it): {disc}"
+        );
+        // The edge appended (the fan-out now re-registers the source's
+        // batches under the consumer), and the counter did not move.
+        let reuse = data_plane.feed_reuse().expect("the boot cell");
+        assert!(reuse.consumes(&consumer, &source));
+        assert_eq!(
+            reuse.mounts.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no mount was attempted — the source was already running"
+        );
+    }
+
+    /// M2 wire test 3 — 停用不重订 / 重启不重订. After a consumer binds
+    /// (mounting the source once), UNBINDING the account must not touch the
+    /// upstream (the source's components keep running — another consumer or
+    /// a re-bind may need them), and RE-BINDING the same consumer must mount
+    /// nothing new: the feed start count stays 1 forever, the declared edge
+    /// stays a single entry.
+    #[tokio::test]
+    async fn consumer_unbind_and_rebind_never_re_subscribe_the_upstream() {
+        let (core, registry, peer, host, data_plane, source, consumer) =
+            reuse_fixture("rebind", &[]).await;
+        let bind = |id: u32| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"account.venue.set","params":{{"accountId":"paper","venue":"{consumer}","reason":"lifecycle"}}}}"#
+            )
+        };
+        let unbind = r#"{"jsonrpc":"2.0","id":9,"method":"account.venue.set","params":{"accountId":"paper","venue":"","reason":"unbind"}}"#.to_string();
+
+        // Bind #1: mounts the source once.
+        let reply =
+            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(1)).await;
+        assert!(reply.get("error").is_none(), "bind 1 must land: {reply}");
+        // Unbind: lands, upstream untouched.
+        let reply =
+            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, unbind.to_string())
+                .await;
+        assert!(reply.get("error").is_none(), "unbind must land: {reply}");
+        // Re-bind: idempotent, no second mount.
+        let reply =
+            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(2)).await;
+        assert!(reply.get("error").is_none(), "re-bind must land: {reply}");
+
+        // The start log is a process-global shared cell — filter to THIS
+        // fixture's tag: bind → unbind → re-bind keeps the upstream at ONE
+        // start.
+        let starts = COUNTED_FEED_STARTS
+            .lock()
+            .expect("counted feed starts poisoned")
+            .iter()
+            .filter(|o| **o == source)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            starts,
+            vec![source.clone()],
+            "bind → unbind → re-bind keeps the upstream at ONE start: {starts:?}"
+        );
+        let reuse = data_plane.feed_reuse().expect("the boot cell");
+        assert_eq!(
+            reuse
+                .consumers_of(&source)
+                .iter()
+                .filter(|v| **v == consumer)
+                .count(),
+            1,
+            "the declared edge is ONE entry, never duplicated by the lifecycle"
         );
     }
 
