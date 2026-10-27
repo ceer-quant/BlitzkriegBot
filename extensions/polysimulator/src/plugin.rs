@@ -17,9 +17,9 @@
 //! plugin's feed and discovery — declared to the API layer as
 //! `feed_source = Some("polymarket")` (RFC-661 M2: the host multiplexes
 //! ONE upstream stream to every consumer and re-registers each round batch
-//! under this venue's own identity), and mirrored in the engine as
-//! `mirror_of = Some("polymarket")` (the admission/routing evidence that
-//! retires with the engine's mirror table in M3). What remains here is
+//! under this venue's own identity; RFC-661 M3 retired the engine-facing
+//! mirror declaration with the whole engine bridge — the OME sees a
+//! native venue). What remains here is
 //! the order executor plus the settlement sweep. The executor is inert
 //! without credentials, exactly like the sibling plugins:
 //! [`crate::executor::spawn_if_configured`] returns `Ok(None)` when the
@@ -77,26 +77,17 @@ impl MarketPlugin for PolySimulatorPlugin {
     fn supported_round_secs(&self) -> Option<Vec<i64>> {
         None
     }
-    /// Constructive fact of this venue's identity: PolySimulator IS a
-    /// Polymarket simulator — its token ids are Polymarket's byte for byte.
-    /// The engine reads this as the mirror admission/routing evidence that
-    /// does not depend on this plugin declaring any rounds of its own (the
-    /// parasitic shape: Polymarket's feed owns the table rows, this plugin
-    /// trades through them). RFC-661: the ENGINE-facing half retires with
-    /// the engine's mirror table (M3); until then this plugin declares
-    /// BOTH faces.
-    fn mirror_of(&self) -> Option<&str> {
-        Some("polymarket")
-    }
     /// RFC-661 M2 — the API data-plane declaration: this plugin's market
     /// data EATS the polymarket plugin's upstream feed/discovery stream.
     /// The host reads this and never starts a second upstream connection
     /// for this plugin: the source plugin's feed/discovery pulls the
     /// upstream once, and every round batch is re-registered under THIS
     /// plugin's own venue identity (`(venue, token)` rows of its own — the
-    /// OME sees a native venue). Unlike [`Self::mirror_of`] this is a data
-    /// TOPOLOGY fact that survives M3: admission/routing evidence leaves
-    /// the engine, who-eats-whose-stream stays at the API layer.
+    /// OME sees a native venue). Constructive identity fact: PolySimulator
+    /// IS a Polymarket simulator — its token ids are Polymarket's byte for
+    /// byte. This is a data TOPOLOGY fact at the API layer; the engine reads
+    /// no mirror/shadow anything (RFC-661 M3 retired the engine face — the
+    /// OME cannot tell the parasite from a native venue).
     fn feed_source(&self) -> Option<&str> {
         Some("polymarket")
     }

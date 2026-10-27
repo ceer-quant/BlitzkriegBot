@@ -4662,29 +4662,6 @@ impl Core {
         self.plugin_modes = modes;
     }
 
-    /// Feed every active plugin's static mirror declaration into the engine
-    /// (the parasitic shape: PolySimulator declares no rounds of its own, so
-    /// its mirror admission/routing evidence must come from this declaration,
-    /// not from a shadow batch its dead discovery would have produced). The
-    /// declaration is the plugin's identity, it never changes at runtime.
-    /// ORDERING: the boot must call this AFTER the engine exists
-    /// (`install_engine`) — the landing is `engine.as_mut()`, so a push made
-    /// while the engine slot is still `None` is a silent no-op (found live:
-    /// the pre-a860636 placement next to `set_plugin_modes` never landed a
-    /// single declaration).
-    pub fn apply_plugin_mirrors(
-        &mut self,
-        plugins: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
-    ) {
-        for p in plugins {
-            if let Some(source) = p.mirror_of()
-                && let Some(e) = self.engine.as_mut()
-            {
-                e.set_venue_mirror(p.name(), source);
-            }
-        }
-    }
-
     /// Test-only: record a declaration for a strategy the loader would have
     /// registered (the test adapters carry no C ABI declaration of their
     /// own). Same map the real load path fills.
@@ -7957,9 +7934,9 @@ impl Core {
             }
             // (b) scope — the leg's STAMPED account's binding judges its own
             // leg (the v2 stamp precedes the gates intrinsically: 钉2). The
-            // venue read is the leg's EXECUTION venue: a mirror token's table
-            // row names the mirrored venue, and a mirror-bound leg account
-            // must be judged against its OWN binding, not the row's.
+            // venue read is the leg's EXECUTION venue: on a shared token the
+            // leg account's binding names its own (venue, token) row, so the
+            // leg is judged against its OWN binding, never a sibling row's.
             let mut refusal: Option<String> = None;
             for leg in &legs {
                 let venue = self.execution_venue_of(&leg.account, &leg.token);
@@ -8897,7 +8874,10 @@ impl Core {
         let scanner = engine.scanner();
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
-        let mut rows: Vec<AssetBooksView> = scanner
+        // RFC-661 M3: natural rows only. The dual-key table holds every
+        // venue's OWN (venue, token) rows (M1), so the round-state sweep IS
+        // the whole display.
+        let rows: Vec<AssetBooksView> = scanner
             .round_state(now)
             .markets
             .iter()
@@ -8912,63 +8892,6 @@ impl Core {
                 down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
             })
             .collect();
-        // 镜像盘盘口行（#627 的显示簿契约延伸到 engine.books 面）：token
-        // 唯一键遮蔽了 PolySimulator 这类镜像所的表行 —— 钟已开口、
-        // books 行里却没有自己 venue 的行，盘口深度卡在该所视图下整卡
-        // 消失（价格卡走 engine.round 的合成行是活的，盘口卡走本视图，
-        // 两条装配线缺一不可）。从显示簿取它自己申报的批次补合成行：
-        // token 相同 → book_side_view 读的就是同一份 book，深度是真实
-        // 读数；is_live_round_row 同一谓词，不复活旧窗口。venue 直接填
-        // 行自身 —— server 端 handler 对带 venue 字段的行不再按 token
-        // 反查（反查会首中被镜像所，标签就错了）。仅显示面。
-        // 静态镜像臂（寄生形态）：镜像插件自己不再申报任何轮次 ——
-        // observed_clock_keys() 里永远没有它的钟行（钟由 RoundMarkets 开口），
-        // shadow 批也不会存在。直接按镜像声明遍历：镜像源的表行就是它的行，
-        // token 逐字节同，深度读数同源；is_live_round_row 同一谓词，不复活
-        // 旧窗口。行 venue 填镜像所自己（handler 对带 venue 字段的行不反查）。
-        for (mirror, source) in engine.mirror_pairs() {
-            if rows.iter().any(|r| r.venue == mirror) {
-                continue;
-            }
-            for m in scanner
-                .round_state(now)
-                .markets
-                .iter()
-                .filter(|m| m.venue == source && scanner.is_live_round_row(m, now))
-            {
-                if !seen.insert((mirror.clone(), m.asset.clone())) {
-                    continue;
-                }
-                rows.push(AssetBooksView {
-                    venue: mirror.clone(),
-                    asset: m.asset.clone(),
-                    up_token_id: m.up_token_id.clone(),
-                    down_token_id: m.down_token_id.clone(),
-                    up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
-                    down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
-                });
-            }
-        }
-        for (venue, duration) in scanner.observed_clock_keys() {
-            if rows.iter().any(|r| r.venue == venue) {
-                continue;
-            }
-            if let Some(shadow) = engine.shadow_markets_for(&venue, duration) {
-                for m in shadow.iter().filter(|m| scanner.is_live_round_row(m, now)) {
-                    if !seen.insert((venue.clone(), m.asset.clone())) {
-                        continue;
-                    }
-                    rows.push(AssetBooksView {
-                        venue: venue.clone(),
-                        asset: m.asset.clone(),
-                        up_token_id: m.up_token_id.clone(),
-                        down_token_id: m.down_token_id.clone(),
-                        up: Self::book_side_view(&self.books, &m.up_token_id, max_levels),
-                        down: Self::book_side_view(&self.books, &m.down_token_id, max_levels),
-                    });
-                }
-            }
-        }
         rows
     }
 
@@ -10351,19 +10274,17 @@ impl Core {
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
                             // #427: the panels' Venue column, never a decision
-                            // input. The stamp is the ORDER'S EXECUTION venue —
-                            // RFC-661 M1 made it identical to the table row's
-                            // venue (the (venue, token) dual-key table holds
-                            // each venue's OWN row, so the row the executing
-                            // plugin's token resolves to already names the
-                            // execution venue); the lookup stays the same call
-                            // the executor drain routes by, now a plain read
-                            // of the row's own tag. Pre-M1 it was a correction
-                            // over the token-unique table's first-row venue
-                            // (the mirror shape): without it the position/
-                            // trade rows carried a venue tag the account-bound
-                            // venue filter hid — the history badge counted a
-                            // trade no row ever showed.
+                            // input. The stamp is the ORDER'S EXECUTION venue
+                            // — under the (venue, token) dual-key table the
+                            // stamp equals the fill's own row's venue; for a
+                            // shared token the placing account's binding
+                            // picks its own row (the same read the executor
+                            // drain routes by). Pre-M1 it was a correction
+                            // over the token-unique table's first-row venue:
+                            // without it the position/trade rows carried a
+                            // venue tag the account-bound venue filter hid —
+                            // the history badge counted a trade no row ever
+                            // showed.
                             venue: self.execution_venue_of(d.account_id.as_str(), &d.token_id),
                             // The condition's other token, stamped from the
                             // SAME market lookup: the dry settlement ladder's
@@ -10933,10 +10854,11 @@ impl Core {
     /// [`Self::pending_unbound`] filtered to ONE venue: the multi-plugin
     /// executor drain. The routing truth is the ORDER'S OWN execution venue
     /// (`execution_venue_for`: RFC-661 M1 — the placing account's binding
-    /// resolves its OWN (venue, token) dual-key row first, so a shared token's
-    /// two accounts each route to their own executor with no override logic;
-    /// the transitional mirror declaration only speaks when the binding's
-    /// venue holds no row of its own) — an order whose execution venue
+    /// resolves its OWN (venue, token) dual-key row first, so a shared
+    /// token's two accounts each route to their own executor; the account
+    /// dimension is the AMBIGUITY DISCRIMINATOR, not an override — a
+    /// token-only read refuses on two candidate rows and could not pick)
+    /// — an order whose execution venue
     /// resolves to nothing, or to a market with no venue label, is UNTAGGED
     /// and routes to the requested plugin only when it is the host's active
     /// plugin — the single-plugin behaviour, unchanged. With the lookup empty
@@ -10952,10 +10874,12 @@ impl Core {
     /// The venue that should execute this order: the placing account's
     /// binding rides through [`Engine::execution_venue_for`] — RFC-661 M1:
     /// the (venue, token) dual-key table holds each venue's OWN row for a
-    /// byte-identical token, so the row's venue IS the execution venue and
-    /// the account dimension degenerates to a plain read (M4 retires the
-    /// account parameter). `""` when the engine is down or the token belongs
-    /// to no market: UNTAGGED, never "venue empty-string" — callers route
+    /// byte-identical token, so the binding's own row names the executor.
+    /// The account parameter is the AMBIGUITY DISCRIMINATOR (a shared token
+    /// carries one row per venue; a token-only read refuses on two
+    /// candidates), not a mirror-era leftover — it stays. `""` when the
+    /// engine is down or the token belongs to no market: UNTAGGED, never
+    /// "venue empty-string" — callers route
     /// untagged work to the active plugin instead of guessing. Fallbacks to
     /// the plain table lookup when the engine is down (same empty answer,
     /// kept total for the host's drain seam, which cannot go through the
@@ -13540,11 +13464,10 @@ impl Core {
     /// anywhere, and an order whose token belongs to no labelled market (the
     /// engine down, a legacy corpus) carries no venue evidence to judge. The
     /// venue read is the ORDER'S EXECUTION VENUE (`execution_venue_of`):
-    /// mirror tokens (PolySimulator ↔ Polymarket, byte-identical ids) carry
-    /// the mirrored venue's row in the table, and judging on the table alone
-    /// would refuse every order a mirror-bound account legitimately places —
-    /// the same mirror blindness the engine's `scope_admits_token` carried
-    /// before its shadow-batch lookup.
+    /// a shared token carries one row per venue, and judging on a token-only
+    /// read alone would refuse on the ambiguity (or pick the wrong row) —
+    /// the account's binding names its own row, the same admission blindness
+    /// the engine's `scope_admits_token` resolves.
     fn refuse_cross_venue_order(&self, req: &OrderRequest) -> CoreResult<()> {
         let Some(account) = self.accounts.account(&req.account_id) else {
             // Unknown accounts are refused by the ledger lookup right after;
@@ -13655,10 +13578,10 @@ impl Core {
             // behaviour for every account until B1d wires the real set.
             return Ok(());
         }
-        // The venue read is the ORDER'S EXECUTION VENUE: a mirror token's
-        // table row names the mirrored venue, and a subscription spelled in
-        // the mirror account's own venue never matches the row's — the same
-        // mirror blindness the venue guard shed above.
+        // The venue read is the ORDER'S EXECUTION VENUE: a shared token
+        // carries one row per venue, and the placing account's binding names
+        // its own row — a token-only read could not pick between the
+        // candidates (the same blindness the venue guard above sheds).
         let token_venue = self.execution_venue_of(req.account_id.as_str(), &req.token_id);
         if token_venue.is_empty() {
             // No labelled market, no family evidence — same stance as the
