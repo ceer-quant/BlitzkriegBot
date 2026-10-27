@@ -68,6 +68,20 @@ impl MarketPlugin for PolymarketPlugin {
     fn supported_round_secs(&self) -> Option<Vec<i64>> {
         Some(vec![300, 900, 3600, 14400, 86_400])
     }
+    /// The Gamma slug labels for those families — the plugin's own naming
+    /// vocabulary (`crate::gamma::duration_label` spells the same table when
+    /// it builds discovery slugs; this declaration is the contract face of
+    /// the same knowledge). Verbatim the historical kernel table so the
+    /// `round_duration.get` readout keeps rendering identical labels.
+    fn round_labels(&self) -> &[(i64, &'static str)] {
+        &[
+            (300, "5m"),
+            (900, "15m"),
+            (3600, "1h"),
+            (14400, "4h"),
+            (86400, "daily"),
+        ]
+    }
     fn data_feed(&self) -> Option<&dyn DataFeed> {
         Some(&POLY_DATA_FEED)
     }
@@ -173,5 +187,40 @@ impl OrderExecutor for PolymarketExecutor {
                 )),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod round_labels_tests {
+    use super::*;
+
+    /// The anti-drift pin (issue 648): this plugin's declared label table is
+    /// VERBATIM the historical kernel table (`scanner::duration_label_for`,
+    /// retired by this change) — the values the `round_duration.get` readout
+    /// rendered before the labels moved to the declaration face. A drift here
+    /// is a UI-visible rename of an existing family, not a declaration
+    /// detail: 300→"5m", 900→"15m", 3600→"1h", 14400→"4h", 86400→"daily".
+    /// `crate::gamma::duration_label` (the slug builder's own copy) must
+    /// agree with this table — the two faces spell one venue vocabulary.
+    #[test]
+    fn declared_round_labels_are_verbatim_the_historical_kernel_table() {
+        let declared = PolymarketPlugin.round_labels();
+        assert_eq!(
+            declared,
+            &[
+                (300, "5m"),
+                (900, "15m"),
+                (3600, "1h"),
+                (14400, "4h"),
+                (86400, "daily"),
+            ],
+            "the declaration must stay verbatim the historical kernel table"
+        );
+        // The slug vocabulary and the declaration face spell the SAME table —
+        // a rename on either side alone would split the venue's own names.
+        for (sec, label) in declared {
+            assert_eq!(crate::gamma::duration_label(*sec), Some(*label));
+        }
+        assert_eq!(crate::gamma::duration_label(60), None);
     }
 }

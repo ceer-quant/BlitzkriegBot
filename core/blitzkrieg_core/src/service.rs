@@ -54,6 +54,13 @@ pub struct CoreConfig {
     /// value would be the kernel inventing knowledge the declaration face
     /// never made — not "allow everything").
     pub allowed_round_secs: Vec<i64>,
+    /// The labels the registered market plugins declare for their round
+    /// families (`MarketPluginRegistry::round_labels`, issue 648), computed
+    /// once at boot — `sec → label` as the plugins named their own Gamma
+    /// slug families. The kernel holds no hardcoded label table of its own:
+    /// `round_duration.get` renders exactly the labels the plugins claimed,
+    /// and a duration missing here reads unlabeled.
+    pub round_labels: std::collections::BTreeMap<i64, &'static str>,
     /// Where the effective round length came from — one of `cli` / `env` /
     /// `runtime` / `toml` / `default`. The boot resolution owns the spelling;
     /// `round_duration.get` surfaces it so the UI can say "an explicit flag
@@ -880,6 +887,7 @@ impl Default for CoreConfig {
             // no market concern keep the historical behaviour through the
             // TEST_ALLOWED_ROUNDS helper.
             allowed_round_secs: Vec::new(),
+            round_labels: std::collections::BTreeMap::new(),
             round_duration_source: "default",
             runtime_config_path: None,
             env_file_path: None,
@@ -1109,14 +1117,16 @@ pub fn round_duration_readout(core: &Core) -> crate::ipc::schema::RoundDurationR
     });
     let next_session = cell.map(|c| c.duration_sec).unwrap_or(effective);
     // The declared union the plugins own — the kernel hardcodes nothing
-    // (whichever durations appear are exactly what the plugins claimed).
+    // (whichever durations appear are exactly what the plugins claimed) and
+    // the labels travel the same road (issue 648): the readout renders the
+    // plugins' declared names, not a kernel-side decoder table.
     let mut allowed: Vec<RoundDurationOption> = core
         .config()
         .allowed_round_secs
         .iter()
         .map(|&sec| RoundDurationOption {
             sec,
-            label: crate::scanner::duration_label_for(sec),
+            label: core.config().round_labels.get(&sec).copied(),
         })
         .collect();
     // A non-standard boot value (e.g. a test's 60s) is not in the declared

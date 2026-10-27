@@ -13,20 +13,14 @@ use std::collections::HashMap;
 /// scanner keys by venue.
 const DEFAULT_VENUE: &str = "";
 
-/// Duration label for a round length (5m/15m/1h/4h/daily). Kept in the core
-/// because it describes round cadence, not a venue; the extension reuses the
-/// same mapping when it builds discovery slugs.
-pub fn duration_label_for(round_duration_sec: i64) -> Option<&'static str> {
-    match round_duration_sec {
-        300 => Some("5m"),
-        900 => Some("15m"),
-        3600 => Some("1h"),
-        14400 => Some("4h"),
-        86400 => Some("daily"),
-        _ => None,
-    }
-}
-
+/// Duration labels live with the plugins that name their own round families
+/// (issue 648): a plugin declares `MarketPlugin::round_labels`, the registry
+/// aggregates them (`MarketPluginRegistry::round_labels`) and boot threads
+/// the map into `CoreConfig::round_labels` — the `round_duration.get`
+/// readout renders exactly what the plugins claimed. The kernel keeps no
+/// label table of its own; the Polymarket extension's `gamma::duration_label`
+/// is that plugin's own copy of its own vocabulary. What stays here is the
+/// venue-agnostic slot-grid math, which never needed a label.
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
     pub assets: Vec<String>,
@@ -180,11 +174,6 @@ impl Scanner {
             .copied()
             .or_else(|| self.clock_offset_ms.values().copied().min())
             .unwrap_or(0)
-    }
-
-    /// Duration label used in Gamma slugs (5m/15m/1h/4h/daily).
-    pub fn duration_label(&self) -> Option<&'static str> {
-        duration_label_for(self.cfg.round_duration_sec)
     }
 
     /// Current round slot, floored to the round boundary using venue time.

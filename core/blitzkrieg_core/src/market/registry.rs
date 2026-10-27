@@ -122,6 +122,35 @@ impl MarketPluginRegistry {
         out
     }
 
+    /// The DECLARED union of duration labels (issue 648): every registered
+    /// plugin's `MarketPlugin::round_labels`, keyed by seconds — `sec →
+    /// label`. First declarer wins: two plugins labeling the same duration
+    /// keep the first-registered one's name (the same registration-order
+    /// posture as `active_plugin`'s first-registered default), and the
+    /// survivor's choice is deterministic, never kernel-invented.
+    ///
+    /// This is a report of what the plugins CLAIM, not kernel knowledge —
+    /// the kernel hardcodes no label table of its own. Plugins returning the
+    /// default `&[]` contribute nothing; an EMPTY return means the readout
+    /// lists durations unlabeled. The labels stay `&'static str` end to end
+    /// — the plugins' declaration tables are constants, so the readout's
+    /// wire type (`RoundDurationOption::label`) is untouched.
+    pub fn round_labels(&self) -> std::collections::BTreeMap<i64, &'static str> {
+        let g = self.inner.lock().expect("market registry poisoned");
+        let mut out = std::collections::BTreeMap::new();
+        for name in &g.order {
+            let Some(p) = g.plugins.get(name) else {
+                continue;
+            };
+            for (sec, label) in p.round_labels() {
+                // First declarer wins: `entry` keeps the existing label when
+                // the duration is already claimed.
+                out.entry(*sec).or_insert(*label);
+            }
+        }
+        out
+    }
+
     /// Capability + state report for `market.list`.
     pub fn list(&self) -> Vec<PluginInfo> {
         let g = self.inner.lock().expect("market registry poisoned");
@@ -135,5 +164,67 @@ impl MarketPluginRegistry {
                 info
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod round_labels_tests {
+    use super::*;
+    use blitzkrieg_market_api::MarketType;
+
+    /// A stub plugin declaring an optional label table — the registry test's
+    /// only lever (the registry is compiled in, so a test registers its own
+    /// names; same trick as the `set_tests` stub).
+    struct LabeledStub {
+        name: String,
+        labels: Vec<(i64, &'static str)>,
+    }
+    impl MarketPlugin for LabeledStub {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn market_type(&self) -> MarketType {
+            MarketType::Prediction
+        }
+        fn round_labels(&self) -> &[(i64, &'static str)] {
+            &self.labels
+        }
+    }
+
+    #[test]
+    fn round_labels_is_the_union_of_the_plugins_declarations_first_declarer_wins() {
+        let reg = MarketPluginRegistry::new();
+        reg.register(Box::new(LabeledStub {
+            name: "a".into(),
+            labels: vec![(900, "15m"), (60, "1m")],
+        }));
+        reg.register(Box::new(LabeledStub {
+            name: "b".into(),
+            // Same duration, different label: registration order decides —
+            // the survivor is deterministic, never kernel-chosen.
+            labels: vec![(900, "quarter")],
+        }));
+        let labels = reg.round_labels();
+        assert_eq!(
+            labels.get(&900),
+            Some(&"15m"),
+            "the first declarer's label survives a collision"
+        );
+        assert_eq!(labels.get(&60), Some(&"1m"));
+        assert_eq!(labels.len(), 2);
+    }
+
+    #[test]
+    fn round_labels_empty_default_and_empty_registry_contribute_nothing() {
+        // The trait default (`&[]`) and an empty registry both yield the
+        // empty map — the readout then lists durations unlabeled, and the
+        // kernel never invents a label of its own.
+        let reg = MarketPluginRegistry::new();
+        assert!(reg.round_labels().is_empty(), "empty registry");
+        reg.register(Box::new(LabeledStub {
+            name: "quiet".into(),
+            labels: Vec::new(),
+        }));
+        assert!(reg.round_labels().is_empty(), "default declaration");
     }
 }
