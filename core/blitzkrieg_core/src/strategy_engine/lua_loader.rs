@@ -396,6 +396,12 @@ pub struct LuaEngineAdapter {
     /// reservation posture). Armed only when `CoreConfig::virtual_limits`
     /// also configures the strategy's pot.
     atomic_batch: bool,
+    /// RFC-645 A-1: the pair-book statistics consumption declaration stamped
+    /// by the host loader (`declare_pair_book_stats`) for the ONE arbiter
+    /// package. Subject to the engine's acceptance predicate (atomic_batch +
+    /// a live PairBook entry); every package the loader does not stamp stays
+    /// at `false`, the trait default's exact behaviour.
+    consumes_pair_book_stats: bool,
     /// The manifest's three-state trailing verdict (`None` = follow the
     /// kernel-wide `risk.setExit` value).
     trailing_exit: Option<bool>,
@@ -461,6 +467,7 @@ impl LuaEngineAdapter {
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
             atomic_batch: false,
+            consumes_pair_book_stats: false,
             trailing_exit: None,
             params_cell: None,
             defaults: tunables,
@@ -493,6 +500,7 @@ impl LuaEngineAdapter {
             holds_to_settlement: false,
             gate_exemptions: GateExemptions::none(),
             atomic_batch: false,
+            consumes_pair_book_stats: false,
             trailing_exit: None,
             params_cell: None,
             defaults: tunables,
@@ -517,6 +525,23 @@ impl LuaEngineAdapter {
     /// path; the same route `declare` rides).
     pub fn declare_atomic_batch(mut self, atomic_batch: bool) -> Self {
         self.atomic_batch = atomic_batch;
+        self
+    }
+
+    /// RFC-645 A-1 (决议②): stamp the pair-book statistics CONSUMPTION
+    /// declaration for the ONE arbiter package. The declaration face is the
+    /// Rust trait's `consumes_pair_book_stats`; the Lua package itself has no
+    /// manifest key for it (决议②: cdylib-side optional symbols wait for a
+    /// real third-party pair strategy — YAGNI), so the host answers for the
+    /// package it loads: the loaded-package path stamps `true` for exactly
+    /// `ARB_STRATEGY` (the kernel's one cross-venue arbiter, whose legs are
+    /// atomic batches by contract) and leaves every other package at the
+    /// `false` default. The ENGINE still runs the full three-legged
+    /// acceptance predicate on top (`atomic_batch` + a live PairBook entry —
+    /// `Engine::pair_book_stats_accepted`), so a stamped declaration without
+    /// the substance is treated as undeclared, fail-closed.
+    pub fn declare_pair_book_stats(mut self, consumes: bool) -> Self {
+        self.consumes_pair_book_stats = consumes;
         self
     }
 
@@ -890,6 +915,14 @@ impl EngineStrategy for LuaEngineAdapter {
 
     fn atomic_batch(&self) -> bool {
         self.atomic_batch
+    }
+
+    /// RFC-645 A-1: the host-stamped consumption declaration (see
+    /// [`Self::declare_pair_book_stats`] — the package has no manifest key;
+    /// the loader answers for the one arbiter package). Still subject to the
+    /// engine's three-legged acceptance predicate.
+    fn consumes_pair_book_stats(&self) -> bool {
+        self.consumes_pair_book_stats
     }
 
     fn take_exit_intents(&mut self) -> Vec<StrategyExitIntent> {

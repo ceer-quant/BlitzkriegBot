@@ -521,7 +521,7 @@ pub trait EngineStrategy: Send + Sync {
     /// fields it knows back into its own types (a parse failure is the
     /// config-rejection path, advisory — never a strategy crash). The JSON's
     /// camelCase spelling is the dylib wire contract pinned byte-for-byte by
-    /// the golden test (`spread_arb_config_json_is_the_foreign_marshal_golden`
+    /// the golden test (`engine_strategy_config_json_is_the_foreign_marshal_golden`
     /// in `strategies::test_support`); the trait used to carry the two builtin
     /// config types directly, which was the one type-level leak RFC-645 A-2
     /// retires — the C ABI (`strategy_api/src/lib.rs` `on_config`) has been
