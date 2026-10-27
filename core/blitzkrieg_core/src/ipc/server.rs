@@ -322,10 +322,7 @@ impl DataPlaneRuntime {
         // account actually binds the consumer.
         let feed_reuse = crate::market::host::FeedReuse::default();
         for p in actives {
-            if let Some(src) = p
-                .feed_source()
-                .filter(|src| registry.get(src).is_some())
-            {
+            if let Some(src) = p.feed_source().filter(|src| registry.get(src).is_some()) {
                 feed_reuse.add_edge(p.name(), src);
             }
         }
@@ -632,8 +629,7 @@ async fn enable_venue_at_runtime(
                             if ok {
                                 feed_started = true;
                                 if let Some(r) = reuse {
-                                    r.mounts
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    r.mounts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 eprintln!(
                                     "blitzkrieg-core: feed started for {src} (consumer {name}'s \
@@ -1076,11 +1072,7 @@ pub async fn run(
         let feed_reuse = data_plane.feed_reuse().expect("boot installs the cell");
         let declared_edges = DataPlaneRuntime::declared_feed_edges(&actives, &registry);
         if !declared_edges.is_empty() {
-            let edges = feed_reuse
-                .edges
-                .read()
-                .expect("feed reuse edges")
-                .clone();
+            let edges = feed_reuse.edges.read().expect("feed reuse edges").clone();
             eprintln!(
                 "blitzkrieg-core: feed_source reuse active — upstream stream(s) of {:?} \
                  also feed(s) {:?}",
@@ -1088,7 +1080,10 @@ pub async fn run(
                     .iter()
                     .map(|e| e.source.as_str())
                     .collect::<std::collections::BTreeSet<_>>(),
-                edges.iter().map(|e| e.consumer.as_str()).collect::<Vec<_>>(),
+                edges
+                    .iter()
+                    .map(|e| e.consumer.as_str())
+                    .collect::<Vec<_>>(),
             );
         }
     }
@@ -1217,7 +1212,9 @@ pub async fn run(
         let reuse = data_plane.feed_reuse().expect("boot installs the cell");
         for p in &feeds_to_start {
             if reused_sources.contains(p.name()) {
-                reuse.mounts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                reuse
+                    .mounts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(feed) = p.data_feed() {
                 if let Err(e) = feed.start(host.clone(), cfg.clone(), Vec::new()).await {
@@ -1308,7 +1305,9 @@ pub async fn run(
             // stream's discovery mount (a source some consumer declares)
             // counts once per (source, family).
             if reused_sources.contains(venue) {
-                reuse.mounts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                reuse
+                    .mounts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             if let Err(e) = disc.start(host.clone(), cfg).await {
                 eprintln!("blitzkrieg-core: discovery start failed for {venue}@{duration}s: {e}");
@@ -4139,7 +4138,7 @@ async fn handle_line(
                                 &fams,
                                 &core,
                                 registry,
-                                &data_plane,
+                                data_plane,
                             )
                             .await;
                             // A feed_source consumer owns NO components: the
@@ -4361,7 +4360,7 @@ async fn handle_line(
                                             .collect::<Vec<_>>(),
                                         &core,
                                         registry,
-                                        &data_plane,
+                                        data_plane,
                                     )
                                     .await;
                                     // A feed_source consumer owns NO components
@@ -4620,7 +4619,7 @@ async fn handle_line(
                                 &fams,
                                 &core,
                                 registry,
-                                &data_plane,
+                                data_plane,
                             )
                             .await;
                             // A feed_source consumer owns NO components (same
@@ -8635,7 +8634,7 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_bound_consumer_on_a_running_source_re_subscribes_nothing() {
         let (core, registry, peer, host, data_plane, source, consumer) =
-            reuse_fixture("warm", &[&"src-warm"]).await;
+            reuse_fixture("warm", &["src-warm"]).await;
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"account.venue.set","params":{{"accountId":"paper","venue":"{consumer}","reason":"consumer bind onto running source"}}}}"#
         );
@@ -8702,17 +8701,21 @@ mod tests {
         let unbind = r#"{"jsonrpc":"2.0","id":9,"method":"account.venue.set","params":{"accountId":"paper","venue":"","reason":"unbind"}}"#.to_string();
 
         // Bind #1: mounts the source once.
-        let reply =
-            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(1)).await;
+        let reply = rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(1)).await;
         assert!(reply.get("error").is_none(), "bind 1 must land: {reply}");
         // Unbind: lands, upstream untouched.
-        let reply =
-            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, unbind.to_string())
-                .await;
+        let reply = rpc_with_data_plane(
+            &core,
+            &registry,
+            &peer,
+            &host,
+            &data_plane,
+            unbind.to_string(),
+        )
+        .await;
         assert!(reply.get("error").is_none(), "unbind must land: {reply}");
         // Re-bind: idempotent, no second mount.
-        let reply =
-            rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(2)).await;
+        let reply = rpc_with_data_plane(&core, &registry, &peer, &host, &data_plane, bind(2)).await;
         assert!(reply.get("error").is_none(), "re-bind must land: {reply}");
 
         // The start log is a process-global shared cell — filter to THIS

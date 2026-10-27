@@ -57,10 +57,7 @@ impl FeedReuse {
     /// Append a declared edge (idempotent — the same declaration re-bound is
     /// a no-op). Returns true when the edge was newly added.
     pub fn add_edge(&self, consumer: &str, source: &str) -> bool {
-        let mut edges = self
-            .edges
-            .write()
-            .expect("feed reuse edges lock poisoned");
+        let mut edges = self.edges.write().expect("feed reuse edges lock poisoned");
         if edges
             .iter()
             .any(|e| e.consumer == consumer && e.source == source)
@@ -1366,7 +1363,11 @@ mod tests {
     /// expiry rides the REAL clock's current 900s window: the scanner's clock
     /// guard refuses a declaration more than two rounds from `now_ms()`, so a
     /// fixed fixture timestamp would silently open no round clock.
-    fn reuse_batch(source: &str, up: &str, down: &str) -> Vec<blitzkrieg_market_api::MarketDescriptor> {
+    fn reuse_batch(
+        source: &str,
+        up: &str,
+        down: &str,
+    ) -> Vec<blitzkrieg_market_api::MarketDescriptor> {
         let slot = blitzkrieg_market_api::net::now_ms() / 1000 / 900;
         vec![blitzkrieg_market_api::MarketDescriptor {
             asset: "BTC".to_string(),
@@ -1415,7 +1416,8 @@ mod tests {
         reuse.add_edge("simspace", "polymarket"); // the declared consumer
         host.set_feed_reuse(reuse);
 
-        host.on_round_markets(reuse_batch("polymarket", "share-up", "share-down")).await;
+        host.on_round_markets(reuse_batch("polymarket", "share-up", "share-down"))
+            .await;
 
         let c = core.lock().await;
         let rows = rows_for(&c, "share-up");
@@ -1435,8 +1437,16 @@ mod tests {
         // the token-only legacy lookup refuses as ambiguous (never first-hit).
         assert_eq!(c.venue_of_token("share-down"), "");
         let scanner = c.engine.as_ref().expect("engine").scanner();
-        assert!(scanner.market_for_token_on_venue("simspace", "share-up").is_some());
-        assert!(scanner.market_for_token_on_venue("polymarket", "share-up").is_some());
+        assert!(
+            scanner
+                .market_for_token_on_venue("simspace", "share-up")
+                .is_some()
+        );
+        assert!(
+            scanner
+                .market_for_token_on_venue("polymarket", "share-up")
+                .is_some()
+        );
         assert!(
             scanner.market_for_token("share-up").is_none(),
             "two venues hold the token: the token-only lookup must refuse, not first-hit"
@@ -1472,9 +1482,11 @@ mod tests {
         host.set_feed_reuse(reuse);
 
         // Source A's batch: only cons_a may re-register it.
-        host.on_round_markets(reuse_batch("src_a", "a-up", "a-down")).await;
+        host.on_round_markets(reuse_batch("src_a", "a-up", "a-down"))
+            .await;
         // Source B's batch: only cons_b may re-register it.
-        host.on_round_markets(reuse_batch("src_b", "b-up", "b-down")).await;
+        host.on_round_markets(reuse_batch("src_b", "b-up", "b-down"))
+            .await;
 
         let c = core.lock().await;
         let a_rows = rows_for(&c, "a-up");
@@ -1507,7 +1519,8 @@ mod tests {
         reuse.add_edge("simspace", "polymarket");
         host.set_feed_reuse(reuse);
 
-        host.on_round_markets(reuse_batch("polymarket", "flow-up", "flow-down")).await;
+        host.on_round_markets(reuse_batch("polymarket", "flow-up", "flow-down"))
+            .await;
         // The upstream book, once (ONE connection feeding both venues).
         host.on_book(blitzkrieg_market_api::BookUpdate {
             token_id: "flow-up".to_string(),
@@ -1520,7 +1533,11 @@ mod tests {
         let c = core.lock().await;
         // Both rows survived the book (a merge would have dropped one).
         let rows = rows_for(&c, "flow-up");
-        assert_eq!(rows.len(), 2, "the book application must keep both rows: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "the book application must keep both rows: {rows:?}"
+        );
         // The book snapshot is readable THROUGH each venue's own row: same
         // bytes, two owners — the OME cannot tell the consumer from a native.
         for venue in ["polymarket", "simspace"] {
