@@ -1,0 +1,12 @@
+[package]
+name = "blitzkrieg-data-model"
+version.workspace = true
+edition = "2024"
+description = "Leaf data contract: the replay-stream event taxonomy (DataEvent) and the round-market shape (CryptoMarket) shared by the core, the market plugins and the offline tools. No internal deps beyond market_api."
+
+[dependencies]
+# `Side`/`TokenId`/`UnifiedEvent` are market_api types already; the leaf pulls
+# them from the contract crate directly so core and plugins keep ONE definition.
+blitzkrieg-market-api = { path = "../market_api" }rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

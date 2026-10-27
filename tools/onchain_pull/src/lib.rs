@@ -16,8 +16,9 @@
 //! * CLOB API  `clob.polymarket.com/prices-history?market=<token>&startTs=&endTs=&fidelity=1`
 //!   — the published historical price series (~1-min points). No public L2
 //!   history exists, so the honest book reconstruction is a top-of-book print
-//!   at each point (`k=top`, nominal 1.0 depth — the same convention
-//!   [`crate::marketdata::LocalBook::update_top`] uses for unknown sizes).
+//!   at each point (`k=top`, nominal 1.0 depth — the same convention the
+//!   replay-side books built from [`blitzkrieg_data_model::DataEvent::Book`]
+//!   use for unknown sizes).
 //!   No depth is invented: nothing in a replay of this stream can mint
 //!   fillability that the venue did not publish.
 //!
@@ -42,8 +43,8 @@
 //! page/phase — the pull is never a blocking loop without feedback (the
 //! #352 reverse gate), and the IPC layer (#353) wraps the same functions.
 
-use crate::engine::{CashflowKind, DataEvent};
-use crate::model::CryptoMarket;
+use blitzkrieg_data_model::{CashflowKind, DataEvent};
+use blitzkrieg_data_model::CryptoMarket;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -1455,7 +1456,7 @@ fn convert(
     cashflows: &[TimedCashflow],
     req: &PullRequest,
 ) -> Result<(Vec<DataEvent>, u64), String> {
-    use crate::data_source::event_to_json;
+    use blitzkrieg_data_model::event_to_json;
 
     // Condition → (slug, traded tokens) for the rounds we will emit.
     let mut by_condition: BTreeMap<&str, &Value> = BTreeMap::new();
@@ -1676,8 +1677,8 @@ fn convert(
             continue;
         };
         let side = match r.get("side").and_then(Value::as_str).unwrap_or("") {
-            "BUY" => crate::model::Side::Buy,
-            "SELL" => crate::model::Side::Sell,
+            "BUY" => blitzkrieg_data_model::Side::Buy,
+            "SELL" => blitzkrieg_data_model::Side::Sell,
             _ => {
                 skipped += 1;
                 continue;
@@ -1753,7 +1754,7 @@ fn convert(
     let mut keyed: Vec<(i64, u8, String, DataEvent)> = events
         .into_iter()
         .map(|ev| {
-            let at = crate::data_source::event_at_ms(&ev);
+            let at = blitzkrieg_data_model::event_at_ms(&ev);
             let r = rank(&ev);
             let line = event_to_json(&ev).to_string();
             (at, r, line, ev)
@@ -1767,7 +1768,7 @@ fn convert(
 /// Write the event stream: one canonical JSON line per event, sorted (the
 /// sort already happened in [`convert`]).
 fn write_events(path: &Path, events: &[DataEvent]) -> Result<(), String> {
-    use crate::data_source::event_to_json;
+    use blitzkrieg_data_model::event_to_json;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -2452,8 +2453,8 @@ mod tests {
 
         // The whole stream still replays clean through the parser.
         verify_dataset(&o.manifest_path).unwrap();
-        let mut src = crate::data_source::open_replay(o.events_path.to_str().unwrap()).unwrap();
-        use crate::data_source::DataSource as _;
+        use blitzkrieg_data_model::DataSource as _;
+        let mut src = blitzkrieg_data_model::open_replay(o.events_path.to_str().unwrap()).unwrap();
         let mut n = 0u64;
         while src.next_event().is_some() {
             n += 1;
@@ -2710,8 +2711,8 @@ mod tests {
         );
         assert_eq!(v["p"], json!([[UP1, "1"], [DOWN1, "0"]]));
         // And the line parses back into the event the replay dispatches.
-        match crate::data_source::event_from_json(&v).unwrap() {
-            crate::engine::DataEvent::Resolution {
+        match blitzkrieg_data_model::event_from_json(&v).unwrap() {
+            blitzkrieg_data_model::DataEvent::Resolution {
                 condition_id,
                 payouts,
                 ..
@@ -2927,7 +2928,7 @@ mod tests {
     /// malformed lines — the four kinds are first-class archive events.
     #[tokio::test]
     async fn the_event_stream_replays_without_malformed_lines() {
-        use crate::data_source::DataSource;
+        use blitzkrieg_data_model::DataSource;
         let fetch = Scripted::new(vec![rows_ab(), vec![]], gamma_map(), false);
         let r = req(tmp("replay"));
         let o = pull_and_convert(&fetch, &r, &noop_cb()).await.unwrap();
@@ -2935,7 +2936,8 @@ mod tests {
         // so the acceptance must run through that path: the sibling
         // `<stem>.trades.jsonl` side file and the manifest sit in the same
         // directory and must not leak into the replay as phantom segments.
-        let mut src = crate::data_source::open_replay_all(o.events_path.to_str().unwrap()).unwrap();
+        let mut src =
+            blitzkrieg_data_model::open_replay_all(o.events_path.to_str().unwrap()).unwrap();
         while src.next_event().is_some() {}
         let st = src.stats();
         assert_eq!(st.events, EXPECTED_EVENTS);
