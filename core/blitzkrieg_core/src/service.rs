@@ -4662,29 +4662,6 @@ impl Core {
         self.plugin_modes = modes;
     }
 
-    /// Feed every active plugin's static mirror declaration into the engine
-    /// (the parasitic shape: PolySimulator declares no rounds of its own, so
-    /// its mirror admission/routing evidence must come from this declaration,
-    /// not from a shadow batch its dead discovery would have produced). The
-    /// declaration is the plugin's identity, it never changes at runtime.
-    /// ORDERING: the boot must call this AFTER the engine exists
-    /// (`install_engine`) — the landing is `engine.as_mut()`, so a push made
-    /// while the engine slot is still `None` is a silent no-op (found live:
-    /// the pre-a860636 placement next to `set_plugin_modes` never landed a
-    /// single declaration).
-    pub fn apply_plugin_mirrors(
-        &mut self,
-        plugins: &[std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>],
-    ) {
-        for p in plugins {
-            if let Some(source) = p.mirror_of()
-                && let Some(e) = self.engine.as_mut()
-            {
-                e.set_venue_mirror(p.name(), source);
-            }
-        }
-    }
-
     /// Test-only: record a declaration for a strategy the loader would have
     /// registered (the test adapters carry no C ABI declaration of their
     /// own). Same map the real load path fills.
