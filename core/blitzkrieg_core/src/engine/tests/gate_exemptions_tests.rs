@@ -31,7 +31,7 @@ fn trend_then_dip(e: &mut Engine, token: &str, now: i64) {
 /// stays idle, so only a strategy that needs no trend confirmation can
 /// signal here. Book it at the instant you evaluate: a stale book is not
 /// priceable at all (`fresh_book` returns None).
-
+///
 /// Push a spot price that fell over the momentum window (against an UP bet).
 fn spot_falls(e: &mut Engine, asset: &str, from: Decimal, to: Decimal, now: i64) {
     e.on_data(DataEvent::Spot {

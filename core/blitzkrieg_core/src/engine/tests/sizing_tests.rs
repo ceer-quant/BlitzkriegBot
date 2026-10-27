@@ -499,7 +499,7 @@ fn size_pct_off_leaves_declared_shares_clamped_only_by_max_shares() {
 }
 
 /// Per-asset market helper (the shared `market()` only makes BTC).
-
+///
 /// A hosted strategy that DECLARES its share count on every signal (the
 /// `single_leg_pair` / `pair_discount_arb` shape): it sizes from the
 /// visible ask depth, which has nothing to do with the account. The
