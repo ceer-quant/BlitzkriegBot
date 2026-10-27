@@ -3473,6 +3473,11 @@ async fn main() -> anyhow::Result<()> {
         let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
         blitzkrieg_core::market::register_builtin_markets(&registry);
         config.credential_vars = registry.credential_vars();
+        // The labels travel with the durations (issue 648): the plugins'
+        // declared `sec → label` vocabulary, so the readout renders exactly
+        // the names the plugins claim (was the kernel's hardcoded
+        // `duration_label_for` table).
+        config.round_labels = registry.round_labels();
         registry.allowed_round_secs()
     };
     eprintln!(

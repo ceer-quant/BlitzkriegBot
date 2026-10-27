@@ -1208,9 +1208,9 @@ pub struct RoundDurationResult {
     /// resolution's own report, so the UI can say "an explicit flag outranks
     /// this card" instead of silently ignoring a write.
     pub source: &'static str,
-    /// The switchable whitelist (`scanner::duration_label_for` is the ONE
-    /// decoder). Empty `label` rows are still listed so the UI can name a
-    /// non-standard boot value.
+    /// The switchable whitelist (labels come from the plugins' declared
+    /// `round_labels`, aggregated at boot — issue 648). Empty `label` rows
+    /// are still listed so the UI can name a non-standard boot value.
     pub allowed: Vec<RoundDurationOption>,
     /// What the NEXT session will run on: the persisted cell if one was
     /// written (regardless of this session's source), else the effective

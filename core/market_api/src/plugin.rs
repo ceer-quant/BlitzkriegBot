@@ -230,6 +230,19 @@ pub trait MarketPlugin: Send + Sync {
     fn supported_round_secs(&self) -> Option<Vec<i64>> {
         None
     }
+
+    /// The duration labels this plugin declares for its round families
+    /// (issue 648 — the kernel used to hold this map as the hardcoded
+    /// `scanner::duration_label_for` table; the labels are the PLUGIN's own
+    /// naming vocabulary, so the plugin declares them). `(seconds, label)`
+    /// pairs, e.g. `(900, "15m")`. Consumers: the `round_duration.get`
+    /// readout — the kernel's aggregate answers with exactly the labels the
+    /// plugins claim, nothing else. Default `&[]` = no labels declared: the
+    /// durations this plugin routes stay unlabeled in the readout, and every
+    /// existing and third-party plugin compiles unchanged.
+    fn round_labels(&self) -> &[(i64, &'static str)] {
+        &[]
+    }
     /// Static capability report for `market.list`.
     fn info(&self) -> PluginInfo {
         let modes = self.declare_modes();

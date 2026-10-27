@@ -6247,8 +6247,19 @@ mod tests {
                 position_log_path: None,
                 // The plugins' declared union as a test fixture (the values
                 // the shipped plugins declare): the readout's label check
-                // below judges against it.
+                // below judges against it. The labels travel the same road
+                // (issue 648: the fixture states the plugins' declared
+                // vocabulary itself — the shape boot aggregates).
                 allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+                round_labels: [
+                    (300, "5m"),
+                    (900, "15m"),
+                    (3600, "1h"),
+                    (14400, "4h"),
+                    (86400, "daily"),
+                ]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             };
             let mut c = Core::new(cfg.clone());
@@ -6291,7 +6302,7 @@ mod tests {
             .collect();
         assert!(
             labels.contains(&(300, "5m")) && labels.contains(&(900, "15m")),
-            "the whitelist carries the scanner's labels: {labels:?}"
+            "the whitelist carries the plugins' declared labels: {labels:?}"
         );
 
         // The write path: 5m lands in the cell, the reply names the NEXT
