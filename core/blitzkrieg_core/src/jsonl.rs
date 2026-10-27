@@ -35,7 +35,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// the previous generation or the new one, byte-complete.
 ///
 /// The temp name is unique per writer (pid + in-process counter), same
-/// discipline as `onchain::write_json_atomic` — two concurrent writers must not
+/// discipline as `blitzkrieg_onchain_pull::write_json_atomic` — two concurrent
+/// writers must not
 /// rename the same `X.tmp` out from under each other. Returns `false` when any
 /// step failed (the caller decides whether that is warn-and-continue or fatal;
 /// memory stays authoritative either way). The write is fsynced so the rename

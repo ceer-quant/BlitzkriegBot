@@ -1,7 +1,7 @@
 //! The event taxonomy — moved VERBATIM from `blitzkrieg_core::engine`
 //! (CashflowKind, BatchBook, DataEvent) and `blitzkrieg_core::data_source`
-//! (event_at_ms, event_to_json). Zero behaviour change; the kernel re-exports
-//! these under the original paths.
+//! (event_at_ms, event_to_json, event_from_json). Zero behaviour change; the
+//! kernel re-exports these under the original paths.
 
 use blitzkrieg_market_api::Side;
 use rust_decimal::Decimal;
@@ -176,8 +176,12 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "ts": now_ms,
             "books": books
                 .iter()
-                .map(|(t, b, a)| json!({ "t": t, "b": levels_json(b), "a": levels_json(a) }))
-                .collect::<Vec<_>>(),
+                .map(|(t, b, a)| json!({
+                    "t": t,
+                    "b": levels_json(b),
+                    "a": levels_json(a),
+                }))
+                .collect::<Vec<Value>>(),
         }),
         DataEvent::TopOfBook {
             token_id,
@@ -204,7 +208,8 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
         DataEvent::RoundMarkets { markets, now_ms } => json!({
             "at": now_ms,
             "k": "round",
-            "m": markets,
+            // CryptoMarket already has the camelCase serde form used on the wire.
+            "m": serde_json::to_value(markets).unwrap_or(Value::Null),
         }),
         DataEvent::Trade {
             token_id,
@@ -216,7 +221,10 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "at": now_ms,
             "k": "trade",
             "t": token_id,
-            "s": if *side == Side::Buy { "BUY" } else { "SELL" },
+            "s": match side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            },
             "p": price.to_string(),
             "q": size.to_string(),
         }),
@@ -233,12 +241,10 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "at": now_ms,
             "k": "resolution",
             "c": condition_id,
-            "p": payouts
-                .iter()
-                .map(|(t, p)| {
-                    Value::Array(vec![Value::String(t.clone()), Value::String(p.to_string())])
-                })
-                .collect::<Vec<_>>(),
+            // Pairs as [["<token>","<payout>"], …] — same shape the wire's
+            // MarketResolution carries, stringified the way every decimal
+            // here survives the round trip exactly.
+            "p": payouts_json(payouts),
             "n": neg_risk,
         }),
         DataEvent::Cashflow {
@@ -249,14 +255,28 @@ pub fn event_to_json(ev: &DataEvent) -> Value {
             "at": now_ms,
             "k": "cashflow",
             "which": which.as_str(),
+            // String decimal — the exactness convention of every decimal here.
             "usd": amount_usd.to_string(),
         }),
         DataEvent::UnifiedMapping { event, now_ms } => json!({
             "at": now_ms,
             "k": "unified",
+            // The #425 UnifiedEvent's camelCase serde form rides verbatim —
+            // one spelling on the wire, no re-shaping.
             "e": serde_json::to_value(event).unwrap_or(Value::Null),
         }),
     }
+}
+
+fn payouts_json(payouts: &[(String, Decimal)]) -> Value {
+    Value::Array(
+        payouts
+            .iter()
+            .map(|(t, p)| {
+                Value::Array(vec![Value::String(t.clone()), Value::String(p.to_string())])
+            })
+            .collect(),
+    )
 }
 
 fn levels_json(levels: &[(Decimal, Decimal)]) -> Value {
@@ -271,4 +291,177 @@ fn levels_json(levels: &[(Decimal, Decimal)]) -> Value {
             })
             .collect(),
     )
+}
+
+/// Decode one archive line value back into a [`DataEvent`].
+pub fn event_from_json(v: &Value) -> Result<DataEvent, String> {
+    let now_ms = v
+        .get("at")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "missing/invalid `at`".to_string())?;
+    let kind = v
+        .get("k")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing `k`".to_string())?;
+    match kind {
+        "book" => Ok(DataEvent::Book {
+            token_id: str_field(v, "t")?,
+            bids: levels(v.get("b"))?,
+            asks: levels(v.get("a"))?,
+            now_ms,
+        }),
+        "top" => Ok(DataEvent::TopOfBook {
+            token_id: str_field(v, "t")?,
+            best_bid: opt_dec(v.get("bb"))?,
+            best_ask: opt_dec(v.get("ba"))?,
+            now_ms,
+        }),
+        // 盘口批次原子化：`k:"books"` 批行解码。整批一个事件、一个时间戳 ——
+        // 回放端一次喂入整批，与 live 的 Batch 应用逐位同构。
+        "books" => {
+            let arr = v
+                .get("books")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "missing `books`".to_string())?;
+            let mut books = Vec::with_capacity(arr.len());
+            for item in arr {
+                let token_id = item
+                    .get("t")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "missing `books[].t`".to_string())?
+                    .to_string();
+                let bids = levels(item.get("b"))?;
+                let asks = levels(item.get("a"))?;
+                books.push((token_id, bids, asks));
+            }
+            Ok(DataEvent::Books { books, now_ms })
+        }
+        "spot" => Ok(DataEvent::Spot {
+            asset: str_field(v, "s")?,
+            price: dec_field(v, "p")?,
+            now_ms,
+        }),
+        "round" => {
+            let m = v.get("m").ok_or_else(|| "missing `m`".to_string())?;
+            let markets: Vec<CryptoMarket> =
+                serde_json::from_value(m.clone()).map_err(|e| format!("bad round markets: {e}"))?;
+            Ok(DataEvent::RoundMarkets { markets, now_ms })
+        }
+        "trade" => {
+            let side = match str_field(v, "s")?.as_str() {
+                "BUY" => Side::Buy,
+                "SELL" => Side::Sell,
+                other => return Err(format!("bad trade side `{other}`")),
+            };
+            Ok(DataEvent::Trade {
+                token_id: str_field(v, "t")?,
+                side,
+                price: dec_field(v, "p")?,
+                size: dec_field(v, "q")?,
+                now_ms,
+            })
+        }
+        "round_end" => Ok(DataEvent::RoundEnd { now_ms }),
+        "resolution" => {
+            let c = v
+                .get("c")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "missing `c`".to_string())?
+                .to_string();
+            let raw = v
+                .get("p")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "missing `p`".to_string())?;
+            let mut payouts = Vec::with_capacity(raw.len());
+            for pair in raw {
+                let items = pair
+                    .as_array()
+                    .ok_or_else(|| format!("expected [token,payout], got {pair}"))?;
+                if items.len() != 2 {
+                    return Err(format!("expected [token,payout], got {pair}"));
+                }
+                let token = items[0]
+                    .as_str()
+                    .ok_or_else(|| format!("bad payout token {}", items[0]))?
+                    .to_string();
+                payouts.push((token, dec_value(&items[1])?));
+            }
+            Ok(DataEvent::Resolution {
+                condition_id: c,
+                payouts,
+                neg_risk: v.get("n").and_then(Value::as_bool).unwrap_or(false),
+                now_ms,
+            })
+        }
+        "cashflow" => {
+            let which = v
+                .get("which")
+                .and_then(Value::as_str)
+                .and_then(CashflowKind::parse_kind)
+                .ok_or_else(|| "missing/invalid `which`".to_string())?;
+            Ok(DataEvent::Cashflow {
+                which,
+                amount_usd: dec_field(v, "usd")?,
+                now_ms,
+            })
+        }
+        "unified" => {
+            let raw = v.get("e").ok_or_else(|| "missing `e`".to_string())?;
+            let event: blitzkrieg_market_api::unified::UnifiedEvent =
+                serde_json::from_value(raw.clone())
+                    .map_err(|e| format!("bad unified event: {e}"))?;
+            Ok(DataEvent::UnifiedMapping { event, now_ms })
+        }
+        other => Err(format!("unknown event kind `{other}`")),
+    }
+}
+
+fn str_field(v: &Value, key: &str) -> Result<String, String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing `{key}`"))
+}
+
+fn dec_field(v: &Value, key: &str) -> Result<Decimal, String> {
+    let raw = v.get(key).ok_or_else(|| format!("missing `{key}`"))?;
+    dec_value(raw)
+}
+
+fn dec_value(v: &Value) -> Result<Decimal, String> {
+    match v {
+        Value::String(s) => {
+            Decimal::from_str_exact(s.trim()).map_err(|e| format!("bad decimal `{s}`: {e}"))
+        }
+        Value::Number(n) => {
+            Decimal::from_str_exact(&n.to_string()).map_err(|e| format!("bad decimal `{n}`: {e}"))
+        }
+        other => Err(format!("expected decimal, got {other}")),
+    }
+}
+
+fn opt_dec(v: Option<&Value>) -> Result<Option<Decimal>, String> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => dec_value(x).map(Some),
+    }
+}
+
+fn levels(v: Option<&Value>) -> Result<Vec<(Decimal, Decimal)>, String> {
+    let arr = match v {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(a)) => a,
+        Some(other) => return Err(format!("expected level array, got {other}")),
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for lvl in arr {
+        let pair = lvl
+            .as_array()
+            .ok_or_else(|| format!("expected [price,size], got {lvl}"))?;
+        if pair.len() != 2 {
+            return Err(format!("expected [price,size], got {lvl}"));
+        }
+        out.push((dec_value(&pair[0])?, dec_value(&pair[1])?));
+    }
+    Ok(out)
 }

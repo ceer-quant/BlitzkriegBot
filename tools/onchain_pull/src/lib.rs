@@ -43,8 +43,8 @@
 //! page/phase — the pull is never a blocking loop without feedback (the
 //! #352 reverse gate), and the IPC layer (#353) wraps the same functions.
 
-use blitzkrieg_data_model::{CashflowKind, DataEvent};
 use blitzkrieg_data_model::CryptoMarket;
+use blitzkrieg_data_model::{CashflowKind, DataEvent};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};

@@ -61,9 +61,11 @@ pub mod market;
 pub mod marketdata;
 pub mod model;
 pub mod ome;
-/// #352: on-chain data pull + conversion (Polymarket Data/Gamma/CLOB APIs →
-/// the backtest JSONL event stream, with resume + cache + SHA256 manifests).
-pub mod onchain;
+// #648 C: the #352 on-chain pull (Polymarket Data/Gamma/CLOB APIs → the
+// backtest JSONL event stream, with resume + cache + SHA256 manifests) MOVED
+// to the `blitzkrieg-onchain-pull` crate. The kernel keeps only the
+// `--onchain-pull` CLI entry (main.rs) and the IPC pull jobs
+// (backtest_jobs.rs); both call into the crate.
 pub mod order;
 pub mod order_db;
 /// RFC 568 阶段一：内核侧跨所套利配对状态簿（PairBook）。事实事件驱动的

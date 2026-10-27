@@ -89,6 +89,16 @@ strategy-logic = { path = "../../user_layer/strategy_logic" }
 # Market-plugin contract (no internal deps): DTOs + the DataFeed/Discovery/
 # OrderExecutor traits + MarketHost. The core implements the host side here.
 blitzkrieg-market-api = { path = "../market_api" }
+# #648 C: the leaf data contract (DataEvent taxonomy + JSONL codec + replay
+# readers). The kernel consumes the stream through it; the definitions re-
+# exported from engine/model/data_source LIVE here — the kernel keeps only
+# re-exports, so the offline puller crate shares the identical contract.
+blitzkrieg-data-model = { path = "../data_model" }
+# #648 C: the #352 on-chain pull moved OUT of the kernel — this binary edge is
+# only the `--onchain-pull` dispatch (the operator entry point) and the IPC
+# pull jobs calling into the crate that owns the implementation. No pull logic
+# lives in the kernel any more.
+blitzkrieg-onchain-pull = { path = "../../tools/onchain_pull" }
 # Official Polymarket market extension (optional; the default feature links it).
 # The core never imports it directly except at the single assembly seam.
 polymarket-extension = { path = "../../extensions/polymarket", optional = true }

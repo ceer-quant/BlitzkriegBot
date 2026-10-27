@@ -2,11 +2,19 @@
 name = "blitzkrieg-data-model"
 version.workspace = true
 edition = "2024"
-description = "Leaf data contract: the replay-stream event taxonomy (DataEvent) and the round-market shape (CryptoMarket) shared by the core, the market plugins and the offline tools. No internal deps beyond market_api."
+description = "Leaf data contract: the replay-stream event taxonomy (DataEvent, its JSONL codec, the replay reader) and the round-market shape (CryptoMarket) shared by the core, the market plugins and the offline tools. No internal deps beyond market_api."
 
 [dependencies]
 # `Side`/`TokenId`/`UnifiedEvent` are market_api types already; the leaf pulls
 # them from the contract crate directly so core and plugins keep ONE definition.
-blitzkrieg-market-api = { path = "../market_api" }rust_decimal = { workspace = true }
+blitzkrieg-market-api = { path = "../market_api" }
+rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Structured warn on skipped replay lines (the same one-warn-per-run shape the
+# kernel's archive reader used before the move; a malformed corpus tail must
+# never abort a long replay silently).
+tracing = "0.1"
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }

@@ -21,7 +21,7 @@
 //! events and an injected clock, so it is unit-testable without network.
 
 use crate::marketdata::LocalBook;
-use crate::model::{CryptoMarket, OrderbookSnapshot, Side, SignalDirection};
+use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
 use crate::scanner::{RoundTiming, Scanner, ScannerConfig};
 use crate::signal::{PriceBuffer, SpreadArbConfig, TradeSignal, TrendConfig};
 use crate::strategies::{

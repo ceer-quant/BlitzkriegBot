@@ -3127,7 +3127,9 @@ async fn main() -> anyhow::Result<()> {
         // the backtest JSONL event stream under data/onchain. Like
         // --regime-eval it needs no mode, no feeds and never trades; unlike
         // it, the pull is async (page-sized progress on stderr, never a
-        // blocking loop without feedback).
+        // blocking loop without feedback). #648 C: the kernel keeps only this
+        // operator entry point — the implementation lives in the
+        // `blitzkrieg-onchain-pull` crate and is called unchanged.
         let (Some(start), Some(end)) = (&args.onchain_start, &args.onchain_end) else {
             eprintln!(
                 "blitzkrieg-core: --onchain-pull needs --onchain-start and --onchain-end \
@@ -3135,14 +3137,14 @@ async fn main() -> anyhow::Result<()> {
             );
             std::process::exit(2);
         };
-        let start_sec = match blitzkrieg_core::onchain::parse_time_arg(start) {
+        let start_sec = match blitzkrieg_onchain_pull::parse_time_arg(start) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("blitzkrieg-core: --onchain-start: {e}");
                 std::process::exit(2);
             }
         };
-        let end_sec = match blitzkrieg_core::onchain::parse_time_arg(end) {
+        let end_sec = match blitzkrieg_onchain_pull::parse_time_arg(end) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("blitzkrieg-core: --onchain-end: {e}");
@@ -3163,7 +3165,7 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("data/onchain"));
-        let req = blitzkrieg_core::onchain::PullRequest {
+        let req = blitzkrieg_onchain_pull::PullRequest {
             wallet: wallet.clone(),
             start_ms: start_sec * 1000,
             end_ms: end_inclusive_sec * 1000,
@@ -3172,17 +3174,17 @@ async fn main() -> anyhow::Result<()> {
             out_dir,
             page_limit: 500,
             fill_source: match &args.onchain_fills {
-                Some(path) => blitzkrieg_core::onchain::FillSource::ActivityFile(
+                Some(path) => blitzkrieg_onchain_pull::FillSource::ActivityFile(
                     std::path::PathBuf::from(path),
                 ),
                 None => Default::default(),
             },
         };
-        let fetch = blitzkrieg_core::onchain::HttpFetcher::new(150);
-        let outcome = blitzkrieg_core::onchain::pull_and_convert(
+        let fetch = blitzkrieg_onchain_pull::HttpFetcher::new(150);
+        let outcome = blitzkrieg_onchain_pull::pull_and_convert(
             &fetch,
             &req,
-            &|p: &blitzkrieg_core::onchain::PullProgress| {
+            &|p: &blitzkrieg_onchain_pull::PullProgress| {
                 eprintln!("onchain {}: {} — {}", p.phase, p.fetched, p.detail);
             },
         )

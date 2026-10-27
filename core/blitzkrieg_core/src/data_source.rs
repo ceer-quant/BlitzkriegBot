@@ -50,17 +50,19 @@
 //! decision clock.
 
 use crate::engine::DataEvent;
-use crate::model::Side;
-use rust_decimal::Decimal;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 // #648 C: `event_at_ms` / `event_to_json` / `event_from_json` moved verbatim
 // to `blitzkrieg_data_model` (the leaf the offline `tools/onchain_pull` crate
-// also compiles against); these re-exports keep every
-// `crate::data_source::event_*` spelling in the kernel compiling unchanged.
+// also compiles against, with the replay readers those tests drive); these
+// re-exports keep every `crate::data_source::event_*` spelling in the kernel
+// compiling unchanged. The archive WRITER below stays kernel-side: recording
+// is a live-core concern (locks, rotation, disk guards); reading a stream is
+// the leaf's contract, duplicated here verbatim because the kernel's
+// ReplaySource pairs with EventArchive's segment naming and lock semantics.
 pub use blitzkrieg_data_model::{event_at_ms, event_from_json, event_to_json};
 
 /// One market-data event plus the timestamp it must be replayed at.
