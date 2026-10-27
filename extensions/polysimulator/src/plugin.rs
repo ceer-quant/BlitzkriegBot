@@ -51,6 +51,9 @@ impl MarketPlugin for PolySimulatorPlugin {
     fn name(&self) -> &str {
         "polysimulator"
     }
+    fn required_credential_env(&self) -> &[&str] {
+        &["POLYSIM_API_KEY"]
+    }
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
     }

@@ -74,6 +74,27 @@ impl MarketPluginRegistry {
         g.order.clone()
     }
 
+    /// Every registered plugin's DECLARED credential environment names
+    /// (issue 648): `plugin → [env var name]`, from
+    /// `MarketPlugin::required_credential_env`. A report of what the plugins
+    /// CLAIM — the same posture as `allowed_round_secs()`: which env names a
+    /// venue's executor reads is the plugin's own contract, never a hardcoded
+    /// core table. Plugins returning `&[]` (the default) contribute nothing.
+    pub fn credential_vars(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let g = self.inner.lock().expect("market registry poisoned");
+        g.order
+            .iter()
+            .filter_map(|name| g.plugins.get(name))
+            .map(|p| {
+                (p.name().to_string(), {
+                    let vars = p.required_credential_env();
+                    vars.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                })
+            })
+            .filter(|(_, vars)| !vars.is_empty())
+            .collect()
+    }
+
     /// The DECLARED union of round lengths (轮次多族): every registered
     /// plugin's `info().supported_round_secs`, deduplicated and ascending.
     ///

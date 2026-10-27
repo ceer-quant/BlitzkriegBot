@@ -271,6 +271,19 @@ pub trait MarketPlugin: Send + Sync {
         None
     }
 
+    /// The environment variable names this plugin's executor reads its
+    /// credentials from (issue 648 — the kernel used to hold this table as a
+    /// hardcoded `venue → env names` match; the names are the PLUGIN's own
+    /// contract, so the plugin declares them). Consumers: the
+    /// `market.credentials.status` readout, the `market.credentials.set`
+    /// write-path validation, and the RFC #541 credential-ready predicates.
+    /// Default `&[]` = the plugin's data plane is credential-free — a plugin
+    /// missing here is simply not credential-bearing, and a third-party
+    /// plugin compiles unchanged.
+    fn required_credential_env(&self) -> &[&str] {
+        &[]
+    }
+
     /// The market modes this plugin declares (§7.3). Empty = undeclared: the
     /// handshake then treats the plugin as ONE implicit market_type-only mode
     /// (its `market_type()`, no structure, no capabilities — the server

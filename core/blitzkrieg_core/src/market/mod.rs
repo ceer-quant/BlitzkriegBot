@@ -549,41 +549,24 @@ async fn persist_cell(
 
 // ── 行情插件凭据（API 配置 UI 的内核侧）─────────────────────────────────────
 
-/// The env vars each market plugin's executor reads at boot, in the order the
-/// plugins themselves read them. ONE table: `market.credentials.status`
-/// reports it, `market.credentials.set` validates names against it, and the
-/// UI renders it. A plugin missing from the table has no executor credentials
-/// (its data plane is credential-free).
-///
-/// Kept in the CORE (not the plugin crates) because the status readout must
-/// answer for every registered plugin, including ones whose executor never
-/// starts in this session. A new credential-bearing plugin adds its row here
-/// AND reads the vars in its own executor — the gate test fails when the two
-/// drift.
-pub fn plugin_credential_vars(plugin: &str) -> &'static [&'static str] {
-    match plugin {
-        "polymarket" => &["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"],
-        "kalshi" => &["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
-        "predictfun" => &["PREDICT_API_KEY", "PREDICT_PRIVATE_KEY"],
-        "polysimulator" => &["POLYSIM_API_KEY"],
-        _ => &[],
-    }
-}
-
 /// `market.credentials.status`: for every registered plugin, which of its
 /// required vars will resolve for the NEXT session — judged against this
 /// process's environment (the launcher loads `.env` before spawning the
 /// kernel; the config.json credentials cell is retired, `.env` is the single
-/// persistent home). Values never leave the process; names and presence only.
+/// persistent home). The required-vars table is the PLUGINS' own declaration
+/// (`MarketPlugin::required_credential_env`, issue 648 — was a hardcoded
+/// core-side match). Values never leave the process; names and presence only.
 pub fn credentials_status(
     registry: &registry::MarketPluginRegistry,
 ) -> crate::ipc::schema::CredentialsStatus {
     use crate::ipc::schema::{CredentialsStatus, PluginCredentialRow};
     let rows = registry
-        .list()
+        .names()
         .iter()
+        .filter_map(|n| registry.get(n))
         .map(|p| {
-            let required: Vec<String> = plugin_credential_vars(&p.name)
+            let required: Vec<String> = p
+                .required_credential_env()
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
@@ -594,7 +577,7 @@ pub fn credentials_status(
                 .collect();
             let ready = !required.is_empty() && resolved.len() == required.len();
             PluginCredentialRow {
-                plugin: p.name.clone(),
+                plugin: p.name().to_string(),
                 required_vars: required,
                 resolved_vars: resolved,
                 ready,
@@ -604,27 +587,37 @@ pub fn credentials_status(
     CredentialsStatus { rows }
 }
 
-/// RFC #541 方案 2a-i 挂钩 B（原型）的凭证谓词：`plugin` 的全部必需凭证变量
-/// 是否都能从本进程环境解析——与 [`credentials_status`] 逐变量同一谓词。
-/// 需要的插件变量表为空 ⇒
-/// 视为就绪（数据面无凭证的插件没有可失败的维度——`credentials_status` 的
-/// `ready = !required.is_empty()` 语义只属于面板行，这里不能把一个无凭证
-/// 插件的 venue 判成永远未就绪）。
-pub fn venue_credentials_ready(plugin: &str) -> bool {
-    venue_credentials_missing(plugin).is_empty()
+/// RFC #541 方案 2a-i 挂钩 B（原型）的凭证谓词：`plugin` 的全部**声明**凭证
+/// 变量（issue 648 的声明表，boot 从 `required_credential_env` 聚合进
+/// config）是否都能从本进程环境解析——与 [`credentials_status`] 逐变量同一
+/// 谓词。声明表里没有该插件（或表为空）⇒ 视为就绪（数据面无凭证的插件没有
+/// 可失败的维度——`credentials_status` 的 `ready = !required.is_empty()` 语义
+/// 只属于面板行，这里不能把一个无凭证插件的 venue 判成永远未就绪）。
+pub fn venue_credentials_ready(
+    plugin: &str,
+    declared: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    venue_credentials_missing(plugin, declared).is_empty()
 }
 
 /// The refusal-diagnosis half of [`venue_credentials_ready`]: WHICH of the
-/// plugin's required vars do not resolve from the process environment, in the
+/// plugin's declared vars do not resolve from the process environment, in the
 /// plugin's declared order. RFC #541 边界三（拒绝可见性）：
 /// an operator must be able to fix a wholesale batch refusal from the log line
 /// alone — "kalshi 缺 KALSHI_RSA_PRIVATE_KEY"，不是笼统的"批校验失败"。
-pub fn venue_credentials_missing(plugin: &str) -> Vec<&'static str> {
-    plugin_credential_vars(plugin)
-        .iter()
-        .copied()
-        .filter(|v| !std::env::var_os(v).is_some_and(|s| !s.is_empty()))
-        .collect()
+pub fn venue_credentials_missing(
+    plugin: &str,
+    declared: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    declared
+        .get(plugin)
+        .map(|vars| {
+            vars.iter()
+                .filter(|v| !std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `market.credentials.set`: validate every var name against the plugin's
@@ -644,17 +637,20 @@ pub async fn apply_credentials_set(
     use crate::model::{CoreError, CoreErrorCode};
 
     let plugin = patch.plugin.trim();
-    if registry.get(plugin).is_none() {
-        let known = registry.names();
-        let known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
-        return Err(CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!(
-                "market.credentials.set: '{plugin}' is not a registered plugin — the switchable set is {known:?}"
-            ),
-        ));
-    }
-    let allowed = plugin_credential_vars(plugin);
+    let plugin_obj = match registry.get(plugin) {
+        Some(p) => p,
+        None => {
+            let known = registry.names();
+            let known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "market.credentials.set: '{plugin}' is not a registered plugin — the switchable set is {known:?}"
+                ),
+            ));
+        }
+    };
+    let allowed = plugin_obj.required_credential_env();
     let path = core
         .lock()
         .await

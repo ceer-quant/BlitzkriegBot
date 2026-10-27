@@ -60,6 +60,9 @@ impl MarketPlugin for PredictFunPlugin {
     fn name(&self) -> &str {
         "predictfun"
     }
+    fn required_credential_env(&self) -> &[&str] {
+        &["PREDICT_API_KEY", "PREDICT_PRIVATE_KEY"]
+    }
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
     }
