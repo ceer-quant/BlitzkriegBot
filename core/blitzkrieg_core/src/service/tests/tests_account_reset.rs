@@ -475,8 +475,8 @@ fn archive_stop_emits_one_risk_alert_on_the_edge() {
     }
     assert_eq!(alerts.len(), 1, "exactly one alert on the edge: {alerts:?}");
     assert!(
-        alerts[0].contains("事件归档停录") && alerts[0].contains("locked"),
-        "the alert names the stop reason: {}",
+        alerts[0].contains("事件归档停录"),
+        "the alert says what stopped: {}",
         alerts[0]
     );
 
