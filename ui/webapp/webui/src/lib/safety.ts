@@ -132,7 +132,7 @@ export function selfCheckBanner(stats: EngineStats | null | undefined): SafetyBa
 }
 
 /**
- * The market-data archive stopped recording (issue #669 ②). The kernel's own
+ * The market-data archive stopped recording (issue 669 ②). The kernel's own
  * stop is a single journal warn line — an external operator found FIVE DAYS of
  * silently missing backtest corpus with a manual `df`. The kernel also emits
  * one risk alert on the stop edge; this banner is the CONTINUOUS face: it reads

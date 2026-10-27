@@ -15574,9 +15574,8 @@ impl Core {
         if let Some(a) = self.event_archive.as_ref() {
             let recording = a.status().recording;
             if self.archive_recording_last && !recording {
-                let message =
-                    "事件归档停录——回测语料不再记录；请清理磁盘或调整归档上限后重启会话"
-                        .to_string();
+                let message = "事件归档停录——回测语料不再记录；请清理磁盘或调整归档上限后重启会话"
+                    .to_string();
                 eprintln!("core: {message}");
                 tracing::error!("{}", message);
                 self.note_error(
