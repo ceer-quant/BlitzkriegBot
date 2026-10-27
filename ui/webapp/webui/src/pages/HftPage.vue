@@ -620,7 +620,9 @@ const filteredRows = computed<TradeRow[]>(() => {
   const now = Date.now()
   const dayStart = new Date(new Date().setHours(0, 0, 0, 0)).getTime()
   const week = now - 7 * 86_400_000
-  const kept = historyRows.value.filter((t) => {
+  // 显示集 = 成交行 + 终态死单合成行（上方 terminalOrderRows）：口径与
+  // 统计全部只认 historyRows，这里只是历史页签的行列表多了一路来源。
+  const kept = [...historyRows.value, ...terminalOrderRows.value].filter((t) => {
     const ts = t.exitTime ?? t.entryTime ?? 0
     if (fTime.value === 'today' && ts < dayStart) return false
     if (fTime.value === '7d' && ts < week) return false
@@ -967,6 +969,55 @@ const orderRows = computed<OrderRow[]>(() => {
   ).rows
 })
 const expiredOrderRows = computed(() => orderRows.value.filter((o) => o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING').filter(orderExpired))
+// 内核 is_live 的三态（service.rs 活单判定同口径）：挂单页签只显活单 ——
+// 终态死单（REJECTED/FAILED/FORCE_CLOSED/CANCELLED/FILLED）不再堆在挂单
+// 表里当「当前挂单 N」充数。FORCE_CLOSED 的活单走内核 run_expiry_sweep
+// 自动收（reason="round expired"），强平按钮保留作手动兜底；死单全部
+// 分流到历史页签（下方 terminalOrderRows），挂单页签的徽标 = 真挂单数。
+const isLiveOrder = (o: OrderRow): boolean =>
+  o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING'
+const openOrderRows = computed(() => orderRows.value.filter(isLiveOrder))
+
+// ── 终态死单自动落历史页签（裁决「过期轮次订单自动进入历史订单」）─────────
+// 历史页签的行源是 trades（成交流水），从未成交的死单在里面没有行 —— 35 行
+// REJECTED/FORCE_CLOSED 曾经只能在挂单页签烂着。这里把 orderRows 里的终态
+// 行合成 TradeRow 形状补进历史页签：
+//   * 只并四种「无成交终态」（REJECTED/FAILED/FORCE_CLOSED/CANCELLED）。
+//     FILLED 天然有成交，trades 里已有（或将有）对应行，并进去必然重复，
+//     故不合成 —— 这就是去重：按状态语义划界，不做 (asset, side, price,
+//     size, submittedAtMs) 的近似匹配（那是在给两个独立台账硬造一致性）。
+//   * 合成行是「未成交」不是「亏了零块钱」：净利/收益率/费用/出场全占位
+//     （—），字段给 0 只为 TradeRow 形状完整，盈亏统计（cumStats /
+//     filteredStats / winBands / 权益曲线）全部只吃 historyRows（成交行），
+//     口径不动 —— 历史徽标（cumStats.total）也不改，两口径差异是既有语义。
+//   * entryTime = submittedAtMs（wire 一直带，见 OrderRow 注释），exitTime
+//     不设：时间筛选与 newestFirst 都回落 entryTime（lib/trades 同一处理），
+//     买入时间 = 提交时刻、卖出时间 = —（从未出场，诚实）；更重要的是
+//     tradeIdentity 的键——双时间戳齐会按 (asset, entry, exit) 合成键，同毫秒
+//     批量提交的两单会撞键（Vue patch 错乱），缺 exitTime 落 i:order:<orderId>
+//     的 id 键，orderId 内核唯一，天然不撞。
+//   * strategy/venue 照抄订单行：历史页签的资产/策略筛选器对合成行照常
+//     生效；「结果」筛选（仅盈利/仅亏损）按净利 0 把合成行划进「亏损」
+//     桶的边界之外（pnl > 0 才算盈），「全部」下总能看到。
+const terminalOrderRows = computed<TradeRow[]>(() =>
+  orderRows.value
+    .filter((o) => o.status === 'REJECTED' || o.status === 'FAILED' || o.status === 'FORCE_CLOSED' || o.status === 'CANCELLED')
+    .map((o) => ({
+      id: `order:${o.orderId}`,
+      strategy: o.strategy || undefined,
+      asset: o.asset,
+      direction: o.direction,
+      entryPrice: Number(o.price) || 0,
+      exitPrice: 0,
+      shares: Number(o.size) || 0,
+      netPnlUsd: 0,
+      feesUsd: 0,
+      entryTime: o.submittedAtMs,
+      venue: o.venue,
+      orderStatus: o.status,
+      orderRoundSlot: o.roundSlot,
+    })),
+)
 
 const orderBusy = ref(false)
 const orderErr = ref<string | null>(null)
@@ -1051,6 +1102,10 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
   if (r.includes('stop') || r.includes('loss')) return 'down'
   return 'gold'
 }
+
+/** 历史页签的终态死单合成行（orderStatus 在场 = 来源「订单」）：状态徽标
+ * 语气沿用挂单页签的 orderStatusTone，轮次照挂单页签的 #slot 形。 */
+const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefined
 </script>
 
 <template>
@@ -1679,7 +1734,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           v-model="tab"
           :segments="[
             { id: 'positions', label: '当前持仓', badge: positions.length },
-            { id: 'orders', label: '当前挂单', badge: orderRows.length },
+            { id: 'orders', label: '当前挂单', badge: openOrderRows.length },
             { id: 'history', label: '历史订单', badge: cumStats.total },
           ]"
           size="sm"
@@ -1841,9 +1896,11 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
           : '启用策略后，成交平仓即出现在这里。'" compact />
       </div>
 
-      <!-- issue 456: 挂单簿 —— 内核记账的订单，逐行强平（确认词门） -->
+      <!-- issue 456: 挂单簿 —— 内核记账的订单，逐行强平（确认词门）。
+           只显活单：终态死单已被分流去历史页签（裁决「过期轮次订单自动
+           进入历史订单」），不再在这里堆尸体充「当前挂单」。 -->
       <div v-else-if="tab === 'orders'">
-        <div v-if="orderRows.length" class="overflow-x-auto">
+        <div v-if="openOrderRows.length" class="overflow-x-auto">
           <table class="w-full min-w-[900px] text-[13px]">
             <thead>
               <tr class="text-left">
@@ -1862,7 +1919,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             </thead>
             <tbody>
               <tr
-                v-for="o in orderRows"
+                v-for="o in openOrderRows"
                 :key="o.orderId"
                 class="border-t border-line transition-colors hover:bg-panel-2"
               >
@@ -1899,7 +1956,7 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无挂单" hint="策略报出的订单会出现在这里；过期残留可用强平清理。" compact />
+        <EmptyState v-else text="无挂单" hint="策略报出的活单（挂单中/部分成交）会出现在这里；过期活单由内核自动强平归历史，被拒/撤销的死单在历史订单页签。" compact />
       </div>
 
       <!-- history waterfall -->
@@ -1948,31 +2005,47 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.venue || '—' }}</td>
                 <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.strategy ?? '—' }}</td>
                 <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.entryPrice).toFixed(3)" /></td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.exitPrice).toFixed(3)" /></td>
+                <td class="px-2 py-2.5 text-right num text-muted-fg">
+                  <!-- 死单合成行从未成交，出场没有值 —— 占位而不是 0.000
+                       （0 会冒充「以零价出场」）。 -->
+                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="Number(t.exitPrice).toFixed(3)" />
+                  <span v-else class="text-faint-fg">—</span>
+                </td>
                 <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="t.shares" /></td>
                 <td class="px-2 py-2.5 text-right num text-down">
-                  <RollingNumber :value="t.feesUsd ? money(t.feesUsd, 3) : '—'" />
+                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="t.feesUsd ? money(t.feesUsd, 3) : '—'" />
+                  <span v-else class="text-faint-fg">—</span>
                 </td>
                 <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
-                  <RollingNumber :value="signedMoney(t.netPnlUsd, 2)" />
+                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="signedMoney(t.netPnlUsd, 2)" />
+                  <span v-else class="text-faint-fg">—</span>
                 </td>
                 <td class="px-2 py-2.5 text-right num" :class="Number(t.netPnlPct ?? 0) >= 0 ? 'text-up' : 'text-down'">
-                  <RollingNumber :value="signedPct(t.netPnlPct, 2)" />
+                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="signedPct(t.netPnlPct, 2)" />
+                  <span v-else class="text-faint-fg">—</span>
                 </td>
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  <RollingNumber :value="t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—'" />
+                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—'" />
+                  <span v-else class="text-faint-fg">—</span>
                 </td>
                 <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.entryTime) }}</td>
                 <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.exitTime) }}</td>
                 <td class="px-2 py-2.5">
-                  <Badge v-if="t.exitReason" :variant="exitReasonTone(t.exitReason)">{{ t.exitReason }}</Badge>
+                  <!-- 死单合成行：原因列 = 状态徽标 + 轮次 #slot + 来源「订单」；
+                       成交行照旧 exitReason。 -->
+                  <template v-if="orderRowIsSynthetic(t)">
+                    <Badge :variant="orderStatusTone(t.orderStatus ?? '')">{{ orderStatusLabel(t.orderStatus ?? '') }}</Badge>
+                    <RollingNumber class="ml-1.5 text-[11px] text-faint-fg" :value="`#${t.orderRoundSlot ?? 0}`" />
+                    <span class="ml-1.5 text-[10.5px] text-faint-fg">订单</span>
+                  </template>
+                  <Badge v-else-if="t.exitReason" :variant="exitReasonTone(t.exitReason)">{{ t.exitReason }}</Badge>
                   <span v-else class="text-faint-fg">—</span>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <EmptyState v-else text="无匹配订单" hint="清空搜索或筛选后仍为空，说明该窗口尚无成交。" compact />
+        <EmptyState v-else text="无匹配订单" hint="清空搜索或筛选后仍为空，说明该窗口尚无成交、也没有终态订单（被拒/撤销/强平的死单会落在这里）。" compact />
 
         <!-- waterfall sentinel + fallback button -->
         <div ref="sentinel" class="h-px" />

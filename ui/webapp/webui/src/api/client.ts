@@ -483,6 +483,12 @@ export interface OrderRow {
   status: string
   roundSlot: number
   /**
+   * 订单提交时刻（毫秒）。wire 一直带着（内核 TrackedOrder.submittedAtMs，
+   * serde camelCase 直通），此前前端没消费故未声明 —— 终态死单分流历史
+   * 页签时要拿它当合成行的时间戳，按需声明即可，老读数不用动。
+   */
+  submittedAtMs?: number
+  /**
    * E28 (§9.2): the account the order belongs to. Empty/absent = pre-E28
    * core — unattributed, shown regardless of the active account.
    */
@@ -1917,6 +1923,15 @@ export interface TradeRow {
    * record/core — unattributed, shown regardless of the active account.
    */
   accountId?: string
+  /**
+   * 挂单页签的终态死单分流进历史页签时（面板合成行，从未成交、无对应
+   * trades 行）由前端写入的来源标记：原内核订单的 status（REJECTED/
+   * FAILED/FORCE_CLOSED/CANCELLED）。真实成交行永远没有这个键 —— 与
+   * 「来源 = 订单」徽标和净利占位（—，不进盈亏统计）同源判定。
+   */
+  orderStatus?: string
+  /** 合成行的轮次（内核 TrackedOrder.roundSlot），真实成交行缺省。 */
+  orderRoundSlot?: number
 }
 
 export interface TradeSummary {
