@@ -35,7 +35,7 @@ const check = (label, fn) => {
 }
 
 const {
-  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner,
+  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
 } = await import('../src/lib/safety.ts')
 
 console.log('trading-safety banners — the three states that used to be invisible')
@@ -147,6 +147,36 @@ check('a healthy snapshot raises nothing at all', () => {
   assert.equal(freezeBanner(stats), null)
   assert.equal(lastErrorBanner(stats), null)
   assert.equal(selfCheckBanner(stats), null)
+  assert.equal(archiveStoppedBanner(stats), null)
+})
+
+// Issue #669 ②: the archive stopped recording and nothing on the panel said so
+// — an external operator found five days of missing backtest corpus by hand.
+// The banner is CONTINUOUS (reads stats.archive on every snapshot), names the
+// kernel's stopped_reason, and stays dark for an older core (`archive: null`)
+// or a recording one.
+check('a stopped archive raises the corpus-loss banner with the kernel\'s reason', () => {
+  const b = archiveStoppedBanner({
+    archive: { path: '/data/events.jsonl', events: 1, bytes: 2, dropped: 3, recording: false, rotateBytes: 0, segmentBytes: 0, segments: 0, freeBytes: 0, stoppedReason: 'disk' },
+  })
+  assert.ok(b, 'a stopped archive must never be silent on the cockpit')
+  assert.equal(b.tone, 'warn')
+  assert.match(b.body, /停录/)
+  assert.match(b.body, /disk/, 'the kernel\'s stopped_reason is DATA on screen')
+  assert.match(b.body, /语料/)
+})
+
+check('a recording or absent archive raises no archive banner', () => {
+  assert.equal(
+    archiveStoppedBanner({
+      archive: { path: '/data/events.jsonl', events: 1, bytes: 2, dropped: 0, recording: true, rotateBytes: 0, segmentBytes: 0, segments: 0, freeBytes: 9, stoppedReason: null },
+    }),
+    null,
+  )
+  // Older cores: the key is null (no archive configured) or missing.
+  assert.equal(archiveStoppedBanner({ archive: null }), null)
+  assert.equal(archiveStoppedBanner({}), null)
+  assert.equal(archiveStoppedBanner(null), null)
 })
 
 console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)

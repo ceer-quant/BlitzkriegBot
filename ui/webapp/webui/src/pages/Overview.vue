@@ -15,7 +15,7 @@ import {
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
-  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner,
+  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
 } from '@/lib/safety'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
@@ -43,6 +43,11 @@ const connBanner = computed(() => connectionBanner(snap.value))
 const freeze = computed(() => freezeBanner(stats.value))
 const lastError = computed(() => lastErrorBanner(stats.value, freeze.value !== null))
 const selfCheck = computed(() => selfCheckBanner(stats.value))
+// issue #669: the event archive stopped recording — the kernel's stop was a
+// single journal line, so an operator found days of missing backtest corpus by
+// hand. The reading rule lives in lib/safety.ts like the other banners; this
+// one stays up on EVERY snapshot while `stats.archive.recording` is false.
+const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
 
 // ── balance (principal + net profit is the real balance in both modes) ──────
 // issue 561（裁决 1）：真实余额瓦片跟随显示账户 —— 读 account.list 行
@@ -579,6 +584,11 @@ const needsStrategyHint = computed(() => {
         <span v-for="item in selfCheck.items" :key="item.name" class="block">
           {{ item.name }}：{{ item.detail }}
         </span>
+      </AlertBanner>
+    </div>
+    <div v-if="archiveStopped" class="mt-3.5">
+      <AlertBanner tone="warn" :title="archiveStopped.title" :hint="archiveStopped.hint">
+        {{ archiveStopped.body }}
       </AlertBanner>
     </div>
   </template>

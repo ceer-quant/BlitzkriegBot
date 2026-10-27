@@ -1641,6 +1641,16 @@ pub struct Core {
     /// (active) account is bound to; a sibling venue's cash is a different
     /// book's truth.
     venue_free_by_venue: std::collections::HashMap<String, (i64, Decimal)>,
+    /// The event archive's recording state as THIS core last saw it (issue
+    /// #669): `true` = recording (and the boot assumption — an archive that
+    /// opened stopped — still arms the edge below, because `stop()` may also
+    /// have fired at open). On each tick the archive's live `status().recording`
+    /// is folded through here, and a `true → false` edge emits ONE RiskAlert —
+    /// the disk-floor/lock/io stop is otherwise a single journal warn line that
+    /// a 24/7 operator finds days later as missing corpus. Staying false is
+    /// silent (the alert fired once; the banner reads `stats.archive`), and a
+    /// defensive `false → true` reset just re-arms the detector.
+    archive_recording_last: bool,
     /// F4: close-accounting credentials for fill-driven full closes, keyed by
     /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
     /// strategy PnL / breaker immediately; if the venue later reports that same
@@ -2438,6 +2448,7 @@ impl Core {
             },
             settlement,
             venue_free_by_venue: std::collections::HashMap::new(),
+            archive_recording_last: true,
             close_credentials: std::collections::VecDeque::new(),
             close_credential_log,
             next_id: 1,
@@ -9611,6 +9622,26 @@ impl Core {
             .get(&active_venue)
             .map(|(t, b)| (*t, *b));
         let ledger_realigned = self.audit.last_realign.get(&active_venue).copied();
+        // The venue leg compares the ledger against a PAPER site's own figure
+        // when this venue declared itself SIMULATED (its plugin's declaration
+        // snapshot — the same `set_plugin_modes` injection the strategy
+        // handshake reads): the paper site freezes its reported free cash on a
+        // resting BUY and never nets the reservation back out, so the leg's
+        // `balance − reserved` expectation is fee-level cents off by
+        // construction and two strikes halted new entries over arithmetic that
+        // could never agree (external operator report, issue #669). The
+        // declaration is the plugin's identity — it cannot change mid-session.
+        let venue_simulated = self
+            .plugin_modes
+            .iter()
+            .find(|p| p.name == active_venue)
+            .map(|p| {
+                p.modes.iter().any(|m| {
+                    m.capabilities
+                        .satisfies(blitzkrieg_market_api::MarketCapabilities::SIMULATED)
+                })
+            })
+            .unwrap_or(false);
         AuditInput {
             now_ms,
             live: self.config.mode == Mode::Live,
@@ -9637,6 +9668,7 @@ impl Core {
             open_positions,
             seen_trades,
             has_trade_log,
+            venue_simulated,
         }
     }
 
@@ -15529,6 +15561,34 @@ impl Core {
         // (P-1.3).
         if let Some(a) = self.event_archive.as_mut() {
             a.flush_if_due(now_ms, 1000);
+        }
+        // Issue #669: the archive's stop (disk floor / lock / io / session cap)
+        // is otherwise a single journal warn line — the external operator who
+        // reported it found the silent corpus loss FIVE DAYS later with a manual
+        // `df`. Fold the live recording state through the last-seen slot and
+        // say it OUT LOUD on the `true → false` edge, exactly once: the risk
+        // alert carries the stop reason and what is being lost (backtest
+        // corpus). Staying stopped is silent; the panel banner reads
+        // `stats.archive` continuously. `false → true` cannot happen (a stopped
+        // archive never restarts) but resets the slot defensively.
+        if let Some(a) = self.event_archive.as_ref() {
+            let recording = a.status().recording;
+            if self.archive_recording_last && !recording {
+                let message =
+                    "事件归档停录——回测语料不再记录；请清理磁盘或调整归档上限后重启会话"
+                        .to_string();
+                eprintln!("core: {message}");
+                tracing::error!("{}", message);
+                self.note_error(
+                    &CoreError::new(CoreErrorCode::Internal, message.clone()),
+                    now_ms,
+                );
+                self.emit(Event::RiskAlert {
+                    code: CoreErrorCode::Internal,
+                    message,
+                });
+            }
+            self.archive_recording_last = recording;
         }
 
         // E29 (§12.2): the still-growing bars push at most 1/s per
