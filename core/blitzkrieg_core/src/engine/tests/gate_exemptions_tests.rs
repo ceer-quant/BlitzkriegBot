@@ -558,7 +558,10 @@ fn blocked_gate_counts_are_attributable_per_account() {
     e.tally_blocked();
     let d = e.gate_tally_for_account("probe", DEFAULT_ACCT);
     let p = e.gate_tally_for_account("probe", "paper");
-    assert_eq!(d.blocked_timing, 1, "default account blocked_timing mismatch");
+    assert_eq!(
+        d.blocked_timing, 1,
+        "default account blocked_timing mismatch"
+    );
     assert_eq!(p.blocked_timing, 1, "paper account blocked_timing mismatch");
     assert_eq!(d.blocked_momentum, 0);
     assert_eq!(p.exempted_timing, 0);
@@ -625,8 +628,14 @@ fn honoured_exemptions_are_counted_per_account() {
     );
     let d = e.gate_tally_for_account("window_fade", DEFAULT_ACCT);
     let p = e.gate_tally_for_account("window_fade", "paper");
-    assert_eq!(d.exempted_timing, 1, "unexpected exempted_timing for default account");
-    assert_eq!(p.exempted_timing, 1, "unexpected exempted_timing for paper account");
+    assert_eq!(
+        d.exempted_timing, 1,
+        "unexpected exempted_timing for default account"
+    );
+    assert_eq!(
+        p.exempted_timing, 1,
+        "unexpected exempted_timing for paper account"
+    );
     assert_eq!(d.blocked_timing, 0);
     assert_eq!(p.blocked_momentum, 0);
     // The per-name fold keeps its pre-fanout value semantics: the sum.
