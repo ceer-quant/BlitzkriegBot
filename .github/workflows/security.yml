@@ -8,6 +8,9 @@ on:
     # Run weekly on Monday at 9am UTC
     - cron: '0 9 * * 1'
 
+permissions:
+  contents: read
+
 jobs:
   # The npm audit jobs were removed with the root Node layer (no root
   # package.json). The runtime dependency surface is Cargo (cargo-auditable /
