@@ -48,6 +48,12 @@ pub const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub scanner: ScannerConfig,
+    /// The trend knobs' in-memory carrier. RFC-645 A-2 retired the concrete
+    /// types from the STRATEGY face (`EngineStrategy::on_config` is opaque
+    /// JSON now) — the field stays: the kernel's own config mapping
+    /// (`CoreConfig::engine_config`) needs a typed home for the builtin
+    /// strategies' knobs, and [`engine_strategy_config_json`] is the JSON
+    /// projection strategies actually receive.
     pub trend: TrendConfig,
     pub spread_arb: SpreadArbConfig,
     /// Max orderbook staleness before we refuse to price off it (#205).
@@ -130,6 +136,45 @@ pub struct EffectiveSizing {
     pub strategy_scoped: bool,
     /// The weight in force (`None` = unweighted).
     pub size_weight: Option<Decimal>,
+}
+
+/// The strategy config push's JSON projection (RFC-645 A-2, 决议④): the
+/// kernel-side marshal that used to live in `ForeignStrategy::on_config`
+/// (strategies/foreign.rs), now the ONE sink — every hosted strategy, builtin
+/// adapter or foreign library alike, receives the SAME bytes through
+/// [`EngineStrategy::on_config`].
+///
+/// GOLDEN CONTRACT (决议④, wire 逐位不变): the camelCase spelling and the
+/// decimal-as-STRING shapes below are the dylib wire contract the foreign
+/// marshal layer has shipped for the whole life of the v2 ABI — pinned
+/// byte-for-byte by `engine_strategy_config_json_is_the_foreign_marshal_golden`
+/// (strategies/test_support.rs). Drift here is a wire break, not a refactor.
+pub fn engine_strategy_config_json(
+    trend: &TrendConfig,
+    spread_arb: &SpreadArbConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trend": {
+            "confirmSec": trend.confirm_sec,
+            "minPrice": trend.min_price.to_string(),
+            "brokenPrice": trend.broken_price.to_string(),
+            "ratio": trend.ratio.to_string(),
+            "windowFloorMs": trend.window_floor_ms,
+        },
+        "spreadArb": {
+            "trendMinPrice": spread_arb.trend_min_price.to_string(),
+            "trendConfirmSec": spread_arb.trend_confirm_sec,
+            "trendBrokenPrice": spread_arb.trend_broken_price.to_string(),
+            "trendEntryPrice": spread_arb.trend_entry_price.to_string(),
+            "trendEntryFactor": spread_arb.trend_entry_factor.to_string(),
+            "trendMaxEntryPrice": spread_arb.trend_max_entry_price.to_string(),
+            "entryMinObi": spread_arb.entry_min_obi.to_string(),
+            "entryMaxSpreadPct": spread_arb.entry_max_spread_pct.to_string(),
+            "entryDipMaxPct": spread_arb.entry_dip_max_pct.to_string(),
+            "entryBounceMinPct": spread_arb.entry_bounce_min_pct.to_string(),
+            "entryBounceWindowSec": spread_arb.entry_bounce_window_sec,
+        }
+    })
 }
 
 impl Default for EngineConfig {
@@ -827,8 +872,13 @@ impl Engine {
 
     pub fn set_config(&mut self, cfg: EngineConfig) {
         self.scanner.set_config(cfg.scanner.clone());
+        // RFC-645 A-2 (决议④): the ONE marshal runs HERE, at the dispatch
+        // site — every hosted strategy receives the same projection bytes the
+        // foreign dylibs have always received (one build per set_config call,
+        // shared by reference across the fan-out).
+        let config_json = engine_strategy_config_json(&cfg.trend, &cfg.spread_arb);
         for s in &mut self.strategies {
-            s.strategy.on_config(&cfg.trend, &cfg.spread_arb);
+            s.strategy.on_config(&config_json);
         }
         self.cfg = cfg;
     }
@@ -2321,6 +2371,61 @@ impl Engine {
             .is_some_and(|s| s.strategy.atomic_batch())
     }
 
+    /// RFC-645 A-1 (决议③): whether the named strategy's DECLARATION to
+    /// consume the pair-book statistics surface is ACCEPTED. The predicate is
+    /// deliberately three-legged and fail-closed:
+    ///
+    /// 1. the strategy declared `consumes_pair_book_stats()` (the trait's
+    ///    declaration face), AND
+    /// 2. it declared `atomic_batch()` (a pair consumer that does not run
+    ///    atomic batches cannot keep its legs whole), AND
+    /// 3. the PairBook holds at least one live (non-Closed) entry whose
+    ///    `owner_strategy` is this strategy (it actually produces pairs).
+    ///
+    /// Any unmet leg = NOT accepted (the row carries no `arb*` fields) —
+    /// the host-side warn lives in `Core::strategy_stats`, which owns the
+    /// reasons per strategy (one warn per stats read, per strategy, when a
+    /// declaration is present but not accepted).
+    pub(crate) fn pair_book_stats_accepted(
+        &self,
+        name: &str,
+        pair_book: &crate::pair::PairBook,
+    ) -> bool {
+        let declared = self
+            .strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .is_some_and(|s| s.strategy.consumes_pair_book_stats());
+        declared && self.strategy_atomic_batch(name) && pair_book.active_pairs_count(name) > 0
+    }
+
+    /// The RFC-645 A-1 acceptance diagnosis for ONE strategy name: which of
+    /// the three predicate legs is unmet, as a human-readable clause for the
+    /// host's warn. `None` = either the declaration is absent entirely (the
+    /// strategy never claimed the surface — silent default) or ALL three legs
+    /// hold (the strategy IS accepted — nothing to diagnose).
+    pub(crate) fn pair_book_stats_rejection_reason(
+        &self,
+        name: &str,
+        pair_book: &crate::pair::PairBook,
+    ) -> Option<&'static str> {
+        let declared = self
+            .strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .is_some_and(|s| s.strategy.consumes_pair_book_stats());
+        if !declared {
+            return None;
+        }
+        if !self.strategy_atomic_batch(name) {
+            return Some("atomic_batch not declared");
+        }
+        if pair_book.active_pairs_count(name) == 0 {
+            return Some("no live PairBook entry under this strategy");
+        }
+        None
+    }
+
     /// True when EVERY ENABLED strategy holds to settlement — the replay
     /// fast path's precondition for skipping the exit ladder between dirty
     /// ticks (a ladder verdict against a holder is discarded by the host
@@ -2556,10 +2661,13 @@ impl Engine {
             account_id: account_id.to_string(),
             exits_only: false,
         };
-        // Hand the host config to the newly registered strategy.
-        hosted
-            .strategy
-            .on_config(&self.cfg.trend, &self.cfg.spread_arb);
+        // Hand the host config to the newly registered strategy — the SAME
+        // JSON projection every other push site uses (RFC-645 A-2, 决议④:
+        // one marshal, one wire shape, set_config dispatch and birth feed
+        // alike; the dispatch TIMING here is unchanged — still synchronous at
+        // registration, before the strategy can be enabled).
+        let birth_config = engine_strategy_config_json(&self.cfg.trend, &self.cfg.spread_arb);
+        hosted.strategy.on_config(&birth_config);
         // Registered after Shadow Evolution was configured? Forward the handle
         // so a later evolution still reaches this strategy.
         if let Some(h) = &self.hot_params {
@@ -3270,6 +3378,165 @@ mod tests {
             .expect("probe registers");
         e.set_strategy_enabled("batch_probe", true);
         (e, seen)
+    }
+
+    // ── RFC-645 A-1（决议③）：pair-book 统计面的声明受理谓词 ─────────────
+    // 三条腿各一枚钉：声明 + atomic_batch + PairBook 在册条目，缺一即不受理。
+
+    /// A declarable probe: flags settable per test leg.
+    struct PairStatsProbe {
+        probe_name: &'static str,
+        declares: bool,
+        atomic: bool,
+    }
+    impl EngineStrategy for PairStatsProbe {
+        fn name(&self) -> &str {
+            self.probe_name
+        }
+        fn on_book(&mut self, _t: &str, _s: &OrderbookSnapshot, _n: i64) {}
+        fn on_round(&mut self, _slot: i64, _left: i64, _now: i64) {}
+        fn find_candidates(&mut self, _ctx: &StrategyCtx<'_>) -> Vec<crate::signal::TradeSignal> {
+            Vec::new()
+        }
+        fn consumes_pair_book_stats(&self) -> bool {
+            self.declares
+        }
+        fn atomic_batch(&self) -> bool {
+            self.atomic
+        }
+    }
+
+    /// A PairBook with one live (non-Closed) entry under `owner`.
+    fn pair_book_with_live_entry(owner: &str) -> crate::pair::PairBook {
+        use rust_decimal_macros::dec;
+        let mut pb = crate::pair::PairBook::default();
+        let facts = crate::pair::TokenMarketFacts {
+            asset: "BTC".into(),
+            slot: 42,
+        };
+        let decl = crate::pair::PairLegDecl {
+            token_id: "up".into(),
+            shares: dec!(10),
+            leg: "up".into(),
+            leg_account: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+        };
+        pb.declare(
+            owner,
+            blitzkrieg_market_api::DEFAULT_ACCOUNT_ID,
+            "pair-key",
+            &decl,
+            &facts,
+            1_000,
+        );
+        pb
+    }
+
+    /// 全三腿齐备：声明 + atomic_batch + PairBook 在册条目 ⇒ 受理。
+    #[test]
+    fn pair_book_stats_accepted_when_all_three_legs_hold() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PairStatsProbe {
+                probe_name: "pair_consumer",
+                declares: true,
+                atomic: true,
+            }),
+            "test".into(),
+        )
+        .expect("probe registers");
+        let pb = pair_book_with_live_entry("pair_consumer");
+        assert!(
+            e.pair_book_stats_accepted("pair_consumer", &pb),
+            "declaration + atomic_batch + a live PairBook entry = accepted"
+        );
+        // The rejection reason is None exactly when accepted (declared).
+        assert_eq!(
+            e.pair_book_stats_rejection_reason("pair_consumer", &pb),
+            None
+        );
+    }
+
+    /// 缺声明（trait 默认 false）：不受理 —— 任何既有策略的默认形状逐位不变。
+    #[test]
+    fn pair_book_stats_refused_without_the_declaration() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PairStatsProbe {
+                probe_name: "undeclared",
+                declares: false,
+                atomic: true,
+            }),
+            "test".into(),
+        )
+        .expect("probe registers");
+        let pb = pair_book_with_live_entry("undeclared");
+        assert!(
+            !e.pair_book_stats_accepted("undeclared", &pb),
+            "no declaration = not accepted, even with atomic_batch and a live entry"
+        );
+        // Not declared ⇒ NOT a rejection: the silent default, no warn reason.
+        assert_eq!(e.pair_book_stats_rejection_reason("undeclared", &pb), None);
+    }
+
+    /// 缺 atomic_batch：声明在场却不受理（fail-closed），并给出可读原因。
+    #[test]
+    fn pair_book_stats_refused_when_atomic_batch_missing() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PairStatsProbe {
+                probe_name: "no_atomic",
+                declares: true,
+                atomic: false,
+            }),
+            "test".into(),
+        )
+        .expect("probe registers");
+        let pb = pair_book_with_live_entry("no_atomic");
+        assert!(
+            !e.pair_book_stats_accepted("no_atomic", &pb),
+            "a declaration without atomic_batch is NOT accepted"
+        );
+        assert_eq!(
+            e.pair_book_stats_rejection_reason("no_atomic", &pb),
+            Some("atomic_batch not declared"),
+            "the warn names the unmet leg"
+        );
+    }
+
+    /// 缺 PairBook 在册条目：声明在场却不受理（fail-closed），并给出可读原因。
+    #[test]
+    fn pair_book_stats_refused_without_a_live_pair_book_entry() {
+        let mut e = Engine::new(cfg());
+        e.register_user_strategy(
+            Box::new(PairStatsProbe {
+                probe_name: "no_entries",
+                declares: true,
+                atomic: true,
+            }),
+            "test".into(),
+        )
+        .expect("probe registers");
+        // Empty book: the strategy has never produced a pair.
+        let pb = crate::pair::PairBook::default();
+        assert!(
+            !e.pair_book_stats_accepted("no_entries", &pb),
+            "a declaration without a live PairBook entry is NOT accepted"
+        );
+        assert_eq!(
+            e.pair_book_stats_rejection_reason("no_entries", &pb),
+            Some("no live PairBook entry under this strategy"),
+            "the warn names the unmet leg"
+        );
+        // A Closed entry is NOT a live entry: the retired history does not
+        // re-arm the surface.
+        let closed_book = pair_book_with_live_entry("no_entries");
+        // force-close through retire_before (every non-Closed slot < before).
+        let mut closed_book = closed_book;
+        closed_book.retire_before(i64::MAX);
+        assert!(
+            !e.pair_book_stats_accepted("no_entries", &closed_book),
+            "a Closed entry is history, not a live pairing"
+        );
     }
 
     /// 红测试（修复前）：一个 up+down 批次以两个单事件喂入，策略在第二条

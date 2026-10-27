@@ -120,7 +120,10 @@ pub enum TrendPhase {
     Broken,
 }
 
-#[derive(Debug, Clone)]
+/// PartialEq: the RFC-645 A-2 round-trip test asserts a config survives the
+/// JSON projection's deserialize path unchanged (`SpreadArbConfig` already
+/// carried it for the same reason).
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrendConfig {
     pub confirm_sec: i64,
     pub min_price: Decimal,

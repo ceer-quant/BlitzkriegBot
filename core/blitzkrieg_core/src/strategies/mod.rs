@@ -32,7 +32,7 @@ pub mod test_support;
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
-use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
+use crate::signal::TradeSignal;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
@@ -489,8 +489,48 @@ pub trait EngineStrategy: Send + Sync {
         None
     }
 
-    /// The host config changed (trend / spread_arb knobs).
-    fn on_config(&mut self, _trend: &TrendConfig, _spread_arb: &SpreadArbConfig) {}
+    /// RFC-645 (A-1, 决议③): whether this strategy CONSUMES the pair-book
+    /// statistics surface — the `arb*` fields (`arbNetPnlUsd` / `arbWins` /
+    /// `arbLosses` / `arbClosedTrades` / `arbActivePairs`) the host attaches to
+    /// the strategy's `strategy.stats` row.
+    ///
+    /// Why a declaration: the statistic fields' content is computed from the
+    /// strategy's OWN accounting keys and the PairBook's `owner_strategy`
+    /// filter, so the kernel needs no strategy knowledge to serve them — only
+    /// the answer to "does this strategy want the pair surface?". The
+    /// pre-RFC-645 arbiter was a NAME comparison against the one privileged
+    /// builtin (`cross_venue_arb`); this declaration is what replaces the
+    /// name (the name branch survives one release cycle as a deprecated
+    /// alias, then M3 deletes it).
+    ///
+    /// NOT unconditional: the host ACCEPTS the declaration only when the
+    /// strategy also declares `atomic_batch()` (a pair consumer that does not
+    /// run atomic batches cannot keep its legs whole) AND the PairBook holds
+    /// at least one live entry for it (it actually produces pairs). A claim
+    /// that fails the check is treated as undeclared, with a warn — the
+    /// fail-closed shape resolution ③ pinned.
+    ///
+    /// Default: `false` — every existing strategy keeps its row untouched.
+    fn consumes_pair_book_stats(&self) -> bool {
+        false
+    }
+
+    /// The host config changed — the ONE opaque-JSON push (RFC-645 A-2):
+    /// the kernel serialises each strategy's OWN config projection to JSON at
+    /// the dispatch site and hands it over here; a strategy deserialises the
+    /// fields it knows back into its own types (a parse failure is the
+    /// config-rejection path, advisory — never a strategy crash). The JSON's
+    /// camelCase spelling is the dylib wire contract pinned byte-for-byte by
+    /// the golden test (`engine_strategy_config_json_is_the_foreign_marshal_golden`
+    /// in `strategies::test_support`); the trait used to carry the two builtin
+    /// config types directly, which was the one type-level leak RFC-645 A-2
+    /// retires — the C ABI (`strategy_api/src/lib.rs` `on_config`) has been
+    /// opaque JSON all along, and the trait now faces the same shape.
+    ///
+    /// Default: no-op — a strategy that reads nothing of the push (the Lua
+    /// adapter's packages, any strategy without config knobs) keeps today's
+    /// behaviour exactly.
+    fn on_config(&mut self, _config: &serde_json::Value) {}
 
     /// E30 (§6.3): the one-shot poison alert from a sandboxed runtime (the
     /// Lua state machine breached its instruction budget or memory ceiling).

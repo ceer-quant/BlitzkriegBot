@@ -175,10 +175,29 @@ impl EngineStrategy for TestSpreadArb {
         }))
     }
 
-    fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
-        self.cfg = spread_arb.clone();
-        self.trend_cfg = trend.clone();
-        self.trend.set_config(trend.clone());
+    fn on_config(&mut self, config: &serde_json::Value) {
+        // RFC-645 A-2: deserialize this strategy's OWN knobs out of the ONE
+        // opaque-JSON push. A parse failure is the config-REJECTION path:
+        // advisory warn, the previous config stays in force, never a panic —
+        // the same posture the C ABI's non-zero reject has always had.
+        match serde_json::from_value::<StrategyConfigJson>(config.clone()) {
+            Ok(cfg) => {
+                if let Some(trend) = cfg.trend {
+                    self.trend_cfg = trend.into();
+                    self.trend.set_config(self.trend_cfg.clone());
+                }
+                if let Some(spread_arb) = cfg.spread_arb {
+                    self.cfg = spread_arb.into();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    strategy = "spread_arb",
+                    error = %e,
+                    "config push rejected (malformed projection) — keeping the previous config"
+                );
+            }
+        }
     }
 }
 
@@ -599,4 +618,308 @@ fn host_all(
             "test".into(),
         )
         .expect("fresh engine");
+}
+
+// ── RFC-645 A-2: the builtin adapter's config deserialization face ──────────
+
+/// The wire shape a builtin strategy deserializes out of the ONE opaque-JSON
+/// config push ([`super::EngineStrategy::on_config`]). Mirrors the kernel's
+/// [`crate::engine::engine_strategy_config_json`] projection field-for-field:
+/// camelCase keys, decimals as STRINGS, ints as JSON numbers. Deserialization
+/// failures are advisory (the caller keeps its previous config), so the
+/// default impls only ever fire on a malformed push.
+#[derive(Debug, serde::Deserialize)]
+struct StrategyConfigJson {
+    #[serde(default)]
+    trend: Option<TrendJson>,
+    #[serde(default, rename = "spreadArb")]
+    spread_arb: Option<SpreadArbJson>,
+}
+
+/// A field-presence-tolerant read: a push missing a whole section leaves that
+/// section's previous config untouched (a partial projection is not an error).
+#[derive(Debug, serde::Deserialize)]
+struct TrendJson {
+    #[serde(default = "default_confirm_sec", rename = "confirmSec")]
+    confirm_sec: i64,
+    #[serde(default = "default_min_price", rename = "minPrice")]
+    min_price: Decimal,
+    #[serde(default = "default_broken_price", rename = "brokenPrice")]
+    broken_price: Decimal,
+    #[serde(default = "default_ratio", rename = "ratio")]
+    ratio: Decimal,
+    #[serde(default = "default_window_floor_ms", rename = "windowFloorMs")]
+    window_floor_ms: i64,
+}
+
+fn default_confirm_sec() -> i64 {
+    TrendConfig::default().confirm_sec
+}
+fn default_min_price() -> Decimal {
+    TrendConfig::default().min_price
+}
+fn default_broken_price() -> Decimal {
+    TrendConfig::default().broken_price
+}
+fn default_ratio() -> Decimal {
+    TrendConfig::default().ratio
+}
+fn default_window_floor_ms() -> i64 {
+    TrendConfig::default().window_floor_ms
+}
+
+impl From<TrendJson> for TrendConfig {
+    fn from(j: TrendJson) -> Self {
+        Self {
+            confirm_sec: j.confirm_sec,
+            min_price: j.min_price,
+            broken_price: j.broken_price,
+            ratio: j.ratio,
+            window_floor_ms: j.window_floor_ms,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SpreadArbJson {
+    #[serde(default = "default_trend_min_price", rename = "trendMinPrice")]
+    trend_min_price: Decimal,
+    #[serde(default = "default_trend_confirm_sec", rename = "trendConfirmSec")]
+    trend_confirm_sec: i64,
+    #[serde(default = "default_trend_broken_price", rename = "trendBrokenPrice")]
+    trend_broken_price: Decimal,
+    #[serde(default = "default_trend_entry_price", rename = "trendEntryPrice")]
+    trend_entry_price: Decimal,
+    #[serde(default = "default_trend_entry_factor", rename = "trendEntryFactor")]
+    trend_entry_factor: Decimal,
+    #[serde(
+        default = "default_trend_max_entry_price",
+        rename = "trendMaxEntryPrice"
+    )]
+    trend_max_entry_price: Decimal,
+    #[serde(default = "default_entry_min_obi", rename = "entryMinObi")]
+    entry_min_obi: Decimal,
+    #[serde(default = "default_entry_max_spread_pct", rename = "entryMaxSpreadPct")]
+    entry_max_spread_pct: Decimal,
+    #[serde(default = "default_entry_dip_max_pct", rename = "entryDipMaxPct")]
+    entry_dip_max_pct: Decimal,
+    #[serde(default = "default_entry_bounce_min_pct", rename = "entryBounceMinPct")]
+    entry_bounce_min_pct: Decimal,
+    #[serde(
+        default = "default_entry_bounce_window_sec",
+        rename = "entryBounceWindowSec"
+    )]
+    entry_bounce_window_sec: i64,
+}
+
+fn default_trend_min_price() -> Decimal {
+    SpreadArbConfig::default().trend_min_price
+}
+fn default_trend_confirm_sec() -> i64 {
+    SpreadArbConfig::default().trend_confirm_sec
+}
+fn default_trend_broken_price() -> Decimal {
+    SpreadArbConfig::default().trend_broken_price
+}
+fn default_trend_entry_price() -> Decimal {
+    SpreadArbConfig::default().trend_entry_price
+}
+fn default_trend_entry_factor() -> Decimal {
+    SpreadArbConfig::default().trend_entry_factor
+}
+fn default_trend_max_entry_price() -> Decimal {
+    SpreadArbConfig::default().trend_max_entry_price
+}
+fn default_entry_min_obi() -> Decimal {
+    SpreadArbConfig::default().entry_min_obi
+}
+fn default_entry_max_spread_pct() -> Decimal {
+    SpreadArbConfig::default().entry_max_spread_pct
+}
+fn default_entry_dip_max_pct() -> Decimal {
+    SpreadArbConfig::default().entry_dip_max_pct
+}
+fn default_entry_bounce_min_pct() -> Decimal {
+    SpreadArbConfig::default().entry_bounce_min_pct
+}
+fn default_entry_bounce_window_sec() -> i64 {
+    SpreadArbConfig::default().entry_bounce_window_sec
+}
+
+impl From<SpreadArbJson> for SpreadArbConfig {
+    fn from(j: SpreadArbJson) -> Self {
+        Self {
+            trend_min_price: j.trend_min_price,
+            trend_confirm_sec: j.trend_confirm_sec,
+            trend_broken_price: j.trend_broken_price,
+            trend_entry_price: j.trend_entry_price,
+            trend_entry_factor: j.trend_entry_factor,
+            trend_max_entry_price: j.trend_max_entry_price,
+            entry_min_obi: j.entry_min_obi,
+            entry_max_spread_pct: j.entry_max_spread_pct,
+            entry_dip_max_pct: j.entry_dip_max_pct,
+            entry_bounce_min_pct: j.entry_bounce_min_pct,
+            entry_bounce_window_sec: j.entry_bounce_window_sec,
+        }
+    }
+}
+
+// ── RFC-645 A-2 golden: the projection IS the foreign marshal ───────────────
+
+#[cfg(test)]
+mod rfc645_config_push_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// THE byte-level pin (RFC-645 决议④): the kernel's
+    /// [`crate::engine::engine_strategy_config_json`] projection must be
+    /// byte-for-byte what `ForeignStrategy::on_config` (strategies/foreign.rs)
+    /// marshalled to dylibs for the whole life of the v2 ABI — camelCase keys
+    /// in exactly this order, every Decimal rendered as a STRING, ints as JSON
+    /// numbers. Drift here is a WIRE BREAK (every shipped cdylib parses these
+    /// bytes), not a refactor. If this test goes red, the projection function
+    /// was changed and the dylib contract moved with it — restore the
+    /// spelling.
+    #[test]
+    fn engine_strategy_config_json_is_the_foreign_marshal_golden() {
+        let trend = TrendConfig {
+            confirm_sec: 90,
+            min_price: dec!(0.55),
+            broken_price: dec!(0.35),
+            ratio: dec!(0.80),
+            window_floor_ms: 10_000,
+        };
+        let spread_arb = SpreadArbConfig {
+            trend_min_price: dec!(0.55),
+            trend_confirm_sec: 90,
+            trend_broken_price: dec!(0.35),
+            trend_entry_price: dec!(0.50),
+            trend_entry_factor: dec!(0.88),
+            trend_max_entry_price: dec!(0.45),
+            entry_min_obi: dec!(-0.10),
+            entry_max_spread_pct: dec!(2.5),
+            entry_dip_max_pct: dec!(6),
+            entry_bounce_min_pct: dec!(0.4),
+            entry_bounce_window_sec: 7,
+        };
+        let wire = crate::engine::engine_strategy_config_json(&trend, &spread_arb).to_string();
+        // The full expected wire shape, verbatim. Key ORDER is alphabetical:
+        // serde_json's default build serializes `Value::Object` through its
+        // BTreeMap-backed Map, so both the OLD `json!` marshal in foreign.rs
+        // and the new projection function have ALWAYS emitted sorted keys —
+        // the wire contract below is what every shipped cdylib has parsed all
+        // along. Decimals are quoted strings (the ABI's numeric form), i64
+        // knobs are bare JSON numbers.
+        let golden = concat!(
+            r#"{"spreadArb":{"entryBounceMinPct":"0.4","entryBounceWindowSec":7,"#,
+            r#""entryDipMaxPct":"6","entryMaxSpreadPct":"2.5","entryMinObi":"-0.10","#,
+            r#""trendBrokenPrice":"0.35","trendConfirmSec":90,"trendEntryFactor":"0.88","#,
+            r#""trendEntryPrice":"0.50","trendMaxEntryPrice":"0.45","trendMinPrice":"0.55"},"#,
+            r#""trend":{"brokenPrice":"0.35","confirmSec":90,"minPrice":"0.55","#,
+            r#""ratio":"0.80","windowFloorMs":10000}}"#
+        );
+        assert_eq!(
+            wire, golden,
+            "the strategy-config JSON projection drifted from the foreign marshal wire contract"
+        );
+        // Defaults ride the same shape (the zero-override boot config is what
+        // every fresh scope is born with).
+        let default_wire = crate::engine::engine_strategy_config_json(
+            &TrendConfig::default(),
+            &SpreadArbConfig::default(),
+        )
+        .to_string();
+        let default_golden = concat!(
+            r#"{"spreadArb":{"entryBounceMinPct":"0","entryBounceWindowSec":5,"#,
+            r#""entryDipMaxPct":"0","entryMaxSpreadPct":"0","entryMinObi":"0","#,
+            r#""trendBrokenPrice":"0.35","trendConfirmSec":60,"trendEntryFactor":"0.88","#,
+            r#""trendEntryPrice":"0","trendMaxEntryPrice":"0.45","trendMinPrice":"0.55"},"#,
+            r#""trend":{"brokenPrice":"0.35","confirmSec":60,"minPrice":"0.55","#,
+            r#""ratio":"0.8","windowFloorMs":10000}}"#
+        );
+        assert_eq!(
+            default_wire, default_golden,
+            "the default-config projection drifted from the foreign marshal wire contract"
+        );
+    }
+
+    /// The builtin adapter's reject path: a push that does not parse is
+    /// ADVISORY — the previous config stays in force, the adapter warns,
+    /// nothing panics.
+    #[test]
+    fn on_config_parse_failure_keeps_the_previous_config_advisory() {
+        let mut s = TestSpreadArb::new(TrendConfig::default(), SpreadArbConfig::default());
+        let before = s.cfg.clone();
+        let before_trend = s.trend_cfg.clone();
+        // A structurally-wrong push: a spreadArb field carries a WRONG type
+        // (not the decimal string the wire defines) — the whole spreadArb
+        // section fails to deserialize and must be refused as a unit.
+        let malformed = serde_json::json!({
+            "trend": { "confirmSec": 90, "minPrice": "0.55", "brokenPrice": "0.35",
+                       "ratio": "0.8", "windowFloorMs": 10000 },
+            "spreadArb": { "trendMinPrice": "not-a-decimal", "trendConfirmSec": 90 }
+        });
+        s.on_config(&malformed);
+        assert_eq!(
+            s.cfg, before,
+            "a malformed section is rejected WHOLE: the previous config stays"
+        );
+        // The well-formed trend section beside a malformed sibling is ALSO not
+        // applied: the projection is one document, one verdict (reject = keep
+        // everything), which is what makes "keep the previous config" a
+        // meaningful invariant.
+        assert_eq!(
+            s.trend_cfg, before_trend,
+            "no partial application: one malformed section rejects the whole push"
+        );
+    }
+
+    /// The happy path round-trip: a projection built from one config, fed
+    /// back through the adapter's deserializer, reproduces that config
+    /// exactly — the same values the direct `&TrendConfig/&SpreadArbConfig`
+    /// push used to carry (the behaviour-equivalence clause of the RFC).
+    #[test]
+    fn on_config_projection_round_trip_reproduces_the_config() {
+        let trend = TrendConfig {
+            confirm_sec: 45,
+            window_floor_ms: 2_000,
+            ..TrendConfig::default()
+        };
+        let spread_arb = SpreadArbConfig {
+            trend_entry_factor: dec!(0.8),
+            entry_min_obi: dec!(-0.1),
+            entry_bounce_window_sec: 7,
+            ..SpreadArbConfig::default()
+        };
+        let mut s = TestSpreadArb::new(TrendConfig::default(), SpreadArbConfig::default());
+        s.on_config(&crate::engine::engine_strategy_config_json(
+            &trend,
+            &spread_arb,
+        ));
+        assert_eq!(
+            s.trend_cfg, trend,
+            "trend knobs survive the JSON round-trip"
+        );
+        assert_eq!(
+            s.cfg, spread_arb,
+            "spread_arb knobs survive the JSON round-trip"
+        );
+        // The live tracker picked the new knobs up too (the pre-RFC
+        // behaviour: on_config re-seeds the tracker's own config copy).
+        let mut tracker_check =
+            TestSpreadArb::new(TrendConfig::default(), SpreadArbConfig::default());
+        tracker_check.on_config(&crate::engine::engine_strategy_config_json(
+            &trend,
+            &spread_arb,
+        ));
+        tracker_check.sync_trend_cfg();
+        // `sync_trend_cfg` reads back through effective_trend (hot-params
+        // aware): no registry is attached, so it must now serve the pushed
+        // trend config — the observable "the new knobs are live" verdict.
+        assert_eq!(
+            tracker_check.effective_trend(),
+            trend,
+            "the tracker serves the pushed config after the push"
+        );
+    }
 }

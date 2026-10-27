@@ -32,7 +32,7 @@ use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use crate::model::OrderbookSnapshot;
 use crate::shadow_evolution::{KnobDeclaration, KnobSpec, ParamRegistry, StrategyParams};
-use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
+use crate::signal::TradeSignal;
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
     BkBookView, BkEvalCtx, BkEvolvableKnobsFn, BkGateExemptionsFn, BkHandle, BkLevel, BkMarket,
@@ -993,33 +993,18 @@ impl EngineStrategy for ForeignStrategy {
         // per actual change.
     }
 
-    fn on_config(&mut self, trend: &TrendConfig, spread_arb: &SpreadArbConfig) {
+    fn on_config(&mut self, config: &serde_json::Value) {
         let Some(f) = self.vtable.on_config else {
             return;
         };
-        let json = serde_json::json!({
-            "trend": {
-                "confirmSec": trend.confirm_sec,
-                "minPrice": trend.min_price.to_string(),
-                "brokenPrice": trend.broken_price.to_string(),
-                "ratio": trend.ratio.to_string(),
-                "windowFloorMs": trend.window_floor_ms,
-            },
-            "spreadArb": {
-                "trendMinPrice": spread_arb.trend_min_price.to_string(),
-                "trendConfirmSec": spread_arb.trend_confirm_sec,
-                "trendBrokenPrice": spread_arb.trend_broken_price.to_string(),
-                "trendEntryPrice": spread_arb.trend_entry_price.to_string(),
-                "trendEntryFactor": spread_arb.trend_entry_factor.to_string(),
-                "trendMaxEntryPrice": spread_arb.trend_max_entry_price.to_string(),
-                "entryMinObi": spread_arb.entry_min_obi.to_string(),
-                "entryMaxSpreadPct": spread_arb.entry_max_spread_pct.to_string(),
-                "entryDipMaxPct": spread_arb.entry_dip_max_pct.to_string(),
-                "entryBounceMinPct": spread_arb.entry_bounce_min_pct.to_string(),
-                "entryBounceWindowSec": spread_arb.entry_bounce_window_sec,
-            }
-        });
-        if let Ok(cs) = CString::new(json.to_string()) {
+        // RFC-645 A-2: the kernel already marshalled the ONE projection
+        // (`engine_strategy_config_json`, engine.rs) — the exact bytes this
+        // site used to build inline (the golden pin lives in
+        // `engine_strategy_config_json_is_the_foreign_marshal_golden`,
+        // test_support.rs). This is now a PASS-THROUGH: serialize what the
+        // trait handed us, no re-marshal, so builtin adapters and dylibs see
+        // byte-identical config pushes by construction.
+        if let Ok(cs) = CString::new(config.to_string()) {
             // SAFETY: valid handle + borrowed JSON for the call; the library's
             // accept/reject return is advisory (kernel keeps driving either way).
             let _ = unsafe { f(self.handle, cs.as_ptr()) };

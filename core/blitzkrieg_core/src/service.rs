@@ -5309,7 +5309,13 @@ impl Core {
                 let adapter = LuaEngineAdapter::new(loaded.strategy, tunables)
                     .declare(holds, exemptions)
                     .declare_atomic_batch(atomic)
-                    .declare_trailing_exit(trailing);
+                    .declare_trailing_exit(trailing)
+                    // RFC-645 A-1: the ONE arbiter package declares the
+                    // pair-book statistics surface (决议②: the loader answers
+                    // for the Lua side); every other package keeps the
+                    // `false` default. The engine's acceptance predicate
+                    // still gates the row's arb* fields.
+                    .declare_pair_book_stats(name == ARB_STRATEGY);
                 adapter.set_fee_schedule(fee_view);
                 match engine
                     .register_user_strategy(Box::new(adapter), format!("lua:{}", dir.display()))
@@ -8245,18 +8251,55 @@ impl Core {
                     "feesUsd": dec_json(acc.fees_usd),
                     "netPnlUsd": dec_json(acc.net_pnl_usd),
                 });
-                // 套利合计字段（契约）：仅套利行携带 —— 双腿平仓各记在
-                // (cross_venue_arb, 各腿账户) 键下（`on_position_closed`），
-                // 上面的 fold 已经是套利单元的全口径合计，原样再报一遍专名
-                // 字段，前端不必知道键形状；`arbActivePairs` 读配对簿的在册
-                // （非 Closed）配对数。非套利行不带这些键。
-                if name == ARB_STRATEGY {
+                // 套利合计字段（契约）：仅「声明被受理」的行携带 —— RFC-645
+                // A-1（决议②③）：套利面的裁判从名字比较改为声明驱动。受理
+                // 谓词 = 该策略声明 consumes_pair_book_stats() 且声明
+                // atomic_batch() 且配对簿里有它 owner_strategy 名下至少一条
+                // 在册（非 Closed）条目，三者缺一 = 视为未声明（不附加
+                // arb* 字段），并在声明在场却未被受理时 warn 一条（说明缺
+                // 哪条腿）。M2 过渡期：名字恰好等于 ARB_STRATEGY 的行仍按
+                // 旧名字分支受理（保留一个发布周期），命中时打一次性的
+                // deprecation 告警；M3 删名字分支。双腿平仓各记在该策略的
+                // (strategy, 各腿账户) 键下（`on_position_closed`），上面的
+                // fold 已经是该策略的全口径合计，原样再报一遍专名字段，前端
+                // 不必知道键形状；`arbActivePairs` 读配对簿的在册（非
+                // Closed）配对数。未受理行不带这些键。
+                let arb_accepted = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.pair_book_stats_accepted(&name, &self.pair_book))
+                    .unwrap_or(false);
+                // M2 deprecation bridge: the NAME branch (an exact
+                // ARB_STRATEGY match) stays authoritative for one release
+                // cycle. A row that rides the name instead of an accepted
+                // declaration gets a one-shot (per process) deprecation warn;
+                // a row whose declaration IS accepted rides the new path
+                // silently.
+                let name_bridge = name == ARB_STRATEGY && !arb_accepted;
+                if name_bridge {
+                    arb_name_branch_warn_once(&name);
+                }
+                if arb_accepted || name_bridge {
+                    if let Some(reason) = self
+                        .engine
+                        .as_ref()
+                        .and_then(|e| e.pair_book_stats_rejection_reason(&name, &self.pair_book))
+                    {
+                        tracing::warn!(
+                            strategy = name.as_str(),
+                            reason,
+                            "consumes_pair_book_stats declared but NOT accepted — the arb* face \
+                             rides the deprecated name branch (ARB_STRATEGY match) or is omitted \
+                             entirely; a pair consumer must also declare atomic_batch and hold at \
+                             least one live PairBook entry"
+                        );
+                    }
                     row["arbNetPnlUsd"] = dec_json(acc.net_pnl_usd);
                     row["arbWins"] = serde_json::json!(acc.wins);
                     row["arbLosses"] = serde_json::json!(acc.losses);
                     row["arbClosedTrades"] = serde_json::json!(acc.closed_trades);
                     row["arbActivePairs"] =
-                        serde_json::json!(self.pair_book.active_pairs_count(ARB_STRATEGY));
+                        serde_json::json!(self.pair_book.active_pairs_count(&name));
                 }
                 row
             })
@@ -8280,8 +8323,13 @@ impl Core {
             // fold across its leg accounts); read before any slice overwrites
             // the row, and re-attached below so every account's page shows the
             // arb unit's combined take — the legs' own slices stay per-account
-            // in the plain counters.
-            let arb_totals = if name == ARB_STRATEGY {
+            // in the plain counters. RFC-645 A-1: which rows carry the arb*
+            // keys was decided by the acceptance predicate in `strategy_stats`
+            // (declaration accepted, or the M2 name bridge) — the global row's
+            // `arbNetPnlUsd` presence IS the verdict, so this read follows it
+            // verbatim and the slice re-attachment cannot drift from the row
+            // that produced it.
+            let arb_totals = if row.get("arbNetPnlUsd").is_some() {
                 Some((
                     row.get("arbNetPnlUsd").cloned().unwrap_or_default(),
                     row.get("arbWins").cloned().unwrap_or_default(),
@@ -16437,7 +16485,10 @@ fn build_lua_scope(
     );
     adapter = adapter
         .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
-        .declare_atomic_batch(loaded.atomic_batch);
+        .declare_atomic_batch(loaded.atomic_batch)
+        // RFC-645 A-1: the arbiter package's statistics declaration follows
+        // the name, exactly as the default-scope load path stamps it.
+        .declare_pair_book_stats(name == ARB_STRATEGY);
     let sched = crate::exit_policy::fee_schedule();
     adapter.set_fee_schedule(blitzkrieg_lua_runtime::FeeScheduleView {
         name: sched.name.to_string(),
@@ -16705,6 +16756,29 @@ fn strategy_acc_key(strategy: &str, account: &str) -> String {
 /// so the arb totals on the stats rows ARE the arb unit's totals.
 /// ponytail: 平台化多套利实例留待真有第二个实例再谈。
 pub(crate) const ARB_STRATEGY: &str = "cross_venue_arb";
+
+/// RFC-645 M2 deprecation warn, ONE-shot per process: the stats row's arb
+/// surface rode the NAME branch (an exact `ARB_STRATEGY` match) instead of an
+/// accepted `consumes_pair_book_stats` declaration. The name branch is kept
+/// for exactly one release cycle (决议⑤) and removed in M3 — this log line is
+/// the operator's pointer to the migration before that happens. Not per-tick
+/// noise: `strategy_stats` is a read path, and the once-cell collapses every
+/// later hit to nothing.
+fn arb_name_branch_warn_once(strategy: &str) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.get().is_none() {
+        // get_or_init runs the closure at most once even under races; the
+        // warn rides inside it so a lost race prints nothing either.
+        WARNED.get_or_init(|| {
+            tracing::warn!(
+                strategy = strategy,
+                "strategy.stats arb* fields served via the DEPRECATED name branch \
+                 (exact ARB_STRATEGY match) — declare consumes_pair_book_stats (trait \
+                 default method) instead; the name branch is removed next release cycle (RFC-645 M3)"
+            );
+        });
+    }
+}
 
 /// RFC #541 挂钩 B (c)：one declared-atomic strategy's cycle leg, captured by
 /// value so the judges can read `&self` while the wholesale rejection mutates
@@ -24258,7 +24332,12 @@ mod strategy_dispatch_tests {
             loaded.tunables,
         )
         .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
-        .declare_atomic_batch(loaded.atomic_batch);
+        .declare_atomic_batch(loaded.atomic_batch)
+        // RFC-645 A-1: this fixture hosts the REAL arbiter package — stamp
+        // the statistics declaration the production loader stamps (the
+        // acceptance predicate still requires atomic_batch + the live
+        // PairBook entry the fixture's evaluate produces).
+        .declare_pair_book_stats(true);
         adapter.set_fee_schedule(blitzkrieg_lua_runtime::FeeScheduleView {
             name: sched.name.to_string(),
             rate: sched.rate.to_string(),
