@@ -5,8 +5,11 @@
 //! Polymarket's API shape and its token ids byte for byte, fills are the
 //! venue engine's own model and balances are play money. The plugin declares
 //! the `simulated` capability bit so every surface can label it honestly,
-//! and `mirror_of = Some("polymarket")` routes the polymarket plugin's rows
-//! to this executor.
+//! `mirror_of = Some("polymarket")` routes the polymarket plugin's rows to
+//! this executor, and `feed_source = Some("polymarket")` (RFC-661 M2) tells
+//! the API layer to reuse polymarket's upstream feed/discovery instead of
+//! starting a second one — each round batch lands under THIS venue's own
+//! `(venue, token)` rows.
 //!
 //! The transport needs no signature layer: the venue is single-secret
 //! (`X-API-Key`) and its native `POST /v1/order` form accepts orders without

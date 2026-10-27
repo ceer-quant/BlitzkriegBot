@@ -484,6 +484,16 @@ async fn enable_venue_at_runtime(
     discovery_round_duration_sec: i64,
     families: &[(String, i64)],
     core: &Arc<AsyncMutex<Core>>,
+    registry: &crate::market::registry::MarketPluginRegistry,
+    // RFC-661 M2: the session's fan-out cell (`None` in tests that assembled
+    // no reuse plane — the consumer then registers nothing and the historical
+    // mounts run). Also carries the upstream-mount counter.
+    host_feed_reuse: Option<&crate::market::host::FeedReuse>,
+    // The venues whose data plane is ALREADY mounted this session (boot
+    // actives + earlier runtime binds). The source-mount guard reads it: a
+    // consumer binding onto an already-running source must not duplicate the
+    // upstream. Caller-owned so the cell stays the single source of truth.
+    enabled_venues: &std::collections::BTreeSet<String>,
 ) {
     let name = plugin.name();
     // The mirror declaration rides the runtime enablement too: a venue bound
@@ -495,11 +505,121 @@ async fn enable_venue_at_runtime(
     // it) and its account trades nothing until the next boot. Idempotent:
     // set_venue_mirror is a map write, re-pushing the same declaration is a
     // no-op, and the declaration is the plugin's identity (never changes).
+    // RFC-661 M3 retires this half (the fan-out re-registers the consumer's
+    // own rows; the engine reads no mirror fact then).
     if let Some(source) = plugin.mirror_of()
         && let Some(c) = core.lock().await.engine.as_mut()
     {
         c.set_venue_mirror(name, source);
         eprintln!("blitzkrieg-core: {name} mirrors {source} (runtime enablement)");
+    }
+    // RFC-661 M2 (feed_source 复用管道): a consumer plugin owns NO upstream —
+    // its own feed/discovery must NOT start (that would be a second upstream
+    // connection, the exact thing the reuse pipeline exists to prevent).
+    // Instead:
+    //   * the consumer's venue joins the host's fan-out (its own `(venue,
+    //     token)` rows re-register from the source's batches), and
+    //   * the SOURCE plugin's data components mount here when the source is
+    //     not already enabled (consumer-only enablement: the data plane is
+    //     self-sufficient; the source's EXECUTOR is never constructed — this
+    //     function never mounts executors, and the source reaches it as a
+    //     data-only registry fetch).
+    // The mount counter counts every upstream stream mount: N consumers ⇒
+    // still one stream.
+    if let Some(src) = plugin.feed_source() {
+        let source_plugin = registry.get(src);
+        let source_enabled = source_plugin
+            .as_ref()
+            .map(|sp| sp.name())
+            .map(|sn| {
+                // The source is already mounted if the boot actives (or an
+                // earlier runtime bind) carry it: its feed/discovery started
+                // through the boot loop above or an earlier mount's marks.
+                enabled_venues.contains(sn)
+            })
+            .unwrap_or(false);
+        let added = match host_feed_reuse {
+            Some(reuse) => {
+                let mut venues = reuse.venues.write().expect("feed reuse venues");
+                if venues.iter().any(|v| v == name) {
+                    false
+                } else {
+                    venues.push(name.to_string());
+                    true
+                }
+            }
+            None => false,
+        };
+        if let Some(sp) = source_plugin.filter(|_| !source_enabled) {
+            // The source's data plane must run for the consumer to eat: mount
+            // it exactly once (the enabled_venues set dedupes concurrent
+            // binds — the same guard the (venue, duration) pairs use).
+            if feed_ws_enabled {
+                match sp.data_feed() {
+                    Some(feed) => {
+                        let cfg = blitzkrieg_market_api::DataFeedConfig::default();
+                        if let Err(e) = feed.start(host.clone(), cfg, Vec::new()).await {
+                            eprintln!(
+                                "blitzkrieg-core: data feed start failed for {src}: {e}"
+                            );
+                        } else {
+                            if let Some(reuse) = host_feed_reuse {
+                                reuse
+                                    .mounts
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            eprintln!(
+                                "blitzkrieg-core: feed started for {src} (consumer {name}'s \
+                                 upstream; no executor mounted)"
+                            );
+                        }
+                    }
+                    None => {
+                        eprintln!("blitzkrieg-core: {src} declares no data feed — nothing to mount")
+                    }
+                }
+            }
+            if discovery_enabled {
+                for (_, duration) in families {
+                    match sp.discovery() {
+                        Some(disc) => {
+                            let cfg = blitzkrieg_market_api::DiscoveryConfig {
+                                assets: discovery_assets.to_vec(),
+                                round_duration_sec: *duration,
+                                poll_sec: 5,
+                            };
+                            if let Err(e) = disc.start(host.clone(), cfg).await {
+                                eprintln!(
+                                    "blitzkrieg-core: discovery start failed for \
+                                     {src}@{duration}s: {e}"
+                                );
+                            } else if let Some(reuse) = host_feed_reuse {
+                                reuse
+                                    .mounts
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                eprintln!(
+                                    "blitzkrieg-core: discovery started for {src}@{duration}s \
+                                     (consumer {name}'s upstream; no executor mounted)"
+                                );
+                            }
+                        }
+                        None => {
+                            eprintln!(
+                                "blitzkrieg-core: {src} declares no discovery — nothing to mount"
+                            )
+                        }
+                    }
+                }
+            }
+        } else if !added {
+            eprintln!(
+                "blitzkrieg-core: {name} consumes {src}'s stream (already mounted — no second \
+                 upstream)"
+            );
+        }
+        // The consumer's OWN data components never start: the fan-out is its
+        // registrar. Fall through — the historical mounts below are skipped.
+        return;
     }
     if feed_ws_enabled {
         match plugin.data_feed() {
@@ -847,6 +967,65 @@ pub async fn run(
         .collect();
     let data_plane = DataPlaneRuntime::at_boot(&config, &actives, &account_families);
 
+    // RFC-661 M2: the feed_source reuse fan-out. When ANY plugin the session
+    // can reach (boot actives, or the whole registry so a runtime bind of a
+    // consumer finds its fan-out armed) declares `feed_source`, the host
+    // re-registers each upstream round batch under every consumer's own venue
+    // identity. The mount counter lives on the FeedReuse cell and is what the
+    // assembly consults before starting the SOURCE's upstream components: a
+    // second enablement (consumer-only boot, re-bind) must not duplicate the
+    // upstream connection.
+    let feed_reuse = crate::market::host::FeedReuse::default();
+    {
+        let declared: Vec<String> = registry
+            .names()
+            .iter()
+            .filter_map(|n| registry.get(n))
+            .filter_map(|p| {
+                p.feed_source()
+                    .filter(|src| registry.get(src).is_some())
+                    .map(|_| p.name().to_string())
+            })
+            .collect();
+        let mut venues = feed_reuse.venues.write().expect("feed reuse venues");
+        for consumer in &declared {
+            if !venues.iter().any(|v| v == consumer) {
+                venues.push(consumer.clone());
+            }
+        }
+        // The source venues every declared consumer points at — the upstream
+        // stream's owners. A source that is itself a consumer chains (A←B←C):
+        // every link's venue belongs to the fan-out.
+        let mut sources: Vec<String> = registry
+            .names()
+            .iter()
+            .filter_map(|n| registry.get(n))
+            .filter_map(|p| {
+                p.feed_source()
+                    .filter(|src| registry.get(src).is_some())
+                    .map(str::to_string)
+            })
+            .collect();
+        for src in &sources {
+            if !venues.contains(src) {
+                venues.push(src.clone());
+            }
+        }
+        sources.clear();
+    }
+    if feed_reuse
+        .venues
+        .read()
+        .expect("feed reuse venues")
+        .len()
+        > 1
+    {
+        eprintln!(
+            "blitzkrieg-core: feed_source reuse active — one upstream stream feeds {:?}",
+            feed_reuse.venues.read().expect("feed reuse venues"),
+        );
+    }
+
     // B2 (轮次多族 软卸): the discovery poll-output gate, installed on the
     // CONCRETE CoreHost before it erases into the trait object. Every
     // extension discovery funnels through `CoreHost::on_round_markets`; from
@@ -890,6 +1069,11 @@ pub async fn run(
     // re-buckets per plugin with `for_plugin` handles.
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> = Arc::new(concrete_host.clone());
 
+    // RFC-661 M2: the fan-out rides the CONCRETE host (every clone shares the
+    // cell — the same Arc shape as poll_admission), so the upstream feed's
+    // pushes and every later runtime mount re-see the same venue list.
+    concrete_host.set_feed_reuse(feed_reuse.clone());
+
     // P4: Rust-native feeds. Start Binance spot now (symbols known at boot); the
     // orderbook subscriptions are added when `engine.markets` arrives (from Node)
     // or from Rust-native round discovery below.
@@ -897,11 +1081,52 @@ pub async fn run(
     // Multi-plugin data plane: EVERY selected plugin's feed starts (each on the
     // shared CoreHost — the Core lock just queues the pushes). Tokens stay
     // per-plugin: each feed only ever receives the tokens its own venue reports.
+    //
+    // RFC-661 M2 (feed_source 复用管道): a plugin that declares `feed_source`
+    // owns NO upstream of its own — its feed/discovery never start (the host's
+    // fan-out re-registers the source's batches under its venue identity). The
+    // SOURCE's own feed start bumps the reuse mount counter: the falsifiable
+    // claim「上游连接一份」reads this counter (one mount per upstream stream,
+    // no matter how many consumers enable). A consumer-only enablement (source
+    // inactive at boot) mounts the source's DATA plane through the same loop
+    // — the source's executor stays out of `actives`, so execution never
+    // starts (数据消费与执行启用解耦).
     if config.feed_ws_enabled {
         let cfg = blitzkrieg_market_api::DataFeedConfig {
             spot_assets: config.binance_assets.clone(),
         };
+        // The upstream mounts this boot must serve: every active plugin's own
+        // feed, PLUS the data plane of any `feed_source` whose plugin is not
+        // itself enabled (consumer-only boot — the data plane is self-sufficient,
+        // the executor is not invited).
+        let mut feed_targets: Vec<std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin>> =
+            actives.clone();
         for p in &actives {
+            let Some(src) = p.feed_source() else {
+                continue;
+            };
+            let Some(source_plugin) = registry.get(src) else {
+                continue;
+            };
+            if feed_targets.iter().any(|t| t.name() == source_plugin.name()) {
+                continue;
+            }
+            eprintln!(
+                "blitzkrieg-core: {} consumes {}'s feed — mounting the source data plane \
+                 (no executor)",
+                p.name(),
+                src
+            );
+            feed_targets.push(source_plugin);
+        }
+        for p in &feed_targets {
+            let is_reused_stream = p.feed_source().is_none()
+                && actives.iter().any(|a| a.feed_source() == Some(p.name()));
+            if is_reused_stream {
+                feed_reuse
+                    .mounts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(feed) = p.data_feed() {
                 if let Err(e) = feed.start(host.clone(), cfg.clone(), Vec::new()).await {
                     eprintln!(
@@ -939,11 +1164,50 @@ pub async fn run(
             .iter()
             .cloned()
             .collect();
+        // RFC-661 M2: a consumer's (venue, duration) family rides the SOURCE
+        // plugin's discovery (one upstream stream). Translate consumer pairs
+        // to their source before mounting; the consumer's own plugin supplies
+        // no discovery instance (its registrar is the host's fan-out).
+        let resolve_source = |venue: &str| -> String {
+            actives
+                .iter()
+                .find(|p| p.name() == venue)
+                .and_then(|p| p.feed_source())
+                .filter(|src| registry.get(src).is_some())
+                .map(str::to_string)
+                .unwrap_or_else(|| venue.to_string())
+        };
+        let mut pairs: Vec<(String, i64)> = pairs
+            .into_iter()
+            .map(|(v, d)| (resolve_source(&v), d))
+            .collect();
+        pairs.sort();
+        pairs.dedup();
         for (venue, duration) in &pairs {
-            let Some(p) = actives.iter().find(|p| p.name() == *venue) else {
-                continue;
-            };
-            let Some(disc) = p.discovery() else {
+            let plugin: std::sync::Arc<dyn blitzkrieg_market_api::MarketPlugin> =
+                match actives.iter().find(|p| p.name() == *venue) {
+                    Some(p) => std::sync::Arc::clone(p),
+                    None => {
+                        // Consumer-only enablement: the source plugin is not in
+                        // `actives` (its executor must NOT start) but its data
+                        // components are the upstream every consumer eats —
+                        // mount them from the registry (data-plane
+                        // self-sufficiency).
+                        let src = resolve_source(venue);
+                        if src == *venue {
+                            continue;
+                        }
+                        eprintln!(
+                            "blitzkrieg-core: discovery family {venue}@{duration}s rides {src}'s \
+                             upstream (consumer-only enablement)"
+                        );
+                        match registry.get(&src) {
+                            Some(p) => p,
+                            None => continue,
+                        }
+                    }
+                };
+            let Some(disc) = plugin.discovery() else {
                 continue;
             };
             let cfg = blitzkrieg_market_api::DiscoveryConfig {

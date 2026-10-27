@@ -12,6 +12,40 @@ use blitzkrieg_market_api::{BoxFuture, MarketHost};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+// ── RFC-661 M2: the feed_source reuse fan-out ────────────────────────────────
+
+/// The venue that owns an upstream batch AND every consumer venue re-registering
+/// it under their own identity. A `FeedEvent::Books`/`on_book` carries no batch
+/// owner (the token id is the only key), so the registry's WHO list is what the
+/// data-plane fan-out replays updates against: the source's own venue plus every
+/// declared `feed_source` consumer. One upstream event ⇒ one application per
+/// venue, each landing under its own `(venue, token)` identity.
+pub type VenueFanout = std::sync::Arc<std::sync::RwLock<Vec<String>>>;
+
+/// The multiplexed data plane's shared bookkeeping (RFC-661 M2). The host's
+/// `on_round_markets` consults it to re-register an upstream round batch under
+/// every CONSUMING venue's own identity, so a parasitic plugin gains its own
+/// scanner rows / books / position venue stamps without the OME ever seeing a
+/// mirror fact. `venues` is the fan-out list: source venue + every declared
+/// consumer. `count` counts UPSTREAM connection mounts the assembly attempted
+/// for the source's stream — one mount serves every consumer (the reuse
+/// pipeline's falsifiable claim: the number stays 1, not 1-per-venue).
+///
+/// Field lock discipline: each cell is an independent short critical section,
+/// never held across an await — the same shape as `active_plugin`/`poll_admission`.
+#[derive(Clone, Default)]
+pub struct FeedReuse {
+    /// Who receives each upstream batch: the source venue itself plus every
+    /// plugin whose `feed_source` names it (registration order — the order
+    /// `run`'s actives walk plus later runtime binds append).
+    pub venues: VenueFanout,
+    /// Every attempt to mount the SOURCE venue's upstream components (feed and
+    /// discovery separately). A consumer-only enablement mounts the source's
+    /// data plane through this path too (data-plane self-sufficiency), so this
+    /// counter is the reuse pipeline's observable: N venues enabled ⇒ still 1.
+    pub mounts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
 // ── DTO ↔ core-model conversions ─────────────────────────────────────────────
 
 pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
@@ -161,6 +195,17 @@ pub struct CoreHost {
     /// computation and the gauge live there); the host stays data-plane-blind.
     /// `Arc` inside the Mutex makes the whole cell trivially shareable.
     poll_admission: std::sync::Arc<std::sync::Mutex<Option<PollAdmissionGate>>>,
+    /// RFC-661 M2: the `feed_source` reuse fan-out. `None` (the never-called
+    /// default) keeps every host path byte-identical with the historical
+    /// single-registration shape — in-process tests, replays and backtests.
+    /// When the session assembly installs it (an active or bound plugin
+    /// declares a `feed_source`), each upstream round batch is re-registered
+    /// under every consuming venue's own identity, and each upstream book /
+    /// top-of-book update is applied once per venue token copy (the re-arm
+    /// `on_round_markets` ran the venue re-tags through the engine's same-slot
+    /// merge, so the consumer's token copies are engine-resident and each
+    /// application lands on its own row).
+    feed_reuse: std::sync::Arc<std::sync::Mutex<Option<FeedReuse>>>,
 }
 
 impl CoreHost {
@@ -169,6 +214,7 @@ impl CoreHost {
             core,
             active_plugin: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
             poll_admission: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            feed_reuse: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -179,6 +225,63 @@ impl CoreHost {
             .active_plugin
             .write()
             .expect("core host active plugin lock poisoned") = name.to_string();
+    }
+
+    /// RFC-661 M2: install the `feed_source` fan-out. Called once by the
+    /// session assembly AFTER it resolved the enablement graph (boot actives
+    /// and any later runtime bind appends consumers through [`Self::add_feed_consumer`]).
+    /// The default (never called) is None — every path stays the historical
+    /// single-registration shape.
+    pub fn set_feed_reuse(&self, reuse: FeedReuse) {
+        *self
+            .feed_reuse
+            .lock()
+            .expect("core host feed reuse lock poisoned") = Some(reuse);
+    }
+
+    /// RFC-661 M2: a runtime bind of a `feed_source` consumer appends its
+    /// venue to the fan-out (idempotent — the same declaration re-bound is a
+    /// no-op). Returns true when the venue was newly added.
+    pub fn add_feed_consumer(&self, venue: &str) -> bool {
+        let guard = self
+            .feed_reuse
+            .lock()
+            .expect("core host feed reuse lock poisoned");
+        let Some(reuse) = guard.as_ref() else {
+            return false;
+        };
+        let mut venues = reuse
+            .venues
+            .write()
+            .expect("feed reuse venues lock poisoned");
+        if venues.iter().any(|v| v == venue) {
+            return false;
+        }
+        venues.push(venue.to_string());
+        true
+    }
+
+    /// The fan-out list for an upstream batch from `source`: itself plus every
+    /// declared consumer (in registration order). Empty when the reuse cell is
+    /// absent — the caller forwards once, the historical shape.
+    fn feed_fanout_for(&self, source: &str) -> Vec<String> {
+        let guard = self
+            .feed_reuse
+            .lock()
+            .expect("core host feed reuse lock poisoned");
+        let Some(reuse) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let venues = reuse
+            .venues
+            .read()
+            .expect("feed reuse venues lock poisoned");
+        if !venues.iter().any(|v| v == source) {
+            // The upstream venue is not part of this fan-out (a plain native
+            // plugin): forward once, no re-registration.
+            return Vec::new();
+        }
+        venues.clone()
     }
 
     /// #647: a handle naming ONE plugin for the settlement drains. The
@@ -197,6 +300,7 @@ impl CoreHost {
             core: Arc::clone(&self.core),
             active_plugin: std::sync::Arc::new(std::sync::RwLock::new(name.to_string())),
             poll_admission: std::sync::Arc::clone(&self.poll_admission),
+            feed_reuse: std::sync::Arc::clone(&self.feed_reuse),
         }
     }
 
@@ -215,6 +319,14 @@ impl MarketHost for CoreHost {
     fn on_book(&self, update: api::BookUpdate) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let now = now_ms();
+            // RFC-661 M2: an upstream book applies once per venue identity.
+            // The source's token row and each consumer's re-registered copy
+            // (the fan-out `on_round_markets` armed them) all live in the
+            // engine's book map under the SAME byte token — one application
+            // per event is the single-connection claim; the engine's per-venue
+            // rows read the same book. No extra apply is needed: the fan-out
+            // is a ROW re-registration, not a book duplication (books stay
+            // keyed by token, M1's dual-key rows both point at it).
             let mut c = self.core.lock().await;
             c.engine_on_data(
                 crate::engine::DataEvent::Book {
@@ -329,6 +441,38 @@ impl MarketHost for CoreHost {
             );
             drop(c);
             self.subscribe_tokens(plugin, tokens).await;
+            // RFC-661 M2 (feed_source 复用管道): one upstream round batch feeds
+            // every consumer venue. The source's own registration above is the
+            // historical forward; each consumer re-registers the SAME batch
+            // under ITS OWN venue tag so the engine's scanner holds the
+            // consumer's own `(venue, token)` rows (M1's dual-key table). The
+            // consumer registration lands AFTER the source's — the engine's
+            // same-slot merge then admits the consumer's batch as fresh rows
+            // (its venue tag differs, its tokens as byte strings are already
+            // known but its venue identity is its own). The consumer's tokens
+            // subscribe on the SOURCE's feed control (one upstream connection
+            // carries every consumer's tokens; the feed polls a union set).
+            let fanout = self.feed_fanout_for(plugin);
+            for consumer in fanout.iter().filter(|v| *v != plugin) {
+                let mut re_tagged: Vec<api::MarketDescriptor> = markets.clone();
+                for d in re_tagged.iter_mut() {
+                    d.venue = consumer.clone();
+                }
+                let consumer_tokens: Vec<String> = re_tagged
+                    .iter()
+                    .flat_map(|d| [d.up_token_id.clone(), d.down_token_id.clone()])
+                    .collect();
+                self.core.lock().await.engine_on_data(
+                    crate::engine::DataEvent::RoundMarkets {
+                        markets: re_tagged.iter().map(market_from_api).collect(),
+                        now_ms: now,
+                    },
+                    now,
+                );
+                // The consumer has no upstream of its own: its token set rides
+                // the source feed's control (one connection, one poll loop).
+                self.subscribe_tokens(plugin, consumer_tokens).await;
+            }
         })
     }
 
