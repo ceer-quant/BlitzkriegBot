@@ -10305,14 +10305,19 @@ impl Core {
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
                             // #427: the panels' Venue column, never a decision
-                            // input. The stamp is the ORDER'S EXECUTION venue
-                            // (the same fact list_orders tags and the executor
-                            // drain routes by) — for a mirror token the market
-                            // table row names the mirrored venue (PM registers
-                            // first), and stamping the table row here left the
-                            // position/trade rows carrying a venue tag the
-                            // account-bound venue filter then hid: the history
-                            // badge counted a trade no row ever showed.
+                            // input. The stamp is the ORDER'S EXECUTION venue —
+                            // RFC-661 M1 made it identical to the table row's
+                            // venue (the (venue, token) dual-key table holds
+                            // each venue's OWN row, so the row the executing
+                            // plugin's token resolves to already names the
+                            // execution venue); the lookup stays the same call
+                            // the executor drain routes by, now a plain read
+                            // of the row's own tag. Pre-M1 it was a correction
+                            // over the token-unique table's first-row venue
+                            // (the mirror shape): without it the position/
+                            // trade rows carried a venue tag the account-bound
+                            // venue filter hid — the history badge counted a
+                            // trade no row ever showed.
                             venue: self.execution_venue_of(d.account_id.as_str(), &d.token_id),
                             // The condition's other token, stamped from the
                             // SAME market lookup: the dry settlement ladder's
@@ -10881,18 +10886,16 @@ impl Core {
 
     /// [`Self::pending_unbound`] filtered to ONE venue: the multi-plugin
     /// executor drain. The routing truth is the ORDER'S OWN execution venue
-    /// (`execution_venue_for`: the token's table row venue, overridden by the
-    /// placing account's mirror binding when the binding's venue statically
-    /// declares the row's venue — `mirror_of`, the constructive fact #643
-    /// made the sole routing evidence) — a mirror token's table row always
-    /// names the mirrored venue, and keying the drain on the table alone
-    /// would hand the mirror account's live order to the real venue's
-    /// executor. An order whose execution venue resolves to nothing, or to
-    /// a market with no venue label, is UNTAGGED and routes to the requested
-    /// plugin only when it is the host's active plugin — the single-plugin
-    /// behaviour, unchanged. With the lookup empty (engine down, replay
-    /// corpora) every order is untagged, so each executor sees all of them
-    /// exactly as the pre-routing bridge did.
+    /// (`execution_venue_for`: RFC-661 M1 — the placing account's binding
+    /// resolves its OWN (venue, token) dual-key row first, so a shared token's
+    /// two accounts each route to their own executor with no override logic;
+    /// the transitional mirror declaration only speaks when the binding's
+    /// venue holds no row of its own) — an order whose execution venue
+    /// resolves to nothing, or to a market with no venue label, is UNTAGGED
+    /// and routes to the requested plugin only when it is the host's active
+    /// plugin — the single-plugin behaviour, unchanged. With the lookup empty
+    /// (engine down, replay corpora) every order is untagged, so each executor
+    /// sees all of them exactly as the pre-routing bridge did.
     pub fn pending_unbound_for_venue(&self, venue: &str) -> Vec<TrackedOrder> {
         self.pending_unbound()
             .into_iter()
@@ -10901,14 +10904,16 @@ impl Core {
     }
 
     /// The venue that should execute this order: the placing account's
-    /// binding rides through [`Engine::execution_venue_for`] — for mirror
-    /// tokens (PolySimulator ↔ Polymarket, byte-identical ids) the account's
-    /// OWN venue is the executor, the table row's venue is not. `""` when
-    /// the engine is down or the token belongs to no market: UNTAGGED, never
-    /// "venue empty-string" — callers route untagged work to the active
-    /// plugin instead of guessing. Fallbacks to the plain table lookup when
-    /// the engine is down (same empty answer, kept total for the host's
-    /// drain seam, which cannot go through the engine handle).
+    /// binding rides through [`Engine::execution_venue_for`] — RFC-661 M1:
+    /// the (venue, token) dual-key table holds each venue's OWN row for a
+    /// byte-identical token, so the row's venue IS the execution venue and
+    /// the account dimension degenerates to a plain read (M4 retires the
+    /// account parameter). `""` when the engine is down or the token belongs
+    /// to no market: UNTAGGED, never "venue empty-string" — callers route
+    /// untagged work to the active plugin instead of guessing. Fallbacks to
+    /// the plain table lookup when the engine is down (same empty answer,
+    /// kept total for the host's drain seam, which cannot go through the
+    /// engine handle).
     pub fn execution_venue_of(&self, account: &str, token_id: &str) -> String {
         self.engine
             .as_ref()
@@ -30655,6 +30660,142 @@ mod audit_fix_tests {
         assert!(err.message.contains("cross-venue order refused"), "{err}");
     }
 
+    /// RFC-661 §五.1 面板 bug 的根修钉（M1 形态）：polysimulator 执行
+    /// polymarket 字节同 token 的单，成交行/持仓行/trade 行的 venue 必须
+    /// ≡ 执行身份（polysimulator）——M1 双键表让 poly 的行自己落表（不
+    /// 再需要 mirror 声明），入场戳（`execution_venue_of`）按绑定读它
+    /// 自己的 (venue, token) 行，从开仓到 trade_db 全链同戳。面板
+    /// `venue:polysimulator` 滤网筛出行数 ≡ 徽标计数——「汇总 1 单、
+    /// 筛后 0 行」的截图 bug 在自然行形态下不可复现。开仓→SELL 平仓→
+    /// trade 行全链钉死。
+    #[test]
+    fn a_polysimulator_executed_polymarket_token_stamps_execution_identity_end_to_end() {
+        let mut c = venue_bound_core();
+        let now = 1_000_000;
+        let slot = now / 1000 / 900;
+        // M1 双键形态：polysimulator 的批次带着与 polymarket 无关的自身行
+        // 落表（这里 token 与 PM 的 poly-up 同字节——镜像的构造性事实保
+        // 留，但表不再 token 唯一），没有任何 mirror 声明参与。
+        let sim = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-polymarket".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-up".into(),
+            down_token_id: "poly-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: "polysimulator".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        c.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![sim],
+                now_ms: now + 1,
+            },
+            now + 1,
+        );
+        c.accounts_mut()
+            .insert(crate::account::Account {
+                id: crate::account::AccountId::from("sim"),
+                name: "sim".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polysimulator".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: 0,
+            })
+            .unwrap();
+        c.accounts_mut()
+            .get_mut(&crate::account::AccountId::from("sim"))
+            .unwrap()
+            .set_balance(dec!(10));
+        // The book's binding reaches the engine's scope map on the evaluate
+        // tick — the same sync the runtime relies on.
+        c.engine_evaluate(now + 2);
+
+        // Precondition: the dual-key table carries BOTH venues' rows for the
+        // byte-identical token (M1: two instruments).
+        let e = c.engine.as_ref().expect("engine");
+        assert!(
+            e.market_for_token_on_venue("polymarket", "poly-up")
+                .is_some()
+                && e.market_for_token_on_venue("polysimulator", "poly-up")
+                    .is_some(),
+            "the dual-key table holds both venues' rows for the byte-identical token"
+        );
+
+        // The sim account's own row admits and routes it — NO declaration.
+        let mut order = bound_order("poly-up", "sim-1");
+        order.account_id = crate::account::AccountId::from("sim");
+        c.place(order, 0, 1).unwrap();
+        assert_eq!(
+            c.execution_venue_of("sim", "poly-up"),
+            "polysimulator",
+            "execution follows the placing account's own dual-key row"
+        );
+
+        // The fill opens the position stamped with the EXECUTION identity.
+        let sim_id = c.ome().all()[0].order_id.clone();
+        c.ingest_fill(
+            crate::model::Fill {
+                order_id: sim_id,
+                trade_id: Some("sim-t1".into()),
+                token_id: "poly-up".into(),
+                side: Side::Buy,
+                price: dec!(0.6),
+                size: dec!(5),
+                status: FillStatus::Confirmed,
+                ts_ms: now + 3,
+                tx_hash: None,
+                maker: Some(false),
+                account_id: crate::account::AccountId::from("sim"),
+            },
+            now + 4,
+        )
+        .unwrap();
+        let opened = c.positions().open_positions();
+        assert_eq!(opened.len(), 1, "the fill opened the position");
+        assert_eq!(
+            opened[0].venue, "polysimulator",
+            "the position stamps the EXECUTION venue — the panel's venue column"
+        );
+
+        // The close turns the position into a trade row; the trade_db record
+        // carries the SAME venue (the field the panel's venue filter reads).
+        let pos_id = opened[0].id.clone();
+        let closed = c
+            .positions_mut()
+            .close(
+                &pos_id,
+                dec!(0.8),
+                crate::model::ExitReason::Manual,
+                true,
+                now + 5,
+            )
+            .expect("the full-size close lands");
+        assert_eq!(
+            closed.venue, "polysimulator",
+            "the closed trade keeps the execution identity"
+        );
+        c.on_position_closed(&closed, now + 6);
+        let trades = c.recent_trades(50);
+        assert_eq!(trades.len(), 1, "one trade row exists");
+        assert_eq!(
+            trades[0].get("venue").and_then(|v| v.as_str()),
+            Some("polysimulator"),
+            "the trade row's venue ≡ the execution identity — the venue:polysimulator \
+             filter now finds the rows the badge counted (the panel bug's root fix)"
+        );
+    }
+
     /// The boot assembly seam itself: `apply_plugin_mirrors` must read each
     /// active plugin's own `mirror_of` declaration into the engine (the
     /// parasitic shape's only constructive evidence — no rounds, no shadow
@@ -31221,6 +31362,110 @@ mod audit_fix_tests {
             line, line2,
             "the order log is untouched by a venue rebinding"
         );
+    }
+
+    /// RFC-661 §五.5 回放半边（M1）：单键时代（venue A）落盘的 live 订单
+    /// 重启恢复（`restore_orders` → OME restore）后，其执行路由仍走
+    /// `execution_venue_of` 的 token-only 解析。双键时代同一字节 token
+    /// 若两所各持一行（A→B 换 venue：B 的批次后到，token-only 查找变
+    /// 歧义），恢复的单绝不能按插入序被路由到先到的 A 执行器 —— 歧义
+    /// 解析为空（UNTAGGED），UNTAGGED 单只进 active-plugin 桶；账户绑定
+    /// （B）的单仍路由到它自己的执行器。A→B 不串账，B→A 对称（同一规
+    /// 则，插入序无关）。
+    #[test]
+    fn a_restored_legacy_order_routes_by_binding_not_by_insertion_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-restore-dualkey-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Era 1 (venue A = polymarket only): a live order rests on the shared
+        // token and is persisted.
+        let mut c = venue_bound_core_opts(Some(
+            dir.join("orders.jsonl").to_string_lossy().into_owned(),
+        ));
+        c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+        assert_eq!(c.list_orders().len(), 1);
+        drop(c);
+
+        // Era 2: the core reboots and restores. The era-2 fixture's round
+        // list still names ONLY polymarket's row for the token: the
+        // token-only lookup has a UNIQUE candidate and resolves to it — the
+        // legacy archive replays byte-identically. (With the engine fully
+        // down the same lookup is UNTAGGED `""` — every executor sees the
+        // order, the pre-routing bridge behaviour.)
+        let mut reborn = venue_bound_core_opts(Some(
+            dir.join("orders.jsonl").to_string_lossy().into_owned(),
+        ));
+        assert_eq!(reborn.restore_orders(), 1, "the live order is re-adopted");
+        assert_eq!(
+            reborn.pending_unbound_for_venue("polymarket").len(),
+            1,
+            "a unique candidate routes the restored order to its venue's drain"
+        );
+        assert!(reborn.pending_unbound_for_venue("kalshi").is_empty());
+
+        // A→B: the B venue (kalshi here, any sibling) now lands a batch
+        // carrying byte-identical tokens. The token-only lookup turns
+        // AMBIGUOUS — the restored order must NOT ride the insertion-order
+        // first-hit into the wrong executor; the ACCOUNT's binding
+        // (polymarket) still owns the order through the dual-key row.
+        let now = 1_000_000;
+        let slot = now / 1000 / 900;
+        let twin = crate::model::CryptoMarket {
+            asset: "BTC".into(),
+            condition_id: "cond-twin".into(),
+            question_id: "q".into(),
+            up_token_id: "poly-up".into(),
+            down_token_id: "poly-down".into(),
+            up_price: dec!(0.6),
+            down_price: dec!(0.4),
+            expires_at_ms: (slot + 1) * 900 * 1000,
+            round_slot: slot,
+            round_duration_sec: 900,
+            archive_verdict: false,
+            venue: "twinvenue".into(),
+            neg_risk: false,
+            question: "?".into(),
+        };
+        reborn.engine_on_data(
+            crate::engine::DataEvent::RoundMarkets {
+                markets: vec![twin],
+                now_ms: now + 1,
+            },
+            now + 1,
+        );
+        // The binding reaches the engine's scope map on the evaluate tick —
+        // the same sync the runtime relies on.
+        reborn.engine_evaluate(now + 2);
+        assert_eq!(
+            reborn.execution_venue_of("default", "poly-up"),
+            "polymarket",
+            "the account binding reads its OWN dual-key row — ambiguity of the \
+             token-only lookup never re-routes a bound account"
+        );
+        assert_eq!(
+            reborn.pending_unbound_for_venue("polymarket").len(),
+            1,
+            "the bound account's restored order drains to ITS venue"
+        );
+        assert!(
+            reborn.pending_unbound_for_venue("twinvenue").is_empty(),
+            "the sibling executor never sees another venue's bound order"
+        );
+        // The ambiguity itself is real and refused (never first-hit): an
+        // UNBOUND account's token-only resolution gets nothing.
+        assert_eq!(
+            reborn.execution_venue_of("paper", "poly-up"),
+            "",
+            "an ambiguous token resolves for no unbound account"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #463: the close-credential journal survives a restart. A push is
