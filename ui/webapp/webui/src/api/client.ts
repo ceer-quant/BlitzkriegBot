@@ -1778,14 +1778,26 @@ export interface EngineStats {
   strategies?: StrategyStatsRow[]
 }
 
-/** Market plugin classes — binary prediction market / spot / futures / options. */
-export type MarketType = 'prediction' | 'spot' | 'futures' | 'options'
+/** Market plugin classes — the kernel's seven-value enum (market_api types.rs),
+ * snake_case wire spelling. A value outside this union renders its raw string
+ * (`marketTypeLabel` 的 `?? t` 兜底), so a future kernel value degrades, never mis-renders. */
+export type MarketType =
+  | 'prediction'
+  | 'spot'
+  | 'margin'
+  | 'futures'
+  | 'options'
+  | 'earn'
+  | 'bot'
 
 export const MARKET_TYPE_LABELS: Record<MarketType, string> = {
   prediction: '二元预测市场',
   spot: '现货市场',
+  margin: '杠杆现货',
   futures: '合约市场',
   options: '期货实现',
+  earn: '生息市场',
+  bot: '托管机器人',
 }
 
 export function marketTypeLabel(t?: string | null): string {

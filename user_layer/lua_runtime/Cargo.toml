@@ -24,3 +24,7 @@ blitzkrieg-strategy-api = { path = "../strategy_api" }
 rust_decimal = "1"
 # Diagnostics payload (`LuaStrategy::diagnostics`) is JSON.
 serde_json = "1"
+# Issue 648: unknown intent keys warn+drop — the same `target: "strategy"`
+# diagnostic line shape the C ABI's reserved-key seal emits, so a strategy
+# author sees one diagnostic shape whichever runtime they ship.
+tracing = "0.1"
