@@ -319,6 +319,15 @@ pub struct AuditInput {
     /// failure: with no log there is no record of realized PnL, and a closed
     /// position would look like cash that vanished.
     pub has_trade_log: bool,
+    /// The active venue is a SIMULATED-capability site (its plugin declared
+    /// `MarketCapabilities::SIMULATED` — a paper venue that settles against its
+    /// own model). The venue leg is skipped for it: a paper venue freezes its
+    /// own reported free cash when a BUY rests, while `balance − reserved` nets
+    /// the commitment out, so the two figures are fee-level cents apart by
+    /// construction and the leg falsely failed every audit (two strikes halted
+    /// new entries on a venue where no drift exists). Every other check —
+    /// ledger balance, trade leg, reservations — still runs.
+    pub venue_simulated: bool,
 }
 
 /// One line of the audit: what was compared, against what, and by how much it
@@ -577,7 +586,12 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
     // 4) The venue's free cash against what the ledger believes is free
     //    (cross-source: a fetch race or a stale figure is possible, and the two
     //    reporting conventions differ while orders rest — see the plugin host).
-    if input.live {
+    //    Skipped entirely for a SIMULATED venue: the paper site freezes its own
+    //    reported free cash on a resting BUY and never reports the reservation
+    //    back, so the gap is structural, fee-level and forever — skipping (not
+    //    covering) keeps the other checks untouched while refusing to halt
+    //    entries over arithmetic that cannot agree.
+    if input.live && !input.venue_simulated {
         match input.venue_free {
             None => checks.push(AuditCheck::pass(
                 "venue_free_cash",
@@ -973,6 +987,7 @@ mod tests {
             open_positions: 0,
             seen_trades: 0,
             has_trade_log: true,
+            venue_simulated: false,
         }
     }
 
@@ -1157,6 +1172,52 @@ mod tests {
         assert_eq!(c.drift, dec!(-5));
         assert!(!c.structural);
         assert!(!r.structural_failure);
+    }
+
+    /// A SIMULATED venue's free-cash leg is ABSENT, not failing: the paper site
+    /// freezes its own reported free cash while a BUY rests and the ledger's
+    /// `balance − reserved` nets the commitment out, so the two figures disagree
+    /// by fee-level cents forever — the leg would falsely fail every audit and
+    /// two strikes halted new entries on a venue where nothing drifted. The
+    /// other checks still run; a real venue (`venue_simulated = false`) keeps
+    /// the leg.
+    #[test]
+    fn venue_leg_is_skipped_for_a_simulated_venue() {
+        let mut input = clean_input();
+        input.live = true;
+        input.venue_simulated = true;
+        input.identity.balance = dec!(93.558);
+        input.reserved = dec!(4.35);
+        input.open_buys = 1;
+        input.open_buy_notional = dec!(4.35);
+        // The paper site's frozen figure: balance minus what IT held for the
+        // resting order, plus a fee-level cent it rounded away.
+        input.venue_free = Some(dec!(89.11));
+        input.venue_free_at_ms = Some(900);
+        let r = audit_accounting(&input, None);
+        assert!(
+            r.ok,
+            "the simulated-venue leg must not fail the audit: {:?}",
+            r.checks
+        );
+        assert!(!r.halt_entries);
+        assert!(
+            !r.checks.iter().any(|c| c.name == "venue_free_cash"),
+            "the leg is absent (skipped, not covered): {:?}",
+            r.checks
+        );
+
+        // The same books on a REAL venue keep the leg — and its drift.
+        input.venue_simulated = false;
+        let r = audit_accounting(&input, None);
+        assert!(!r.ok, "a real venue's 92-cent gap is still drift");
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.name == "venue_free_cash")
+            .expect("the leg must be present for a real venue");
+        let expected_drift = dec!(89.11) + dec!(4.35) - dec!(93.558);
+        assert_eq!(c.drift, expected_drift);
     }
 
     /// A residual the VENUE itself created (the host sets the ledger's cash from

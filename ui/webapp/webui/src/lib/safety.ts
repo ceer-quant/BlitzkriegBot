@@ -130,3 +130,24 @@ export function selfCheckBanner(stats: EngineStats | null | undefined): SafetyBa
     items: failed.map((i) => ({ name: i.name, detail: i.detail })),
   }
 }
+
+/**
+ * The market-data archive stopped recording (issue #669 ②). The kernel's own
+ * stop is a single journal warn line — an external operator found FIVE DAYS of
+ * silently missing backtest corpus with a manual `df`. The kernel also emits
+ * one risk alert on the stop edge; this banner is the CONTINUOUS face: it reads
+ * `stats.archive` (recording/stoppedReason) every snapshot, so a panel opened
+ * days after the stop still shows it. Older cores send `archive: null` —
+ * absence renders nothing, never an invented outage.
+ */
+export function archiveStoppedBanner(stats: EngineStats | null | undefined): SafetyBanner | null {
+  const archive = stats?.archive
+  if (!archive || archive.recording !== false) return null
+  const reason = archive.stoppedReason || 'unknown'
+  return {
+    tone: 'warn',
+    title: '事件归档已停录',
+    body: `事件归档已停录（${reason}）——回测语料不再记录`,
+    hint: '行情事件不再落盘，回测/复盘语料从停录时刻起缺失。清理磁盘或调大归档上限后重启会话恢复录制。',
+  }
+}

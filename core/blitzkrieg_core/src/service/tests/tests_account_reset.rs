@@ -307,6 +307,208 @@ fn audit_identity_scopes_to_the_active_account() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// 纸面场地的 `venue_free_cash` 误熔断（外部用户实盘报告，issue #669）：
+/// SIMULATED capability 场地（挂单即冻结、场地自扣可用现金）下，该子检查
+/// 的 `balance − reserved` 口径永远差 fee 级零头，连续两轮就把新开仓熔断。
+/// 修法 = 声明快照豁免：venue→capabilities 查询走 `plugin_modes`（boot
+/// `set_plugin_modes` 注入的声明快照，与策略握手同一视图），声明了
+/// SIMULATED 的场地在 `build_audit_input` 置 `venue_simulated`，检查整臂
+/// 跳过。未声明的场地（真盘）不受影响。
+#[test]
+fn audit_skips_the_venue_leg_for_a_simulated_venue() {
+    let dir = reset_audit_dir("audit-venue-simulated");
+    let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+    let book = crate::account::AccountLedgers::new(
+        vec![crate::account::Account {
+            id: crate::account::AccountId::from("default"),
+            name: "default".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: crate::account::AccountStatus::Active,
+            credential_keys: crate::account::CredentialKeys::default(),
+            venue: "polysimulator".into(),
+            trading_enabled: true,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            updated_at_ms: 0,
+        }],
+        crate::account::AccountId::from("default"),
+    );
+    let mut c = Core::with_account_book(
+        CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: None,
+            position_log_path: None,
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        },
+        book,
+    );
+    // 注入声明快照（生产装配同一入口）：polysimulator 的模式声明带
+    // SIMULATED 位。
+    let paper = crate::market::compat::PluginModes {
+        name: "polysimulator".into(),
+        modes: vec![blitzkrieg_market_api::MarketMode {
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            structure: None,
+            capabilities: blitzkrieg_market_api::MarketCapabilities::SIMULATED,
+        }],
+    };
+    c.set_plugin_modes(vec![paper]);
+
+    // 一笔真实挂单 BUY（生产 place_pending 路径：预留 4 进账本、OME 有
+    // 活单），随后场地报它的真值 96：纸面场地挂单即自扣，96 = 100 − 4，
+    // 但场地按自己的撮合四舍五入过 —— 这里留 0.008 的零头（fee 级）。
+    c.set_balance(Decimal::from(100));
+    let req = crate::model::OrderRequest {
+        token_id: "tok".into(),
+        condition_id: "cond".into(),
+        side: Side::Buy,
+        mode: crate::model::FillPolicy::Taker,
+        price: dec!(0.4),
+        size: dec!(10),
+        internal_key: "k1".into(),
+        strategy: "s1".into(),
+        asset: "BTC".into(),
+        direction: "up".into(),
+        round_slot: 1,
+        account_id: crate::account::AccountId::from("default"),
+    };
+    let (id, _) = c.place_pending(req, 1).unwrap();
+    c.bind_venue(&id, "v1".into(), 2).unwrap();
+    c.realign_venue_cash("polysimulator", Decimal::from(100));
+    c.fold_venue_free("polysimulator", Decimal::new(96008, 3));
+
+    let input = c.build_audit_input(now_ms());
+    assert!(input.venue_simulated, "the declaration must mark the venue");
+    let report = crate::reconcile::audit_accounting(&input, None);
+    assert!(
+        report.ok,
+        "the paper venue's fee-level gap must not fail the audit: {:?}",
+        report
+            .checks
+            .iter()
+            .filter(|c| !c.ok)
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(!report.halt_entries);
+    assert!(
+        !report.checks.iter().any(|c| c.name == "venue_free_cash"),
+        "the leg is skipped entirely, not merely forgiven"
+    );
+
+    // 防御半边：同书同数，只把声明换成非 SIMULATED（真盘）——该腿回到
+    // 检查列表并照旧报 cross-source drift（首轮不熔断，既有语义不变）。
+    let real = crate::market::compat::PluginModes {
+        name: "polysimulator".into(),
+        modes: vec![blitzkrieg_market_api::MarketMode {
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            structure: None,
+            capabilities: blitzkrieg_market_api::MarketCapabilities::WEBSOCKET_FEED,
+        }],
+    };
+    c.set_plugin_modes(vec![real]);
+    let input = c.build_audit_input(now_ms());
+    assert!(!input.venue_simulated);
+    let report = crate::reconcile::audit_accounting(&input, None);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.name == "venue_free_cash" && !c.ok),
+        "a real venue's gap is still cross-source drift: {:?}",
+        report.checks
+    );
+    assert!(
+        !report.halt_entries,
+        "first cross-source strike never halts"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 归档停录的显性告警（issue #669 ②）：空间地板/锁/io 停录原本只有
+/// journal 一行 warn，外部用户 5 天后才发现回测语料一直没记。tick 折叠
+/// `status().recording` 过 `archive_recording_last` 槽，true→false 翻转沿
+/// 发恰好一条 RiskAlert（消息含 stopped_reason）；持续 false 不再发；面板
+/// 侧读 `stats.archive` 持续渲染横幅。确定性停录用「第二写者」路径：
+/// 测试先持锁打开同路径，内核 open 即 stop("locked")——与磁盘地板同一
+/// `stop()` 入口。
+#[test]
+fn archive_stop_emits_one_risk_alert_on_the_edge() {
+    let dir = std::env::temp_dir().join(format!(
+        "bk-archive-alert-{}-{}",
+        std::process::id(),
+        std::cell::Cell::new(0).replace(now_ms() as u64)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("events.jsonl");
+    let _ = std::fs::remove_file(&path);
+
+    // The lock owner: the core's own archive open below must lose.
+    let _owner = crate::data_source::EventArchive::open(&path, 0).unwrap();
+
+    let mut c = Core::new(CoreConfig {
+        event_archive_path: Some(path.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    assert!(
+        !c.event_archive.as_ref().unwrap().status().recording,
+        "the fixture: the core's archive opened already stopped"
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+
+    // First tick: the true→false edge fires exactly one alert.
+    c.tick(1_000).unwrap();
+    let mut alerts = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::RiskAlert { message, .. } = ev
+            && message.contains("事件归档停录")
+        {
+            alerts.push(message);
+        }
+    }
+    assert_eq!(alerts.len(), 1, "exactly one alert on the edge: {alerts:?}");
+    assert!(
+        alerts[0].contains("事件归档停录") && alerts[0].contains("locked"),
+        "the alert names the stop reason: {}",
+        alerts[0]
+    );
+
+    // Staying stopped is silent: further ticks must not repeat it.
+    c.tick(2_000).unwrap();
+    c.tick(3_000).unwrap();
+    let mut repeat = 0;
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::RiskAlert { message, .. } = ev
+            && message.contains("事件归档停录")
+        {
+            repeat += 1;
+        }
+    }
+    assert_eq!(
+        repeat, 0,
+        "the edge fired once; staying false must not re-fire"
+    );
+
+    // The engine.stats face carries the same fact continuously (the panel
+    // banner reads it): recording=false + stopped_reason survive.
+    let stats = c.engine_stats_at(4_000);
+    assert_eq!(stats["archive"]["recording"], serde_json::json!(false));
+    assert_eq!(
+        stats["archive"]["stoppedReason"],
+        serde_json::json!("locked")
+    );
+
+    drop(_owner);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// 铺一个已平仓交易到指定账户（生产路径：open → close() →
 /// on_position_closed，TradeDb/positions.closed/strategy_accounting 三处
 /// 各折一次 —— 与 9833 行注释的幂等契约一致）。
