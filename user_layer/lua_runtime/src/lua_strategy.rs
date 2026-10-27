@@ -260,7 +260,7 @@ impl SafeStrategy for LuaStrategy {
         match self.sandbox.invoke("bk_evaluate", |_| f.call::<Value>(())) {
             Ok(v) => {
                 self.note_ok();
-                let (intents, parse_err) = parse_intents(&v);
+                let (intents, parse_err) = parse_intents(&v, self.name());
                 if let Some(err) = parse_err {
                     self.note_err(&err, false);
                 }
@@ -293,8 +293,39 @@ impl SafeStrategy for LuaStrategy {
 }
 
 /// Parse the `bk_evaluate` return value into [`Intents`]. The wire is the
+/// Keys a returned entry row may carry — everything else is dropped with a
+/// warn, the same observability the C ABI's reserved-key seal provides
+/// (`foreign.rs` warn+drop; issue 648's micro-drift: the Lua side used to
+/// ignore unknown keys in TOTAL silence).
+const ENTRY_KEYS: &[&str] = &["token", "price", "reason", "shares", "pair"];
+/// Keys a returned exit row may carry.
+const EXIT_KEYS: &[&str] = &["token", "reason"];
+/// Keys a returned break row may carry.
+const BREAK_KEYS: &[&str] = &["token", "broken_price"];
+
+/// Warn once per unknown key on one intent row — the Lua twin of the C ABI's
+/// reserved-key warn+drop (same `target: "strategy"` line shape, so an author
+/// sees the same diagnostic whichever runtime they ship). The key is still
+/// dropped (parse below never reads it); this only makes the drop VISIBLE.
+fn warn_unknown_keys(row: &mlua::Table, allowed: &[&str], strategy: &str, token: &str) {
+    for pair in row.pairs::<String, mlua::Value>() {
+        if let Ok((key, _)) = pair
+            && !allowed.contains(&key.as_str())
+            && key != "token"
+        {
+            tracing::warn!(
+                target: "strategy",
+                strategy = %strategy,
+                token = %token,
+                key,
+                "unknown intent key dropped (the kernel never reads it)"
+            );
+        }
+    }
+}
+
 /// §6.5 contract:
-fn parse_intents(v: &Value) -> (Intents, Option<String>) {
+fn parse_intents(v: &Value, strategy: &str) -> (Intents, Option<String>) {
     let mut intents = Intents::none();
     let Value::Table(t) = v else {
         return (intents, Some("bk_evaluate must return a table".into()));
@@ -315,6 +346,7 @@ fn parse_intents(v: &Value) -> (Intents, Option<String>) {
                 let leg = pt.raw_get::<String>("leg").ok()?;
                 Some(EntryPairDecl { key, leg })
             });
+            warn_unknown_keys(&row, ENTRY_KEYS, strategy, &token);
             intents.entries.push(Entry {
                 token,
                 price,
@@ -331,6 +363,7 @@ fn parse_intents(v: &Value) -> (Intents, Option<String>) {
             let Some(token) = row.raw_get::<String>("token").ok() else {
                 return (intents, Some("exit missing token string".into()));
             };
+            warn_unknown_keys(&row, EXIT_KEYS, strategy, &token);
             intents.exits.push(Exit {
                 token,
                 reason: row.raw_get::<String>("reason").unwrap_or_default(),
@@ -351,9 +384,10 @@ fn parse_intents(v: &Value) -> (Intents, Option<String>) {
                 );
             };
             intents.breaks.push(Break {
-                token,
+                token: token.clone(),
                 broken_price,
             });
+            warn_unknown_keys(&row, BREAK_KEYS, strategy, &token);
         }
     }
     (intents, None)

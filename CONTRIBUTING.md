@@ -74,7 +74,12 @@ and loaded at runtime. See
 1. Run the full gate set above before submitting.
 2. Keep changes focused and atomic.
 3. Describe what changed and why; attach gate output where relevant.
-4. Live-trading changes are **not** accepted from outside contributors.
+4. **Territory accounting** — every changed file must be claimed in the PR
+   body (full path, bare filename, or a `dir/` prefix). Before a
+   squash-merge, run
+   `node scripts/pr-territory-check.mjs <PR编号>` and land it green (#547's
+   squash truncation is the lesson this gate closes).
+5. Live-trading changes are **not** accepted from outside contributors.
 
 ## Code Style
 

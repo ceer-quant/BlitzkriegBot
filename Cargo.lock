@@ -1246,6 +1246,7 @@ dependencies = [
  "mlua",
  "rust_decimal",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -12,6 +12,10 @@ extension_type = "market"
 enabled = false            # shell only; not wired to trading yet
 description = "Binance spot market adapter (extension-point proof)"
 
+# Declared-but-unacted metadata: the extension loader surfaces every key it
+# does not act on as `declared_only` (config.rs) — this row tells a reader a
+# shell-only plugin would depend on the core IF it were ever wired, and the
+# transparency list says as much. Not a Cargo manifest; no build effect.
 [dependencies]
 blitzkrieg_core = ">=0.1.0"
 
