@@ -6,6 +6,7 @@
   "sha256": "943ed8fee5f0503c6d305ed02e431e667b90f7ceff444d73468d16d0827bc8f2",
   "author": "BlitzkriegBot",
   "description": "Official Lua EXAMPLE (E30/#336) — teaching fixture, NOT for production: measured net -$17,575.78 over 20,038 closed trades on the v2 corpus census (RETEST-2026-10-10); single-tick confirmation rides naked legs into settlement zeros. Do not enable.",
+  "trailing_exit": true,
   "tunables": {
     "threshold": {
       "type": "decimal",
