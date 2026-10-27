@@ -250,6 +250,7 @@ cargo build --release --workspace --locked
   — because the trade ledger only knows CLOSED positions, not how their entries
   filled; `--json` prints that manifest to stdout for a script.
 - `feed-live-probe.mjs` / `poly-ws-endurance.mjs` / `poly-wire-measure.mjs` — Polymarket feed probes.
+- `venue-identity-probe.mjs` — RFC #661 三点真线只读验收（`books`/`trades`/`upstream`，可单选）：engine.books 按 venue 计数与双键/合并形态判定（phase 自标注，迁移前后都可跑）、trade.venue ≡ 执行身份一致率 + legacy-tagged 行明列 + 每账户徽标/滤网对照、上游 feed/discovery 组件一份断言。只调只读 IPC 动词，token 只出截断值；`--socket` 可指私有核，`--sample-sec` 控 upstream 活性窗口。
 - `price-compare.mjs` / `reconcile-exits.mjs` / `sweep-exits.mjs` / `final-exit-opt.mjs` — pricing and exit sweeps.
 - `account-drift-check.mjs` — live panel/account drift diagnosis.
 - `blitzkrieg-new-strategy.mjs` — scaffold a new cdylib strategy under `user_layer/strategies/`.
