@@ -45,7 +45,15 @@ const page = read('src', 'pages', 'Strategies.vue')
 const theme = read('src', 'styles', 'theme.css')
 
 /** Strip CSS and template comments so prose about a rule cannot trip a rule. */
-const code = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+const code = (s) => {
+  let prev
+  let cur = s
+  do {
+    prev = cur
+    cur = cur.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+  } while (cur !== prev)
+  return cur
+}
 
 const template = code(page)
 
