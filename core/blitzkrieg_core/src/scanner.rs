@@ -114,6 +114,22 @@ pub struct RoundTiming {
 pub struct Scanner {
     cfg: ScannerConfig,
     markets: Vec<CryptoMarket>,
+    /// RFC-661 M1: the `(venue, token)` dual-key index over `markets` —
+    /// every row lands under its OWN venue's token keys, so the same
+    /// byte-identical token under two venues is TWO independent instruments
+    /// (each with its own market row, book, clock, positions and trade
+    /// attribution). Rebuilt wholesale by `set_markets` (the table is small —
+    /// a round's listings — so a rebuild per feed beats an incremental
+    /// cache-invalidation contract). Insertion-order independent: the index
+    /// maps (venue, token) → row position, nothing else.
+    ///
+    /// #627's "one row per token globally" invariant is SUPERSEDED here.
+    token_index: HashMap<(String, String), usize>,
+    /// The reverse index of `token_index`: token → the venues whose rows
+    /// hold it. The token-only legacy lookups (`market_for_token`) consult
+    /// this to tell "unique candidate" (resolve) from "ambiguous" (≥2 venues
+    /// hold the token — refuse, never first-hit by insertion order).
+    token_venues: HashMap<String, Vec<String>>,
     /// Venue-reported actual round end (ms), keyed by **(venue, round duration
     /// sec)** — the multi-family clock key (B1a). A venue can run SEVERAL
     /// round-length families at once (PM 15m matches alongside PM 1h markets);
@@ -137,6 +153,8 @@ impl Scanner {
         Self {
             cfg,
             markets: Vec::new(),
+            token_index: HashMap::new(),
+            token_venues: HashMap::new(),
             actual_end_time_ms: HashMap::new(),
             clock_offset_ms: HashMap::new(),
         }
@@ -154,18 +172,63 @@ impl Scanner {
         let up = asset.to_uppercase();
         self.markets.iter().find(|m| m.asset == up)
     }
-
-    /// The market a token belongs to (either side). Multi-plugin scanners hold
-    /// several venues' markets, and each venue's book has its own clock — the
-    /// exit policy reads the token's OWN market's expiry through this.
-    pub fn market_for_token(&self, token: &str) -> Option<&CryptoMarket> {
+    /// The market a token belongs to (either side) on ONE venue — the
+    /// RFC-661 M1 venue-qualified lookup. Same-byte token under two venues
+    /// resolves to the venue's OWN row; a venue that holds no row for the
+    /// token returns `None` even when a sibling venue lists it.
+    pub fn market_for_token_on_venue(&self, venue: &str, token: &str) -> Option<&CryptoMarket> {
+        let idx = *self
+            .token_index
+            .get(&(venue.to_string(), token.to_string()))?;
         self.markets
-            .iter()
-            .find(|m| m.up_token_id == token || m.down_token_id == token)
+            .get(idx)
+            .filter(|m| m.venue == venue && (m.up_token_id == token || m.down_token_id == token))
+    }
+
+    /// The token-only legacy lookup (RFC-661 §4.3 compatible entry): resolves
+    /// ONLY on a unique candidate — the whole table holds exactly one row
+    /// carrying this token. Ambiguity (≥2 venues each hold a row) refuses
+    /// with `None` — NEVER a first-hit by insertion order (that would revive
+    /// #638's "first venue to arrive owns the row"). Single-venue
+    /// deployments and old corpora (one row per token by construction)
+    /// resolve exactly as before, byte-identical.
+    pub fn market_for_token(&self, token: &str) -> Option<&CryptoMarket> {
+        let venues = self.token_venues.get(token)?;
+        if venues.len() != 1 {
+            return None;
+        }
+        self.market_for_token_on_venue(&venues[0], token)
+    }
+
+    /// The venues whose rows carry `token` (sorted, deterministic). The
+    /// ambiguity diagnostic: callers that must distinguish "unique candidate"
+    /// from "refused as ambiguous" read this to NAME the candidate venues.
+    pub fn venues_holding_token(&self, token: &str) -> Vec<String> {
+        let mut v = self.token_venues.get(token).cloned().unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Rebuild both indexes from the row list. `set_markets` is the only
+    /// write path, so the indexes are always the exact projection of
+    /// `markets`.
+    fn rebuild_token_index(&mut self) {
+        self.token_index.clear();
+        self.token_venues.clear();
+        for (i, m) in self.markets.iter().enumerate() {
+            for t in [&m.up_token_id, &m.down_token_id] {
+                self.token_index.insert((m.venue.clone(), t.clone()), i);
+                let venues = self.token_venues.entry(t.clone()).or_default();
+                if !venues.contains(&m.venue) {
+                    venues.push(m.venue.clone());
+                }
+            }
+        }
     }
 
     pub fn set_markets(&mut self, markets: Vec<CryptoMarket>) {
         self.markets = markets;
+        self.rebuild_token_index();
     }
 
     pub fn clock_offset_ms(&self) -> i64 {

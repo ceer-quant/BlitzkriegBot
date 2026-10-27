@@ -495,14 +495,10 @@ pub struct Engine {
     /// merge 臂被判「全是已知 token」吞掉，它的 (venue, duration) 轮钟
     /// 与行情行双双落不了地，面板切到该所账户永远「加载中」。
     ///
-    /// 处置：交易面保持单行（镜像即同一市场，表里一份就够）；显示面把
-    /// 被遮蔽 venue 自己声明的批次存进这张簿 —— 键 (venue, duration)，
-    /// 值该所最近一次申报的整批行。只有行情装配层（ENGINE_ROUND）读它，
-    /// 给「钟已开口但表里没有自己的行」的 venue 合成带它标签的行情行
-    /// （token 相同 → 共享同一份 book，价格是真实读数）。交易面零接触：
-    /// 入场门、token→市场查询、结算对侧证据都不查这张簿（#643 收口：
-    /// #634 短暂把 shadow 批次接进 scope 放行与执行路由，已撤——镜像
-    /// 归属以 `mirror_of` 自声明为唯一交易真值）。
+    /// RFC-661 M1 更新：写路径已退役（双键表让每个 venue 的行自然落表，
+    /// fresh-empty 臂只对同 venue 真重复申报触发，此刻 `has_own_rows`
+    /// 恒真，insert 分支永不可达）。结构壳（字段 + `shadow_markets_for`
+    /// 读视图 + 消费端合成臂）留给 M3 拆除；当前簿恒空。
     shadow_markets: HashMap<(String, i64), Vec<CryptoMarket>>,
 }
 
@@ -683,12 +679,14 @@ impl Engine {
 
     /// Declare a static mirror relationship: `mirror` trades its `source`'s
     /// tokens (byte-identical ids) through its own executor while the source's
-    /// feed owns the table rows. THE admission/routing evidence: scope
-    /// admission (`scope_admits_token`) and execution routing
-    /// (`execution_venue_for`) read this declaration and nothing else — it
-    /// survives the mirror venue going quiet (the parasitic PolySimulator
-    /// never declares rounds), where runtime observation would wobble with
-    /// the feed (#643 retired the shadow-batch fallback).
+    /// feed owns the table rows. THE transitional admission/routing evidence
+    /// (RFC-661 M1 keeps the mirror table for the parasitic shape — M3
+    /// retires it with the whole bridge): a binding whose venue holds NO own
+    /// dual-key row rides the token-only unique-candidate lookup, and the
+    /// declaration routes it. It survives the mirror venue going quiet (the
+    /// parasitic PolySimulator never declares rounds), where runtime
+    /// observation would wobble with the feed (#643 retired the shadow-batch
+    /// fallback).
     pub fn set_venue_mirror(&mut self, mirror: &str, source: &str) {
         if mirror.is_empty() || source.is_empty() || mirror == source {
             self.mirror_of.remove(mirror);
@@ -765,36 +763,35 @@ impl Engine {
     }
 
     /// Whether a scope's venue binding admits a token: unbound admits
-    /// everything; bound scopes only their own venue's tokens (an unknown
-    /// token venue = not admitted — the token must belong to a market this
-    /// deployment trades). A market with NO venue tag (`m.venue` empty —
-    /// corpora from the single-plugin world, where the venue was implicit)
-    /// admits every bound scope: the archive predates #427's tagging, and
-    /// there is nothing to disagree with the binding about — refusing those
-    /// made any venue-bound account go silent on every pre-tag corpus (the
-    /// exit-economics fixture first tripped it: signals 89975→0, closes 13→0).
+    /// everything; bound scopes their OWN venue's dual-key rows (RFC-661 M1).
     ///
-    /// 镜像盘（PolySimulator 镜像 Polymarket，token 逐字节相同）：交易表按
-    /// token 唯一存行，先到的 PM 批占住行，镜像 token 的表行永远标着被镜像
-    /// 所。绑镜像所的账户查表必得「别所的行」，每条候选静默出局（真线：
-    /// signals=0 / blocked=0，连遥测都不留）。mirror admission 只读插件的
-    /// 自声明（`mirror_of`，#638 的构造性事实，boot/绑定时推入）：绑定所
-    /// 声明镜像表行所属的所即放行。声明是交易面的唯一镜像证据 —— 显示簿
-    /// （`shadow_markets`）不是：运行时观测随 feed 时效摆动（feed 断则放
-    /// 行消失），声明不会（#643 把 shadow 批次退出交易裁决）。
+    /// RFC-661 M1: the table is (venue, token) dual-keyed — each venue holds
+    /// its OWN row for a byte-identical token — so a bound scope reads ITS
+    /// OWN venue's row (`market_for_token_on_venue`) and admits iff that row
+    /// exists. Insertion order is irrelevant (the PM-first/sim-first
+    /// symmetry is test-pinned). A token the whole table does not carry is
+    /// refused for bound scopes exactly as before; untagged rows (the
+    /// legacy bucket, venue "") still admit every bound scope.
+    ///
+    /// Transitional mirror bridge (M1 keeps the mirror table; M3 retires it
+    /// with the whole parasitic shape): when the bound venue has NO own row,
+    /// the token-only lookup resolves ONLY a unique candidate — a single row
+    /// carrying the token — and admits when the binding's plugin statically
+    /// declares that row's venue its mirror, or when the row is untagged
+    /// (the pre-tag corpus case). Ambiguity (≥2 venues hold the token, none
+    /// of them the binding's) refuses — never first-hit by insertion order.
     /// crate-visible so the IPC runtime-enablement tests can pin the wire
     /// behaviour the admission gate actually answers.
     pub(crate) fn scope_admits_token(&self, account: &str, token: &str) -> bool {
         let Some(bound) = self.venue_by_account.get(account).filter(|v| !v.is_empty()) else {
             return true;
         };
+        if let Some(m) = self.scanner.market_for_token_on_venue(bound, token) {
+            return m.venue.is_empty() || m.venue == *bound;
+        }
         match self.scanner.market_for_token(token) {
             None => false,
-            Some(m) => {
-                m.venue.is_empty()
-                    || m.venue == *bound
-                    || self.mirror_source_of(bound) == Some(m.venue.as_str())
-            }
+            Some(m) => m.venue.is_empty() || self.mirror_source_of(bound) == Some(m.venue.as_str()),
         }
     }
 
@@ -866,8 +863,32 @@ impl Engine {
 
     /// The scanner market a token belongs to (either side), if any. Multi-plugin
     /// callers (the rollover taker-kill) need the VENUE of a leg's token.
+    ///
+    /// RFC-661 M1: token-only resolution admits ONLY a unique candidate — the
+    /// whole table holds exactly one row carrying the token. Ambiguity (≥2
+    /// venues each hold a row) refuses with `None`, never first-hit by
+    /// insertion order. Callers that know their venue read
+    /// [`Self::market_for_token_on_venue`].
     pub fn market_for_token(&self, token: &str) -> Option<&crate::model::CryptoMarket> {
         self.scanner.market_for_token(token)
+    }
+
+    /// RFC-661 M1: the venue-qualified market lookup — `venue`'s OWN row for
+    /// `token`. The same-byte token under two venues is two instruments; each
+    /// resolves to itself. `None` when this venue holds no row for the token
+    /// (even if a sibling venue does).
+    pub fn market_for_token_on_venue(
+        &self,
+        venue: &str,
+        token: &str,
+    ) -> Option<&crate::model::CryptoMarket> {
+        self.scanner.market_for_token_on_venue(venue, token)
+    }
+
+    /// The venues whose table rows carry `token` (sorted) — the ambiguity
+    /// diagnostic for token-only callers that must name their candidates.
+    pub fn venues_holding_token(&self, token: &str) -> Vec<String> {
+        self.scanner.venues_holding_token(token)
     }
 
     pub fn set_config(&mut self, cfg: EngineConfig) {
@@ -1089,11 +1110,16 @@ impl Engine {
                                 == feed_duration
                     });
                 if scanner_holds_slot {
-                    // The batch's own venue tag + its expiry, read BEFORE the
-                    // fresh filter consumes the list — the fresh-empty path
-                    // below still needs both (a mirror venue's batch carries
-                    // its identity and declaration even when every token is
-                    // already known).
+                    // RFC-661 M1: the known-token test is VENUE-QUALIFIED —
+                    // a token is "already known" only when the FEEDING
+                    // VENUE's own rows already carry it. A sibling venue's
+                    // byte-identical token is a DIFFERENT instrument (the
+                    // dual-key table holds both rows), so its batch is a
+                    // fresh batch for its own venue, not a duplicate of the
+                    // first venue's. #627's token-unique invariant (and the
+                    // #638 fresh-empty merge that hid behind it) is
+                    // superseded here: two venues' same-slot batches each
+                    // land their own rows, whichever arrives first.
                     let batch_venue_tag =
                         markets.first().map(|m| m.venue.clone()).unwrap_or_default();
                     let batch_first_expiry =
@@ -1102,52 +1128,62 @@ impl Engine {
                         .scanner
                         .markets()
                         .iter()
+                        .filter(|m| m.venue == batch_venue_tag)
                         .flat_map(|m| [m.up_token_id.as_str(), m.down_token_id.as_str()])
                         .collect();
-                    let fresh: Vec<CryptoMarket> = markets
+                    // RFC-661 M1: "known" is judged against the feeding
+                    // VENUE's rows AT THE BATCH'S OWN SLOT. The venue's stale
+                    // rows from a PREVIOUS window carry the same tokens (a
+                    // binary market re-lists both sides every round), so a
+                    // slot-blind known set would misread this venue's own
+                    // ROLLOVER as a duplicate re-feed and freeze its rows at
+                    // the old round forever (the poly slot-2 row beside the
+                    // sibling's slot-3 row — found in the first A/B replay).
+                    // The batch's slot and the resident rows' slot therefore
+                    // both key the comparison: same (venue, slot) + all
+                    // tokens known = duplicate; anything else = fresh rows
+                    // for the feeding venue.
+                    let batch_has_new_slot = !self
+                        .scanner
+                        .markets()
                         .iter()
-                        .filter(|m| {
-                            !known.contains(m.up_token_id.as_str())
-                                && !known.contains(m.down_token_id.as_str())
-                        })
-                        .cloned()
-                        .collect();
+                        .filter(|m| m.venue == batch_venue_tag)
+                        .all(|m| m.round_slot == slot);
+                    let fresh: Vec<CryptoMarket> = if batch_has_new_slot {
+                        markets.clone()
+                    } else {
+                        markets
+                            .iter()
+                            .filter(|m| {
+                                !known.contains(m.up_token_id.as_str())
+                                    && !known.contains(m.down_token_id.as_str())
+                            })
+                            .cloned()
+                            .collect()
+                    };
                     if fresh.is_empty() {
-                        // Pure duplicate: nothing to add, nothing to restart.
+                        // Pure duplicate: THIS venue re-feeding its own
+                        // round. Nothing to add, nothing to restart; the
+                        // (venue, duration) clock re-speaks (observe is
+                        // idempotent for a same-venue re-declaration — the
+                        // same value rewrites the same key, state
+                        // byte-identical).
                         //
-                        // 镜像盘（2026-10-25 poly 轮钟冻结定谳）：「全已知」
-                        // 不等于「同一家的重复申报」——PolySimulator 镜像
-                        // Polymarket，同窗口 token 逐字节相同；PM 批先落，
-                        // 这批就被判成纯重复。两条不可再吞的伴生事实：
-                        // ① 轮钟——该 (venue, duration) 若还没开口，这次
-                        //   申报就是它唯一的发言机会（它的 next feed 在
-                        //   下个窗口，仍是 merge 路径），静默 return 会让
-                        //   venueRounds 永远缺行、面板倒计时绑不上；observed
-                        //   幂等检查挡掉真正的同 venue 重复申报。
-                        // ② 显示簿——表按 token 唯一，它的行进不了表，把
-                        //   整批存进 shadow_markets：行情装配层据此给该所
-                        //   合成带自己标签的行情行。交易面不读这张簿。
-                        //
-                        // observe 无条件照写（同换轮臂的信任序：批次自带的
-                        // 申报就是该所自己的权威，越界值由 observe 内部的
-                        // 2 轮 guard 拒收）——不按「已开口」跳过：上窗口的
-                        // 开口挡不住本窗口的新申报，跳过会把钟永远钉在旧
-                        // 轮。同所真重复申报重写同一个值，状态逐字节不变。
+                        // RFC-661 M1 note: this arm is reachable ONLY for a
+                        // same-venue re-feed now — a sibling venue's batch
+                        // (byte-identical tokens included) carries fresh
+                        // tokens for ITS venue and lands its own rows below.
+                        // The #638 shadow_markets display book is retired as
+                        // a WRITE target (M1 keeps the struct for M3 to tear
+                        // out): the dual-key table carries every venue's
+                        // rows naturally, so there is no "shadowed venue"
+                        // left to synthesize display rows for.
                         self.scanner.observe_end_time_for(
                             &batch_venue_tag,
                             feed_duration,
                             batch_first_expiry,
                             now_ms,
                         );
-                        let has_own_rows = self.scanner.markets().iter().any(|m| {
-                            m.venue == batch_venue_tag
-                                && row_family_duration(m.round_duration_sec, global_duration_sec)
-                                    == feed_duration
-                        });
-                        if !has_own_rows {
-                            self.shadow_markets
-                                .insert((batch_venue_tag, feed_duration), markets);
-                        }
                         return Vec::new();
                     }
                     // Seed the genuinely new tokens from any book that has
@@ -1180,7 +1216,29 @@ impl Engine {
                     // venue slot and out-of-band values are refused inside
                     // `observe_end_time_for_venue`.
                     let merge_venue = fresh.first().map(|m| (m.venue.clone(), m.expires_at_ms));
-                    let mut merged = self.scanner.markets().to_vec();
+                    // RFC-661 M1: a same-slot batch whose venue holds only
+                    // STALE rows (its previous window) is that venue's
+                    // rollover through the merge arm — the feeding venue's
+                    // own family rows are replaced, not appended to (the
+                    // appended shape left the old-round row beside the new
+                    // one, growing the table every window).
+                    let mut merged: Vec<CryptoMarket> =
+                        if batch_has_new_slot && !batch_venue_tag.is_empty() {
+                            let global = global_duration_sec;
+                            let tag = batch_venue_tag.as_str();
+                            self.scanner
+                                .markets()
+                                .iter()
+                                .filter(|m| {
+                                    m.venue != tag
+                                        || row_family_duration(m.round_duration_sec, global)
+                                            != feed_duration
+                                })
+                                .cloned()
+                                .collect()
+                        } else {
+                            self.scanner.markets().to_vec()
+                        };
                     merged.extend(fresh);
                     self.scanner.set_markets(merged);
                     if let Some((venue, end_ms)) = merge_venue {
@@ -1360,6 +1418,10 @@ impl Engine {
                 // by its OWN feed, never collateral of this one. Single-family
                 // tables resolve every row to the feed's duration, so the
                 // predicate degenerates to the historic `m.venue != venue`.
+                // RFC-661 M1: "the venue's rows" are the dual-key rows of THIS
+                // venue only — a sibling venue's byte-identical token rows are
+                // different instruments and must survive this venue's
+                // rollover untouched (per-venue round clocks included).
                 if venue.is_empty() {
                     self.scanner.set_markets(markets);
                 } else {
@@ -2127,42 +2189,64 @@ impl Engine {
     /// cross-venue pair shows one leg per venue). `None` when the engine is
     /// down or the token belongs to no live market; the caller renders that
     /// as the undeclared case.
+    ///
+    /// RFC-661 M1: token-only resolution admits ONLY a unique candidate —
+    /// ambiguity (≥2 venues hold rows for the token) refuses with `None`,
+    /// never first-hit by insertion order (the old "first venue to arrive
+    /// owns the token" the mirror shape depended on).
     pub fn venue_of(&self, token_id: &str) -> Option<String> {
+        let venues = self.scanner.venues_holding_token(token_id);
+        if venues.len() != 1 {
+            return None;
+        }
         self.scanner
-            .markets()
-            .iter()
-            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .market_for_token_on_venue(&venues[0], token_id)
             .map(|m| m.venue.clone())
             .filter(|v| !v.is_empty())
     }
 
-    /// The venue that should EXECUTE `token` for `account`. The table row's
-    /// venue, with one override: an account bound to a venue whose STATIC
-    /// mirror declaration names the row's venue (the constructive fact — a
-    /// parasitic mirror plugin never declares rounds; PolySimulator's token
-    /// ids ARE Polymarket's by construction). The executor drain's routing
-    /// truth: per-venue drains key on this, so a mirror token's two accounts
-    /// each reach their OWN executor and the poly account's live order can
-    /// never land on the real venue (nor the reverse). Unbound accounts and
-    /// non-mirror tokens ride the plain table lookup, byte-identical with
-    /// the pre-mirror routing. The display book (`shadow_markets`) is NOT
-    /// routing evidence (#643): runtime observation wobbles with the feed,
-    /// the declaration does not.
+    /// The venue that should EXECUTE `token` for `account`. RFC-661 M1: the
+    /// table is (venue, token) dual-keyed — each venue holds its OWN row for
+    /// a byte-identical token — so a binding whose venue holds the token's
+    /// row executes on ITS OWN venue, insertion order irrelevant. A binding
+    /// with no own row rides the transitional mirror bridge (M1 keeps the
+    /// mirror table; M3 retires it): the token-only lookup admits ONLY a
+    /// unique candidate — a single row carrying the token — and the binding's
+    /// static mirror declaration (or an untagged row) routes it to the
+    /// binding. Ambiguity (≥2 venues hold the token, none of them the
+    /// binding's) resolves on the token-only rule: refuse (None), never
+    /// first-hit by insertion order. Unbound accounts ride the same
+    /// unique-candidate lookup, byte-identical with the single-venue
+    /// routing. The executor drain's routing truth: per-venue drains key on
+    /// this, so a shared token's two accounts each reach their OWN executor
+    /// and the poly account's live order can never land on the real venue
+    /// (nor the reverse). The display book (`shadow_markets`) is NOT routing
+    /// evidence (#643): runtime observation wobbles with the feed, the
+    /// declaration does not.
     pub fn execution_venue_for(&self, account: &str, token_id: &str) -> Option<String> {
-        let table = self.venue_of(token_id);
-        match (
-            table,
-            self.venue_by_account.get(account).filter(|v| !v.is_empty()),
-        ) {
-            (Some(v), Some(b)) if v != *b => {
-                if self.mirror_source_of(b) == Some(v.as_str()) {
-                    Some(b.clone())
-                } else {
-                    Some(v.clone())
+        let bound = self.venue_by_account.get(account).filter(|v| !v.is_empty());
+        if let Some(b) = bound {
+            if let Some(m) = self.scanner.market_for_token_on_venue(b, token_id) {
+                // The binding's own dual-key row: its venue IS the executor
+                // (untagged rows name no venue — fall through to the
+                // unique-candidate read, which resolves them the old way).
+                if !m.venue.is_empty() {
+                    return Some(b.clone());
                 }
+            } else if let Some(v) = self.venue_of(token_id) {
+                // Unique candidate on the table, none of it the binding's:
+                // the mirror declaration routes the binding's executor.
+                if self.mirror_source_of(b) == Some(v.as_str()) {
+                    return Some(b.clone());
+                }
+                if v.is_empty() {
+                    return Some(b.clone());
+                }
+                return Some(v);
             }
-            (other, _) => other,
+            return None;
         }
+        self.venue_of(token_id)
     }
 
     /// The condition's OTHER outcome token, read off the current round's
@@ -2170,14 +2254,19 @@ impl Engine {
     /// binary market structure guarantees a held token's partner exists while
     /// the market is live; `None` when the token belongs to no live market
     /// (the caller stamps empty and the ladder keeps its withhold behavior).
+    ///
+    /// RFC-661 M1: token-only resolution admits ONLY a unique candidate —
+    /// ambiguity (≥2 venues hold rows for the token) refuses with `None`,
+    /// never first-hit by insertion order. Callers that know their venue read
+    /// [`Self::market_for_token_on_venue`]. A partner token IS itself shared
+    /// by both rows (the sibling instrument), which is fine: the ladder's
+    /// counter-evidence key names the condition's other side, not a venue.
     pub fn partner_of(&self, token_id: &str) -> Option<String> {
-        self.scanner.markets().iter().find_map(|m| {
+        self.scanner.market_for_token(token_id).map(|m| {
             if m.up_token_id == token_id {
-                Some(m.down_token_id.clone())
-            } else if m.down_token_id == token_id {
-                Some(m.up_token_id.clone())
+                m.down_token_id.clone()
             } else {
-                None
+                m.up_token_id.clone()
             }
         })
     }
@@ -2185,45 +2274,43 @@ impl Engine {
     /// #461: whether the token's market settles through the NegRisk adapter —
     /// the merge call's routing key. `None`/`false` merge through the plain
     /// CTF; a neg-risk market would revert there, so the request must say so.
+    /// RFC-661 M1: unique-candidate resolution (ambiguity refuses, never
+    /// first-hit) — see [`Self::market_for_token`].
     pub fn neg_risk_of(&self, token_id: &str) -> Option<bool> {
-        self.scanner
-            .markets()
-            .iter()
-            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
-            .map(|m| m.neg_risk)
+        self.scanner.market_for_token(token_id).map(|m| m.neg_risk)
     }
 
     /// The token's live round slot (the market that currently lists it).
     /// The pair-chase request's round identity: a NEXT round's orphan gets a
     /// fresh internal key, so a retried chase never collides with the OME's
     /// duplicate-intent guard. `None` = the token belongs to no live market.
+    /// RFC-661 M1: unique-candidate resolution (ambiguity refuses, never
+    /// first-hit) — see [`Self::market_for_token`].
     pub fn round_slot_of(&self, token_id: &str) -> Option<i64> {
         self.scanner
-            .markets()
-            .iter()
-            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .market_for_token(token_id)
             .map(|m| m.round_slot)
     }
 
     /// The token's market asset (the request's provenance echo).
+    /// RFC-661 M1: unique-candidate resolution (ambiguity refuses, never
+    /// first-hit) — see [`Self::market_for_token`].
     pub fn asset_of(&self, token_id: &str) -> Option<String> {
         self.scanner
-            .markets()
-            .iter()
-            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id)
+            .market_for_token(token_id)
             .map(|m| m.asset.clone())
     }
 
     /// The token's leg label (`"up"` / `"down"`, read off its market side —
     /// the same wire direction the engine stamps on entry requests).
+    /// RFC-661 M1: unique-candidate resolution (ambiguity refuses, never
+    /// first-hit) — see [`Self::market_for_token`].
     pub fn direction_of(&self, token_id: &str) -> Option<SignalDirection> {
-        self.scanner.markets().iter().find_map(|m| {
+        self.scanner.market_for_token(token_id).map(|m| {
             if m.up_token_id == token_id {
-                Some(SignalDirection::Up)
-            } else if m.down_token_id == token_id {
-                Some(SignalDirection::Down)
+                SignalDirection::Up
             } else {
-                None
+                SignalDirection::Down
             }
         })
     }
@@ -3896,7 +3983,14 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_venues_same_slot_batch_still_opens_its_clock_and_display_rows() {
+    fn a_mirror_venues_same_slot_batch_lands_its_own_dual_key_rows() {
+        // RFC-661 M1 取代（原断言：表保持 token 唯一 1 行 + 整批进 shadow
+        // 显示簿 —— #627「token 全局唯一一份行」不变式被 §4.3 双键正面废
+        // 除）：同字节 token 在两个 venue 下是两个独立标的。PM 批先落，
+        // poly 批同 slot 到达时按 (venue, token) 双键各落各的行 —— 插入
+        // 次序无关；shadow_markets 作为写目标同步退役（M1 停写，M3 拆
+        // 壳）：双键表天然承载每个 venue 的行，没有「被遮蔽所」再需要
+        // 合成显示行。
         let mut e = Engine::new(cfg());
         let end = 1_800_000; // slot 2
         // Polymarket lands first: a rollover puts its row in the table and
@@ -3909,47 +4003,61 @@ mod tests {
 
         // The mirror venue declares the SAME round — byte-identical tokens,
         // a different venue tag. Its batch is a same-slot merge whose fresh
-        // set is EMPTY (every token already known).
+        // set (venue-qualified) is ITS OWN tokens — the rows land.
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![mirror_market(end, "polysimulator")],
             now_ms: 61_000,
         });
-        // The table stays token-unique — no duplicate mirror row.
+        // Dual-key: TWO rows, one per venue, both in the table.
         assert_eq!(
             e.scanner.markets().len(),
-            1,
-            "mirror tokens are one market; the table must not grow a second row"
+            2,
+            "the same-byte token under two venues is two instruments — each venue's row lands"
         );
-        // ...but the mirror venue's clock MUST have spoken: the panel's
+        assert!(
+            e.scanner
+                .market_for_token_on_venue("polymarket", "mirror-up")
+                .is_some(),
+            "the first venue keeps its own row"
+        );
+        assert!(
+            e.scanner
+                .market_for_token_on_venue("polysimulator", "mirror-up")
+                .is_some(),
+            "the second venue gains its own row — insertion order irrelevant"
+        );
+        // ...and the second venue's clock MUST have spoken: the panel's
         // venueRounds row and the countdown rebind wait for it.
         assert!(
             e.scanner()
                 .observed_clock_keys()
                 .iter()
                 .any(|(v, d)| v == "polysimulator" && *d == 900),
-            "a mirror venue's same-slot batch must open its own (venue, duration) clock \
-             even when every token is already known"
+            "the second venue's same-slot batch must open its own (venue, duration) clock"
         );
-        // ...and its batch lands in the display book for the assembly to
-        // synthesize its tagged rows.
-        let shadow = e.shadow_markets_for("polysimulator", 900).expect(
-            "the mirror batch must reach the display book (the table cannot carry its rows)",
+        // The retired write path: the display book never fills again — the
+        // dual-key table is the only market store (M3 removes the struct).
+        assert!(
+            e.shadow_markets_for("polysimulator", 900).is_none(),
+            "shadow_markets is retired as a write target: the dual-key table carries the rows"
         );
-        assert_eq!(shadow.len(), 1);
-        assert_eq!(shadow[0].venue, "polysimulator");
 
-        // A genuine duplicate re-feed of the SAME venue does not disturb
-        // anything: the clock is already open, no re-observe, no shadow churn.
+        // A genuine duplicate re-feed of the SAME venue stays idempotent —
+        // the same-venue merge semantics survive verbatim: no third row, no
+        // churn.
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![mirror_market(end, "polysimulator")],
             now_ms: 91_000,
         });
-        assert!(e.shadow_markets_for("polysimulator", 900).is_some());
-        assert_eq!(e.scanner.markets().len(), 1);
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "same-venue re-feed adds nothing"
+        );
 
-        // The next window: PM rolls over (real rows move), the mirror venue's
-        // new-window batch again merges fresh-empty — its clock re-speaks for
-        // the new expiry and the shadow rows refresh.
+        // The next window: PM rolls over (its rows move), the mirror venue's
+        // new-window batch merges ITS OWN rows — both venues track the live
+        // window, each on its own (venue, duration) clock.
         let next_end = 2_700_000; // slot 3
         e.on_data(DataEvent::RoundMarkets {
             markets: vec![mirror_market(next_end, "polymarket")],
@@ -3960,29 +4068,39 @@ mod tests {
             now_ms: 1_800_001,
         });
         assert_eq!(
-            e.scanner.markets()[0].round_slot,
-            next_end / 1000 / 900,
-            "the table tracks the live window"
+            e.scanner.markets().len(),
+            2,
+            "both venues' rows stay in the table"
+        );
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .all(|m| m.round_slot == next_end / 1000 / 900),
+            "the table tracks the live window for BOTH venues"
         );
         assert_eq!(
             e.scanner
                 .round_timing_for("polysimulator", 900, 1_800_001)
                 .expires_at_ms,
             next_end,
-            "the mirror venue's clock follows its own new-window declaration"
+            "the second venue's clock follows its own new-window declaration"
         );
         assert_eq!(
-            e.shadow_markets_for("polysimulator", 900).unwrap()[0].expires_at_ms,
+            e.scanner
+                .round_timing_for("polymarket", 900, 1_800_001)
+                .expires_at_ms,
             next_end,
-            "the display book carries the live window's rows, not the stale ones"
+            "the first venue's clock follows its own declaration, independent"
         );
     }
 
     #[test]
-    fn a_mirror_venue_shadow_rows_never_leak_into_trading_lookups() {
-        // The display book is display-only: token→market lookups (the venue
-        // admission chain reads these) must see exactly the table's rows —
-        // the mirror table row is the first venue's.
+    fn a_shared_token_is_ambiguous_to_the_token_only_lookup() {
+        // RFC-661 M1 取代（原断言：token-only 查找首中先到的 PM 行 ——
+        // 「first venue wins」正是 §五.5 钉死废除的插入序解析）：双键表下
+        // 两个 venue 各持同字节 token 的行，token-only 查找遇到歧义必须
+        // 拒绝（None），绝不按插入顺序首中；venue 限定查找各得各行。
         let mut e = Engine::new(cfg());
         let end = 1_800_000;
         e.on_data(DataEvent::RoundMarkets {
@@ -3993,14 +4111,32 @@ mod tests {
             markets: vec![mirror_market(end, "polysimulator")],
             now_ms: 61_000,
         });
-        let m = e
-            .scanner
-            .market_for_token("mirror-up")
-            .expect("the mirror token resolves through the table");
+        assert!(
+            e.scanner.market_for_token("mirror-up").is_none(),
+            "two venues hold the token — the token-only lookup refuses the ambiguity"
+        );
         assert_eq!(
-            m.venue, "polymarket",
-            "token lookups stay single-sourced on the table's row (first venue wins), \
-             never on the display book"
+            e.venues_holding_token("mirror-up"),
+            vec!["polymarket".to_string(), "polysimulator".to_string()],
+            "the ambiguity diagnostic names BOTH candidate venues (sorted)"
+        );
+        assert_eq!(
+            e.venue_of("mirror-up"),
+            None,
+            "venue_of refuses the ambiguous token, never first-hit"
+        );
+        // Each venue-qualified lookup resolves to its OWN row.
+        assert_eq!(
+            e.scanner
+                .market_for_token_on_venue("polymarket", "mirror-up")
+                .map(|m| m.venue.as_str()),
+            Some("polymarket"),
+        );
+        assert_eq!(
+            e.scanner
+                .market_for_token_on_venue("polysimulator", "mirror-up")
+                .map(|m| m.venue.as_str()),
+            Some("polysimulator"),
         );
     }
 
@@ -4061,6 +4197,244 @@ mod tests {
             venues,
             vec!["kalshi"],
             "a venue that missed a full round must not keep its finished-round row: {venues:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_token_rolls_over_per_venue_without_cross_venue_pollution() {
+        // RFC-661 §五.6（M1 半边）：同字节 token 双键行在场时，一个 venue
+        // 的换轮（rollover）只替换它自己那一族的行 —— 兄弟 venue 的同
+        // token 行是另一个标的，必须原样存活；换轮后两所各自的行各追各
+        // 的新窗口，token-only 查找依旧歧义拒绝。
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000; // slot 2
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 61_000,
+        });
+        assert_eq!(e.scanner.markets().len(), 2, "both venues' rows live");
+
+        // polymarket rolls to slot 3: only ITS row moves; the simulator's
+        // slot-2 row (byte-identical tokens) must survive untouched.
+        let next_end = 2_700_000; // slot 3
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polymarket")],
+            now_ms: 1_800_000,
+        });
+        let pm = e
+            .scanner
+            .market_for_token_on_venue("polymarket", "mirror-up")
+            .expect("the rolling venue keeps its own row");
+        assert_eq!(
+            pm.round_slot,
+            next_end / 1000 / 900,
+            "the rolling venue's row tracks the new window"
+        );
+        let sim = e
+            .scanner
+            .market_for_token_on_venue("polysimulator", "mirror-up")
+            .expect("the sibling venue's row survives the sibling rollover");
+        assert_eq!(
+            sim.round_slot,
+            end / 1000 / 900,
+            "the sibling venue's row is NOT dragged along by the sibling rollover"
+        );
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the rollover replaces the feeding venue's row, never the sibling's"
+        );
+
+        // The simulator rolls too (its feed was just late): both rows now
+        // track the live window, each through its own feed.
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polysimulator")],
+            now_ms: 1_800_001,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the late feed lands its own row"
+        );
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .all(|m| m.round_slot == next_end / 1000 / 900),
+            "both venues track the live window on their own feeds"
+        );
+        // Ambiguity persists exactly as before — the token stays shared.
+        assert!(
+            e.scanner.market_for_token("mirror-up").is_none(),
+            "the token-only lookup still refuses: two venues hold the token"
+        );
+        // The per-venue clocks each followed their own declaration.
+        assert_eq!(
+            e.scanner
+                .round_timing_for("polymarket", 900, 1_800_001)
+                .expires_at_ms,
+            next_end,
+        );
+        assert_eq!(
+            e.scanner
+                .round_timing_for("polysimulator", 900, 1_800_001)
+                .expires_at_ms,
+            next_end,
+        );
+    }
+
+    #[test]
+    fn the_reverse_landing_order_lands_the_same_dual_key_rows() {
+        // RFC-661 §五.1 的对称半边：sim 批先落、PM 批后落，两所各得各的
+        // 行 —— 双键表对插入次序完全无关（§五.1「先 PM 批后 sim 批、先
+        // sim 批后 PM 批双向喂」验收的 B→A 向）。行内容、歧义拒绝、时钟
+        // 开口与 A→B 向（`a_mirror_venues_same_slot_batch_lands_its_own_
+        // dual_key_rows`）逐断言对称。
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000; // slot 2
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polysimulator")],
+            now_ms: 1_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(end, "polymarket")],
+            now_ms: 61_000,
+        });
+        assert_eq!(
+            e.scanner.markets().len(),
+            2,
+            "the same-byte token under two venues is two instruments, in either landing order"
+        );
+        assert!(
+            e.scanner
+                .market_for_token_on_venue("polysimulator", "mirror-up")
+                .is_some(),
+            "the FIRST venue keeps its own row"
+        );
+        assert!(
+            e.scanner
+                .market_for_token_on_venue("polymarket", "mirror-up")
+                .is_some(),
+            "the SECOND venue gains its own row — insertion order irrelevant"
+        );
+        assert!(
+            e.scanner
+                .observed_clock_keys()
+                .iter()
+                .any(|(v, d)| v == "polymarket" && *d == 900),
+            "the second venue's same-slot batch opened its own (venue, duration) clock"
+        );
+        assert!(
+            e.shadow_markets_for("polymarket", 900).is_none(),
+            "the display book never fills, in either landing order"
+        );
+        assert!(
+            e.scanner.market_for_token("mirror-up").is_none(),
+            "the token-only lookup refuses the ambiguity regardless of landing order"
+        );
+        assert_eq!(
+            e.venue_of("mirror-up"),
+            None,
+            "venue_of never resolves to the first lander"
+        );
+        // The next window, same reverse order: both venues track it.
+        let next_end = 2_700_000; // slot 3
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polysimulator")],
+            now_ms: 1_800_000,
+        });
+        e.on_data(DataEvent::RoundMarkets {
+            markets: vec![mirror_market(next_end, "polymarket")],
+            now_ms: 1_800_001,
+        });
+        assert_eq!(e.scanner.markets().len(), 2);
+        assert!(
+            e.scanner
+                .markets()
+                .iter()
+                .all(|m| m.round_slot == next_end / 1000 / 900),
+            "both venues' rows track the live window, reverse landing order included"
+        );
+    }
+
+    #[test]
+    fn a_unique_candidate_resolves_every_token_only_read_ambiguity_refuses() {
+        // RFC-661 §五.5 的读取面全表：token-only 的每个入口（market_for_
+        // token、venue_of、partner_of、neg_risk_of、round_slot_of、
+        // asset_of、direction_of、venue_of_token 的引擎侧）都走同一条
+        // 「唯一候选才解析」规则 —— 唯一候选解析到该行自己的值，歧义
+        // （≥2 所持行）全部拒绝，绝不按插入序首中。
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        // The unique candidate: only polymarket lists the token.
+        let mut pm = venue_market(end, "polymarket");
+        pm.up_token_id = "shared-up".into();
+        pm.down_token_id = "shared-down".into();
+        pm.neg_risk = true;
+        e.scanner.set_markets(vec![pm.clone()]);
+        assert_eq!(
+            e.scanner
+                .market_for_token("shared-up")
+                .map(|m| m.venue.as_str()),
+            Some("polymarket"),
+            "a unique candidate resolves the token-only lookup"
+        );
+        assert_eq!(e.venue_of("shared-up").as_deref(), Some("polymarket"));
+        assert_eq!(e.partner_of("shared-up").as_deref(), Some("shared-down"));
+        assert_eq!(e.neg_risk_of("shared-up"), Some(true));
+        assert_eq!(e.round_slot_of("shared-up"), Some(end / 1000 / 900));
+        assert_eq!(e.asset_of("shared-up").as_deref(), Some("BTC"));
+        assert_eq!(e.direction_of("shared-up"), Some(SignalDirection::Up));
+        assert_eq!(
+            e.direction_of("shared-down"),
+            Some(SignalDirection::Down),
+            "the partner side reads its own leg label"
+        );
+
+        // The ambiguity: a sibling venue now holds byte-identical rows.
+        let mut sim = pm.clone();
+        sim.venue = "polysimulator".into();
+        sim.condition_id = "cond-sim".into();
+        e.scanner.set_markets(vec![pm, sim]);
+        assert!(e.scanner.market_for_token("shared-up").is_none());
+        assert_eq!(e.venue_of("shared-up"), None);
+        assert_eq!(e.partner_of("shared-up"), None);
+        assert_eq!(e.neg_risk_of("shared-up"), None);
+        assert_eq!(e.round_slot_of("shared-up"), None);
+        assert_eq!(e.asset_of("shared-up"), None);
+        assert_eq!(e.direction_of("shared-up"), None);
+    }
+
+    #[test]
+    fn a_legacy_untagged_row_still_admits_every_bound_scope_next_to_dual_key_rows() {
+        // The pre-tag corpus case survives beside the dual-key rows: an
+        // untagged market (venue "" — serde default) carries no venue
+        // evidence a binding could disagree with, so it still admits every
+        // bound scope, while the sibling venues' tagged rows keep their own
+        // admission verdicts.
+        let mut e = Engine::new(cfg());
+        let end = 1_800_000;
+        e.scanner.set_markets(vec![
+            venue_market(end, "polymarket"),
+            mirror_market(end, "polysimulator"), // shares no tokens with PM
+            eth_market(end),                     // untagged legacy row
+        ]);
+        e.set_account_venue("sim", "polysimulator");
+        assert!(
+            e.scope_admits_token("sim", "mirror-up"),
+            "the binding's own dual-key row admits"
+        );
+        assert!(
+            e.scope_admits_token("sim", "eth-up"),
+            "an untagged legacy row admits every bound scope, as before"
+        );
+        assert!(
+            !e.scope_admits_token("sim", "polymarket-up"),
+            "another venue's tagged row still refuses — the gate keeps its teeth"
         );
     }
 
@@ -4526,23 +4900,47 @@ mod tests {
             e.execution_venue_for("pm", "mirror-up") == Some("polymarket".into()),
             "the mirrored venue's binding reads its own row, unchanged"
         );
+        // RFC-661 §五.5: with BOTH venues holding the byte-identical token,
+        // the unbound account's token-only resolution REFUSES — the old
+        // first-hit answer ("polymarket", the row that landed first) is the
+        // insertion-order semantics the dual-key table supersedes.
+        assert_eq!(
+            e.execution_venue_for("unbound", "mirror-up"),
+            None,
+            "an ambiguous token resolves for NO unbound account — never first-hit by landing order"
+        );
+
+        // The unique-candidate half: drop the second venue's rows (its feed
+        // dies) and the surviving polymarket row is the ONLY holder — the
+        // token-only lookup resolves again, to the same venue the old table
+        // happened to answer by landing order.
+        let kept: Vec<CryptoMarket> = e
+            .scanner
+            .markets()
+            .iter()
+            .filter(|m| m.venue != "polysimulator")
+            .cloned()
+            .collect();
+        e.scanner.set_markets(kept);
         assert_eq!(
             e.execution_venue_for("unbound", "mirror-up"),
             Some("polymarket".into()),
-            "an unbound account rides the plain table lookup"
+            "a UNIQUE candidate resolves the token-only lookup for an unbound account"
         );
     }
 
     #[test]
     fn a_shadow_batch_without_a_mirror_declaration_never_admits_or_reroutes() {
         // #643's contract, pinned in reverse: WITHOUT a mirror_of declaration
-        // the shadow batch (the display book — the mirror venue's feed was
-        // merged away as all-known tokens) must NOT open the scope gate nor
-        // swing the execution routing, however fresh the observation is.
-        // Runtime observation wobbles with the feed (plugin dead, credentials
-        // expired → the batch drops out); the declaration does not. The
-        // display book's rows stay display-only here, exactly as they are in
-        // the books_view arm.
+        // the mirror venue's batch alone must NOT swing the execution routing
+        // to the sibling row's venue — the runtime observation wobbles with
+        // the feed (plugin dead, credentials expired → the batch drops out);
+        // the declaration does not.
+        //
+        // RFC-661 M1 迁移：M1 双键表让 mirror venue 的行自然落表（shadow
+        // 显示簿作为写目标退役），所以本测试的「shadow 批次在场」前提换成
+        // 「mirror venue 的双键行在场」——被断言的核心不变式原样保留：无
+        // 声明时 mirror venue 的行不改变受理与路由判定。
         let mut e = Engine::new(cfg());
         let end = 1_800_000;
         e.on_data(DataEvent::RoundMarkets {
@@ -4554,39 +4952,64 @@ mod tests {
             now_ms: 61_000,
         });
         e.set_account_venue("poly", "polysimulator");
-        // Pre-condition: the display book actually carries the shadow batch —
-        // the refusal below is judged against live display evidence, not an
-        // empty book.
+        // Pre-condition: the mirror venue's OWN dual-key row is live in the
+        // table (the M1 shape — the display book stays empty).
         assert!(
-            e.shadow_markets_for("polysimulator", 900).is_some(),
-            "the fixture must have the shadow batch in the display book"
+            e.scanner
+                .market_for_token_on_venue("polysimulator", "mirror-up")
+                .is_some(),
+            "the fixture must have the second venue's own dual-key row in the table"
         );
         assert!(
-            !e.scope_admits_token("poly", "mirror-up"),
-            "the shadow batch alone must not admit the mirror-bound scope"
+            e.shadow_markets_for("polysimulator", 900).is_none(),
+            "shadow_markets stays empty under the dual-key table (write path retired)"
         );
-        assert_eq!(
-            e.execution_venue_for("poly", "mirror-up"),
-            Some("polymarket".into()),
-            "routing stays on the table row — no shadow-batch override"
+        // The venue's own row admits its binding — no declaration needed when
+        // the row itself exists (RFC-661: 行本身按 venue 分立，天然受理).
+        assert!(
+            e.scope_admits_token("poly", "mirror-up"),
+            "the bound scope admits through its own dual-key row"
         );
-        // Routing is not perturbed for the other bindings either: the display
-        // book changes nothing about who executes the token.
+        assert!(
+            e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
+            "execution follows the placing account's own dual-key row"
+        );
+        // Routing is not perturbed for the other bindings either.
         e.set_account_venue("pm", "polymarket");
         assert!(
             e.execution_venue_for("pm", "mirror-up") == Some("polymarket".into()),
             "the mirrored venue's binding keeps its plain table routing"
         );
 
-        // The declaration is the ONLY key that opens the gate: with it (the
-        // plugin's own `mirror_of` fact, pushed at assembly) the evidence is
-        // CONSTRUCTIVE — it survives the shadow batch going away entirely
-        // (the parasitic shape, where the mirror plugin declares no rounds at
-        // all and the shadow batch can never exist).
+        // The token-only AMBIGUITY rule (§五.5): with both venues holding the
+        // token, the unbound account's token-only resolution refuses — never
+        // first-hit by insertion order.
+        assert_eq!(
+            e.execution_venue_for("unbound", "mirror-up"),
+            None,
+            "the ambiguous token resolves for no unbound account (never first-hit)"
+        );
+        assert!(
+            !e.scope_admits_token("poly", "polymarket-up"),
+            "a NON-shared token of another venue still refuses"
+        );
+
+        // The transitional mirror bridge (M1 keeps the mirror table; M3
+        // retires it): drop the second venue's rows (the parasitic shape —
+        // its feed dies) and the declaration alone still admits/routes the
+        // binding through the unique PM candidate.
         e.set_venue_mirror("polysimulator", "polymarket");
+        let kept: Vec<CryptoMarket> = e
+            .scanner
+            .markets()
+            .iter()
+            .filter(|m| m.venue != "polysimulator")
+            .cloned()
+            .collect();
+        e.scanner.set_markets(kept);
         assert!(
             e.scope_admits_token("poly", "mirror-up"),
-            "the static mirror declaration admits the mirrored row without any shadow batch"
+            "the static mirror declaration admits the surviving unique candidate"
         );
         assert!(
             e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
@@ -4612,7 +5035,7 @@ mod tests {
         assert_eq!(
             e.execution_venue_for("poly", "mirror-up"),
             Some("polymarket".into()),
-            "routing falls back to the table row once the declaration is gone"
+            "routing falls back to the unique table row once the declaration is gone"
         );
     }
 
