@@ -546,6 +546,58 @@ async fn enable_venue_at_runtime(
     }
 }
 
+/// P0 #670: Linux/macOS 的 EMFILE 都是 errno 24——fd 配额耗尽时 accept()
+/// 立即失败，是自旋刷日志的典型诱因。单测钉 `== libc::EMFILE`。
+const ACCEPT_EMFILE_ERRNO: i32 = 24;
+
+/// P0 #670: 同一 [`std::io::ErrorKind`] 的 warn 限速窗。
+const ACCEPT_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+/// P0 #670: Err 臂退避起点与封顶（毫秒）。50ms 起，指数倍增到 2s 封顶。
+const ACCEPT_BACKOFF_START_MS: u64 = 50;
+const ACCEPT_BACKOFF_MAX_MS: u64 = 2_000;
+
+/// accept() Err 臂的限速 + 退避状态（P0 #670）。纯逻辑、无 IO：`step` 吃
+/// 调用方时钟（测试可控），sleep/打日志/发事件都留在调用点。
+#[derive(Debug, Default)]
+struct AcceptErrState {
+    /// 当前退避毫秒数（Ok 复位为起点）。
+    backoff_ms: u64,
+    /// 上次放行打印的 (错误种类, 时刻)——同种类 5s 内只打一条。
+    last_logged: Option<(std::io::ErrorKind, std::time::Instant)>,
+    /// 限速窗内被吞掉的错误条数，下次放行时随 `suppressed` 字段补记。
+    suppressed: u64,
+}
+
+impl AcceptErrState {
+    /// 一次 accept 失败：更新状态，返回 (是否本次放行打印, 截至已抑制条数)。
+    /// 同 ErrorKind 在 5s 窗内静默（计数）；跨窗或换种类立即放行；
+    /// 放行后倍增退避（50→100→…→2000 封顶）。
+    fn step(&mut self, kind: std::io::ErrorKind, now: std::time::Instant) -> (bool, u64) {
+        let within_window = match &self.last_logged {
+            Some((last_kind, at)) => {
+                *last_kind == kind && now.duration_since(*at) < ACCEPT_LOG_WINDOW
+            }
+            None => false,
+        };
+        if within_window {
+            self.suppressed += 1;
+            return (false, self.suppressed);
+        }
+        let suppressed = std::mem::take(&mut self.suppressed);
+        self.last_logged = Some((kind, now));
+        self.backoff_ms = (self.backoff_ms.saturating_mul(2))
+            .clamp(ACCEPT_BACKOFF_START_MS, ACCEPT_BACKOFF_MAX_MS);
+        (true, suppressed)
+    }
+
+    /// Ok 臂复位：退避回起点、限速记忆清空、抑制计数清零。
+    fn reset_ok(&mut self) {
+        self.backoff_ms = ACCEPT_BACKOFF_START_MS;
+        self.last_logged = None;
+        self.suppressed = 0;
+    }
+}
+
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
 pub async fn run(
     socket_path: String,
@@ -1085,10 +1137,16 @@ pub async fn run(
     tokio::pin!(shutdown);
     // Report an unavailable peer check once, not per connection.
     let mut peer_warning_logged = false;
+    // P0 #670: accept() 的 Err 臂限速 + 指数退避状态。EMFILE 等错误让
+    // accept 立刻返回、select 立刻再就绪 → 紧自旋刷日志（外部用户实测
+    // 4 行/11μs，journald+syslog 无上限轮转 7 天写满 50G）。三者都在
+    // Ok 臂复位；sleep 只在 Err 臂，shutdown 最多多等一个封顶 2s 的退避。
+    let mut accept_err = AcceptErrState::default();
     loop {
         tokio::select! {
             accept = listener.accept() => match accept {
                 Ok((stream, _)) => {
+                    accept_err.reset_ok();
                     // Authenticate the PEER before serving it (#187): the socket
                     // mode is the file-system control, this is the identity one.
                     let peer = classify_peer(&stream);
@@ -1121,7 +1179,32 @@ pub async fn run(
                         data_plane.clone(),
                     )
                 }
-                Err(e) => tracing::warn!(error = %e, "accept failed"),
+                Err(e) => {
+                    let now = std::time::Instant::now();
+                    let kind = e.kind();
+                    let (should_log, suppressed) = accept_err.step(kind, now);
+                    if should_log {
+                        tracing::warn!(error = %e, suppressed, "accept failed");
+                    }
+                    // P0 #670: 命中 EMFILE 才广播 RiskAlert，且只在限速窗
+                    // 放行的那次（首命中必放行；其后 5s 内静默，绝不给自旋
+                    // 期间的每次失败各发一条）。
+                    if e.raw_os_error() == Some(ACCEPT_EMFILE_ERRNO) && should_log {
+                        let c = core.lock().await;
+                        c.emit_risk_alert(
+                            CoreErrorCode::Internal,
+                            format!(
+                                "IPC accept hit EMFILE (fd exhaustion): open as many files as \
+                                 allowed? suppressed {suppressed} repeat error(s) before this \
+                                 alert; details in the log (issue #670)"
+                            ),
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        accept_err.backoff_ms,
+                    ))
+                    .await;
+                }
             },
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
@@ -12393,5 +12476,103 @@ mod tests {
             scanner.is_live_round_row(&legacy, now),
             "round_slot == 0 rows ride the unconditional legacy bridge"
         );
+    }
+
+    /// P0 #670: accept Err 臂的限速/退避纯逻辑钉。用合成时钟（Instant 加法）
+    /// 驱动 `step`，绝不 sleep。
+    mod accept_err_state {
+        use super::*;
+
+        fn at(ms: u64) -> std::time::Instant {
+            // 一个公共起点 + 偏移；Instant::checked_add 对任意进程内时间轴成立。
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(ms))
+                .expect("synthetic clock offset in range")
+        }
+
+        #[test]
+        fn same_kind_within_5s_window_is_silent_and_counted() {
+            let mut s = AcceptErrState::default();
+            let kind = std::io::ErrorKind::Other;
+            assert!(s.step(kind, at(0)).0, "first hit always logs");
+            // 5s 窗内的每一次都静默，抑制计数递增。
+            for i in 1..=100u64 {
+                let (should_log, suppressed) = s.step(kind, at(i * 40));
+                assert!(!should_log, "hit {i} within the window must be silenced");
+                assert_eq!(suppressed, i, "suppression count tracks each silenced hit");
+            }
+        }
+
+        #[test]
+        fn crossing_the_5s_window_logs_again_and_flushes_the_count() {
+            let mut s = AcceptErrState::default();
+            let kind = std::io::ErrorKind::Other;
+            assert!(s.step(kind, at(0)).0);
+            // 窗内静默一条（t=100 < 5000），随后跨窗放行时随行补记。
+            assert!(!s.step(kind, at(100)).0);
+            let (should_log, suppressed) = s.step(kind, at(5_100));
+            assert!(should_log, "past the window the same kind logs again");
+            assert_eq!(
+                suppressed, 1,
+                "the one silenced hit is reported with the next log"
+            );
+            // 刚放行后又立刻来一条：新窗口重新静默。
+            let (should_log, suppressed) = s.step(kind, at(5_200));
+            assert!(!should_log);
+            assert_eq!(suppressed, 1);
+        }
+
+        #[test]
+        fn different_kind_logs_immediately() {
+            let mut s = AcceptErrState::default();
+            let a = std::io::ErrorKind::Other;
+            let b = std::io::ErrorKind::ConnectionAborted;
+            assert!(s.step(a, at(0)).0);
+            let (should_log, suppressed) = s.step(b, at(10));
+            assert!(should_log, "a different ErrorKind bypasses the window");
+            assert_eq!(
+                suppressed, 0,
+                "the other kind's window owns the suppressed counter at switch time"
+            );
+        }
+
+        #[test]
+        fn backoff_doubles_to_the_cap() {
+            let mut s = AcceptErrState::default();
+            let kind = std::io::ErrorKind::Other;
+            // 首次放行 → 50；其后每次放行（跨 5s 窗）倍增到 2000 封顶。
+            let mut now = 0u64;
+            let expected = [50u64, 100, 200, 400, 800, 1600, 2000, 2000];
+            for want in expected {
+                let (should_log, _) = s.step(kind, at(now));
+                assert!(should_log, "window crossings log (and step the backoff)");
+                assert_eq!(s.backoff_ms, want, "backoff sequence 50→100→…→2000");
+                now += 5_100;
+            }
+        }
+
+        #[test]
+        fn ok_resets_everything() {
+            let mut s = AcceptErrState::default();
+            let kind = std::io::ErrorKind::Other;
+            assert!(s.step(kind, at(0)).0);
+            assert!(!s.step(kind, at(100)).0);
+            s.reset_ok();
+            assert_eq!(
+                s.backoff_ms, ACCEPT_BACKOFF_START_MS,
+                "backoff re-arms at 50"
+            );
+            assert!(s.last_logged.is_none(), "rate-limit memory cleared");
+            // 复位后同种类立刻放行，suppressed 从 0 起。
+            let (should_log, suppressed) = s.step(kind, at(200));
+            assert!(should_log, "post-reset the same kind logs immediately");
+            assert_eq!(suppressed, 0, "post-reset the suppressed counter restarts");
+        }
+
+        #[test]
+        fn emfile_errno_is_pinned_on_both_platforms() {
+            // Linux 与 macOS 的 EMFILE 都是 24——修②b 的 RiskAlert 判据钉死。
+            assert_eq!(ACCEPT_EMFILE_ERRNO, libc::EMFILE);
+        }
     }
 }

@@ -341,3 +341,126 @@ impl NtpWatch {
             .is_some_and(|ms| ms.abs() >= NTP_RED_OFFSET_MS)
     }
 }
+
+// ───────────────────────── fd 使用率探针（P0 #670）─────────────────────────────
+
+/// fd 配额快照（P0 #670）：`engine.stats.probe.fd` 的数据面。
+///
+/// * `soft`/`hard` — RLIMIT_NOFILE（getrlimit 原值；macOS 默认两个都是
+///   `RLIM_INFINITY`，按原样上抛，`usage_pct` 对无限配额返回 `None`）。
+/// * `open` — Linux 读 `/proc/self/fd` 目录项数；macOS 没有等价的廉
+///   procfs 读法（proc_pidinfo 需要额外特权面），保持 `None`（JSON
+///   里 `null`），面板只看 usagePct 时不该为它引入平台特例代码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdUsage {
+    pub soft: u64,
+    pub hard: u64,
+    pub open: Option<u64>,
+}
+
+impl FdUsage {
+    /// 使用率（%，一位小数）；open 未知或 soft 无限（RLIM_INFINITY）时
+    /// `None`——无限配额没有"使用率"可言，不制造假 0%。
+    pub fn usage_pct(&self) -> Option<f64> {
+        if self.soft == u64::MAX {
+            return None;
+        }
+        self.open
+            .map(|open| (open as f64 / self.soft.max(1) as f64 * 1000.0).round() / 10.0)
+    }
+
+    /// fd 告急判据：使用率 ≥ 80%（EMFILE 自旋的前夜，见 issue #670）。
+    pub fn critical(&self) -> bool {
+        self.usage_pct().is_some_and(|pct| pct >= 80.0)
+    }
+}
+
+/// 读当前进程的 fd 配额与使用量。soft/hard 拿不到（getrlimit 失败）返回
+/// None——探针静默降级，绝不拦截调用路径。只在 `engine.stats` 求值时调用
+/// （面板轮询频率），不在数据/订单路径上。
+pub fn fd_usage() -> Option<FdUsage> {
+    // RLIMIT_NOFILE 的 getrlimit(2)：libc 在 Unix 两平台都暴露。
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+        return None;
+    }
+    Some(FdUsage {
+        soft: rlim.rlim_cur,
+        hard: rlim.rlim_max,
+        open: count_open_fds(),
+    })
+}
+
+/// 打开的 fd 数：Linux 读 /proc/self/fd 目录项数；非 Linux（macOS 无
+/// procfs）返回 None——懒优先，不为观测面引入平台特例。
+fn count_open_fds() -> Option<u64> {
+    let mut entries = std::fs::read_dir("/proc/self/fd").ok()?;
+    // 目录自身的句柄在遍历中途打开也占一个 fd；多算一个不影响量级判定，
+    // 但 procfs 每次读都会先建目录句柄——迭代时新 fd 不再出现在快照里，
+    // 读到的就是调用瞬间的稳定近似。
+    let mut n = 0u64;
+    loop {
+        match entries.next() {
+            Some(Ok(_)) => n += 1,
+            Some(Err(_)) => return None,
+            None => break,
+        }
+    }
+    Some(n)
+}
+
+#[cfg(test)]
+mod fd_tests {
+    use super::*;
+
+    #[test]
+    fn fd_usage_reports_rlimit_on_this_host() {
+        // 本平台能拿到 rlimit 就必须非零；RLIM_INFINITY（u64::MAX）合法
+        // （macOS 默认如此），此时 usage_pct 必须是 None 而不是假 0%。
+        let Some(usage) = fd_usage() else {
+            panic!("getrlimit(RLIMIT_NOFILE) must succeed on Linux and macOS");
+        };
+        assert!(usage.soft > 0, "soft limit must be positive");
+        if usage.soft == u64::MAX {
+            assert_eq!(usage.usage_pct(), None, "infinite soft limit has no ratio");
+            assert!(!usage.critical());
+        }
+    }
+
+    #[test]
+    fn usage_pct_and_critical_threshold() {
+        let u = FdUsage {
+            soft: 1024,
+            hard: 524_288,
+            open: Some(213),
+        };
+        assert_eq!(u.usage_pct(), Some(20.8));
+        assert!(!u.critical(), "20.8% is nowhere near the 80% line");
+        let full = FdUsage {
+            soft: 1024,
+            hard: 524_288,
+            open: Some(820),
+        };
+        assert_eq!(full.usage_pct(), Some(80.1));
+        assert!(full.critical(), "≥80% is critical by definition");
+        // open 未知 → 不判 critical（观测面缺数据不制造假警报）。
+        let unknown = FdUsage {
+            soft: 1024,
+            hard: 524_288,
+            open: None,
+        };
+        assert_eq!(unknown.usage_pct(), None);
+        assert!(!unknown.critical());
+        // 无限配额（macOS 默认）：数值原样保留，比率与告急恒缺省。
+        let infinity = FdUsage {
+            soft: u64::MAX,
+            hard: u64::MAX,
+            open: Some(213),
+        };
+        assert_eq!(infinity.usage_pct(), None);
+        assert!(!infinity.critical());
+    }
+}
