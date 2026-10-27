@@ -29,6 +29,12 @@ impl MarketPlugin for PolymarketPlugin {
     fn name(&self) -> &str {
         "polymarket"
     }
+    fn required_credential_env(&self) -> &[&str] {
+        // The executor reads these once at start (`exec.start`); the kernel
+        // surfaces only their NAMES (issue 648 declaration, was a hardcoded
+        // core-side match).
+        &["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"]
+    }
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
     }

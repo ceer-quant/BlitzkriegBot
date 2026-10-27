@@ -219,6 +219,28 @@ fn arb_core_live(pot: Decimal, default_venue: Option<&str>, nofast: bool) -> Cor
         execution_policy_path: None,
         replay_scheduling: nofast,
         virtual_limits,
+        // Issue 648: the credential DECLARATIONS ride the config (boot
+        // aggregates them from the plugins' required_credential_env); the
+        // fixture states the two legs' tables itself — the same shape the
+        // compiled-in plugins declare.
+        credential_vars: [
+            (
+                "polymarket".to_string(),
+                vec![
+                    "POLYMARKET_PRIVATE_KEY".to_string(),
+                    "POLYMARKET_FUNDER_ADDRESS".to_string(),
+                ],
+            ),
+            (
+                "kalshi".to_string(),
+                vec![
+                    "KALSHI_API_KEY_ID".to_string(),
+                    "KALSHI_RSA_PRIVATE_KEY".to_string(),
+                ],
+            ),
+        ]
+        .into_iter()
+        .collect(),
         ..Default::default()
     });
     // LIVE core：boot 不播种（venue 是现金事实源）——夹具代行 host 的 venue
@@ -589,14 +611,23 @@ fn credentials_not_ready_refuses_the_whole_batch_then_both_legs_pass() {
     // (declared order); the predicate seam is unit-pinned here, and the
     // Err-string format that interpolates it is the same surface the
     // `batch rejected: … reason={reason}` log line renders.
-    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI);
+    let declared: std::collections::BTreeMap<String, Vec<String>> = [(
+        "kalshi".to_string(),
+        vec![
+            "KALSHI_API_KEY_ID".to_string(),
+            "KALSHI_RSA_PRIVATE_KEY".to_string(),
+        ],
+    )]
+    .into_iter()
+    .collect();
+    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &declared);
     assert_eq!(
         missing,
         vec!["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
         "the diagnosis helper names exactly the unresolved vars, in declared order"
     );
     set_env("KALSHI_API_KEY_ID", "test-key");
-    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI);
+    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &declared);
     assert_eq!(
         missing_one,
         vec!["KALSHI_RSA_PRIVATE_KEY"],

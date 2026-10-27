@@ -77,6 +77,14 @@ pub struct CoreConfig {
     /// already carries the launcher's `.env` load, so every predicate reads
     /// `std::env` directly.
     pub env_file_path: Option<String>,
+    /// Every registered plugin's DECLARED credential env names (issue 648,
+    /// `plugin → [env var name]` from `MarketPlugin::required_credential_env`),
+    /// computed once at boot from the registry — the same report posture as
+    /// `allowed_round_secs`. The credential readout, the `market.credentials.set`
+    /// validation and the RFC #541 ready predicates all read it from here; the
+    /// kernel holds no hardcoded venue→env table of its own. Empty map = no
+    /// credential-bearing plugin is compiled in.
+    pub credential_vars: std::collections::BTreeMap<String, Vec<String>>,
     /// The account book's own file (`user_layer/configs/accounts.toml` in
     /// production) — the write half of `account.venue.set` persists the
     /// binding HERE, read back at the next boot. `None` disables the write
@@ -875,6 +883,7 @@ impl Default for CoreConfig {
             round_duration_source: "default",
             runtime_config_path: None,
             env_file_path: None,
+            credential_vars: std::collections::BTreeMap::new(),
             accounts_config_path: None,
             manual_ops_audit_path: None,
             unified_ledger_path: None,
@@ -7888,13 +7897,18 @@ impl Core {
                 for leg in &legs {
                     let venue = self.execution_venue_of(&leg.account, &leg.token);
                     // tag 腿的 venue 插件必需凭证必须全部可解析（进程环境，
-                    // 与 market::credentials_status 同一谓词）；
+                    // 与 market::credentials_status 同一谓词；声明表来自
+                    // 插件自声明，boot 聚合进 config）；
                     // untagged 腿不阻断——scope 门对无标签语料同样放行。
-                    if !venue.is_empty() && !venue_credentials_ready(&venue) {
+                    if !venue.is_empty()
+                        && !venue_credentials_ready(&venue, &self.config.credential_vars)
+                    {
                         // RFC #541 边界三（拒绝可见性）：the refusal names the
                         // leg, the venue, and the EXACT unresolved vars — the
                         // operator fixes the batch from this line alone.
-                        let missing = venue_credentials_missing(&venue).join(",");
+                        let missing =
+                            venue_credentials_missing(&venue, &self.config.credential_vars)
+                                .join(",");
                         refusal = Some(format!(
                             "credentials.notReady: leg {} (token {}) venue `{venue}` has \
                              unresolved executor credentials: missing [{missing}]",

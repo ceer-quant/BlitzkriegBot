@@ -62,6 +62,9 @@ impl MarketPlugin for KalshiPlugin {
     fn name(&self) -> &str {
         "kalshi"
     }
+    fn required_credential_env(&self) -> &[&str] {
+        &["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"]
+    }
     fn market_type(&self) -> MarketType {
         MarketType::Prediction
     }

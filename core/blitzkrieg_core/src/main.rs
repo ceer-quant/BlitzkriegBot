@@ -3472,6 +3472,7 @@ async fn main() -> anyhow::Result<()> {
     config.allowed_round_secs = {
         let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
         blitzkrieg_core::market::register_builtin_markets(&registry);
+        config.credential_vars = registry.credential_vars();
         registry.allowed_round_secs()
     };
     eprintln!(
