@@ -771,16 +771,11 @@ impl Engine {
     /// exists. Insertion order is irrelevant (the PM-first/sim-first
     /// symmetry is test-pinned). A token the whole table does not carry is
     /// refused for bound scopes exactly as before; untagged rows (the
-    /// legacy bucket, venue "") still admit every bound scope.
-    ///
-    /// Transitional mirror bridge (M1 keeps the mirror table; M3 retires it
-    /// with the whole parasitic shape): when the bound venue has NO own row,
-    /// the token-only lookup resolves ONLY a unique candidate — a single row
-    /// carrying the token — and admits when the binding's plugin statically
-    /// declares that row's venue its mirror, or when the row is untagged
-    /// (the pre-tag corpus case). Ambiguity (≥2 venues hold the token, none
-    /// of them the binding's) refuses — never first-hit by insertion order.
-    /// crate-visible so the IPC runtime-enablement tests can pin the wire
+    /// legacy bucket, venue "" — the #635 pre-tag corpus case) still admit
+    /// every bound scope through the token-only unique-candidate read, and
+    /// a TAGGED row of another venue refuses (RFC-661 M3 retired the mirror
+    /// bridge that used to overrule this verdict).
+    /// Crate-visible so the IPC runtime-enablement tests can pin the wire
     /// behaviour the admission gate actually answers.
     pub(crate) fn scope_admits_token(&self, account: &str, token: &str) -> bool {
         let Some(bound) = self.venue_by_account.get(account).filter(|v| !v.is_empty()) else {
@@ -791,7 +786,7 @@ impl Engine {
         }
         match self.scanner.market_for_token(token) {
             None => false,
-            Some(m) => m.venue.is_empty() || self.mirror_source_of(bound) == Some(m.venue.as_str()),
+            Some(m) => m.venue.is_empty(),
         }
     }
 
@@ -2207,22 +2202,19 @@ impl Engine {
 
     /// The venue that should EXECUTE `token` for `account`. RFC-661 M1: the
     /// table is (venue, token) dual-keyed — each venue holds its OWN row for
-    /// a byte-identical token — so a binding whose venue holds the token's
-    /// row executes on ITS OWN venue, insertion order irrelevant. A binding
-    /// with no own row rides the transitional mirror bridge (M1 keeps the
-    /// mirror table; M3 retires it): the token-only lookup admits ONLY a
-    /// unique candidate — a single row carrying the token — and the binding's
-    /// static mirror declaration (or an untagged row) routes it to the
-    /// binding. Ambiguity (≥2 venues hold the token, none of them the
-    /// binding's) resolves on the token-only rule: refuse (None), never
-    /// first-hit by insertion order. Unbound accounts ride the same
-    /// unique-candidate lookup, byte-identical with the single-venue
-    /// routing. The executor drain's routing truth: per-venue drains key on
-    /// this, so a shared token's two accounts each reach their OWN executor
-    /// and the poly account's live order can never land on the real venue
-    /// (nor the reverse). The display book (`shadow_markets`) is NOT routing
-    /// evidence (#643): runtime observation wobbles with the feed, the
-    /// declaration does not.
+    /// a byte-identical token — so the row's venue IS the execution venue,
+    /// insertion order irrelevant (the data lands already attributed; RFC-661
+    /// M3 retired the mirror-override arm with the whole bridge). A binding
+    /// whose venue holds the token's row executes on ITS OWN venue. No own
+    /// row: the token-only lookup admits ONLY a unique candidate — a single
+    /// row carrying the token — and an untagged row (the legacy bucket)
+    /// routes to the binding. Ambiguity (≥2 venues hold the token, none of
+    /// them the binding's) refuses (None), never first-hit by insertion
+    /// order. Unbound accounts ride the same unique-candidate lookup,
+    /// byte-identical with the single-venue routing. The executor drain's
+    /// routing truth: per-venue drains key on this, so a shared token's two
+    /// accounts each reach their OWN executor and the poly account's live
+    /// order can never land on the real venue (nor the reverse).
     pub fn execution_venue_for(&self, account: &str, token_id: &str) -> Option<String> {
         let bound = self.venue_by_account.get(account).filter(|v| !v.is_empty());
         if let Some(b) = bound {
@@ -2235,10 +2227,8 @@ impl Engine {
                 }
             } else if let Some(v) = self.venue_of(token_id) {
                 // Unique candidate on the table, none of it the binding's:
-                // the mirror declaration routes the binding's executor.
-                if self.mirror_source_of(b) == Some(v.as_str()) {
-                    return Some(b.clone());
-                }
+                // the row's venue is the executor (an untagged unique row
+                // keeps the legacy "routes to the binding" reading).
                 if v.is_empty() {
                     return Some(b.clone());
                 }
@@ -4857,15 +4847,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_bound_scope_admits_through_the_mirror_declaration() {
-        // The polysimulator account's zero-signal root cause: the table is
-        // token-unique and the PM batch lands first, so the mirror token's
-        // row is tagged `polymarket` forever — a polysimulator-bound scope
-        // looked the row up, saw "another venue", and silently dropped every
-        // candidate (signals=0, blocked=0). The plugin's OWN `mirror_of`
-        // declaration is the evidence it really trades the token: it admits.
-        // The display book (shadow_markets) is NOT consulted — #643 retired
-        // the shadow-batch fallback, admission reads the declaration table.
+    fn a_shared_tokens_dual_key_rows_admit_each_own_binding_without_cross_talk() {
+        // The polysimulator account's zero-signal root cause, and how the
+        // dual-key table dissolves it WITHOUT any mirror fact: the table used
+        // to be token-unique and the PM batch landed first, so a
+        // polysimulator-bound scope looked the row up, saw "another venue",
+        // and silently dropped every candidate (signals=0, blocked=0). Under
+        // RFC-661 M1 each venue holds its OWN (venue, token) row — the sim
+        // row admits its own binding, the PM row its own, and the two never
+        // cross. No declaration table is consulted (M3 retired it).
         let mut e = Engine::new(cfg());
         let end = 1_800_000;
         e.on_data(DataEvent::RoundMarkets {
@@ -4876,21 +4866,20 @@ mod tests {
             markets: vec![mirror_market(end, "polysimulator")],
             now_ms: 61_000,
         });
-        e.set_venue_mirror("polysimulator", "polymarket");
         e.set_account_venue("poly", "polysimulator");
         e.set_account_venue("pm", "polymarket");
 
         assert!(
             e.scope_admits_token("poly", "mirror-up"),
-            "the mirror-bound scope admits through the venue's mirror_of declaration"
+            "the sim binding admits through the sim venue's OWN dual-key row"
         );
         assert!(
             e.scope_admits_token("pm", "mirror-up"),
-            "the mirrored venue's own row admits its binding, as before"
+            "the PM binding admits through the PM venue's own row, as before"
         );
         assert!(
             !e.scope_admits_token("poly", "polymarket-up"),
-            "a NON-mirror token of another venue still refuses (no declaration names it)"
+            "a NON-shared token of another venue still refuses — the gate keeps its teeth"
         );
         assert!(
             e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
@@ -4926,116 +4915,6 @@ mod tests {
             e.execution_venue_for("unbound", "mirror-up"),
             Some("polymarket".into()),
             "a UNIQUE candidate resolves the token-only lookup for an unbound account"
-        );
-    }
-
-    #[test]
-    fn a_shadow_batch_without_a_mirror_declaration_never_admits_or_reroutes() {
-        // #643's contract, pinned in reverse: WITHOUT a mirror_of declaration
-        // the mirror venue's batch alone must NOT swing the execution routing
-        // to the sibling row's venue — the runtime observation wobbles with
-        // the feed (plugin dead, credentials expired → the batch drops out);
-        // the declaration does not.
-        //
-        // RFC-661 M1 迁移：M1 双键表让 mirror venue 的行自然落表（shadow
-        // 显示簿作为写目标退役），所以本测试的「shadow 批次在场」前提换成
-        // 「mirror venue 的双键行在场」——被断言的核心不变式原样保留：无
-        // 声明时 mirror venue 的行不改变受理与路由判定。
-        let mut e = Engine::new(cfg());
-        let end = 1_800_000;
-        e.on_data(DataEvent::RoundMarkets {
-            markets: vec![mirror_market(end, "polymarket")],
-            now_ms: 1_000,
-        });
-        e.on_data(DataEvent::RoundMarkets {
-            markets: vec![mirror_market(end, "polysimulator")],
-            now_ms: 61_000,
-        });
-        e.set_account_venue("poly", "polysimulator");
-        // Pre-condition: the mirror venue's OWN dual-key row is live in the
-        // table (the M1 shape — the display book stays empty).
-        assert!(
-            e.scanner
-                .market_for_token_on_venue("polysimulator", "mirror-up")
-                .is_some(),
-            "the fixture must have the second venue's own dual-key row in the table"
-        );
-        assert!(
-            e.shadow_markets_for("polysimulator", 900).is_none(),
-            "shadow_markets stays empty under the dual-key table (write path retired)"
-        );
-        // The venue's own row admits its binding — no declaration needed when
-        // the row itself exists (RFC-661: 行本身按 venue 分立，天然受理).
-        assert!(
-            e.scope_admits_token("poly", "mirror-up"),
-            "the bound scope admits through its own dual-key row"
-        );
-        assert!(
-            e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
-            "execution follows the placing account's own dual-key row"
-        );
-        // Routing is not perturbed for the other bindings either.
-        e.set_account_venue("pm", "polymarket");
-        assert!(
-            e.execution_venue_for("pm", "mirror-up") == Some("polymarket".into()),
-            "the mirrored venue's binding keeps its plain table routing"
-        );
-
-        // The token-only AMBIGUITY rule (§五.5): with both venues holding the
-        // token, the unbound account's token-only resolution refuses — never
-        // first-hit by insertion order.
-        assert_eq!(
-            e.execution_venue_for("unbound", "mirror-up"),
-            None,
-            "the ambiguous token resolves for no unbound account (never first-hit)"
-        );
-        assert!(
-            !e.scope_admits_token("poly", "polymarket-up"),
-            "a NON-shared token of another venue still refuses"
-        );
-
-        // The transitional mirror bridge (M1 keeps the mirror table; M3
-        // retires it): drop the second venue's rows (the parasitic shape —
-        // its feed dies) and the declaration alone still admits/routes the
-        // binding through the unique PM candidate.
-        e.set_venue_mirror("polysimulator", "polymarket");
-        let kept: Vec<CryptoMarket> = e
-            .scanner
-            .markets()
-            .iter()
-            .filter(|m| m.venue != "polysimulator")
-            .cloned()
-            .collect();
-        e.scanner.set_markets(kept);
-        assert!(
-            e.scope_admits_token("poly", "mirror-up"),
-            "the static mirror declaration admits the surviving unique candidate"
-        );
-        assert!(
-            e.execution_venue_for("poly", "mirror-up") == Some("polysimulator".into()),
-            "execution still follows the binding under the static mirror declaration"
-        );
-        assert!(
-            !e.scope_admits_token("poly", "polymarket-up"),
-            "a NON-mirror token of another venue still refuses under the static declaration"
-        );
-        e.shadow_markets.clear();
-        assert!(
-            e.scope_admits_token("poly", "mirror-up"),
-            "the declaration admits with the display book gone — constructive, not observed"
-        );
-
-        // The declaration is the plugin's identity: clearing it (or a
-        // self-mirror/empty spelling) removes the evidence again.
-        e.set_venue_mirror("polysimulator", "");
-        assert!(
-            !e.scope_admits_token("poly", "mirror-up"),
-            "an empty mirror spelling clears the declaration"
-        );
-        assert_eq!(
-            e.execution_venue_for("poly", "mirror-up"),
-            Some("polymarket".into()),
-            "routing falls back to the unique table row once the declaration is gone"
         );
     }
 

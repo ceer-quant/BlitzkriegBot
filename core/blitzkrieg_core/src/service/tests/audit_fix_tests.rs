@@ -626,24 +626,20 @@ fn an_order_on_an_unlabelled_token_passes_the_venue_guard() {
     );
 }
 
-/// The mirror account (`venue = "polysimulator"`) trades tokens whose
-/// table row names `polymarket` (byte-identical ids, PM's batch lands
-/// first). The venue guard must judge the order's EXECUTION venue — the
-/// account's own binding via the plugin's `mirror_of` declaration — or
-/// it refuses every legitimate mirror order.
+/// The sim account (`venue = "polysimulator"`) trades byte-identical tokens
+/// polymarket also lists (the mirror property). Under the RFC-661 M1 dual-key
+/// table the sim batch lands its OWN rows — the venue guard judges the
+/// order's EXECUTION venue off the placing account's own (venue, token) row,
+/// no declaration involved.
 #[test]
 fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
     let mut c = venue_bound_core();
     // The polysimulator batch declares the SAME token pair polymarket
-    // already listed: a same-slot merge, the rows land in the shadow
-    // book (#629's display-only path). The plugin's mirror_of
-    // declaration (boot's apply_plugin_mirrors) is the admission
-    // evidence — #643: the display book is never consulted.
+    // already listed: a same-slot merge whose fresh set is the sim venue's
+    // OWN tokens — the rows land under their own (venue, token) keys
+    // (RFC-661 M1; no mirror declaration participates).
     let now = 1_000_000;
     let slot = now / 1000 / 900;
-    if let Some(e) = c.engine.as_mut() {
-        e.set_venue_mirror("polysimulator", "polymarket");
-    }
     let sim = crate::model::CryptoMarket {
         asset: "BTC".into(),
         condition_id: "cond-polymarket".into(),
@@ -668,8 +664,8 @@ fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
         now + 1,
     );
     // A poly-sim account bound to polysimulator: its mirror-token order
-    // must pass the venue guard (the mirror_of declaration rides the
-    // binding through execution_venue_of).
+    // passes the venue guard — the binding reads its OWN (venue, token)
+    // row through execution_venue_of.
     c.accounts_mut()
         .insert(crate::account::Account {
             id: crate::account::AccountId::from("sim"),
@@ -697,23 +693,24 @@ fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
     c.place(order, 0, 1).unwrap();
     assert_eq!(c.list_orders().len(), 1, "the mirror order passes");
 
-    // And the execution venue reads the binding, not the table row —
-    // the same fact the executor drain and the cancel queue key on.
+    // And the execution venue reads the placing binding's own dual-key row —
+    // the same fact the executor drain and the cancel queue key on. Two
+    // accounts on the byte-identical token each read their OWN venue.
     assert_eq!(
         c.execution_venue_of("sim", "poly-up"),
         "polysimulator",
-        "execution follows the placing account's binding through the mirror declaration"
+        "execution follows the placing account's own dual-key row"
     );
     assert_eq!(
         c.execution_venue_of("default", "poly-up"),
         "polymarket",
-        "the PM-bound account keeps the plain table lookup"
+        "the PM-bound account reads the PM row — the two never collapse"
     );
 
     // The position (and the trade row it closes into) stamps the same
-    // EXECUTION venue: a mirror fill opened under a venue-bound account
-    // must not inherit the market table row's venue (polymarket), or the
-    // panel's account-bound venue filter hides the row the badge counted.
+    // EXECUTION venue: a fill opened under a venue-bound account inherits
+    // the row's own venue tag (polysimulator), so the panel's account-bound
+    // venue filter finds the row the badge counted.
     let sim_id = c.ome().all()[0].order_id.clone();
     c.ingest_fill(
         crate::model::Fill {
@@ -883,20 +880,17 @@ fn a_polysimulator_executed_polymarket_token_stamps_execution_identity_end_to_en
     );
 }
 
-/// The cancel queue tags by EXECUTION venue: a live mirror order
-/// cancelled by its polysimulator account must land in the
-/// polysimulator executor's drain, never the real venue's.
+/// The cancel queue tags by EXECUTION venue: a live order cancelled by its
+/// polysimulator account must land in the polysimulator executor's drain,
+/// never the real venue's.
 #[tokio::test]
 async fn a_mirror_order_cancel_queues_to_the_mirror_executor() {
     let mut c = venue_bound_core();
     let now = 1_000_000;
     let slot = now / 1000 / 900;
-    // The plugin's mirror_of declaration (boot's apply_plugin_mirrors)
-    // is the routing evidence — #643: the display book is never
-    // consulted.
-    if let Some(e) = c.engine.as_mut() {
-        e.set_venue_mirror("polysimulator", "polymarket");
-    }
+    // The sim batch lands its OWN dual-key rows (RFC-661 M1) — the cancel
+    // queue reads the placing binding's own (venue, token) row; no
+    // declaration participates.
     let sim = crate::model::CryptoMarket {
         asset: "BTC".into(),
         condition_id: "cond-polymarket".into(),

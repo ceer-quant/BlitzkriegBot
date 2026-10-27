@@ -979,24 +979,21 @@ mod tests {
         );
     }
 
-    /// Mirror routing at the production drain seam: a mirror token's table
-    /// row names the mirrored venue, but the EXECUTOR that must pull the
-    /// order is the placing account's own venue — a polysimulator account's
+    /// Dual-key routing at the production drain seam: a byte-identical token
+    /// carries one row per venue, and the EXECUTOR that must pull the order
+    /// is the placing account's own venue — a polysimulator account's
     /// poly-up order can never land on the real polymarket drain (nor the
     /// reverse).
     #[tokio::test]
     async fn mirror_tokens_drain_to_the_placing_account_venue() {
         let mut c = two_venue_live_core();
         // The simulator's batch declares the SAME tokens polymarket already
-        // listed: same-slot merge, rows to the shadow book. The table row
-        // stays tagged polymarket. The plugin's mirror_of declaration (boot's
-        // apply_plugin_mirrors) is the routing evidence — #643: the display
-        // book is never consulted.
+        // listed: a same-slot merge whose fresh set is the sim venue's OWN
+        // tokens — the rows land under their own (venue, token) keys
+        // (RFC-661 M1). The drain keys on the placing binding's own row; no
+        // declaration participates.
         let now: i64 = 1_000_001;
         let slot = now / 1000 / 900;
-        if let Some(e) = c.engine.as_mut() {
-            e.set_venue_mirror("polysimulator", "polymarket");
-        }
         let sim = crate::model::CryptoMarket {
             asset: "BTC".into(),
             condition_id: "cond-polymarket".into(),
