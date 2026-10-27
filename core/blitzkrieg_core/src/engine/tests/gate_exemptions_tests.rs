@@ -558,8 +558,8 @@ fn blocked_gate_counts_are_attributable_per_account() {
     e.tally_blocked();
     let d = e.gate_tally_for_account("probe", DEFAULT_ACCT);
     let p = e.gate_tally_for_account("probe", "paper");
-    assert_eq!(d.blocked_timing, 1, "{d:?}");
-    assert_eq!(p.blocked_timing, 1, "{p:?}");
+    assert_eq!(d.blocked_timing, 1, "default account blocked_timing mismatch");
+    assert_eq!(p.blocked_timing, 1, "paper account blocked_timing mismatch");
     assert_eq!(d.blocked_momentum, 0);
     assert_eq!(p.exempted_timing, 0);
     // A scope that never saw a gate verdict reads zeros.
