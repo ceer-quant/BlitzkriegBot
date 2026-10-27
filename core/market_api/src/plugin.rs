@@ -261,6 +261,7 @@ pub trait MarketPlugin: Send + Sync {
         PluginInfo {
             name: self.name().to_string(),
             supported_round_secs: self.supported_round_secs(),
+            feed_source: self.feed_source().map(str::to_string),
             market_type: self.market_type(),
             structure,
             capabilities,
@@ -280,7 +281,37 @@ pub trait MarketPlugin: Send + Sync {
     /// identity (PolySimulator IS a Polymarket simulator), never a runtime
     /// observation, so it survives the mirror plugin declaring no rounds of
     /// its own. `None` = not a mirror.
+    ///
+    /// RFC-661 迁移注记：本声明是「我撮合谁家的 token」——引擎受理/路由的
+    /// 构造性证据，M3 随引擎 mirror 表一并退役。数据拓扑请声明
+    /// [`MarketPlugin::feed_source`]（「我的行情吃谁的流」）：两者同形、
+    /// 语义不同，过渡期寄生插件两个都声明。
     fn mirror_of(&self) -> Option<&str> {
+        None
+    }
+
+    /// The upstream plugin whose market-data stream this plugin CONSUMES
+    /// (RFC-661 M2): 「我的行情数据吃谁的流」——插件向 API 数据面申明的
+    /// 数据拓扑需求。宿主读到本声明后**不启动**本插件自己的上游连接
+    /// （feed/discovery 一概不挂），而是把被源插件拉到的一条上游
+    /// feed/discovery 流多路复用给本插件，并把每个上游轮次批次按本插件
+    /// 自己的 venue 身份重新登记（市场行/token 表行/盘口行以本插件自己的
+    /// 名义入册，OME 对寄生与原生不可分辨）。
+    ///
+    /// 与 [`MarketPlugin::mirror_of`] 同形、语义不同：`mirror_of` 是「我撮
+    /// 合谁家的 token」（引擎受理/路由证据，M3 退役）；`feed_source` 是
+    /// 「我的行情吃谁的流」（API 数据面的连接与生命周期事实，留存）。
+    /// 值为上游插件名（如 `Some("polymarket")`）。
+    ///
+    /// 约束（宿主侧实现，插件零成本）：上游连接/订阅数一份——无论多少个
+    /// 插件声明消费同一个源；只启用消费插件（源未启用）时，宿主仍启动源
+    /// 插件的数据组件（数据面自足），但绝不启动源的执行面；禁用/重启一侧
+    /// 不重复上游订阅。复用前提：消费插件与上游共享 token 字节空间（寄生
+    /// 的构造性事实）。
+    ///
+    /// `None`（默认）= 自带上游数据的原生插件：现有插件零改动、行为零
+    /// 变化。
+    fn feed_source(&self) -> Option<&str> {
         None
     }
 

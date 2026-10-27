@@ -11,8 +11,12 @@
  *      polysimulator，面板 venue 滤网行数 ≡ 徽标计数（截图 bug「汇总 2 单
  *      0 行」不可复现）。迁移前的旧违建行被明列为 legacy-tagged —— 那正是
  *      违建活体证据；迁移后同脚本应转绿。
- *   ③ 上游一份：启用双 venue 时，带上游 feed/discovery 组件的启用插件数
- *      ≡ 单 venue 形态（M2 复用生效，无第二条上游轮询流）。
+ *   ③ 上游组件集合 ≡ 原生集合：声明 feedSource 的消费端插件不得新增
+ *      feed/discovery 组件（组件集合 ⊆ 原生未声明者集合）——M2 复用生效，
+ *      消费端只吃源家的流，总上游轮询流不因消费端启用而增长；kalshi 等
+ *      第二原生 venue 自持 feed 是合法的第二条流，判据不是「恒 ≡1」。
+ *      旧核 market.list 缺 feedSource 字段时本断言退化为 note（向后兼容，
+ *      不误报）。
  *
  * 只读铁律：本脚本只调只读 IPC 动词 —— core.ready / engine.books /
  * engine.round / engine.stats / trades.history / trades.summary /
@@ -29,9 +33,9 @@
  *   - trades：行 venue ≡ 账户绑定 venue 的一致率；不一致行 = legacy-tagged
  *     （迁移前旧违建数据）。每账户「summary.totalTrades vs venue 滤网命中
  *     行数」对照 —— 相等即截图 bug 不可复现。
- *   - upstream：启用插件中带数据 feed / discovery 的组件计数 ≡ 1（一条上
- *     游流）；feed 计数窗（Δbooks/Δtops）与 tickHealth 作为活性读数（非断
- *     言）。
+ *   - upstream：启用插件中带数据 feed / discovery 的组件集合 ⊆ 原生
+ *     （未声明 feedSource）集合——消费端不新增组件；feed 计数窗
+ *     （Δbooks/Δtops）与 tickHealth 作为活性读数（非断言）。
  *
  * 入口：UDS 直连（lib/core-client.mjs 的 requestOnce，与 feed-live-probe /
  * account-drift-check 同一客户端）。socket 不在时报清晰错误退出（码 2），
@@ -40,7 +44,7 @@
  *
  * 退出码：0 = 探针完成（发现以标注呈现，phase 各安其位）；1 = 结构性断言
  * 失败（任何 phase 都不该出现的形态：同 venue 内 (venue,token) 重复行 /
- * 合并形态 N+0 / 第二条上游 feed 组件）；2 = 连不上核或用法错误。
+ * 合并形态 N+0 / 消费端新增上游组件）；2 = 连不上核或用法错误。
  *
  * Usage:
  *   node scripts/venue-identity-probe.mjs                    # 三模式连跑
@@ -263,34 +267,58 @@ async function probeUpstream() {
   const feedPlugins = enabled.filter((p) => p.hasDataFeed);
   const discoveryPlugins = enabled.filter((p) => p.hasDiscovery);
   const executors = enabled.filter((p) => p.hasExecutor);
+  // M2 修正后的判据（RFC §五.2）：消费端（声明 feedSource）不新增组件——
+  // 组件集合 ⊆ 原生（未声明 feedSource 的启用插件）集合。kalshi 等第二
+  // 原生 venue 自持 feed 是合法的第二条流，因此判据不是「恒 ≡1」而是
+  // 「没有消费端新增组件」。旧核 market.list 无 feedSource 字段 → 无法
+  // 判别寄生，断言退化为 note 非 ASSERT（向后兼容，不误报）。
+  const feedSourceKnown = enabled.some((p) => 'feedSource' in p);
+  const nativeEnabled = feedSourceKnown ? enabled.filter((p) => !p.feedSource) : [];
+  const nativeVenues = nativeEnabled.map((p) => p.name);
+  const parasiticFeeds = feedSourceKnown
+    ? feedPlugins.filter((p) => p.feedSource)
+    : [];
+  const parasiticDiscovery = feedSourceKnown
+    ? discoveryPlugins.filter((p) => p.feedSource)
+    : [];
   for (const p of plugins) {
     jline({
       mode: 'upstream', plugin: p.name, enabled: p.enabled, active: p.active,
       dataFeed: p.hasDataFeed, discovery: p.hasDiscovery, executor: p.hasExecutor,
+      feedSource: p.feedSource ?? null,
       marketType: p.type ?? null,
     });
   }
-  // 连接台账的组件面：上游连接数 ≡ 启用的 feed 组件数（每组件一条上游流）。
-  // 寄生形态下它本来就是 1（polysimulator 无 feed）；M2 feed_source 复用后
-  // 必须仍是 1 —— 双 venue 启用也不许长出第二条上游轮询流。
-  const oneUpstream = feedPlugins.length === 1 && discoveryPlugins.length === 1;
+  // 连接台账的组件面：上游连接数 ≡ 原生（自持）feed 组件数。寄生消费端
+  // （声明 feedSource）不得新增 feed/discovery 组件——M2 复用后
+  // polysimulator 声明 feedSource=polymarket，组件集合应仍为原生 venue
+  // 集合（polymarket、kalshi 各自持一条），总上游流不因消费端启用而增长。
+  const noParasiticComponents = feedSourceKnown
+    && parasiticFeeds.length === 0 && parasiticDiscovery.length === 0;
   jline({
     mode: 'upstream', enabledVenues: readout?.derivedVenues ?? [],
     enablementSource: readout?.source ?? null, activePlugin: readout?.activePlugin ?? null,
+    nativeVenues,
     feedComponents: feedPlugins.map((p) => p.name),
     discoveryComponents: discoveryPlugins.map((p) => p.name),
     executorComponents: executors.map((p) => p.name),
     venueRounds: (round?.venueRounds ?? []).map((r) => r.venue),
-    assertion: { upstreamComponentsOne: oneUpstream },
+    assertion: feedSourceKnown
+      ? { noParasiticComponents }
+      : { upstreamComponentsOne: null },
   });
-  if (feedPlugins.length > 1 || discoveryPlugins.length > 1) {
-    console.error('  ASSERT FAIL 第二条上游流：启用的 feed/discovery 组件 > 1 —— ' +
-      `feed=${feedPlugins.map((p) => p.name)} discovery=${discoveryPlugins.map((p) => p.name)}；` +
-      'M2 复用应保持一份（若为 binance 类现货价源请人工复核其 venue 归属）');
+  if (feedSourceKnown && !noParasiticComponents) {
+    console.error('  ASSERT FAIL 寄生组件泄漏：声明 feedSource 的消费端插件仍挂着' +
+      '自己的 feed/discovery 组件 —— ' +
+      `feed=${parasiticFeeds.map((p) => p.name)} ` +
+      `discovery=${parasiticDiscovery.map((p) => p.name)}；` +
+      'M2 复用后消费端应只吃源家的上游流（组件集合 ⊆ 原生 venue 集合）');
     return 1;
   }
-  if (feedPlugins.length === 0) {
-    console.log('  note 无启用 feed 组件（数据面关闭 / 单 executor 部署）— 一份断言空真');
+  if (!feedSourceKnown) {
+    console.log('  note 旧核（market.list 无 feedSource）— 寄生判别退化，' +
+      `组件计数仅记录：feed=${feedPlugins.map((p) => p.name)} ` +
+      `discovery=${discoveryPlugins.map((p) => p.name)}`);
   }
   // 活性读数（非断言）：feed 计数窗 + tickHealth。两条独立上游会把同一批
   // token 的 tops 速率翻倍 —— 人工比对口径。
@@ -311,6 +339,7 @@ async function probeUpstream() {
     },
   });
   console.log(`  ok — feed×${feedPlugins.length} discovery×${discoveryPlugins.length} ` +
+    `native=[${nativeVenues.join(',')}] ` +
     `(Δbooks=${s2?.books - s1?.books} Δtops=${s2?.tops - s1?.tops}/${SAMPLE_SEC}s)`);
   return 0;
 }
