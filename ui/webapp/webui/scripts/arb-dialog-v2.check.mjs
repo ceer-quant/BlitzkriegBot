@@ -52,7 +52,7 @@ const check = (label, fn) => {
 console.log('配置意图模型 — the arb-dialog v2 contract')
 
 const dialog = read('src', 'components', 'CreateArbDialog.vue')
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'accounts.ts')
 
 // ── 四段结构锚点 ────────────────────────────────────────────────────────────
 check('弹窗有 A 腿段（交易所 + 账户两个下拉）', () => {

@@ -6,17 +6,17 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, Play, Square, Bell, BellOff, Search, X, TrendingUp, TrendingDown, Clock, Filter, Info, ChevronDown, Timer, Check } from 'lucide-vue-next'
-import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type BookSide, type BookLevel, type OrderRow, type AccountJournalDoc, type AccountJournalRowDoc, type NetCheckDoc } from '@/api/client'
+import { Activity, Play, Square, Bell, BellOff, X, Clock, Filter, Info, Timer, Check } from 'lucide-vue-next'
+import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type OrderRow, type NetCheckDoc } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
 import {
-  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration, dateTime, clockTime,
+  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration,
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
-import { newestFirst, tradeIdentity } from '@/lib/trades'
+import { newestFirst } from '@/lib/trades'
 import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import { useRoundDuration } from '@/lib/round-duration'
@@ -25,18 +25,19 @@ import {
 } from '@/composables/alertSounds'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
-import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
-import StatRow from '@/components/ui/stat/StatRow.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
-import EquityCurve from '@/components/charts/EquityCurve.vue'
-import BookDepth from '@/components/charts/BookDepth.vue'
-import KlineChart from '@/components/charts/KlineChart.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
+import PriceGrid from '@/components/hft/PriceGrid.vue'
+import DepthCard from '@/components/hft/DepthCard.vue'
+import KlineCard from '@/components/hft/KlineCard.vue'
+import StatsRow from '@/components/hft/StatsRow.vue'
+import JournalCard from '@/components/hft/JournalCard.vue'
+import TradesTables from '@/components/hft/TradesTables.vue'
 
 const store = usePanelStore()
 const settings = useSettingsStore()
@@ -250,9 +251,6 @@ const leftFraction = computed(() => {
 const urgent = computed(() => leftSec.value > 0 && leftSec.value <= 60)
 
 const prices = computed<MarketPrice[]>(() => round.value?.prices ?? [])
-function spreadCents(m: MarketPrice): number {
-  return Math.max(0, m.up + m.down - 1) * 100
-}
 
 // ── 盘口深度 (E8-c, engine.books) ───────────────────────────────────────────
 const books = computed<AssetBook[]>(() => snap.value?.books ?? [])
@@ -383,12 +381,6 @@ watch(visibleBooks, (b) => {
 const depthToken = ref<'up' | 'down'>('up')
 
 const activeBook = computed(() => visibleBooks.value.find((b) => b.asset === depthAsset.value) ?? null)
-const activeSide = computed<BookSide | null>(() => {
-  const b = activeBook.value
-  if (!b) return null
-  return depthToken.value === 'up' ? b.up : b.down
-})
-
 // ── K线 (E29, kline.history) ─────────────────────────────────────────────────
 /**
  * The aggregator keys prediction-token bars by TOKEN id (what `feed_klines`
@@ -409,20 +401,6 @@ const klineSymbol = computed(() => {
   const b = activeBook.value
   if (!b) return ''
   return depthToken.value === 'up' ? b.upTokenId : b.downTokenId
-})
-
-const depthMetrics = computed(() => {
-  const s = activeSide.value
-  if (!s) return null
-  const sum = (xs: BookLevel[]) => xs.reduce((a, l) => a + (Number(l.size) || 0), 0)
-  return {
-    bestBid: s.bestBid,
-    bestAsk: s.bestAsk,
-    spread: s.spread,
-    obi: s.obi,
-    bidDepth: sum(s.bids),
-    askDepth: sum(s.asks),
-  }
 })
 
 /**
@@ -539,65 +517,9 @@ const balanceAccountSuffix = (label: string): string => {
   if (!id || store.accounts.length <= 1) return label
   return `${label} · ${id}`
 }
-
-// ── 现金流水卡（account.journal，issue 509 内核 / issue 511 动词 / issue 513 面板消费面）─────
-// issue 509 给 Ledger 加的 append-only 现金流水在此可见：操作者能看见每笔钱的来去
-// （「钱包应是真实记账」的最后一公里）。折叠卡默认收起——展开时拉一次
-// account.journal（limit 100），不随 2s 快照轮询打。issue 561：请求不带
-// accountId，内核缺省解析链（session → display → 进程 default）让流水跟
-// 随显示账户；卡内 accountId 徽标展示内核回执的解析结果。
-/** 九个内核 JournalKind 的中文标签——固定映射表，一处消费（本卡）。 */
-const JOURNAL_KIND_LABELS: Record<string, string> = {
-  seed: '注资',
-  buy_fill: '买入成交',
-  sell_fill: '卖出成交',
-  fee: '手续费',
-  merge: '合并赎回',
-  redemption: '结算赔付',
-  cashflow: '返现',
-  realign: '对账回正',
-  reset: '重置',
-}
-const journalOpen = ref(false)
-const journalLoading = ref(false)
-const journalErr = ref<string | null>(null)
-const journalDoc = ref<AccountJournalDoc | null>(null)
-const journalRows = computed<AccountJournalRowDoc[]>(() => journalDoc.value?.rows ?? [])
-/**
- * 老内核没有 account.journal 动词 → 网关把 JSON-RPC 错误包成 200 + {error}
- * 文档。照 AccountSwitcher 的容错正则判「未知动词」，整卡退化为一句升级
- * 提示而不是崩——这份 UI 先合，内核合上后自动活。
- */
-const journalUnsupported = computed(() => {
-  const msg = journalDoc.value?.error ?? journalErr.value ?? ''
-  return /unknown|not found|method|未知的|不支持/i.test(msg)
-})
-const journalFatal = computed(() => {
-  if (journalUnsupported.value) return '当前内核不支持流水查看，需要升级内核'
-  return journalErr.value ?? journalDoc.value?.error ?? ''
-})
-/** 展开时拉一次（缺省账户由内核按 §9.5 解析）；重展开刷新，不加轮询。 */
-function toggleJournal(): void {
-  journalOpen.value = !journalOpen.value
-  if (journalOpen.value) void loadJournal()
-}
-async function loadJournal(): Promise<void> {
-  journalLoading.value = true
-  journalErr.value = null
-  try {
-    journalDoc.value = await api.accountJournal({ limit: 100 })
-  } catch (e) {
-    journalDoc.value = null
-    journalErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    journalLoading.value = false
-  }
-}
-const journalKindLabel = (kind: string): string => JOURNAL_KIND_LABELS[kind] ?? kind
-/** ref 等宽小字超长截断：悬停看全文。 */
-const journalRef = (r: string): string => (r.length > 24 ? `${r.slice(0, 24)}…` : r || '—')
-/** 余额列渲染 balanceAfter（decimal 字符串），空窗口给一行诚实文案。 */
-const journalBalance = (v: string): string => money(v)
+const balanceLabel = computed(() =>
+  balanceAccountSuffix(isDry.value ? (recon.value.equity !== null ? '真实余额' : '内核现金账') : (recon.value.equity !== null ? '账户权益' : '交易所余额')),
+)
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
@@ -1026,21 +948,6 @@ const forceOpen = ref(false)
 const forceTarget = ref<OrderRow | null>(null)
 const sweepOpen = ref(false)
 
-function orderStatusLabel(s: string): string {
-  const map: Record<string, string> = {
-    PENDING: '待确认', LIVE: '挂单中', PARTIALLY_FILLED: '部分成交',
-    FILLED: '已成交', CANCELLED: '已撤销', REJECTED: '已拒绝',
-    FAILED: '失败', FORCE_CLOSED: '已强平',
-  }
-  return map[s] ?? s
-}
-function orderStatusTone(s: string): 'up' | 'down' | 'default' | 'gold' {
-  if (s === 'LIVE' || s === 'PENDING' || s === 'PARTIALLY_FILLED') return 'gold'
-  if (s === 'FILLED') return 'up'
-  if (s === 'FORCE_CLOSED' || s === 'CANCELLED') return 'down'
-  return 'default'
-}
-
 function askForceClose(o: OrderRow): void {
   orderErr.value = null
   forceTarget.value = o
@@ -1095,17 +1002,10 @@ const positionUnrealized = computed(() =>
   positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0), 0),
 )
 
-function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
-  if (!reason) return 'default'
-  const r = reason.toLowerCase()
-  if (r.includes('take') || r.includes('profit')) return 'up'
-  if (r.includes('stop') || r.includes('loss')) return 'down'
-  return 'gold'
-}
-
-/** 历史页签的终态死单合成行（orderStatus 在场 = 来源「订单」）：状态徽标
- * 语气沿用挂单页签的 orderStatusTone，轮次照挂单页签的 #slot 形。 */
-const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefined
+// ── 现金流水卡（account.journal）—— 卡体与九类标签映射拆到
+// components/hft/JournalCard.vue（issue 717）；展开状态留在页面（折叠态是
+// 操作者的会话语境，页级持有让卡片重排不影响它）。
+const journalOpen = ref(false)
 </script>
 
 <template>
@@ -1343,389 +1243,61 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
       </Tooltip>
     </div>
 
-    <!-- 未绑定态：账户没绑交易所 → 不显示任何行情数据（含旧所残留），
-         指引去账户切换器绑定。老面板/单账户（无账户读数）不进这里。 -->
-    <Card v-if="venueUnbound" class="mt-3.5">
-      <EmptyState
-        text="该账户未绑定交易所"
-        hint="行情数据源跟随账户绑定的交易所 —— 到右上角账户切换器给该账户绑定交易所（绑定即启用），行情卡会立即跟随切换。"
-        compact
-      />
-    </Card>
-    <!-- venue 切换 Loading：旧所行已清空，等新所首行数据到达才渲染 ——
-         决不残留旧所盘口。 -->
-    <Card v-else-if="venueLoading" class="mt-3.5">
-      <EmptyState
-        loading
-        :text="`正在接入 ${activeVenue} 的行情…`"
-        :hint="venueSwitchFrom ? `已解除 ${venueSwitchFrom} 的订阅与盘口显示；${activeVenue} 的首行数据到达后本卡立即渲染。` : '新交易所的首行数据到达后本卡立即渲染。'"
-        compact
-      />
-    </Card>
-    <div v-else-if="visiblePrices.length" class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-      <div
-        v-for="m in visiblePrices"
-        :key="`${m.venue ?? ''}:${m.asset}`"
-        class="glass card-pad transition-transform duration-200 hover:-translate-y-0.5"
-      >
-        <div class="flex items-center justify-between">
-          <span class="flex min-w-0 items-center gap-1.5">
-            <span class="truncate text-[13px] font-bold tracking-wide">{{ m.asset }}</span>
-          </span>
-          <Badge :variant="spreadCents(m) <= 1 ? 'up' : 'gold'">
-            {{ spreadCents(m).toFixed(1) }}¢
-          </Badge>
-        </div>
-        <div class="mt-3 grid grid-cols-2 gap-3">
-          <div class="rounded-md border border-up/25 bg-up/8 px-2.5 py-2">
-            <div class="flex items-center gap-1 text-[10.5px] font-semibold text-up">
-              <TrendingUp class="size-3" />UP
-            </div>
-            <div class="stat-num mt-1 text-[21px] leading-none text-up">
-              <RollingNumber :value="Number(m.up).toFixed(3)" />
-            </div>
-            <div class="mt-0.5 text-[10px] text-faint-fg num">
-              <RollingNumber :value="cents(m.up)" />
-            </div>
-          </div>
-          <div class="rounded-md border border-down/25 bg-down/8 px-2.5 py-2">
-            <div class="flex items-center gap-1 text-[10.5px] font-semibold text-down">
-              <TrendingDown class="size-3" />DOWN
-            </div>
-            <div class="stat-num mt-1 text-[21px] leading-none text-down">
-              <RollingNumber :value="Number(m.down).toFixed(3)" />
-            </div>
-            <div class="mt-0.5 text-[10px] text-faint-fg num">
-              <RollingNumber :value="cents(m.down)" />
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <Card v-else class="mt-3.5">
-      <!--
-        issue 488: 连不上 ≠ 未接入。插件已接入（marketName 有值）但行情卡空 =
-        数据源拉不到（网络/代理/对端），指向网络自检而不是叫操作员去绑定
-        一个已经接入的插件 —— 那条提示是误导。
+    <!-- 未绑定 / Loading / 行情网格 / 空态 —— 四个互斥卡面拆到
+         components/hft/PriceGrid.vue（issue 717）；数据面消费点仍是页面
+         的 visiblePrices（Loading 门清空 + venue 过滤的唯一出口）。 -->
+    <PriceGrid
+      :visible-prices="visiblePrices"
+      :venue-unbound="venueUnbound"
+      :venue-loading="venueLoading"
+      :active-venue="activeVenue"
+      :venue-switch-from="venueSwitchFrom"
+      :market-name="marketName"
+      :venue-round-unsupported="venueRoundUnsupported"
+      :round-dur-label="roundDurLabel"
+    />
 
-        轮次分支：探针全通过（连接正常）时，空卡的真因不再是网络，而是当前
-        轮次档位在该所没有市场（有的所只带 15m/daily 两个轮次系列，其余档位
-        discovery 拿到空集）——此时指向「切换轮次」才对。
-      -->
-      <EmptyState
-        v-if="venueRoundUnsupported"
-        :text="`交易所连接正常，但是无法获取对应轮次（${roundDurLabel}），请尝试切换轮次`"
-        hint="该交易所未必提供当前轮次长度的市场 —— 到「设置 · 通用」的轮次时间周期卡切换档位（下次会话生效），或换绑定其它交易所的账户。"
-        compact
-      />
-      <EmptyState
-        v-else
-        :text="marketName ? `行情插件 ${marketName} 已接入，但暂无行情到达` : '暂无行情数据（等待报价插件）'"
-        :hint="marketName
-          ? '通常是网络/代理拦住了数据源域名。运行网关命令 netcheck 做网络自检，或检查本机代理是否放行该插件的 API 域名。'
-          : '行情按账户绑定自动接入：在右上角账户切换器里给账户绑定交易所（绑定即启用）。'"
-        compact
-      />
-    </Card>
-
-    <!-- ── 盘口深度 (E8-c) ──────────────────────────────────────────────── -->
-    <Card v-if="visibleBooks.length" class="mt-3.5">
-      <CardHeader label="盘口深度">
-        <template #action>
-          <div class="flex items-center gap-2">
-            <select v-model="depthAsset" class="filter-select">
-              <option v-for="b in visibleBooks" :key="`${b.venue ?? ''}:${b.asset}`" :value="b.asset">{{ b.asset }}</option>
-            </select>
-            <SegmentedControl
-              v-model="depthToken"
-              :segments="[
-                { id: 'up', label: 'UP' },
-                { id: 'down', label: 'DOWN' },
-              ]"
-              size="sm"
-            />
-          </div>
-        </template>
-        <template #title>
-          <span class="flex items-center gap-1.5">
-            <span class="truncate text-[13px] font-bold tracking-wide">{{ depthAsset }}</span>
-          </span>
-        </template>
-      </CardHeader>
-      <!--
-        The touch metrics first: a depth ladder is read from the spread and the
-        imbalance before any level is looked at. Null means the feed has not
-        delivered this token's book yet — never a zero quote.
-      -->
-      <div
-        v-if="depthMetrics && activeSide"
-        class="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11.5px]"
-      >
-        <span>买一 <span class="num text-up"><RollingNumber :value="depthMetrics.bestBid != null ? cents(depthMetrics.bestBid) : '—'" /></span></span>
-        <span>卖一 <span class="num text-down"><RollingNumber :value="depthMetrics.bestAsk != null ? cents(depthMetrics.bestAsk) : '—'" /></span></span>
-        <span>点差 <span class="num"><RollingNumber :value="depthMetrics.spread != null ? cents(depthMetrics.spread) : '—'" /></span></span>
-        <span>盘口失衡 OBI <span class="num" :class="(depthMetrics.obi ?? 0) >= 0 ? 'text-up' : 'text-down'"><RollingNumber :value="depthMetrics.obi != null ? signedPct(depthMetrics.obi * 100, 1) : '—'" /></span></span>
-        <span class="text-faint-fg">累计买深 <span class="num text-fg"><RollingNumber :value="depthMetrics.bidDepth.toFixed(1)" /></span> · 卖深 <span class="num text-fg"><RollingNumber :value="depthMetrics.askDepth.toFixed(1)" /></span> 份</span>
-      </div>
-      <div class="mt-2">
-        <BookDepth :side="activeSide" :height="168" />
-      </div>
-    </Card>
-    <Card v-else-if="!hasDepthData" class="mt-3.5">
-      <EmptyState text="盘口深度暂不可用" hint="当前内核未提供 engine.books——重启到新内核后自动出现。" compact />
-    </Card>
-
-    <!-- ── K线 (E29, kline.history) ─────────────────────────────────────────
-      The aggregator keys bars by TOKEN id, so the card needs the books view's
-      E29 token-id fields. Older cores omit them (empty string): the card hides
-      rather than queries a wrong key. Shares the depth card's asset/token
-      pickers so one selection drives both charts.
+    <!-- ── 盘口深度 (E8-c) + K线 (E29) ─────────────────────────────────────
+      Both cards share the depth card's asset/token pickers (defineModel) so
+      one selection drives both charts; the token-id readiness (E29) stays on
+      the page — the card hides rather than queries a wrong key.
     -->
-    <Card v-if="klineReady && klineSymbol" class="mt-3.5">
-      <CardHeader label="K线">
-        <template #action>
-          <div class="flex items-center gap-2">
-            <select v-model="depthAsset" class="filter-select">
-              <option v-for="b in visibleBooks" :key="`${b.venue ?? ''}:${b.asset}`" :value="b.asset">{{ b.asset }}</option>
-            </select>
-            <SegmentedControl
-              v-model="depthToken"
-              :segments="[
-                { id: 'up', label: 'UP' },
-                { id: 'down', label: 'DOWN' },
-              ]"
-              size="sm"
-            />
-          </div>
-        </template>
-      </CardHeader>
-      <div class="mt-2">
-        <KlineChart :symbol="klineSymbol" :height="260" />
-      </div>
-    </Card>
+    <DepthCard
+      v-model:asset="depthAsset"
+      v-model:token="depthToken"
+      :visible-books="visibleBooks"
+      :has-depth-data="hasDepthData"
+      :active-book="activeBook"
+    />
+    <KlineCard
+      v-if="klineReady && klineSymbol"
+      v-model:asset="depthAsset"
+      v-model:token="depthToken"
+      :visible-books="visibleBooks"
+      :kline-symbol="klineSymbol"
+    />
 
     <!-- ── stats row ─────────────────────────────────────────────────────── -->
-    <!--
-      Four stat cards. The 1.6/1/1/1 split only applies once there is room for it
-      (`xl`), but the fallback used to be a single column all the way down — at
-      tablet and small-laptop widths that stacked four full-width cards into a
-      long scroll. `sm:grid-cols-2` puts them 2×2 across that whole range instead,
-      and 累计净 PnL keeps the wider column whenever the split is active.
-    -->
-    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
-      <Card>
-        <CardHeader label="累计净 PnL">
-          <template #title>
-            <span class="stat-num text-[16px]" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber :value="signedMoney(cumStats.net)" />
-            </span>
-          </template>
-          <template #action>
-            <Badge variant="default">扣费口径</Badge>
-          </template>
-        </CardHeader>
-        <EquityCurve :rows="historyRows" :height="128" :show-axis="false" />
-        <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
-          <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(cumStats.gross)" /></span></span>
-          <span>费用 <span class="num text-down"><RollingNumber :value="money(cumStats.fees)" /></span></span>
-        </div>
-      </Card>
-
-      <Card>
-        <CardHeader label="胜率分布" />
-        <div class="stat-num text-[30px] leading-none">
-          <RollingNumber :value="pct(cumStats.winRate)" />
-        </div>
-        <div class="mt-1 flex items-center gap-3 text-[11.5px]">
-          <span class="font-semibold text-up"><RollingNumber :value="cumStats.wins" /> 盈</span>
-          <span class="font-semibold text-down"><RollingNumber :value="cumStats.losses" /> 亏</span>
-        </div>
-        <div class="mt-3.5 space-y-1.5">
-          <div v-for="b in winBands" :key="b.label" class="flex items-center gap-2">
-            <span class="w-[52px] shrink-0 text-[10.5px] text-faint-fg">{{ b.label }}</span>
-            <span class="h-1.5 flex-1 overflow-hidden rounded-full bg-panel-2">
-              <span
-                class="block h-full rounded-full transition-[width] duration-500"
-                :style="{
-                  width: `${b.frac * 100}%`,
-                  background: b.tone === 'up' ? 'var(--up)' : 'var(--down)',
-                }"
-              />
-            </span>
-            <span class="w-7 shrink-0 text-right text-[10.5px] text-muted-fg num"><RollingNumber :value="b.count" /></span>
-          </div>
-        </div>
-      </Card>
-
-      <Card>
-        <CardHeader label="交易统计" />
-        <div class="grid grid-cols-2 gap-x-4 gap-y-3">
-          <div>
-            <div class="label-micro">笔数</div>
-            <div class="stat-num mt-1 text-[19px] leading-none"><RollingNumber :value="tradeStats.count" /></div>
-          </div>
-          <div>
-            <div class="label-micro">今日</div>
-            <div class="stat-num mt-1 text-[19px] leading-none"><RollingNumber :value="tradeStats.today" /></div>
-          </div>
-          <div>
-            <div class="label-micro">成交额</div>
-            <div class="stat-num mt-1 text-[15px] leading-none"><RollingNumber :value="money(tradeStats.volume)" /></div>
-          </div>
-          <div>
-            <div class="label-micro">均笔</div>
-            <div class="stat-num mt-1 text-[15px] leading-none"><RollingNumber :value="money(tradeStats.avg)" /></div>
-          </div>
-        </div>
-        <div class="mt-3.5 flex items-center justify-between border-t border-line pt-2.5 text-[11.5px]">
-          <span class="text-faint-fg">今日净利</span>
-          <span class="stat-num" :class="tradeStats.todayNet >= 0 ? 'text-up' : 'text-down'">
-            <RollingNumber :value="signedMoney(tradeStats.todayNet)" />
-          </span>
-        </div>
-      </Card>
-
-      <Card>
-        <CardHeader label="今日表现" />
-        <StatRow label="最佳单笔" :value="signedPct(cumStats.best)" tone="up" />
-        <StatRow label="最差单笔" :value="signedPct(cumStats.worst)" tone="down" />
-        <StatRow label="持仓浮动" :value="signedPct(positionUnrealized)" :tone="positionUnrealized >= 0 ? 'up' : 'down'" />
-        <StatRow label="平均持仓" :value="cumStats.avgHold ? duration(cumStats.avgHold) : '—'" tone="dim" />
-        <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->
-        <StatRow label="运行模式" :value="(snap.mode ?? '—').toUpperCase()" :tone="isDry ? 'gold' : 'up'" :roll="false" />
-        <StatRow label="行情轮次" :value="round?.markets ?? '—'" tone="dim" />
-        <div class="mt-2.5 border-t border-line pt-2.5">
-          <!--
-            Headline is 本金 ＋ 净利润 (the real balance). No cash-ledger row
-            underneath in DRY: the core's ledger is 本金 ＋ 本次会话净利, a strict
-            subset of what the history tab below already shows.
-          -->
-          <StatRow
-            :label="balanceAccountSuffix(isDry ? (recon.equity !== null ? '真实余额' : '内核现金账') : (recon.equity !== null ? '账户权益' : '交易所余额'))"
-            :value="recon.equity !== null ? money(recon.equity) : money(recon.cash)"
-            :tone="isDry ? 'gold' : 'default'"
-          />
-          <p v-if="recon.equity !== null" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            本金 {{ money(recon.seed) }} ＋ 已实现净利 {{ signedMoney(recon.net) }}
-            <Tooltip :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 扣费后净利 ${signedMoney(recon.net)}。手续费是成本：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利。手续费不改变本金，因此不并入余额。${balanceAccountNote}`">
-              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-                手续费支出 {{ money(recon.fees) }}
-              </span>
-            </Tooltip>
-          </p>
-          <!--
-            No principal on the wire: either LIVE, or a core older than the field
-            that reports it. Show the cash ledger and say the principal is
-            missing instead of printing an equation the panel cannot verify.
-          -->
-          <p v-else-if="isDry" class="mt-1 text-[10px] leading-snug text-faint-fg">
-            <Tooltip content="内核未上报本金，无法计算「本金 ＋ 净利」的真实余额，此处显示内核现金账。本金由内核按 --seed-balance 持有；当前运行中的内核早于该字段，重启内核后即可显示真实余额。">
-              <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-                内核现金账 · 本金未上报
-              </span>
-            </Tooltip>
-          </p>
-        </div>
-      </Card>
-    </div>
+    <!-- 四张统计卡拆到 components/hft/StatsRow.vue（issue 717）；口径派生
+         （cumStats/tradeStats/recon/winBands）留在页面 —— 单一来源。 -->
+    <StatsRow
+      :history-rows="historyRows"
+      :cum-stats="cumStats"
+      :win-bands="winBands"
+      :trade-stats="tradeStats"
+      :recon="recon"
+      :position-unrealized="positionUnrealized"
+      :mode="snap.mode ?? '—'"
+      :is-dry="isDry"
+      :round-markets="round?.markets"
+      :balance-label="balanceLabel"
+      :balance-account-note="balanceAccountNote"
+    />
 
     <!-- ── 现金流水（account.journal）──────────────────────────────────────
-      钱包重构的最后一公里：操作者能看见每笔钱的来去。折叠卡默认收起，
-      展开时拉一次 account.journal（limit 100）——流水是审计 trail，不是
-      行情，不随 2s 快照轮询打。老内核没有该动词时整卡退化为一句升级提示。
+      卡体拆到 components/hft/JournalCard.vue（issue 717）；展开状态留在页面。
     -->
-    <Card class="mt-3.5" dense>
-      <button
-        class="flex w-full items-center gap-2 text-left"
-        @click="toggleJournal"
-      >
-        <ChevronDown
-          class="size-3.5 text-faint-fg transition-transform"
-          :class="journalOpen && 'rotate-180'"
-        />
-        <span class="label-micro">现金流水</span>
-        <span
-          v-if="journalDoc?.accountId"
-          class="font-mono text-[11px] text-faint-fg"
-          :title="'流水所属账户（内核缺省解析：跟随显示账户）'"
-        >{{ journalDoc.accountId }}</span>
-        <span
-          v-if="journalRows.length"
-          class="text-[11px] text-faint-fg num"
-        ><RollingNumber :value="journalRows.length" /> 笔</span>
-        <!-- 口径说明（现金事件流水）：一笔成交拆成买入+卖出两行现金事件，
-             与「交易记录」（一笔一行）口径不同 —— 数字对得上，行数对不上
-             是本来的形状。悬浮展开。 -->
-        <Tooltip content="这里是现金事件流水：一笔成交拆成「买入成交」+「卖出成交」两行（手续费、注资、重置各占一行），与交易记录的一笔一行口径不同——金额逐笔相等，行数天然更多。">
-          <span class="cursor-help text-[11px] text-faint-fg underline decoration-dotted decoration-line underline-offset-2">现金事件口径</span>
-        </Tooltip>
-        <span class="ml-auto text-[11px] text-faint-fg">{{ journalOpen ? '收起' : '展开' }}</span>
-      </button>
-
-      <div v-if="journalOpen" class="mt-3">
-        <!-- 老内核 / 网络失败：一句话如实说，不崩卡。 -->
-        <p v-if="journalFatal" class="text-[12px]" :class="journalUnsupported ? 'text-muted-fg' : 'text-down'">
-          {{ journalFatal }}
-        </p>
-        <p v-else-if="journalLoading && !journalRows.length" class="text-[12px] text-faint-fg">
-          加载中…
-        </p>
-        <template v-else-if="journalRows.length">
-          <div class="overflow-x-auto">
-            <table class="w-full min-w-[640px] text-[12.5px]">
-              <thead>
-                <tr class="text-left">
-                  <th class="label-micro px-2 pb-2">时间</th>
-                  <th class="label-micro px-2 pb-2">类型</th>
-                  <th class="label-micro px-2 pb-2 text-right">金额</th>
-                  <th class="label-micro px-2 pb-2 text-right">余额</th>
-                  <th class="label-micro px-2 pb-2">ref</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template v-for="(r, i) in journalRows" :key="`${r.atMs}-${i}`">
-                  <!-- 重置分隔线：reset 是「此前一切清账」的硬事实，账目在其
-                       前后互不可加和（流水总额与当前余额对不上 = 中间有
-                       reset），显性切一刀免得读者硬算一个不存在的总额。 -->
-                  <tr v-if="r.kind === 'reset' && i > 0" class="border-t border-line">
-                    <td colspan="5" class="px-2 py-1 text-center text-[10.5px] text-faint-fg">
-                      ── 以下为此前记录 · {{ clockTime(r.atMs) }} 交易环境已重置，余额回到 {{ journalBalance(r.balanceAfter) }} ──
-                    </td>
-                  </tr>
-                  <tr
-                    class="border-t border-line transition-colors hover:bg-panel-2"
-                  >
-                  <td class="whitespace-nowrap px-2 py-2 font-mono text-[11.5px] text-faint-fg">{{ clockTime(r.atMs) }}</td>
-                  <td class="px-2 py-2">
-                    <Badge variant="outline">{{ journalKindLabel(r.kind) }}</Badge>
-                  </td>
-                  <td
-                    class="px-2 py-2 text-right num font-semibold"
-                    :class="Number(r.amount) >= 0 ? 'text-up' : 'text-down'"
-                  ><RollingNumber :value="signedMoney(r.amount)" /></td>
-                  <td class="px-2 py-2 text-right num text-muted-fg"><RollingNumber :value="journalBalance(r.balanceAfter)" /></td>
-                  <td
-                    class="max-w-[220px] truncate px-2 py-2 font-mono text-[11px] text-faint-fg"
-                    :title="r.ref"
-                  >{{ journalRef(r.ref) }}</td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-          <!-- truncated 披露：读者看到的是内存窗口（JOURNAL_CAP = 10000），不是全史。 -->
-          <p v-if="journalDoc?.truncated" class="mt-2 text-[10.5px] text-faint-fg">
-            仅显示最近 100 笔（内核窗口 10000）
-          </p>
-        </template>
-        <EmptyState
-          v-else
-          text="流水为空"
-          hint="该账户的账本还没有任何现金变动；启动引擎、注资或成交后这里会出现每一笔。"
-          compact
-        />
-      </div>
-    </Card>
+    <JournalCard v-model:open="journalOpen" />
 
     <!-- ── positions / orders / history ─────────────────────────────────── -->
     <Card class="mt-3.5" dense>
@@ -1837,228 +1409,32 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
         </div>
       </template>
 
-      <!-- positions -->
-      <div v-if="tab === 'positions'">
-        <div v-if="positions.length" class="overflow-x-auto">
-          <table class="w-full min-w-[640px] text-[13px]">
-            <thead>
-              <tr class="text-left">
-                <th class="label-micro px-2 pb-2">资产</th>
-                <th class="label-micro px-2 pb-2">方向</th>
-                <th class="label-micro px-2 pb-2">场地</th>
-                <th class="label-micro px-2 pb-2">策略</th>
-                <th class="label-micro px-2 pb-2 text-right">入场</th>
-                <th class="label-micro px-2 pb-2 text-right">现价</th>
-                <th class="label-micro px-2 pb-2 text-right">份额</th>
-                <th class="label-micro px-2 pb-2 text-right">浮动</th>
-                <th class="label-micro px-2 pb-2 text-right">剩余</th>
-                <th class="label-micro px-2 pb-2 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="p in positions"
-                :key="p.id"
-                class="border-t border-line transition-colors hover:bg-panel-2"
-              >
-                <td class="px-2 py-2.5 font-semibold">{{ p.asset }}</td>
-                <td class="px-2 py-2.5">
-                  <Badge :variant="p.direction === 'up' ? 'up' : 'down'">{{ p.direction.toUpperCase() }}</Badge>
-                </td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.venue || '—' }}</td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ p.strategy ?? '—' }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(p.entryPrice).toFixed(3)" /></td>
-                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(p.currentPrice).toFixed(3)" /></td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="p.shares ?? '—'" /></td>
-                <td class="px-2 py-2.5 text-right num font-semibold" :class="p.unrealizedPct >= 0 ? 'text-up' : 'text-down'">
-                  <RollingNumber :value="`${Number(p.unrealizedPct) >= 0 ? '+' : ''}${Number(p.unrealizedPct).toFixed(2)}%`" />
-                </td>
-                <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
-                </td>
-                <td class="px-2 py-2.5 text-right">
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    :disabled="busy || !control.canStop"
-                    :title="busy ? '正在下发命令…' : control.canStop ? '人工强行平仓' : (control.blockedReason ?? '当前网关不允许人工操作')"
-                    @click="forceClose(p)"
-                  >
-                    强平
-                  </Button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <EmptyState v-else :text="venueFiltered ? `暂无 ${activeVenue} 的持仓` : '无持仓'" :hint="venueFiltered
-          ? `当前账户绑定了 ${activeVenue}，只显示该交易所的持仓。若该所行情未喂入，请到插件页确认插件已启用（插件启用将随账户派生：绑定即启用）。`
-          : '启用策略后，成交平仓即出现在这里。'" compact />
-      </div>
-
-      <!-- issue 456: 挂单簿 —— 内核记账的订单，逐行强平（确认词门）。
-           只显活单：终态死单已被分流去历史页签（裁决「过期轮次订单自动
-           进入历史订单」），不再在这里堆尸体充「当前挂单」。 -->
-      <div v-else-if="tab === 'orders'">
-        <div v-if="openOrderRows.length" class="overflow-x-auto">
-          <table class="w-full min-w-[900px] text-[13px]">
-            <thead>
-              <tr class="text-left">
-                <th class="label-micro px-2 pb-2">资产</th>
-                <th class="label-micro px-2 pb-2">方向</th>
-                <th class="label-micro px-2 pb-2">侧</th>
-                <th class="label-micro px-2 pb-2">方式</th>
-                <th class="label-micro px-2 pb-2">策略</th>
-                <th class="label-micro px-2 pb-2 text-right">价格</th>
-                <th class="label-micro px-2 pb-2 text-right">数量</th>
-                <th class="label-micro px-2 pb-2 text-right">已成交</th>
-                <th class="label-micro px-2 pb-2">轮次</th>
-                <th class="label-micro px-2 pb-2">状态</th>
-                <th class="label-micro px-2 pb-2 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="o in openOrderRows"
-                :key="o.orderId"
-                class="border-t border-line transition-colors hover:bg-panel-2"
-              >
-                <td class="px-2 py-2.5 font-semibold">{{ o.asset }}</td>
-                <td class="px-2 py-2.5">
-                  <Badge :variant="o.direction === 'up' ? 'up' : 'down'">{{ o.direction.toUpperCase() }}</Badge>
-                </td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.side }}</td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.mode }}</td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ o.strategy || '—' }}</td>
-                <td class="px-2 py-2.5 text-right num"><RollingNumber :value="Number(o.price).toFixed(3)" /></td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(o.size).toFixed(1)" /></td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(o.filledSize).toFixed(1)" /></td>
-                <td class="px-2 py-2.5 text-[12px] num text-faint-fg">
-                  <RollingNumber :value="`#${o.roundSlot}`" />
-                </td>
-                <td class="px-2 py-2.5">
-                  <Badge :variant="orderStatusTone(o.status)">{{ orderStatusLabel(o.status) }}</Badge>
-                </td>
-                <td class="px-2 py-2.5 text-right">
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    :disabled="orderBusy || !orderExpired(o)"
-                    :title="orderExpired(o)
-                      ? `强平 ${o.orderId}（轮次已过期，写 force_close 审计）`
-                      : '轮次仍活着，强平被内核拒绝 —— 活单等成交或自然过期'"
-                    @click="askForceClose(o)"
-                  >
-                    强平
-                  </Button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <EmptyState v-else text="无挂单" hint="策略报出的活单（挂单中/部分成交）会出现在这里；过期活单由内核自动强平归历史，被拒/撤销的死单在历史订单页签。" compact />
-      </div>
-
-      <!-- history waterfall -->
-      <div v-else>
-        <div v-if="visibleRows.length" class="overflow-x-auto">
-          <!-- 13 列在手机上不可压成一列一个字符：min-width 让表格保持
-               可读列宽、在容器内横向滚动（与 Plugins 页表格同一模式），
-               否则 min-content 按"每列一个折行点"计算，数字会竖排。 -->
-          <table class="w-full min-w-[1160px] text-[13px]">
-            <thead>
-              <tr class="text-left">
-                <th class="label-micro px-2 pb-2">资产</th>
-                <th class="label-micro px-2 pb-2">方向</th>
-                <th class="label-micro px-2 pb-2">场地</th>
-                <th class="label-micro px-2 pb-2">策略</th>
-                <th class="label-micro px-2 pb-2 text-right">入场</th>
-                <th class="label-micro px-2 pb-2 text-right">出场</th>
-                <th class="label-micro px-2 pb-2 text-right">份额</th>
-                <th class="label-micro px-2 pb-2 text-right">费用</th>
-                <th class="label-micro px-2 pb-2 text-right">净利</th>
-                <th class="label-micro px-2 pb-2 text-right">收益率</th>
-                <th class="label-micro px-2 pb-2 text-right">持仓时长</th>
-                <th class="label-micro px-2 pb-2">买入时间</th>
-                <th class="label-micro px-2 pb-2">卖出时间</th>
-                <th class="label-micro px-2 pb-2">原因</th>
-              </tr>
-            </thead>
-            <tbody>
-              <!--
-                Keyed on the trade's identity, never on `t.id`: the id is a
-                per-boot counter (`hft-1` …) and the log is append-only, so the
-                first page of 30 rows carried only 14 distinct ids. Duplicate
-                keys break Vue's patch algorithm — it reuses the wrong nodes, so
-                the table showed rows from the pre-filter list and left stale
-                rows behind on 重置.
-              -->
-              <tr
-                v-for="t in visibleRows"
-                :key="tradeIdentity(t)"
-                class="border-t border-line transition-colors hover:bg-panel-2"
-              >
-                <td class="px-2 py-2.5 font-semibold">{{ t.asset }}</td>
-                <td class="px-2 py-2.5">
-                  <Badge :variant="t.direction === 'up' ? 'up' : 'down'">{{ t.direction.toUpperCase() }}</Badge>
-                </td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.venue || '—' }}</td>
-                <td class="px-2 py-2.5 text-[12px] text-muted-fg">{{ t.strategy ?? '—' }}</td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="Number(t.entryPrice).toFixed(3)" /></td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg">
-                  <!-- 死单合成行从未成交，出场没有值 —— 占位而不是 0.000
-                       （0 会冒充「以零价出场」）。 -->
-                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="Number(t.exitPrice).toFixed(3)" />
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-                <td class="px-2 py-2.5 text-right num text-muted-fg"><RollingNumber :value="t.shares" /></td>
-                <td class="px-2 py-2.5 text-right num text-down">
-                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="t.feesUsd ? money(t.feesUsd, 3) : '—'" />
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-                <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
-                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="signedMoney(t.netPnlUsd, 2)" />
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-                <td class="px-2 py-2.5 text-right num" :class="Number(t.netPnlPct ?? 0) >= 0 ? 'text-up' : 'text-down'">
-                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="signedPct(t.netPnlPct, 2)" />
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-                <td class="px-2 py-2.5 text-right num text-faint-fg">
-                  <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="t.holdTimeSec !== undefined ? duration(t.holdTimeSec) : '—'" />
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-                <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.entryTime) }}</td>
-                <td class="px-2 py-2.5 text-[11.5px] text-faint-fg num">{{ dateTime(t.exitTime) }}</td>
-                <td class="px-2 py-2.5">
-                  <!-- 死单合成行：原因列 = 状态徽标 + 轮次 #slot + 来源「订单」；
-                       成交行照旧 exitReason。 -->
-                  <template v-if="orderRowIsSynthetic(t)">
-                    <Badge :variant="orderStatusTone(t.orderStatus ?? '')">{{ orderStatusLabel(t.orderStatus ?? '') }}</Badge>
-                    <RollingNumber class="ml-1.5 text-[11px] text-faint-fg" :value="`#${t.orderRoundSlot ?? 0}`" />
-                    <span class="ml-1.5 text-[10.5px] text-faint-fg">订单</span>
-                  </template>
-                  <Badge v-else-if="t.exitReason" :variant="exitReasonTone(t.exitReason)">{{ t.exitReason }}</Badge>
-                  <span v-else class="text-faint-fg">—</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <EmptyState v-else text="无匹配订单" hint="清空搜索或筛选后仍为空，说明该窗口尚无成交、也没有终态订单（被拒/撤销/强平的死单会落在这里）。" compact />
-
-        <!-- waterfall sentinel + fallback button -->
-        <div ref="sentinel" class="h-px" />
-        <div v-if="hasMore" class="mt-3 flex flex-col items-center gap-2">
-          <Button variant="outline" size="sm" @click="visibleCount += PAGE">加载更多</Button>
-          <span class="text-[10.5px] text-faint-fg num">
-            已显示 <RollingNumber :value="visibleRows.length" /> / <RollingNumber :value="filteredRows.length" />
-          </span>
-        </div>
-        <p v-else-if="filteredRows.length > PAGE" class="mt-3 text-center text-[10.5px] text-faint-fg">
-          已加载全部 <RollingNumber :value="filteredRows.length" /> 笔
-        </p>
-      </div>
+      <!-- 三表（持仓/挂单/历史）拆到 components/hft/TradesTables.vue
+           （issue 717）；表头控件（tab 徽标/账户与 venue 标注/清理按钮/
+           筛选器）读页级状态，留在本卡。 -->
+      <TradesTables
+        :tab="tab"
+        :positions="positions"
+        :open-order-rows="openOrderRows"
+        :visible-rows="visibleRows"
+        :filtered-rows="filteredRows"
+        :has-more="hasMore"
+        :page="PAGE"
+        :venue-filtered="venueFiltered"
+        :active-venue="activeVenue"
+        :busy="busy"
+        :order-busy="orderBusy"
+        :control-can-stop="control.canStop"
+        :control-blocked-reason="control.blockedReason"
+        :identity-dur-sec="identityDurSec"
+        @force-close="forceClose"
+        @ask-force-close="askForceClose"
+        @load-more="visibleCount += PAGE"
+      >
+        <template #waterfall>
+          <div ref="sentinel" class="h-px" />
+        </template>
+      </TradesTables>
     </Card>
   </template>
 

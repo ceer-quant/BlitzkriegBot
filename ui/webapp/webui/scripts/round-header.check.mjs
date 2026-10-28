@@ -45,6 +45,10 @@ const read = (...p) => readFileSync(join(here, '..', ...p), 'utf8')
 
 const component = read('src', 'components', 'ui', 'roll', 'RollingNumber.vue')
 const page = read('src', 'pages', 'HftPage.vue')
+// issue 717 面板瘦身：四卡统计行拆到 components/hft/StatsRow.vue、行情网格
+// 拆到 PriceGrid.vue —— 版式断言跟着消费面走（正则逐字不动）。
+const statsRow = read('src', 'components', 'hft', 'StatsRow.vue')
+const priceGrid = read('src', 'components', 'hft', 'PriceGrid.vue')
 const app = read('src', 'App.vue')
 const theme = read('src', 'styles', 'theme.css')
 
@@ -410,13 +414,13 @@ check('content clears the header more on mobile than it used to', () => {
 check('the stats row is not a single column up to 1280px', () => {
   // It used to stack four full-width cards until `xl`, which is a long scroll on
   // a tablet or a small laptop.
-  const row = page.match(/<div class="(mt-3\.5 grid gap-3\.5[^"]*xl:grid-cols-\[1\.6fr_1fr_1fr_1fr\][^"]*)"/)
+  const row = statsRow.match(/<div class="(mt-3\.5 grid gap-3\.5[^"]*xl:grid-cols-\[1\.6fr_1fr_1fr_1fr\][^"]*)"/)
   assert.ok(row, 'the stats row must exist')
   assert.match(row[1], /sm:grid-cols-2/, 'it must pair up from `sm`')
 })
 
 check('the price grid already pairs up from `sm`', () => {
-  assert.match(page, /sm:grid-cols-2 xl:grid-cols-4/, 'the price cards keep their breakpoints')
+  assert.match(priceGrid, /sm:grid-cols-2 xl:grid-cols-4/, 'the price cards keep their breakpoints')
 })
 
 // ── 4. every panel-wide number rolls ──────────────────────────────────────────
@@ -503,7 +507,7 @@ check('the shared stat primitives roll by default', () => {
 check('a word, not a figure, is opted out of the roll', () => {
   // DRY / LIVE are labels. A roller would announce them digit by digit and let
   // the mode flicker between two strings; they are explicitly excluded instead.
-  assert.match(page, /:roll="false"/, 'HftPage must opt the mode row out')
+  assert.match(statsRow, /:roll="false"/, 'the stats row must opt the mode row out')
   const overview = pageText['Overview.vue']
   assert.match(overview, /:roll="false"/, 'Overview must opt the mode tile out')
 })

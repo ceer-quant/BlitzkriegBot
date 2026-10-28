@@ -55,7 +55,8 @@ const check = (label, fn) => {
 
 console.log('显示账户 — the display-account identity contract (issue 559)')
 
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'accounts.ts')
+const snapshotClient = read('src', 'api', 'snapshot.ts')
 const store = read('src', 'stores', 'panel.ts')
 const page = read('src', 'pages', 'HftPage.vue')
 const switcher = read('src', 'components', 'AccountSwitcher.vue')
@@ -63,8 +64,8 @@ const gateway = read('../../..', 'ui', 'ui_kit', 'src', 'web', 'mod.rs')
 
 // ── 1. the wire contract ─────────────────────────────────────────────────────
 check('Snapshot 合同声明 displayAccount/displayVenue（可选字段，老内核缺省）', () => {
-  assert.match(client, /displayAccount\?: string \| null/, '快照缺 displayAccount 字段')
-  assert.match(client, /displayVenue\?: string \| null/, '快照缺 displayVenue 字段')
+  assert.match(snapshotClient, /displayAccount\?: string \| null/, '快照缺 displayAccount 字段')
+  assert.match(snapshotClient, /displayVenue\?: string \| null/, '快照缺 displayVenue 字段')
 })
 
 check('display.account.set 有专用代理方法（/display-account/set，body 逐字转发）', () => {

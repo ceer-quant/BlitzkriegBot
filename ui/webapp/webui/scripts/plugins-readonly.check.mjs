@@ -36,7 +36,7 @@ const check = (label, fn) => {
 }
 
 const page = read('src', 'pages', 'Plugins.vue')
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'market.ts')
 
 console.log('绑定即启用 — the plugins page is a status view, not a switch panel')
 
