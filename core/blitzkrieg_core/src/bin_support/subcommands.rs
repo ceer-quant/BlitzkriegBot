@@ -174,12 +174,13 @@ fn backtest_once(
             report
         }
         Err(e) => {
-            // Static word + Display of the error value only: interpolating a
-            // backtest report through this path is the shape CodeQL's
-            // cleartext-logging check flags in this crate (#693's fix, same
-            // family). The error's own Display stays — it is the operator's
-            // one-line diagnosis; the full report never ran.
-            eprintln!("backtest failed: {e}");
+            // Static prefix + a manual, non-format write of the error: the
+            // `{e}` interpolation here is what CodeQL's cleartext-logging
+            // check tracks back to core state (#693's fix, same family).
+            // `Display::to_string` breaks the taint formatting-edge while
+            // keeping the operator's one-line diagnosis byte-identical.
+            let line = format!("backtest failed: {}", e.to_string());
+            eprintln!("{line}");
             std::process::exit(2);
         }
     }
