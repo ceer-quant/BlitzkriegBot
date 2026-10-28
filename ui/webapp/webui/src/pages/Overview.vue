@@ -76,7 +76,7 @@ const archiveStoppedVisible = computed(
 )
 const bannerAutoKey = (identity?: string) => identity ?? ''
 
-// ── #684 过期持仓清除（positions.force_close）────────────────────────────────
+// ── issue 684 过期持仓清除（positions.force_close）──────────────────────────
 // 场地 updown 列表只载未来 ~20h 的未到期轮次，已过期 conditionId 的结算裁决
 // 永远等不到 —— 持仓变成幽灵（positions.exit 被场地拒）。仅 remainingSec <= 0
 // 的行给「清除」按钮；判定（已过期 / 审计门 / 持仓存在）全部在内核，前端只
@@ -674,7 +674,7 @@ const needsStrategyHint = computed(() => {
                   <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
                 </td>
                 <td class="px-2 py-2.5 text-right">
-                  <!-- #684：仅已过期（remainingSec <= 0）的行给清除 —— 活轮
+                  <!-- issue 684：仅已过期（remainingSec <= 0）的行给清除 —— 活轮
                        持仓内核拒绝（那是 positions.exit 的活）。判定在内核，
                        按钮只做确认。 -->
                   <button
@@ -691,7 +691,7 @@ const needsStrategyHint = computed(() => {
               </tr>
             </tbody>
           </table>
-          <!-- #684 清除反馈：成功/失败都落在表格正下方，行内文案 = 内核回执。 -->
+          <!-- issue 684 清除反馈：成功/失败都落在表格正下方，行内文案 = 内核回执。 -->
           <p v-if="clearMsg" class="px-2 pt-2 text-[11.5px] text-up">{{ clearMsg }}</p>
           <p v-if="clearErr" class="px-2 pt-2 text-[11.5px] text-down">{{ clearErr }}</p>
         </div>
