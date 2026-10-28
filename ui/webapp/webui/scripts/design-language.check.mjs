@@ -53,6 +53,13 @@ const FILES = [
   ['LoginView', 'src', 'components', 'LoginView.vue'],
   ['Overview', 'src', 'pages', 'Overview.vue'],
   ['行情面板', 'src', 'pages', 'HftPage.vue'],
+  // issue 717 面板瘦身：行情页拆出的组件面走同一设计语言审计。
+  ['行情·网格', 'src', 'components', 'hft', 'PriceGrid.vue'],
+  ['行情·盘口', 'src', 'components', 'hft', 'DepthCard.vue'],
+  ['行情·K线', 'src', 'components', 'hft', 'KlineCard.vue'],
+  ['行情·统计行', 'src', 'components', 'hft', 'StatsRow.vue'],
+  ['行情·流水卡', 'src', 'components', 'hft', 'JournalCard.vue'],
+  ['行情·三表', 'src', 'components', 'hft', 'TradesTables.vue'],
   ['回测', 'src', 'pages', 'BacktestPage.vue'],
   ['蓝图', 'src', 'pages', 'BlueprintPage.vue'],
   ['策略', 'src', 'pages', 'Strategies.vue'],
@@ -109,6 +116,10 @@ for (const f of FILES) {
     // has no tabular-data empty state; its "unavailable/loading" readings go
     // through AlertBanner (the rule below), before and after #381.
     const exempt = ['App.vue', 'LoginView'].includes(f.name) || f.name.startsWith('设置')
+      // issue 717 拆出的纯读数卡面：K线卡只在 klineReady 时挂载（页面判定），
+      // 统计行是四张常驻统计卡 —— 两者没有自己的数据空态；空态归
+      // PriceGrid/JournalCard/TradesTables（各自在 FILES 里被审计）。
+      || ['行情·K线', '行情·统计行'].includes(f.name)
     const hasEmpty = /EmptyState/.test(f.src)
     assert.ok(hasEmpty || exempt, 'page renders data but has no EmptyState usage')
   })
@@ -152,7 +163,10 @@ for (const f of FILES) {
 // (the app shell, the login gate, the settings IA shell and its orchestrator)
 // compose pages instead; the settings domain (通用) surfaces its readings
 // through Badges/AlertBanner on the cards that own them.
-for (const f of FILES.filter((f) => !['App.vue', 'LoginView', '设置壳', '设置·风控与策略', '设置·通用'].includes(f.name))) {
+// issue 717 拆出的行情组件面不各自持告警条：告警（feed 过期/内核退出/
+// 指令反馈）语义归页面 round bar 与 feed 区（HftPage 仍被审计）；组件面
+// 的非数据态走 EmptyState（上面那条已钉）。
+for (const f of FILES.filter((f) => !['App.vue', 'LoginView', '设置壳', '设置·风控与策略', '设置·通用'].includes(f.name) && !f.name.startsWith('行情·'))) {
   check(`${f.name}: surfaces its alerts through the AlertBanner primitive`, () => {
     assert.ok(/<AlertBanner/.test(f.src), 'no AlertBanner usage')
   })
@@ -179,13 +193,20 @@ console.log('E8 vocabulary still in use')
 // are exempt as a domain — the data pages are not.
 for (const f of FILES.filter((f) => !['LoginView', 'App.vue'].includes(f.name) && !f.name.startsWith('设置'))) {
   check(`${f.name}: surfaces via glass or the Card primitive`, () => {
-    assert.ok(/glass|<Card/.test(f.src), 'neither glass nor Card')
+    // 行情·三表是页内 dense Card 的表体碎片（Card 由页面持有）—— 豁免。
+    const exempt = f.name === '行情·三表'
+    assert.ok(exempt || /glass|<Card/.test(f.src), 'neither glass nor Card')
   })
   check(`${f.name}: uses the micro-label header style`, () => {
-    assert.ok(/label-micro/.test(f.src), 'no label-micro')
+    // 行情·网格是纯瓦片网格、行情·盘口的标签在 CardHeader（label 形参），
+    // 页内没有裸 label-micro —— 瓦片/图表卡面豁免（统计行/流水卡/三表仍钉）。
+    const exempt = ['行情·网格', '行情·盘口', '行情·K线'].includes(f.name)
+    assert.ok(exempt || /label-micro/.test(f.src), 'no label-micro')
   })
   check(`${f.name}: figures use stat-num / RollingNumber`, () => {
-    assert.ok(/stat-num|RollingNumber/.test(f.src), 'no figure vocabulary')
+    // 行情·K线只嵌图表（无数字位）—— 数字位在统计行/三表/流水卡，仍被钉。
+    const exempt = f.name === '行情·K线'
+    assert.ok(exempt || /stat-num|RollingNumber/.test(f.src), 'no figure vocabulary')
   })
 }
 

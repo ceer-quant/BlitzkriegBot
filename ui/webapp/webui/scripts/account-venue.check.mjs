@@ -63,7 +63,7 @@ check('the binding verb stays out of the text command channel too', () => {
 check('the binding write path still exists for the CREATE dialog (client level)', () => {
   // The gateway route and client helper stay: AddAccountDialog-era creates
   // bind at creation. Only the per-row edit surface is gone.
-  const client = read('src/api/client.ts')
+  const client = read('src/api/accounts.ts')
   assert.match(
     client,
     /accountVenueSet[^`]*'\/account-venue\/set'/,
@@ -82,7 +82,7 @@ const dialog = read('src/components/AddAccountDialog.vue')
 check('AddAccountDialog creates the identity through account.create', () => {
   assert.match(dialog, /accountCreate\(/, 'the dialog must call api.accountCreate')
   assert.match(dialog, /venue:\s*venue\.value/, 'the chosen venue must ride the create call (绑定即启用)')
-  const client = read('src/api/client.ts')
+  const client = read('src/api/accounts.ts')
   assert.match(client, /accountCreate[^`]*'\/account-create'/, 'client must post to /account-create')
 })
 
@@ -126,6 +126,9 @@ check('every account is removable — no default interception anywhere', () => {
 
 // ── 2. the 行情 page derives its venue view from the active account ──────
 const hft = read('src/pages/HftPage.vue')
+// issue 717 面板瘦身：三表拆到 components/hft/TradesTables.vue —— 表体断言
+// 跟着消费面走（断言正则逐字不动，只改 read 目标）。
+const tables = read('src/components/hft/TradesTables.vue')
 
 check('HftPage venue filter derives from the active account binding', () => {
   assert.match(hft, /filterByVenue/, 'filterByVenue not imported/used')
@@ -170,7 +173,7 @@ check('balance tile is labeled with the account id under multi-account', () => {
 })
 
 check('empty state under venue filtering names the venue', () => {
-  assert.match(hft, /暂无 \$\{activeVenue\} 的持仓/, 'venue-aware empty state missing')
+  assert.match(tables, /暂无 \$\{activeVenue\} 的持仓/, 'venue-aware empty state missing')
 })
 
 // ── 3. Strategy page: fixed action columns (user ruling 2026-10-16) ──────

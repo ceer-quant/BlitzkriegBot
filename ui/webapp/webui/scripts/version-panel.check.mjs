@@ -36,7 +36,7 @@ const check = (label, fn) => {
 const versionLib = read('src', 'lib', 'version.ts')
 // #381: the version card is a domain sub-page of the settings IA.
 const settingsPage = read('src', 'pages', 'settings', 'SettingsVersion.vue')
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'version.ts')
 
 console.log('三态：null ≠ false，徽章不许撒谎（N16）')
 
