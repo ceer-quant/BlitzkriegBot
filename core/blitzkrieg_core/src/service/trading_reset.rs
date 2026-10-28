@@ -1010,6 +1010,19 @@ impl Core {
                  next boot may replay pre-reset rows"
             );
         }
+        // issue 723: the reset rewrote this account's journal into a single
+        // `Reset` row — a NEW evidence generation with its own row-seq space.
+        // The bound venues' cursors die here: the pre-reset numbers must
+        // never judge post-reset facts.
+        for v in self
+            .venue_fact_cursor
+            .keys()
+            .filter(|v| self.venue_cash_account(v.as_str()).as_ref() == Some(&account_id))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.venue_fact_cursor.remove(&v);
+        }
 
         // 6) 自校验：目标账户 live 索引空 / 该账户 open 持仓空 / 该账户在
         //    三个记录文件中的行数归零 / 余额 == seed。其他账户的行不在断言

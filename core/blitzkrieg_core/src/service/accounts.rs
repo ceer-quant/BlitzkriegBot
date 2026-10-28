@@ -135,12 +135,19 @@ impl Core {
     /// truth reports last answered for the book. Debits (buy fills, fees)
     /// are negative, credits (sell fills, settlements, cashflow) positive.
     ///
-    /// The window is the [`Self::venue_fact_cursor`]: journal rows before it
-    /// are reconciled history, rows after it are facts the venue's current
-    /// number has not been checked against. A cursor, not a timestamp —
-    /// journal rows stamp real wall clock while replay/tests drive virtual
-    /// clocks, and comparing the two bases silently swallows every fact;
-    /// row COUNT is the same sequence in both worlds.
+    /// The window is the [`Self::venue_fact_cursor`]: journal rows at or
+    /// below it are reconciled history, rows above it are facts the venue's
+    /// current number has not been checked against. A cursor, not a
+    /// timestamp — journal rows stamp real wall clock while replay/tests
+    /// drive virtual clocks, and comparing the two bases silently swallows
+    /// every fact.
+    ///
+    /// issue 723: the cursor is a GLOBAL row seq, not a row count — the
+    /// bounded journal window's length freezes at `JOURNAL_CAP`, so a
+    /// count-keyed cursor skipped everything forever after (booked read 0,
+    /// every legal correction read as unattributed). `skip` below is the
+    /// number of RETAINED rows at or below the cursor — the cursor itself
+    /// stopped being an index the moment eviction began.
     ///
     /// Realign rows are excluded (they are the corrections being judged, not
     /// evidence for them), as are Seed/Reset (boot and operator reseeds are
@@ -154,11 +161,16 @@ impl Core {
         let Ok(ledger) = self.accounts.ledger_of(target) else {
             return Decimal::ZERO;
         };
-        ledger
-            .journal_snapshot()
+        let snapshot = ledger.journal_snapshot();
+        let (total, len) = ledger.journal_seq_basis();
+        // snapshot[i] carries seq `total − len + i`; the window is every row
+        // with seq > cursor, so the retained prefix to skip is the rows with
+        // seq <= cursor (`cursor + len − total`, saturating).
+        let skip = cursor.saturating_add(len as u64).saturating_sub(total) as usize;
+        snapshot
             .iter()
             .enumerate()
-            .skip(cursor.min(usize::MAX.saturating_sub(1)))
+            .skip(skip)
             .filter(|(_, e)| {
                 !matches!(
                     e.kind,
@@ -169,6 +181,34 @@ impl Core {
             })
             .map(|(_, e)| e.amount)
             .sum()
+    }
+
+    /// issue 723: how many rows the venue's cursor had NOT yet answered for
+    /// that the bounded journal window has since evicted (0 = the window is
+    /// contiguous down to the cursor). A positive count means
+    /// [`Self::window_cash_facts`] is a lower bound — the residual verdict
+    /// must be skipped, not faked (see `report_venue_cash_move`).
+    fn journal_evidence_gap(&self, venue: &str, target: &crate::account::AccountId) -> u64 {
+        let Some(cursor) = self.venue_fact_cursor.get(venue).copied() else {
+            return 0; // no baseline: nothing was consumed, nothing can be lost
+        };
+        let Ok(ledger) = self.accounts.ledger_of(target) else {
+            return 0;
+        };
+        let (total, len) = ledger.journal_seq_basis();
+        // Rows with seq <= total − len are gone; of those, the ones past the
+        // cursor were unconsumed evidence. (A cursor beyond `total` — a
+        // cursor that met a rebuilt ledger — is the same loss, other end.)
+        (total.saturating_sub(len as u64)).saturating_sub(cursor) + cursor.saturating_sub(total)
+    }
+
+    /// The venue ledger's newest global row seq — where a cursor write
+    /// anchors (issue 723): always on the last row this ledger appended.
+    fn journal_head(&self, target: &crate::account::AccountId) -> u64 {
+        self.accounts
+            .ledger_of(target)
+            .map(|l| l.journal_seq_basis().0)
+            .unwrap_or(0)
     }
 
     /// 幽灵成交探测器（issue 692）：the realign channel's alert.
@@ -215,11 +255,7 @@ impl Core {
             // mid-session is a REAL move and stays under the detector. The
             // cursor still starts here: everything journalled before this
             // report is the book's opening state, not a move to explain.
-            let seen = self
-                .accounts
-                .ledger_of(target)
-                .map(|l| l.journal_snapshot().len())
-                .unwrap_or(0);
+            let seen = self.journal_head(target);
             self.venue_fact_cursor.insert(venue.to_string(), seen);
             self.venue_truth_last.insert(venue.to_string(), reported);
             return;
@@ -237,15 +273,63 @@ impl Core {
         // against everything before it, so the cursor moves past them.
         let changed = previous_venue_report != Some(reported);
         let booked = self.window_cash_facts(venue, target);
-        if changed {
-            let seen = self
-                .accounts
-                .ledger_of(target)
-                .map(|l| l.journal_snapshot().len())
-                .unwrap_or(0);
+        // issue 723: the bounded window may have EVICTED unconsumed rows past
+        // the cursor since the last report — `booked` is then a lower bound,
+        // and every verdict built on it (silent pass or unattributed alert)
+        // would be fiction. Detect BEFORE the cursor write below closes this
+        // window.
+        let evicted = self.journal_evidence_gap(venue, target);
+        if evicted > 0 || changed {
+            // A changed report closes a judged window (the advance above);
+            // an eviction re-anchors past the void — the old window is
+            // unjudgeable and nothing in it may carry into the next one.
+            let seen = self.journal_head(target);
             self.venue_fact_cursor.insert(venue.to_string(), seen);
         }
         self.venue_truth_last.insert(venue.to_string(), reported);
+
+        if evicted > 0 {
+            // The honest gap handling: a loud, once-per-episode alert (the
+            // re-anchor above makes the next report see a contiguous
+            // window), and NO residual verdict for this report — the truth
+            // still advanced, so the next window's residual starts from here
+            // instead of compounding the lost evidence.
+            let message = format!(
+                "cash_evidence_gap venue={} account={} evicted_rows={} — journal rows the \
+                 venue's evidence cursor had not yet answered for were evicted by the \
+                 bounded journal window (issue 723); this window's booked evidence is \
+                 incomplete, the residual verdict is SKIPPED for this report and the \
+                 cursor re-anchors at the newest row",
+                venue,
+                target.as_str(),
+                evicted,
+            );
+            tracing::error!(
+                venue = %venue,
+                account = %target.as_str(),
+                evicted_rows = evicted,
+                "journal window evicted unconsumed rows past the venue's evidence \
+                 cursor — window skipped (issue 723)"
+            );
+            // Static line on stderr; the figures live in the structured
+            // channels (tracing fields, RiskAlert, audit JSONL) — the same
+            // cleartext-logging posture as the unattributed alert below.
+            eprintln!(
+                "core: cash_evidence_gap — the venue evidence window lost unconsumed rows to journal eviction; see RiskAlert + audit log (issue 723)"
+            );
+            self.emit(Event::RiskAlert {
+                code: CoreErrorCode::Internal,
+                message: message.clone(),
+            });
+            self.persist_audit_value(serde_json::json!({
+                "atMs": now_ms,
+                "event": "cash_evidence_gap",
+                "venue": venue,
+                "account": target.as_str(),
+                "evictedRows": evicted,
+            }));
+            return;
+        }
 
         // Explanation identity (#702): the venue's move is explained exactly
         // when `reported − its last report == booked` — the venue moved cash
@@ -1583,7 +1667,22 @@ impl Core {
                 ),
             ));
         }
+        // issue 723: the bound venues' evidence cursors die with the ledger —
+        // a same-name re-create is a NEW journal generation with its own seq
+        // space, and the previous generation's row numbers must never judge
+        // it (a cursor past every seq the new ledger will ever issue reads
+        // booked as 0 forever). Collected BEFORE the book shrinks: the
+        // venue→account resolution reads the very binding this remove ends.
+        let orphaned_venues: Vec<String> = self
+            .venue_fact_cursor
+            .keys()
+            .filter(|v| self.venue_cash_account(v.as_str()).as_ref() == Some(id))
+            .cloned()
+            .collect();
         self.accounts.remove(id)?;
+        for v in orphaned_venues {
+            self.venue_fact_cursor.remove(&v);
+        }
         // 冻结簿随账户走：旧实现留着悬空冻结项（同名 id 重建即继承上一世
         // 的 kill switch），自愈时间戳同理一并摘除。
         self.account_freezes.remove(id.as_str());
