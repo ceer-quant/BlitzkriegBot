@@ -197,7 +197,11 @@ check('severity tiers: urgent banners are exactly the trading-is-down pair', () 
 check('severity tiers: attention banners are dismissible with a stable identity', () => {
   const frozen = freezeBanner({ tradingFrozen: { active: true, reason: 'x' } })
   const refusal = lastErrorBanner({
-    lastError: { tsMs: 1, code: 'INVALID_PARAMS', message: 'duplicate internal key: lua_momentum' },
+    lastError: {
+      tsMs: 1,
+      code: 'INVALID_PARAMS',
+      message: 'duplicate internal key: lua_momentum (balance 13.596906, drift -7.898029)',
+    },
   })
   assert.ok(refusal)
   assert.equal(refusal.urgent, false, 'a transient refusal record is amber, not red')
@@ -205,13 +209,57 @@ check('severity tiers: attention banners are dismissible with a stable identity'
   // The SAME error keeps the identity stable across snapshots (so a dismissal
   // sticks); a DIFFERENT error yields a different identity (so it re-raises).
   const again = lastErrorBanner({
-    lastError: { tsMs: 2, code: 'INVALID_PARAMS', message: 'duplicate internal key: lua_momentum' },
+    lastError: {
+      tsMs: 2,
+      code: 'INVALID_PARAMS',
+      message: 'duplicate internal key: lua_momentum (balance 7.898029, drift -0.000000)',
+    },
   })
   assert.equal(again?.identity, refusal.identity, 'same failure → same identity')
   const other = lastErrorBanner({
     lastError: { tsMs: 3, code: 'VENUE_ERROR', message: 'different failure' },
   })
   assert.notEqual(other?.identity, refusal.identity, 'a new failure re-raises the banner')
+  // Volatile figures inside the message must NOT change the identity: the
+  // accounting-audit note embeds balances/drift/timestamps recomputed on every
+  // reconcile pass, and an identity that churns with them resurrects a
+  // dismissed banner (2026-10-28 operator report: 警告还是关不掉). `again`
+  // above already carries churned numbers; a ms-timestamp churn is the other
+  // live variant (anchor correction at 1793176336641).
+  const churned = lastErrorBanner({
+    lastError: {
+      tsMs: 4,
+      code: 'INVALID_PARAMS',
+      message: 'duplicate internal key: lua_momentum (balance 7.898029, drift -7.898029 at 1793176336641)',
+    },
+  })
+  // The conditional "at <ts>" tail is a real wording change (a different
+  // realign branch) — same skeleton + churned NUMBERS must collapse, so assert
+  // on the balance/drift churn only.
+  assert.equal(
+    churned?.identity,
+    'error:INVALID_PARAMS:duplicate internal key: lua_momentum (balance N drift -N at N)',
+    'number churn with identical skeleton → same identity',
+  )
+  const skeletonStable = lastErrorBanner({
+    lastError: {
+      tsMs: 5,
+      code: 'INVALID_PARAMS',
+      message: 'duplicate internal key: lua_momentum (balance 0.000000, drift -7.898029)',
+    },
+  })
+  assert.equal(
+    skeletonStable?.identity,
+    again?.identity,
+    'churned numbers, same skeleton → same identity (stays dismissed)',
+  )
+  // Dismiss-memory contract: one dismissal covers every churned variant.
+  const dismissedSet = new Set([refusal.identity])
+  assert.ok(again?.identity && dismissedSet.has(again.identity), 'churned variant stays dismissed')
+  assert.ok(
+    skeletonStable?.identity && dismissedSet.has(skeletonStable.identity),
+    'skeleton-stable variant stays dismissed',
+  )
   // Legacy slot and the other amber banners carry identities too.
   assert.ok(lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'x' } })?.identity)
   assert.ok(connectionBanner({ lastError: 'core not reachable' })?.identity)

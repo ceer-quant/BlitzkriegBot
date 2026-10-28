@@ -2476,6 +2476,36 @@ async fn handle_line(
             }
         }
 
+        // #684: the operator's clear-out verb for an EXPIRED market's
+        // position whose settlement verdict never arrived. All gates (expiry
+        // past, audit path present, position exists) live in the kernel
+        // method — the dispatch layer only attributes the actor, the same
+        // posture as `system.reset_trading`'s arm.
+        method::POSITION_FORCE_CLOSE => {
+            typed(params, |p: PositionForceCloseParams| {
+                let core = core.clone();
+                async move {
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } => format!("uid:{uid}"),
+                        _ => "uid:unknown".to_string(),
+                    };
+                    let closed = core.lock().await.force_close_expired_position(
+                        &p.position_id,
+                        &actor,
+                        now_ms(),
+                    )?;
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(PositionForceCloseResult {
+                            position_id: closed.id,
+                            price: closed.exit_price,
+                        })
+                        .unwrap_or(Value::Null),
+                    )
+                }
+            })
+            .await
+        }
+
         method::BOOK_SNAPSHOT => {
             typed(params, |p: BookSnapshotParams| {
                 let core = core.clone();

@@ -2351,6 +2351,15 @@ impl WebServer {
                 // order whose round is still live and lands the audit row.
                 self.proxy_backtest_body("orders.force_close", &req.body)
             }
+            ("POST", "/api/positions/force-close") => {
+                // #684: the 当前持仓 card's per-row clear-out write path for an
+                // EXPIRED market's position whose settlement verdict never
+                // arrived. The body IS the `positions.force_close` params
+                // object (`{positionId}`), forwarded verbatim; the kernel
+                // refuses a live round (that is positions.exit's job) and an
+                // unaudited call, and lands the manual-ops audit row itself.
+                self.proxy_backtest_body("positions.force_close", &req.body)
+            }
             ("GET", "/api/execution-policy") | ("GET", "/api/execution-policy/preview") => {
                 // #364: the settings page's 生效风控 section. Effective view =
                 // `execution_policy.get` (the kernel folds `[accounts.<id>]`

@@ -92,6 +92,18 @@ die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
 # is lost.
 ua_die() { die "$1"; }
 
+# Rotate the run log aside instead of truncating it in place (issue 690). Both
+# start points below used to `: > "$RUN_LOG"`, so every upgrade — and every
+# rollback — destroyed the previous core's entire stdout (the 2026-10-28
+# evidence incident left one generation of runtime output unrecoverable). Now
+# the previous generation is `mv -f`'d to `.1` first: exactly one old log is
+# kept, the next rotation overwrites it, so the disk cost stays bounded at two
+# files. Log content, path and everything downstream are unchanged.
+rotate_run_log() {
+  if [ -f "$RUN_LOG" ]; then mv -f "$RUN_LOG" "$RUN_LOG.1"; fi
+  : > "$RUN_LOG"
+}
+
 mode="ship"
 case "${1:-}" in
   "") ;;
@@ -208,7 +220,9 @@ rollback_and_die() {
   "$release/blitzkrieg" stop || true
   sleep 2
   ua_rollback
-  : > "$RUN_LOG"
+  # The tail -30 above already happened, so the evidence from the failed
+  # generation survives this rotation (issue 690).
+  rotate_run_log
   nohup "$release/blitzkrieg" run >> "$RUN_LOG" 2>&1 &
   sleep 10
   old=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$lock" 2>/dev/null || true)
@@ -216,7 +230,7 @@ rollback_and_die() {
 }
 
 step "7. start the stack and verify identity within ${READY_DEADLINE}s"
-: > "$RUN_LOG"
+rotate_run_log
 nohup "$release/blitzkrieg" run >> "$RUN_LOG" 2>&1 &
 ready=""
 i=0

@@ -508,6 +508,17 @@ export interface ForceCloseOrderBody {
   orderId: string
 }
 
+/** #684 `positions.force_close` 请求体：只点名持仓，判定（过期/审计门）在内核。 */
+export interface ForceClosePositionBody {
+  positionId: string
+}
+
+/** #684 `positions.force_close` 回执：平账落地的持仓与价格（最后 mid，缺则入场价）。 */
+export interface ForceClosePositionResultDoc {
+  positionId: string
+  price: number | string
+}
+
 // ── 轮次时间周期设置卡（mirror core schema RoundDurationResult / runtime cell）──
 
 /** 白名单一行（内核 RoundDurationOption 的 wire 形状；label 缺省 = 非标档位）。 */
@@ -968,6 +979,19 @@ export const api = {
    */
   forceCloseOrder: (body: ForceCloseOrderBody) =>
     request<{ success: boolean }>('/orders/force-close', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * #684 当前持仓卡的清除写路径（`positions.force_close`）：只对已过期市场
+   * 的持仓可用 —— 场地 updown 列表只载未来轮次，过期 conditionId 的裁决
+   * 永远等不到。内核三道门（持仓存在 / 已过期 / manual-ops 审计路径），
+   * 活轮持仓拒绝并提示走 positions.exit。按兜底价平账入历史（最后 mid，
+   * 缺则入场价 = 成本回收），不建 redemption claim —— 现金真值由既有
+   * reconcile/realign sweep 跟平。
+   */
+  forceClosePosition: (body: ForceClosePositionBody) =>
+    request<ForceClosePositionResultDoc>('/positions/force-close', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

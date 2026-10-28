@@ -310,16 +310,43 @@ pub async fn spawn_from_env(
     let signer = LocalSigner::from_str(&pk)?.with_chain_id(Some(polymarket_client_sdk_v2::POLYGON));
     let signer_address = signer.address();
 
+    // #694 Plan B: pin this deployment's watermark before any order can be
+    // signed, so every salt this process ever emits carries the same high
+    // 20 bits. Env pin > persisted default (generated once from machine
+    // identity + install moment); the startup line reports which and prints
+    // the 20-bit number only — never a credential.
+    let (deploy_fp, fp_source) = crate::fingerprint::init_deploy_fingerprint();
+    eprintln!("polymarket-extension: deploy fingerprint {deploy_fp:05x} (source: {fp_source:?})");
+
+    // #694 Plan A: the kernel's own API-key nonce. Default (unset) keeps the
+    // historical nonce-0 key shared with the web session — a deployment that
+    // never sets POLYMARKET_API_KEY_NONCE must not silently change identity.
+    // Nonce != 0 derives a kernel-only key, which the venue's fills then name
+    // in their `owner` field ("who placed this order" becomes checkable).
+    let api_key_nonce = crate::fingerprint::parse_api_key_nonce(
+        std::env::var("POLYMARKET_API_KEY_NONCE").ok().as_deref(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(format!(
+            "polymarket-extension: {e} (set 0 or unset for the shared key)"
+        ))
+    })?;
+
     let client_unauth = Client::new(&url, Config::builder().use_server_time(true).build())?;
-    // L2 credentials for the user WebSocket, derived from the private key here
-    // so Node never needs API keys at all.
+    // L2 credentials for the user WebSocket — and, when a dedicated nonce is
+    // configured, for the TRADING client too: the authenticated builder would
+    // otherwise re-derive at nonce 0 (`None`) and undo Plan A. Deriving once
+    // here and passing the credentials through keeps one derivation (one
+    // `POST /auth/api-key` per boot) and one identity end to end.
     let ws_credentials: Credentials = client_unauth
-        .create_or_derive_api_key(&signer, None)
+        .create_or_derive_api_key(&signer, api_key_nonce)
         .await?;
     let client = client_unauth
         .authentication_builder(&signer)
+        .credentials(ws_credentials.clone())
         .funder(funder)
         .signature_type(SignatureType::Poly1271)
+        .salt_generator(crate::fingerprint::salt_generator)
         .authenticate()
         .await?;
 

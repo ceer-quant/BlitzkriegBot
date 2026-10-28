@@ -123,6 +123,27 @@ pub struct LateFill {
 pub struct FillOutcome {
     pub delta: Option<FillDelta>,
     pub late_fill: Option<LateFill>,
+    /// issue 691: a fill that resolved to NO order at all — buffered for retry
+    /// and, on first sight, flagged so the service can audit + alert it. The
+    /// shares are real money moving at the venue with no order of ours to
+    /// attribute them to; the buffer cap (500, FIFO) means silence is a data
+    /// hole, not a safety property.
+    pub ghost_fill: Option<GhostFill>,
+}
+
+/// A fill the OME could not attribute to any order (`apply_fill_report`'s
+/// resolve-miss branch). Pure fact carried up to the service, which owns the
+/// alert + audit I/O — the OME itself performs none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostFill {
+    /// Venue trade id / tx hash / synthetic key; `-` in the alert text when the
+    /// venue carried neither (the key that dedup would use is empty then).
+    pub trade_id: String,
+    pub token_id: TokenId,
+    pub side: Side,
+    /// Cumulative size the venue reported for this trade.
+    pub size: Decimal,
+    pub price: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +267,13 @@ pub struct Ome {
     applied_seq: u64,
     pending_fills: Vec<PendingFill>,
     pending_ttl_ms: i64,
+    /// issue 691: trade keys already alerted as unresolvable, so a venue that
+    /// re-reports the same ghost trade does not page the operator twice — and
+    /// a trade whose order LATER registers clears out and can alert again if
+    /// it ever ghosts anew. Bounded in practice by the same venue behaviour
+    /// the pending buffer bounds; a `HashSet` would do, but the OME already
+    /// imports `BTreeSet` and ghost keys number in single digits.
+    ghost_alerted: BTreeSet<String>,
 }
 
 impl Ome {
@@ -262,6 +290,7 @@ impl Ome {
             applied_seq: 0,
             pending_fills: Vec::new(),
             pending_ttl_ms: 30_000,
+            ghost_alerted: BTreeSet::new(),
         }
     }
 
@@ -866,16 +895,79 @@ impl Ome {
         }
 
         let order_id = match self.resolve(&fill) {
-            Some(id) => id,
-            None => {
-                self.pending_fills.push(PendingFill {
-                    fill,
-                    at_ms: now_ms,
-                });
-                if self.pending_fills.len() > 500 {
-                    self.pending_fills.remove(0);
+            Some(id) => {
+                // issue 691: the order caught up with the fill (restart replay,
+                // a late registration). The ghost alert retires — a trade that
+                // resolves is not a ghost, whatever it looked like earlier.
+                if let Some(key) = fill
+                    .trade_id
+                    .clone()
+                    .or_else(|| fill.tx_hash.clone())
+                    .filter(|k| !k.is_empty())
+                {
+                    self.ghost_alerted.remove(&key);
                 }
-                return Ok(FillOutcome::default());
+                id
+            }
+            None => {
+                // issue 691: an unattributable fill must not vanish into this
+                // memory queue (cap 500, FIFO — silence is a data hole, not a
+                // safety property). First sight of a trade key flags the
+                // outcome; the service turns the flag into the audit row +
+                // RiskAlert, exactly like a late fill. A re-report of the same
+                // trade stays silent, and a FAILED notice books no money so it
+                // never alerts (the same gate the duplicate check above uses).
+                let key = fill
+                    .trade_id
+                    .clone()
+                    .or_else(|| fill.tx_hash.clone())
+                    .unwrap_or_default();
+                let ghost_src = (fill.status != FillStatus::Failed && !key.is_empty()).then(|| {
+                    (
+                        key.clone(),
+                        fill.token_id.clone(),
+                        fill.side,
+                        fill.size,
+                        fill.price,
+                    )
+                });
+                let first_seen = ghost_src.is_some()
+                    && self
+                        .ghost_alerted
+                        .insert(ghost_src.as_ref().unwrap().0.clone());
+                let pending_len = {
+                    self.pending_fills.push(PendingFill {
+                        fill,
+                        at_ms: now_ms,
+                    });
+                    if self.pending_fills.len() > 500 {
+                        self.pending_fills.remove(0);
+                    }
+                    self.pending_fills.len()
+                };
+                let ghost = first_seen.then(|| {
+                    let (key, token_id, side, size, price) = ghost_src.unwrap();
+                    tracing::warn!(
+                        trade = %key,
+                        token = %token_id,
+                        side = ?side,
+                        size = %size,
+                        price = %price,
+                        pending = pending_len,
+                        "ghost_fill — fill report resolved to NO order of ours; buffered and alerted (issue 691)"
+                    );
+                    GhostFill {
+                        trade_id: key,
+                        token_id,
+                        side,
+                        size,
+                        price,
+                    }
+                });
+                return Ok(FillOutcome {
+                    ghost_fill: ghost,
+                    ..FillOutcome::default()
+                });
             }
         };
         fill.order_id = order_id.clone();
@@ -906,6 +998,7 @@ impl Ome {
                     l.trade_id = trade_key;
                     l
                 }),
+                ghost_fill: None,
             });
         }
 
@@ -939,6 +1032,7 @@ impl Ome {
                 l.trade_id = trade_key;
                 l
             }),
+            ghost_fill: None,
         })
     }
 

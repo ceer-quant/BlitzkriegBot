@@ -9,6 +9,7 @@
 
 pub mod discovery;
 pub mod feed;
+pub mod fingerprint;
 pub mod gamma;
 pub mod live;
 pub mod net_check;
