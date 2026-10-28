@@ -672,10 +672,12 @@ impl CoreConfig {
                     continue;
                 }
                 let ok = receipt.contains("registered into the engine dispatch");
+                tracing::info!(path = %path.display(), ok, receipt = %receipt, "strategy auto-load");
+                // Static literal at the stream sink (#693 family): the kernel
+                // receipt rides the structured line above.
                 eprintln!(
-                    "blitzkrieg-core: strategy auto-load {}: {}",
-                    if ok { "ok" } else { "FAILED" },
-                    receipt
+                    "blitzkrieg-core: strategy auto-load {} — see the info log line above",
+                    if ok { "ok" } else { "FAILED" }
                 );
             }
         }
@@ -705,10 +707,12 @@ impl CoreConfig {
                 continue;
             }
             let ok = receipt.contains("registered into the engine dispatch");
+            tracing::info!(pkg = %pkg.display(), ok, receipt = %receipt, "lua strategy auto-load");
+            // Static literal at the stream sink (#693 family); the receipt
+            // rides the structured line above.
             eprintln!(
-                "blitzkrieg-core: lua strategy auto-load {}: {}",
-                if ok { "ok" } else { "FAILED" },
-                receipt
+                "blitzkrieg-core: lua strategy auto-load {} — see the info log line above",
+                if ok { "ok" } else { "FAILED" }
             );
         }
     }

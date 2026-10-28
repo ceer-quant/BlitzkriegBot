@@ -397,16 +397,14 @@ impl Core {
         if reserved == Decimal::ZERO {
             if balance != free {
                 self.realign_venue_cash(venue, free);
-                eprintln!(
-                    "core: venue cash reconcile [{venue}]: ledger {balance} -> venue free {free}"
-                );
+                tracing::warn!(venue = %venue, ledger = %balance, venue_free = %free, "venue cash reconciled to the venue's report");
+                eprintln!("core: venue cash reconcile — see the warn log line above");
             }
         } else {
             let expected_free = balance - reserved;
             if (expected_free - free).abs() > Decimal::new(2, 2) {
-                eprintln!(
-                    "core: venue cash drift [{venue}]: ledger={balance} reserved={reserved} venue free={free} (resting orders; not auto-corrected)"
-                );
+                tracing::warn!(venue = %venue, ledger = %balance, reserved = %reserved, venue_free = %free, "venue cash drift (resting orders; not auto-corrected)");
+                eprintln!("core: venue cash drift — see the warn log line above");
             }
         }
     }
@@ -1783,8 +1781,12 @@ impl Core {
                 "accounting audit FAILED — new entries blocked until it passes: {}",
                 report.note
             );
-            eprintln!("core: {message}");
+            // The reason rides the structured channels (tracing / error slot /
+            // RiskAlert); the stream write stays a static literal — kernel
+            // text reaching the stream sink is the cleartext-logging shape
+            // CodeQL flags (#693 family).
             tracing::error!(drift = %report.drift_usd, "{}", message);
+            eprintln!("core: accounting audit FAILED — see the error log line above");
             // The halt is an error of the highest order (entries are blocked), so
             // it also lands in the one panel-visible slot (#180).
             self.note_error(
@@ -1805,8 +1807,8 @@ impl Core {
                 "accounting audit recovered — new entries resumed ({})",
                 report.note
             );
-            eprintln!("core: {message}");
             tracing::info!("{message}");
+            eprintln!("core: accounting audit recovered — see the info log line above");
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
                 message,
@@ -1814,8 +1816,8 @@ impl Core {
         } else if !report.ok {
             // Failing but not (yet) halting: still loud, still persisted.
             let message = format!("accounting audit drift: {}", report.note);
-            eprintln!("core: {message}");
             tracing::warn!(drift = %report.drift_usd, "{}", message);
+            eprintln!("core: accounting audit drift — see the warn log line above");
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,
                 message,

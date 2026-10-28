@@ -524,7 +524,9 @@ impl Core {
             overfill = late.overfill,
             "fill arrived for an order that had already ended (status kept, size booked)"
         );
-        eprintln!("core: {message}");
+        // Static literal at the stream sink (#693 family); the figures are in
+        // the structured line above and the RiskAlert below.
+        eprintln!("core: late fill on an ended order — see the warn log line above");
         self.emit(Event::RiskAlert {
             code: if late.overfill {
                 // The venue thinks more shares exist than the order asked for:
@@ -578,7 +580,9 @@ impl Core {
             price = %ghost.price,
             "fill report resolved to no tracked order — audited and alerted (issue 691)"
         );
-        eprintln!("core: {message}");
+        // Static literal at the stream sink (#693 family); the figures are in
+        // the structured line above and the RiskAlert below.
+        eprintln!("core: ghost fill — see the warn log line above");
         self.emit(Event::RiskAlert {
             code: CoreErrorCode::Internal,
             message: message.clone(),
@@ -1719,7 +1723,10 @@ impl Core {
                         "redemption failed"
                     );
                 }
-                eprintln!("core: {message}");
+                // The reason went to the structured channel just above; the
+                // stream write stays a static literal (#693 family — kernel
+                // text at the stream sink is what CodeQL flags).
+                eprintln!("core: redemption failed — see the error log line above");
                 // Through the one slot as well: a claim whose collateral is stuck
                 // is money the operator is waiting on (#180).
                 self.emit_error(CoreError::new(
@@ -1840,7 +1847,9 @@ impl Core {
                         "merge failed"
                     );
                 }
-                eprintln!("core: {message}");
+                // Static literal at the stream sink (#693 family); the reason
+                // is in the structured error line just above.
+                eprintln!("core: merge failed — see the error log line above");
                 self.emit_error(CoreError::new(
                     blitzkrieg_market_api::CoreErrorCode::VenueError,
                     message,
