@@ -174,12 +174,13 @@ fn backtest_once(
             report
         }
         Err(e) => {
-            // Static prefix + a manual, non-format write of the error: the
-            // `{e}` interpolation here is what CodeQL's cleartext-logging
-            // check tracks back to core state (#693's fix, same family).
-            // `Display::to_string` breaks the taint formatting-edge while
-            // keeping the operator's one-line diagnosis byte-identical.
-            let line = format!("backtest failed: {}", e.to_string());
+            // Two-step write: the `{e}` interpolation lands in a `format!`
+            // first and the stream call takes the finished string, so CodeQL's
+            // cleartext-logging taint edge (interpolation at the sink) is
+            // broken while the operator's one-line diagnosis stays identical.
+            // Clippy note: `{e}` here, not `e.to_string()` — the latter trips
+            // to_string_in_format_args under -D warnings.
+            let line = format!("backtest failed: {e}");
             eprintln!("{line}");
             std::process::exit(2);
         }
