@@ -235,7 +235,25 @@ while [ "$i" -lt "$READY_DEADLINE" ]; do
   sleep 2
   i=$((i + 2))
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:51888/panel/ 2>/dev/null || echo 000)
+# ── the panel probe (#688) ───────────────────────────────────────────────────
+# What the probe must follow and why the old line misreported every upgrade:
+#   * ADDRESS. The launcher resolves the listen address the same way
+#     (run_unified: --addr > BLITZKRIEG_PANEL_ADDR from the repo .env >
+#     127.0.0.1:51888); this deployment binds 0.0.0.0 via .env, so the old
+#     hardcoded 127.0.0.1:<default-port> was never the shape to ask. The
+#     library helper mirrors that precedence (lib: ua_panel_addr), and a
+#     wildcard host is probed as 127.0.0.1 — ua_probe_url's comment explains
+#     why `curl http://0.0.0.0/` would be worse than useless.
+#   * TIMING. `blitzkrieg run` spawns the core and starts the web thread
+#     concurrently: the lock file can already name the new build while the
+#     bind is still microseconds away, so the probe retries before it speaks.
+#   * HONEST OUTPUT. `$(curl … || echo 000)` used to print curl's own 000 AND
+#     the fallback's 000 — the `panel probe 000000` every upgrade logged.
+PANEL_ADDR=$(ua_panel_addr "${BLITZKRIEG_PANEL_ARGS_ADDR:-}")
+PANEL_URL=$(ua_probe_url "$PANEL_ADDR")
+PANEL_PROBE_TRIES="${BLITZKRIEG_PANEL_PROBE_TRIES:-5}"
+PANEL_PROBE_TIMEOUT="${BLITZKRIEG_PANEL_PROBE_TIMEOUT:-3}"
+code=$(ua_panel_probe "$PANEL_URL" "$PANEL_PROBE_TRIES" "$PANEL_PROBE_TIMEOUT")
 
 if [ -z "$ready" ]; then
   rollback_and_die \
@@ -254,10 +272,17 @@ if [ -f "$repo_root/data/evolution/state.json" ]; then
   printf 'evolution bookkeeping (state.json, no switch authority since #578): %s\n' \
     "$(cat "$repo_root/data/evolution/state.json")"
 fi
-printf 'panel: HTTP %s on 127.0.0.1:51888/panel/\n' "$code"
+printf 'panel: HTTP %s on %s\n' "$code" "$PANEL_URL"
 case "$code" in
   200|302|401) ;;
-  *) echo "note: the panel probe answered $code — check the auth/port config before trading" >&2 ;;
+  *)
+    echo "note: the panel probe answered $code — the gateway did not answer on $PANEL_URL" >&2
+    echo "      (address precedence: --addr > BLITZKRIEG_PANEL_ADDR in $repo_root/.env > 127.0.0.1:51888)." >&2
+    echo "      If the panel is actually up, probe that real address by hand:" >&2
+    echo "        curl -4 -s -o /dev/null -w '%{http_code}' --connect-timeout 3 $PANEL_URL" >&2
+    echo "      If it is genuinely down, check the tail of $RUN_LOG for a web server error" >&2
+    echo "      and see the listen address with: lsof -nP -iTCP -sTCP:LISTEN | grep blitzkrieg" >&2
+    ;;
 esac
 
 printf '\nUPGRADE OK — production now runs %s (rollback: %s)\n' "$SRC_SHORT" "$ROLLBACK"

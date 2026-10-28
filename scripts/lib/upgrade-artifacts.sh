@@ -15,7 +15,9 @@
 # `scripts/upgrade.sh`, never executed on its own, and it deliberately knows
 # nothing about cargo, npm or git: every function works on directories the caller
 # names, which is what lets `scripts/upgrade-propagate-test.sh` exercise the whole
-# install/rollback path with no build and no network.
+# install/rollback path with no build and no network. (The panel-probe helpers
+# at the bottom are the one exception that touches the network — the propagate
+# test drives them with a local throwaway listener instead.)
 #
 # Contract — the caller exports, all paths absolute:
 #   REPO_ROOT   the running checkout (what the kernel reads)
@@ -286,6 +288,97 @@ ua_prune_rollbacks() {
       *) ua_die "refusing to prune '$old': not a rollback directory" ;;
     esac
   done
+}
+
+# ── the post-start panel probe (#688) ────────────────────────────────────────
+# Three helpers, each pure enough for the propagate test to drive with no
+# network and no live stack.
+
+# The address the panel actually listens on, following the same precedence the
+# launcher resolves at startup (`blitzkrieg run`, see run_unified):
+#   $1 = --addr if given   >   BLITZKRIEG_PANEL_ADDR (the repo .env carries it)
+#   >   127.0.0.1:51888 (loopback default)
+# The old probe hardcoded the loopback default. This production server binds
+# 0.0.0.0:<port> via .env, so the probe shot a host:port that answers —
+# verified 2026-10-28 — yet every upgrade logged `panel probe 000000`.
+ua_panel_addr() {
+  addr_env=""
+  if [ -f "$REPO_ROOT/.env" ]; then
+    # Last assignment wins: parse_env_file/set_var semantics in env_file.rs.
+    addr_env=$(sed -n 's/^[[:space:]]*BLITZKRIEG_PANEL_ADDR=[[:space:]]*//p' "$REPO_ROOT/.env" | tail -n 1)
+    # One optional layer of matching quotes, as the .env parser strips.
+    case "$addr_env" in
+      \"*\") addr_env=${addr_env#\"}; addr_env=${addr_env%\"} ;;
+      \'*\') addr_env=${addr_env#\'}; addr_env=${addr_env%\'} ;;
+    esac
+  fi
+  if [ -n "$1" ]; then
+    printf '%s\n' "$1"
+  elif [ -n "$addr_env" ]; then
+    printf '%s\n' "$addr_env"
+  else
+    printf '127.0.0.1:51888\n'
+  fi
+}
+
+# Normalize a listen addr to a probe URL. A wildcard host is replaced with the
+# loopback literal — `curl http://0.0.0.0:51888/` connects nowhere on macOS
+# (BSD sendto: sin_zero), while on Linux it would loop back and *miss* the
+# 0.0.0.0-vs-LAN-IP listening problem this probe exists to surface. IPv6 is
+# handled explicitly: an already-bracketed `[::1]:51888` passes through, a bare
+# `::1` gets brackets — the naive `host=${addr%%:*}` split mangles both, which
+# is why the shapes are separated before any splitting happens.
+ua_probe_url() {
+  addr="$1"
+  case "$addr" in
+    # Already-bracketed IPv6: the port is after the last colon; the host keeps
+    # its closing bracket (`%:*` strips only the port — `%%]:*` would eat the
+    # bracket too, which is exactly the mangling this branch exists to avoid).
+    \[*:*)
+      host="${addr%:*}"
+      port="${addr##*:}"
+      printf 'http://%s:%s/panel/\n' "$host" "$port"
+      ;;
+    # All-loopback IPv6, bare — the common LAN shorthand.
+    "::1")
+      printf 'http://[::1]:51888/panel/\n'
+      ;;
+    # Any other bare IPv6 (colons beyond the port separator): bracket all but
+    # the last colon; an empty/unspecified host (`::`) probes the loopback.
+    *:*:*|::)
+      host="[$(printf '%s' "$addr" | sed 's/:[^:]*$//')]"; port=${addr##*:}
+      case "$host" in "[::]"|"[]") host="127.0.0.1" ;; esac
+      printf 'http://%s:%s/panel/\n' "$host" "$port"
+      ;;
+    # IPv4 / hostname[:port] — the everyday shapes.
+    *)
+      host=${addr%%:*}; port=${addr#*:}
+      [ "$host" = "0.0.0.0" ] && host="127.0.0.1"
+      printf 'http://%s:%s/panel/\n' "$host" "$port"
+      ;;
+  esac
+}
+
+# The probe itself: `$1` = full URL, `$2` = attempts, `$3` = per-attempt curl
+# timeout in seconds. Retries, because the launcher spawns the core and the web
+# thread concurrently — after .core-lock carries the new identity the bind can
+# still be microseconds away. Prints the final HTTP code (000 = could not
+# connect; curl already said it once, so no `|| echo` doubling).
+ua_panel_probe() {
+  url="$1"; attempts="$2"; timeout="$3"
+  code=000
+  n=0
+  while [ "$n" -lt "$attempts" ]; do
+    # `|| true` keeps the failure status off the assignment: under the caller's
+    # `set -e` a connection refusal (curl exit 7) would otherwise abort the
+    # function before the final printf, and the probe would report NOTHING.
+    code=$(curl -4 -s -o /dev/null -w '%{http_code}' --connect-timeout "$timeout" "$url" 2>/dev/null || true)
+    [ -n "$code" ] || code=000
+    n=$((n + 1))
+    [ "$code" = "000" ] || break
+    [ "$n" -lt "$attempts" ] && sleep 2
+  done
+  printf '%s\n' "$code"
 }
 
 # Is the webui's node_modules behind its lockfile? A pure file-mtime verdict —
