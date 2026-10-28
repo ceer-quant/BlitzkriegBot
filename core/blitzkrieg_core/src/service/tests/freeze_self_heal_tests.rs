@@ -80,8 +80,10 @@ fn close_intent_insufficient_position_does_not_feed_freeze_streak() {
     }
     assert!(
         c.account_freeze_reason("default").is_none(),
-        "benign close rejections must never freeze the account: {:?}",
-        c.account_freeze_reason("default")
+        // Static message (no {:?} interpolation): CodeQL's cleartext-logging
+        // check flags measured-value interpolation in test asserts (#693's
+        // fix, same family); the reason itself is on the line above.
+        "benign close rejections must never freeze the account"
     );
     assert!(
         !c.is_killed(),
@@ -129,8 +131,8 @@ fn open_intent_insufficient_position_still_counts() {
     assert!(
         c.account_freeze_reason("default")
             .is_some_and(|r| r.contains("consecutive venue rejections")),
-        "an open intent's refusal streak must still freeze the account: {:?}",
-        c.account_freeze_reason("default")
+        // Static message: same CodeQL cleartext-logging family as above.
+        "an open intent's refusal streak must still freeze the account"
     );
 }
 
@@ -145,8 +147,8 @@ fn auto_frozen_account_lifted_when_venue_accepts() {
     }
     assert!(
         c.account_freeze_reason("poly-acct").is_some(),
-        "precondition: 3 sweep failures auto-froze poly-acct: {:?}",
-        c.account_freeze_reason("poly-acct")
+        // Static message: same CodeQL cleartext-logging family as above.
+        "precondition: 3 sweep failures auto-froze poly-acct"
     );
     // A close flows through the freeze (the #174 hatch) and the venue takes it.
     let mut close = close_req("flatten:manual:tok");
@@ -157,8 +159,8 @@ fn auto_frozen_account_lifted_when_venue_accepts() {
     c.confirm_live(&id, 2_100).unwrap();
     assert!(
         c.account_freeze_reason("poly-acct").is_none(),
-        "venue acceptance must lift the auto freeze: {:?}",
-        c.account_freeze_reason("poly-acct")
+        // Static message: same CodeQL cleartext-logging family as above.
+        "venue acceptance must lift the auto freeze"
     );
     // A NEW order now passes the gate again — full trading capability back.
     let mut entry = open_req("fresh-entry");
@@ -227,8 +229,8 @@ fn reconcile_lift_respects_debounce() {
     .unwrap();
     assert!(
         c.account_freeze_reason("default").is_none(),
-        "past the debounce window a successful sweep lifts the auto freeze: {:?}",
-        c.account_freeze_reason("default")
+        // Static message: same CodeQL cleartext-logging family as above.
+        "past the debounce window a successful sweep lifts the auto freeze"
     );
 }
 
