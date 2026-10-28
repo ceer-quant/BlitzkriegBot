@@ -54,11 +54,24 @@ const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
 // 不自动消失。其余（最近交易错误 / 连接 / 归档）琥珀色 + ✕ + 40s 自动消失；
 // 关掉的是「这一条」（identity 计），同一条不再重弹，新错误重新亮起。
 const AUTO_DISMISS_MS = 40_000
-const dismissed = ref(new Set<string>())
+// Dismiss memory lives in sessionStorage, not in a ref: the kernel's lastError
+// slot survives page refreshes (it only moves when the NEXT error arrives), so
+// an in-memory Set re-lit the exact banner the operator just closed on reload.
+// sessionStorage scopes that to the tab session — a fresh tab / new error
+// (different identity) alerts again, as it should.
+const DISMISS_KEY = 'overview.dismissed-banners'
+const loadDismissed = (): Set<string> => {
+  try {
+    const raw = sessionStorage.getItem(DISMISS_KEY)
+    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+  } catch { return new Set() }
+}
+const dismissed = ref(loadDismissed())
 const dismiss = (identity: string) => {
   const next = new Set(dismissed.value)
   next.add(identity)
   dismissed.value = next
+  try { sessionStorage.setItem(DISMISS_KEY, JSON.stringify([...next])) } catch { /* private mode */ }
 }
 // The kernel's `lastError` slot keeps its value until the NEXT error overwrites
 // it — a dismissed identity must stay dismissed across snapshots. A different
