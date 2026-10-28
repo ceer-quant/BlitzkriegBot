@@ -174,6 +174,11 @@ fn backtest_once(
             report
         }
         Err(e) => {
+            // Static word + Display of the error value only: interpolating a
+            // backtest report through this path is the shape CodeQL's
+            // cleartext-logging check flags in this crate (#693's fix, same
+            // family). The error's own Display stays — it is the operator's
+            // one-line diagnosis; the full report never ran.
             eprintln!("backtest failed: {e}");
             std::process::exit(2);
         }
