@@ -687,7 +687,10 @@ fn daily_loss_breaker_trips_on_unrealized_loss() {
     assert!(realized < Decimal::ZERO && realized > dec!(-10));
     assert!(
         !pm.daily_loss_tripped_for("default"),
-        "realized {realized} alone is inside the 10 cap"
+        // Static message: CodeQL's cleartext-logging check flags test-assert
+        // interpolation of measured values (#693's fix, same family) — the
+        // actual figures are on the line above anyway.
+        "realized alone is inside the 10 cap"
     );
     // unrealized leg: 100 shares entered 0.40, marked 0.20 → −20 on paper.
     enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.20));
@@ -695,7 +698,7 @@ fn daily_loss_breaker_trips_on_unrealized_loss() {
     assert!(realized + pm.unrealized_pnl_usd() <= dec!(-10));
     assert!(
         pm.daily_loss_tripped_for("default"),
-        "realized {realized} + unrealized −20 must breach the 10 cap"
+        "realized + unrealized −20 must breach the 10 cap"
     );
     assert!(
         pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 2000)
@@ -729,7 +732,7 @@ fn realized_only_config_ignores_unrealized_loss() {
     // …but the breaker must not judge on it.
     assert!(
         !pm.daily_loss_tripped_for("default"),
-        "realized-only: {realized} against a 10 cap is not a trip"
+        "realized-only against a 10 cap is not a trip"
     );
     assert!(
         pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 2000)
