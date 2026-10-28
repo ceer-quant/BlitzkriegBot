@@ -30,6 +30,24 @@ import type { EngineStats, Snapshot } from '@/api/client'
 
 export interface SafetyBanner {
   tone: 'error' | 'warn'
+  /**
+   * Severity, not color alone: `urgent` banners are the conditions under which
+   * trading is DOWN right now (freeze, failed self-check) — red, persistent,
+   * no auto-dismiss, no ✕ (the operator must act or fix the condition; hiding
+   * the only red on the cockpit hides the outage). Everything else is
+   * `attention`: amber, dismissible, and it fades on its own — a transient
+   * refusal record must not squat on the cockpit until the next error
+   * overwrites it (2026-10-28 operator call: 红色只留给紧急，其余黄色 +
+   * 自动消失 + X).
+   */
+  urgent: boolean
+  /**
+   * Stable key for dismiss-memory on non-urgent banners (`error:INVALID_PARAMS`
+   …
+   * the same failure re-raises; a DIFFERENT error gets a fresh banner). Urgent
+   * banners ignore it — they cannot be dismissed away.
+   */
+  identity?: string
   title: string
   body: string
   hint?: string
@@ -54,6 +72,8 @@ export function connectionBanner(snap: Snapshot | null | undefined): SafetyBanne
   if (!err) return null
   return {
     tone: 'warn',
+    urgent: false,
+    identity: 'connection',
     title: '面板无法连接内核',
     body: err,
     hint: '先确认 blitzkrieg-core 进程在运行（进程页可启停），再刷新；这一条来自网关，不是内核的交易错误。',
@@ -70,6 +90,7 @@ export function freezeBanner(stats: EngineStats | null | undefined): SafetyBanne
   if (!frozen?.active) return null
   return {
     tone: 'error',
+    urgent: true,
     title: '交易已冻结（kill switch）',
     body: frozen.reason || '交易已被冻结，原因未上报。',
     hint: '冻结期间新开仓被拒绝，平仓不受影响。核对原因后在进程页重启内核，或按风控流程解除。',
@@ -95,6 +116,8 @@ export function lastErrorBanner(
   if (structured) {
     return {
       tone: 'warn',
+      urgent: false,
+      identity: `error:${structured.code}:${structured.message}`,
       title: '最近交易错误',
       body: structured.message,
       code: structured.code,
@@ -106,6 +129,8 @@ export function lastErrorBanner(
   // No `code` field: an older core pre-rendered the code into this string.
   return {
     tone: 'warn',
+    urgent: false,
+    identity: `error:legacy:${legacy.message}`,
     title: '最近交易错误',
     body: legacy.message,
     hint: '旧内核的兼容字段（lastVenueError），内容形如「代码: 原因」。',
@@ -123,6 +148,7 @@ export function selfCheckBanner(stats: EngineStats | null | undefined): SafetyBa
   const failed = (report.items ?? []).filter((i) => !i.ok)
   return {
     tone: 'error',
+    urgent: true,
     title: '交易能力自检未通过',
     body: failed.length
       ? `${failed.length} 项探测失败`
@@ -146,6 +172,8 @@ export function archiveStoppedBanner(stats: EngineStats | null | undefined): Saf
   const reason = archive.stoppedReason || 'unknown'
   return {
     tone: 'warn',
+    urgent: false,
+    identity: 'archive-stopped',
     title: '事件归档已停录',
     body: `事件归档已停录（${reason}）——回测语料不再记录`,
     hint: '行情事件不再落盘，回测/复盘语料从停录时刻起缺失。清理磁盘或调大归档上限后重启会话恢复录制。',
