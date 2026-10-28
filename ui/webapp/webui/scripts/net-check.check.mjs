@@ -17,7 +17,7 @@
  *   cd ui/webapp/webui && npm run check:net
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -226,14 +226,23 @@ for (const [field, rustFnName, heading, tsFnName] of TABLES) {
 // 网络诊断跟随显示账户（2026-10-25 操作者报告）：内核按 display venue 选插件、
 // 网关缓存带 venue 维度 —— 切户后读数必须立刻换到新账户的 venue，不许在 TTL
 // 内继续端旧账户的网络。三个钉各守一层。
+// （issue 699 拆分后动词臂住进 ipc/server/handlers/ —— 钉「调用形态」的检查
+// 扫 server.rs + handlers/ 全体，钉到的是单一入口这个事实，不是文件名。）
+const IPC_DISPATCH_SOURCES = [
+  read('core', 'blitzkrieg_core', 'src', 'ipc', 'server.rs'),
+  ...readdirSync(join(here, '..', '..', '..', '..', 'core', 'blitzkrieg_core', 'src', 'ipc', 'server', 'handlers'), { recursive: true })
+    .filter((f) => f.endsWith('.rs'))
+    .map((f) => read('core', 'blitzkrieg_core', 'src', 'ipc', 'server', 'handlers', f)),
+]
+const ipcSourcesJoined = IPC_DISPATCH_SOURCES.join('\n')
+
 check('内核 NET_CHECK 按 display venue 解析插件（net_check_plugin 单一入口）', () => {
-  const server = read('core', 'blitzkrieg_core', 'src', 'ipc', 'server.rs')
   assert.ok(
-    server.includes('net_check_plugin(registry, display_venue'),
+    ipcSourcesJoined.includes('net_check_plugin(registry, display_venue'),
     'NET_CHECK does not resolve the plugin via net_check_plugin',
   )
   assert.ok(
-    server.includes('display_venue().to_string()'),
+    ipcSourcesJoined.includes('display_venue().to_string()'),
     'NET_CHECK does not read the display venue from the account book',
   )
 })
