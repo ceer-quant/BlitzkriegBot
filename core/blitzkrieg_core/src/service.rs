@@ -10064,6 +10064,9 @@ impl Core {
         if let Some(late) = outcome.late_fill {
             self.emit_late_fill(&late, now_ms);
         }
+        if let Some(ghost) = outcome.ghost_fill {
+            self.emit_ghost_fill(&ghost, now_ms);
+        }
     }
 
     /// Surface a fill that landed on an order which had already ended (or that
@@ -10126,6 +10129,51 @@ impl Core {
             "orderSize": late.order_size.to_string(),
             "reportedCumulative": late.reported_cumulative.to_string(),
             "overfill": late.overfill,
+        }));
+        message
+    }
+
+    /// Surface a fill report that resolved to NO order of ours (issue 691).
+    /// Same shape as [`Core::emit_late_fill`]: the existing `RiskAlert` event
+    /// (no new wire type), a greppable `ghost_fill …` message, and one audit
+    /// row so the shares that moved at the venue stay on the record. The OME
+    /// only flags the FIRST sight of a trade key and clears it once the fill
+    /// resolves, so re-reports stay quiet and a late-resolving trade stops
+    /// alerting on its own.
+    pub fn emit_ghost_fill(&mut self, ghost: &crate::ome::GhostFill, now_ms: i64) -> String {
+        let message = format!(
+            "ghost_fill trade={} token={} side={} size={} price={} — no order to attribute; buffered for retry",
+            if ghost.trade_id.is_empty() {
+                "-"
+            } else {
+                &ghost.trade_id
+            },
+            ghost.token_id,
+            ghost.side.as_str(),
+            ghost.size,
+            ghost.price,
+        );
+        tracing::warn!(
+            trade = %ghost.trade_id,
+            token = %ghost.token_id,
+            side = ?ghost.side,
+            size = %ghost.size,
+            price = %ghost.price,
+            "fill report resolved to no tracked order — audited and alerted (issue 691)"
+        );
+        eprintln!("core: {message}");
+        self.emit(Event::RiskAlert {
+            code: CoreErrorCode::Internal,
+            message: message.clone(),
+        });
+        self.persist_audit_value(serde_json::json!({
+            "atMs": now_ms,
+            "event": "ghost_fill",
+            "tradeId": ghost.trade_id,
+            "tokenId": ghost.token_id,
+            "side": ghost.side.as_str(),
+            "size": ghost.size.to_string(),
+            "price": ghost.price.to_string(),
         }));
         message
     }
@@ -17500,6 +17548,7 @@ mod tests {
     mod fee_quote_tests;
     mod fill_model_tests;
     mod freeze_self_heal_tests;
+    mod ghost_fill_tests;
     mod order_state_machine_462_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;
