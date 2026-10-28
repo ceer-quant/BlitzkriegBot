@@ -224,23 +224,31 @@ pub async fn run_panel_with_dispatcher(
         );
         std::thread::spawn(move || reader.run());
     }
+    // Issue 719: the drain BLOCKS on the bus — the publisher signals the bus's
+    // condvar, so a quiet core costs this task nothing (no poll to wake it) and
+    // a published batch reaches the loop the instant it lands. The 30 s cap is
+    // a hang probe, not a latency budget; the main loop's own 1 s tick stays
+    // the render heartbeat. One persistent subscription (not a per-drain
+    // clone): each event is delivered exactly once.
     {
         let bus = bus.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let sub = bus.subscribe();
+            let sub = Arc::new(Mutex::new(bus.subscribe()));
             loop {
                 let drained = tokio::task::spawn_blocking({
                     let bus = bus.clone();
-                    let mut sub = sub.clone();
-                    move || bus.drain_new(&mut sub)
+                    let sub = sub.clone();
+                    move || {
+                        let mut s = sub.lock().unwrap();
+                        bus.wait_drain(&mut s, Duration::from_secs(30))
+                    }
                 })
                 .await
                 .unwrap_or_default();
                 if !drained.is_empty() && tx.send(Msg::Events(drained)).is_err() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(200)).await;
             }
         });
     }

@@ -20,12 +20,6 @@ const FG: Color = Color::Reset;
 /// bare `Color::Yellow` at the call site is how the two sides drifted apart.
 const WARN: Color = Color::Yellow;
 
-fn signed(v: f64, unit: &str) -> String {
-    format!("{}{:.2}{}", if v >= 0.0 { "+" } else { "-" }, v.abs(), unit)
-}
-fn signed_pct(v: f64) -> String {
-    format!("{}{:.1}%", if v >= 0.0 { "+" } else { "-" }, v.abs())
-}
 fn color_of(v: f64) -> Color {
     if v >= 0.0 {
         GREEN
@@ -671,7 +665,7 @@ fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
     f.render_widget(
         stat(
             "Net PnL",
-            signed(net, ""),
+            blitzkrieg_ui_kit::web::money(net),
             format!("{} trades · {:.0}% WR", s.trades.len(), s.win_rate()),
             Style::default().fg(color_of(net)),
         ),
@@ -780,7 +774,7 @@ fn render_positions(f: &mut Frame, area: Rect, s: &UiSnapshot) {
                 Cell::from(format!("{:.2}", p.entry_price)),
                 Cell::from(format!("{:.2}", p.current_price)),
                 Cell::from(Span::styled(
-                    signed_pct(p.unrealized_pct),
+                    blitzkrieg_ui_kit::web::pct(p.unrealized_pct),
                     Style::default().fg(color_of(p.unrealized_pct)),
                 )),
                 Cell::from(format!("{}s", p.remaining_sec)),
@@ -911,11 +905,11 @@ fn render_trades(f: &mut Frame, area: Rect, s: &UiSnapshot) {
                 Cell::from(t.strategy.clone()),
                 Cell::from(format!("{:.2}→{:.2}", t.entry_price, t.exit_price)),
                 Cell::from(Span::styled(
-                    signed(t.net_pnl_usd, ""),
+                    blitzkrieg_ui_kit::web::money(t.net_pnl_usd),
                     Style::default().fg(color_of(t.net_pnl_usd)),
                 )),
                 Cell::from(Span::styled(
-                    signed_pct(t.net_pnl_pct),
+                    blitzkrieg_ui_kit::web::pct(t.net_pnl_pct),
                     Style::default().fg(color_of(t.net_pnl_pct)),
                 )),
                 Cell::from(format!("{}s", t.hold_time_sec)),
@@ -1932,9 +1926,9 @@ fn push_comparison(lines: &mut Vec<Line<'static>>, p: &EvolutionProposalView) {
         ),
         (
             "net",
-            signed(p.baseline.net_pnl_usd, ""),
-            signed(p.variant.net_pnl_usd, ""),
-            signed(p.variant.net_pnl_usd - p.baseline.net_pnl_usd, ""),
+            blitzkrieg_ui_kit::web::money(p.baseline.net_pnl_usd),
+            blitzkrieg_ui_kit::web::money(p.variant.net_pnl_usd),
+            blitzkrieg_ui_kit::web::money(p.variant.net_pnl_usd - p.baseline.net_pnl_usd),
             Some(p.variant.net_pnl_usd > p.baseline.net_pnl_usd),
         ),
     ];
@@ -2081,6 +2075,24 @@ fn render_log(f: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// issue 719: the signed figures now come from the ui_kit shared
+    /// formatters (the same functions behind the web face's HTML), so the
+    /// TUI's visible bytes are pinned here too — a format change on either
+    /// side must fail a test before the two faces can drift apart.
+    #[test]
+    fn shared_signed_formatters_render_the_pinned_bytes() {
+        assert_eq!(blitzkrieg_ui_kit::web::money(12.341), "+12.34");
+        assert_eq!(blitzkrieg_ui_kit::web::money(-12.341), "-12.34");
+        assert_eq!(blitzkrieg_ui_kit::web::money(0.0), "+0.00");
+        assert_eq!(blitzkrieg_ui_kit::web::pct(3.44), "+3.4%");
+        assert_eq!(blitzkrieg_ui_kit::web::pct(-3.44), "-3.4%");
+        assert_eq!(blitzkrieg_ui_kit::web::pct(0.0), "+0.0%");
+        // The evolution tab's own fraction-scaled pct keeps its local
+        // semantics (0.4 → "40.0%", NOT the shared "+0.4%").
+        assert_eq!(pct(0.4), "40.0%");
+        assert_eq!(f2(3.14519), "3.15");
+    }
 
     fn line(text: &str) -> Line<'static> {
         Line::from(text.to_string())

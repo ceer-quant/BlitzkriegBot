@@ -31,10 +31,17 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn money(v: f64) -> String {
+/// One signed money figure shared by every adapter face (`+12.34` / `-3.00`).
+/// Pure presentation — no trading meaning, no GUI dependency; the TUI panel
+/// renders the same bytes from the same function (issue 719).
+pub fn money(v: f64) -> String {
     format!("{}{:.2}", if v >= 0.0 { "+" } else { "-" }, v.abs())
 }
-fn pct(v: f64) -> String {
+/// One signed percentage figure shared by every adapter face (`+3.4%`).
+/// Semantics deliberately differ from the evolution tab's fraction-scaled
+/// `pct` in `ui_kit_panel` — that one multiplies by 100 first; this takes a
+/// percent that already is one.
+pub fn pct(v: f64) -> String {
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "-" }, v.abs())
 }
 
@@ -3005,6 +3012,20 @@ mod tests {
     fn body_json_or_raw() {
         assert_eq!(body_to_command("{\"cmd\":\"status\"}"), "status");
         assert_eq!(body_to_command("  stop  "), "stop");
+    }
+
+    /// issue 719: `money`/`pct` are now the shared signed figures BOTH faces
+    /// render (web HTML + the TUI panel's PnL columns), so the wire-visible
+    /// bytes are pinned here — a format change on either side fails this test
+    /// before it can silently diverge the two faces.
+    #[test]
+    fn shared_signed_formatters_render_the_pinned_bytes() {
+        assert_eq!(money(12.341), "+12.34");
+        assert_eq!(money(-12.341), "-12.34");
+        assert_eq!(money(0.0), "+0.00");
+        assert_eq!(pct(3.44), "+3.4%");
+        assert_eq!(pct(-3.44), "-3.4%");
+        assert_eq!(pct(0.0), "+0.0%");
     }
 
     #[test]
