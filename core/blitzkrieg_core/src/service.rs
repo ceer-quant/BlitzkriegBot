@@ -1599,6 +1599,14 @@ pub struct Core {
     /// GLOBAL kill switch (`risk.kill`, `is_killed`) is unchanged and
     /// still outranks everything.
     account_freezes: HashMap<String, String>,
+    /// 冻结自愈（2026-10-28 真线事故）：AUTO-frozen accounts and WHEN —
+    /// account id → freeze timestamp (ms). Only the three automatic freeze
+    /// routes (rejection streak, failed self-check, failed sweep streak)
+    /// register here, so `auto_lift_if_venue_healthy` can tell "the kernel
+    /// froze this on circumstantial evidence" from an operator's deliberate
+    /// `account.freeze` — the latter must never self-lift. Same `&mut self`
+    /// discipline as `account_freezes`: no lock, atomic by construction.
+    auto_frozen: HashMap<String, i64>,
     /// Consecutive failed reconciliation sweeps (a successful sweep resets).
     /// Reaching the threshold freezes trading — a blind safety net is the
     /// failure mode that lets ghosts and orphans accumulate (E31-b).
@@ -2433,6 +2441,7 @@ impl Core {
             consecutive_venue_rejects: 0,
             consecutive_venue_rejects_by_account: HashMap::new(),
             account_freezes: HashMap::new(),
+            auto_frozen: HashMap::new(),
             consecutive_sweep_failures: 0,
             consecutive_sweep_failures_by_venue: HashMap::new(),
             last_error: None,
@@ -4282,6 +4291,10 @@ impl Core {
             ));
         }
         self.accounts.remove(id)?;
+        // 冻结簿随账户走：旧实现留着悬空冻结项（同名 id 重建即继承上一世
+        // 的 kill switch），自愈时间戳同理一并摘除。
+        self.account_freezes.remove(id.as_str());
+        self.auto_frozen.remove(id.as_str());
         self.accounts.repair_active_after_removal(id);
         // 显示账户配置化: the removal must not orphan the display pointer —
         // the file was rewritten WITHOUT the row above, and the same render
@@ -9078,6 +9091,11 @@ impl Core {
             self.consecutive_venue_rejects = 0;
             self.consecutive_venue_rejects_by_account
                 .remove(o.account_id.as_str());
+            // 冻结自愈：the venue just accepted an order from this account —
+            // the strongest proof of life there is. An AUTO freeze rides
+            // circumstantial evidence (a rejection streak, a failed probe);
+            // positive evidence outranks it. Manual freezes never lift here.
+            self.auto_lift_if_venue_healthy(o.account_id.as_str(), "venue accepted order", now_ms);
             self.place_cooldowns.remove(&o.internal_key);
             // A `maker_then_taker` order rests as GTC; the escalation clock
             // starts on the venue's acceptance (the submit path cannot arm it
@@ -9268,8 +9286,30 @@ impl Core {
         now_ms: i64,
     ) {
         self.stats.venue_rejected += 1;
-        self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
-        let account_streak = {
+        // 冻结自愈（2026-10-28 真线事故）：a close intent refused with
+        // "Insufficient position" means the venue says the position is ALREADY
+        // GONE — almost always the exit POST that timed out actually FILLED.
+        // That is benign bookkeeping drift, not a venue defect: feeding it to
+        // the freeze streaks froze accounts for hours (5 honest rejections in
+        // a row = kill switch). Close intents keep their per-intent backoff
+        // below; only the freeze counters are exempt. Opening intents with
+        // the same reason stay counted — for them the refusal is a real gate.
+        let benign_close = is_close_intent(internal_key) && is_position_already_gone(&err.message);
+        if benign_close {
+            if !self.place_cooldowns.contains_key(internal_key) {
+                tracing::warn!(
+                    key = %internal_key,
+                    account = %account_id,
+                    reason = %err.message,
+                    "benign close-intent rejection (Insufficient position) — backoff retry continues, freeze streak not fed"
+                );
+            }
+        } else {
+            self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
+        }
+        let account_streak = if benign_close {
+            0
+        } else {
             let streak = self
                 .consecutive_venue_rejects_by_account
                 .entry(account_id.to_string())
@@ -9298,6 +9338,26 @@ impl Core {
             cd.next_ok_ms = now_ms + reject_backoff_ms(cd.attempts);
             (cd.attempts, cd.next_ok_ms)
         };
+        if benign_close {
+            // 良性拒单的 40 哨兵（≈15–20 分钟连续退避重试）：场所账本和本地
+            // 簿已经分歧到退出永远落不下去。平仓意图本身仍继续重试（裸露
+            // 敞口不能弃），但对账 sweep 应当把场所侧的成交折叠回来——在此
+            // 之前操作员值得听一次响。
+            // TODO(#684): Once phantom positions are resolved (expiry fallback
+            // settlement), this safeguard becomes a fallback.
+            if attempts == BENIGN_CLOSE_DIVERGENCE_ATTEMPTS {
+                let message = format!(
+                    "close intent {internal_key} account {account_id} rejected {attempts} times \
+                     in a row (Insufficient position) — venue state diverged, reconcile sweep \
+                     should fold the fill; manual attention advised"
+                );
+                tracing::error!("{message}");
+                self.emit(Event::RiskAlert {
+                    code: blitzkrieg_market_api::CoreErrorCode::VenueError,
+                    message,
+                });
+            }
+        }
         tracing::info!(
             "venue rejected order: key={internal_key} attempts={} next_retry_in={}ms reason={}",
             attempts,
@@ -9309,12 +9369,13 @@ impl Core {
         // survives for the legacy readout; the trip decision is the
         // account-scoped one.
         if account_streak >= FREEZE_ON_REJECTS {
-            self.freeze_account(
+            self.freeze_account_auto(
                 account_id,
                 format!(
                     "{account_streak} consecutive venue rejections on account {account_id}; last: {}",
                     err.message
                 ),
+                now_ms,
             );
         } else if attempts >= MAX_PLACE_ATTEMPTS {
             // One intent keeps bouncing. Entries stop here; closing intents
@@ -9409,6 +9470,48 @@ impl Core {
         tracing::error!(account = %account, reason = %reason, "account frozen (account-scoped kill switch)");
     }
 
+    /// The AUTOMATIC freeze route: [`Self::freeze_account`] plus a timestamp
+    /// in `auto_frozen` — but only when the freeze actually landed. The
+    /// freeze is idempotent (first reason wins), so a re-freeze of an
+    /// already-frozen account keeps the ORIGINAL stamp: the clock an
+    /// auto-lift debounces against is the moment the operator first lost
+    /// the account, not the latest symptom.
+    ///
+    /// 手动冻结（`account.freeze` 直达 `freeze_account`）从不登记 —— 操作员
+    /// 的裁决只能由操作员推翻，健康探针不得越权。
+    fn freeze_account_auto(&mut self, account: &str, reason: String, now_ms: i64) {
+        let fresh = !self.account_freezes.contains_key(account);
+        self.freeze_account(account, reason);
+        if fresh {
+            self.auto_frozen.insert(account.to_string(), now_ms);
+        }
+    }
+
+    /// 冻结自愈的解冻半边：only an AUTO-frozen account may self-lift, and
+    /// only on positive evidence the venue recovered (`trigger` names it).
+    /// A manual freeze is never touched — `auto_frozen` is the ledger that
+    /// separates kernel circumstantial freezes from operator verdicts.
+    fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
+        let Some(frozen_at) = self.auto_frozen.get(account).copied() else {
+            return;
+        };
+        self.resume_account(account);
+        self.auto_frozen.remove(account);
+        let minutes = (now_ms - frozen_at).max(0) / 60_000;
+        tracing::warn!(
+            account = %account,
+            frozen_duration_ms = now_ms - frozen_at,
+            trigger = %trigger,
+            "auto-frozen account auto-lifted — venue proved healthy"
+        );
+        self.emit(Event::RiskAlert {
+            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
+            message: format!(
+                "自动冻结已解除（{trigger}）：账户 {account} 冻结 {minutes} 分钟后场地恢复"
+            ),
+        });
+    }
+
     /// Lift one account's freeze (`account.freeze` with `frozen: false`, the
     /// reset path, or a future operator verb). Unknown account = no-op: the
     /// freeze book only ever contains accounts the kernel knows.
@@ -9417,6 +9520,10 @@ impl Core {
             self.engine_set_account_frozen(account, false);
             tracing::info!(account = %account, "account freeze lifted");
         }
+        // 手动解冻也要摘掉自愈时间戳：freeze book 与 auto ledger 对同一
+        // 账户要么都有意、要么都干净，半悬空状态只会让下一次 auto-lift
+        // 读到一个已不存在的冻结。
+        self.auto_frozen.remove(account);
     }
 
     /// Why an account is frozen, when it is.
@@ -9826,7 +9933,7 @@ impl Core {
             // #532 routing): same contract as `freeze_account` — new entries
             // refused, closes keep flowing.
             for account in self.accounts.account_ids_bound_to_venue(venue) {
-                self.freeze_account(&account, message.clone());
+                self.freeze_account_auto(&account, message.clone(), ts);
             }
             // No bound account (unbound deployments, dry tests): keep the
             // legacy global freeze so the failure is never silently dropped.
@@ -9890,12 +9997,13 @@ impl Core {
                 return;
             }
             for account in accounts {
-                self.freeze_account(
+                self.freeze_account_auto(
                     &account,
                     format!(
                         "reconciliation sweep failed {streak} times in a row on {venue}: {}",
                         err.message
                     ),
+                    now_ms,
                 );
             }
         }
@@ -10929,6 +11037,22 @@ impl Core {
         // alive, and a fresh failure just rebuilds its own streak).
         self.consecutive_sweep_failures = 0;
         self.consecutive_sweep_failures_by_venue.clear();
+        // 冻结自愈：a successful sweep proves the transport fabric alive, but
+        // the snapshot names no venue — so every AUTO-frozen account gets the
+        // same evidence, debounced by FREEZE_AUTO_LIFT_MIN_MS (a fresh freeze
+        // rides out the flash outage that caused it before the lift fires).
+        // Manual freezes are invisible to this loop by construction.
+        for account in self.auto_frozen.keys().cloned().collect::<Vec<_>>() {
+            if let Some(t) = self.auto_frozen.get(account.as_str())
+                && snap.now_ms - t >= FREEZE_AUTO_LIFT_MIN_MS
+            {
+                self.auto_lift_if_venue_healthy(
+                    account.as_str(),
+                    "reconcile sweep succeeded",
+                    snap.now_ms,
+                );
+            }
+        }
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
             crate::reconcile::ReconcileAction::FilledGap { delta, .. } => Some(delta.clone()),
@@ -12855,6 +12979,7 @@ impl Core {
         self.consecutive_venue_rejects_by_account
             .remove(account_id.as_str());
         self.account_freezes.remove(account_id.as_str());
+        self.auto_frozen.remove(account_id.as_str());
         self.consecutive_sweep_failures = 0;
         self.last_error = None;
         // #537: the strategy page's PnL counters are the OTHER survivor —
@@ -16640,6 +16765,16 @@ const FREEZE_ON_REJECTS: u32 = 5;
 /// Consecutive failed reconciliation sweeps that freeze trading (E31-b): a
 /// blind sweep is the failure mode that lets ghosts and orphans accumulate.
 const SWEEP_FAILURE_FREEZE: u32 = 3;
+/// 冻结自愈防抖：an AUTO-frozen account is only lifted by a reconcile sweep
+/// after THIS long, so the flash outage that caused the freeze has to stay
+/// quiet for ten minutes before the kernel trusts it again (真线 2026-10-28:
+/// 断网恢复后 sweep 曾长期无处落地，冻结白挂数小时).
+const FREEZE_AUTO_LIFT_MIN_MS: i64 = 600_000;
+/// A benign close-intent rejection (Insufficient position) backoff-retried
+/// THIS many times in a row (≈15–20 min under the exponential curve) before
+/// the kernel shouts once: the venue's book and ours have diverged on one
+/// position, and only a reconcile sweep (or a human) can close the gap.
+const BENIGN_CLOSE_DIVERGENCE_ATTEMPTS: u32 = 40;
 
 /// #462: how long a place-timeout order may sit pending with no venue evidence
 /// (no id bound, no fold, nothing) before the reconciliation sweep retires it
@@ -16699,6 +16834,17 @@ fn reject_backoff_ms(attempts: u32) -> i64 {
     // bounded patience for a persistent one.
     let ms = REJECT_BACKOFF_BASE_MS.saturating_mul(1 << (attempts.saturating_sub(1)).min(4));
     ms.min(REJECT_BACKOFF_MAX_MS)
+}
+
+/// 冻结自愈（2026-10-28 真线事故）：did the venue say the position we tried
+/// to close is ALREADY GONE? The canonical text is polymarket CLOB's
+/// "Insufficient position for limit sell order" — the honest refusal an exit
+/// POST draws when the timed-out sell actually FILLED. Matched lowercase on
+/// the stable stem, so wording drift around it is tolerated.
+fn is_position_already_gone(rejection_message: &str) -> bool {
+    rejection_message
+        .to_lowercase()
+        .contains("insufficient position")
 }
 
 /// How long a resting `maker_then_taker` order waits before the taker leg
@@ -17061,6 +17207,7 @@ mod tests {
     mod exit_reason_table_tests;
     mod fee_quote_tests;
     mod fill_model_tests;
+    mod freeze_self_heal_tests;
     mod order_state_machine_462_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;
