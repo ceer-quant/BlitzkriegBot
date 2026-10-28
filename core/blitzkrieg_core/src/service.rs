@@ -3065,7 +3065,9 @@ impl Core {
     ///
     /// Three counters, all OME state — no new wire type, no new persistence:
     ///  - total fills applied (the applied-fill idempotency table, one row per
-    ///    venue trade id ever absorbed, including late fills);
+    ///    venue trade id ever absorbed, including late fills) — attributed to
+    ///    THIS book via its order's account (#701: the raw table length is
+    ///    GLOBAL and would let venue A's fills mute venue B's alert);
     ///  - tracked orders with at least one fill (filled_size > 0);
     ///  - tracked orders live or terminal with any size (order records at all).
     ///
@@ -3075,7 +3077,20 @@ impl Core {
     /// stays quiet.
     fn venue_trade_records(&self, venue: &str, target: &crate::account::AccountId) -> usize {
         let bound = self.accounts.account_for_venue(venue).is_some();
-        let total_fills = self.ome.applied_len();
+        // #701: fills are attributed through their ORDER's account — an
+        // applied-fill row is only this book's evidence when the order it
+        // landed on belongs to `target`. An order from a sibling account can
+        // never explain THIS book's residual; an order no longer in the
+        // table's sight claims no book at all (fail toward alerting).
+        let applied_orders = self.ome.applied_order_ids();
+        let attributed_fills = self
+            .ome
+            .all()
+            .iter()
+            .filter(|o| {
+                applied_orders.contains(o.order_id.as_str()) && (o.account_id == *target || !bound)
+            })
+            .count();
         let (filled_orders, any_orders) = {
             let mut filled = 0usize;
             let mut any = 0usize;
@@ -3091,12 +3106,12 @@ impl Core {
             (filled, any)
         };
         if bound {
-            total_fills + filled_orders + any_orders
+            attributed_fills + filled_orders + any_orders
         } else {
             // The legacy single-account fallback parked this venue's report on
             // the one book — its orders are this venue's history by
             // construction (the account did not exist to scope by).
-            total_fills + any_orders
+            attributed_fills + any_orders
         }
     }
 
