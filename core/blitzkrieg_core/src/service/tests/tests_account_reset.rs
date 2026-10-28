@@ -173,16 +173,22 @@ async fn single_account_deployment_keeps_the_legacy_venue_cash_fallback() {
     // fold drift killer：无 resting、余额对不上时仍自动校正（旧语义）。
     c.fold_venue_free("polysimulator", Decimal::from(90));
     assert_eq!(c.ledger().balance(), Decimal::from(90));
-    // 全程零告警 —— 拒绝路径在单账户形态下绝不触发。
+    // 拒绝路径在单账户形态下绝不触发 —— #646 钉的就是这个静默。注意
+    // realign/fold 的幽灵成交告警（issue 692）不在此列：本 fixture 未注入
+    // SIMULATED 声明，polysimulator 在这里扮演「持真钱的真盘」，fold 把
+    // 100 校正到 90 正是该响亮告警的零记录异动形态（同一数值序列在
+    // ghost_cash_move_tests.rs 有专门的告警断言）。
     let mut alerts = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        if let Event::RiskAlert { message, .. } = ev {
+        if let Event::RiskAlert { message, .. } = ev
+            && message.contains("refused")
+        {
             alerts.push(message);
         }
     }
     assert!(
         alerts.is_empty(),
-        "the single-account fallback must stay silent: {alerts:?}"
+        "the single-account fallback must never hit the #646 refusal: {alerts:?}"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

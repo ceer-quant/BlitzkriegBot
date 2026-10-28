@@ -1659,6 +1659,12 @@ pub struct Core {
     /// silent (the alert fired once; the banner reads `stats.archive`), and a
     /// defensive `false → true` reset just re-arms the detector.
     archive_recording_last: bool,
+    /// 幽灵成交探测器（issue 692）：已告警过「场地现金异动而内核零成交/订单
+    /// 记录」的 venue 集合 —— 去重键就是异常窗口本身（该 venue 绑定账户零
+    /// 记录的整段时期）。账户一旦出现内核自己的成交/订单记录，窗口关闭、
+    /// 槽位摘除（此后带交易史的修正走「正常 realign」静默分支；新会话槽位
+    /// 随 Core 重建，零记录异动自然重新武装）。
+    ghost_cash_alerted: std::collections::HashSet<String>,
     /// F4: close-accounting credentials for fill-driven full closes, keyed by
     /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
     /// strategy PnL / breaker immediately; if the venue later reports that same
@@ -2458,6 +2464,7 @@ impl Core {
             settlement,
             venue_free_by_venue: std::collections::HashMap::new(),
             archive_recording_last: true,
+            ghost_cash_alerted: std::collections::HashSet::new(),
             close_credentials: std::collections::VecDeque::new(),
             close_credential_log,
             next_id: 1,
@@ -3024,6 +3031,10 @@ impl Core {
                 .map(|l| l.balance())
                 .unwrap_or_default();
             if previous != b {
+                // 幽灵成交探测器（issue 692）：把「场地在我不知情时动了钱」变成
+                // 操作者第一时间可见的事实 —— 详论与告警见 `report_venue_cash_move`。
+                let trade_records = self.venue_trade_records(venue, &target);
+                self.report_venue_cash_move(venue, &target, previous, b, trade_records, ts);
                 // The move is recorded PER VENUE so the audit's trade-leg check
                 // can name the venue's own correction on ITS book only — a
                 // sibling venue's realign must never explain this book's
@@ -3045,6 +3056,157 @@ impl Core {
             ledger.set_balance(b);
         }
         tracing::debug!(account = %target.as_str(), venue = %venue, balance = %b, "venue cash routed");
+    }
+
+    /// The kernel's own trading evidence for one venue's book, as the count of
+    /// fills/orders the OME can name (issue 692's「有对应成交记录」side). Any
+    /// nonzero count closes the anomaly window: a residual correction over a
+    /// book with trading history is the documented normal-realign shape.
+    ///
+    /// Three counters, all OME state — no new wire type, no new persistence:
+    ///  - total fills applied (the applied-fill idempotency table, one row per
+    ///    venue trade id ever absorbed, including late fills);
+    ///  - tracked orders with at least one fill (filled_size > 0);
+    ///  - tracked orders live or terminal with any size (order records at all).
+    ///
+    /// `total_fills == 0` alone would be a lie after a restart (the table
+    /// replays from its log only when one is configured), so the order leg is
+    /// the second witness: a core that placed orders knows its own trading and
+    /// stays quiet.
+    fn venue_trade_records(&self, venue: &str, target: &crate::account::AccountId) -> usize {
+        let bound = self.accounts.account_for_venue(venue).is_some();
+        let total_fills = self.ome.applied_len();
+        let (filled_orders, any_orders) = {
+            let mut filled = 0usize;
+            let mut any = 0usize;
+            for o in self.ome.all() {
+                if bound && o.account_id != *target {
+                    continue;
+                }
+                any += 1;
+                if o.filled_size > Decimal::ZERO {
+                    filled += 1;
+                }
+            }
+            (filled, any)
+        };
+        if bound {
+            total_fills + filled_orders + any_orders
+        } else {
+            // The legacy single-account fallback parked this venue's report on
+            // the one book — its orders are this venue's history by
+            // construction (the account did not exist to scope by).
+            total_fills + any_orders
+        }
+    }
+
+    /// 幽灵成交探测器（issue 692）：the realign channel's alert.
+    ///
+    /// The 2026-10-28 11:31 incident: the venue's cash moved
+    /// (13.596906 → 7.898029) with the kernel knowing NOTHING about it. The
+    /// accounting was later proven correct — reconcile found the gap, the
+    /// journal `ref=venue` realign row booked it honestly — but the whole chain
+    /// was SILENT: this channel used to write the journal row and say nothing,
+    /// so the anomaly surfaced only days later through a manual audit. The
+    /// correction row is bookkeeping; the venue having moved money the kernel
+    /// cannot attribute is a RISK FACT, and it must be loud.
+    ///
+    /// Same shape as [`Self::emit_late_fill`] (ipc/schema.rs is not this
+    /// change's territory): the existing `RiskAlert` event carries a greppable
+    /// `unattributed_cash_move …` line, the same fact lands in the audit JSONL,
+    /// and `tracing` + stderr say it too.
+    ///
+    /// 去重键 = 异常窗口本身（该 venue 绑定账户零成交/订单记录的整段时期），
+    /// 不是单次记账：a reconcile cycle repeats every `audit_interval_sec`, and
+    /// the uncorrected gap would re-alert on every fold — alert spam trains
+    /// operators to ignore the one alert that matters. So the venue is marked
+    /// alerted and stays silent for as long as the window persists. When the
+    /// kernel gains its own trading evidence for the book (a real fill, an
+    /// order record) the slot is REMOVED — but from that instant the realign
+    /// is a normal correction anyway (the branch above): silence is correct
+    /// for it. Re-arming happens through the evidence leg itself: a fresh
+    /// session (or a book whose records were reset away) starts with an empty
+    /// slot, so a NEW unattributed move alerts again. Zero false positives is
+    /// the other half of the contract: a normal realign (a residual correction
+    /// with corresponding trade records) never alerts.
+    fn report_venue_cash_move(
+        &mut self,
+        venue: &str,
+        target: &crate::account::AccountId,
+        previous: Decimal,
+        reported: Decimal,
+        trade_records: usize,
+        now_ms: i64,
+    ) {
+        if trade_records > 0 {
+            // The book has trading history: a realign here is the documented
+            // normal correction (fee-level residue, settlement timing, a
+            // manual close). Silence is CORRECT, and any earlier ghost alert
+            // for this venue is retired — its anomaly window is over.
+            self.ghost_cash_alerted.remove(venue);
+            return;
+        }
+        if previous == Decimal::ZERO {
+            // The boot adoption, not a move: a LIVE book wakes at zero and its
+            // FIRST venue report IS the balance (`realign_venue_cash` is the
+            // seeding path — #646's regression pins this silence). Nothing was
+            // "moved"; there was nothing to move. The detector watches the
+            // book from the second report on.
+            return;
+        }
+        if self.plugin_modes.iter().any(|p| {
+            p.name == venue
+                && p.modes.iter().any(|m| {
+                    m.capabilities
+                        .satisfies(blitzkrieg_market_api::MarketCapabilities::SIMULATED)
+                })
+        }) {
+            // A SIMULATED-declared (paper) venue: its reported free cash is
+            // the simulation's own bookkeeping (freezes on resting BUYs, never
+            // nets reservations back — the #669 arithmetic), not a money fact
+            // about anyone's funds. The audit's venue leg already skips it for
+            // the same reason; alerting here would re-create that noise. The
+            // detector exists for venues that hold REAL cash.
+            return;
+        }
+        if !self.ghost_cash_alerted.insert(venue.to_string()) {
+            // Same anomaly window: already alerted once, stay quiet until the
+            // window closes (trade records appear) or a new session boots.
+            return;
+        }
+        let delta = reported - previous;
+        let message = format!(
+            "unattributed_cash_move venue={} account={} previous={} reported={} delta={} \
+             fills=0 orders=0 — the venue moved cash the kernel has no trade or \
+             order record for; booked as a realign (ref=venue), attributed to NOBODY",
+            venue,
+            target.as_str(),
+            previous,
+            reported,
+            delta,
+        );
+        tracing::error!(
+            venue = %venue,
+            account = %target.as_str(),
+            previous = %previous,
+            reported = %reported,
+            delta = %delta,
+            "venue cash moved with zero kernel trade/order records (ghost-fill detector, issue 692)"
+        );
+        eprintln!("core: {message}");
+        self.emit(Event::RiskAlert {
+            code: CoreErrorCode::Internal,
+            message: message.clone(),
+        });
+        self.persist_audit_value(serde_json::json!({
+            "atMs": now_ms,
+            "event": "unattributed_cash_move",
+            "venue": venue,
+            "account": target.as_str(),
+            "previous": previous.to_string(),
+            "reported": reported.to_string(),
+            "delta": delta.to_string(),
+        }));
     }
 
     /// The account a venue's cash truth belongs to: the first ACTIVE account
@@ -17208,6 +17370,7 @@ mod tests {
     mod fee_quote_tests;
     mod fill_model_tests;
     mod freeze_self_heal_tests;
+    mod ghost_cash_move_tests;
     mod order_state_machine_462_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;
