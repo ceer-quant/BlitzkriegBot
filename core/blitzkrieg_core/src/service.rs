@@ -299,19 +299,30 @@ pub struct Core {
     /// and comparing the new report to the book (instead of to the venue's own
     /// last word) would read a fully-explained correction as an anomaly.
     venue_truth_last: std::collections::HashMap<String, Decimal>,
-    /// #702: per venue, how many journal rows the venue's truth reports had
-    /// already ANSWERED FOR when its number last CHANGED — the evidence
-    /// window cursor. Rows after the cursor are facts the venue's current
-    /// number has not yet been checked against; rows before it are
-    /// reconciled history. A CHANGED report advances the cursor (the delta
-    /// was judged against everything before it); an EQUAL report deliberately
-    /// keeps the cursor — facts booked between two equal reports happened
-    /// after the venue's last word and belong to the still-open window.
+    /// issue 702: per venue, the GLOBAL row seq of the last journal row the venue's
+    /// truth reports had already ANSWERED FOR — the evidence window cursor.
+    /// Rows with a higher seq are facts the venue's current number has not yet
+    /// been checked against; rows at or below it are reconciled history. A
+    /// CHANGED report advances the cursor (the delta was judged against
+    /// everything before it); an EQUAL report deliberately keeps the cursor —
+    /// facts booked between two equal reports happened after the venue's last
+    /// word and belong to the still-open window.
     ///
     /// A cursor, not a timestamp: journal rows stamp real wall clock while
     /// replay/tests drive virtual clocks — comparing the two bases silently
-    /// swallows every fact. Row COUNT is the same sequence in both worlds.
-    venue_fact_cursor: std::collections::HashMap<String, usize>,
+    /// swallows every fact.
+    ///
+    /// issue 723: the seq, not the row COUNT. The journal is a bounded window
+    /// whose length freezes at [`crate::ledger::JOURNAL_CAP`] — a count-keyed
+    /// cursor skipped everything forever after (booked read 0, every legal
+    /// correction read as unattributed). The global seq = total rows ever
+    /// appended − window length + index (see
+    /// `Ledger::journal_seq_basis`), monotonic across eviction; the counter
+    /// is in-memory only and boot replay anchors it to the loaded row count.
+    /// Entries die with their ledger generation: account remove and account
+    /// reset clear the entries of the affected venues — a rebuilt ledger's
+    /// rows must never be judged by the previous generation's numbers.
+    venue_fact_cursor: std::collections::HashMap<String, u64>,
     /// F4: close-accounting credentials for fill-driven full closes, keyed by
     /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
     /// strategy PnL / breaker immediately; if the venue later reports that same
@@ -1885,6 +1896,7 @@ mod tests {
     mod freeze_self_heal_tests;
     mod ghost_cash_move_tests;
     mod ghost_fill_tests;
+    mod journal_cursor_tests;
     mod order_state_machine_462_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;
