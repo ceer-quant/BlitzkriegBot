@@ -1,15 +1,21 @@
 #![cfg(test)]
 
-//! 幽灵成交探测器（issue 692，2026-10-28 11:31 事故）：场地现金异动而内核
-//! 零认知时必须响亮告警。事故链：场地成交与现金变动（13.596906 →
-//! 7.898029），内核全程零认知；事后证明记账本身是对的（reconcile 发现差额
-//! → journal `ref=venue` realign 行如实记账），但整条链路静默 —— realign
-//! 通道只写 journal 行，异动只能靠人工对账事后发现。
+//! 幽灵成交探测器（issue 692，2026-10-28 11:31 事故；#702 决策修订）：场地
+//! 现金异动而内核解释不了时必须响亮告警。事故链：场地成交与现金变动
+//! （13.596906 → 7.898029），内核全程零认知；事后证明记账本身是对的
+//! （reconcile 发现差额 → journal `ref=venue` realign 行如实记账），但整条
+//! 链路静默 —— realign 通道只写 journal 行，异动只能靠人工对账事后发现。
 //!
-//! 验收（issue 692 三条）：
-//! 1. 场地现金变动且零成交/订单记录 → `RiskAlert` 恰一次；
-//! 2. 同一异常窗口下一轮 reconcile 不重复告警（去重键 = 异常窗口）；
-//! 3. 正常 realign（有对应成交记录的差额修正）零误报。
+//! #702 判据（窗口化证据，替代 #700 的终身订单计数）：本次差额能否被
+//! 「上次场地真值以来台账记下的现金事实」解释。终身计数被证明过宽 ——
+//! 一张零成交订单或很早以前的成交会永久豁免之后的所有未知变动。
+//!
+//! 验收（issue 702 五条）：
+//! 1. 零记录账户的未知现金减少 → 告警；
+//! 2. 历史成交已对账完成后，新的无归属现金变化 → 告警；
+//! 3. 同窗口真实成交能解释的修正 → 不误报；
+//! 4. 同一未解释残差重复报告只告警一次，变化后重新告警；
+//! 5. 拒单/零成交取消单（从不进台账）不构成免警凭据（验收 1 的账本即此形态）。
 
 use super::*;
 use crate::risk::RiskConfig;
@@ -58,9 +64,50 @@ fn ghost_alerts(alerts: &[String]) -> Vec<&String> {
         .collect()
 }
 
-/// 验收 1：场地现金变动且内核零成交/订单记录 → `RiskAlert` 恰一次，消息
-/// 可 grep（`unattributed_cash_move` 前缀 + venue + 金额），同一事实落审计
-/// JSONL —— 与 `emit_late_fill` 同一三面孔（事件 / 审计日志 / tracing）。
+/// 一笔真实成交的生产路径（挂单 → live → 确认成交）：订单行 + 台账 BuyFill
+/// 行各折一次。
+fn place_and_fill(c: &mut Core, price: Decimal, size: Decimal, ts: i64) {
+    c.book_snapshot("tok", vec![], vec![(price, dec!(100))], 1);
+    let req = crate::model::OrderRequest {
+        token_id: "tok".into(),
+        condition_id: "cond".into(),
+        side: Side::Buy,
+        mode: FillPolicy::Maker,
+        price,
+        size,
+        internal_key: "k1".into(),
+        strategy: "s1".into(),
+        asset: "BTC".into(),
+        direction: "up".into(),
+        round_slot: 1,
+        account_id: crate::model::default_account_id(),
+    };
+    let (id, _) = c.place(req, ts, ts + 1).unwrap();
+    c.bind_venue(&id, "0xv1".into(), ts + 2).unwrap();
+    c.ingest_fill(
+        Fill {
+            order_id: id,
+            trade_id: Some("t1".into()),
+            token_id: "tok".into(),
+            side: Side::Buy,
+            price,
+            size,
+            status: FillStatus::Confirmed,
+            ts_ms: ts + 3,
+            tx_hash: None,
+            maker: None,
+            account_id: crate::model::default_account_id(),
+        },
+        ts + 3,
+    )
+    .unwrap();
+}
+
+/// 验收 1：场地现金变动且内核窗口内零账务事实 → `RiskAlert` 恰一次，消息
+/// 可 grep（`unattributed_cash_move` 前缀 + venue + 金额 + 残差），同一事实
+/// 落审计 JSONL —— 与 `emit_late_fill` 同一三面孔（事件 / 审计日志 /
+/// tracing）。账本从未下过单（拒单/零成交取消单也不进台账），没有任何
+/// 免警凭据 —— issue 702「仅有拒单 → 未知现金减少：告警」的形态。
 #[test]
 fn venue_cash_move_with_zero_kernel_records_alerts_exactly_once() {
     let mut c = live_core_fixture("ghost-692-alert");
@@ -69,7 +116,15 @@ fn venue_cash_move_with_zero_kernel_records_alerts_exactly_once() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     c.set_event_sink(tx);
 
-    // 场地报它的真值（内核对这笔钱零成交、零订单记录）。
+    // 场地报它的真值（内核对这笔钱零账务事实）。首报是 boot adoption：
+    // 报数本身成为账本真值，静默 —— 窗口从此刻起算。
+    c.realign_venue_cash("polymarket", Decimal::new(13596906, 6));
+    assert!(
+        ghost_alerts(&drain_alerts(&mut rx)).is_empty(),
+        "the boot adoption seeds the book and never alerts"
+    );
+
+    // 第二轮报数：venue 自己动了 5.698877，内核窗口内零事实 → 响亮告警。
     c.realign_venue_cash("polymarket", Decimal::new(7898029, 6));
 
     let alerts = drain_alerts(&mut rx);
@@ -77,7 +132,7 @@ fn venue_cash_move_with_zero_kernel_records_alerts_exactly_once() {
     assert_eq!(
         ghost.len(),
         1,
-        "an unattributed venue cash move must alert exactly once: {alerts:?}"
+        "an unexplained venue cash move must alert exactly once: {alerts:?}"
     );
     let m = ghost[0];
     assert!(
@@ -87,10 +142,9 @@ fn venue_cash_move_with_zero_kernel_records_alerts_exactly_once() {
     assert!(m.contains("polymarket"), "names the venue: {m}");
     assert!(m.contains("13.596906"), "names the previous book: {m}");
     assert!(m.contains("7.898029"), "names the venue's report: {m}");
-    assert!(m.contains("fills=0"), "states the zero-fill evidence: {m}");
     assert!(
-        m.contains("orders=0"),
-        "states the zero-order evidence: {m}"
+        m.contains("residual=-5.698877"),
+        "states the unexplained residual (venue SHORT): {m}"
     );
 
     // The audit log carries the same fact (structured, with the amounts).
@@ -106,34 +160,201 @@ fn venue_cash_move_with_zero_kernel_records_alerts_exactly_once() {
     assert_eq!(events[0]["reported"], "7.898029");
 }
 
-/// 验收 2：同一异常窗口（账户仍零成交/零订单记录）下的下一轮 reconcile /
-/// fold 不重复告警 —— 去重键是异常窗口本身，不是单次记账。窗口关闭
-/// （内核获得自己的成交证据）后，账本带交易史，此后的修正按验收 3 的
-/// 「正常 realign」静默；全新会话自然重新武装（槽位随 Core 重建）。
+/// 验收 3：窗口内台账事实能解释的修正零误报 —— 成交花了 2.00，场地报数
+/// 相应少 2.00（Maker 零费）：残差 = −2 −(−2) = 0 → 静默。紧接的 fee 级
+/// 零头抖动（±0.01 以内）同样在 ε 容忍内。#702 验收「解释不足的残差不得
+/// 被全额免警」由 an_unexplained_move_after_history_was_reconciled 钉死。
 #[test]
-fn the_same_anomaly_window_does_not_re_alert_but_rearms_after_evidence() {
-    let mut c = live_core_fixture("ghost-692-dedup");
+fn a_correction_explained_by_window_facts_never_alerts() {
+    let mut c = live_core_fixture("ghost-702-normal");
     c.set_balance(Decimal::from(100));
     let (tx, mut rx) = mpsc::unbounded_channel();
     c.set_event_sink(tx);
 
-    // 首次异动：响亮告警一次。
+    // 真值进场：场地报 100，窗口起点就此定格。
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx);
+
+    // 窗口内一笔真实成交：买 0.40 × 5 = 2.00（Maker 零费，台账 −2.00）。
+    place_and_fill(&mut c, dec!(0.40), dec!(5), 10);
+    drain_alerts(&mut rx);
+
+    // 场地报 98 = 100 − 2.00：每一分都被窗口内的 BuyFill 解释 → 静默。
+    c.realign_venue_cash("polymarket", Decimal::from(98));
+
+    // fee 级零头（0.01 容忍内）依旧静默。
+    c.realign_venue_cash("polymarket", Decimal::new(9801, 2));
+
+    let alerts = drain_alerts(&mut rx);
+    assert!(
+        ghost_alerts(&alerts).is_empty(),
+        "a correction fully explained by this window's booked facts must never alert: {alerts:?}"
+    );
+}
+
+/// 验收 2：历史合法成交已对账完成后，新的无归属现金变化 → 告警。
+/// 这正是 #702 推翻的旧语义：成交在窗口 1 里发生并已被真值 98 对账收编；
+/// 窗口 2 里场地又动了 3.00 而内核零事实 —— 旧终身计数模型会因「有交易史」
+/// 永久静默，窗口模型正确告警。
+#[test]
+fn an_unexplained_move_after_history_was_reconciled_alerts() {
+    let mut c = live_core_fixture("ghost-702-after-history");
+    c.set_balance(Decimal::from(100));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+
+    // 窗口 1：真值 100 → 成交 2.00 → 场地报 98（对账成立，静默）。
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx);
+    place_and_fill(&mut c, dec!(0.40), dec!(5), 10);
+    drain_alerts(&mut rx);
+    c.realign_venue_cash("polymarket", Decimal::from(98));
+    assert!(
+        ghost_alerts(&drain_alerts(&mut rx)).is_empty(),
+        "window 1 closes clean: the fill explains the correction"
+    );
+
+    // 窗口 2：场地又动了 3.00（98 → 95），内核零窗口事实 → 告警。
+    // 「曾经成交过」不再构成免警凭据（issue 702 的核心修订）。
+    c.realign_venue_cash("polymarket", Decimal::from(95));
+    let alerts = drain_alerts(&mut rx);
+    let ghost = ghost_alerts(&alerts);
+    assert_eq!(
+        ghost.len(),
+        1,
+        "history that is already reconciled must not mute a NEW unexplained move: {alerts:?}"
+    );
+    assert!(
+        ghost[0].contains("residual=-3"),
+        "names this window's own residual: {}",
+        ghost[0]
+    );
+}
+
+/// 验收 4：同一未解释残差重复报告（reconcile 周期重放同一条腿）只告警
+/// 一次；残差变化（叠加新异动）重新告警；账本恢复可解释（窗口事实把
+/// 残差吃回 ε 内）后清槽，再来的新异动又告警 —— 不靠会话生命周期重新
+/// 武装（旧模型用「从未交易过的整个会话」当窗口，#702 明令废弃）。
+#[test]
+fn the_same_residual_dedups_but_a_new_one_re_alerts() {
+    let mut c = live_core_fixture("ghost-702-dedup");
+    c.set_balance(Decimal::from(100));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+
+    // 真值 100 进场。
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx);
+
+    // 第一次未知异动（−30）：告警一次。
     c.realign_venue_cash("polymarket", Decimal::from(70));
     assert_eq!(ghost_alerts(&drain_alerts(&mut rx)).len(), 1);
 
-    // 场地继续报同一窗口内的数（未修正的差额随 reconcile 周期反复出现）：
-    // 一轮轮 fold 不刷屏 —— 静默正是本探测器与告警风暴的分界线。
-    c.realign_venue_cash("polymarket", Decimal::from(60));
-    c.realign_venue_cash("polymarket", Decimal::from(50));
-    c.fold_venue_free("polymarket", Decimal::from(50));
+    // 同一条腿重放（场地继续报 70）：同一残差，静默不刷屏。
+    c.realign_venue_cash("polymarket", Decimal::from(70));
+    c.fold_venue_free("polymarket", Decimal::from(70));
     let alerts = drain_alerts(&mut rx);
     assert!(
         ghost_alerts(&alerts).is_empty(),
-        "the same anomaly window must not re-alert: {alerts:?}"
+        "the SAME unexplained residual must not re-alert: {alerts:?}"
     );
 
-    // 窗口关闭：内核经生产成交路径获得自己的订单 + 成交记录（OME 幂等表
-    // 折进一笔 fill，订单行 filled_size > 0）。挂单 → live → 确认成交。
+    // 残差变化（又动了 10，70 → 60）：新事实，重新告警。
+    c.realign_venue_cash("polymarket", Decimal::from(60));
+    assert_eq!(
+        ghost_alerts(&drain_alerts(&mut rx)).len(),
+        1,
+        "a CHANGED residual is a new anomaly and re-alerts"
+    );
+
+    // 方向反转也是新残差（60 → 90，无中生有 +30）：告警一次；重放静默。
+    c.realign_venue_cash("polymarket", Decimal::from(90));
+    assert_eq!(
+        ghost_alerts(&drain_alerts(&mut rx)).len(),
+        1,
+        "a reversed-direction anomaly is its own new residual"
+    );
+    c.realign_venue_cash("polymarket", Decimal::from(90));
+    assert!(
+        ghost_alerts(&drain_alerts(&mut rx)).is_empty(),
+        "the reversed residual replays silent, same as any other"
+    );
+
+    // 恢复清槽：窗口内台账进账 +30（cashflow 台账事实），场地按事实报
+    // 120 —— 残差 = (120−90) − 30 = 0 → 解释成立，槽位清空。
+    c.accounts
+        .active_ledger_mut()
+        .credit_cashflow(Decimal::from(30), "rebate");
+    c.realign_venue_cash("polymarket", Decimal::from(120));
+    let alerts = drain_alerts(&mut rx);
+    assert!(
+        ghost_alerts(&alerts).is_empty(),
+        "a residual the window now explains clears the alert slot: {alerts:?}"
+    );
+
+    // 恢复后的新异动：120 → 90（场地又少 30，窗口零新事实）→ 重新告警
+    // —— 不靠会话生命周期重新武装（旧终身模型做不到这一点）。
+    c.realign_venue_cash("polymarket", Decimal::from(90));
+    assert_eq!(
+        ghost_alerts(&drain_alerts(&mut rx)).len(),
+        1,
+        "after recovery a fresh unexplained move re-alerts"
+    );
+}
+
+/// 验收 5（跨 venue 隔离，#701 承接）：A（polymarket）窗口内有成交事实，
+/// B（poly）零事实但发生异动 —— A 的事实解释不了 B 的账：B 恰一次告警；
+/// A 自己账本上能解释的修正照旧静默。#700 曾用全局 applied 计数让 A 的
+/// 成交替 B 挡刀。
+#[test]
+fn a_sibling_venues_facts_do_not_explain_this_venues_residual() {
+    // 双账户：poly-acct 绑 polymarket，klin-acct 绑 poly。
+    let dir = reset_audit_dir("ghost-701-cross");
+    let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+    let acct = |id: &str, name: &str, venue: &str| crate::account::Account {
+        id: crate::account::AccountId::from(id),
+        name: name.into(),
+        market_type: blitzkrieg_market_api::MarketType::Prediction,
+        status: crate::account::AccountStatus::Active,
+        credential_keys: crate::account::CredentialKeys::default(),
+        venue: venue.into(),
+        trading_enabled: true,
+        strategies: Vec::new(),
+        rounds: Vec::new(),
+        updated_at_ms: 0,
+    };
+    let mut c = Core::with_account_book(
+        CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            manual_ops_audit_path: Some(
+                dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+            ),
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: log("orders.jsonl"),
+            position_log_path: log("positions.jsonl"),
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        },
+        crate::account::AccountLedgers::new(
+            vec![
+                acct("poly-acct", "polymarket 主账户", "polymarket"),
+                acct("klin-acct", "poly 副账户", "poly"),
+            ],
+            crate::account::AccountId::from("poly-acct"),
+        ),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+
+    // A 账本真值进场。
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx); // 首报=种子，静默
+
+    // A（polymarket / poly-acct）窗口内一笔真实成交：台账 −2.00。
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
     let req = crate::model::OrderRequest {
         token_id: "tok".into(),
@@ -147,7 +368,7 @@ fn the_same_anomaly_window_does_not_re_alert_but_rearms_after_evidence() {
         asset: "BTC".into(),
         direction: "up".into(),
         round_slot: 1,
-        account_id: crate::model::default_account_id(),
+        account_id: crate::account::AccountId::from("poly-acct"),
     };
     let (id, _) = c.place(req, 0, 1).unwrap();
     c.bind_venue(&id, "0xv1".into(), 2).unwrap();
@@ -163,91 +384,63 @@ fn the_same_anomaly_window_does_not_re_alert_but_rearms_after_evidence() {
             ts_ms: 3,
             tx_hash: None,
             maker: None,
-            account_id: crate::model::default_account_id(),
+            account_id: crate::account::AccountId::from("poly-acct"),
         },
         3,
     )
     .unwrap();
     drain_alerts(&mut rx);
 
-    // 有交易史后的差额修正：走「正常 realign 静默」分支（验收 3 的语义），
-    // 既不重复旧窗口的告警，也不误报。全新会话（新 Core）自带空告警槽 ——
-    // 重启后的第一笔零记录异动自然重新武装（验收 1 的形态）。
-    c.realign_venue_cash("polymarket", Decimal::from(1));
-    let alerts = drain_alerts(&mut rx);
+    // A 的账本对得上：场地报 98 = 100 − 2.00 → 静默。
+    c.realign_venue_cash("polymarket", Decimal::from(98));
     assert!(
-        ghost_alerts(&alerts).is_empty(),
-        "with trade records on the book the realign is a normal correction: {alerts:?}"
+        ghost_alerts(&drain_alerts(&mut rx)).is_empty(),
+        "A's own explained correction stays silent"
+    );
+
+    // B（poly / klin-acct）真值进场后异动：A 的台账事实解释不了 B 的账。
+    c.realign_venue_cash("poly", Decimal::from(50));
+    drain_alerts(&mut rx); // 首报=种子，静默
+    c.realign_venue_cash("poly", Decimal::from(30));
+    let alerts = drain_alerts(&mut rx);
+    assert_eq!(
+        ghost_alerts(&alerts).len(),
+        1,
+        "B's unexplained move must alert even though venue A has window facts: {alerts:?}"
     );
 }
 
-/// 验收 3：正常 realign（有对应成交记录的差额修正）零误报 —— fee 级零头、
-/// 结算时点差、人工平仓残差这类有交易史账本的校正必须保持静默（改前语义）。
+/// Boot adoption 门只对「从未报过数的场地」生效：账本中途被外部清零
+/// （previous==0 但真值簿已有记录）是真实异动，必须照常探测。
 #[test]
-fn a_normal_realign_with_trade_records_never_alerts() {
-    let mut c = live_core_fixture("ghost-692-normal");
+fn a_zero_book_mid_session_is_a_move_not_a_reseed() {
+    let mut c = live_core_fixture("ghost-702-zero-mid");
     c.set_balance(Decimal::from(100));
     let (tx, mut rx) = mpsc::unbounded_channel();
     c.set_event_sink(tx);
 
-    // 有对应成交记录：一笔真实成交（订单行 + OME 幂等表各折一次）。
-    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
-    let req = crate::model::OrderRequest {
-        token_id: "tok".into(),
-        condition_id: "cond".into(),
-        side: Side::Buy,
-        mode: FillPolicy::Maker,
-        price: dec!(0.40),
-        size: dec!(5),
-        internal_key: "k1".into(),
-        strategy: "s1".into(),
-        asset: "BTC".into(),
-        direction: "up".into(),
-        round_slot: 1,
-        account_id: crate::model::default_account_id(),
-    };
-    let (id, _) = c.place(req, 0, 1).unwrap();
-    c.bind_venue(&id, "0xv1".into(), 2).unwrap();
-    c.ingest_fill(
-        Fill {
-            order_id: id,
-            trade_id: Some("t1".into()),
-            token_id: "tok".into(),
-            side: Side::Buy,
-            price: dec!(0.40),
-            size: dec!(5),
-            status: FillStatus::Confirmed,
-            ts_ms: 3,
-            tx_hash: None,
-            maker: None,
-            account_id: crate::model::default_account_id(),
-        },
-        3,
-    )
-    .unwrap();
-    drain_alerts(&mut rx);
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx); // boot adoption 种子，静默
 
-    // 此后场地报来的差额修正（如 fee 零头 / 手续费回填）全是正常 realign。
-    c.realign_venue_cash("polymarket", Decimal::from(97));
-    c.realign_venue_cash("polymarket", Decimal::from(98));
-    c.fold_venue_free("polymarket", Decimal::from(98));
-
+    // 场地报 0（资金全没了），内核窗口内零事实 → 告警（不是 boot adoption）。
+    c.realign_venue_cash("polymarket", Decimal::from(0));
     let alerts = drain_alerts(&mut rx);
-    assert!(
-        ghost_alerts(&alerts).is_empty(),
-        "a realign over a book with trade records must never alert (zero false positives): {alerts:?}"
+    assert_eq!(
+        ghost_alerts(&alerts).len(),
+        1,
+        "a mid-session collapse to zero is a move the kernel must see: {alerts:?}"
     );
-
-    // 反向半边：成交证据出现前若曾误警过，窗口关闭时槽位必须被摘除 ——
-    // 这里用「先无记录告警 → 获得成交 → 再异动不再算同窗口」已被验收 2
-    // 覆盖；本测试钉死的是「有记录 → 永远静默」这半边。
+    assert!(
+        ghost_alerts(&alerts)[0].contains("residual=-100"),
+        "names the full unexplained loss: {}",
+        ghost_alerts(&alerts)[0]
+    );
 }
 
-/// #701 验收 1：跨 venue 成交计数污染。A（polymarket）有一笔合法成交，
-/// B（poly）零订单/零成交记录但发生现金异动 —— A 的全局 applied 计数
-/// 曾替 B 挡掉告警（修复前 `venue_trade_records` 把 `applied_len()` 无条件
-/// 算进每个 venue 的证据）。修复后 fills 经订单 account 归属：B 恰一次
-/// 告警；A 自己账本上的异动（有成交史）照旧走正常 realign 静默。
+/// #701 验收 1：跨 venue 证据隔离。A（polymarket）有一笔合法成交（落进
+/// A 自己的窗口），B（poly）零事实但发生现金异动 —— A 的台账事实永远
+/// 解释不了 B 的账本（两本账、两个游标）。B 恰一次告警；A 自己的异动
+/// 被窗口内成交事实解释，走正常 realign 静默。
 #[test]
 fn a_sibling_venues_fills_do_not_mute_this_venues_ghost_alert() {
     // 双账户：poly-acct 绑 polymarket，klin-acct 绑 poly。
@@ -345,11 +538,12 @@ fn a_sibling_venues_fills_do_not_mute_this_venues_ghost_alert() {
         "B's unattributed move must alert even though venue A has fills: {alerts:?}"
     );
 
-    // A 自己账本上的异动（有成交史）：正常 realign 静默 —— 归属不串门。
-    c.realign_venue_cash("polymarket", Decimal::from(88));
+    // A 自己账本上的异动（窗口内成交事实解释得了）：正常 realign 静默 ——
+    // 归属不串门。场地报 98 = 100 − 2.00 成交，residual = (−2) − (−2) = 0。
+    c.realign_venue_cash("polymarket", Decimal::from(98));
     let alerts = drain_alerts(&mut rx);
     assert!(
         ghost_alerts(&alerts).is_empty(),
-        "a realign over A's own trade history stays a normal correction: {alerts:?}"
+        "a realign explained by A's own window facts stays a normal correction: {alerts:?}"
     );
 }
