@@ -179,5 +179,48 @@ check('a recording or absent archive raises no archive banner', () => {
   assert.equal(archiveStoppedBanner(null), null)
 })
 
+// ── severity tiers (2026-10-28 operator call) ───────────────────────────────
+// 红色只留给紧急（交易此刻真的停了：冻结 / 自检失败），其余黄色 + 可关闭 +
+// 自动消失。tone 已经各自断言过；这里钉住的是 urgent 分级本身——红色横幅
+// 必须钉住（不可关、不自动消失），琥珀横幅必须可关且带去重 identity。
+check('severity tiers: urgent banners are exactly the trading-is-down pair', () => {
+  const frozen = freezeBanner({ tradingFrozen: { active: true, reason: 'x' } })
+  assert.ok(frozen)
+  assert.equal(frozen.urgent, true, 'a freeze is urgent — red and pinned')
+  const selfcheck = selfCheckBanner({
+    selfCheck: { ok: false, tsMs: 1, items: [{ name: 'venue_balance', ok: false, detail: 'd' }] },
+  })
+  assert.ok(selfcheck)
+  assert.equal(selfcheck.urgent, true, 'a failed self-check is urgent — red and pinned')
+})
+
+check('severity tiers: attention banners are dismissible with a stable identity', () => {
+  const frozen = freezeBanner({ tradingFrozen: { active: true, reason: 'x' } })
+  const refusal = lastErrorBanner({
+    lastError: { tsMs: 1, code: 'INVALID_PARAMS', message: 'duplicate internal key: lua_momentum' },
+  })
+  assert.ok(refusal)
+  assert.equal(refusal.urgent, false, 'a transient refusal record is amber, not red')
+  assert.ok(refusal.identity, 'identity is the dismiss-memory key')
+  // The SAME error keeps the identity stable across snapshots (so a dismissal
+  // sticks); a DIFFERENT error yields a different identity (so it re-raises).
+  const again = lastErrorBanner({
+    lastError: { tsMs: 2, code: 'INVALID_PARAMS', message: 'duplicate internal key: lua_momentum' },
+  })
+  assert.equal(again?.identity, refusal.identity, 'same failure → same identity')
+  const other = lastErrorBanner({
+    lastError: { tsMs: 3, code: 'VENUE_ERROR', message: 'different failure' },
+  })
+  assert.notEqual(other?.identity, refusal.identity, 'a new failure re-raises the banner')
+  // Legacy slot and the other amber banners carry identities too.
+  assert.ok(lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'x' } })?.identity)
+  assert.ok(connectionBanner({ lastError: 'core not reachable' })?.identity)
+  assert.ok(archiveStoppedBanner({
+    archive: { path: '/p', events: 1, bytes: 2, dropped: 0, recording: false, rotateBytes: 0, segmentBytes: 0, segments: 0, freeBytes: 9, stoppedReason: 'disk' },
+  })?.identity)
+  // Urgent banners carry NO identity — they cannot be dismissed away at all.
+  assert.equal(frozen.identity, undefined)
+})
+
 console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)
 process.exit(failures === 0 ? 0 : 1)

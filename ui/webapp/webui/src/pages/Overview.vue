@@ -4,7 +4,7 @@
  * equity curve, engine counters, rejection attribution and open positions.
  * Every number the old hft.html surfaced is reachable from here or 行情面板.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   CircleDot, ShieldCheck, ArrowUpRight, ArrowDownRight,
 } from 'lucide-vue-next'
@@ -48,6 +48,32 @@ const selfCheck = computed(() => selfCheckBanner(stats.value))
 // hand. The reading rule lives in lib/safety.ts like the other banners; this
 // one stays up on EVERY snapshot while `stats.archive.recording` is false.
 const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
+
+// ── banner severity (2026-10-28 operator call) ──────────────────────────────
+// 红色只留给紧急（冻结 / 自检失败 —— 交易此刻真的停了）：persistent、无 ✕、
+// 不自动消失。其余（最近交易错误 / 连接 / 归档）琥珀色 + ✕ + 40s 自动消失；
+// 关掉的是「这一条」（identity 计），同一条不再重弹，新错误重新亮起。
+const AUTO_DISMISS_MS = 40_000
+const dismissed = ref(new Set<string>())
+const dismiss = (identity: string) => {
+  const next = new Set(dismissed.value)
+  next.add(identity)
+  dismissed.value = next
+}
+// The kernel's `lastError` slot keeps its value until the NEXT error overwrites
+// it — a dismissed identity must stay dismissed across snapshots. A different
+// message/code yields a different identity, so the banner returns for it.
+const lastErrorVisible = computed(
+  () => lastError.value && !(lastError.value.identity && dismissed.value.has(lastError.value.identity)),
+)
+const connBannerVisible = computed(
+  () => connBanner.value && !(connBanner.value.identity && dismissed.value.has(connBanner.value.identity)),
+)
+const archiveStoppedVisible = computed(
+  () => archiveStopped.value
+    && !(archiveStopped.value.identity && dismissed.value.has(archiveStopped.value.identity)),
+)
+const bannerAutoKey = (identity?: string) => identity ?? ''
 
 // ── balance (principal + net profit is the real balance in both modes) ──────
 // issue 561（裁决 1）：真实余额瓦片跟随显示账户 —— 读 account.list 行
@@ -567,18 +593,36 @@ const needsStrategyHint = computed(() => {
       </Card>
     </div>
 
-    <div v-if="connBanner" class="mt-3.5">
-      <AlertBanner tone="warn" :title="connBanner.title" :hint="connBanner.hint">{{ connBanner.body }}</AlertBanner>
+    <div v-if="connBanner && connBannerVisible" class="mt-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="connBanner.title"
+        :hint="connBanner.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(connBanner.identity)"
+        @dismiss="connBanner.identity && dismiss(connBanner.identity)"
+      >{{ connBanner.body }}</AlertBanner>
     </div>
     <div v-if="freeze" class="mt-3.5">
+      <!-- 紧急：交易此刻停了 —— 红色、钉住、无 ✕（藏掉唯一的红 = 藏掉事故） -->
       <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
     </div>
-    <div v-else-if="lastError" class="mt-3.5">
-      <AlertBanner tone="warn" :title="lastError.title" :hint="lastError.hint">
+    <div v-else-if="lastError && lastErrorVisible" class="mt-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="lastError.title"
+        :hint="lastError.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(lastError.identity)"
+        @dismiss="lastError.identity && dismiss(lastError.identity)"
+      >
         <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
       </AlertBanner>
     </div>
     <div v-if="selfCheck" class="mt-3.5">
+      <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->
       <AlertBanner tone="error" :title="selfCheck.title">
         {{ selfCheck.body }}
         <span v-for="item in selfCheck.items" :key="item.name" class="block">
@@ -586,8 +630,16 @@ const needsStrategyHint = computed(() => {
         </span>
       </AlertBanner>
     </div>
-    <div v-if="archiveStopped" class="mt-3.5">
-      <AlertBanner tone="warn" :title="archiveStopped.title" :hint="archiveStopped.hint">
+    <div v-if="archiveStopped && archiveStoppedVisible" class="mt-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="archiveStopped.title"
+        :hint="archiveStopped.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(archiveStopped.identity)"
+        @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
+      >
         {{ archiveStopped.body }}
       </AlertBanner>
     </div>
