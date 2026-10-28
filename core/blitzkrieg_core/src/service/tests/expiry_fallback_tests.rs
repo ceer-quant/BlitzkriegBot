@@ -164,7 +164,13 @@ fn an_expired_never_answered_position_falls_back_closed() {
     );
     // 记账恒等式在兜底平仓后依然成立。
     let audit = c.run_accounting_audit(bound + 3_000);
-    assert!(audit.ok, "audit after fallback close: {}", audit.summary());
+    // CodeQL rust/cleartext-logging 会把插值进消息的 summary()（含 balance 字样）
+    // 当成敏感数据落日志；测试断言消息不插值，失败时 panic 定位靠 git/blame 与
+    // audit 字段本身（#679 同族驳回先例：内部记账数值不是凭据）。
+    assert!(
+        audit.ok,
+        "audit after fallback close failed (see AuditReport fields)"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -330,7 +336,10 @@ fn force_close_gates_and_audit() {
     assert!(alerts >= 1, "the operator hears the manual close");
     // 记账恒等式成立。
     let report = c.run_accounting_audit(EXPIRES_MS + 2_000);
-    assert!(report.ok, "audit after force-close: {}", report.summary());
+    assert!(
+        report.ok,
+        "audit after force-close failed (see AuditReport fields)"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
