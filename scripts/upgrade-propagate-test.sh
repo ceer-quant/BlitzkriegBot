@@ -250,5 +250,81 @@ else
   ok "a lockfile-less tree is left to the build"
 fi
 
+# ── 8. the post-start panel probe helpers (#688) ─────────────────────────────
+# The address helpers are pure; the probe itself is driven against a throwaway
+# local listener — no production stack, no external network. `000000` (the old
+# probe's literal output: curl printed 000, the `|| echo 000` appended another)
+# is what every upgrade logged while the panel answered 200 the whole time.
+printf '\npanel probe helpers (#688)\n'
+if ! type ua_panel_addr >/dev/null 2>&1; then
+  no "the probe helpers exist in the library" "ua_panel_addr/ua_probe_url/ua_panel_probe" "missing — §8 cannot run"
+  printf '\n%s\n' "upgrade-propagate: $pass passed, $fail failed"
+  exit 1
+fi
+
+# 8a. address precedence: --addr > BLITZKRIEG_PANEL_ADDR from $REPO_ROOT/.env
+# (last assignment wins, quotes stripped — env_file.rs semantics) > loopback.
+check "addr: explicit argument wins" "1.2.3.4:9999" "$(ua_panel_addr '1.2.3.4:9999')"
+check "addr: no .env, no arg → loopback default" "127.0.0.1:51888" "$(ua_panel_addr '')"
+: > "$REPO_ROOT/.env"
+check "addr: empty .env → loopback default" "127.0.0.1:51888" "$(ua_panel_addr '')"
+printf 'BLITZKRIEG_PANEL_KEY_TEST=x\nBLITZKRIEG_PANEL_ADDR=0.0.0.0:51888\n' > "$REPO_ROOT/.env"
+check "addr: .env value wins over default" "0.0.0.0:51888" "$(ua_panel_addr '')"
+printf 'BLITZKRIEG_PANEL_ADDR="0.0.0.0:6001"\nBLITZKRIEG_PANEL_ADDR=0.0.0.0:6002\n' > "$REPO_ROOT/.env"
+check "addr: last assignment wins" "0.0.0.0:6002" "$(ua_panel_addr '')"
+printf "BLITZKRIEG_PANEL_ADDR='0.0.0.0:6003'\n" > "$REPO_ROOT/.env"
+check "addr: single quotes stripped" "0.0.0.0:6003" "$(ua_panel_addr '')"
+rm "$REPO_ROOT/.env"
+
+# 8b. URL normalization. A wildcard host is probed as the loopback literal:
+# `curl http://0.0.0.0/` connects nowhere on macOS, and an IPv6 ::1 target of
+# the old line was exactly the silent 000 this section pins.
+check "url: loopback passthrough" "http://127.0.0.1:51888/panel/" "$(ua_probe_url '127.0.0.1:51888')"
+check "url: wildcard host → loopback literal" "http://127.0.0.1:51888/panel/" "$(ua_probe_url '0.0.0.0:51888')"
+check "url: custom port kept" "http://127.0.0.1:9999/panel/" "$(ua_probe_url '0.0.0.0:9999')"
+check "url: ipv6 literal gets brackets" "http://[::1]:51888/panel/" "$(ua_probe_url '[::1]:51888')"
+check "url: bare ipv6 gets brackets" "http://[::1]:51888/panel/" "$(ua_probe_url '::1')"
+
+# 8c. the probe, end to end, against a throwaway listener. python3 supplies the
+# HTTP and also a non-/panel 404 — a real HTTP answer must surface as its code.
+live_port=""
+for p in 5971 5972 5973 5974 5975; do
+  if ! nc -z 127.0.0.1 "$p" 2>/dev/null; then live_port=$p; break; fi
+done
+[ -n "$live_port" ] || no "a free local port for the probe fixture" "one free in 5971-5975" "none"
+if [ -n "$live_port" ]; then
+  listen_py='
+import socket, sys, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port = int(sys.argv[1])
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/panel/":
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        else:
+            self.send_response(404); self.end_headers(); self.wfile.write(b"no")
+    def log_message(self, *a): pass
+srv = HTTPServer(("127.0.0.1", port), H)
+srv.serve_forever()
+'
+  python3 -c "$listen_py" "$live_port" &
+  fixture_pid=$!
+  i=0; up=""
+  while [ $i -lt 25 ]; do
+    if nc -z 127.0.0.1 "$live_port" 2>/dev/null; then up=1; break; fi
+    sleep 0.2; i=$((i + 1))
+  done
+  if [ -n "$up" ]; then
+    check "probe: healthy local gateway answers 200" "200" \
+      "$(ua_panel_probe "http://127.0.0.1:$live_port/panel/" 2 2)"
+    check "probe: a non-panel path reports its real code" "404" \
+      "$(ua_panel_probe "http://127.0.0.1:$live_port/other" 1 2)"
+    check "probe: nothing listening is 000 (said once)" "000" \
+      "$(ua_panel_probe "http://127.0.0.1:1/panel/" 1 2)"
+  else
+    no "the probe fixture came up" "listener on $live_port" "no listener"
+  fi
+fi
+
 printf '\n%s\n' "upgrade-propagate: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
