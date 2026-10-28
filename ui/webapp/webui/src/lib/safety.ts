@@ -98,6 +98,17 @@ export function freezeBanner(stats: EngineStats | null | undefined): SafetyBanne
 }
 
 /**
+ * Collapse volatile numbers inside an error message so the identity survives
+ * them: the accounting-audit note embeds live figures (balances, drift, an
+ * anchor ms-timestamp) that the kernel recomputes on every reconcile pass —
+ * `error:CODE:msg 13.59… drift -7.89…` became `… 7.89…` one audit later and the
+ * dismissed-identity match broke, resurrecting the banner the operator closed.
+ * Digits are the only churn class observed in practice; wording changes SHOULD
+ * re-raise. (2026-10-28 operator report: 警告还是关不掉.)
+ */
+const stableIdentity = (message: string): string => message.replace(/\d[\d.,]*/g, 'N')
+
+/**
  * The kernel's last recorded error — the ONE slot every internal refusal path
  * writes (`Core::note_error`).
  *
@@ -117,7 +128,7 @@ export function lastErrorBanner(
     return {
       tone: 'warn',
       urgent: false,
-      identity: `error:${structured.code}:${structured.message}`,
+      identity: `error:${structured.code}:${stableIdentity(structured.message)}`,
       title: '最近交易错误',
       body: structured.message,
       code: structured.code,
@@ -130,7 +141,7 @@ export function lastErrorBanner(
   return {
     tone: 'warn',
     urgent: false,
-    identity: `error:legacy:${legacy.message}`,
+    identity: `error:legacy:${stableIdentity(legacy.message)}`,
     title: '最近交易错误',
     body: legacy.message,
     hint: '旧内核的兼容字段（lastVenueError），内容形如「代码: 原因」。',

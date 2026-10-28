@@ -12,6 +12,7 @@ import { usePanelStore } from '@/stores/panel'
 import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
+import { api } from '@/api/client'
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
@@ -87,6 +88,35 @@ const archiveStoppedVisible = computed(
     && !(archiveStopped.value.identity && dismissed.value.has(archiveStopped.value.identity)),
 )
 const bannerAutoKey = (identity?: string) => identity ?? ''
+
+// ── issue 684 过期持仓清除（positions.force_close）──────────────────────────
+// 场地 updown 列表只载未来 ~20h 的未到期轮次，已过期 conditionId 的结算裁决
+// 永远等不到 —— 持仓变成幽灵（positions.exit 被场地拒）。仅 remainingSec <= 0
+// 的行给「清除」按钮；判定（已过期 / 审计门 / 持仓存在）全部在内核，前端只
+// 做确认与反馈。成功/失败的行内文案都来自内核自己的回执/错误。
+const clearingId = ref<string | null>(null)
+const clearMsg = ref<string | null>(null)
+const clearErr = ref<string | null>(null)
+
+async function clearExpiredPosition(positionId: string): Promise<void> {
+  if (clearingId.value) return
+  if (!confirm(`清除持仓 ${positionId}？仅限已过期且裁决永远等不到的市场；按兜底价平账（不建赎回申索），并写 manual-ops 审计。`)) {
+    return
+  }
+  clearingId.value = positionId
+  clearMsg.value = null
+  clearErr.value = null
+  try {
+    const r = await api.forceClosePosition({ positionId })
+    clearMsg.value = `已清除 ${r.positionId}（平账价 ${Number(r.price).toFixed(3)}，审计已写）`
+    await store.refresh()
+  } catch (e) {
+    clearErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    clearingId.value = null
+    setTimeout(() => { clearMsg.value = null; clearErr.value = null }, 8000)
+  }
+}
 
 // ── balance (principal + net profit is the real balance in both modes) ──────
 // issue 561（裁决 1）：真实余额瓦片跟随显示账户 —— 读 account.list 行
@@ -631,6 +661,7 @@ const needsStrategyHint = computed(() => {
                 <th class="label-micro px-2 pb-2 text-right">份额</th>
                 <th class="label-micro px-2 pb-2 text-right">浮动</th>
                 <th class="label-micro px-2 pb-2 text-right">剩余</th>
+                <th class="label-micro px-2 pb-2 text-right">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -655,9 +686,27 @@ const needsStrategyHint = computed(() => {
                 <td class="px-2 py-2.5 text-right num text-faint-fg">
                   <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
                 </td>
+                <td class="px-2 py-2.5 text-right">
+                  <!-- issue 684：仅已过期（remainingSec <= 0）的行给清除 —— 活轮
+                       持仓内核拒绝（那是 positions.exit 的活）。判定在内核，
+                       按钮只做确认。 -->
+                  <button
+                    v-if="(p.remainingSec ?? 1) <= 0"
+                    class="text-[11.5px] font-medium text-down underline decoration-dotted decoration-line underline-offset-2 transition-colors hover:opacity-80 disabled:opacity-40"
+                    :disabled="clearingId !== null"
+                    :title="`清除 ${p.id}（已过期且裁决未到，按兜底价平账并写审计）`"
+                    @click="clearExpiredPosition(p.id)"
+                  >
+                    {{ clearingId === p.id ? '清除中…' : '清除' }}
+                  </button>
+                  <span v-else class="text-faint-fg">—</span>
+                </td>
               </tr>
             </tbody>
           </table>
+          <!-- issue 684 清除反馈：成功/失败都落在表格正下方，行内文案 = 内核回执。 -->
+          <p v-if="clearMsg" class="px-2 pt-2 text-[11.5px] text-up">{{ clearMsg }}</p>
+          <p v-if="clearErr" class="px-2 pt-2 text-[11.5px] text-down">{{ clearErr }}</p>
         </div>
         <EmptyState v-else text="无持仓" hint="启用策略后，成交平仓即出现在这里。" compact />
       </Card>

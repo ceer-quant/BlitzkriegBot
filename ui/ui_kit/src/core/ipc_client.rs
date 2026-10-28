@@ -66,6 +66,9 @@ pub(crate) mod method {
     pub const POSITIONS_EXIT: &str = "positions.exit";
     /// issue 456: declare a ghost order dead (the manual `orders.force_close`).
     pub const ORDER_FORCE_CLOSE: &str = "orders.force_close";
+    /// #684: clear out an EXPIRED market's position whose settlement verdict
+    /// never arrived (the manual `positions.force_close`).
+    pub const POSITION_FORCE_CLOSE: &str = "positions.force_close";
     pub const SHADOW_EVOLUTION_STATUS: &str = "shadow_evolution.status";
     pub const SHADOW_EVOLUTION_PROPOSALS: &str = "shadow_evolution.proposals";
     pub const SHADOW_EVOLUTION_DECIDE: &str = "shadow_evolution.decide";
@@ -473,6 +476,21 @@ impl IpcClient {
         self.call(
             method::ORDER_FORCE_CLOSE,
             serde_json::json!({ "orderId": order_id }),
+        )
+    }
+
+    /// `positions.force_close` — clear out an EXPIRED market's position whose
+    /// settlement verdict never arrived (#684). The kernel refuses a live
+    /// round (that is `position_exit`'s job) and an unaudited call; the close
+    /// lands at a bookkeeping price with no redemption claim, audit row
+    /// naming the caller.
+    pub fn force_close_position(
+        &mut self,
+        position_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::POSITION_FORCE_CLOSE,
+            serde_json::json!({ "positionId": position_id }),
         )
     }
 

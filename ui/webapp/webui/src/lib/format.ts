@@ -59,11 +59,11 @@ export function cents(v: unknown, fallback = '—'): string {
 }
 
 export function duration(sec: unknown, fallback = '—'): string {
-  const s = Number(sec)
+  const s = Math.floor(Number(sec))
   if (!Number.isFinite(s) || s < 0) return fallback
-  if (s < 60) return `${s.toFixed(0)}s`
+  if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
-  const rem = Math.floor(s % 60)
+  const rem = s % 60
   if (m < 60) return `${m}m${String(rem).padStart(2, '0')}s`
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
 }
