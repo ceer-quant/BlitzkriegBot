@@ -20,7 +20,8 @@
  * the fix promises, each one on the artifact that ships:
  *
  *   1. `--help` / `-h` — exit 0, and the list names EVERY flag the parser in
- *      `core/blitzkrieg_core/src/main.rs` accepts (both directions: no accepted
+ *      `core/blitzkrieg_core/src/bin_support/boot.rs` accepts (#699 moved it
+ *      there from main.rs; both directions: no accepted
  *      flag unlisted, no listed flag unaccepted). A help list that drifts from
  *      the parser is this defect in a new spelling.
  *   2. `--version` / `-V` — exit 0, `<semver>+g<sha>`, and NO boot (#197's
@@ -81,11 +82,14 @@ const { check } = gate;
  * (comparing the help list against an empty set) would pass forever.
  */
 function parserFlags() {
-  const src = readFileSync(join(ROOT, 'core', 'blitzkrieg_core', 'src', 'main.rs'), 'utf8');
+  // #699: the parse loop moved from main.rs into bin_support/boot.rs (pure
+  // code move). This gate reads the SOURCE the binary is built from, so it
+  // follows the loop — same markers, same extraction, new path.
+  const src = readFileSync(join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot.rs'), 'utf8');
   const start = src.indexOf('let mut it = argv.iter().cloned();');
   const end = src.indexOf('// ── Resolve the file-settable settings');
   if (start < 0 || end < 0 || end <= start) {
-    check('parse-loop markers found in core/blitzkrieg_core/src/main.rs', false,
+    check('parse-loop markers found in core/blitzkrieg_core/src/bin_support/boot.rs', false,
       `the help/parser comparison cannot run (start=${start}, end=${end})`);
     return [];
   }
