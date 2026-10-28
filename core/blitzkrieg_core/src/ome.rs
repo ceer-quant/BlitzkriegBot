@@ -497,6 +497,14 @@ impl Ome {
         self.applied.len()
     }
 
+    /// Order ids the applied-fill table references (issue #701: evidence
+    /// attribution — a caller that needs to know WHICH book a fill belongs to
+    /// walks these through [`Self::all`]; the raw table length is global and
+    /// must never be read as one venue's history).
+    pub fn applied_order_ids(&self) -> std::collections::HashSet<&str> {
+        self.applied.values().map(|a| a.order_id.as_str()).collect()
+    }
+
     /// True when this trade key was already applied with a non-zero size — the
     /// exact test a re-delivered trade id must fail.
     pub fn already_applied(&self, trade_key: &str) -> bool {

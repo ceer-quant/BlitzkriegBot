@@ -242,3 +242,114 @@ fn a_normal_realign_with_trade_records_never_alerts() {
     // 这里用「先无记录告警 → 获得成交 → 再异动不再算同窗口」已被验收 2
     // 覆盖；本测试钉死的是「有记录 → 永远静默」这半边。
 }
+
+/// #701 验收 1：跨 venue 成交计数污染。A（polymarket）有一笔合法成交，
+/// B（poly）零订单/零成交记录但发生现金异动 —— A 的全局 applied 计数
+/// 曾替 B 挡掉告警（修复前 `venue_trade_records` 把 `applied_len()` 无条件
+/// 算进每个 venue 的证据）。修复后 fills 经订单 account 归属：B 恰一次
+/// 告警；A 自己账本上的异动（有成交史）照旧走正常 realign 静默。
+#[test]
+fn a_sibling_venues_fills_do_not_mute_this_venues_ghost_alert() {
+    // 双账户：poly-acct 绑 polymarket，klin-acct 绑 poly。
+    let dir = reset_audit_dir("ghost-701-cross");
+    let log = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+    let acct = |id: &str, name: &str, venue: &str| crate::account::Account {
+        id: crate::account::AccountId::from(id),
+        name: name.into(),
+        market_type: blitzkrieg_market_api::MarketType::Prediction,
+        status: crate::account::AccountStatus::Active,
+        credential_keys: crate::account::CredentialKeys::default(),
+        venue: venue.into(),
+        trading_enabled: true,
+        strategies: Vec::new(),
+        rounds: Vec::new(),
+        updated_at_ms: 0,
+    };
+    let mut c = Core::with_account_book(
+        CoreConfig {
+            mode: Mode::Live,
+            risk: RiskConfig {
+                max_order_notional: dec!(100),
+                ..Default::default()
+            },
+            manual_ops_audit_path: Some(
+                dir.join("manual-ops.jsonl").to_string_lossy().into_owned(),
+            ),
+            trade_log_path: log("trades.jsonl"),
+            order_log_path: log("orders.jsonl"),
+            position_log_path: log("positions.jsonl"),
+            dry_seed_balance: Decimal::from(1_000),
+            ..Default::default()
+        },
+        crate::account::AccountLedgers::new(
+            vec![
+                acct("poly-acct", "polymarket 主账户", "polymarket"),
+                acct("klin-acct", "poly 副账户", "poly"),
+            ],
+            crate::account::AccountId::from("poly-acct"),
+        ),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+
+    // A 账本先注资（live 账本默认 0，reserve 门要先有钱才放行下单）。
+    c.realign_venue_cash("polymarket", Decimal::from(100));
+    drain_alerts(&mut rx); // 首报=种子，静默
+
+    // A（polymarket / poly-acct）一笔真实成交：订单行 + applied 表各折一次。
+    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
+    let req = crate::model::OrderRequest {
+        token_id: "tok".into(),
+        condition_id: "cond".into(),
+        side: Side::Buy,
+        mode: FillPolicy::Maker,
+        price: dec!(0.40),
+        size: dec!(5),
+        internal_key: "k1".into(),
+        strategy: "s1".into(),
+        asset: "BTC".into(),
+        direction: "up".into(),
+        round_slot: 1,
+        account_id: crate::account::AccountId::from("poly-acct"),
+    };
+    let (id, _) = c.place(req, 0, 1).unwrap();
+    c.bind_venue(&id, "0xv1".into(), 2).unwrap();
+    c.ingest_fill(
+        Fill {
+            order_id: id,
+            trade_id: Some("t1".into()),
+            token_id: "tok".into(),
+            side: Side::Buy,
+            price: dec!(0.40),
+            size: dec!(5),
+            status: FillStatus::Confirmed,
+            ts_ms: 3,
+            tx_hash: None,
+            maker: None,
+            account_id: crate::account::AccountId::from("poly-acct"),
+        },
+        3,
+    )
+    .unwrap();
+    drain_alerts(&mut rx);
+
+    // B（poly / klin-acct）零记录但现金异动：修复前被 A 的全局计数静默。
+    // 场地报 B 的账前 B 账本要先有非零初值（previous==0 是 boot adoption 静默）。
+    c.realign_venue_cash("poly", Decimal::from(50));
+    drain_alerts(&mut rx); // 首报=种子，静默
+    c.realign_venue_cash("poly", Decimal::from(30));
+    let alerts = drain_alerts(&mut rx);
+    assert_eq!(
+        ghost_alerts(&alerts).len(),
+        1,
+        "B's unattributed move must alert even though venue A has fills: {alerts:?}"
+    );
+
+    // A 自己账本上的异动（有成交史）：正常 realign 静默 —— 归属不串门。
+    c.realign_venue_cash("polymarket", Decimal::from(88));
+    let alerts = drain_alerts(&mut rx);
+    assert!(
+        ghost_alerts(&alerts).is_empty(),
+        "a realign over A's own trade history stays a normal correction: {alerts:?}"
+    );
+}
