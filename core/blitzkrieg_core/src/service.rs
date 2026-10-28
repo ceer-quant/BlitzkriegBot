@@ -3193,7 +3193,14 @@ impl Core {
             delta = %delta,
             "venue cash moved with zero kernel trade/order records (ghost-fill detector, issue 692)"
         );
-        eprintln!("core: {message}");
+        // Static line on stderr: the figures live in the structured channels
+        // above/below (tracing fields, RiskAlert, audit JSONL). Interpolating
+        // them here too is the exact shape CodeQL's cleartext-logging check
+        // flags in this file (#693's test-assertion fix, same family) — and
+        // stderr adds nothing those three channels don't already carry.
+        eprintln!(
+            "core: unattributed_cash_move — venue cash moved with zero kernel trade/order records; see RiskAlert + audit log (issue 692)"
+        );
         self.emit(Event::RiskAlert {
             code: CoreErrorCode::Internal,
             message: message.clone(),
