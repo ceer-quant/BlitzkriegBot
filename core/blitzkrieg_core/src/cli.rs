@@ -1013,8 +1013,10 @@ mod tests {
     /// source. The loop is located by two markers rather than by line numbers,
     /// so the extraction survives edits above it; a moved marker fails the test
     /// with the reason instead of silently comparing two empty sets.
+    /// #699: the loop itself now lives in the bin's `bin_support/boot.rs`
+    /// (a pure main.rs size split), so the source is read from there.
     fn flags_matched_by_the_parser() -> Vec<String> {
-        const SRC: &str = include_str!("main.rs");
+        const SRC: &str = include_str!("bin_support/boot.rs");
         const START: &str = "let mut it = argv.iter().cloned();";
         const END: &str = "// ── Resolve the file-settable settings";
         let start = SRC
