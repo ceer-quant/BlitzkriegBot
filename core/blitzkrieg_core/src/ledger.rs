@@ -37,6 +37,13 @@ pub enum JournalKind {
     Merge,
     /// A settled position's redemption payout confirmed on-chain.
     Redemption,
+    /// #684: an expired, never-answered position closed at its fallback price
+    /// (last known mid, else entry). NOT a venue event — no sell fill happened
+    /// and no verdict was received; the credit is the bookkeeping entry that
+    /// keeps the cash identity whole after the position leaves the open book
+    /// without a settlement claim. The kind is what keeps it from ever reading
+    /// as a venue payout (the reconcile sweep still owns the venue's truth).
+    ExpiryFallback,
     /// A wallet-level venue cash row (MAKER_REBATE / REWARD, #388).
     Cashflow,
     /// The venue-reported balance realigned the local book (live reconcile).
@@ -342,6 +349,23 @@ impl Ledger {
             return;
         }
         self.apply(JournalKind::Redemption, payout_usd, claim_id);
+    }
+
+    /// #684: credit the fallback notional of an expired, never-answered
+    /// position closed WITHOUT a settlement claim. The position's cash identity
+    /// walks out of the open book when it closes (`spent`/`received` folds
+    /// shrink by its flows); the settlement path covers that walk with a
+    /// `receivable` claim and merge with `credit_merge` — this path has no
+    /// claim, so the fallback notional moves into spendable cash here instead.
+    /// The amount is the same value `close` priced the un-sold shares at
+    /// (`exit_price × dust_shares`, fee-free: a maker close charges no exit
+    /// fee), so the trade ledger and the cash ledger stay on one number.
+    /// kind = `ExpiryFallback`, `ref` = the position id.
+    pub fn credit_expiry_fallback(&mut self, amount_usd: Decimal, position_id: &str) {
+        if amount_usd <= Decimal::ZERO {
+            return;
+        }
+        self.apply(JournalKind::ExpiryFallback, amount_usd, position_id);
     }
 
     /// Credit the collateral of MERGED share-pairs (task 2.2): one complete
@@ -692,6 +716,8 @@ mod tests {
         l.release("o1"); // no cash movement, no row
         // Zero-delta set_balance is a silent no-op (no flood of realign rows):
         l.set_balance(dec!(150));
+        l.credit_expiry_fallback(dec!(2), "hft-1"); // #684 fallback close
+        l.credit_expiry_fallback(Decimal::ZERO, "hft-1"); // no row: zero is a no-op
         let rows = l.journal_snapshot();
         let sum = rows.iter().fold(Decimal::ZERO, |a, r| a + r.amount);
         assert_eq!(sum, l.balance(), "balance == Σ journal.amount");
@@ -730,10 +756,11 @@ mod tests {
                 JournalKind::Cashflow,
                 JournalKind::Realign,
                 JournalKind::Reset,
+                JournalKind::ExpiryFallback,
             ]
         );
         // The zero/negative rows really were skipped:
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 10);
     }
 
     /// Clamped fills still satisfy the identity because the row records the

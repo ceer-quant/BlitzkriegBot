@@ -54,6 +54,7 @@
 | `orders.reconcile` | `{ openOrderIds?, trades? }` | `{ filled, markedFilled, markedCancelled, ghostIds }` |
 | `positions.list` | `{}` | `{ "positions": [PositionView...] }` |
 | `positions.exit` | `{ positionId? }` | `{ "closed": <n> }` |
+| `positions.force_close` | `{ positionId }` | `{ "positionId", "price" }` —— #684：清除**已过期市场**的幽灵持仓（裁决查询从未被场地应答——updown 列表只载未来轮次，过期 conditionId 永远等不到裁决）。内核三道门：持仓存在 / 已真正过期（活轮拒 `INVALID_ORDER_STATE`，提示走 `positions.exit`）/ `manual_ops_audit_path` 已配置（无审计不下药，拒 `INVALID_PARAMS`）。按兜底价平账入历史（最后已知 mid，为 0 则入场价=成本回收），exit reason = `unverifiable_expiry`，**不建 redemption claim**（裁决未经验证，现金真值由既有 reconcile/realign sweep 跟平）；manual-ops 审计行记 op/actor/position/价格 |
 | `trades.history` | `{ limit? }` —— 缺省 50 | `{ "version": "1.1", "trades": [TradeRecord...] }` —— 已平仓历史（Node 兼容记录；`--trade-log` 在时优先读记录文件尾部，否则内存平仓簿尾部），最旧 → 最新 |
 | `trades.summary` | `{ accountId? }` —— 缺省 = 全局累计 | `{ "version": "1.1", "summary": <TradeSummary> }` —— 持久化 `summary.json` 的**全期**累计（与窗口式 history 不同）；带 `accountId` 时把该账户行现场折叠成同形状汇总（pre-E28 行 accountId 为空归 default），旧核忽略该字段 |
 | `ledger.balance` | `{}` | `{ balance, reserved, available }` |

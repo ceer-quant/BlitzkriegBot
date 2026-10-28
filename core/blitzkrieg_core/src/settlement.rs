@@ -72,8 +72,24 @@ pub const BLIND_AFTER_MS: i64 = 300_000;
 /// for settlement: it stays open in the book where an operator can see it,
 /// instead of being closed at a made-up payout.
 pub const EXPIRY_TRUST_MS: i64 = 300_000;
+/// #684: how long a watched market may stay UNANSWERED past its first query
+/// before the expiry fallback sweep stops waiting. The venue's round list only
+/// carries rounds ending in the next ~20h, so an ALREADY-EXPIRED condition can
+/// never appear in a settlement answer — the query re-arms every
+/// [`REQUERY_MS`] forever and the position is a ghost until an operator
+/// notices. That silence is the observable signature: a venue that CAN answer
+/// does so within one re-query interval (every answer counts, including a
+/// `resolved: false` "not yet"). Unanswered past this bound means the venue
+/// will never rule on this condition, structurally.
+pub const EXPIRY_FALLBACK_AFTER_MS: i64 = 7_200_000;
 /// The exit reason a settled position closes with (`exit:settlement`).
 pub const SETTLEMENT_EXIT_REASON: ExitReason = ExitReason::Settlement;
+/// #684: the exit reason a fallback-closed position carries
+/// (`unverifiable_expiry` on the wire). Deliberately NOT
+/// [`ExitReason::Settlement`]: no venue verdict was ever received, so the
+/// trade record must never read as one — the close price is a bookkeeping
+/// value, not a payout, and the label is what makes that auditable forever.
+pub const UNVERIFIED_EXPIRY_EXIT_REASON: ExitReason = ExitReason::UnverifiableExpiry;
 
 /// One position's settlement, as computed from a venue resolution. Pure data:
 /// the caller decides whether it becomes a booking, which keeps the arithmetic
@@ -625,6 +641,23 @@ impl SettlementBook {
         let edge = blind && !self.blind_alerted;
         self.blind_alerted = blind;
         edge
+    }
+
+    /// #684: the watched markets whose settlement query has NEVER been
+    /// answered (`answers == 0`) and whose first dispatch is older than
+    /// `min_ms`, as `(condition_id, first_sent_ms)` pairs. This is the
+    /// structural signature of a market the venue will never rule on: the
+    /// round list only carries future rounds, so an already-expired condition
+    /// cannot appear in any answer, ever. A venue that CAN answer is heard
+    /// within one re-query interval — every answer counts, including a
+    /// `resolved: false` "not yet" — so only true silence accumulates here.
+    /// Read-only accessor: the query map's shape stays private.
+    pub fn unanswered_since(&self, min_ms: i64, now_ms: i64) -> Vec<(String, i64)> {
+        self.queries
+            .values()
+            .filter(|q| q.answers == 0 && q.first_sent_ms > 0 && now_ms - q.first_sent_ms > min_ms)
+            .map(|q| (q.condition_id.clone(), q.first_sent_ms))
+            .collect()
     }
 
     // ── Queries ─────────────────────────────────────────────────────────────

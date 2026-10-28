@@ -353,6 +353,16 @@ pub enum ExitReason {
     /// is exactly the $1.00 the ledger credits per pair. Unpaired remainders
     /// stay open for settlement.
     Merge,
+    /// #684: a LIVE position held past its market's expiry whose settlement
+    /// query was NEVER answered by the venue (the updown round list only
+    /// carries future rounds, so an already-expired condition can never appear
+    /// in an answer). Closed at a bookkeeping price — last known mid, else
+    /// entry price (cost recovery) — with NO redemption claim: no verdict was
+    /// received, so none is invented and no "winner" is redeemed. The venue's
+    /// own cash truth folds in later through the reconcile/realign sweep; the
+    /// wire label `unverifiable_expiry` on the trade record is the audit trail
+    /// (`settlement` would read as a verified verdict, which never happened).
+    UnverifiableExpiry,
 }
 
 /// A binary UP/DOWN market for one asset in the current round.
