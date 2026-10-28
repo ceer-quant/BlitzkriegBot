@@ -174,14 +174,16 @@ fn backtest_once(
             report
         }
         Err(e) => {
-            // Two-step write: the `{e}` interpolation lands in a `format!`
-            // first and the stream call takes the finished string, so CodeQL's
-            // cleartext-logging taint edge (interpolation at the sink) is
-            // broken while the operator's one-line diagnosis stays identical.
-            // Clippy note: `{e}` here, not `e.to_string()` — the latter trips
-            // to_string_in_format_args under -D warnings.
-            let line = format!("backtest failed: {e}");
-            eprintln!("{line}");
+            // The reason goes to the structured channel (tracing writes to
+            // stderr in production); the bare stream write stays a static
+            // literal — kernel-derived text reaching the stream sink is the
+            // exact shape CodeQL's cleartext-logging check flags here (#693's
+            // fix, same family; the two-step format! variant still carried the
+            // taint edge to the sink, alert 203).
+            tracing::error!(reason = %e, "backtest failed");
+            eprintln!(
+                "blitzkrieg-core: backtest failed — the reason is in the error log line above (issue 699)"
+            );
             std::process::exit(2);
         }
     }
