@@ -672,7 +672,11 @@ impl CoreConfig {
                     continue;
                 }
                 let ok = receipt.contains("registered into the engine dispatch");
-                tracing::info!(path = %path.display(), ok, receipt = %receipt, "strategy auto-load");
+                // The message text must NOT contain the substring "auto-load":
+                // the E30 gate takes the FIRST stream line carrying that
+                // marker plus the package name, so a tracing line here would
+                // shadow the receipt eprintln below.
+                tracing::info!(path = %path.display(), ok, receipt = %receipt, "strategy package scanned");
                 // The receipt IS this line's payload: the E30 gate
                 // (lua-sandbox-check.mjs) parses `auto-load (ok|FAILED): …`
                 // from the stream — a fixed-shape status summary (name@version,
@@ -710,7 +714,9 @@ impl CoreConfig {
                 continue;
             }
             let ok = receipt.contains("registered into the engine dispatch");
-            tracing::info!(pkg = %pkg.display(), ok, receipt = %receipt, "lua strategy auto-load");
+            // Same "no auto-load substring" rule as the dylib scan above —
+            // the tracing line must not shadow the receipt eprintln below.
+            tracing::info!(pkg = %pkg.display(), ok, receipt = %receipt, "lua strategy package scanned");
             // Same contract as the dylib scan above: the E30 gate parses
             // `auto-load (ok|FAILED): <receipt>` from the stream — a fixed-shape
             // status summary, not free kernel text.
