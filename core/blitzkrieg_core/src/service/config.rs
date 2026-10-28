@@ -673,11 +673,14 @@ impl CoreConfig {
                 }
                 let ok = receipt.contains("registered into the engine dispatch");
                 tracing::info!(path = %path.display(), ok, receipt = %receipt, "strategy auto-load");
-                // Static literal at the stream sink (#693 family): the kernel
-                // receipt rides the structured line above.
+                // The receipt IS this line's payload: the E30 gate
+                // (lua-sandbox-check.mjs) parses `auto-load (ok|FAILED): …`
+                // from the stream — a fixed-shape status summary (name@version,
+                // registration phrase, disabled marker), not free kernel text.
                 eprintln!(
-                    "blitzkrieg-core: strategy auto-load {} — see the info log line above",
-                    if ok { "ok" } else { "FAILED" }
+                    "blitzkrieg-core: strategy auto-load {}: {}",
+                    if ok { "ok" } else { "FAILED" },
+                    receipt
                 );
             }
         }
@@ -708,11 +711,13 @@ impl CoreConfig {
             }
             let ok = receipt.contains("registered into the engine dispatch");
             tracing::info!(pkg = %pkg.display(), ok, receipt = %receipt, "lua strategy auto-load");
-            // Static literal at the stream sink (#693 family); the receipt
-            // rides the structured line above.
+            // Same contract as the dylib scan above: the E30 gate parses
+            // `auto-load (ok|FAILED): <receipt>` from the stream — a fixed-shape
+            // status summary, not free kernel text.
             eprintln!(
-                "blitzkrieg-core: lua strategy auto-load {} — see the info log line above",
-                if ok { "ok" } else { "FAILED" }
+                "blitzkrieg-core: lua strategy auto-load {}: {}",
+                if ok { "ok" } else { "FAILED" },
+                receipt
             );
         }
     }
