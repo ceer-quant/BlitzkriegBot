@@ -347,6 +347,63 @@ const needsStrategyHint = computed(() => {
 
 <template>
   <template v-if="snap">
+    <!--
+      警示横幅在驾驶舱最顶上（2026-10-28 运营者裁决：挪到 page 最上方、低于
+      App header）——交易安全面先于一切数据瓦片进视线；KPI 行从「第一眼」退
+      为「横幅之下」。横幅自身的分级/钉住/自动消失语义见 lib/safety.ts 与上
+      方脚本块，此处只管摆位。
+    -->
+    <div v-if="connBanner && connBannerVisible" class="mb-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="connBanner.title"
+        :hint="connBanner.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(connBanner.identity)"
+        @dismiss="connBanner.identity && dismiss(connBanner.identity)"
+      >{{ connBanner.body }}</AlertBanner>
+    </div>
+    <div v-if="freeze" class="mb-3.5">
+      <!-- 紧急：交易此刻停了 —— 红色、钉住、无 ✕（藏掉唯一的红 = 藏掉事故） -->
+      <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
+    </div>
+    <div v-else-if="lastError && lastErrorVisible" class="mb-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="lastError.title"
+        :hint="lastError.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(lastError.identity)"
+        @dismiss="lastError.identity && dismiss(lastError.identity)"
+      >
+        <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
+      </AlertBanner>
+    </div>
+    <div v-if="selfCheck" class="mb-3.5">
+      <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->
+      <AlertBanner tone="error" :title="selfCheck.title">
+        {{ selfCheck.body }}
+        <span v-for="item in selfCheck.items" :key="item.name" class="block">
+          {{ item.name }}：{{ item.detail }}
+        </span>
+      </AlertBanner>
+    </div>
+    <div v-if="archiveStopped && archiveStoppedVisible" class="mb-3.5">
+      <AlertBanner
+        tone="warn"
+        :title="archiveStopped.title"
+        :hint="archiveStopped.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(archiveStopped.identity)"
+        @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
+      >
+        {{ archiveStopped.body }}
+      </AlertBanner>
+    </div>
+
     <!-- beginner hint: the panel is live but the robot is not yet allowed to act -->
     <div v-if="needsStrategyHint" class="mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
       <CircleDot class="size-3.5 shrink-0 text-primary" />
@@ -593,56 +650,6 @@ const needsStrategyHint = computed(() => {
       </Card>
     </div>
 
-    <div v-if="connBanner && connBannerVisible" class="mt-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="connBanner.title"
-        :hint="connBanner.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(connBanner.identity)"
-        @dismiss="connBanner.identity && dismiss(connBanner.identity)"
-      >{{ connBanner.body }}</AlertBanner>
-    </div>
-    <div v-if="freeze" class="mt-3.5">
-      <!-- 紧急：交易此刻停了 —— 红色、钉住、无 ✕（藏掉唯一的红 = 藏掉事故） -->
-      <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
-    </div>
-    <div v-else-if="lastError && lastErrorVisible" class="mt-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="lastError.title"
-        :hint="lastError.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(lastError.identity)"
-        @dismiss="lastError.identity && dismiss(lastError.identity)"
-      >
-        <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
-      </AlertBanner>
-    </div>
-    <div v-if="selfCheck" class="mt-3.5">
-      <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->
-      <AlertBanner tone="error" :title="selfCheck.title">
-        {{ selfCheck.body }}
-        <span v-for="item in selfCheck.items" :key="item.name" class="block">
-          {{ item.name }}：{{ item.detail }}
-        </span>
-      </AlertBanner>
-    </div>
-    <div v-if="archiveStopped && archiveStoppedVisible" class="mt-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="archiveStopped.title"
-        :hint="archiveStopped.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(archiveStopped.identity)"
-        @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
-      >
-        {{ archiveStopped.body }}
-      </AlertBanner>
-    </div>
   </template>
 
   <Card v-else class="mt-3.5">
