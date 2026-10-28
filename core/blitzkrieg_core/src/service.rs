@@ -1662,12 +1662,30 @@ pub struct Core {
     /// silent (the alert fired once; the banner reads `stats.archive`), and a
     /// defensive `false → true` reset just re-arms the detector.
     archive_recording_last: bool,
-    /// 幽灵成交探测器（issue 692）：已告警过「场地现金异动而内核零成交/订单
-    /// 记录」的 venue 集合 —— 去重键就是异常窗口本身（该 venue 绑定账户零
-    /// 记录的整段时期）。账户一旦出现内核自己的成交/订单记录，窗口关闭、
-    /// 槽位摘除（此后带交易史的修正走「正常 realign」静默分支；新会话槽位
-    /// 随 Core 重建，零记录异动自然重新武装）。
-    ghost_cash_alerted: std::collections::HashSet<String>,
+    /// 幽灵成交探测器（issue 692）：已告警过的 venue → 上次告警的残差
+    /// （厘粒度 mantissa）。#702 修订：去重键 = 同一个未解释残差 —— 同一
+    /// 条腿的 reconcile 周期重放只响一次；残差变化（叠加新异动）或先恢复
+    /// （|残差|≤ε 清槽）后的新异动，重新响。
+    ghost_cash_alerted: std::collections::HashMap<String, i128>,
+    /// #702: each venue's own last reported number — the previous side of the
+    /// move the NEXT report is judged against. The ledger balance is NOT this:
+    /// a fill the venue already reported moves the book between venue reports,
+    /// and comparing the new report to the book (instead of to the venue's own
+    /// last word) would read a fully-explained correction as an anomaly.
+    venue_truth_last: std::collections::HashMap<String, Decimal>,
+    /// #702: per venue, how many journal rows the venue's truth reports had
+    /// already ANSWERED FOR when its number last CHANGED — the evidence
+    /// window cursor. Rows after the cursor are facts the venue's current
+    /// number has not yet been checked against; rows before it are
+    /// reconciled history. A CHANGED report advances the cursor (the delta
+    /// was judged against everything before it); an EQUAL report deliberately
+    /// keeps the cursor — facts booked between two equal reports happened
+    /// after the venue's last word and belong to the still-open window.
+    ///
+    /// A cursor, not a timestamp: journal rows stamp real wall clock while
+    /// replay/tests drive virtual clocks — comparing the two bases silently
+    /// swallows every fact. Row COUNT is the same sequence in both worlds.
+    venue_fact_cursor: std::collections::HashMap<String, usize>,
     /// F4: close-accounting credentials for fill-driven full closes, keyed by
     /// the OME trade key. A MATCHED sell that emptied a position books TradeDb /
     /// strategy PnL / breaker immediately; if the venue later reports that same
@@ -2467,7 +2485,9 @@ impl Core {
             settlement,
             venue_free_by_venue: std::collections::HashMap::new(),
             archive_recording_last: true,
-            ghost_cash_alerted: std::collections::HashSet::new(),
+            ghost_cash_alerted: std::collections::HashMap::new(),
+            venue_truth_last: std::collections::HashMap::new(),
+            venue_fact_cursor: std::collections::HashMap::new(),
             close_credentials: std::collections::VecDeque::new(),
             close_credential_log,
             next_id: 1,
@@ -3033,11 +3053,17 @@ impl Core {
                 .ledger_of(&target)
                 .map(|l| l.balance())
                 .unwrap_or_default();
+            // 幽灵成交探测器（issue 692/#702）：把「场地在我不知情时动了
+            // 钱」变成操作者第一时间可见的事实 —— 判据是残差对账（本次
+            // 报数差减去窗口内台账已记账的现金事实），详论与告警见
+            // `report_venue_cash_move`。#702： EVERY report feeds the
+            // detector — including one equal to the book, which is how the
+            // venue's truth baseline and the evidence cursor get established;
+            // gating on `previous != b` left the baseline unwritten whenever
+            // the seeding report matched the book, and the next real delta
+            // was then judged against nothing.
+            self.report_venue_cash_move(venue, &target, previous, b, ts);
             if previous != b {
-                // 幽灵成交探测器（issue 692）：把「场地在我不知情时动了钱」变成
-                // 操作者第一时间可见的事实 —— 详论与告警见 `report_venue_cash_move`。
-                let trade_records = self.venue_trade_records(venue, &target);
-                self.report_venue_cash_move(venue, &target, previous, b, trade_records, ts);
                 // The move is recorded PER VENUE so the audit's trade-leg check
                 // can name the venue's own correction on ITS book only — a
                 // sibling venue's realign must never explain this book's
@@ -3061,61 +3087,49 @@ impl Core {
         tracing::debug!(account = %target.as_str(), venue = %venue, balance = %b, "venue cash routed");
     }
 
-    /// The kernel's own trading evidence for one venue's book, as the count of
-    /// fills/orders the OME can name (issue 692's「有对应成交记录」side). Any
-    /// nonzero count closes the anomaly window: a residual correction over a
-    /// book with trading history is the documented normal-realign shape.
+    /// The absolute tolerance a residual may carry and still read as
+    /// explained (#702). The reconciliation fold itself quantizes to cents,
+    /// so anything under a cent is rounding, not a money fact. (A plain fn:
+    /// `Decimal::new` is not const-callable.)
+    fn residual_eps() -> Decimal {
+        Decimal::new(1, 2) // 0.01
+    }
+
+    /// #702: the cash facts THIS BOOK journalled inside the current evidence
+    /// window, SIGNED — the net the ledger says cash moved since the venue's
+    /// truth reports last answered for the book. Debits (buy fills, fees)
+    /// are negative, credits (sell fills, settlements, cashflow) positive.
     ///
-    /// Three counters, all OME state — no new wire type, no new persistence:
-    ///  - total fills applied (the applied-fill idempotency table, one row per
-    ///    venue trade id ever absorbed, including late fills) — attributed to
-    ///    THIS book via its order's account (#701: the raw table length is
-    ///    GLOBAL and would let venue A's fills mute venue B's alert);
-    ///  - tracked orders with at least one fill (filled_size > 0);
-    ///  - tracked orders live or terminal with any size (order records at all).
+    /// The window is the [`Self::venue_fact_cursor`]: journal rows before it
+    /// are reconciled history, rows after it are facts the venue's current
+    /// number has not been checked against. A cursor, not a timestamp —
+    /// journal rows stamp real wall clock while replay/tests drive virtual
+    /// clocks, and comparing the two bases silently swallows every fact;
+    /// row COUNT is the same sequence in both worlds.
     ///
-    /// `total_fills == 0` alone would be a lie after a restart (the table
-    /// replays from its log only when one is configured), so the order leg is
-    /// the second witness: a core that placed orders knows its own trading and
-    /// stays quiet.
-    fn venue_trade_records(&self, venue: &str, target: &crate::account::AccountId) -> usize {
-        let bound = self.accounts.account_for_venue(venue).is_some();
-        // #701: fills are attributed through their ORDER's account — an
-        // applied-fill row is only this book's evidence when the order it
-        // landed on belongs to `target`. An order from a sibling account can
-        // never explain THIS book's residual; an order no longer in the
-        // table's sight claims no book at all (fail toward alerting).
-        let applied_orders = self.ome.applied_order_ids();
-        let attributed_fills = self
-            .ome
-            .all()
-            .iter()
-            .filter(|o| {
-                applied_orders.contains(o.order_id.as_str()) && (o.account_id == *target || !bound)
-            })
-            .count();
-        let (filled_orders, any_orders) = {
-            let mut filled = 0usize;
-            let mut any = 0usize;
-            for o in self.ome.all() {
-                if bound && o.account_id != *target {
-                    continue;
-                }
-                any += 1;
-                if o.filled_size > Decimal::ZERO {
-                    filled += 1;
-                }
-            }
-            (filled, any)
+    /// Realign rows are excluded (they are the corrections being judged, not
+    /// evidence for them), as are Seed/Reset (boot and operator reseeds are
+    /// not the venue's story).
+    fn window_cash_facts(&self, venue: &str, target: &crate::account::AccountId) -> Decimal {
+        let cursor = self.venue_fact_cursor.get(venue).copied().unwrap_or(0);
+        let Ok(ledger) = self.accounts.ledger_of(target) else {
+            return Decimal::ZERO;
         };
-        if bound {
-            attributed_fills + filled_orders + any_orders
-        } else {
-            // The legacy single-account fallback parked this venue's report on
-            // the one book — its orders are this venue's history by
-            // construction (the account did not exist to scope by).
-            attributed_fills + any_orders
-        }
+        ledger
+            .journal_snapshot()
+            .iter()
+            .enumerate()
+            .skip(cursor.min(usize::MAX.saturating_sub(1)))
+            .filter(|(_, e)| {
+                !matches!(
+                    e.kind,
+                    crate::ledger::JournalKind::Realign
+                        | crate::ledger::JournalKind::Seed
+                        | crate::ledger::JournalKind::Reset
+                )
+            })
+            .map(|(_, e)| e.amount)
+            .sum()
     }
 
     /// 幽灵成交探测器（issue 692）：the realign channel's alert.
@@ -3134,42 +3148,80 @@ impl Core {
     /// `unattributed_cash_move …` line, the same fact lands in the audit JSONL,
     /// and `tracing` + stderr say it too.
     ///
-    /// 去重键 = 异常窗口本身（该 venue 绑定账户零成交/订单记录的整段时期），
-    /// 不是单次记账：a reconcile cycle repeats every `audit_interval_sec`, and
-    /// the uncorrected gap would re-alert on every fold — alert spam trains
-    /// operators to ignore the one alert that matters. So the venue is marked
-    /// alerted and stays silent for as long as the window persists. When the
-    /// kernel gains its own trading evidence for the book (a real fill, an
-    /// order record) the slot is REMOVED — but from that instant the realign
-    /// is a normal correction anyway (the branch above): silence is correct
-    /// for it. Re-arming happens through the evidence leg itself: a fresh
-    /// session (or a book whose records were reset away) starts with an empty
-    /// slot, so a NEW unattributed move alerts again. Zero false positives is
-    /// the other half of the contract: a normal realign (a residual correction
-    /// with corresponding trade records) never alerts.
+    /// #702 决策修订（窗口化证据，替代 #700 的终身订单计数模型）：判据不是
+    /// 「这本账有没有交易史」，而是「本次差额能否被当前对账窗口内的账务事实
+    /// 解释」。残差 = (reported − previous) − 窗口内台账净记账（fee 零头以
+    /// [`Self::residual_eps`] 容忍）；|残差| ≤ ε → 正常修正静默；否则有内核
+    /// 解释不了的异动，告警。终身计数被证明过宽（一张零成交订单或很早以前
+    /// 的成交会永久豁免之后的所有未知变动）；窗口模型下，已被报数收编的
+    /// 旧事实、拒单与零成交取消单（从不进台账），都不再构成免警凭据。
+    ///
+    /// 去重与重臂（#702 语义）：告警槽按 venue 记「这个残差已经报过」。
+    /// 残差一旦变化（新的未知异动）或恢复可解释（清槽），随之重置 —— 同一
+    /// 异常只响一次，恢复后的新异常重新响。不靠会话生命周期。
     fn report_venue_cash_move(
         &mut self,
         venue: &str,
         target: &crate::account::AccountId,
         previous: Decimal,
         reported: Decimal,
-        trade_records: usize,
         now_ms: i64,
     ) {
-        if trade_records > 0 {
-            // The book has trading history: a realign here is the documented
-            // normal correction (fee-level residue, settlement timing, a
-            // manual close). Silence is CORRECT, and any earlier ghost alert
-            // for this venue is retired — its anomaly window is over.
-            self.ghost_cash_alerted.remove(venue);
-            return;
-        }
-        if previous == Decimal::ZERO {
+        if previous == Decimal::ZERO && !self.venue_truth_last.contains_key(venue) {
             // The boot adoption, not a move: a LIVE book wakes at zero and its
             // FIRST venue report IS the balance (`realign_venue_cash` is the
             // seeding path — #646's regression pins this silence). Nothing was
-            // "moved"; there was nothing to move. The detector watches the
-            // book from the second report on.
+            // "moved"; there was nothing to move. The gate fires only for a
+            // venue with no prior truth on file — a book folded back to zero
+            // mid-session is a REAL move and stays under the detector. The
+            // cursor still starts here: everything journalled before this
+            // report is the book's opening state, not a move to explain.
+            let seen = self
+                .accounts
+                .ledger_of(target)
+                .map(|l| l.journal_snapshot().len())
+                .unwrap_or(0);
+            self.venue_fact_cursor.insert(venue.to_string(), seen);
+            self.venue_truth_last.insert(venue.to_string(), reported);
+            return;
+        }
+        // The venue's OWN last report is the comparison base — not the ledger
+        // balance: a fill the venue already reported moves the book between
+        // venue reports, and diffing against the book would read a fully
+        // explained correction as an anomaly.
+        let previous_venue_report = self.venue_truth_last.get(venue).copied();
+        // The cursor read must precede the cursor write: `booked` is the
+        // window's evidence, the advance below closes that window. An
+        // EQUAL-value report deliberately does not advance — facts booked
+        // between two equal reports happened after the venue's last word and
+        // belong to the still-open window; a CHANGED report has been judged
+        // against everything before it, so the cursor moves past them.
+        let changed = previous_venue_report != Some(reported);
+        let booked = self.window_cash_facts(venue, target);
+        if changed {
+            let seen = self
+                .accounts
+                .ledger_of(target)
+                .map(|l| l.journal_snapshot().len())
+                .unwrap_or(0);
+            self.venue_fact_cursor.insert(venue.to_string(), seen);
+        }
+        self.venue_truth_last.insert(venue.to_string(), reported);
+
+        // Explanation identity (#702): the venue's move is explained exactly
+        // when `reported − its last report == booked` — the venue moved cash
+        // by the signed net the ledger booked this window. What is LEFT is
+        // the part no kernel fact accounts for, signed in the venue-move
+        // direction: negative means the venue is SHORT vs the book's story
+        // (the 11:31 shape), positive means extra cash appeared.
+        let previous = previous_venue_report.unwrap_or(previous);
+        let residual = (reported - previous) - booked;
+        if residual.abs() <= Self::residual_eps() {
+            // Every cent of the venue's move is accounted for by facts the
+            // kernel booked INSIDE this window (fills, fees, settlements,
+            // cashflow) — a normal correction. Silence, and a prior alert's
+            // anomaly is over: the book is back to explainable.
+            self.ghost_cash_alerted.remove(venue);
             return;
         }
         if self.plugin_modes.iter().any(|p| {
@@ -3187,21 +3239,30 @@ impl Core {
             // detector exists for venues that hold REAL cash.
             return;
         }
-        if !self.ghost_cash_alerted.insert(venue.to_string()) {
-            // Same anomaly window: already alerted once, stay quiet until the
-            // window closes (trade records appear) or a new session boots.
+        // Dedup key = the residual itself, quantized to cents: the same
+        // unexplained gap replaying on every reconcile cycle alerts once; a
+        // CHANGED residual is a new fact and re-alerts. `round_dp(2)` first
+        // — a raw `mantissa()/100` collapses scale-0 integers (−10, −30,
+        // +30 all → 0) into one false-equal key.
+        let residual_key = residual.round_dp(2).mantissa();
+        if self.ghost_cash_alerted.get(venue) == Some(&residual_key) {
             return;
         }
+        self.ghost_cash_alerted
+            .insert(venue.to_string(), residual_key);
         let delta = reported - previous;
         let message = format!(
             "unattributed_cash_move venue={} account={} previous={} reported={} delta={} \
-             fills=0 orders=0 — the venue moved cash the kernel has no trade or \
-             order record for; booked as a realign (ref=venue), attributed to NOBODY",
+             booked_in_window={} residual={} — the venue moved cash the kernel cannot \
+             explain from THIS window's ledger facts (issue 702 windowed evidence); \
+             booked as a realign (ref=venue), attributed to NOBODY",
             venue,
             target.as_str(),
             previous,
             reported,
             delta,
+            booked,
+            residual,
         );
         tracing::error!(
             venue = %venue,
@@ -3209,7 +3270,9 @@ impl Core {
             previous = %previous,
             reported = %reported,
             delta = %delta,
-            "venue cash moved with zero kernel trade/order records (ghost-fill detector, issue 692)"
+            booked_in_window = %booked,
+            residual = %residual,
+            "venue cash move exceeds this window's booked evidence (ghost detector, issues 692+702)"
         );
         // Static line on stderr: the figures live in the structured channels
         // above/below (tracing fields, RiskAlert, audit JSONL). Interpolating
@@ -3231,6 +3294,8 @@ impl Core {
             "previous": previous.to_string(),
             "reported": reported.to_string(),
             "delta": delta.to_string(),
+            "bookedInWindow": booked.to_string(),
+            "residual": residual.to_string(),
         }));
     }
 
