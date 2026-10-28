@@ -179,6 +179,15 @@ pub mod method {
     pub const POSITIONS_LIST: &str = "positions.list";
     /// Force-close a position at market (manual flatten).
     pub const POSITION_EXIT: &str = "positions.exit";
+    /// #684: the operator's clear-out verb for a position whose market has
+    /// EXPIRED and whose settlement verdict never arrived (the updown round
+    /// list only carries future rounds, so an expired condition can never be
+    /// answered). Kernel gates: position exists, expiry is genuinely past (a
+    /// live round is refused — that is `positions.exit`'s job), and a
+    /// manual-ops audit path is configured. Closes at a bookkeeping price
+    /// (last known mid, else entry) with NO redemption claim; the audit row
+    /// names the operator.
+    pub const POSITION_FORCE_CLOSE: &str = "positions.force_close";
     /// Closed-trade history (Node-compatible records) for the UI.
     pub const TRADES_HISTORY: &str = "trades.history";
     pub const TRADES_SUMMARY: &str = "trades.summary";
@@ -1721,6 +1730,26 @@ pub struct PositionExitParams {
 #[serde(rename_all = "camelCase")]
 pub struct PositionExitResult {
     pub closed: usize,
+}
+
+/// #684: `positions.force_close` params — names ONE position; every judgment
+/// (expired? audited?) is the kernel's. Same body shape as
+/// [`ForceCloseParams`] (the order-side verb) so the two verbs read alike.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionForceCloseParams {
+    pub position_id: String,
+}
+
+/// #684: `positions.force_close` result — the closed row's id and the price
+/// the bookkeeping close landed at (last known mid, else entry), so the
+/// caller's receipt names exactly what was written.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionForceCloseResult {
+    pub position_id: String,
+    #[serde(with = "crate::decimal")]
+    pub price: Decimal,
 }
 
 // ── v0.3 Wave 0 (#329): the two read-only envelopes ──────────────────────────
