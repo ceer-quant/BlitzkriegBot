@@ -3263,6 +3263,14 @@ impl Core {
                 // Slot matching for the panel's expiry judgment — same
                 // grid coordinate the orders tab already carries.
                 round_slot: p.round_slot,
+                // The position's OWN family duration (three-state fallback
+                // resolved exactly as the force-close gate resolves it), so
+                // the panel's per-row slot arithmetic uses the family clock
+                // the kernel judges with — not the page's identity-venue
+                // duration, which is a different family under multi-family
+                // deployment (issue 733).
+                round_duration_sec: p
+                    .effective_round_duration_sec(None, self.config.round_duration_sec),
                 // Cash actually moved on this position, so an external monitor
                 // can check the ledger identity without waiting for a flat book.
                 // `entry_cost_usd` is the TOTAL entry notional (what left the

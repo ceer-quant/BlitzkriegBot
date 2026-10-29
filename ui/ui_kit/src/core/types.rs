@@ -124,6 +124,11 @@ pub struct PositionView {
     /// the panel falls back to remainingSec's sign for those).
     #[serde(default)]
     pub round_slot: i64,
+    /// The position's own family duration in seconds (0 = legacy core; the
+    /// panel falls back to its page-level hint). The panel's slot arithmetic
+    /// multiplies by THIS, never by a page-level duration (issue 733).
+    #[serde(default)]
+    pub round_duration_sec: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

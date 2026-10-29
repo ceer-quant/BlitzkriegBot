@@ -344,6 +344,48 @@ fn force_close_gates_and_audit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 用例 5b（issue 733）：非零 round_slot 的过期门按**持仓自身族长**判定，
+/// 不是全局格。持仓戳 slot=2、自身族长 3600s（快照直存），全局 900s：
+/// 轮尾在 (2+1)·3600 = 10_800_000 —— 全局钟会把 [5_400_000, 10_800_000)
+/// 误判成已过期（slot×900=2_700_000 更早），自身钟在 5_400_000 仍判活轮
+/// 拒、在 10_800_000 放行。老快照（slot=0）回落 expires_at_ms 倒计时。
+#[test]
+fn force_close_expiry_uses_the_positions_own_family_clock() {
+    let dir = scratch("force-close-family-clock");
+    let mut c = fallback_core(&dir, true);
+    let mut p = open_expiring_position(&mut c);
+    p.round_slot = 2;
+    p.round_duration_sec = 3600;
+    // 直接把带戳的持仓放回账本（开仓路径的戳来自成交行，这里测判定门本身）。
+    c.positions_mut().restore_open(vec![p.clone()]);
+
+    // 自身钟下仍在轮内：(slot+1)·3600 = 10_800_000，此刻 5_400_001 → 拒。
+    let err = c
+        .force_close_expired_position(&p.id, "uid:op", 5_400_001)
+        .expect_err("the 3600s round is still live at slot midpoint");
+    assert_eq!(err.code, CoreErrorCode::InvalidOrderState, "{err}");
+    assert!(err.message.contains("still live"), "{err}");
+    assert_eq!(c.positions().open_positions().len(), 1);
+
+    // 全局钟的误判点（slot×900 早已过去）也不放行 —— 判定不用全局格。
+    let err = c
+        .force_close_expired_position(&p.id, "uid:op", 2_700_001)
+        .expect_err("the global-grid arithmetic must not decide");
+    assert_eq!(err.code, CoreErrorCode::InvalidOrderState, "{err}");
+
+    // 自身钟轮尾已过 → 平。
+    let closed = c
+        .force_close_expired_position(&p.id, "uid:op", 10_800_001)
+        .expect("past the slot's own end = closable");
+    assert_eq!(
+        closed.exit_reason,
+        crate::model::ExitReason::UnverifiableExpiry
+    );
+    assert!(c.positions().open_positions().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 用例 6：幂等 —— 已平仓的 position_id 再调 force_close → 拒
 /// （InvalidParams），不重复记账（只有一条 trade record）。
 #[test]
