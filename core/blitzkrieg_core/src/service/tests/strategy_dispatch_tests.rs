@@ -215,12 +215,13 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
     let dir = std::env::temp_dir().join(format!("bk-mint-seed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     let journal_dir = dir.join("ledger");
     std::fs::create_dir_all(&journal_dir).expect("journal dir");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=\"main\"\n",
     )
     .expect("fixture");
     // Dry settles locally: the mint gets the seed.
@@ -231,8 +232,9 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
             ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -271,12 +273,13 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
     // LIVE: the venue owns the cash — a mint stays at zero (and no journal
     // path is needed to remember a venue truth, but attaching one is
     // harmless; the balance stays 0 and no row is written).
-    let accounts_path_live = dir.join("accounts-live.toml");
+    let accounts_path_live = dir.join("accounts-live.toml"); // the LEGACY path — never written
+    let env_path_live = dir.join("live.env");
     let journal_dir_live = dir.join("ledger-live");
     std::fs::create_dir_all(&journal_dir_live).expect("live journal dir");
     std::fs::write(
-        &accounts_path_live,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        &env_path_live,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=\"main\"\n",
     )
     .expect("fixture");
     let mut live = Core::with_account_book(
@@ -286,8 +289,9 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
             ledger_journal_dir: Some(journal_dir_live.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path_live,
+            Some(&env_path_live),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -323,10 +327,11 @@ fn display_account_set_persists_and_validates_plan_first() {
     let dir = std::env::temp_dir().join(format!("bk-display-set-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
     let mut c = Core::with_account_book(
@@ -334,8 +339,9 @@ fn display_account_set_persists_and_validates_plan_first() {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -349,26 +355,27 @@ fn display_account_set_persists_and_validates_plan_first() {
     c.set_display_account_persisting(&crate::account::AccountId::from("paper"), "test", "")
         .expect("the re-point lands");
     assert_eq!(c.accounts.display_id(), "paper");
-    let reloaded = crate::account::config::load_account_ledgers(
+    let reloaded = crate::account::config::load_account_ledgers_single_source(
         &accounts_path,
+        Some(&env_path),
         2,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
     .unwrap();
     assert_eq!(reloaded.display_id(), "paper", "the pointer is durable");
     // The top-level key survived the render next to both rows' fields.
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    assert!(text.contains("display_account = \"paper\""), "{text}");
+    let text = std::fs::read_to_string(&env_path).unwrap();
+    assert!(text.contains("ACCOUNT_DISPLAY=\"paper\""), "{text}");
 
     // UNKNOWN id: refused plan-first, memory and file untouched.
-    let before = std::fs::read_to_string(&accounts_path).unwrap();
+    let before = std::fs::read_to_string(&env_path).unwrap();
     let err = c
         .set_display_account_persisting(&crate::account::AccountId::from("ghost"), "test", "")
         .expect_err("unknown id");
     assert!(err.message.contains("unknown account"), "{}", err.message);
     assert_eq!(c.accounts.display_id(), "paper");
     assert_eq!(
-        std::fs::read_to_string(&accounts_path).unwrap(),
+        std::fs::read_to_string(&env_path).unwrap(),
         before,
         "a refused write leaves the file byte-identical"
     );
@@ -377,8 +384,8 @@ fn display_account_set_persists_and_validates_plan_first() {
     // Active-only 校验拒绝，现在 display 是面板唯一可信账户源、切观察
     // 户必须生效 —— 「存在即可」，frozen1 合法落位，内存与文件同步。
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"frozen1\"\nname = \"f\"\nstatus = \"frozen\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,frozen1\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_FROZEN1_NAME=\"f\"\nACCOUNT_FROZEN1_STATUS=\"frozen\"\n",
     )
     .expect("fixture two");
     let mut c2 = Core::with_account_book(
@@ -386,8 +393,9 @@ fn display_account_set_persists_and_validates_plan_first() {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -400,8 +408,9 @@ fn display_account_set_persists_and_validates_plan_first() {
         "frozen1",
         "display follows a frozen book — view-only, posture gates the orders"
     );
-    let reloaded2 = crate::account::config::load_account_ledgers(
+    let reloaded2 = crate::account::config::load_account_ledgers_single_source(
         &accounts_path,
+        Some(&env_path),
         2,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -431,10 +440,11 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
     let dir = std::env::temp_dir().join(format!("bk-inherit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
     let mut c = Core::with_account_book(
@@ -442,8 +452,9 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -500,9 +511,11 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
     );
     // The persisted file spells the empty assignment by absence (the
     // config half's own牙).
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let row = text.split("[[account]]").nth(1).unwrap();
-    assert!(!row.contains("strategies"), "empty spelled by absence");
+    let text = std::fs::read_to_string(&env_path).unwrap();
+    assert!(
+        !text.contains("_STRATEGIES"),
+        "empty spelled by absence: {text}"
+    );
 
     // A NAMED assignment restores exactly one scope. The rebuild's ADD
     // phase (incl. "assignment IS enablement") is pinned by the engine
@@ -527,11 +540,10 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         &vec!["spread_arb".to_string()],
         "the book spells the named assignment"
     );
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let row = text.split("[[account]]").nth(1).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        row.contains("strategies = [\"spread_arb\"]"),
-        "the file spells the named assignment"
+        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"spread_arb\""),
+        "the file spells the named assignment: {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -547,10 +559,11 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
     let dir = std::env::temp_dir().join(format!("bk-boot-assign-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"probe2\"\nname = \"probe two\"\nstrategies = [\"spread_arb\"]\n",
+        &env_path,
+        "ACCOUNT_LIST=default,probe2\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PROBE2_NAME=\"probe two\"\nACCOUNT_PROBE2_STRATEGIES=\"spread_arb\"\n",
     )
     .expect("fixture");
     let state_path = dir.join("strategy-state.json");
@@ -562,8 +575,9 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -591,11 +605,10 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
             .expect("migrated into the book"),
         &vec!["spread_arb".to_string(), "trend_follow".to_string()],
     );
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let default_row = text.split("[[account]]").nth(1).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        default_row.contains("strategies"),
-        "the file gained the default's explicit assignment"
+        text.contains("ACCOUNT_DEFAULT_STRATEGIES"),
+        "the file gained the default's explicit assignment: {text}"
     );
 
     // Idempotence: a SECOND boot call does not re-report (the file now
@@ -615,8 +628,9 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
             strategy_state_path: None,
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -660,11 +674,12 @@ fn boot_keeps_the_production_default_enablement_shape_byte_identical() {
     let dir = std::env::temp_dir().join(format!("bk-prod-shape-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     // The production file's exact spelling (from the deployment tree).
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\nstrategies = [\"pair_discount_arb\", \"spread_arb\"]\n",
+        &env_path,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_DEFAULT_STRATEGIES=\"pair_discount_arb,spread_arb\"\n",
     )
     .expect("fixture");
     // The old global toggle's durable form: spread_arb off, the rest on —
@@ -679,8 +694,9 @@ fn boot_keeps_the_production_default_enablement_shape_byte_identical() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -739,10 +755,11 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
     let dir = std::env::temp_dir().join(format!("bk-scope-enable-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
     let state_path = dir.join("strategy-state.json");
@@ -753,8 +770,9 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -787,10 +805,9 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         vec!["paper".to_string()],
         "paper is the only account whose enablement set names it"
     );
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let paper_row = text.split("[[account]]").nth(2).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        paper_row.contains("strategies = [\"trend_follow\"]"),
+        text.contains("ACCOUNT_PAPER_STRATEGIES=\"trend_follow\""),
         "the file spells paper's enablement: {text}"
     );
 
@@ -801,11 +818,10 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         .expect("the scoped disable lands");
     assert!(kept.is_empty() && set_now.is_empty());
     assert!(c.strategy_enabled_accounts("trend_follow").is_empty());
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let paper_row = text.split("[[account]]").nth(2).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        !paper_row.contains("strategies"),
-        "the empty set is spelled by absence"
+        !text.contains("ACCOUNT_PAPER_STRATEGIES"),
+        "the empty set is spelled by absence: {text}"
     );
 
     // REBOOT: a fresh Core over the same file (paper re-enabled first so
@@ -825,8 +841,9 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -868,12 +885,13 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
     let dir = std::env::temp_dir().join(format!("bk-default-toggle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     // The pre-#537 production shape: the default account's enablement set
     // IS in the file (this is what made the toggle unable to win).
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\nstrategies = [\"trend_follow\", \"spread_arb\"]\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_DEFAULT_STRATEGIES=\"trend_follow,spread_arb\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
     let state_path = dir.join("strategy-state.json");
@@ -884,8 +902,9 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -909,10 +928,9 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         .expect("the default disable lands");
     assert!(kept.is_empty(), "flat scope → nothing demoted");
     assert_eq!(set_now, vec!["trend_follow".to_string()]);
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let default_row = text.split("[[account]]").nth(1).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        default_row.contains("strategies = [\"trend_follow\"]"),
+        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"trend_follow\""),
         "the file lost spread_arb the moment the toggle did: {text}"
     );
     assert_eq!(
@@ -929,8 +947,9 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
             strategy_state_path: Some(state_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -957,10 +976,9 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
     // The reverse direction: re-enabling through the same write lands the
     // name in BOTH stores again.
     let _ = c2.set_scoped_strategy_enabled(&default_id, "spread_arb", true, "test", "panel on", 3);
-    let text = std::fs::read_to_string(&accounts_path).unwrap();
-    let default_row = text.split("[[account]]").nth(1).unwrap();
+    let text = std::fs::read_to_string(&env_path).unwrap();
     assert!(
-        default_row.contains("spread_arb"),
+        text.contains("ACCOUNT_DEFAULT_STRATEGIES") && text.contains("spread_arb"),
         "the enable lands in the file too: {text}"
     );
     assert!(crate::strategy_state::load(&state_path).contains(&"spread_arb".to_string()));
@@ -4580,10 +4598,11 @@ fn empty_set_teardown_then_enable_scoped_write_still_lands_ok() {
     let dir = std::env::temp_dir().join(format!("bk-default-enable-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=\"main\"\n",
     )
     .expect("fixture");
     let mut c = Core::with_account_book(
@@ -4591,8 +4610,9 @@ fn empty_set_teardown_then_enable_scoped_write_still_lands_ok() {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ..Default::default()
         },
-        crate::account::config::load_account_ledgers(
+        crate::account::config::load_account_ledgers_single_source(
             &accounts_path,
+            Some(&env_path),
             1,
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )

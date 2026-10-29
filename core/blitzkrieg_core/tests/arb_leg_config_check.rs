@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
-use blitzkrieg_core::account::config::load_account_ledgers;
+use blitzkrieg_core::account::config::load_account_ledgers_single_source;
 use blitzkrieg_core::engine::{DataEvent, Engine};
 use blitzkrieg_core::model::{CryptoMarket, default_account_id};
 use blitzkrieg_core::service::{Core, CoreConfig};
@@ -58,16 +58,31 @@ fn scratch_dir() -> PathBuf {
     dir
 }
 
-/// Two-account accounts.toml: `default` (bound to polymarket) and `arb-b`
+/// Two-account book: `default` (bound to polymarket) and `arb-b`
 /// (bound to kalshi) — the deployment the leg configuration wires together.
+/// Env-single-source (issue 751): only the per-test `.env` is written (same
+/// unique stem as the nominal toml path; cargo runs tests in parallel, a
+/// shared `.env` would cross-contaminate). The toml path stays UNWRITTEN —
+/// the env write face refuses while any legacy toml exists.
 fn accounts_toml_path(name: &str) -> PathBuf {
     let path = scratch_dir().join(format!("accounts-{name}-{}.toml", std::process::id()));
     std::fs::write(
-        &path,
-        "[[account]]\nid = \"default\"\nvenue = \"polymarket\"\n\n[[account]]\nid = \"arb-b\"\nvenue = \"kalshi\"\n",
+        path.with_extension("env"),
+        "ACCOUNT_LIST=default,arb-b\n\
+         ACCOUNT_DEFAULT_NAME=default\n\
+         ACCOUNT_DEFAULT_VENUE=polymarket\n\
+         ACCOUNT_DEFAULT_STATUS=\n\
+         ACCOUNT_ARB_B_NAME=arb-b\n\
+         ACCOUNT_ARB_B_VENUE=kalshi\n\
+         ACCOUNT_ARB_B_STATUS=\n",
     )
-    .expect("accounts.toml fixture writes");
+    .expect("accounts.env fixture writes");
     path
+}
+
+/// The per-test `.env` sibling of an `accounts_toml_path` fixture.
+fn accounts_env_path(toml_path: &Path) -> PathBuf {
+    toml_path.with_extension("env")
 }
 
 fn package_dir() -> PathBuf {
@@ -169,11 +184,21 @@ fn arb_core_atomic(accounts_path: &Path, virtual_pot: bool, atomic: bool) -> Cor
         },
         execution_policy_path: None,
         accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+        env_file_path: Some(
+            accounts_env_path(accounts_path)
+                .to_string_lossy()
+                .into_owned(),
+        ),
         virtual_limits,
         ..Default::default()
     };
-    let book = load_account_ledgers(accounts_path, NOW, TEST_ALLOWED_ROUNDS)
-        .expect("accounts fixture parses");
+    let book = load_account_ledgers_single_source(
+        accounts_path,
+        Some(&accounts_env_path(accounts_path)),
+        NOW,
+        TEST_ALLOWED_ROUNDS,
+    )
+    .expect("accounts fixture parses");
     let mut c = Core::with_account_book(config, book);
     let cfg = c.config().engine_config();
     let mut eng = Engine::new(cfg.clone());
@@ -243,23 +268,24 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
     let path = accounts_toml_path("roundtrip");
     let now = NOW;
 
-    // Unconfigured boot: the getter answers None and a fresh file has no
+    // Unconfigured boot: the getter answers None and a fresh env has no
     // section.
+    let env_path = accounts_env_path(&path);
     {
         let c = arb_core(&path, false);
         assert!(
             c.arb_leg_config().is_none(),
             "a fresh book boots unconfigured"
         );
-        let book = load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS)
-            .expect("the untouched file parses");
+        let lookup = blitzkrieg_core::account::config::env_lookup_from_sources(Some(&env_path));
+        load_account_ledgers_single_source(&path, Some(&env_path), now, TEST_ALLOWED_ROUNDS)
+            .expect("the untouched env parses");
         assert!(
-            blitzkrieg_core::account::config::read_cross_venue_arb(&path)
+            blitzkrieg_core::account::config::read_cross_venue_arb_from_env(&lookup)
                 .expect("read")
                 .is_none(),
-            "no section in the file before the first set"
+            "no section in the env before the first set"
         );
-        let _ = book;
     }
 
     // A wrong-payload set REFUSES with the field named — nothing persisted.
@@ -322,8 +348,9 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
 
         // Nothing moved: no section on disk, no cell in memory.
         assert!(c.arb_leg_config().is_none(), "a refused set moves nothing");
+        let lookup = blitzkrieg_core::account::config::env_lookup_from_sources(Some(&env_path));
         assert!(
-            blitzkrieg_core::account::config::read_cross_venue_arb(&path)
+            blitzkrieg_core::account::config::read_cross_venue_arb_from_env(&lookup)
                 .expect("read")
                 .is_none(),
             "a refused set never persists"
@@ -359,11 +386,12 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
         // clear removes BOTH stores.
         c.arb_config_clear_persisting("test").expect("clear lands");
         assert!(c.arb_leg_config().is_none());
+        let lookup = blitzkrieg_core::account::config::env_lookup_from_sources(Some(&env_path));
         assert!(
-            blitzkrieg_core::account::config::read_cross_venue_arb(&path)
+            blitzkrieg_core::account::config::read_cross_venue_arb_from_env(&lookup)
                 .expect("read")
                 .is_none(),
-            "the section leaves the file"
+            "the section leaves the env"
         );
         // Re-enable nothing: a following evaluate offers nothing (the
         // strategy pairs nothing unconfigured) — the hot-push cleared.
@@ -372,17 +400,22 @@ fn arb_config_set_round_trips_through_the_file_and_refuses_bad_fields() {
     }
 
     // A hand-edited BAD section fails the BOOT closed: the loader runs the
-    // section coherence rules over the whole file and refuses (`from_str` →
-    // `validate_cross_venue_arb_section`). The get path reports what the file
-    // says (it answers the truth); the boot is the gate.
+    // section coherence rules over the whole book and refuses. The get path
+    // reports what the env says (it answers the truth); the boot is the gate.
     {
-        let mut text = std::fs::read_to_string(&path).expect("the file from the clear half reads");
+        let mut text =
+            std::fs::read_to_string(&env_path).expect("the env from the clear half reads");
         text.push_str(
-            "\n[cross_venue_arb]\nleg_a_venue = \"polymarket\"\nleg_a_account = \"default\"\nleg_b_venue = \"polymarket\"\nleg_b_account = \"arb-b\"\npairs = [\"BTC\"]\n",
+            "\nACCOUNT_ARB_LEG_A_VENUE=polymarket\n\
+             ACCOUNT_ARB_LEG_A_ACCOUNT=default\n\
+             ACCOUNT_ARB_LEG_B_VENUE=polymarket\n\
+             ACCOUNT_ARB_LEG_B_ACCOUNT=arb-b\n\
+             ACCOUNT_ARB_PAIRS=BTC\n",
         );
-        std::fs::write(&path, text).expect("hand-edited bad section");
-        let err = load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS)
-            .expect_err("identical venues in the file refuse the boot");
+        std::fs::write(&env_path, text).expect("hand-edited bad section");
+        let err =
+            load_account_ledgers_single_source(&path, Some(&env_path), now, TEST_ALLOWED_ROUNDS)
+                .expect_err("identical venues in the env refuse the boot");
         assert!(
             err.message.contains("[cross_venue_arb]"),
             "the boot refusal names the section: {}",

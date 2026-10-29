@@ -618,11 +618,17 @@ impl Core {
                         .to_string(),
                 ));
             };
-            crate::ipc::runtime_config::persist_round_duration_to(
+            let env_path = self
+                .config
+                .env_file_path
+                .as_deref()
+                .map(std::path::Path::new);
+            crate::ipc::runtime_config::persist_round_duration_to_with_env(
                 std::path::Path::new(path),
                 value,
                 actor,
                 now_ms,
+                env_path,
             )
             .map_err(|e| {
                 CoreError::new(

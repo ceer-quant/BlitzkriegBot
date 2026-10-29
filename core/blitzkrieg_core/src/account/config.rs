@@ -305,12 +305,17 @@ pub(crate) fn validate_rounds(
 /// refuses an account `rounds` row naming a duration no plugin declared, but
 /// judges nothing on its own: which durations are legal is venue knowledge
 /// (§7.2), reported by the declaration face, not a kernel constant.
+///
+/// This is the TOML-ONLY reader: the migration-window fallback and the tests'
+/// entry. Production boots through [`load_account_ledgers_single_source`],
+/// which consults the ACCOUNT_* env grammar first.
 pub fn load_account_ledgers(
     path: &Path,
     now_ms: i64,
     allowed: &[i64],
 ) -> Result<AccountLedgers, CoreError> {
-    if !path.exists() {
+    let file_present = path.exists();
+    if !file_present {
         return Ok(AccountLedgers::single_default(now_ms));
     }
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -320,6 +325,41 @@ pub fn load_account_ledgers(
         )
     })?;
     from_str(&text, now_ms, allowed)
+}
+
+/// The production boot entry (issue 751, the .env single-source ruling):
+/// ACCOUNT_* (process environment first, then the `.env` file the launcher
+/// owns) beats the toml file; the toml file beats the single default. Env and
+/// file NEVER merge — when ACCOUNT_LIST is in force and the legacy toml file
+/// still exists, env wins and the residue is shouted at (one source, the
+/// migration script removes the file).
+///
+/// `toml_path` is the legacy `accounts.toml` (compat fallback only);
+/// `env_path` is the `.env` file (the same one `env_file_path` names —
+/// `None` skips the file face and reads the process environment alone).
+pub fn load_account_ledgers_single_source(
+    toml_path: &Path,
+    env_path: Option<&Path>,
+    now_ms: i64,
+    allowed: &[i64],
+) -> Result<AccountLedgers, CoreError> {
+    let env = env_lookup_from_sources(env_path);
+    let from_env = load_account_ledgers_from_env(now_ms, allowed, &env)?;
+    let toml_present = toml_path.exists();
+    match from_env {
+        Some(book) => {
+            if toml_present {
+                tracing::warn!(
+                    "accounts: ACCOUNT_* keys are in force; the legacy {} still \
+                     exists and is IGNORED — delete it \
+                     (scripts/migrate-config-to-env.sh)",
+                    toml_path.display()
+                );
+            }
+            Ok(book)
+        }
+        None => load_account_ledgers(toml_path, now_ms, allowed),
+    }
 }
 
 /// Parse the toml text into the book. Split from [`load_account_ledgers`] so
@@ -1046,6 +1086,678 @@ pub fn read_credential_keys(keys: &CredentialKeys) -> CredentialKeys {
     }
 }
 
+// ── .env single-source (issue 751, 2026-10-28 operator ruling) ──────────────
+//
+// The operator retired the 10-23 judgment (ENV_MIGRATION.md §1/§6 kept
+// accounts.toml): ALL account configuration now lives in .env under the
+// ACCOUNT_* prefix, and every runtime write face (account.venue.set,
+// account.rounds.set, account.strategies.set, account.trading.set,
+// account.create/remove, display.account.set, arb.config.*) UPSERTS those
+// keys through `crate::env_file` (atomic + 0600 + comment-preserving — the
+// same primitive market.credentials.set runs).
+//
+// Key grammar, per account id spelled like the policy env suffix (uppercase,
+// non-alphanumeric → `_`):
+//   ACCOUNT_LIST                    comma-separated ids, book order (e.g.
+//                                   "default,paper,polysimulator")
+//   ACCOUNT_DISPLAY                 the display pointer (the old
+//                                   `display_account` key)
+//   ACCOUNT_<ID>_NAME / _VENUE / _STATUS / _TRADING_ENABLED /
+//                   _STRATEGIES (comma list) / _ROUNDS (comma list) /
+//                   _API_KEY_ENV / _SECRET_ENV / _PASSPHRASE_ENV /
+//                   _PRIVATE_KEY_ENV   (credential key NAMES only, never values)
+//   ACCOUNT_ARB_LEG_A_VENUE / _LEG_A_ACCOUNT / _LEG_B_VENUE / _LEG_B_ACCOUNT /
+//                   _ARB_PAIRS (comma list)   — the [cross_venue_arb] legs
+//
+// Precedence: ACCOUNT_* env > accounts.toml (compat fallback during the
+// migration window) > single default. A file that parses coexists with env
+// keys ONLY when ACCOUNT_LIST is absent (env keys are then ignored — one
+// source wins, no merge); the migration script removes the file.
+
+/// `default` for `ACCOUNT_<ID>_TRADING_ENABLED`; absent key = true.
+fn env_status(raw: Option<String>) -> Result<AccountStatus, CoreError> {
+    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(AccountStatus::Active),
+        Some("active") => Ok(AccountStatus::Active),
+        Some("read_only") => Ok(AccountStatus::ReadOnly),
+        Some("frozen") => Ok(AccountStatus::Frozen),
+        Some("suspended") => Ok(AccountStatus::Suspended {
+            reason: "suspended via .env (no reason spelled)".into(),
+        }),
+        Some(other) => Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "ACCOUNT_*_STATUS=`{other}` is not a status (active / \
+                 read_only / frozen / suspended) — fix .env and restart \
+                 (fail-closed, the same discipline the toml face runs)"
+            ),
+        )),
+    }
+}
+
+/// The env-var suffix for one account id: uppercase, non-alphanumeric → `_`
+/// (the exact spelling the execution policy's per-account env suffix uses).
+fn env_suffix(account_id: &str) -> String {
+    account_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Parse one comma-separated env value into a Vec (empty → empty vec).
+fn env_list(raw: Option<String>) -> Vec<String> {
+    raw.map(|v| {
+        v.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// One account's parsed env row. `None` fields = key absent (defaults apply).
+struct EnvAccount {
+    name: Option<String>,
+    venue: Option<String>,
+    status: Result<AccountStatus, CoreError>,
+    trading_enabled: Option<bool>,
+    strategies: Vec<String>,
+    rounds: Option<Vec<i64>>,
+    api_key_env: Option<String>,
+    secret_env: Option<String>,
+    passphrase_env: Option<String>,
+    private_key_env: Option<String>,
+}
+
+fn parse_env_account(id: &str, env: &dyn Fn(&str) -> Option<String>) -> EnvAccount {
+    let sfx = env_suffix(id);
+    let key = |tail: &str| format!("ACCOUNT_{sfx}_{tail}");
+    let bool_of = |raw: Option<String>| -> Option<bool> {
+        raw.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            _ => None,
+        })
+    };
+    EnvAccount {
+        name: env(&key("NAME")),
+        venue: env(&key("VENUE")),
+        status: env_status(env(&key("STATUS"))),
+        trading_enabled: bool_of(env(&key("TRADING_ENABLED"))),
+        strategies: env_list(env(&key("STRATEGIES"))),
+        rounds: env_list(env(&key("ROUNDS")))
+            .iter()
+            .map(|s| s.parse::<i64>().ok())
+            .collect::<Option<Vec<_>>>(),
+        api_key_env: env(&key("API_KEY_ENV")),
+        secret_env: env(&key("SECRET_ENV")),
+        passphrase_env: env(&key("PASSPHRASE_ENV")),
+        private_key_env: env(&key("PRIVATE_KEY_ENV")),
+    }
+}
+
+/// Load the account book from ACCOUNT_* environment keys (issue 751).
+/// `ACCOUNT_LIST` names the ids in book order; a missing/empty value →
+/// `None` (the caller falls back — the toml file or the single default).
+///
+/// Fail-closed, the same discipline `from_str` runs: a bad status, a
+/// `rounds` value outside the plugins' declared union, or a display id
+/// naming no listed account REFUSES the boot.
+pub fn load_account_ledgers_from_env(
+    now_ms: i64,
+    allowed: &[i64],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<AccountLedgers>, CoreError> {
+    let Some(list) = env("ACCOUNT_LIST")
+        .map(|v| env_list(Some(v)))
+        .filter(|l| !l.is_empty())
+    else {
+        return Ok(None);
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut accounts = Vec::with_capacity(list.len());
+    for id in &list {
+        if !seen.insert(id.clone()) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("ACCOUNT_LIST names id `{id}` twice — ids are unique"),
+            ));
+        }
+        if id.trim().is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "ACCOUNT_LIST carries an empty id — an account without an \
+                 identity cannot be addressed or audited",
+            ));
+        }
+        let row = parse_env_account(id, env);
+        let status = row.status.clone()?;
+        let rounds = row.rounds.clone();
+        accounts.push(Account {
+            id: AccountId::from(id.as_str()),
+            name: row.name.clone().unwrap_or_else(|| id.clone()),
+            market_type: MarketType::Prediction,
+            status,
+            credential_keys: CredentialKeys {
+                api_key_env: row.api_key_env.clone(),
+                secret_env: row.secret_env.clone(),
+                passphrase_env: row.passphrase_env.clone(),
+                private_key_env: row.private_key_env.clone(),
+                loaded: false,
+            },
+            venue: row.venue.clone().unwrap_or_default(),
+            trading_enabled: row.trading_enabled.unwrap_or(true),
+            strategies: row.strategies.clone(),
+            rounds: validate_rounds(rounds, allowed)?,
+            updated_at_ms: now_ms,
+        });
+    }
+    // Probe credentials (the same §9.4 posture the toml path runs).
+    for a in accounts.iter_mut() {
+        a.credential_keys = read_credential_keys(&a.credential_keys);
+    }
+    let active = if accounts.iter().any(|a| a.id == default_account_id()) {
+        default_account_id()
+    } else {
+        accounts[0].id.clone()
+    };
+    let display = match env("ACCOUNT_DISPLAY").as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => {
+            if !accounts.iter().any(|a| a.id.as_str() == id) {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "ACCOUNT_DISPLAY=`{id}` names no ACCOUNT_LIST account — \
+                         the display pointer must name a configured account \
+                         (fail-closed: fix the id or delete the key)"
+                    ),
+                ));
+            }
+            id.to_string()
+        }
+        _ => accounts
+            .iter()
+            .find(|a| matches!(a.status, AccountStatus::Active))
+            .map(|a| a.id.as_str().to_string())
+            .unwrap_or_else(|| accounts[0].id.as_str().to_string()),
+    };
+    // The arb legs, when configured, validate against this book's ids.
+    if let Some(arb) = read_cross_venue_arb_from_env(env)? {
+        validate_cross_venue_arb_section(
+            &arb,
+            &accounts
+                .iter()
+                .map(|a| a.id.as_str().to_string())
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    Ok(Some(AccountLedgers::new_with_display(
+        accounts,
+        active,
+        AccountId::from(display.as_str()),
+    )))
+}
+
+/// The `[cross_venue_arb]` section read from ACCOUNT_ARB_* env keys.
+/// All-or-nothing: leg-a venue+account are the minimum configured pair;
+/// anything else present completes the section, anything missing with the
+/// minimum present is a refusal (a half-written arb config must never trade).
+pub fn read_cross_venue_arb_from_env(
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<CrossVenueArbConfig>, CoreError> {
+    let leg_a_venue = env("ACCOUNT_ARB_LEG_A_VENUE").map(|v| v.trim().to_string());
+    let leg_a_account = env("ACCOUNT_ARB_LEG_A_ACCOUNT").map(|v| v.trim().to_string());
+    let Some(leg_a_venue) = leg_a_venue.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let leg_a_account = leg_a_account.filter(|v| !v.is_empty()).ok_or_else(|| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            "ACCOUNT_ARB_LEG_A_VENUE is set but ACCOUNT_ARB_LEG_A_ACCOUNT is \
+             missing — an arb leg needs both (fail-closed)"
+                .to_string(),
+        )
+    })?;
+    let leg_b_venue = env("ACCOUNT_ARB_LEG_B_VENUE").filter(|v| !v.trim().is_empty());
+    let leg_b_account = env("ACCOUNT_ARB_LEG_B_ACCOUNT").filter(|v| !v.trim().is_empty());
+    let (leg_b_venue, leg_b_account) = match (leg_b_venue, leg_b_account) {
+        (Some(v), Some(a)) => (v.trim().to_string(), a.trim().to_string()),
+        (None, None) => {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "ACCOUNT_ARB_LEG_A_* is configured but leg B is missing \
+                 entirely — cross-venue arb needs both legs (fail-closed)"
+                    .to_string(),
+            ));
+        }
+        _ => {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "ACCOUNT_ARB leg B is half-written (one of VENUE/ACCOUNT \
+                 present, the other missing) — fix or delete both (fail-closed)"
+                    .to_string(),
+            ));
+        }
+    };
+    let pairs = env_list(env("ACCOUNT_ARB_PAIRS"));
+    if pairs.is_empty() {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            "ACCOUNT_ARB_PAIRS is missing or empty — the arb engine needs at \
+             least one pair (fail-closed)"
+                .to_string(),
+        ));
+    }
+    Ok(Some(CrossVenueArbConfig {
+        leg_a_venue,
+        leg_a_account,
+        leg_b_venue,
+        leg_b_account,
+        pairs: pairs.iter().map(|p| p.trim().to_uppercase()).collect(),
+    }))
+}
+
+/// The ACCOUNT_* lookup: process environment FIRST, then the `.env` file at
+/// `env_path` (the same file `CoreConfig::env_file_path` names and
+/// `market.credentials.set` writes). The launcher loads `.env` into the
+/// process environment at start, so in production the two faces carry the
+/// same values; a process-env override beats the file line (12-factor — an
+/// operator exporting a key at launch intends it). Tests feed a closure
+/// directly to [`load_account_ledgers_from_env`].
+pub fn env_lookup_from_sources(env_path: Option<&Path>) -> impl Fn(&str) -> Option<String> + '_ {
+    let file_map: std::collections::HashMap<String, String> = env_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| {
+            text.lines()
+                .filter_map(crate::env_file::parse_line)
+                .collect()
+        })
+        .unwrap_or_default();
+    move |key: &str| {
+        std::env::var(key)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| file_map.get(key).cloned())
+    }
+}
+
+// ── .env write faces (issue 751) ────────────────────────────────────────────
+//
+// Every runtime write face upserts ACCOUNT_* keys through `crate::env_file`
+// (atomic temp+rename, owner-only 0600, every line outside the managed keys
+// preserved byte-for-byte — the same primitive `market.credentials.set`
+// runs). Read-modify-write over the CURRENT env state (process env first,
+// file second — the loader's own order), so a write can never shrink the
+// book: sibling accounts' keys survive untouched.
+
+/// The full ACCOUNT_* key set ONE account id owns — the remove face's sweep
+/// list.
+fn account_env_keys(account_id: &str) -> Vec<String> {
+    let sfx = env_suffix(account_id);
+    [
+        "NAME",
+        "VENUE",
+        "STATUS",
+        "TRADING_ENABLED",
+        "STRATEGIES",
+        "ROUNDS",
+        "API_KEY_ENV",
+        "SECRET_ENV",
+        "PASSPHRASE_ENV",
+        "PRIVATE_KEY_ENV",
+    ]
+    .iter()
+    .map(|tail| format!("ACCOUNT_{sfx}_{tail}"))
+    .collect()
+}
+
+/// The write face's precondition (fail-closed): every runtime writer REFUSES
+/// while the legacy toml file still exists — the migration script owns the
+/// one-way move, a runtime write must never silently fork the book across
+/// two sources (the loader reads env first, so a toml written here would be
+/// dead data the operator believes is live).
+fn refuse_while_legacy_toml(toml_path: &Path, op: &str) -> Result<(), CoreError> {
+    if toml_path.exists() {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "refusing the {op} write: the legacy {} still exists — run \
+                 scripts/migrate-config-to-env.sh first (issue 751: one source; \
+                 the loader reads ACCOUNT_* env over this file, so a write here \
+                 would be dead data)",
+                toml_path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Upsert `vars` into the `.env`, wrapped into the CoreError posture every
+/// persist function reports.
+fn env_upsert(
+    env_path: &Path,
+    vars: &std::collections::BTreeMap<String, String>,
+    op: &str,
+) -> Result<(), CoreError> {
+    crate::env_file::upsert_env_vars(env_path, vars)
+        .map(|_written| ())
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(".env {op} write failed: {e}"),
+            )
+        })
+}
+
+/// The env-state view one writer needs: the ACCOUNT_LIST as configured, plus
+/// the lookup. Refuses a boot-shaped inconsistency only when the writer must
+/// know the book (add/remove/display).
+fn current_account_list(env: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, CoreError> {
+    Ok(env("ACCOUNT_LIST")
+        .map(|v| env_list(Some(v)))
+        .unwrap_or_default())
+}
+
+/// `account.venue.set`'s persisted half — upsert `ACCOUNT_<ID>_VENUE`
+/// (empty venue = remove the key: the env grammar spells "unbound" by
+/// absence, the same shape the toml face ran). The CALLER owns the runtime
+/// validations; this layer owns the file and the legacy-toml refusal.
+pub fn env_persist_account_venue(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    venue: &str,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "venue")?;
+    let mut vars = std::collections::BTreeMap::new();
+    let key = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_VENUE"))
+        .unwrap();
+    if venue.is_empty() {
+        crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(".env venue remove failed: {e}"),
+            )
+        })?;
+    } else {
+        vars.insert(key, venue.to_string());
+        env_upsert(env_path, &vars, "venue")?;
+    }
+    Ok(())
+}
+
+/// `account.create`'s persisted half — append the id to ACCOUNT_LIST and
+/// write its NAME/VENUE keys. No credential names are written (§9.4: the
+/// create call carries no credential surface; the panel edits .env or a
+/// later verb names keys).
+pub fn env_persist_account_create(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    name: Option<&str>,
+    venue: Option<&str>,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "create")?;
+    let lookup = env_lookup_from_sources(Some(env_path));
+    let list = current_account_list(&lookup)?;
+    if list.iter().any(|a| a == account_id) {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("ACCOUNT_LIST already names `{account_id}`"),
+        ));
+    }
+    let mut new_list = list;
+    new_list.push(account_id.to_string());
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert("ACCOUNT_LIST".to_string(), new_list.join(","));
+    if let Some(n) = name.filter(|n| !n.is_empty()) {
+        let sfx = env_suffix(account_id);
+        vars.insert(format!("ACCOUNT_{sfx}_NAME"), n.to_string());
+    }
+    if let Some(v) = venue.filter(|v| !v.is_empty()) {
+        let sfx = env_suffix(account_id);
+        vars.insert(format!("ACCOUNT_{sfx}_VENUE"), v.to_string());
+    }
+    env_upsert(env_path, &vars, "create")
+}
+
+/// `account.trading.set`'s persisted half — `ACCOUNT_<ID>_TRADING_ENABLED`:
+/// `false` is written explicitly; `true` REMOVES the key (the env grammar
+/// spells "trading" by absence, the exact shape a pre-switch .env had).
+pub fn env_persist_account_trading(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    enabled: bool,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "trading")?;
+    let key = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_TRADING_ENABLED"))
+        .unwrap();
+    if enabled {
+        crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(".env trading remove failed: {e}"),
+            )
+        })?;
+    } else {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert(key, "false".to_string());
+        env_upsert(env_path, &vars, "trading")?;
+    }
+    Ok(())
+}
+
+/// `account.strategies.set`'s persisted half — `ACCOUNT_<ID>_STRATEGIES`
+/// (empty list = remove the key: absence is "no restriction").
+pub fn env_persist_account_strategies(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    strategies: &[String],
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "strategies")?;
+    let key = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_STRATEGIES"))
+        .unwrap();
+    if strategies.is_empty() {
+        crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(".env strategies remove failed: {e}"),
+            )
+        })?;
+    } else {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert(key, strategies.join(","));
+        env_upsert(env_path, &vars, "strategies")?;
+    }
+    Ok(())
+}
+
+/// `account.rounds.set`'s persisted half — `ACCOUNT_<ID>_ROUNDS` (empty list
+/// = remove the key: absence is "no declared family set").
+pub fn env_persist_account_rounds(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    rounds: &[i64],
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "rounds")?;
+    let key = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_ROUNDS"))
+        .unwrap();
+    if rounds.is_empty() {
+        crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(".env rounds remove failed: {e}"),
+            )
+        })?;
+    } else {
+        let joined = rounds
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert(key, joined);
+        env_upsert(env_path, &vars, "rounds")?;
+    }
+    Ok(())
+}
+
+/// `account.remove`'s persisted half — drop the id from ACCOUNT_LIST and
+/// sweep ALL its ACCOUNT_<ID>_* keys in the same write. Refuses when the id
+/// is not in the list, and when the removal would empty the book (the next
+/// boot refuses an empty ACCOUNT_LIST; delete the keys themselves for the
+/// single-default deployment). The display pointer, when it named the
+/// removed id, is re-derived in the same write (explicit > first active >
+/// first row — the loader's own order; this layer re-derives from STATUS
+/// keys because it cannot see a runtime book).
+pub fn env_persist_account_remove(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "remove")?;
+    let lookup = env_lookup_from_sources(Some(env_path));
+    let list = current_account_list(&lookup)?;
+    if !list.iter().any(|a| a == account_id) {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("ACCOUNT_LIST names no `{account_id}`"),
+        ));
+    }
+    if list.len() == 1 {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "removing `{account_id}` would leave ACCOUNT_LIST empty — the \
+                 next boot refuses an empty book; delete the ACCOUNT_* keys \
+                 themselves (single default account) instead"
+            ),
+        ));
+    }
+    let remaining: Vec<String> = list.into_iter().filter(|a| a != account_id).collect();
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert("ACCOUNT_LIST".to_string(), remaining.join(","));
+    // Re-derive the display pointer when it named the removed id (explicit >
+    // first active > first row — the loader's own order; this layer reads
+    // STATUS keys because it cannot see a runtime book).
+    let mut sweep = account_env_keys(account_id);
+    let display_now = lookup("ACCOUNT_DISPLAY").map(|v| v.trim().to_string());
+    if display_now.as_deref() == Some(account_id) {
+        let derived = remaining
+            .iter()
+            .find(|id| {
+                lookup(&format!("ACCOUNT_{}_STATUS", env_suffix(id)))
+                    .map(|s| s.trim().eq_ignore_ascii_case("active") || s.trim().is_empty())
+                    .unwrap_or(true)
+            })
+            .or_else(|| remaining.first())
+            .cloned();
+        match derived {
+            Some(d) => {
+                vars.insert("ACCOUNT_DISPLAY".to_string(), d);
+            }
+            None => sweep.push("ACCOUNT_DISPLAY".to_string()),
+        }
+    }
+    let sweep_refs: Vec<&str> = sweep.iter().map(|s| s.as_str()).collect();
+    let removed = crate::env_file::remove_env_vars(env_path, &sweep_refs).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(".env remove sweep failed: {e}"),
+        )
+    })?;
+    let _ = removed;
+    env_upsert(env_path, &vars, "remove")
+}
+
+/// `display.account.set`'s persisted half — `ACCOUNT_DISPLAY` upsert.
+pub fn env_persist_display_account(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "display")?;
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert("ACCOUNT_DISPLAY".to_string(), account_id.to_string());
+    env_upsert(env_path, &vars, "display")
+}
+
+/// `arb.config.set`'s persisted half — the five ACCOUNT_ARB_* keys upserted
+/// as one write. The CALLER owns the semantic validations (distinct venues,
+/// ids exist, pairs non-empty) — it has the book.
+pub fn env_persist_cross_venue_arb(
+    toml_path: &Path,
+    env_path: &Path,
+    cfg: &CrossVenueArbConfig,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "arb config")?;
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert(
+        "ACCOUNT_ARB_LEG_A_VENUE".to_string(),
+        cfg.leg_a_venue.trim().to_string(),
+    );
+    vars.insert(
+        "ACCOUNT_ARB_LEG_A_ACCOUNT".to_string(),
+        cfg.leg_a_account.trim().to_string(),
+    );
+    vars.insert(
+        "ACCOUNT_ARB_LEG_B_VENUE".to_string(),
+        cfg.leg_b_venue.trim().to_string(),
+    );
+    vars.insert(
+        "ACCOUNT_ARB_LEG_B_ACCOUNT".to_string(),
+        cfg.leg_b_account.trim().to_string(),
+    );
+    vars.insert(
+        "ACCOUNT_ARB_PAIRS".to_string(),
+        cfg.pairs
+            .iter()
+            .map(|p| p.trim().to_uppercase())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    env_upsert(env_path, &vars, "arb config")
+}
+
+/// `arb.config.clear`'s persisted half — sweep the five ACCOUNT_ARB_* keys.
+pub fn env_clear_cross_venue_arb(toml_path: &Path, env_path: &Path) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "arb config clear")?;
+    crate::env_file::remove_env_vars(
+        env_path,
+        &[
+            "ACCOUNT_ARB_LEG_A_VENUE",
+            "ACCOUNT_ARB_LEG_A_ACCOUNT",
+            "ACCOUNT_ARB_LEG_B_VENUE",
+            "ACCOUNT_ARB_LEG_B_ACCOUNT",
+            "ACCOUNT_ARB_PAIRS",
+        ],
+    )
+    .map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(".env arb config clear failed: {e}"),
+        )
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,6 +1769,287 @@ mod tests {
         let p = dir.join("accounts.toml");
         std::fs::write(&p, text).expect("write temp config");
         p
+    }
+
+    fn fresh_env_file(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bk-accounts-env-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join(".env")
+    }
+
+    fn static_lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    // ── the env grammar (issue 751) ─────────────────────────────────────────
+
+    #[test]
+    fn env_book_loads_with_defaults_and_probes_credentials() {
+        let env = static_lookup(&[
+            ("ACCOUNT_LIST", "default,paper"),
+            ("ACCOUNT_DEFAULT_NAME", "Poly Main"),
+            ("ACCOUNT_DEFAULT_VENUE", "polymarket"),
+            ("ACCOUNT_PAPER_STATUS", "read_only"),
+        ]);
+        let book = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &env)
+            .expect("a well-formed ACCOUNT_* set loads")
+            .expect("the env grammar produced a book");
+        assert_eq!(book.account_list().len(), 2);
+        assert_eq!(book.active_id().as_str(), "default");
+        let d = book.account(&AccountId::from("default")).unwrap();
+        assert_eq!(d.name, "Poly Main");
+        assert_eq!(d.venue, "polymarket");
+        assert!(d.trading_enabled, "absent key defaults to true");
+        let p = book.account(&AccountId::from("paper")).unwrap();
+        assert!(matches!(p.status, AccountStatus::ReadOnly));
+        // Display defaults to the first active account.
+        assert_eq!(book.display_id(), "default");
+    }
+
+    #[test]
+    fn env_book_refuses_a_bad_status_and_a_dangling_display() {
+        let bad_status = static_lookup(&[("ACCOUNT_LIST", "a"), ("ACCOUNT_A_STATUS", "magical")]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &bad_status)
+            .expect_err("an unknown status refuses (fail-closed)");
+        assert!(err.message.contains("STATUS=`magical`"), "{}", err.message);
+
+        let dangling = static_lookup(&[("ACCOUNT_LIST", "a"), ("ACCOUNT_DISPLAY", "ghost")]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &dangling)
+            .expect_err("a display id naming no listed account refuses");
+        assert!(err.message.contains("ACCOUNT_DISPLAY"), "{}", err.message);
+    }
+
+    #[test]
+    fn env_book_refuses_duplicate_ids_and_bad_rounds() {
+        let dup = static_lookup(&[("ACCOUNT_LIST", "a,a")]);
+        assert!(load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &dup).is_err());
+
+        let bad_rounds =
+            static_lookup(&[("ACCOUNT_LIST", "a"), ("ACCOUNT_A_ROUNDS", "900,424242")]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &bad_rounds)
+            .expect_err("a round duration no plugin declared refuses");
+        assert!(err.message.contains("424242"), "{}", err.message);
+    }
+
+    #[test]
+    fn env_book_validates_the_arb_legs_against_the_list() {
+        let ok = static_lookup(&[
+            ("ACCOUNT_LIST", "a,b"),
+            ("ACCOUNT_ARB_LEG_A_VENUE", "polymarket"),
+            ("ACCOUNT_ARB_LEG_A_ACCOUNT", "a"),
+            ("ACCOUNT_ARB_LEG_B_VENUE", "kalshi"),
+            ("ACCOUNT_ARB_LEG_B_ACCOUNT", "b"),
+            ("ACCOUNT_ARB_PAIRS", "btc, eth"),
+        ]);
+        let book = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &ok)
+            .expect("coherent legs load")
+            .expect("the env grammar produced a book");
+        assert_eq!(book.account_list().len(), 2);
+        // The legs validate against the list AND read back through the
+        // dedicated reader (the boot's arb_leg_config source).
+        let cfg = read_cross_venue_arb_from_env(&ok)
+            .expect("the coherent section reads")
+            .expect("legs configured");
+        assert_eq!(cfg.leg_a_venue, "polymarket");
+        assert_eq!(cfg.pairs, vec!["BTC", "ETH"]);
+
+        let dangling_leg = static_lookup(&[
+            ("ACCOUNT_LIST", "a"),
+            ("ACCOUNT_ARB_LEG_A_VENUE", "polymarket"),
+            ("ACCOUNT_ARB_LEG_A_ACCOUNT", "ghost"),
+            ("ACCOUNT_ARB_LEG_B_VENUE", "kalshi"),
+            ("ACCOUNT_ARB_LEG_B_ACCOUNT", "a"),
+            ("ACCOUNT_ARB_PAIRS", "btc"),
+        ]);
+        assert!(load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &dangling_leg).is_err());
+
+        let half_leg = static_lookup(&[
+            ("ACCOUNT_LIST", "a"),
+            ("ACCOUNT_ARB_LEG_A_VENUE", "polymarket"),
+            ("ACCOUNT_ARB_PAIRS", "btc"),
+        ]);
+        assert!(load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &half_leg).is_err());
+    }
+
+    #[test]
+    fn single_source_env_wins_over_the_legacy_toml() {
+        let dir = std::env::temp_dir().join(format!("bk-single-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("accounts.toml");
+        std::fs::write(
+            &toml,
+            r#"
+[[account]]
+id = "from-file"
+"#,
+        )
+        .unwrap();
+        let dot_env = dir.join(".env");
+        std::fs::write(&dot_env, "ACCOUNT_LIST=from-env\n").unwrap();
+        // process env is empty for these keys (the test harness carries none).
+        let book =
+            load_account_ledgers_single_source(&toml, Some(&dot_env), 5, TEST_ALLOWED_ROUNDS)
+                .expect("env wins");
+        assert_eq!(book.account_list().len(), 1);
+        assert_eq!(book.account_list()[0].id.as_str(), "from-env");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn single_source_falls_back_to_the_toml_then_the_default() {
+        // No ACCOUNT_LIST anywhere: the legacy file still rules.
+        let toml = write_temp(
+            r#"
+[[account]]
+id = "legacy"
+"#,
+        );
+        let missing_env = Path::new("/nonexistent/bk-none/.env");
+        let book =
+            load_account_ledgers_single_source(&toml, Some(missing_env), 5, TEST_ALLOWED_ROUNDS)
+                .expect("toml fallback");
+        assert_eq!(book.account_list()[0].id.as_str(), "legacy");
+
+        // No file, no env: the single default.
+        let book = load_account_ledgers_single_source(
+            Path::new("/nonexistent/bk-none/accounts.toml"),
+            Some(missing_env),
+            5,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect("zero-config default");
+        assert_eq!(book.account_list().len(), 1);
+        assert_eq!(book.active_id().as_str(), "default");
+    }
+
+    #[test]
+    fn env_write_faces_upsert_and_refuse_the_legacy_toml() {
+        // A PRIVATE toml path (the write faces only probe its existence): the
+        // shared write_temp dir races with sibling tests re-creating their
+        // files mid-run, which would resurrect the legacy refusal mid-test.
+        let toml = fresh_env_file("write-faces").with_file_name("legacy-accounts.toml");
+        std::fs::write(&toml, "[[account]]\nid = \"default\"\n").unwrap();
+        let dot_env = fresh_env_file("write-faces");
+        // The refusal: a legacy file alive means every runtime write refuses.
+        let err = env_persist_display_account(&toml, &dot_env, "default")
+            .expect_err("the legacy toml alive refuses the write (one source)");
+        assert!(
+            err.message.contains("migrate-config-to-env.sh"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !dot_env.exists(),
+            "the refusal must not have created the env"
+        );
+
+        std::fs::remove_file(&toml).unwrap();
+        // Display upsert.
+        env_persist_display_account(&toml, &dot_env, "default").expect("display write");
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(text.contains("ACCOUNT_DISPLAY=\"default\""), "{text}");
+
+        // Venue write, then venue REMOVE (empty = unbound, absence spells it).
+        env_persist_account_venue(&toml, &dot_env, "default", "polymarket").unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(
+            text.contains("ACCOUNT_DEFAULT_VENUE=\"polymarket\""),
+            "{text}"
+        );
+        env_persist_account_venue(&toml, &dot_env, "default", "").unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(!text.contains("ACCOUNT_DEFAULT_VENUE"), "{text}");
+
+        // Trading false is explicit; true removes the key.
+        env_persist_account_trading(&toml, &dot_env, "default", false).unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(
+            text.contains("ACCOUNT_DEFAULT_TRADING_ENABLED=\"false\""),
+            "{text}"
+        );
+        env_persist_account_trading(&toml, &dot_env, "default", true).unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(!text.contains("TRADING_ENABLED"), "{text}");
+
+        // Rounds/strategies: value write and remove-by-absence.
+        env_persist_account_rounds(&toml, &dot_env, "default", &[900, 3600]).unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(
+            text.contains("ACCOUNT_DEFAULT_ROUNDS=\"900,3600\""),
+            "{text}"
+        );
+        env_persist_account_rounds(&toml, &dot_env, "default", &[]).unwrap();
+        assert!(
+            !std::fs::read_to_string(&dot_env)
+                .unwrap()
+                .contains("ROUNDS")
+        );
+
+        // Arb config upsert + clear sweep all five keys.
+        let cfg = CrossVenueArbConfig {
+            leg_a_venue: "polymarket".into(),
+            leg_a_account: "default".into(),
+            leg_b_venue: "kalshi".into(),
+            leg_b_account: "k".into(),
+            pairs: vec!["btc".into()],
+        };
+        env_persist_cross_venue_arb(&toml, &dot_env, &cfg).unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(
+            text.contains("ACCOUNT_ARB_LEG_A_VENUE=\"polymarket\""),
+            "{text}"
+        );
+        assert!(text.contains("ACCOUNT_ARB_PAIRS=\"BTC\""), "{text}");
+        env_clear_cross_venue_arb(&toml, &dot_env).unwrap();
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(!text.contains("ACCOUNT_ARB"), "{text}");
+        std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn env_create_appends_to_the_list_and_remove_sweeps_the_row() {
+        let toml = Path::new("/nonexistent/bk-none/accounts.toml");
+        let dot_env = fresh_env_file("create-remove");
+        env_persist_account_create(toml, &dot_env, "default", Some("Main"), Some("polymarket"))
+            .expect("first create writes the list");
+        env_persist_account_create(toml, &dot_env, "paper", None, None)
+            .expect("second create appends");
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(text.contains("ACCOUNT_LIST=\"default,paper\""), "{text}");
+        assert!(text.contains("ACCOUNT_DEFAULT_NAME=\"Main\""), "{text}");
+        // Duplicate create refuses.
+        assert!(env_persist_account_create(toml, &dot_env, "paper", None, None).is_err());
+
+        // The book the two writes produced loads and reads back.
+        let lookup = env_lookup_from_sources(Some(&dot_env));
+        let book = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &lookup)
+            .unwrap()
+            .expect("the env grammar produced a book");
+        assert_eq!(book.account_list().len(), 2);
+
+        // Remove sweeps every per-id key and re-derives the display pointer.
+        env_persist_display_account(toml, &dot_env, "paper").unwrap();
+        env_persist_account_remove(toml, &dot_env, "paper").expect("remove");
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(text.contains("ACCOUNT_LIST=\"default\""), "{text}");
+        assert!(text.contains("ACCOUNT_DISPLAY=\"default\""), "{text}");
+        assert!(!text.contains("ACCOUNT_PAPER_"), "{text}");
+        // Removing the last account refuses (an empty book fails the boot).
+        assert!(env_persist_account_remove(toml, &dot_env, "default").is_err());
+        std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn env_suffix_matches_the_policy_spelling() {
+        assert_eq!(env_suffix("default"), "DEFAULT");
+        assert_eq!(env_suffix("polysimulator"), "POLYSIMULATOR");
+        assert_eq!(env_suffix("my-account.1"), "MY_ACCOUNT_1");
     }
 
     #[test]

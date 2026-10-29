@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
-use blitzkrieg_core::account::config::load_account_ledgers;
+use blitzkrieg_core::account::config::{load_account_ledgers, load_account_ledgers_single_source};
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::ipc::schema::Event;
 use blitzkrieg_core::model::{
@@ -89,20 +89,38 @@ fn scratch_dir() -> PathBuf {
 /// 双账户 accounts.toml。`paper_strategies` 非空时 paper 表预带 strategies 键
 /// （重启恢复牙的文件事实）；否则两张表都只有 id。
 fn accounts_toml_path(name: &str, paper_strategies: Option<&[&str]>) -> PathBuf {
-    let mut text = String::from("[[account]]\nid = \"default\"\n\n[[account]]\nid = \"paper\"\n");
-    if let Some(strategies) = paper_strategies {
-        text = format!(
-            "[[account]]\nid = \"default\"\n\n[[account]]\nid = \"paper\"\nstrategies = [{}]\n",
-            strategies
-                .iter()
-                .map(|s| format!("\"{s}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    // Env-single-source migration (issue 751): the book lives in ACCOUNT_* env
+    // keys, so the fixture writes ONLY the per-test `.env` (same unique stem as
+    // the nominal toml path — cargo runs tests in parallel, a shared `.env`
+    // would cross-contaminate). The toml path itself stays UNWRITTEN: the env
+    // write face refuses while any legacy toml exists (one-source gate), and
+    // the single-source loader takes the env book with no toml residue.
     let path = scratch_dir().join(format!("accounts-{name}-{}.toml", std::process::id()));
-    std::fs::write(&path, text).expect("accounts.toml fixture writes");
+    let env_path = path.with_extension("env");
+    let mut env = String::from("ACCOUNT_LIST=default,paper\n");
+    env.push_str("ACCOUNT_DEFAULT_NAME=default\n");
+    env.push_str("ACCOUNT_DEFAULT_VENUE=\n");
+    env.push_str("ACCOUNT_DEFAULT_STATUS=\n");
+    env.push_str("ACCOUNT_PAPER_NAME=paper\n");
+    env.push_str("ACCOUNT_PAPER_VENUE=\n");
+    env.push_str("ACCOUNT_PAPER_STATUS=\n");
+    if let Some(strategies) = paper_strategies {
+        let joined = strategies
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        env.push_str(&format!("ACCOUNT_PAPER_STRATEGIES={}\n", joined));
+    }
+    std::fs::write(&env_path, env).expect("accounts.env fixture writes");
+
     path
+}
+
+/// The per-test `.env` sibling of an `accounts_toml_path` fixture (the same
+/// unique stem — see the fixture writer above).
+fn accounts_env_path(toml_path: &Path) -> PathBuf {
+    toml_path.with_extension("env")
 }
 
 fn package_dir() -> PathBuf {
@@ -286,13 +304,18 @@ fn decouple_core(accounts_path: Option<&Path>, pot: Option<Decimal>, enable_defa
         // max_positions_per_asset 钳回 1，第二条腿全被拒。
         execution_policy_path: None,
         accounts_config_path: accounts_path.map(|p| p.to_string_lossy().into_owned()),
+        // Env-single-source migration (issue 751): point at the per-test .env
+        // so the loader reads the fixture data from env (env priority > toml).
+        env_file_path: accounts_path.map(|p| accounts_env_path(p).to_string_lossy().into_owned()),
         virtual_limits,
         ..Default::default()
     };
     let mut c = match accounts_path {
         Some(p) => {
+            let env_path = accounts_env_path(p);
             let book =
-                load_account_ledgers(p, NOW, TEST_ALLOWED_ROUNDS).expect("accounts fixture parses");
+                load_account_ledgers_single_source(p, Some(&env_path), NOW, TEST_ALLOWED_ROUNDS)
+                    .expect("accounts fixture parses (env priority)");
             Core::with_account_book(config, book)
         }
         None => Core::new(config),
@@ -1010,11 +1033,12 @@ fn account_removal_is_delete_all_but_the_last_account() {
         "paper",
         "the active cell never dangles: it re-activates the first survivor"
     );
-    let book =
-        load_account_ledgers(&path, now, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
+    let env_path = accounts_env_path(&path);
+    let book = load_account_ledgers_single_source(&path, Some(&env_path), now, TEST_ALLOWED_ROUNDS)
+        .expect("the written env re-parses");
     assert!(
         book.account(&default_account_id()).is_none(),
-        "the `default` row leaves accounts.toml (the next boot re-derives it)"
+        "the `default` row leaves ACCOUNT_LIST (the next boot re-derives it)"
     );
     assert!(book.account(&paper_id()).is_some());
 

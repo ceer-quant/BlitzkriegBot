@@ -165,6 +165,19 @@ pub fn persist_market_plugin_to(
     actor: &str,
     now_ms: i64,
 ) -> std::io::Result<()> {
+    persist_market_plugin_to_with_env(path, plugin, actor, now_ms, None)
+}
+
+/// Write (or clear) the persisted market-plugin choice, also updating the `.env`
+/// RUNTIME_MARKET_PLUGIN key when `env_path` is provided (issue 751).
+/// The JSON cell is kept as a migration fallback; the env key outranks it.
+pub fn persist_market_plugin_to_with_env(
+    path: &std::path::Path,
+    plugin: Option<&str>,
+    actor: &str,
+    now_ms: i64,
+    env_path: Option<&std::path::Path>,
+) -> std::io::Result<()> {
     let market_plugin_actor = plugin.map(|_| actor.to_string());
     let market_plugin_at_ms = plugin.map(|_| now_ms);
     let mut doc: RuntimeConfigDoc = std::fs::read_to_string(path)
@@ -179,7 +192,21 @@ pub fn persist_market_plugin_to(
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+
+    // Issue 751: also write the env key when a path is provided.
+    if let Some(env) = env_path {
+        let mut vars = std::collections::BTreeMap::new();
+        if let Some(p) = plugin {
+            vars.insert("RUNTIME_MARKET_PLUGIN".to_string(), p.to_string());
+        }
+        if !vars.is_empty() {
+            crate::env_file::upsert_env_vars(env, &vars)?;
+        } else {
+            crate::env_file::remove_env_vars(env, &["RUNTIME_MARKET_PLUGIN"])?;
+        }
+    }
+    Ok(())
 }
 
 pub fn persist_round_duration_to(
@@ -187,6 +214,19 @@ pub fn persist_round_duration_to(
     duration_sec: Option<i64>,
     actor: &str,
     now_ms: i64,
+) -> std::io::Result<()> {
+    persist_round_duration_to_with_env(path, duration_sec, actor, now_ms, None)
+}
+
+/// Write (or clear) the persisted round duration, also updating the `.env`
+/// RUNTIME_ROUND_DURATION_SEC key when `env_path` is provided (issue 751).
+/// The JSON cell is kept as a migration fallback; the env key outranks it.
+pub fn persist_round_duration_to_with_env(
+    path: &std::path::Path,
+    duration_sec: Option<i64>,
+    actor: &str,
+    now_ms: i64,
+    env_path: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     // Read-modify-write so a future second cell in this file survives an
     // unrelated round-duration write. A broken existing file is overwritten
@@ -207,7 +247,21 @@ pub fn persist_round_duration_to(
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+
+    // Issue 751: also write the env key when a path is provided.
+    if let Some(env) = env_path {
+        let mut vars = std::collections::BTreeMap::new();
+        if let Some(sec) = duration_sec {
+            vars.insert("RUNTIME_ROUND_DURATION_SEC".to_string(), sec.to_string());
+        }
+        if !vars.is_empty() {
+            crate::env_file::upsert_env_vars(env, &vars)?;
+        } else {
+            crate::env_file::remove_env_vars(env, &["RUNTIME_ROUND_DURATION_SEC"])?;
+        }
+    }
+    Ok(())
 }
 
 /// One-shot boot migration: drain any legacy credentials cell from the
