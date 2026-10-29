@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::risk::RiskConfig;
+use crate::shadow_evolution::EvolutionStatus;
 use crate::shadow_evolution::{MutableParams, StrategyParams};
 use rust_decimal_macros::dec;
 

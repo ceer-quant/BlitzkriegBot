@@ -31,10 +31,17 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn money(v: f64) -> String {
+/// One signed money figure shared by every adapter face (`+12.34` / `-3.00`).
+/// Pure presentation — no trading meaning, no GUI dependency; the TUI panel
+/// renders the same bytes from the same function (issue 719).
+pub fn money(v: f64) -> String {
     format!("{}{:.2}", if v >= 0.0 { "+" } else { "-" }, v.abs())
 }
-fn pct(v: f64) -> String {
+/// One signed percentage figure shared by every adapter face (`+3.4%`).
+/// Semantics deliberately differ from the evolution tab's fraction-scaled
+/// `pct` in `ui_kit_panel` — that one multiplies by 100 first; this takes a
+/// percent that already is one.
+pub fn pct(v: f64) -> String {
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "-" }, v.abs())
 }
 
@@ -433,7 +440,11 @@ pub fn render_json_full(
             // E28 (§9.2): the account the position settles into (empty on a
             // pre-E28 core — the panel leaves unattributed rows visible).
             "accountId": p.account_id,
-            "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
+            "remainingSec": p.remaining_sec,
+            // Slot matching for the panel's expiry judgment: the entry
+            // order's grid slot rides the positions wire (0 = legacy
+            // snapshot, panel falls back to remainingSec's sign).
+            "roundSlot": p.round_slot })).collect::<Vec<_>>(),
         // issue 456: the order book as the kernel tracks it (orders.list wire
         // shape, camelCase). The WebUI's 挂单 card renders it and derives its
         // per-row force-close button from `status`; the bulk sweep targets the
@@ -1805,20 +1816,20 @@ impl WebServer {
         }
     }
 
-    /// #353: proxy one backtest IPC call through the shared core client. The
-    /// gateway adds nothing and reads nothing back out: it forwards the WebUI's
-    /// JSON verbatim to the kernel's job registry and returns the kernel's
-    /// answer (or the transport error) as-is. No filesystem access, no command
-    /// construction, no parameter shaping — the spec's "WebUI 必须走 IPC"
-    /// boundary is enforced by the shape of this function: there is nothing
-    /// here a malicious body could steer onto a path or a subprocess.
-    fn proxy_backtest(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> (u16, &'static str, Vec<u8>) {
+    /// Issue 718: THE transparent-read primitive of the gateway — one verbatim
+    /// IPC call through the shared core client, the kernel's answer (or the
+    /// transport error) back as-is. The gateway adds nothing and reads nothing
+    /// back out: no filesystem access, no command construction, no parameter
+    /// shaping — the spec's "WebUI 必须走 IPC" boundary is enforced by the
+    /// shape of this function: there is nothing here a malicious body could
+    /// steer onto a path or a subprocess. Every transparent read route
+    /// (`risk.limits`, `unified.list`, `orders.list`, the #353 backtest trio,
+    /// the E25 audit tail, …) is a one-line call into this. The error document
+    /// shape (`{ "error": … }`, with the kernel's own message — the frontend's
+    /// `rpc -32601` feature-detect rides inside) is frozen wire contract.
+    fn proxy_read(&self, verb: &str, params: serde_json::Value) -> (u16, &'static str, Vec<u8>) {
         let doc = match self.snapshot_src.lock() {
-            Ok(mut c) => match c.call(method, params) {
+            Ok(mut c) => match c.call(verb, params) {
                 Ok(v) => v,
                 Err(e) => serde_json::json!({ "error": e.to_string() }),
             },
@@ -1829,10 +1840,10 @@ impl WebServer {
 
     /// #353: the POST trio (`onchain-pull` / `run`) — the body IS the IPC
     /// params object; a body that is not valid JSON is a 400 that never
-    /// reaches the kernel.
+    /// reaches the kernel. A thin wrapper over [`Self::proxy_read`].
     fn proxy_backtest_body(&self, method: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
         match body_params(body) {
-            Ok(p) => self.proxy_backtest(method, p),
+            Ok(p) => self.proxy_read(method, p),
             Err(e) => (
                 400,
                 "application/json",
@@ -1843,12 +1854,13 @@ impl WebServer {
 
     /// #353: the GET trio (`status` / `result` / `export`) — the single `?id=`
     /// query param forwarded verbatim; a missing id reaches the kernel's own
-    /// validation, which names the field.
+    /// validation, which names the field. A thin wrapper over
+    /// [`Self::proxy_read`].
     fn proxy_backtest_id(&self, method: &str, id: Option<String>) -> (u16, &'static str, Vec<u8>) {
         let params = id
             .map(|i| serde_json::json!({ "id": i }))
             .unwrap_or_else(|| serde_json::json!({}));
-        self.proxy_backtest(method, params)
+        self.proxy_read(method, params)
     }
 
     fn net_check_invalidate(&self) {
@@ -2055,6 +2067,11 @@ impl WebServer {
                 // through the SAME core client the snapshot uses — a thin
                 // proxy of `intent.audit.tail` (§12.3); the query filters
                 // (`limit` / `strategy` / `decision`) pass through untouched.
+                // Issue 718: the hand-rolled lock→call→error-wrap boilerplate
+                // collapsed into [`Self::proxy_read`] (that boilerplate spelled
+                // the poisoned-lock string "audit client poisoned", but the
+                // client IS the snapshot's, and no test or panel code ever
+                // matched on the difference).
                 let mut params = serde_json::Map::new();
                 if let Some(n) = req
                     .query_param("limit")
@@ -2068,22 +2085,13 @@ impl WebServer {
                 if let Some(v) = req.query_param("decision") {
                     params.insert("decision".into(), serde_json::json!(v));
                 }
-                let doc = match self.snapshot_src.lock() {
-                    Ok(mut c) => {
-                        match c.call("intent.audit.tail", serde_json::Value::Object(params)) {
-                            Ok(v) => v,
-                            Err(e) => serde_json::json!({ "error": e.to_string() }),
-                        }
-                    }
-                    Err(_) => serde_json::json!({ "error": "audit client poisoned" }),
-                };
-                (200, "application/json", doc.to_string().into_bytes())
+                self.proxy_read("intent.audit.tail", serde_json::Value::Object(params))
             }
             ("GET", "/api/backtest/onchain-list") => {
                 // #353: the backtest page's dataset picker — a verbatim proxy
                 // of `backtest.onchain.list` (the kernel's dataset root is
                 // fixed there; no caller parameter to smuggle a path through).
-                self.proxy_backtest("backtest.onchain.list", serde_json::json!({}))
+                self.proxy_read("backtest.onchain.list", serde_json::json!({}))
             }
             ("GET", "/api/backtest/status") => {
                 // #353: the page's ~1s poll — verbatim proxy of
@@ -2158,18 +2166,9 @@ impl WebServer {
                 // uses — a thin proxy of `risk.limits` (read-only, no params;
                 // the core answers from the LIVE risk config, so a hot edit
                 // made through the card below shows up on the next read).
-                // Same house pattern as /api/intent-audit above.
-                let doc = match self.snapshot_src.lock() {
-                    Ok(mut c) => match c.call(
-                        "risk.limits",
-                        serde_json::Value::Object(serde_json::Map::new()),
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => serde_json::json!({ "error": e.to_string() }),
-                    },
-                    Err(_) => serde_json::json!({ "error": "core client poisoned" }),
-                };
-                (200, "application/json", doc.to_string().into_bytes())
+                // Issue 718: one [`Self::proxy_read`] line where the
+                // lock→call→error-wrap boilerplate used to be spelled out.
+                self.proxy_read("risk.limits", serde_json::json!({}))
             }
             ("POST", "/api/risk/set-systemic") => {
                 // 生效风控的可编辑写路径（用户裁决：九项系统限额必须都能改）：
@@ -2192,19 +2191,13 @@ impl WebServer {
                 // 配对视图 card's data source. Read-only proxy of
                 // `unified.list`; the wire shape is the kernel's own (status /
                 // venues / discrepancies as data, no venue branch).
-                self.proxy_backtest(
-                    "unified.list",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("unified.list", serde_json::json!({}))
             }
             ("GET", "/api/unified-candidates") => {
                 // ④: the current round's cross-venue pairing PROPOSALS
                 // (auto-matching proposes, the operator disposes). Read-only
                 // proxy of `unified.candidates`.
-                self.proxy_backtest(
-                    "unified.candidates",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("unified.candidates", serde_json::json!({}))
             }
             ("POST", "/api/unified/confirm") => {
                 // ④: the operator confirms one candidate pair — the body IS
@@ -2229,7 +2222,7 @@ impl WebServer {
                     Some(n) => serde_json::json!({ "name": n }),
                     None => serde_json::json!({}),
                 };
-                self.proxy_backtest("strategy.params.get", params)
+                self.proxy_read("strategy.params.get", params)
             }
             ("POST", "/api/strategy-params/set") => {
                 // Issue #481 (G3): the tunables' operator write path — the
@@ -2246,10 +2239,7 @@ impl WebServer {
                 // verbatim. Read-only — the kernel answers from the live
                 // config + the persisted cell (next_session), the gateway
                 // shapes nothing.
-                self.proxy_backtest(
-                    "round_duration.get",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("round_duration.get", serde_json::json!({}))
             }
             ("POST", "/api/round-duration/set") => {
                 // 轮次时间周期设置卡的写路径（next_session）：the body IS the
@@ -2264,10 +2254,7 @@ impl WebServer {
                 // running session's active plugin, the compiled-in registry
                 // and what a restart would select (`market.plugin.get`,
                 // read-only). The wire shape is the kernel's own.
-                self.proxy_backtest(
-                    "market.plugin.get",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("market.plugin.get", serde_json::json!({}))
             }
             ("POST", "/api/market-plugin/set") => {
                 // Issue #485: the market-plugin switch's write path
@@ -2282,10 +2269,7 @@ impl WebServer {
                 // 行情插件凭据读数：每插件所需 env 变量名 + 下一会话解析
                 // 到没有（ready），值永不过线（`market.credentials.status`，
                 // 只读）。The wire shape is the kernel's own.
-                self.proxy_backtest(
-                    "market.credentials.status",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("market.credentials.status", serde_json::json!({}))
             }
             ("POST", "/api/market-credentials/set") => {
                 // 凭据写路径（next_session）—— the body IS the
@@ -2311,8 +2295,8 @@ impl WebServer {
                     .ok()
                     .and_then(|p| p.get("enabled").and_then(|v| v.as_bool()));
                 match (parsed, enabled) {
-                    (Ok(p), Some(true)) => self.proxy_backtest("extension.enable", p),
-                    (Ok(p), Some(false)) => self.proxy_backtest("extension.disable", p),
+                    (Ok(p), Some(true)) => self.proxy_read("extension.enable", p),
+                    (Ok(p), Some(false)) => self.proxy_read("extension.disable", p),
                     _ => (
                         400,
                         "application/json",
@@ -2339,10 +2323,7 @@ impl WebServer {
                 // issue 456: the order book as the kernel tracks it — the
                 // 挂单 card's data source. Read-only proxy; the wire shape is
                 // `orders.list`'s own (camelCase TrackedOrder rows).
-                self.proxy_backtest(
-                    "orders.list",
-                    serde_json::Value::Object(serde_json::Map::new()),
-                )
+                self.proxy_read("orders.list", serde_json::json!({}))
             }
             ("POST", "/api/orders/force-close") => {
                 // issue 456: the 挂单 card's per-row force-close write path.
@@ -2376,12 +2357,12 @@ impl WebServer {
                 if let Some(a) = req.query_param("accountId") {
                     params.insert("accountId".into(), serde_json::json!(a));
                 }
-                self.proxy_backtest(method, serde_json::Value::Object(params))
+                self.proxy_read(method, serde_json::Value::Object(params))
             }
             ("GET", "/api/execution-policy/list") => {
                 // #364: which accounts the book knows + whether a policy file
                 // loaded — the account chips' source. Verbatim proxy.
-                self.proxy_backtest("execution_policy.list", serde_json::json!({}))
+                self.proxy_read("execution_policy.list", serde_json::json!({}))
             }
             ("GET", "/api/execution-policy/history") => {
                 // #364: the audit journal for one account — the version list
@@ -2396,7 +2377,7 @@ impl WebServer {
                 {
                     params.insert("limit".into(), serde_json::json!(n));
                 }
-                self.proxy_backtest(
+                self.proxy_read(
                     "execution_policy.history",
                     serde_json::Value::Object(params),
                 )
@@ -2436,14 +2417,9 @@ impl WebServer {
                 {
                     params.insert("limit".into(), serde_json::json!(n));
                 }
-                let doc = match self.snapshot_src.lock() {
-                    Ok(mut c) => match c.call("kline.history", serde_json::Value::Object(params)) {
-                        Ok(v) => v,
-                        Err(e) => serde_json::json!({ "error": e.to_string() }),
-                    },
-                    Err(_) => serde_json::json!({ "error": "core client poisoned" }),
-                };
-                (200, "application/json", doc.to_string().into_bytes())
+                // Issue 718: the trailing lock→call→error-wrap boilerplate is
+                // [`Self::proxy_read`]; only the query parsing stays local.
+                self.proxy_read("kline.history", serde_json::Value::Object(params))
             }
             ("GET", "/api/account-journal") => {
                 // #511: the wallet's cash journal — a thin proxy of
@@ -2463,7 +2439,7 @@ impl WebServer {
                 {
                     params.insert("limit".into(), serde_json::json!(n));
                 }
-                self.proxy_backtest("account.journal", serde_json::Value::Object(params))
+                self.proxy_read("account.journal", serde_json::Value::Object(params))
             }
             ("GET", "/api/account-venue") => {
                 // #508: the account↔venue binding readout — a thin proxy of
@@ -2474,7 +2450,7 @@ impl WebServer {
                 if let Some(v) = req.query_param("accountId") {
                     params.insert("accountId".into(), serde_json::json!(v));
                 }
-                self.proxy_backtest("account.venue.get", serde_json::Value::Object(params))
+                self.proxy_read("account.venue.get", serde_json::Value::Object(params))
             }
             ("POST", "/api/account-venue/set") => {
                 // #508: the binding write — the body IS the
@@ -2504,7 +2480,7 @@ impl WebServer {
                 // 的薄代理（只读，无参数）。configured=false = 未配置；
                 // 老内核不认识该动词时错误照包（`error` 带 rpc -32601 字样）
                 // —— 面板据此 feature-detect 降级，网关不代答、不shape。
-                self.proxy_backtest("arb.config.get", serde_json::json!({}))
+                self.proxy_read("arb.config.get", serde_json::json!({}))
             }
             ("POST", "/api/arb-config/set") => {
                 // 跨所套利创建（合同 v1）：双腿配置写 —— body 即
@@ -2541,7 +2517,7 @@ impl WebServer {
                 if let Some(v) = req.query_param("accountId") {
                     params.insert("accountId".into(), serde_json::json!(v));
                 }
-                self.proxy_backtest("trades.summary", serde_json::Value::Object(params))
+                self.proxy_read("trades.summary", serde_json::Value::Object(params))
             }
             ("GET", "/api/strategy-stats") => {
                 // PR H (账户筛选修复)：策略页的 per-NAME 计数 ——
@@ -2553,7 +2529,7 @@ impl WebServer {
                 if let Some(v) = req.query_param("accountId") {
                     params.insert("accountId".into(), serde_json::json!(v));
                 }
-                self.proxy_backtest("engine.stats", serde_json::Value::Object(params))
+                self.proxy_read("engine.stats", serde_json::Value::Object(params))
             }
             ("POST", "/api/account-strategies/set") => {
                 // 多账户扇出（PR B of #518）：策略分配写 —— body 即
@@ -3040,6 +3016,20 @@ mod tests {
     fn body_json_or_raw() {
         assert_eq!(body_to_command("{\"cmd\":\"status\"}"), "status");
         assert_eq!(body_to_command("  stop  "), "stop");
+    }
+
+    /// issue 719: `money`/`pct` are now the shared signed figures BOTH faces
+    /// render (web HTML + the TUI panel's PnL columns), so the wire-visible
+    /// bytes are pinned here — a format change on either side fails this test
+    /// before it can silently diverge the two faces.
+    #[test]
+    fn shared_signed_formatters_render_the_pinned_bytes() {
+        assert_eq!(money(12.341), "+12.34");
+        assert_eq!(money(-12.341), "-12.34");
+        assert_eq!(money(0.0), "+0.00");
+        assert_eq!(pct(3.44), "+3.4%");
+        assert_eq!(pct(-3.44), "-3.4%");
+        assert_eq!(pct(0.0), "+0.0%");
     }
 
     #[test]

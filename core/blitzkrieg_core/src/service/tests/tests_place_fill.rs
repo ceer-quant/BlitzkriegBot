@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use crate::position::EquityBasis;
 use crate::risk::RiskConfig;
 use rust_decimal_macros::dec;
 

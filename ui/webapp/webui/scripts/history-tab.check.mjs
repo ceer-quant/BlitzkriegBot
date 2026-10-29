@@ -43,6 +43,9 @@ const { dedupeTrades, tradeIdentity, newestFirst } = await import('../src/lib/tr
 
 const here = dirname(fileURLToPath(import.meta.url))
 const page = readFileSync(join(here, '..', 'src', 'pages', 'HftPage.vue'), 'utf8')
+// issue 717 面板瘦身：历史表拆到 components/hft/TradesTables.vue —— 键断言
+// 跟着模板走（正则逐字不动）。
+const tables = readFileSync(join(here, '..', 'src', 'components', 'hft', 'TradesTables.vue'), 'utf8')
 
 /** The live shape: 275 rows in append-only order, ids restarting every boot. */
 function liveRows() {
@@ -129,8 +132,8 @@ check('the row key is the trade identity, not the per-boot counter id', () => {
 
 check('the template keys rows on tradeIdentity and never on t.id', () => {
   // Source-level, because the bug is only visible in Vue's patch step.
-  assert.match(page, /:key="tradeIdentity\(t\)"/, 'the history rows must key on tradeIdentity')
-  assert.doesNotMatch(page, /:key="t\.id"/, ':key="t.id" reintroduces duplicate keys')
+  assert.match(tables, /:key="tradeIdentity\(t\)"/, 'the history rows must key on tradeIdentity')
+  assert.doesNotMatch(tables, /:key="t\.id"/, ':key="t.id" reintroduces duplicate keys')
 })
 
 // ── pagination ──────────────────────────────────────────────────────────────

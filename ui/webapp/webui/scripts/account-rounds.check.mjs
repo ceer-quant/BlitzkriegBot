@@ -42,7 +42,9 @@ const check = (label, fn) => {
 
 console.log('轮次周期集 — the per-account rounds whitelist contract (issue 550)')
 
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'accounts.ts')
+const riskClient = read('src', 'api', 'risk.ts')
+const pluginClient = read('src', 'api', 'snapshot.ts')
 const store = read('src', 'stores', 'panel.ts')
 const switcher = read('src', 'components', 'AccountSwitcher.vue')
 const hft = read('src', 'pages', 'HftPage.vue')
@@ -162,7 +164,7 @@ check('轮次周期切换入口在行情页倒计时卡（共享 composable 单�
 // ── 4b. 插件自声明筛档（supported_round_secs，市场插件周期声明面）────────────
 check('client PluginRow 带 supportedRoundSecs（插件自声明，undefined = 不筛）', () => {
   assert.match(
-    client,
+    pluginClient,
     /supportedRoundSecs\?: number\[\]/,
     'client.ts PluginRow 缺 supportedRoundSecs 字段 —— 声明面上不了面板',
   )
@@ -186,7 +188,7 @@ check('退出纪律卡有 trailingEnabled Switch（老内核缺字段 → 禁用
   assert.match(risk, /<Switch/, 'trailing 行未用 Switch 组件（bool 旋钮不是输入框）')
   assert.match(risk, /trailingSupported/, '缺 trailingSupported feature-detect（老内核缺字段禁用）')
   assert.match(risk, /e\.trailingEnabled !== undefined/, '发送端缺缺省守卫 —— 旧内核会意外收 true')
-  const c = read('src', 'api', 'client.ts')
+  const c = riskClient
   assert.match(c, /trailingEnabled\?: boolean/, 'RiskSetExitBody 缺 trailingEnabled')
 })
 

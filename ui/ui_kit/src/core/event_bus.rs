@@ -85,6 +85,30 @@ impl EventBus {
         collect_new(&mut self.inner.lock().unwrap(), sub, |_| true)
     }
 
+    /// As [`drain_new`], but BLOCKS on the bus's condvar until at least one
+    /// event is newer than `sub.cursor` — the publisher (`publish`) signals
+    /// the condvar, so a quiet bus costs nothing and a published batch is
+    /// drained the instant it lands. `timeout` is a HANG PROBE (same contract
+    /// as [`wait_for`]): it cannot cut a live wait short, because the scan
+    /// re-runs after a timed-out wait. An empty return only means the probe
+    /// expired with the bus silent; call again to keep waiting.
+    pub fn wait_drain(&self, sub: &mut Subscription, timeout: Duration) -> Vec<CoreEvent> {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.inner.lock().unwrap();
+        loop {
+            let out = collect_new(&mut guard, sub, |_| true);
+            if !out.is_empty() {
+                return out;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Vec::new();
+            }
+            // Spurious wakeups are harmless: the loop re-scans and re-decides.
+            guard = self.signal.wait_timeout(guard, deadline - now).unwrap().0;
+        }
+    }
+
     /// Block until an event newer than `sub.cursor` satisfies `pred`, and return
     /// it. Woken by the publisher (`publish` signals the condvar), so the caller
     /// costs nothing while the bus is quiet and returns the instant the awaited
@@ -173,6 +197,18 @@ mod tests {
             code: serde_json::json!("Internal"),
             message: msg.into(),
         }
+    }
+
+    /// Message of every drained `RiskAlert`, so order assertions read as plain
+    /// message lists.
+    fn drained_messages(events: &[CoreEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|ev| match ev {
+                CoreEvent::RiskAlert { message, .. } => message.clone(),
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
@@ -270,6 +306,94 @@ mod tests {
         // so this direction can only be violated by a wait that ignored it.
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(bus.seq() == 1);
+    }
+
+    /// `wait_drain` is the blocking `drain_new`: the PUBLISH releases a parked
+    /// waiter (not a poll interval), and a drained event is consumed — never
+    /// redelivered. The old version published two events back-to-back and
+    /// expected ONE wait to return both, but the waiter can legally wake
+    /// between the two publishes (`publish` notifies after releasing the lock)
+    /// and return after the first, so `len == 2` was a scheduling bet rather
+    /// than a contract (issue 725). The wakeup contract is instead pinned with
+    /// an explicit handshake: the publisher emits the next event only after the
+    /// consumer has drained the previous one. The 10 s caps are hang probes,
+    /// not latency budgets — same shape as `wait_for`'s test.
+    #[test]
+    fn wait_drain_is_released_by_each_publish_and_never_redelivers() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+        let publisher = {
+            let bus = bus.clone();
+            std::thread::spawn(move || {
+                bus.publish(risk_alert("first"));
+                drained_rx
+                    .recv()
+                    .expect("consumer must drain the first event");
+                bus.publish(risk_alert("second"));
+            })
+        };
+
+        let started = Instant::now();
+        let first = bus.wait_drain(&mut sub, Duration::from_secs(60));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "wait_drain sat on its timeout instead of waking on the publish"
+        );
+        assert_eq!(drained_messages(&first), ["first"]);
+
+        drained_tx
+            .send(())
+            .expect("publisher must still be running");
+        let started = Instant::now();
+        let second = bus.wait_drain(&mut sub, Duration::from_secs(60));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "wait_drain sat on its timeout instead of waking on the publish"
+        );
+        assert_eq!(drained_messages(&second), ["second"]);
+        publisher.join().unwrap();
+
+        assert!(
+            bus.wait_drain(&mut sub, Duration::from_millis(100))
+                .is_empty(),
+            "a drained event must not be delivered twice"
+        );
+    }
+
+    /// A batch already in the ring when the consumer arrives drains as ONE
+    /// wait: every event, in publish order, with the cursor advanced past the
+    /// whole batch. Split out of the wakeup test (issue 725), where `len == 2`
+    /// against two racing publishes held only while the waiter lost the race
+    /// for the lock between them.
+    #[test]
+    fn wait_drain_hands_back_the_whole_prequeued_batch_in_publish_order() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        bus.publish(risk_alert("first"));
+        bus.publish(risk_alert("second"));
+
+        let got = bus.wait_drain(&mut sub, Duration::from_secs(60));
+        assert_eq!(drained_messages(&got), ["first", "second"]);
+        assert!(
+            bus.wait_drain(&mut sub, Duration::from_millis(100))
+                .is_empty(),
+            "a drained batch must not be delivered twice"
+        );
+    }
+
+    /// A silent bus must still END the wait (the caller's hang probe), saying
+    /// so with an empty vec rather than blocking forever.
+    #[test]
+    fn wait_drain_times_out_empty_when_the_bus_is_silent() {
+        let bus = EventBus::new(8);
+        let mut sub = bus.subscribe();
+        let started = Instant::now();
+        let got = bus.wait_drain(&mut sub, Duration::from_millis(100));
+        assert!(got.is_empty(), "nothing was published");
+        // Monotonic clock, deadline measured from before the call: only a wait
+        // that ignored its timeout could violate this direction.
+        assert!(started.elapsed() >= Duration::from_millis(100));
     }
 
     /// `wait_for` consumes what it looked at, exactly like `drain_new`: the

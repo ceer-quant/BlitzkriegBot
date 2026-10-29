@@ -73,7 +73,7 @@ pub struct JournalEntry {
 
 /// In-memory journal window per account. The FILE is the durable record; this
 /// cap only bounds memory — eviction never rewrites the file.
-const JOURNAL_CAP: usize = 10_000; // ponytail: fixed window, not unbounded — replay reads the file, not this
+pub(crate) const JOURNAL_CAP: usize = 10_000; // ponytail: fixed window, not unbounded — replay reads the file, not this
 
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
@@ -85,6 +85,14 @@ pub struct Ledger {
     /// [`JOURNAL_CAP`]. Rows also append to [`Self::journal_path`] when the
     /// deployment persists one.
     journal: VecDeque<JournalEntry>,
+    /// issue 723: in-memory monotonic count of every row this ledger has EVER
+    /// appended (boot replay anchors it to the loaded row count). The window's
+    /// LENGTH stops growing at [`JOURNAL_CAP`] — a cursor keyed on length goes
+    /// blind at that boundary — so the venue evidence window addresses rows by
+    /// their GLOBAL seq = `journal_total − window_len + index` instead (see
+    /// [`Self::journal_seq_basis`]). Not serialized: the JournalEntry shape
+    /// and the journal.jsonl contract are untouched.
+    journal_total: u64,
     /// Where journal rows append (`data/ledger/<account>.journal.jsonl`).
     /// `None` = memory-only (backtester, in-process tests): nothing is
     /// written or replayed.
@@ -113,9 +121,20 @@ impl Ledger {
             }
             self.journal.push_back(row);
         }
+        // issue 723: a replayed ledger's row seqs start at what it loaded —
+        // the previous process's counters do not follow the rows across boots.
+        self.journal_total = self.journal.len() as u64;
         if let Some(last) = self.journal.back() {
             self.balance = last.balance_after;
         }
+    }
+
+    /// The global row-seq basis (issue 723): `(rows_ever_appended,
+    /// window_len)`. A retained row's global seq = `total − len + index` —
+    /// strictly increasing with append order and immune to the eviction that
+    /// freezes `len` at [`JOURNAL_CAP`]. In-memory only (see the field doc).
+    pub(crate) fn journal_seq_basis(&self) -> (u64, usize) {
+        (self.journal_total, self.journal.len())
     }
 
     /// The ONE entry every balance change goes through. `requested` is the
@@ -141,6 +160,7 @@ impl Ledger {
                 self.journal.pop_front();
             }
             self.journal.push_back(entry);
+            self.journal_total += 1;
         }
         amount
     }
@@ -429,6 +449,10 @@ impl Ledger {
         self.reservations.clear();
         self.balance = target;
         self.journal.clear();
+        // issue 723: every path below appends exactly one `Reset` row — the
+        // global row counter moves with it, monotonically (a rebuilt
+        // generation never reissues the previous one's seqs).
+        self.journal_total += 1;
         let entry = JournalEntry {
             at_ms: now_ms(),
             kind: JournalKind::Reset,
@@ -826,6 +850,42 @@ mod tests {
         let tail = restored.journal_snapshot().pop().unwrap();
         assert_eq!(tail.balance_after, dec!(79));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// issue 723: the global row-seq basis. A replay anchors the counter to
+    /// exactly the loaded rows (the previous process's numbers do not follow
+    /// the rows across a boot), appends keep it monotonic past the window
+    /// cap, and eviction never rewinds it — the seq of the oldest retained
+    /// row stays `total − len + 1`.
+    #[test]
+    fn replay_anchors_the_row_counter_and_eviction_never_rewinds_it() {
+        let mut src = Ledger::new();
+        src.seed(dec!(10));
+        src.credit_cashflow(dec!(1), "a");
+        src.credit_cashflow(dec!(1), "b");
+        let mut l = Ledger::new();
+        l.replay_journal(src.journal_snapshot());
+        assert_eq!(l.journal_seq_basis(), (3, 3), "replay anchors at N rows");
+        l.credit_cashflow(dec!(1), "post");
+        assert_eq!(l.journal_seq_basis(), (4, 4), "appends continue the seq");
+        // Eviction: the window freezes at the cap, the counter does not —
+        // the gap between them IS the evicted prefix (issue 723's blind spot
+        // with a length-keyed cursor).
+        for i in 0..JOURNAL_CAP {
+            l.credit_cashflow(dec!(1), &format!("row-{i}"));
+        }
+        let (total, len) = l.journal_seq_basis();
+        assert_eq!(len, JOURNAL_CAP, "the window is the cap");
+        assert_eq!(
+            total,
+            4 + JOURNAL_CAP as u64,
+            "the counter counts every append, evicted rows included"
+        );
+        assert_eq!(
+            total - len as u64,
+            4,
+            "the oldest retained row's seq is total − len (the 4 pre-cap rows left)"
+        );
     }
 
     /// issue 561: 账户维重置原语的三条不变量 —— 余额/预留归位、内存 trail

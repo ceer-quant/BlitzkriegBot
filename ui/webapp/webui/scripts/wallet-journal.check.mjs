@@ -35,8 +35,11 @@ const check = (label, fn) => {
   }
 }
 
-const client = read('src', 'api', 'client.ts')
-const page = read('src', 'pages', 'HftPage.vue')
+const client = read('src', 'api', 'accounts.ts')
+// issue 717 面板瘦身：流水卡拆到 components/hft/JournalCard.vue（含九类
+// 标签映射、truncated 披露、老内核降级、reset 分隔线、口径说明）—— 消费
+// 断言跟着卡走，正则逐字不动。
+const page = read('src', 'components', 'hft', 'JournalCard.vue')
 
 console.log('钱包现金流水卡 — account.journal 的面板消费面')
 

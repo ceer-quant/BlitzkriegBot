@@ -130,6 +130,7 @@ fn open_params(token: &str, venue: &str, dur: i64, entered_ms: i64) -> crate::po
         was_maker: false,
         target_exit_price: None,
         round_duration_sec: dur,
+        round_slot: 0,
     }
 }
 

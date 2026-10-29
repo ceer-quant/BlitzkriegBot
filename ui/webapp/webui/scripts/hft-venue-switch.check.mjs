@@ -56,6 +56,10 @@ const check = (label, fn) => {
 console.log('行情跟所 — the venue-following contract')
 
 const page = read('src', 'pages', 'HftPage.vue')
+// issue 717 面板瘦身：行情四卡面（未绑定/Loading/网格/空态）拆到
+// components/hft/PriceGrid.vue、盘口卡拆到 DepthCard.vue —— 模板断言跟着
+// 消费面走（正则逐字不动）。
+const priceGrid = read('src', 'components', 'hft', 'PriceGrid.vue')
 // 首页（Overview）的轮次瓦片与行情页倒计时卡共用一条跟随链（issue 559 起
 // identityVenue/displayVenue），混钟尾审计（2026-10-20）后这里一并钉住它：
 // 同一症状（slot 随身份所、剩余/窗口随全局保守钟）不许在第二张页面复活。
@@ -78,7 +82,7 @@ check('activeVenue 派生自账户绑定（store.activeAccountVenue）——行�
 // 老内核缺字段回落账户绑定链。回落按「字段缺省」判定 —— 内核在场即全听
 // 它的（含空串 = 未绑定 = 回落全局读数）。
 check('身份唯一源 identityVenue：displayVenue 优先，快照缺字段回落账户绑定链（issue 559）', () => {
-  const client = read('src', 'api', 'client.ts')
+  const client = read('src', 'api', 'snapshot.ts')
   // The wire contract: the snapshot type declares BOTH display fields.
   assert.match(client, /displayAccount\?: string \| null/, 'Snapshot 合同缺 displayAccount —— 显示账户没进合同')
   assert.match(client, /displayVenue\?: string \| null/, 'Snapshot 合同缺 displayVenue —— 显示 venue 没进合同')
@@ -154,21 +158,21 @@ check('Loading 期间 visiblePrices / visibleBooks 清空（旧所盘口零残�
 
 // ── 5. the template renders the gate (Loading card + 未绑定 empty state) ────
 check('模板渲染 Loading 卡（正在接入新所行情，指出已解除旧所订阅）', () => {
-  assert.match(page, /v-else-if="venueLoading"|v-if="venueLoading"/, '缺 Loading 卡的 venueLoading 分支')
-  assert.match(page, /正在接入/, 'Loading 卡缺「正在接入」文案')
-  assert.match(page, /venueSwitchFrom/, 'Loading 文案未指出从哪个 venue 切出（解除订阅要如实说）')
+  assert.match(priceGrid, /v-else-if="venueLoading"|v-if="venueLoading"/, '缺 Loading 卡的 venueLoading 分支')
+  assert.match(priceGrid, /正在接入/, 'Loading 卡缺「正在接入」文案')
+  assert.match(priceGrid, /venueSwitchFrom/, 'Loading 文案未指出从哪个 venue 切出（解除订阅要如实说）')
 })
 
 check('未绑定账户渲染「该账户未绑定交易所」空态，不显示任何行情数据', () => {
   assert.match(page, /const venueUnbound = computed\(/, '缺 venueUnbound 判定')
-  assert.match(page, /该账户未绑定交易所/, '缺未绑定空态文案')
+  assert.match(priceGrid, /该账户未绑定交易所/, '缺未绑定空态文案')
 })
 
 check('行情面全部读 venue 过滤后的可见行（prices 网格 / 盘口卡 / K线选项均不读原始行）', () => {
   // The prices grid, the depth card and both asset selects must consume the
   // gate-cleared rows; a template still iterating raw `prices`/`books` would
   // render straight through the Loading gate.
-  const template = page.slice(page.indexOf('<template>'))
+  const template = priceGrid.slice(priceGrid.indexOf('<template>'))
   assert.match(template, /v-if="venueUnbound/, '未绑定空态没有挡在行情面之前')
   for (const relic of ['in prices"', 'in books"', 'v-if="prices.length"', 'v-if="books.length"']) {
     assert.doesNotMatch(
@@ -178,7 +182,11 @@ check('行情面全部读 venue 过滤后的可见行（prices 网格 / 盘口�
     )
   }
   assert.match(template, /in visiblePrices/, '行情网格未消费 visiblePrices')
-  assert.match(template, /in visibleBooks/, '盘口/K线选项未消费 visibleBooks')
+  // 盘口/K线选项的消费面在 DepthCard/KlineCard（issue 717 拆分）。
+  const depth = read('src', 'components', 'hft', 'DepthCard.vue')
+  assert.match(depth.slice(depth.indexOf('<template>')), /in visibleBooks/, '盘口选项未消费 visibleBooks')
+  const kline = read('src', 'components', 'hft', 'KlineCard.vue')
+  assert.match(kline.slice(kline.indexOf('<template>')), /in visibleBooks/, 'K线选项未消费 visibleBooks')
 })
 
 check('行情面不渲染 venue 徽标（倒计时卡已写交易所，其他卡不再标注）', () => {
@@ -204,7 +212,7 @@ check('行情面不渲染 venue 徽标（倒计时卡已写交易所，其他卡
 // ── 7. #550（症状②）the countdown re-binds to the identity venue's own clock ──
 check('倒计时优先读身份 venue 自己的钟行（round.venueRounds，#550 症状②）', () => {
   // The wire contract: the snapshot type declares the per-venue rows.
-  const client = read('src', 'api', 'client.ts')
+  const client = read('src', 'api', 'snapshot.ts')
   assert.match(client, /interface VenueRound\b/, 'client.ts 缺 VenueRound 行类型 —— venueRounds 没有进合同')
   assert.match(
     client,

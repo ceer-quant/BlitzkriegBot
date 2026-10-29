@@ -6,17 +6,18 @@
 >
 > | 等级 | 含义 |
 > | --- | --- |
-> | **✅ 已实盘验证（dry）** | 在真实 dry 内核上跑过、有运行日志/面板数据 |
+> | **✅ 已模拟实况验证（dry）** | 在真实 dry 内核上跑过、有运行日志/面板数据 |
 > | **✅ 已验证（离线）** | 有确定性离线证据（测试 / 回放 / 门禁），**未在 dry 实况下长期运行** |
 > | **✅ 已实现（测试覆盖）** | 有实现与单测/集成测试，**无实况或回放证据** |
 > | **⚠️ 已实现（未验证）** | 有代码，**任何环境下都没跑通验证** |
 > | **🚧 部分实现** | 做了主体，有明确缺口 |
 > | **📋 规划中** | 设计已定，未实现 |
 >
-> 最关键的阅读提示：**整条 Live（真实下单）链路属于 ⚠️ 未验证**——全程 DRY。
+> 最关键的阅读提示：**Live 必须按场地与链路分别看证据，不能视为全链路已验收**。§5 的 Polymarket 条目记录了部分真实下单/撤单验证，成交捕获仍标注待复验；dry 实况与离线门禁不等同于真实资金链路验证。
 > 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) §1。
 >
-> 最后核对：2026-09-18（KI-1/KI-7/KI-10/KI-11/KI-23 已关闭；**E12 全验收项闭环**：
+> 2026-10-29：修正总览与既有分项证据的冲突（#731）；本次文档校订未新增实盘验证。
+> 历史核对：2026-09-18（KI-1/KI-7/KI-10/KI-11/KI-23 已关闭；**E12 全验收项闭环**：
 > 崩溃上报 §60 + 一体化启动 §64 / PR #115）。
 
 ---
@@ -28,7 +29,7 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 
 - **核心交易链路**：已跑通并有实况 dry 证据。
 - **多策略与影子进化**：已实现，有离线对照实验证据，实况下**尚未长期运行**。
-- **Live 交易**：代码在位，**从未真实下过一单**，是最大的未验证面。
+- **Live 交易**：已实现；§5 记录部分 Polymarket 真实下单/撤单验证，成交捕获待复验。其余场地与完整成交、结算链路须逐项确认，不作全量已验证声明。
 - **产品化程度**：Vue 面板（总览/行情/回测/策略/插件/设置）与 TUI 可用；多市场数据面
   （polymarket/kalshi/predict.fun，0.4.1 起全默认；polysimulator 为寄生模拟执行插件，
   行情跟随 polymarket）与多账户（每账户独立
@@ -43,23 +44,23 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 
 | 功能 | 状态 | 证据 |
 | --- | --- | --- |
-| **订单引擎（OME）**：意图 → 挂单 → 成交 → 撤单 全生命周期状态机 | ✅ 已实盘验证（dry） | `data/orders/orders.jsonl` 落盘（含终态）；`scripts/core-parity.mjs` 22 项 |
-| **资金账本（Ledger）**：可用/冻结、费用计支出、本金＋净利润口径 | ✅ 已实盘验证（dry） | 面板余额卡与真实余额对账；`MIGRATION_LOG §7`（费用记账统一） |
-| **持仓管理**：开仓 / 实时重估 / 部分平仓 / 移动止盈 | ✅ 已实盘验证（dry） | 面板持仓表实时价格与盈亏；`cycle-check.mjs` 全链路 |
-| **风控引擎（RiskGate）**：单笔名义额、持仓数、单 token 去重、`NoMarkets` 结构前提 | ✅ 已实盘验证（dry） | 实况中确实拒绝过超限订单（日志 `--max-positions 2` 拒单） |
+| **订单引擎（OME）**：意图 → 挂单 → 成交 → 撤单 全生命周期状态机 | ✅ 已模拟实况验证（dry） | `data/orders/orders.jsonl` 落盘（含终态）；`scripts/core-parity.mjs` 22 项 |
+| **资金账本（Ledger）**：可用/冻结、费用计支出、本金＋净利润口径 | ✅ 已模拟实况验证（dry） | 面板余额卡与真实余额对账；`MIGRATION_LOG §7`（费用记账统一） |
+| **持仓管理**：开仓 / 实时重估 / 部分平仓 / 移动止盈 | ✅ 已模拟实况验证（dry） | 面板持仓表实时价格与盈亏；`cycle-check.mjs` 全链路 |
+| **风控引擎（RiskGate）**：单笔名义额、持仓数、单 token 去重、`NoMarkets` 结构前提 | ✅ 已模拟实况验证（dry） | 实况中确实拒绝过超限订单（日志 `--max-positions 2` 拒单） |
 | **连亏熔断（LossBreaker）** | ✅ 已验证（离线） | **按策略分片**（KI-10 / D-18 A，`c06c4ba9`）：任一腿连亏不再冻结全核；日亏上限与 kill switch 仍为全局 |
 | **配置文件（TOML）** | ✅ 已验证（离线） | `config.rs` 13 个单测（KI-11 / §59）：`user_layer/configs/*.toml` 真实生效，优先级 CLI > `BK_*` env > TOML > 代码默认，每个值带来源溯源 |
 | **kill switch**（`risk.kill` / `risk.resume`） | ✅ 已实现（测试覆盖） | IPC 命令面；TUI 有醒目红条提醒 |
 | **受限配置热加载**（`risk.setLimits`）：只改开仓限额 | ✅ 已实现（测试覆盖） | 白名单 = 每笔/组合名义上限 + 开仓股数区间，白名单外**明确拒绝**并要求重启（退出阈值/日亏熔断/凭据/账本一律不许热改）；**只改内存、不落盘**（重启回落启动参数）；审计走 `target: "risk"` INFO 日志（actor/字段/旧值/新值/reason）。`ipc/schema.rs` 的 `SetRiskLimitsParams` + 单测/集成测试；见 [`rust-core/INTERFACES.md §2.5`](rust-core/INTERFACES.md) |
-| **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已实盘验证（dry） | `dev-docs/reports/HFT_OPTIMIZATION_REPORT.md`（内部）；冻结留出段 walk-forward |
-| **行情接入（`--feed-ws`）**：Polymarket 走 REST 轮询，Binance 现货走 WS | ✅ 已实盘验证（dry） | 实况行情跳动；`MIGRATION_LOG §57`（REST 轮询替代 WS 通道，流量降 95%） |
-| **轮盘发现（Gamma）** | ✅ 已实盘验证（dry） | 面板轮次头部实时刷新 |
+| **出场策略（ExitConfig）**：止损 12% / 移动止盈 arm 15% 回吐下限 8% / 时间兜底 | ✅ 已模拟实况验证（dry） | `dev-docs/reports/HFT_OPTIMIZATION_REPORT.md`（内部）；冻结留出段 walk-forward |
+| **行情接入（`--feed-ws`）**：Polymarket 走 REST 轮询，Binance 现货走 WS | ✅ 已模拟实况验证（dry） | 实况行情跳动；`MIGRATION_LOG §57`（REST 轮询替代 WS 通道，流量降 95%） |
+| **轮盘发现（Gamma）** | ✅ 已模拟实况验证（dry） | 面板轮次头部实时刷新 |
 | **崩溃恢复：订单**（孤儿订单防护） | ✅ 已验证（离线） | `scripts/order-recovery-check.mjs`；启动孤儿清算（`startup sweep cancelled N orphan order(s)`） |
 | **崩溃恢复：持仓**（失管防护） | ✅ 已验证（离线） | `position_db.rs` + `restore_positions()`；`scripts/position-recovery-check.mjs` |
 | **内核接管（adopt）**：重复客户端不重启风暴 | ✅ 已验证（离线） | `scripts/core-adopt-check.mjs`；socket 改名后可发现并领养旧名 |
 | **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `backtest.rs` 单元测试。**端到端那条已退役**：`scripts/backtest-check.mjs`（21/21，live vs 回放**逐位相等**，净盈亏 5.12208717）回放的就是被删的 cdylib，现在没有替代品——要恢复它，先让树里重新有一个可回放的策略库 |
-| **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已实盘验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
-| **UDS + JSON-RPC 2.0 IPC** | ✅ 已实盘验证（dry） | 45 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
+| **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已模拟实况验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
+| **UDS + JSON-RPC 2.0 IPC** | ✅ 已模拟实况验证（dry） | 45 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
 | **C ABI v2 策略接口** | ✅ 已验证（离线） | CI 真构建并驱动两个真实 cdylib；`foreign_parity.rs` 逐信号对拍 |
 
 ### 1.1 IPC 方法面（45 个）
@@ -165,7 +166,7 @@ B 组净盈亏 +12.66、胜率 +6.6pt、回撤不变，参数单调收敛一步�
 | 扩展 | 提供 | 状态 |
 | --- | --- | --- |
 | `extensions/polymarket/` | CLOB 下单、行情（REST `POST /books` 轮询）、Gamma 轮盘发现、Poly1271 签名 | ✅ 实盘已验证：下单/撤单全生命周期（2026-09-20 真实落所）+ 5s 余额对账；成交（fill）捕获已修复（maker 成交上报 + 全量 user-WS 订阅），待下一笔真实成交复验 |
-| `extensions/binance_spot/` | 现货行情（供趋势腿的动量过滤使用） | ✅ 已实盘验证（dry） |
+| `extensions/binance_spot/` | 现货行情（供趋势腿的动量过滤使用） | ✅ 已模拟实况验证（dry） |
 
 **扩展契约**（`core/market_api`，**内核零市场代码**）：
 `DataFeed` · `MarketDiscovery` · `OrderExecutor` · `MarketPlugin` · `MarketHost`。

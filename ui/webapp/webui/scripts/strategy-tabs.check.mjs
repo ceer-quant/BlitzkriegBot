@@ -49,7 +49,7 @@ const check = (label, fn) => {
 console.log('策略表现 tab 化 — the strategy-tabs contract')
 
 const page = read('src', 'pages', 'Strategies.vue')
-const client = read('src', 'api', 'client.ts')
+const client = read('src', 'api', 'snapshot.ts')
 
 // ── 1. 双段 SegmentedControl ────────────────────────────────────────────────
 check('策略表现卡内有 SegmentedControl 双段（单所 / 套利）', () => {

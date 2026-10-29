@@ -206,6 +206,7 @@ mod tests {
             partner_token_id: String::new(),
             last_book_ts: 0,
             round_duration_sec: 0,
+            round_slot: 0,
             state: ExitState::new(dec!(0.43), 1000),
             flows: crate::position::CashFlows {
                 entry_cost_usd: dec!(4.3),

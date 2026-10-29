@@ -36,7 +36,7 @@ console.log('venue is visible — the three-platform presentation contract')
 // The wire contract: both row types carry the venue field, typed optional so
 // an older core degrades to the dash instead of a crash.
 check('client.ts types carry venue on Position and TradeRow', () => {
-  const client = read('src/api/client.ts')
+  const client = read('src/api/snapshot.ts')
   const pos = client.match(/export interface Position \{[\s\S]*?\n\}/)?.[0] ?? ''
   assert.match(pos, /venue\?\s*:\s*string/, 'Position.venue missing')
   const trade = client.match(/export interface TradeRow \{[\s\S]*?\n\}/)?.[0] ?? ''
@@ -45,7 +45,9 @@ check('client.ts types carry venue on Position and TradeRow', () => {
 
 // The presentation: the positions table AND the history table render it.
 check('HftPage renders the 场地 column on positions and history tables', () => {
-  const page = read('src/pages/HftPage.vue')
+  // issue 717 面板瘦身：两张表拆到 components/hft/TradesTables.vue —— 断言
+  // 跟着消费面走（正则逐字不动）。
+  const page = read('src/components/hft/TradesTables.vue')
   assert.match(page, /<th[^>]*>场地<\/th>/, 'no 场地 header found')
   // Both row loops read the field; two `p.venue || '—'`-shaped bindings exist.
   const bindings = page.match(/\b[pt]\.venue \|\| '—'/g) ?? []
@@ -59,7 +61,8 @@ check('HftPage renders the 场地 column on positions and history tables', () =>
 // is a column, never a page switch. Any `if venue === 'kalshi'`-shaped
 // decision in the UI is the static-venue kernel written in Vue.
 check('no UI branch on a concrete venue name (venue is data, not a page)', () => {
-  for (const file of ['src/pages/HftPage.vue', 'src/api/client.ts', 'src/lib/onboarding.ts']) {
+  // issue 717 面板瘦身：行情页拆出的组件面走同一 venue-is-data 扫描。
+  for (const file of ['src/pages/HftPage.vue', 'src/api/core.ts', 'src/api/snapshot.ts', 'src/api/accounts.ts', 'src/api/market.ts', 'src/api/orders.ts', 'src/api/strategy.ts', 'src/lib/onboarding.ts', 'src/components/hft/PriceGrid.vue', 'src/components/hft/DepthCard.vue', 'src/components/hft/KlineCard.vue', 'src/components/hft/StatsRow.vue', 'src/components/hft/JournalCard.vue', 'src/components/hft/TradesTables.vue']) {
     const text = read(file)
     const branch = text.match(
       /(==|!=|~=)\s*['"]?(polymarket|kalshi|predictfun|predict_fun)/i,
