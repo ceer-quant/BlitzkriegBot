@@ -522,6 +522,13 @@ impl Core {
         )
     }
 
+    /// Modeled maker rebate credited on MAKER fills (`--maker-rebate`, almach
+    /// REPORT §5 失真点 5). The replay driver's report reads this so the
+    /// modeled pool-share cash is visible next to #388's real rows.
+    pub(crate) fn modeled_maker_rebate_usd(&self) -> Decimal {
+        self.stats.modeled_maker_rebate_usd
+    }
+
     /// E28 (§9.3): the account book — IPC `account.*` reads it, the gates
     /// route through it. Money-moving code does NOT go through this handle;
     /// it routes by the order's own `account_id` at each site.
@@ -1765,6 +1772,11 @@ impl Core {
         {
             spent += p.flows.entry_cost_usd + p.flows.entry_fee_usd;
             received += p.flows.proceeds_usd - p.flows.exit_fee_usd;
+            // The modeled maker rebate the ledger already credited rides the
+            // position's RECEIVED side until the close folds it into the trade
+            // record's net — the identity must cover the cash at every
+            // instant, not only after the position settles.
+            received += p.flows.maker_rebate_usd;
         }
         let open_positions = self
             .positions
@@ -2468,7 +2480,7 @@ impl Core {
             };
             let remaining = self
                 .positions
-                .apply_exit_fill(&position_id, size, t.price, fee_usd, role)
+                .apply_exit_fill(&position_id, size, t.price, fee_usd, role, Decimal::ZERO)
                 .unwrap_or(Decimal::ZERO);
             if remaining == Decimal::ZERO {
                 // F10: a manual full close must hit the SAME close ledger the

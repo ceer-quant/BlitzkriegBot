@@ -58,6 +58,12 @@ pub(super) struct CoreStats {
     pub(super) cashflow_rewards: u64,
     pub(super) cashflow_rebates_usd: Decimal,
     pub(super) cashflow_rewards_usd: Decimal,
+    /// Modeled maker rebate credited on MAKER fills (`model_maker_rebate`;
+    /// almach REPORT §5 失真点 5). Separate from `cashflow_rebates_usd` — that
+    /// counts the corpus's REAL MAKER_REBATE rows, this counts the fill-level
+    /// pool-share approximation — so a report can show both without either
+    /// implying the other.
+    pub(super) modeled_maker_rebate_usd: Decimal,
     /// #427: confirmed cross-venue mapping rows replayed from the stream —
     /// the corpus-completeness anchor for the cross-venue strategies (a
     /// corpus that lost its `unified` rows reports zero instead of replaying

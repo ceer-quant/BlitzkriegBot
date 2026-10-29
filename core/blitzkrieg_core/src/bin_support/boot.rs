@@ -251,6 +251,13 @@ pub(crate) struct Args {
     /// `--backtest-knob`: what a live run charges is not a per-invocation choice,
     /// so asking for this without `--backtest` is refused rather than ignored.
     pub(crate) fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule>,
+    /// Model the venue's maker rebate in a replay: `--maker-rebate`. Each
+    /// MAKER fill then earns `0.20 ×` the taker fee that same notional would
+    /// have paid (the official rule's pool share, approximated per fill —
+    /// almach-benchmark REPORT §5 失真点 5), credited as cash and accrued into
+    /// the trade records' net. Replay-only like `--fee-model`: a live core
+    /// must never credit cash the venue has not reported.
+    pub(crate) maker_rebate: bool,
     /// Replay maintenance-gating fast path: `--backtest-fast`. Skips the
     /// per-tick work an every-tick pass provably discards (the holder ladder,
     /// full-book re-valuation, per-tick Lua on quiet ticks, the settlement /
@@ -807,6 +814,8 @@ pub(crate) fn parse_args(
     let mut verify_latency_ms: i64 = 286;
     // #203: replay-only fee schedule (see `Args::fee_model`).
     let mut fee_model: Option<blitzkrieg_core::exit_policy::FeeSchedule> = None;
+    // Replay-only maker-rebate model (see `Args::maker_rebate`).
+    let mut maker_rebate = false;
     // Replay maintenance-gating fast path (see `Args::backtest_fast`).
     let mut backtest_fast = false;
     let mut regime_eval: Option<String> = None;
@@ -1392,6 +1401,9 @@ pub(crate) fn parse_args(
             // Replay maintenance-gating fast path: a flag, no value. Not a live
             // knob — see `Args::backtest_fast` (refusal below, with --fee-model).
             "--backtest-fast" => backtest_fast = true,
+            // Maker-rebate model: a flag, no value. Replay-only like
+            // --backtest-fast (refused below, same shape).
+            "--maker-rebate" => maker_rebate = true,
             // #351 backtest mode: `mine` (zero latency, keep real friction),
             // `verify` (a real-latency dial set), `sweep` (latency ladder
             // 0..300). Only meaningful with --backtest; the mode re-prices
@@ -2158,6 +2170,7 @@ pub(crate) fn parse_args(
         backtest_mode,
         verify_latency_ms,
         fee_model,
+        maker_rebate,
         backtest_fast,
         regime_eval,
         regime_report,

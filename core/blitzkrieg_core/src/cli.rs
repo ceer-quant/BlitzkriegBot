@@ -679,6 +679,13 @@ pub const FLAGS: &[FlagSpec] = &[
          without --backtest is refused).",
     ),
     flag(
+        "--maker-rebate",
+        "",
+        "Replay-only: credit MAKER fills the modeled maker rebate \
+         (`0.20 × taker-fee-equivalent(notional)`) as venue cash (asking for it \
+         without --backtest is refused).",
+    ),
+    flag(
         "--backtest-fast",
         "",
         "Replay-only: gate the per-tick maintenance work a frozen book makes \

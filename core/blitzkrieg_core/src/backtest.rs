@@ -407,6 +407,14 @@ pub struct BacktestReport {
     /// same archive under the same config MUST produce the same digest — a
     /// differing one is a determinism bug, not a statistic.
     pub trades_sha256: String,
+    /// Modeled maker rebate the replay credited on MAKER fills
+    /// (`--maker-rebate`; almach REPORT §5 失真点 5). Distinct from
+    /// `cashflows.rebates_usd`, which counts the corpus's REAL MAKER_REBATE
+    /// ledger rows (#388) — a replay that models the pool on a corpus also
+    /// carrying real rows would show both, and a reader comparing maker-vs-
+    /// taker runs needs to see which cash was claimed which way.
+    #[serde(with = "crate::decimal")]
+    pub maker_rebate_usd: Decimal,
     /// True when the replay had to force `Mode::Dry` (it always does).
     pub forced_dry: bool,
 }
@@ -449,6 +457,10 @@ impl BacktestReport {
             self.cashflows.rebates,
             self.cashflows.rewards_usd,
             self.cashflows.rewards
+        ));
+        s.push_str(&format!(
+            "  maker rebate     : ${:.2} modeled (--maker-rebate; §5-5)\n",
+            self.maker_rebate_usd
         ));
         s.push_str(&format!(
             "  orders           : {} ({} filled, {} cancelled, {} rejected, {} failed, {} live at end)\n",
@@ -1221,6 +1233,9 @@ impl Backtester for EventBacktester {
             trade_lines,
             trade_lines_truncated: 0,
             trades_sha256,
+            // The fill-level pool-share approximation the replay credited
+            // (`--maker-rebate`); zero when off (the pre-rebate shape).
+            maker_rebate_usd: self.core.modeled_maker_rebate_usd(),
             forced_dry: true,
         })
     }
