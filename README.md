@@ -2,138 +2,101 @@
 
 <div align="center">
 
-<img src="assets/logo.png" alt="BlitzkriegBot" width="140"/>
+<img src="assets/logo.png" alt="BlitzkriegBot" width="96"/>
 
-### 从策略构想到模拟验证，一套可扩展的量化交易平台
+### 把交易想法，变成可运行的策略。
 
-**可视化策略蓝图 · Lua 低代码开发 · 策略包复用 · 风控优先 · Rust 交易核心**
+用可视化蓝图或 Lua 创建策略，在回测与模拟环境中验证，通过面板管理账户与风险。
 
-**用蓝图或 Lua 表达策略，在模拟环境中验证，通过面板管理账户与风险。**
+**[开始模拟](#quickstart) · [创建第一条策略](#blueprint) · [查看验证范围](./docs/FEATURES.md)**
 
-dry 模拟出厂默认 · Polymarket / Kalshi / predict.fun / PolySimulator 官方连接器
+<img src="assets/screenshots/panel-blueprint.png" alt="Blueprint 策略编辑器：连接节点、调整参数、预览 Lua 并检查编译结果" width="100%"/>
+
+*从节点连线到 Lua 策略包，让交易逻辑看得见、改得动。*
+
+</div>
+
+默认 dry 模拟，策略安装后默认关闭。实盘涉及真实资金风险，需要充分验证与明确授权；本项目不构成投资建议。
+
+## 从一个想法开始
+
+**创建策略 → 回测评估 → 模拟运行 → 满足验证与授权条件后实盘**
+
+| 你要做什么 | 在 BlitzkriegBot 中怎么做 |
+| --- | --- |
+| 把想法写成规则 | 在 Blueprint 连接数据源、条件与动作；需要更灵活的逻辑时编写 Lua。 |
+| 检查策略是否值得继续 | 用支持的回放与回测入口评估历史表现，核对费用、回撤和成交假设。 |
+| 观察它如何运行 | 在 dry 模式按账户启用，查看订单、持仓、账本与拒单原因。 |
+| 决定是否进入实盘 | 对照功能证据与场地限制完成验证，再明确授权；模拟盈利不是实盘收益保证。 |
+
+<a id="blueprint"></a>
+
+## Blueprint：先搭出你的第一条策略
+
+打开蓝图页，从节点面板选择输入、条件、守卫逻辑和动作，连接成一条规则：
+
+```text
+数据源 / 常量 → 条件比较 → 且 / 或组合 → 买入 / 卖出 / 持有
+```
+
+1. **搭逻辑**：拖入节点、连接端口，在属性面板调整参数。
+2. **检查输出**：查看生成的 Lua 与编译结果；编译通过说明代码可加载，不代表策略有效。
+3. **保存并试跑**：保存为策略包，在策略页选择账户，在 dry 模式启用并观察结果。
+
+蓝图支持 JSON 导入与导出。手写 Lua 包也可以用源码模式打开，继续编辑。
+
+## 一套策略包，逐步验证
+
+策略包可在支持的回放、模拟与实盘入口复用，减少维护多套策略实现的负担。核心账务路径有 dry/live 对拍门禁，验证范围可在 [功能证据表](./docs/FEATURES.md) 查阅。
+
+**复用代码，不等于复现市场。** 实盘仍受流动性、滑点、费用、网络延迟和场地规则影响；离线测试、dry 实况与部分真实下单验证分别说明不同范围，不能替代完整的实盘验收。
+
+## Lua：从现有示例改起
+
+不必先学习 Rust。一个带 `manifest.json` 的目录就是策略包，[官方 Lua 示例](./user_layer/strategies_lua/) 提供配对、动量、做市等逻辑，方便阅读和修改。
+
+- **改策略**：编辑 Lua 与参数声明，由策略宿主加载。
+- **管参数**：声明可调参数域后，通过面板调整；支持的参数可用于影子进化。
+- **控执行**：内嵌沙箱限制内存与指令预算，帮助限制失控脚本的影响。
+
+示例是研究起点，是否启用应由验证结果决定。
+
+## Risk First：每次试跑都有边界
+
+- **默认先模拟**：出厂使用 dry，策略安装不等于启用，按账户分别控制。
+- **订单先过风控**：持仓数、单笔名义额等限制由内核执行，策略不能自行豁免。
+- **异常可追踪**：无法归属的成交与现金异动进入告警和审计，便于核对账本。
+- **可以只观察**：`--readonly` 不构造下单通道，用于只读检查。
+
+## 从面板看到策略实际做了什么
+
+Web 面板提供行情、订单、持仓、账本和策略管理；TUI 支持终端查看与操作。账户切换帮助你分别观察不同策略与场地的执行情况。
+
+<details>
+<summary>查看行情面板</summary>
+
+<img src="assets/screenshots/panel-markets.png" alt="行情面板示例：轮盘倒计时与盘口深度；截图包含账户未绑定提示" width="100%"/>
+
+*行情页展示倒计时与盘口深度。截图中的账户未绑定提示属于配置状态，使用前需完成账户与场地绑定。*
+
+</details>
+
+## 为策略研究提供可扩展的底座
+
+交易核心与服务进程使用 Rust，策略宿主内嵌 Lua，Web 面板使用 Vue。运行预编译发行包无需另装 Node 或 Python；开发与构建依赖见下方文档。
+
+项目提供 Polymarket、Kalshi、predict.fun 与 PolySimulator 连接器，各自的验证范围见 [功能证据表](./docs/FEATURES.md)。市场扩展与策略包通过独立契约接入，技术细节放在 [开发者文档](#developer-guide)。
 
 [![CI](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml)
 [![Security](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml)
-[![Secret Scan (deep)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/secret-scan.yml)
-[![Release](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/release.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/release.yml)
+[![Release](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/release.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange)](https://doc.rust-lang.org/edition-guide/)
 
-<img src="assets/screenshots/panel-markets.png" alt="BlitzkriegBot 行情面板：轮盘倒计时与盘口深度" width="100%"/>
+<a id="quickstart"></a>
 
-*行情页：轮盘倒计时、UP/DOWN 盘口深度、OBI 失衡、战绩卡。*
+## 开始模拟
 
-**⚠️ 预测市场交易有真实资金风险。本项目默认 dry 模拟模式，仅供学习与研究，不构成投资建议。**
-
-</div>
-
----
-
-## 为什么是 BlitzkriegBot
-
-它不是「一个会下单的脚本」。它是按**交易操作系统**的思路从零设计的量化平台：微内核是它的内核，市场连接器与策略包是它的驱动，蓝图与面板是它的用户界面，风控是它的内核态。以下介绍已有功能；实现不等于完成实盘验证。各链路的 dry、离线、测试与部分实盘证据见 [功能分级](./docs/FEATURES.md)，不能据此推断所有功能已在实盘验证。
-
-**先回答你最关心的问题：我能多快拿到结果？**
-
-| 你是谁 | 你能多快拿到结果 | 从哪开始 |
-| --- | --- | --- |
-| **交易者** | 解压 → 一条命令 → 面板出现：dry 模拟正盯着真实 Polymarket 轮盘跑，你的钱包零风险 | [60 秒上手](#60-秒上手dry-模拟零资金风险) |
-| **策略开发者** | 不写 Rust：蓝图上拖一个策略出来，或抄 11 个官方 Lua 包改一改，回放验证后按账户启用 | [Blueprint](#1--blueprint拖拽出一条完整策略不写一行代码) |
-| **连接器开发者** | 四个 trait 的市场契约 + 四条官方连接器当参考实现，照着接入下一个市场 | [插件架构](#8--插件架构换市场--写一个插件内核不改一行) |
-| **评估者** | 每个功能被什么验证过、哪条链路还没验证，一张证据分级表摊开给你看 | [docs/FEATURES.md](./docs/FEATURES.md) |
-
----
-
-### 1 · Blueprint：拖拽出一条完整策略，不写一行代码
-
-<div align="center">
-<img src="assets/screenshots/panel-blueprint.png" alt="Blueprint 可视化策略画布：节点面板、示例策略、实时 Lua 预览与编译检查" width="100%"/>
-</div>
-
-**Visual Strategy Builder。** 从左侧节点面板拖入组件、连线、点开属性面板调参——一个完整的策略工作流就搭好了：
-
-```
-数据源节点 ──▶ 条件节点 ──▶ 条件节点 ──▶ 买入/卖出/持有动作节点
-              （且 / 或 逻辑组合，守卫链极性可切）
-```
-
-- **Low-Code Strategy Development**：节点面板分四组——值·输入（数据源/常量）、判断（条件）、守卫逻辑（且/或）、动作（买入/卖出/持有），覆盖从信号到执行的完整链路。
-- **实时编译检查**：画布底部就是内核实时生成的 Lua 预览，「编译通过」徽章亮起才算数——你在画布上看到的，就是内核将要执行的。
-- **一键成为策略包**：保存后即是一个标准 Lua 策略包，进策略页按账户启用即可交易；支持导出/导入 JSON，策略可以分享与复用。
-- **手写包也能进画布**：任何手写 Lua 策略包都能被蓝图编辑器以源码模式打开继续编辑。
-
-### 2 · Lua 策略系统：不学 Rust，也能写出能上场的策略
-
-- **学习成本低**：一个带 `manifest.json` 的目录就是一个策略包，语言是 Lua——改完保存，内核即可加载，无需编译步骤。
-- **开发速度快**：11 个官方策略包（折价套利、单腿/双腿配对、跨所套利、动量族、做市、恐慌接盘等）就在 `user_layer/strategies_lua/` 里，全部开源、当活样板抄。
-- **易于测试**：策略跑在内嵌沙箱里（16MiB 内存 / 1e6 指令预算），逻辑失控不会伤到内核；配合回放与回测，先在历史行情上验证再启用。
-- **易于扩展**：manifest 声明可调参数域后，参数能进面板热调、进蓝图编辑、进影子进化。
-
-### 3 · 策略包复用：连接回测、模拟与实盘模式
-
-复用策略包和核心账务结构，减少多套实现之间的偏差。真实成交仍受流动性、网络延迟、费用和场地规则影响；代码复用不保证模拟结果与实盘一致。
-
-```
-           同一套策略包 · 同一套事件系统 · 同一套风控 · 同一套出场纪律 · 同一套账本结构
-                │                    │                     │
-                ▼                    ▼                     ▼
-            Backtest  ──────▶  Paper (dry 模拟)  ──────▶  Live
-```
-
-- 策略包可在支持的回放、模拟与实盘入口复用；各入口的验证范围应分别核对。
-- dry 与 live 的账务路径由核心对拍门禁（`core-parity`）做双核逐字校验——这不是愿景，是 CI 里每天在跑的测试。
-- 诚实条款：各能力的验证等级（实盘验证 / 离线验证 / 仅测试覆盖 / 未验证）以 [`docs/FEATURES.md`](./docs/FEATURES.md) 为权威——包括 Live 场地链路的当前分级。
-
-### 4 · Risk First：先活下来，再谈交易
-
-风控不是插件，是系统的承重墙。任何策略的任何一笔单，都先过同一道闸：
-
-- **硬上限不可豁免**：持仓数、单笔名义额等硬限制写在内核里，策略声明面碰不到它。
-- **九项系统限额与退出纪律**面板热编辑：止损、最小剩余时间、跟踪止盈……改完即生效，不用重启。
-- **先活下来的机制是真的**：账户维熔断与自愈（良性拒单不喂计数、场地恢复自动解冻）、账本与场地报数逐窗对账、无法归属的成交回报响亮告警、场地现金异动探测器。
-- **结构性只读**：`--readonly` 下进程从根上不构造下单通道——不是「不点按钮」，是根本没有那条路。
-
-### 5 · Rust 核心与自包含发行包
-
-交易核心和服务进程使用 Rust，Lua 策略在内嵌运行时中执行，Web 面板使用 Vue。内嵌 Lua 仍有解释执行和垃圾回收，不能据此承诺整个系统没有 GC 停顿。
-
-- **你的收益**：部署 = 解压一个目录；运行 = 一条命令；使用预编译发行包无需另装 Node 或 Python；仍需符合发行包的平台与系统依赖要求。
-- **长时间运行可靠性**：单二进制 + 崩溃自动重建 + 只收自己拉起进程的生命周期托管，重启机器后一条 `blitzkrieg run` 回到全部状态。
-- **安全工程**：内存安全语言 + 双平台 CI + CodeQL + 深度密钥扫描 + 凭据只走环境变量。
-
-### 6 · 毫秒级交易引擎
-
-不是为了跑分，是为了**在行情断流的瞬间不拿着旧价格下单**：
-
-- 引擎节拍默认 50ms、毫秒级可调；行情断流 8 秒内被盘口新鲜度保护发现并拒用陈旧盘口——宁可不开仓，不按过期数据交易。
-- 面板 ↔ 内核走 Unix 域套接字 + JSON-RPC 2.0 换行分帧，使用本机 IPC，仍有序列化、系统调用和调度开销。
-- 回放器按 deadline 驱动调度，历史行情回放的时间轴与实盘节拍同构——这有助于验证调度逻辑，但不等同于复现实盘网络与成交时序。
-
-### 7 · 机构级架构：按「跑十年」的标准设计
-
-- **微内核**：交易核心市场无关、零策略出厂；撮合、下单、持仓、风控、对账、账本各居其位。
-- **冻结的扩展 ABI**：策略 C ABI v2 的 vtable 已冻结，新能力走可选符号——老策略包不会被升级弄坏。
-- **版本单事实来源**：版本号只有一处定义，tag 由发布流水线构建双平台资产，同一 tag 永不覆盖。
-- **全链审计**：订单、成交、持仓、决策、场地异动全部落 JSONL 审计；出事有据可查，升级保留上一代日志。
-
-### 8 · 插件架构：换市场 = 写一个插件，内核不改一行
-
-交易核心不含任何交易所 SDK。四条官方连接器（**Polymarket / Kalshi / predict.fun / PolySimulator**）都实现同一份契约（`core/market_api` 的 `DataFeed` / `MarketDiscovery` / `OrderExecutor` / `MarketPlugin`）：
-
-- 新市场 = 一个扩展 crate + feature 注册，内核零改动。
-- 策略侧同理：Lua 包与 cdylib（C ABI v2）都是标准投放格式，社区策略与官方策略走同一扇门。
-
-### 9 · 现代化界面：面板与终端双形态
-
-- **Web 面板**：Vue 3 + shadcn 风格组件体系（reka-ui + Tailwind）+ vue-flow 画布——行情、挂单、持仓、账本实时刷新，策略/蓝图/裁决流/进化四页签，多账户切换器，首次引导内置。
-- **TUI 终端面板**：`blitzkrieg tui`，同一套 ui_kit 格式化函数，服务器上没有浏览器也能操作。
-- 面板默认只听本机 `127.0.0.1:51888`，跨站来源一律 403。
-
----
-
-## 60 秒上手（dry 模拟，零资金风险）
-
-**路线 A：不装任何工具（推荐）**
+**路线 A：运行预编译发行包**
 
 到 [Releases](https://github.com/ceer-quant/BlitzkriegBot/releases) 下载对应平台（Linux x86_64 / macOS aarch64）的 `tar.gz`，解压后：
 
@@ -142,7 +105,7 @@ cd <解压目录>
 bin/blitzkrieg run
 ```
 
-浏览器打开 **<http://127.0.0.1:51888/panel>** ——完事。它在盯真实 Polymarket 轮盘、按真实盘口在本地模拟成交，你的钱包没有任何风险。
+浏览器打开 **<http://127.0.0.1:51888/panel>**。先核对运行模式为 dry，再配置账户与策略；启用前不会自动运行策略。
 
 **路线 B：源码构建（开发者）**
 
@@ -153,7 +116,7 @@ bash scripts/install-blitzkrieg-shim.sh   # 可选：把 blitzkrieg 装进 PATH
 blitzkrieg run
 ```
 
-**三条路把平台用起来**：① 策略页打开某个官方策略的开关（按账户启用）；② 蓝图页拖一个自己的策略出来保存启用；③ 让网页能下命令——`.env.example` 复制为 `.env`，设置 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`。
+**下一步**：首次配置时参考 `.env.example` 设置 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`，让面板具备操作权限。然后创建或选择策略，确认账户绑定及 dry 模式，再按账户启用。
 
 <details>
 <summary><b>Windows 用户：用 WSL2 安装</b>（本平台原生不支持 Windows，依赖 Unix 域套接字）</summary>
@@ -216,6 +179,8 @@ blitzkrieg run
 | [scripts/README.md](./scripts/README.md) | 运维脚本手册（看门狗/备份/巡检） |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | 贡献流程（架构红线与门禁是硬性的） |
 | [.env.example](./.env.example) | 环境变量全家福（`BK_*` / `BLITZKRIEG_*` / `POLYMARKET_*`） |
+
+<a id="developer-guide"></a>
 
 <details>
 <summary><b>给开发者：架构、目录、常用旗标与门禁</b></summary>
