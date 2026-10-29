@@ -1259,7 +1259,6 @@ pub fn load_account_ledgers_from_env(
         });
     }
     // Probe credentials (the same §9.4 posture the toml path runs).
-    let mut accounts = accounts;
     for a in accounts.iter_mut() {
         a.credential_keys = read_credential_keys(&a.credential_keys);
     }
