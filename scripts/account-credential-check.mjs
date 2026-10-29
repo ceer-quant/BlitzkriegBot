@@ -10,12 +10,15 @@
  *
  * How the gate makes that REAL and non-vacuous:
  *
- *   1. a scratch `accounts.toml` names four env vars for its account, and the
- *      gate spawns the core with those vars SET TO SENTINEL VALUES — so the
- *      kernel's own startup probe (`read_credential_keys`) actually reads
+ *   1. a scratch `.env` names four env vars for its account under the
+ *      ACCOUNT_* grammar (issue 751's single source), and the gate spawns the
+ *      core with those vars SET TO SENTINEL VALUES — injected via `envExtra`
+ *      playing the launcher's role (the kernel injects nothing at boot), so
+ *      the kernel's own startup probe (`read_credential_keys`) actually reads
  *      them and `credentialsLoaded` comes back `true`. A grep over an
  *      environment where nothing was planted would pass vacuously; this one
- *      cannot.
+ *      cannot. The sentinels live in the child's environment only — the
+ *      gate's own process env is never touched.
  *   2. the gate then drives a FULL session over the wire — every read verb,
  *      a real dry order, the reconcile (venue-gap) path, the account verbs,
  *      DELIBERATE errors (unknown method, bad params) — and concatenates
@@ -29,7 +32,7 @@
  * Exit: 0 pass / 1 failure / 2 environment missing.
  */
 
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { CoreClient, rpc } from './lib/core-client.mjs';
@@ -137,22 +140,30 @@ function teeth() {
 
 // ── the real sweep ───────────────────────────────────────────────────────────
 
-const BOOK_TOML = `\
-# Scratch book for the credential gate (§9.4): the config names ENV VARS —
-# the VALUES live only in the kernel process's own environment.
-[[account]]
-id = "default"
-name = "default"
-api_key_env = "${KEY_ENV.api_key_env}"
-secret_env = "${KEY_ENV.secret_env}"
-passphrase_env = "${KEY_ENV.passphrase_env}"
-private_key_env = "${KEY_ENV.private_key_env}"
-`;
+// The fixture (issue 751, the .env single source): the account book lives in
+// a scratch `.env` under the ACCOUNT_* grammar. The credential cells carry
+// ENV VAR NAMES — the VALUES exist only in the kernel process's own
+// environment. The legacy toml face is deliberately left ABSENT: a scratch
+// accounts.toml beside ACCOUNT_LIST is exactly the two-sources shape the
+// single-source ruling refuses (and its mere existence would freeze every
+// runtime account write).
+const ACCOUNT_ENV = {
+  ACCOUNT_LIST: 'default',
+  ACCOUNT_DEFAULT_NAME: 'default',
+  ACCOUNT_DEFAULT_API_KEY_ENV: KEY_ENV.api_key_env,
+  ACCOUNT_DEFAULT_SECRET_ENV: KEY_ENV.secret_env,
+  ACCOUNT_DEFAULT_PASSPHRASE_ENV: KEY_ENV.passphrase_env,
+  ACCOUNT_DEFAULT_PRIVATE_KEY_ENV: KEY_ENV.private_key_env,
+};
+const ENV_FIXTURE =
+  Object.entries(ACCOUNT_ENV).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
 
 function makeCore() {
   const cwd = mkdtempSync(join(tmpdir(), 'bk-e28-cred-'));
-  mkdirSync(join(cwd, 'user_layer', 'configs'), { recursive: true });
-  writeFileSync(join(cwd, 'user_layer', 'configs', 'accounts.toml'), BOOK_TOML);
+  // The .env is cwd-relative (the kernel reads <cwd>/.env and every runtime
+  // account write upserts into it), and the mkdtemp cwd is unique per script,
+  // so parallel gates cannot pollute one another.
+  writeFileSync(join(cwd, '.env'), ENV_FIXTURE);
   return new CoreClient({
     binaryPath: BIN,
     socketPath: scratchSocketPath('cred'),
@@ -166,6 +177,16 @@ function makeCore() {
     noOrderLog: true,
     noPositionLog: true,
     extraArgs: ['--no-auto-exits'],
+    // The launcher's role: load the scratch .env into the child's environment
+    // (production loads it exactly this way), plus the sentinel VALUES for the
+    // credential vars the book names — planted in the child process ONLY.
+    envExtra: {
+      ...ACCOUNT_ENV,
+      [KEY_ENV.api_key_env]: SENTINEL,
+      [KEY_ENV.secret_env]: SENTINEL,
+      [KEY_ENV.passphrase_env]: SENTINEL,
+      [KEY_ENV.private_key_env]: SENTINEL,
+    },
   });
 }
 
@@ -182,9 +203,6 @@ async function main() {
   let cwd;
   try {
     checkCoreProvenance(BIN, check);
-    // Plant the sentinels in THIS process's env: CoreClient spawns the child
-    // with `env: process.env`, so the kernel's startup probe reads them.
-    for (const name of Object.values(KEY_ENV)) process.env[name] = SENTINEL;
     await core.start();
     cwd = core.cwd;
     await rpc.ready(core);
@@ -266,8 +284,6 @@ async function main() {
   } catch (e) {
     check('harness error', false, e?.stack || String(e));
   } finally {
-    // Scrub the sentinels from this process before anything else runs.
-    for (const name of Object.values(KEY_ENV)) delete process.env[name];
     await core.stop();
     if (cwd) { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } }
   }

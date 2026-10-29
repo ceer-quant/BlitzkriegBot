@@ -33,16 +33,16 @@
 # but the kernel RUNS from the main checkout, and it reads more there than the
 # binaries — so each of these used to stay at the previous version after a
 # successful upgrade, which is how a green deploy kept behaving like the old build:
-#   * user_layer/configs/*.toml — the factory values (e.g. shadow_evolution's
-#     enabled / auto_evolve). These are shipped defaults, not the operator's
-#     surface: since #578 the FILE is the single source of truth for the
-#     evolution switches (a runtime verb writes back into it; state.json keeps
-#     only bookkeeping). A locally edited copy is backed up under the rollback
-#     directory and named in the log before it is replaced. EXCEPTION: configs
-#     the KERNEL rewrites at runtime (accounts.toml — venue bindings, per-account
-#     strategy sets, the display pointer all persist there) are operator STATE,
-#     not factory defaults: an existing copy always wins and is never replaced
-#     (2026-10-20; `UA_OPERATOR_STATE_CONFIGS` in the lib owns the list).
+#   * user_layer/configs/*.toml — the factory values. Since issue 751 (the
+#     .env single source) every runtime write face lands in `.env` — the
+#     account verbs upsert ACCOUNT_* keys, the shadow-evolution switches write
+#     SHADOW_* — so every shipped toml is a factory default and none is a
+#     kernel runtime write target anymore. A locally edited copy is backed up
+#     under the rollback directory and named in the log before it is replaced.
+#     The operator's live state (`.env`) is NOT in the carry face at all:
+#     only $CONFIG_DIR/*.toml is staged, so an upgrade can never touch it
+#     (the former operator-state keep rule and its
+#     `UA_OPERATOR_STATE_CONFIGS` list are retired — the list is empty now).
 #   * user_layer/*/target/release/*.dylib — strategy code the kernel `dlopen`s
 #     out of the running checkout. It is code, not build residue: a stale cdylib
 #     makes the running kernel execute a previous build.

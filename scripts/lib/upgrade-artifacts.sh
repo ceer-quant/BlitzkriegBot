@@ -32,20 +32,17 @@
 #
 # STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/, configs/
 
-# Configs the KERNEL WRITES AT RUNTIME (account.venue.set / account.trading.set
-# / strategies.set / account.create/remove / display.account.set all persist
-# into accounts.toml). Unlike the other *.toml files these carry the operator's
-# live state, not factory defaults — an upgrade that overwrites them silently
-# reverts account bindings, per-account strategy sets and the display pointer
-# (2026-10-20: three same-day upgrades each wiped the operator's strategies
-# keys out of accounts.toml this way). A file in this list is installed only
-# when the running checkout has none; an existing copy is left untouched and
-# the shipped one stays in STAGE + ROLLBACK for reference.
-# shadow_evolution.toml joined with #578: the evolution switches now LIVE in
-# the file (a panel flip writes back into it), so an upgrade overwriting it
-# silently reverts the operator's switches to factory OFF — same failure
-# shape as the accounts.toml wipe, caught live 2026-10-23.
-UA_OPERATOR_STATE_CONFIGS="accounts.toml shadow_evolution.toml"
+# Operator-state configs the kernel REWRITES AT RUNTIME, kept as-is by an
+# upgrade ("the running copy wins"). EMPTY by ruling (issue 751, the .env
+# single source): every runtime write face moved to `.env` — the account verbs
+# upsert ACCOUNT_* keys and the shadow-evolution switches write SHADOW_* — so
+# no shipped toml carries operator state anymore, and the operator's live
+# state is not in the upgrade carry face AT ALL (ua_stage stages only
+# $CONFIG_DIR/*.toml; `.env` never travels with a release). The mechanism
+# stays as an extension point for a future runtime-written config; today every
+# entry of $CONFIG_DIR is a factory default that installs (and rolls back)
+# like any other file.
+UA_OPERATOR_STATE_CONFIGS=""
 
 # Is this shipped config operator state? Matched by name, one entry per line.
 ua_config_is_operator_state() {

@@ -532,7 +532,7 @@ end
 | 发现 | `--strategy-dir` 扫描 dylib | `--lua-strategy-dir` 扫描 `manifest.json` |
 | 校验 | `bk_strategy_abi_version() == 2` + 可选符号 | `manifest.sha256` 匹配 + 必需函数存在 |
 | 注册 | `strategy.load` 回执含 API 1.0 | `strategy.load` 回执含 `(lua)` 标记 |
-| 启用 | `strategy.enable` | 同左（0.3：同一个开关，同一条状态持久化 `data/strategy-state.json`。**0.4.1 起语义已变**：`strategy.enable` 是默认 scope 的全局总闸（master power）；启用真值是「账户 × 策略」复合键——每个账户的启用集（`accounts.toml` 的 `strategies` 列表，`account.strategies.set` / 面板按账户启停写入），空集 = 显式不跑（INHERIT 已废除）。见 README「策略状态与进入条件」） |
+| 启用 | `strategy.enable` | 同左（0.3：同一个开关，同一条状态持久化 `data/strategy-state.json`。**0.4.1 起语义已变**：`strategy.enable` 是默认 scope 的全局总闸（master power）；启用真值是「账户 × 策略」复合键——每个账户的启用集（`.env` 的 `ACCOUNT_<ID>_STRATEGIES` 列表，`account.strategies.set` / 面板按账户启停写入，issue 751 单源），空集 = 显式不跑（INHERIT 已废除）。见 README「策略状态与进入条件」） |
 | 隔离 | `catch_unwind` 兜策略 panic（既有） | 投毒 + 错误捕获兜 Lua 异常（新） |
 | 影子进化 | 既有 `bk_strategy_evolvable_knobs` | `manifest.tunables` + 热参（复用同一 `ParamRegistry`） |
 
@@ -817,32 +817,27 @@ impl AccountLedgers {
 
 ### 9.5 账户配置来源
 
-```toml
-# user_layer/configs/accounts.toml （新建；文件缺失 = 只有一个 default 账户）
-[[account]]
-id = "default"
-name = "Poly Main"
-market_type = "prediction"
-status = "active"
-api_key_env = "POLY_API_KEY"
-secret_env = "POLY_SECRET"
-passphrase_env = "POLY_PASSPHRASE"
+**issue 751（.env 单源）**：账户簿的唯一持久格是内核 cwd 的 `.env`，`ACCOUNT_*` 文法（id 后缀 = 大写 + 非字母数字 → `_`）；`user_layer/configs/accounts.toml` 只作迁移窗口的只读回退，且 legacy toml 存在时一切运行期账户写动词拒绝落盘（单源不并立）。
 
-[[account]]
-id = "paper"
-name = "Paper Trading"
-market_type = "prediction"
-status = "read_only"      # 只读：能看不能下单
+```dotenv
+# .env （账户簿单一源；ACCOUNT_LIST 缺失且 toml 不存在 = 只有一个 default 账户）
+ACCOUNT_LIST=default,paper
+ACCOUNT_DEFAULT_NAME=Poly Main
+ACCOUNT_DEFAULT_API_KEY_ENV=POLY_API_KEY
+ACCOUNT_DEFAULT_SECRET_ENV=POLY_SECRET
+ACCOUNT_DEFAULT_PASSPHRASE_ENV=POLY_PASSPHRASE
+ACCOUNT_PAPER_NAME=Paper Trading
+ACCOUNT_PAPER_STATUS=read_only      # 只读：能看不能下单
 ```
 
 | 项 | 决议 |
 |:---|:---|
-| 默认 | 文件不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量）→ **0.2 部署零改动** |
-| 优先级 | CLI > env > toml > 默认（沿用既有 `default.toml` 顶部规则） |
-| 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（`accounts.toml` 落盘）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
+| 默认 | `ACCOUNT_LIST` 缺失且 legacy toml 不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量）→ **0.2 部署零改动** |
+| 优先级 | `ACCOUNT_*` 键：进程环境先、`.env` 文件后（12-factor，启动时显式导出者优先）＞ legacy `accounts.toml`（迁移回退）＞ 单一 default。env 与文件永不合并——`ACCOUNT_LIST` 在场时 toml 被忽略并告警 |
+| 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（upsert `ACCOUNT_LIST` / `ACCOUNT_<ID>_*` 进 `.env`）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
 | 活跃账户 | `account.switch` 是**会话级**（按 UDS 连接），不是进程级全局：两个客户端可以看两个账户。切换只影响**该连接后续请求的默认 account_id**，不影响内核调度 |
-| 显示账户 | **display_account（0.4.1，#559/#561/#562）**：`accounts.toml` 顶层键 `display_account = "<账户id>"`（与 `[[account]]` 表并列），回答「**面板行情页显示哪个账户的交易所**」。缺省 = 第一个 `status = active` 的账户；命名了不存在的 id → 内核拒绝启动（fail-closed，与账户簿同姿态）。运行时动词 `display.account.set`（payload `{accountId}`）：校验存在 + active → **persist 先行** → 运行时指针 + 文件一次写齐；面板切换器在 `account.switch` 成功后顺手调用。快照顶层带 `displayAccount` / `displayVenue`（venue 空串 = 未绑定）。**纯展示指针**：不接记账/下单/策略启用语义（那些跟着会话 activeAccount 走）；`account.remove` 删掉被指账户时内核修复指针（回落第一个 active）。面板身份唯一源 = `displayVenue` 优先，回落 `activeAccountVenue`（老内核零字段 → 原回落链，#561） |
-| 升级不覆盖 | **accounts.toml 是内核运行时写目标（0.4.1，#565）**：venue 绑定 / strategies 启用集 / display_account 全部由运行时动词持久化进来。`blitzkrieg upgrade` 对它的规则是「**运行副本永远赢**」——live 存在则不覆盖、不进回滚集；live 缺失才落工厂版。见 `scripts/lib/upgrade-artifacts.sh` 的 `UA_OPERATOR_STATE_CONFIGS`（2026-10-20 三次同日升级把操作员状态静默洗回工厂簿的事故后设立） |
+| 显示账户 | **display_account（0.4.1，#559/#561/#562）**：`.env` 键 `ACCOUNT_DISPLAY="<账户id>"`，回答「**面板行情页显示哪个账户的交易所**」。缺省 = 第一个 `status = active` 的账户；命名了不存在的 id → 内核拒绝启动（fail-closed，与账户簿同姿态）。运行时动词 `display.account.set`（payload `{accountId}`）：校验存在 + active → **persist 先行** → 运行时指针 + `.env` 一次写齐；面板切换器在 `account.switch` 成功后顺手调用。快照顶层带 `displayAccount` / `displayVenue`（venue 空串 = 未绑定）。**纯展示指针**：不接记账/下单/策略启用语义（那些跟着会话 activeAccount 走）；`account.remove` 删掉被指账户时内核修复指针（回落第一个 active）。面板身份唯一源 = `displayVenue` 优先，回落 `activeAccountVenue`（老内核零字段 → 原回落链，#561） |
+| 升级不覆盖 | **操作员状态已迁出升级携带面（issue 751）**：账户簿的运行期写（venue 绑定 / strategies 启用集 / display 指针）全部 upsert `.env` 的 `ACCOUNT_*` 键，shadow_evolution 的开关同样迁到 `SHADOW_*`——`UA_OPERATOR_STATE_CONFIGS` 已清空，升级携带面只含工厂 toml，而操作员状态所在的 `.env` 根本不在携带面上，不存在被覆盖的路径。（历史：0.4.1 #565 的「运行副本永远赢」规则与 2026-10-20 三次同日升级洗掉操作员策略集的事故，随写目标迁移一并退役） |
 
 ### 9.6 环境与插件的关系（诚实边界）
 

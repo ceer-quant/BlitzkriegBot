@@ -20,7 +20,12 @@
 #      newer than the install is stale (the 2026-10-06 @vue-flow incident —
 #      the bare `[ -d node_modules ]` it replaced calls that tree fresh), a
 #      missing install is stale, and a lockfile-less tree is left to the
-#      build's own loud failure.
+#      build's own loud failure;
+#   8. the operator's live state is NOT in the upgrade carry face (issue 751,
+#      the .env single source): every runtime write lands in `.env` (ACCOUNT_*
+#      / SHADOW_* keys), so `UA_OPERATOR_STATE_CONFIGS` is empty by ruling and
+#      the operator's `.env` is never staged, never drifted, never installed
+#      over and never rolled back.
 #
 # Run it from anywhere: `sh scripts/upgrade-propagate-test.sh` (exit 0 = pass).
 
@@ -82,20 +87,19 @@ printf 'assets\n' > "$BUILD_WT/$DIST_DIR/bundle.js"
 
 printf 'round_sec = 900\n' > "$BUILD_WT/$CONFIG_DIR/default.toml"
 printf 'round_sec = 900\n' > "$REPO_ROOT/$CONFIG_DIR/default.toml"
-# shadow_evolution.toml is OPERATOR STATE since #578 (the evolution switches
-# live in the file; a panel flip writes back into it). The 2026-10-23 upgrade
-# reverted the operator's panel-flipped `enabled = true` to factory OFF by
-# overwriting this file — the exact failure shape accounts.toml already had.
-# It joins UA_OPERATOR_STATE_CONFIGS: running copy wins, shipped copy waits.
+# shadow_evolution.toml and accounts.toml ship as plain factory configs since
+# issue 751 (the .env single source): the evolution switches write SHADOW_* into
+# `.env` and every account write face upserts ACCOUNT_* into `.env`, so NEITHER
+# file is a kernel runtime write target anymore and `UA_OPERATOR_STATE_CONFIGS`
+# is empty. The live copies below are locally-edited configs like any other:
+# an upgrade replaces them (backing them up into ROLLBACK) and a rollback
+# brings them back.
 printf 'auto_evolve = true\n' > "$BUILD_WT/$CONFIG_DIR/shadow_evolution.toml"
 printf 'enabled = true\nauto_evolve = false  # panel-flipped locally\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
-cp "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml" "$tmp/operator-copy.toml"
-# An operator-state config (UA_OPERATOR_STATE_CONFIGS, 2026-10-20): the kernel
-# persists runtime writes INTO accounts.toml, so the running copy is live state
-# — the upgrade must keep it as-is, never ship the factory copy over it.
+cp "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml" "$tmp/local-shadow.toml"
 printf '[[account]]\nid = "default"\nstrategies = ["spread_arb"]\n' > "$BUILD_WT/$CONFIG_DIR/accounts.toml"
 printf '[[account]]\nid = "default"\nstrategies = ["flash_arb"]\n' > "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
-cp "$REPO_ROOT/$CONFIG_DIR/accounts.toml" "$tmp/operator-accounts.toml"
+cp "$REPO_ROOT/$CONFIG_DIR/accounts.toml" "$tmp/local-accounts.toml"
 cp "$REPO_ROOT/target/release/blitzkrieg" "$tmp/old-blitzkrieg"
 
 . "$lib"
@@ -120,10 +124,12 @@ fi
 printf '\ndrift report\n'
 ua_drift > "$tmp/drift.txt"
 check "drift: unchanged config marked =" "1" "$(grep -c '= default.toml' "$tmp/drift.txt" | tr -d ' ')"
-check "drift: operator-state config kept, running copy wins" "1" \
-  "$(grep -c '= shadow_evolution.toml (operator state kept' "$tmp/drift.txt" | tr -d ' ')"
-check "drift: operator-state config kept, running copy wins" "1" \
-  "$(grep -c '= accounts.toml (operator state kept' "$tmp/drift.txt" | tr -d ' ')"
+check "drift: locally-edited config marked ~ (no operator-state keep since issue 751)" "1" \
+  "$(grep -c '~ shadow_evolution.toml (the shipped value differs' "$tmp/drift.txt" | tr -d ' ')"
+check "drift: locally-edited config marked ~ (no operator-state keep since issue 751)" "1" \
+  "$(grep -c '~ accounts.toml (the shipped value differs' "$tmp/drift.txt" | tr -d ' ')"
+check "drift: no operator-state line exists at all (the list is empty by ruling)" "0" \
+  "$(grep -c 'operator state kept' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: rebuilt cdylib marked ~" "1" "$(grep -c '~ lib.*_strategy.dylib' "$tmp/drift.txt" | tr -d ' ')"
 check "drift: new cdylib marked +" "1" "$(grep -c '+ libfresh_strategy.dylib' "$tmp/drift.txt" | tr -d ' ')"
 
@@ -138,10 +144,14 @@ check_same "new cdylib installed" "$STAGE/dylibs/user_layer/parity_strategy/targ
   "$REPO_ROOT/user_layer/parity_strategy/target/release/libfresh_strategy.dylib"
 check_same "bundle replaced" "$STAGE/dist/index.html" "$REPO_ROOT/$DIST_DIR/index.html"
 check "bundle holds exactly the staged set" "2" "$(ls "$REPO_ROOT/$DIST_DIR" | wc -l | tr -d ' ')"
-check_same "operator-state config NOT overwritten (the running copy wins)" "$tmp/operator-accounts.toml" \
+check_same "locally-edited config replaced by the shipped copy" "$STAGE/configs/accounts.toml" \
   "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
-check_same "operator-state config NOT overwritten (panel-flipped switches survive, #578)" \
-  "$tmp/operator-copy.toml" "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+check_same "locally-edited config replaced by the shipped copy" "$STAGE/configs/shadow_evolution.toml" \
+  "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+check_same "the replaced config is kept for rollback" "$tmp/local-accounts.toml" \
+  "$ROLLBACK/configs/accounts.toml"
+check_same "the replaced config is kept for rollback" "$tmp/local-shadow.toml" \
+  "$ROLLBACK/configs/shadow_evolution.toml"
 check_same "the previous binary is kept for rollback" "$tmp/old-blitzkrieg" "$ROLLBACK/bin/blitzkrieg"
 
 # ── 4. a tampered install must not reach the restart ─────────────────────────
@@ -163,17 +173,16 @@ check "cdylib restored" "OLD parity" "$(cat "$REPO_ROOT/user_layer/parity_strate
 check "the cdylib the install ADDED is taken away again" "0" \
   "$(ls "$REPO_ROOT/user_layer/parity_strategy/target/release" | grep -c fresh || true)"
 check "bundle index restored" "<html>OLD</html>" "$(cat "$REPO_ROOT/$DIST_DIR/index.html")"
-check_same "the operator's edited config is restored" "$tmp/operator-copy.toml" \
+check_same "the locally-edited config is restored" "$tmp/local-shadow.toml" \
   "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
-# The operator-state config was never installed over, so it never entered the
-# rollback set — a rollback must leave the running copy exactly as it was.
-check_same "operator-state config untouched by rollback too" "$tmp/operator-accounts.toml" \
+check_same "the other locally-edited config is restored too" "$tmp/local-accounts.toml" \
   "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
 
-# ── 5b. a MISSING operator-state config is installed (factory seed) ──────────
-# The keep rule is "the running copy wins", not "never install": a checkout
-# without the file (first install, or the operator deleted it) must gain the
-# factory copy, and a rollback of that install must take it away again.
+# ── 5b. a MISSING config is installed (factory seed) ─────────────────────────
+# With UA_OPERATOR_STATE_CONFIGS empty there is no keep-instead-of-install
+# exception left: a checkout without a staged file (first install, or the
+# operator deleted it) must gain the factory copy, and a rollback of that
+# install must take it away again.
 printf '\ninstall with no live accounts.toml\n'
 rm "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
 ua_install
@@ -188,6 +197,35 @@ fi
 ua_rollback
 check "the seeded config is taken away again by rollback" "0" \
   "$(ls "$REPO_ROOT/$CONFIG_DIR" | grep -c accounts.toml || true)"
+
+# ── 5c. the operator's .env is NOT in the carry face (issue 751) ─────────────
+# Every runtime write face now upserts into `.env` (ACCOUNT_* keys, SHADOW_*
+# switches), so the operator's live state lives in a file the upgrade never
+# stages, never drifts, never installs over and never rolls back — the exact
+# guarantee UA_OPERATOR_STATE_CONFIGS used to give accounts.toml, now structural
+# instead of enumerated. This pins the boundary through a full cycle, and pins
+# the cleared list itself.
+printf '\nthe operator .env stays out of the carry face (issue 751)\n'
+printf 'ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=live book\nSHADOW_ENABLED=true\nBLITZKRIEG_PANEL_ADDR=0.0.0.0:51888\n' \
+  > "$REPO_ROOT/.env"
+cp "$REPO_ROOT/.env" "$tmp/operator-dot-env"
+for t in default.toml accounts.toml shadow_evolution.toml; do
+  if ua_config_is_operator_state "$t"; then
+    no "no shipped config is operator state ($t)" "not in the cleared list" "matched"
+  else
+    ok "no shipped config is operator state ($t)"
+  fi
+done
+ua_stage
+ua_drift > "$tmp/drift-env.txt"
+check "the carry face stages no .env anywhere" "0" "$(find "$STAGE" -name .env | wc -l | tr -d ' ')"
+check "the drift report never mentions .env" "0" "$(grep -c '\.env' "$tmp/drift-env.txt" || true)"
+ua_install
+ua_verify
+check_same "install leaves the operator .env byte-identical" "$tmp/operator-dot-env" "$REPO_ROOT/.env"
+ua_rollback
+check_same "rollback leaves the operator .env byte-identical too" "$tmp/operator-dot-env" "$REPO_ROOT/.env"
+rm "$REPO_ROOT/.env"
 
 # ── 6. the rollback pruner keeps the three newest ────────────────────────────
 printf '\nrollback pruner\n'
