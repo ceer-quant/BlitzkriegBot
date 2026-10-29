@@ -152,7 +152,7 @@ async fn save_fixture(
 
 #[tokio::test]
 async fn execution_policy_surface_list_get_set_reset_history() {
-    let (core, registry, peer, path) = policy_fixture().await;
+    let (core, registry, peer, path) = policy_fixture_with_accounts(&["acct-a"]).await;
 
     // The journal is this fixture's PRIVATE file (#386) inside a scratch
     // dir, so parallel test cores cannot interleave appends into it. Its
@@ -202,9 +202,14 @@ async fn execution_policy_surface_list_get_set_reset_history() {
         .await;
     assert!(v.get("error").is_none(), "set answers: {v}");
 
-    // The file now carries the section, rendered as valid TOML…
-    let text = std::fs::read_to_string(&path).expect("policy file");
-    assert!(text.contains("[accounts.acct-a]"), "section landed: {text}");
+    // The .env now carries the section's keys (the write face's sweep-then-write;
+    // render_line quotes every value — the same contract the account layer writes)…
+    let text = std::fs::read_to_string(&path).expect("policy env");
+    assert!(
+        text.contains("POLICY_BUDGET_RATIO_ACCT_A=")
+            && text.contains("POLICY_MAX_BUDGET_USD_ACCT_A="),
+        "section landed: {text}"
+    );
     // …and the reload sees it (the effective view is the account's own).
     let v = rpc(&core, &registry, &peer,
         r#"{"jsonrpc":"2.0","id":4,"method":"execution_policy.get","params":{"accountId":"acct-a"}}"#.into())
@@ -279,9 +284,9 @@ async fn execution_policy_surface_list_get_set_reset_history() {
         serde_json::json!("0.10"),
         "reset falls back: {v}"
     );
-    let text = std::fs::read_to_string(&path).expect("policy file");
+    let text = std::fs::read_to_string(&path).expect("policy env");
     assert!(
-        !text.contains("[accounts.acct-a]"),
+        !text.contains("POLICY_BUDGET_RATIO_ACCT_A") && !text.contains("POLICY_RULES_ACCT_A"),
         "section removed: {text}"
     );
 
@@ -320,7 +325,7 @@ async fn execution_policy_reset_of_unknown_section_refuses() {
 /// next reader without any restart or re-login.
 #[tokio::test]
 async fn execution_policy_set_is_fresh_for_the_next_reader() {
-    let (core, registry, peer, path) = policy_fixture().await;
+    let (core, registry, peer, path) = policy_fixture_with_accounts(&["acct-fresh"]).await;
 
     // The baseline read: the account folds over the globals (0.10).
     let v = rpc(&core, &registry, &peer,

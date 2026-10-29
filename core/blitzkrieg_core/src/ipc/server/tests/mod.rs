@@ -656,12 +656,23 @@ async fn policy_fixture_with_accounts(
         N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).expect("scratch root");
-    let path = dir.join("execution_policy.toml");
-    std::fs::write(
-        &path,
-        "version = 1\n\n[defaults]\nbudget_ratio = \"0.10\"\n",
-    )
-    .expect("write policy");
+    // Issue 751 single source: the policy surface lives in POLICY_* env keys,
+    // so the fixture seeds a per-scratch `.env` (the toml path stays an
+    // UNWRITTEN placeholder — the env write face refuses while any legacy
+    // toml exists) and hands the core the env file the write verbs use.
+    let toml_path = dir.join("execution_policy.toml");
+    let env_path = dir.join("policy.env");
+    // The env-only section scan keys off ACCOUNT_LIST (the same id space the
+    // account book lives in), so the fixture spells it when it has accounts.
+    let env_text = if accounts.is_empty() {
+        "POLICY_BUDGET_RATIO=0.10\n".to_string()
+    } else {
+        format!(
+            "POLICY_BUDGET_RATIO=0.10\nACCOUNT_LIST={}\n",
+            accounts.join(",")
+        )
+    };
+    std::fs::write(&env_path, env_text).expect("write policy env");
     // #386: the audit journal is PRIVATE to this fixture, inside the same
     // scratch root the cleanup at the tests' end removes. The old fixed
     // `data/audit/…` spelling made every test core append to ONE file —
@@ -670,8 +681,9 @@ async fn policy_fixture_with_accounts(
     // records at once (the flake PR #378 disclosed; run 37262356151).
     let audit_path = dir.join("data/audit/execution_policy.jsonl");
     let cfg = CoreConfig {
-        execution_policy_path: Some(path.to_string_lossy().to_string()),
+        execution_policy_path: Some(toml_path.to_string_lossy().to_string()),
         execution_policy_audit_path: Some(audit_path.to_string_lossy().to_string()),
+        env_file_path: Some(env_path.to_string_lossy().to_string()),
         dry_seed_balance: dec!(100),
         trade_log_path: None,
         order_log_path: None,
@@ -706,7 +718,7 @@ async fn policy_fixture_with_accounts(
         Arc::new(AsyncMutex::new(c)),
         crate::market::registry::MarketPluginRegistry::new(),
         PeerAuth::SameUid { uid: own_uid() },
-        path,
+        env_path,
     )
 }
 
