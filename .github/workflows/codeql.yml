@@ -1,0 +1,46 @@
+name: CodeQL
+
+# Activate advanced setup when this workflow lands; disable default setup then.
+# Workflow filters skip prose-only changes, not code inside documentation dirs.
+on:
+  push:
+    branches: [main, develop, 'release/**']
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python, rust]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
