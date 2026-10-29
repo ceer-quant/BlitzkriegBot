@@ -46,7 +46,7 @@ jobs:
         with:
           # Default setup rejects advanced SARIF uploads. Still run analysis
           # during migration and retain the reports for inspection.
-          upload: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+          upload: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' && 'always' || 'never' }}
           output: codeql-results
           category: /language:${{ matrix.language }}
       - name: Retain migration analysis
