@@ -15,6 +15,7 @@ use crate::settlement::{
 };
 use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::collections::HashSet;
 
 use super::config::COUNTER_DECISIVE_HIGH;
@@ -642,6 +643,19 @@ impl Core {
         // computed BEFORE the account's ledger is taken mutably (E28: the two
         // borrows must not overlap).
         let mut fee_usd = Decimal::ZERO;
+        // The modeled maker rebate (almach REPORT §5 失真点 5) reads the same
+        // schedule, so it is decided in the same &self window.
+        //
+        // ponytail: the official rule pays a market's makers 20% of the
+        // TAKER-POOL that market accrued, pro-rata by maker share. A replay
+        // never sees the pool, so the smallest honest approximation prices
+        // THIS fill's own notional at the schedule in force —
+        // `0.20 × fee_per_share(px) × shares` — i.e. "the venue's average fee
+        // density equals this fill's density". Upgrade path: carry a
+        // per-market `taker_fees_accrued / maker_shares_traded` accumulator
+        // (pool pro-rata) once a corpus exposes real pool data; the
+        // CashFlows.maker_rebate_usd channel below would not change.
+        let mut maker_rebate_usd = Decimal::ZERO;
         if d.delta > Decimal::ZERO {
             let notional = px * d.delta;
             let fee_pct = if d.role.is_maker() {
@@ -650,6 +664,10 @@ impl Core {
                 self.live_taker_fee_pct(px)
             };
             fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+            if d.role.is_maker() && self.config.model_maker_rebate {
+                let schedule = crate::exit_policy::fee_schedule();
+                maker_rebate_usd = schedule.fee_per_share(px) * dec!(0.20) * d.delta;
+            }
         }
         // E28 (§9.3): every cash movement below lands in the fill's OWN book —
         // the delta carries the account its tracked order was placed with.
@@ -682,6 +700,15 @@ impl Core {
                     ledger.charge_fee(fee_usd);
                 }
                 Side::Sell => ledger.settle_sell_fill(notional, fee_usd),
+            }
+            // A maker fill's modeled rebate rides the same journal as #388's
+            // stream rows (`Cashflow`, ref `rebate`): it is venue cash that
+            // arrived OUTSIDE the fill's own notional/fee movement, and the
+            // trade record's `net` claims exactly this amount when the
+            // position closes — the two books cannot drift.
+            if maker_rebate_usd > Decimal::ZERO {
+                ledger.credit_cashflow(maker_rebate_usd, "rebate");
+                self.stats.modeled_maker_rebate_usd += maker_rebate_usd;
             }
         } else {
             // Rollback/correction: revert the cash with no fee.
@@ -733,7 +760,7 @@ impl Core {
                 );
             }
         }
-        self.project_fill_delta(&d, fee_usd, now_ms);
+        self.project_fill_delta(&d, fee_usd, maker_rebate_usd, now_ms);
         self.emit_fill(d);
         // The idempotency table changed with this fill; get it on disk before the
         // next event can arrive (issue #178).
@@ -752,7 +779,19 @@ impl Core {
     ///
     /// `fee_usd` is the cash fee the ledger just charged for this same delta, so
     /// the position's cost basis is the money actually spent (E17-d).
-    pub(super) fn project_fill_delta(&mut self, d: &FillDelta, fee_usd: Decimal, now_ms: i64) {
+    ///
+    /// `maker_rebate_usd` is the modeled rebate the ledger just CREDITED for
+    /// this same delta (zero for a taker fill, a rollback, or a replay with
+    /// `model_maker_rebate` off). Accrued onto the position's flows so the
+    /// close's `net` includes it — the trade record and the cash journal show
+    /// one number.
+    pub(super) fn project_fill_delta(
+        &mut self,
+        d: &FillDelta,
+        fee_usd: Decimal,
+        maker_rebate_usd: Decimal,
+        now_ms: i64,
+    ) {
         let px = d.price;
         let token = &d.token_id;
         let account = &d.account_id;
@@ -857,9 +896,14 @@ impl Core {
                 // Accrue the basis, the fee and the role from the actual fill.
                 // `d.delta` is SIGNED: a FAILED rollback reverses the accrual by
                 // the same amounts the ledger just refunded, so a rolled-back
-                // entry leaves neither cash nor shares behind.
+                // entry leaves neither cash nor shares behind. The modeled maker
+                // rebate (positive deltas only — the rollback's credit_cashflow
+                // never fired) accrues onto the same flows.
                 self.positions
                     .apply_entry_fill(&id, d.delta, px, fee_usd, d.role);
+                if maker_rebate_usd != Decimal::ZERO {
+                    self.positions.accrue_maker_rebate(&id, maker_rebate_usd);
+                }
                 // A fully rolled-back entry has no shares and no basis: drop the
                 // shell so it cannot block `can_open` or render as an empty row.
                 self.positions.drop_if_empty(&id);
@@ -885,9 +929,14 @@ impl Core {
                             .find(|p| p.id == id)
                             .cloned();
                         // Accrue the exit first, so the close reads final flows.
-                        let left = self
-                            .positions
-                            .apply_exit_fill(&id, d.delta, px, fee_usd, d.role);
+                        let left = self.positions.apply_exit_fill(
+                            &id,
+                            d.delta,
+                            px,
+                            fee_usd,
+                            d.role,
+                            maker_rebate_usd,
+                        );
                         // A reversal that is already accounted for on a CLOSED
                         // trade has nothing open to accrue onto; the cash is
                         // refunded but the realized record stands. Say so — a

@@ -56,6 +56,14 @@ pub struct CashFlows {
     pub proceeds_usd: Decimal,
     /// Σ cash fee the ledger charged on the exit fills.
     pub exit_fee_usd: Decimal,
+    /// Σ maker rebate the venue paid on this position's MAKER fills (modeled
+    /// in replay: the official rule pays a maker 20% of the market's taker-fee
+    /// pool pro-rata by maker share — `apply_delta_effects` books the per-fill
+    /// approximation and the ledger credit together, so `net` below and the
+    /// cash ledger cannot disagree about it). Snapshots written before the
+    /// field existed carry the serde default (zero): the money is simply not
+    /// claimed for pre-model positions.
+    pub maker_rebate_usd: Decimal,
     /// Σ shares bought (the closed trade's size).
     pub opened_shares: Decimal,
     /// Σ shares sold across all exit fills.
@@ -708,6 +716,12 @@ pub struct ClosedPosition {
     pub was_maker_exit: bool,
     pub entry_fee_pct: Decimal,
     pub exit_fee_pct: Decimal,
+    /// Maker rebate the venue paid on this trade's MAKER fills (modeled in
+    /// replay; serde default keeps pre-rebate lines loading). Already INSIDE
+    /// `net_pnl_usd` — carrying it separately is the attribution a maker-vs-
+    /// taker comparison reads, never an amount to add on top.
+    #[serde(default, with = "crate::decimal")]
+    pub maker_rebate_usd: Decimal,
     /// Gross PnL in USD: proceeds − basis. Σ over closed trades equals the
     /// ledger's realized cash movement by construction.
     pub pnl_usd: Decimal,
@@ -1518,6 +1532,26 @@ impl PositionManager {
         Some(pos.clone())
     }
 
+    /// Accrue one MAKER fill's modeled rebate onto the position's cash flows
+    /// (the entry side; a maker EXIT fill's rebate is accrued by
+    /// [`Self::apply_exit_fill`]'s caller through the same method). The caller
+    /// credits the ledger in the same breath, so the rebate is money the trade
+    /// record AND the cash ledger both show.
+    ///
+    /// A negative `shares` (a FAILED rollback) reverses by the same rule the
+    /// other accruals use — the rebate the venue never paid must not stay on
+    /// the books (floored at zero, like every flow, so a rollback past a
+    /// settled boundary cannot mint a negative rebate).
+    pub fn accrue_maker_rebate(&mut self, position_id: &str, rebate_usd: Decimal) {
+        if rebate_usd == Decimal::ZERO {
+            return;
+        }
+        if let Some(pos) = self.open.iter_mut().find(|p| p.id == position_id) {
+            pos.flows.maker_rebate_usd =
+                (pos.flows.maker_rebate_usd + rebate_usd).max(Decimal::ZERO);
+        }
+    }
+
     /// B1b: idempotent lazy backfill of the position's round-length family —
     /// the manager-flavoured wrapper over
     /// [`OpenPosition::backfill_round_duration`]. A non-0 stamp is never
@@ -1538,6 +1572,11 @@ impl PositionManager {
     /// Accrue one EXIT fill (a partial close). Returns the position's new share
     /// count, or None if the position is unknown. A negative `shares` reverses an
     /// earlier exit fill (rolled back by the venue) and returns its basis.
+    ///
+    /// `maker_rebate_usd` is the modeled rebate this exit fill's MAKER role
+    /// earned (zero for a taker exit / when the replay models no rebate). It
+    /// folds into the same flows the close reads, so the trade record's net
+    /// carries it exactly once.
     pub fn apply_exit_fill(
         &mut self,
         position_id: &str,
@@ -1545,11 +1584,14 @@ impl PositionManager {
         price: Decimal,
         fee_usd: Decimal,
         role: OrderRole,
+        maker_rebate_usd: Decimal,
     ) -> Option<Decimal> {
         let pos = self.open.iter_mut().find(|p| p.id == position_id)?;
         pos.flows.sold_shares = (pos.flows.sold_shares + shares).max(Decimal::ZERO);
         pos.flows.proceeds_usd = (pos.flows.proceeds_usd + price * shares).max(Decimal::ZERO);
         pos.flows.exit_fee_usd = (pos.flows.exit_fee_usd + fee_usd).max(Decimal::ZERO);
+        pos.flows.maker_rebate_usd =
+            (pos.flows.maker_rebate_usd + maker_rebate_usd).max(Decimal::ZERO);
         if shares > Decimal::ZERO {
             pos.exit_role = pos.exit_role.after_fill(role);
         }
@@ -2305,8 +2347,13 @@ impl PositionManager {
         let cost = pos.flows.entry_cost_usd;
         let entry_fee_usd = pos.flows.entry_fee_usd;
         let exit_fee_usd = pos.flows.exit_fee_usd + dust_fee;
+        // The maker rebate is CASH the venue paid for this position's maker
+        // fills (modeled in replay; zero elsewhere). It enters `net` with a
+        // plus sign so `balance == seed + Σ net` keeps holding: the ledger
+        // credited the same amount when the fills applied.
+        let maker_rebate_usd = pos.flows.maker_rebate_usd;
         let gross = exit_notional - cost;
-        let net = gross - entry_fee_usd - exit_fee_usd;
+        let net = gross - entry_fee_usd - exit_fee_usd + maker_rebate_usd;
         let net_pct = if cost > Decimal::ZERO {
             (net / cost) * Decimal::ONE_HUNDRED
         } else {
@@ -2361,6 +2408,7 @@ impl PositionManager {
             was_maker_exit: exit_fee_usd == Decimal::ZERO,
             entry_fee_pct: pct_of(entry_fee_usd, cost),
             exit_fee_pct,
+            maker_rebate_usd,
             pnl_usd: gross,
             pnl_pct: pnl_pct(avg_exit, pos.entry_price),
             net_pnl_usd: net,
@@ -2441,12 +2489,15 @@ impl PositionManager {
         let venue = up.venue.clone();
         let mut closed = Vec::new();
         for leg in [up, down] {
+            // A merge is collateral collection, not a market exit: no fee and
+            // no modeled rebate.
             let remaining = self.apply_exit_fill(
                 &leg.id,
                 pairs,
                 merge_leg_price,
                 Decimal::ZERO,
                 OrderRole::Maker,
+                Decimal::ZERO,
             );
             if remaining == Some(Decimal::ZERO) {
                 // The merge consumed the whole leg: record the close. The fee

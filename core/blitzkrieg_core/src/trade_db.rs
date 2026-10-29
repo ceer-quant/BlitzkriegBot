@@ -428,6 +428,7 @@ mod tests {
             was_maker_exit: false,
             entry_fee_pct: Decimal::ZERO,
             exit_fee_pct: rust_decimal_macros::dec!(0.5),
+            maker_rebate_usd: Decimal::ZERO,
             pnl_usd: rust_decimal_macros::dec!(2),
             pnl_pct: rust_decimal_macros::dec!(50),
             net_pnl_usd: rust_decimal_macros::dec!(1.97),

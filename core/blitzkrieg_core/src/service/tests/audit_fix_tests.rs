@@ -1469,6 +1469,7 @@ fn the_close_credential_journal_survives_a_restart() {
             was_maker_exit: false,
             entry_fee_pct: rust_decimal::Decimal::ZERO,
             exit_fee_pct: rust_decimal::Decimal::ZERO,
+            maker_rebate_usd: rust_decimal::Decimal::ZERO,
             pnl_usd: dec!(0.7),
             pnl_pct: dec!(16.27),
             net_pnl_usd: dec!(0.7),

@@ -834,6 +834,10 @@ async fn main() -> anyhow::Result<()> {
         // A replay never writes (or replays) the durable cash journals — the
         // corpus is the only input, the report the only output.
         cfg.ledger_journal_dir = None;
+        // Maker-rebate model: the replay declares it where the money is booked
+        // (same posture as `fee_schedule_replay`), so every MAKER fill the
+        // replay settles earns the modeled pool share.
+        cfg.model_maker_rebate = args.maker_rebate;
         // #351: an explicit mode takes the mode runner (mine / verify /
         // sweep); an empty mode keeps the historic single-run shape so every
         // existing gate and script is byte-identical.
@@ -885,6 +889,13 @@ async fn main() -> anyhow::Result<()> {
         eprintln!(
             "blitzkrieg-core: --backtest-fast only applies to a replay; pass --backtest <archive.jsonl> \
              (a live kernel's tick cadence is not a per-invocation choice)"
+        );
+        std::process::exit(2);
+    }
+    if args.maker_rebate {
+        eprintln!(
+            "blitzkrieg-core: --maker-rebate only applies to a replay; pass --backtest <archive.jsonl> \
+             (a live core must not credit cash the venue has not reported)"
         );
         std::process::exit(2);
     }

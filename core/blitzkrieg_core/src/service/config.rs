@@ -378,6 +378,25 @@ pub struct CoreConfig {
     /// could have repriced live fills with no code objecting. Default `false`:
     /// only the backtester sets it.
     pub fee_schedule_replay: bool,
+    /// Model the venue's maker rebate in fills (almach-benchmark REPORT §5
+    /// 失真点 5): the official rule pays a market's makers 20% of the taker
+    /// fee that market accrued, pro-rata by maker share. A replay cannot see
+    /// the pool, so `apply_delta_effects` books the per-fill approximation —
+    /// each MAKER fill earns `0.20 ×` the taker fee that same notional would
+    /// have paid — as a cash credit AND a position-flow accrual in one step,
+    /// which keeps `balance == seed + Σ net` an identity and lets a
+    /// maker-vs-taker comparison read the rebate it was missing.
+    ///
+    /// Replay-only for the same reason `fee_schedule_replay` is: a live core
+    /// crediting modeled cash would mint money the venue never reported. The
+    /// backtester sets this together with `fee_schedule_replay`; default
+    /// `false` = every existing deployment and test is byte-identical.
+    /// #388's stream rows (real MAKER_REBATE ledger lines) credit on top of
+    /// this, never instead of it — a corpus carrying real rows and a replay
+    /// that models the pool would double-count, which is a converter-choices
+    /// decision an operator makes per corpus, not something the kernel
+    /// guesses.
+    pub model_maker_rebate: bool,
     /// E25 (#331): write the intent-audit trail (`data/audit/intents.jsonl` +
     /// throttled `INTENT_DECISION` pushes). The ARBITRATION GATES always run;
     /// this silences only the WRITES (`--no-intent-audit`), which is exactly
@@ -996,6 +1015,7 @@ impl Default for CoreConfig {
             dry_redeem_manual: false,
             // #234: nothing but the backtester may charge a counterfactual fee.
             fee_schedule_replay: false,
+            model_maker_rebate: false,
             // Replay fast path: off by default — historical tick behaviour is
             // byte-for-byte until the operator opts in with --backtest-fast.
             backtest_fast: false,

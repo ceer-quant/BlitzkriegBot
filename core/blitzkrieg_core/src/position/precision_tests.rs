@@ -94,7 +94,7 @@ fn partial_entry_and_exit_flows_reconcile_exactly() {
             } else {
                 taker_fee(*price, *shares)
             };
-            pm.apply_exit_fill(&pos.id, *shares, *price, fee, role)
+            pm.apply_exit_fill(&pos.id, *shares, *price, fee, role, Decimal::ZERO)
                 .unwrap();
             proceeds += price * shares;
             exit_fee += fee;
@@ -158,6 +158,7 @@ fn sub_grid_dust_is_written_off_not_left_open() {
         dec!(0.60),
         Decimal::ZERO,
         OrderRole::Maker,
+        Decimal::ZERO,
     )
     .unwrap();
     let closed = pm
@@ -281,6 +282,7 @@ fn ladder_close_ratio_sells_in_tranches() {
         dec!(0.42),
         Decimal::ZERO,
         OrderRole::Taker,
+        Decimal::ZERO,
     );
     let reqs = ladder_check(&mut pm, dec!(0.45), 400_100);
     assert_eq!(reqs.len(), 1);
@@ -311,6 +313,7 @@ fn ladder_move_stop_to_raises_the_stop_and_stops_out() {
         dec!(0.432),
         Decimal::ZERO,
         OrderRole::Taker,
+        Decimal::ZERO,
     );
 
     // bid 0.41: +2.5% — far above the policy stop (0.352), below the
@@ -362,6 +365,7 @@ fn an_exhausted_ladder_absorbs_tp_sl_verdicts() {
         dec!(0.42),
         Decimal::ZERO,
         OrderRole::Taker,
+        Decimal::ZERO,
     );
     // The verdict fires again (still above take-profit), but the ladder
     // has no step left: nothing is pushed this tick.

@@ -214,8 +214,15 @@ fn close_dust_fee_follows_the_active_schedule() {
     // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; that
     // fill's own fee is charged by the caller, as production does.
     let exit_fee = (dec!(1.2) / Decimal::ONE_HUNDRED) * dec!(0.6) * dec!(9.9);
-    pm.apply_exit_fill(&p.id, dec!(9.9), dec!(0.6), exit_fee, OrderRole::Taker)
-        .unwrap();
+    pm.apply_exit_fill(
+        &p.id,
+        dec!(9.9),
+        dec!(0.6),
+        exit_fee,
+        OrderRole::Taker,
+        Decimal::ZERO,
+    )
+    .unwrap();
     let closed = pm
         .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
         .unwrap();
@@ -1306,6 +1313,7 @@ fn merge_pairs_only_the_smaller_leg_and_leaves_the_rest() {
         dec!(0.44),
         Decimal::ZERO,
         OrderRole::Maker,
+        Decimal::ZERO,
     );
     let out = pm
         .merge_condition("cond", 1_000)
@@ -1381,6 +1389,7 @@ fn merge_refuses_a_pair_below_the_share_grid() {
         dec!(0.44),
         Decimal::ZERO,
         OrderRole::Maker,
+        Decimal::ZERO,
     );
     assert!(pm.merge_condition("cond", 1_000).is_none());
     assert_eq!(pm.open_positions().len(), 2);

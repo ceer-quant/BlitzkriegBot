@@ -436,6 +436,7 @@ async fn execution_policy_preview_replays_history_through_evaluate() {
             was_maker_exit: false,
             entry_fee_pct: Decimal::ZERO,
             exit_fee_pct: Decimal::ZERO,
+            maker_rebate_usd: Decimal::ZERO,
             pnl_usd: Decimal::ZERO,
             pnl_pct: Decimal::ZERO,
             net_pnl_usd: Decimal::ZERO,
