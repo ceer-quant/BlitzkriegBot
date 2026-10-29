@@ -440,7 +440,11 @@ pub fn render_json_full(
             // E28 (§9.2): the account the position settles into (empty on a
             // pre-E28 core — the panel leaves unattributed rows visible).
             "accountId": p.account_id,
-            "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
+            "remainingSec": p.remaining_sec,
+            // Slot matching for the panel's expiry judgment: the entry
+            // order's grid slot rides the positions wire (0 = legacy
+            // snapshot, panel falls back to remainingSec's sign).
+            "roundSlot": p.round_slot })).collect::<Vec<_>>(),
         // issue 456: the order book as the kernel tracks it (orders.list wire
         // shape, camelCase). The WebUI's 挂单 card renders it and derives its
         // per-row force-close button from `status`; the bulk sweep targets the

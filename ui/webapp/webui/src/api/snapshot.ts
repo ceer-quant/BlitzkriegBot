@@ -223,6 +223,12 @@ export interface Position {
   shares?: number
   strategy?: string
   remainingSec?: number
+  /**
+   * 入场订单的轮次号（slot N 覆盖 [N·dur, (N+1)·dur)）。过期判定按轮次号
+   * 匹配（与挂单页 orderExpired 同一公式），不看倒计时符号；0 = 老内核
+   * 快照没有该字段，回落 remainingSec 的符号。
+   */
+  roundSlot?: number
   /** #427: the venue the position's market listed on (older cores omit). */
   venue?: string
   /**

@@ -562,6 +562,7 @@ mod round_duration_tests {
             partner_token_id: String::new(),
             last_book_ts: 0,
             round_duration_sec: 0,
+            round_slot: 0,
             state: crate::exit_policy::ExitState::new(dec!(0.40), 0),
             flows: crate::position::CashFlows::default(),
         };

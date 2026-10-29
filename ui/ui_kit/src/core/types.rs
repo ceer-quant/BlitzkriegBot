@@ -120,6 +120,10 @@ pub struct PositionView {
     pub expires_at_ms: i64,
     #[serde(default)]
     pub remaining_sec: i64,
+    /// The entry order's round slot (0 = legacy snapshot without the field;
+    /// the panel falls back to remainingSec's sign for those).
+    #[serde(default)]
+    pub round_slot: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1686,6 +1686,13 @@ pub struct PositionView {
     pub entered_at_ms: i64,
     pub expires_at_ms: i64,
     pub remaining_sec: i64,
+    /// The entry order's round slot (grid coordinate; slot N covers
+    /// [N·dur, (N+1)·dur)). The panel judges expiry by SLOT MATCHING — same
+    /// formula as the orders tab — instead of reading the countdown sign.
+    /// `0` = legacy snapshot without a slot fact (the panel then falls back
+    /// to `remaining_sec`'s sign).
+    #[serde(default)]
+    pub round_slot: i64,
     /// The ACTUAL cash flows accrued on this position so far (E17). Exposed so an
     /// external monitor can verify the accounting identity at any instant, not
     /// only once the position is closed:

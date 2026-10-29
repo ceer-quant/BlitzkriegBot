@@ -276,6 +276,7 @@ fn position(
             venue: String::new(),
             partner_token_id: String::new(),
             round_duration_sec: 0,
+            round_slot: 0,
         },
         now,
     );

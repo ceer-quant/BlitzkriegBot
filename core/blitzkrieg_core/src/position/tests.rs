@@ -20,6 +20,7 @@ pub(crate) fn params(asset: &str, dir: SignalDirection, entry: Decimal) -> OpenP
         venue: String::new(),
         partner_token_id: String::new(),
         round_duration_sec: 0,
+        round_slot: 0,
     }
 }
 
@@ -1225,6 +1226,7 @@ fn leg_params(dir: SignalDirection, token: &str, condition: &str, entry: Decimal
         venue: String::new(),
         partner_token_id: String::new(),
         round_duration_sec: 0,
+        round_slot: 0,
     }
 }
 

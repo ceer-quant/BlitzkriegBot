@@ -546,6 +546,7 @@ fn seed_closed_trade(c: &mut Core, account: &str, id: &str, net: Decimal) {
         partner_token_id: String::new(),
         last_book_ts: 0,
         round_duration_sec: 0,
+        round_slot: 0,
         state: crate::exit_policy::ExitState::new(Decimal::ONE / Decimal::from(2), 0),
         flows: CashFlows::default(),
     };

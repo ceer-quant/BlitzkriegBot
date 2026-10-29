@@ -776,6 +776,7 @@ async fn rounds_set_refuses_a_removal_with_open_exposure_and_moves_nothing() {
                 was_maker: true,
                 target_exit_price: None,
                 round_duration_sec: 3600,
+                round_slot: 0,
             },
             now_ms(),
         );
