@@ -208,8 +208,9 @@ impl Core {
             set.retain(|s| s != trimmed);
         }
         // Persist FIRST (a failure leaves both stores untouched — the same
-        // memory-after-disk transaction every accounts.toml writer runs).
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        // memory-after-disk transaction every account writer runs; issue 751:
+        // the durable half upserts ACCOUNT_* keys into .env).
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "strategy.enable: no accounts config path configured — persistence \
@@ -218,8 +219,9 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_strategies(
-            std::path::Path::new(path),
+        crate::account::config::env_persist_account_strategies(
+            &legacy,
+            &env_path,
             id.as_str(),
             &set,
         )

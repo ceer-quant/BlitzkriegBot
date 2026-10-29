@@ -751,22 +751,24 @@ pub(super) fn confirm_error_text(
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
-        // E28 (§9.5): the account book loads from `user_layer/configs/
-        // accounts.toml` relative to the process cwd — a missing file is the
-        // zero-config 0.2 deployment (one `default` account), a MALFORMED one
-        // refuses the boot (fail-closed: a book that is not what the operator
-        // wrote must not trade). The credential probe runs here too, so
-        // `account.list` answers `credentialsLoaded` from boot-time facts.
+        // E28 (§9.5) + issue 751 (.env single source): the account book loads
+        // through the ACCOUNT_* env grammar first (process env, then the
+        // `.env` file), falling back to the legacy `user_layer/configs/
+        // accounts.toml`, falling back to one `default` account. A malformed
+        // source refuses the boot (fail-closed: a book that is not what the
+        // operator wrote must not trade). The credential probe runs here too,
+        // so `account.list` answers `credentialsLoaded` from boot-time facts.
         // Tests (and embedders) inject a book directly via
         // [`Core::with_account_book`] instead of touching the cwd.
-        let accounts = crate::account::config::load_account_ledgers(
+        let accounts = crate::account::config::load_account_ledgers_single_source(
             std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH),
+            config.env_file_path.as_deref().map(std::path::Path::new),
             now_ms(),
             &config.allowed_round_secs,
         )
         .unwrap_or_else(|e| {
             panic!(
-                "refusing to boot: {} (fail-closed: fix accounts.toml and restart)",
+                "refusing to boot: {} (fail-closed: fix the account source and restart)",
                 e.message
             )
         });
@@ -981,28 +983,48 @@ impl Core {
         }
         let mut intent_audit = crate::arbitration::AuditSink::new(accounts.active_id().as_str());
         intent_audit.enabled = config.intent_audit_enabled;
-        // 跨所套利弹窗 v2: the leg configuration reads from the SAME
-        // accounts.toml the book came from (when a path is configured). The
-        // FILE is validated at the parse layer (from_str refuses an
-        // incoherent section), so a read here after a successful book load
-        // cannot fail semantically — the unwrap-style default below is
-        // reachable only when the file vanished between the two reads, and
-        // then "unconfigured" is the honest answer.
-        let arb_leg_config = config
-            .accounts_config_path
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(|p| {
-                crate::account::config::read_cross_venue_arb(p)
-                    .map_err(|e| {
-                        tracing::warn!(
-                            error = %e.message,
-                            "cross_venue_arb section unreadable at boot — running unconfigured"
-                        );
-                    })
-                    .ok()
-                    .flatten()
+        // 跨所套利弹窗 v2: the leg configuration reads from the SAME source
+        // the book came from (issue 751: ACCOUNT_* env — process env, then
+        // the `.env` file — with the toml file as the migration-window
+        // fallback). The parse layer validates coherence (from_str /
+        // load_account_ledgers_from_env refuse an incoherent section), so a
+        // read here after a successful book load cannot fail semantically —
+        // the fallback below is reachable only when the source vanished
+        // between the two reads, and then "unconfigured" is the honest
+        // answer.
+        let arb_leg_config = {
+            let from_env = crate::account::config::read_cross_venue_arb_from_env(
+                &crate::account::config::env_lookup_from_sources(
+                    config.env_file_path.as_deref().map(std::path::Path::new),
+                ),
+            )
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e.message,
+                    "cross_venue_arb env section invalid at boot — running unconfigured"
+                );
             })
+            .ok()
+            .flatten();
+            match from_env {
+                Some(cfg) => Some(cfg),
+                None => config
+                    .accounts_config_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .and_then(|p| {
+                        crate::account::config::read_cross_venue_arb(p)
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    error = %e.message,
+                                    "cross_venue_arb section unreadable at boot — running unconfigured"
+                                );
+                            })
+                            .ok()
+                            .flatten()
+                    }),
+            }
+        }
             .inspect(|cfg| {
                 tracing::info!(
                     leg_a = %format!("{}/{}", cfg.leg_a_venue, cfg.leg_a_account),
@@ -1019,6 +1041,7 @@ impl Core {
         // The shadow manager reads the write-back path off the config before
         // the config moves into the struct (same ordering concern as above).
         let shadow_config_path = config.shadow_config_path.clone();
+        let shadow_env_path = config.env_file_path.clone();
         Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
@@ -1078,6 +1101,7 @@ impl Core {
                 shadow_cfg,
                 &[],
                 shadow_config_path,
+                shadow_env_path,
             ),
             trade_db,
             order_db,

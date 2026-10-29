@@ -486,7 +486,7 @@ impl EnvVars {
     pub(crate) fn from_process() -> Self {
         let mut vars = std::collections::HashMap::new();
         for (k, v) in std::env::vars() {
-            if k.starts_with("BK_") {
+            if k.starts_with("BK_") || k.starts_with("SHADOW_") {
                 vars.insert(k, v);
             }
         }
@@ -1677,11 +1677,13 @@ pub(crate) fn parse_args(
     let se_auto_evolve = resolve_opt!(
         "shadow_evolution.auto_evolve",
         se_auto_evolve,
-        env.text("BK_SE_AUTO_EVOLVE").and_then(|v| match v.trim() {
-            "true" | "1" | "on" | "yes" => Some(true),
-            "false" | "0" | "off" | "no" => Some(false),
-            _ => None,
-        }),
+        env.text("BK_SE_AUTO_EVOLVE")
+            .or_else(|| env.text("SHADOW_AUTO_EVOLVE"))
+            .and_then(|v| match v.trim() {
+                "true" | "1" | "on" | "yes" => Some(true),
+                "false" | "0" | "off" | "no" => Some(false),
+                _ => None,
+            }),
         file.shadow.auto_evolve
     );
     // VERSIONING.md §7: CLI > env > update.toml > built-in default (off).
@@ -2020,7 +2022,8 @@ pub(crate) fn parse_args(
     // it even for a run that configured nothing.
     let se_engine = pick(
         None::<bool>,
-        env.num::<bool>("BK_SHADOW_EVOLUTION"),
+        env.num::<bool>("BK_SHADOW_EVOLUTION")
+            .or_else(|| env.num::<bool>("SHADOW_ENABLED")),
         file.shadow.enabled,
         false,
     );

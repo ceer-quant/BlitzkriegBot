@@ -11,13 +11,15 @@ use tokio::sync::Mutex as AsyncMutex;
 
 // ── 账户簿运行时增删：account.create / account.remove，at the wire ────────
 
-/// A two-account core PLUS its private accounts.toml — the persist half
+/// A two-account core PLUS its private .env — the persist half
 /// needs a file, and it must never be the checkout's own
-/// `user_layer/configs/accounts.toml`. The in-memory book mirrors the
+/// `user_layer/configs/.env`. The in-memory book mirrors the
 /// file (default + paper) so list/persist assertions can never disagree.
 /// The scratch dir is per-CALL (an atomic counter, not just the pid): two
 /// wire tests in the same process run their fixtures CONCURRENTLY under
 /// the suite, and a pid-keyed dir would have them rename over each other.
+/// Returns the legacy toml path (never written; the writers refuse while
+/// it exists) alongside the core.
 async fn two_account_persist_fixture() -> (
     Arc<AsyncMutex<Core>>,
     crate::market::registry::MarketPluginRegistry,
@@ -32,10 +34,11 @@ async fn two_account_persist_fixture() -> (
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
     let now = now_ms();
@@ -80,18 +83,18 @@ async fn two_account_persist_fixture() -> (
         Arc::new(AsyncMutex::new(c)),
         crate::market::registry::MarketPluginRegistry::new(),
         PeerAuth::SameUid { uid: own_uid() },
-        accounts_path,
+        env_path,
     )
 }
 
 /// `account.create` 的闭环：创建 → `account.list` 出现（active + prediction
-/// + 零余额 + 绑定带出）→ 测试私有的 accounts.toml 读回有该表（重新
-/// load_account_ledgers，boot 的同一调用）→ 重复 id 拒 → 空 id 拒 →
-/// 保留名 default 拒 → 未注册 venue 名拒（plan-first）→ 文件在拒绝下
-/// 逐字节不动。
+/// + 零余额 + 绑定带出）→ 测试私有的 .env 读回有该表（重新
+/// load_account_ledgers_single_source，boot 的同一调用）→ 重复 id 拒 →
+/// 空 id 拒 → 保留名 default 拒 → 未注册 venue 名拒（plan-first）→ 文件
+/// 在拒绝下逐字节不动。
 #[tokio::test]
 async fn account_create_round_trips_list_and_the_persisted_file() {
-    let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
     registry.register(Box::new(VenueStubPlugin {
         name: "polysimulator".to_string(),
     }));
@@ -143,8 +146,9 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
     assert_eq!(accounts.len(), 3);
 
     // The FILE: a fresh load — the boot's own call — sees the row.
-    let book = crate::account::config::load_account_ledgers(
-        &accounts_path,
+    let book = crate::account::config::load_account_ledgers_single_source(
+        &env_path.with_file_name("accounts.toml"),
+        Some(&env_path),
         5,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -164,7 +168,7 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
     );
 
     // Duplicate id: refused, INVALID_PARAMS, file untouched.
-    let before = std::fs::read_to_string(&accounts_path).unwrap();
+    let before = std::fs::read_to_string(&env_path).unwrap();
     let reply = rpc(
         &core,
         &registry,
@@ -256,11 +260,11 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
     );
     // Every refusal left the file byte-identical.
     assert_eq!(
-        std::fs::read_to_string(&accounts_path).unwrap(),
+        std::fs::read_to_string(&env_path).unwrap(),
         before,
         "a refused create never touches the file"
     );
-    let scratch = accounts_path
+    let scratch = env_path
         .parent()
         .expect("the fixture file has a parent")
         .to_path_buf();
@@ -276,7 +280,7 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
 /// 变更出口），但最后一格绝不放空。
 #[tokio::test]
 async fn account_remove_round_trips_list_and_the_persisted_file() {
-    let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
 
     // Remove: the retirement lands on the wire, in memory, and in the file.
     let reply = rpc(
@@ -308,8 +312,9 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
     assert_eq!(accounts[0]["id"], serde_json::json!("default"));
 
     // The FILE: a fresh load agrees.
-    let book = crate::account::config::load_account_ledgers(
-        &accounts_path,
+    let book = crate::account::config::load_account_ledgers_single_source(
+        &env_path.with_file_name("accounts.toml"),
+        Some(&env_path),
         5,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -439,7 +444,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
             now_ms(),
         );
     }
-    let before = std::fs::read_to_string(&accounts_path).unwrap();
+    let before = std::fs::read_to_string(&env_path).unwrap();
     let reply = rpc(
         &core,
         &registry,
@@ -468,7 +473,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
     );
     // The pinned account survived every refusal, on the wire AND the file.
     assert_eq!(
-        std::fs::read_to_string(&accounts_path).unwrap(),
+        std::fs::read_to_string(&env_path).unwrap(),
         before,
         "a refused remove never touches the file"
     );
@@ -540,15 +545,16 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
         reply["result"]["active"], "pinned",
         "the active cell never dangles: it re-activates the first survivor"
     );
-    let book = crate::account::config::load_account_ledgers(
-        &accounts_path,
+    let book = crate::account::config::load_account_ledgers_single_source(
+        &env_path.with_file_name("accounts.toml"),
+        Some(&env_path),
         5,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
     .expect("the written file re-parses");
     assert!(book.account(&AccountId::from("default")).is_none());
     assert!(book.account(&AccountId::from("pinned")).is_some());
-    let scratch = accounts_path
+    let scratch = env_path
         .parent()
         .expect("the fixture file has a parent")
         .to_path_buf();
@@ -562,8 +568,8 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
 /// 本测试钉死的不变量被打破的形状。
 #[tokio::test]
 async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
-    let (core, registry, peer, accounts_path) = two_account_persist_fixture().await;
-    let journal_dir = accounts_path.parent().expect("fixture dir").join("ledger");
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let journal_dir = env_path.parent().expect("fixture dir").join("ledger");
     std::fs::create_dir_all(&journal_dir).expect("journal dir");
     let journal_path = journal_dir.join("paper.journal.jsonl");
     // 上一世：seed + 一买一卖全落盘（boot attach_journals 会整表回放的形状）。
@@ -627,7 +633,7 @@ async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
                 && r["kind"] != serde_json::json!("sell_fill")),
         "no previous-life fills survive the recreate: {rows:?}"
     );
-    let scratch = accounts_path
+    let scratch = env_path
         .parent()
         .expect("the fixture file has a parent")
         .to_path_buf();
@@ -638,7 +644,7 @@ async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
 /// 同 venue.set 的文案形状）。
 #[tokio::test]
 async fn account_create_and_remove_are_refused_in_read_only_mode() {
-    let (core, registry, peer, _accounts_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, _env_path) = two_account_persist_fixture().await;
     core.lock().await.config_mut().mode = Mode::ReadOnly;
     let reply = rpc(
         &core,

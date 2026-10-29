@@ -905,6 +905,29 @@ pub struct ShadowEvolutionTuning {
     pub deep_dims: Option<usize>,
 }
 
+impl CoreConfig {
+    /// The account write faces' source pair (issue 751, .env single source):
+    /// the `.env` the writers upsert ACCOUNT_* keys into, and the legacy toml
+    /// file whose mere existence REFUSES every runtime write (the migration
+    /// script owns the one-way move — a runtime write must never silently
+    /// fork the book across two sources the loader reads in different
+    /// precedences). `None` when persistence is off (backtester, tests).
+    ///
+    /// The `.env` path resolves per kernel: the configured `env_file_path`
+    /// in production (the launcher loads exactly that file); a configured
+    /// `accounts_config_path` alone (in-process persist round-trip tests)
+    /// derives the sibling `.env` beside the test's private toml — the same
+    /// scratch-dir isolation those tests already run.
+    pub fn account_env_write_paths(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let legacy = self.accounts_config_path.as_deref()?;
+        let env = match self.env_file_path.as_deref() {
+            Some(env) => std::path::PathBuf::from(env),
+            None => std::path::Path::new(legacy).with_file_name(".env"),
+        };
+        Some((env, std::path::PathBuf::from(legacy)))
+    }
+}
+
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {

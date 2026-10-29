@@ -76,10 +76,14 @@ async fn reuse_fixture(
     let dir = std::env::temp_dir().join(format!("bk-reuse-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    // issue 751: the persist half writes .env (the writers refuse while a
+    // legacy toml sits beside it), so the fixture keeps a PRIVATE .env and
+    // lets `accounts_config_path` derive the sibling for the refusal probe.
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -376,10 +380,11 @@ async fn venue_set_mounts_every_declared_family_of_the_account() {
     let dir = std::env::temp_dir().join(format!("bk-family-mount-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -528,20 +533,21 @@ async fn venue_set_mounts_every_declared_family_of_the_account() {
 /// of two families on a bound account mounts BOTH (venue, duration)
 /// discovery instances at runtime (增族即挂), reports
 /// `runtimeEnabled: true`, persists the rounds into the private
-/// accounts.toml, and the account book reads the new set back. The
+/// .env, and the account book reads the new set back. The
 /// idempotence posture: a second write with the same set mounts nothing
 /// (`runtimeEnabled: false` — every pair already live).
 #[tokio::test]
 async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
-    // A private accounts.toml — the persist half refuses without a
-    // config path, the same posture venue.set's mount test runs under.
+    // A private .env — the persist half refuses while a legacy toml sits
+    // beside it, the same posture venue.set's mount test runs under.
     let dir = std::env::temp_dir().join(format!("bk-rounds-set-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -657,14 +663,14 @@ async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
         durations.contains(&900) && durations.contains(&3600),
         "the mount started one discovery per added family: {durations:?}"
     );
-    // The durable half: rounds are on disk, sibling fields intact.
-    let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+    // The durable half: rounds are on disk in .env, sibling fields intact.
+    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
     assert!(
-        file.contains("rounds = [900, 3600]"),
+        file.contains("ACCOUNT_PAPER_ROUNDS=\"900,3600\""),
         "the declaration must land on disk: {file}"
     );
     assert!(
-        file.contains("name = \"paper\""),
+        file.contains("ACCOUNT_PAPER_NAME=\"paper\""),
         "sibling field kept: {file}"
     );
     // And the in-memory book reads the new set.
@@ -722,10 +728,11 @@ async fn rounds_set_refuses_a_removal_with_open_exposure_and_moves_nothing() {
     let dir = std::env::temp_dir().join(format!("bk-rounds-guard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundslive\"\nrounds = [900, 3600]\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\nACCOUNT_PAPER_VENUE=\"roundslive\"\nACCOUNT_PAPER_ROUNDS=\"900,3600\"\n",
     )
     .expect("fixture");
 
@@ -851,9 +858,9 @@ async fn rounds_set_refuses_a_removal_with_open_exposure_and_moves_nothing() {
         "the refusal must name the removed family: {reply}"
     );
     // NEITHER store moved: the file keeps both families, memory too.
-    let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
     assert!(
-        file.contains("rounds = [900, 3600]"),
+        file.contains("ACCOUNT_PAPER_ROUNDS=\"900,3600\""),
         "the file must be untouched: {file}"
     );
     {
@@ -889,10 +896,11 @@ async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
     let dir = std::env::temp_dir().join(format!("bk-rounds-soft-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundssoft\"\nrounds = [900, 3600]\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\nACCOUNT_PAPER_VENUE=\"roundssoft\"\nACCOUNT_PAPER_ROUNDS=\"900,3600\"\n",
     )
     .expect("fixture");
 
@@ -1009,9 +1017,9 @@ async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
         "a pure removal mounts nothing: {reply}"
     );
     // Both stores moved.
-    let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
     assert!(
-        file.contains("rounds = [900]") && !file.contains("3600"),
+        file.contains("ACCOUNT_PAPER_ROUNDS=\"900\"") && !file.contains("3600"),
         "the file must carry the shrunk set: {file}"
     );
     {
@@ -1064,7 +1072,7 @@ async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
 /// refuses before anything is computed; an unknown account refuses with
 /// the standard unknown-account error; a duplicate-carrying list is
 /// deduplicated with first-seen order kept (900, 3600, 900 → [900,
-/// 3600]); the EMPTY set removes the accounts.toml key entirely (missing
+/// 3600]); the EMPTY set removes the ACCOUNT_*_ROUNDS key entirely (missing
 /// and `[]` are the same unrestricted spelling, the deleted key is the
 /// cleaner one) and a NEW core reading the same file boots with the
 /// unrestricted account (the persistence round-trip).
@@ -1073,10 +1081,11 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
     let dir = std::env::temp_dir().join(format!("bk-rounds-params-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"paper\"\nname = \"paper\"\nvenue = \"roundslive\"\n",
+        &env_path,
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\nACCOUNT_PAPER_VENUE=\"roundslive\"\n",
     )
     .expect("fixture");
 
@@ -1195,9 +1204,9 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
         serde_json::json!([900, 3600]),
         "duplicates dropped, first-seen order kept: {reply}"
     );
-    let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
     assert!(
-        file.contains("rounds = [900, 3600]"),
+        file.contains("ACCOUNT_PAPER_ROUNDS=\"900,3600\""),
         "the deduplicated set is what lands on disk: {file}"
     );
 
@@ -1217,19 +1226,23 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
         "the empty set is the legal unrestricted write: {reply}"
     );
     assert_eq!(reply["result"]["rounds"], serde_json::json!([]), "{reply}");
-    let file = std::fs::read_to_string(&accounts_path).expect("fixture readable");
+    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
     assert!(
-        !file.contains("rounds ="),
+        !file.contains("_ROUNDS"),
         // ("roundslive" the venue contains the substring — match the
         // KEY spelling, not a bare substring.)
         "the rounds key must be GONE from the file: {file}"
     );
-    assert!(file.contains("name = \"paper\""), "siblings kept: {file}");
+    assert!(
+        file.contains("ACCOUNT_PAPER_NAME=\"paper\""),
+        "siblings kept: {file}"
+    );
 
-    // Persistence round-trip: a NEW core reading the same file boots
+    // Persistence round-trip: a NEW core reading the same sources boots
     // unrestricted (the deleted key parses as the empty set).
-    let reread = crate::account::config::load_account_ledgers(
+    let reread = crate::account::config::load_account_ledgers_single_source(
         &accounts_path,
+        Some(&env_path),
         now_ms(),
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -1251,14 +1264,15 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
 #[tokio::test]
 async fn account_create_mounts_a_never_booted_venues_data_plane_at_runtime() {
     // Same private-persist posture as the venue.set mount test: create
-    // persists, and the fixture's scratch accounts.toml is where.
+    // persists into the fixture's private .env.
     let dir = std::env::temp_dir().join(format!("bk-create-mount-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -1430,10 +1444,11 @@ async fn venue_set_unbind_does_not_touch_the_data_plane() {
     let dir = std::env::temp_dir().join(format!("bk-venue-unbind-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -1568,18 +1583,19 @@ async fn account_venue_get_reports_empty_as_unbound_and_narrows_by_id() {
 /// `AccountView.venue` 同步（面板账户卡的数据源）、同 venue 多账户合法
 /// （一个交易所多套 API = 多账户，这正是用户的账户模型）、空串解绑、
 /// 未注册 venue 名拒绝（plan-first）、未知账户拒绝 —— 以及持久化：
-/// 绑定落进测试私有的 accounts.toml，重新 load_account_ledgers 读回。
+/// 绑定落进测试私有的 .env，重新 load_account_ledgers_single_source 读回。
 #[tokio::test]
 async fn account_venue_set_round_trips_get_and_the_persisted_file() {
-    // A private accounts.toml — the persist half needs a file, and it
-    // must never be the checkout's own user_layer/configs/accounts.toml.
+    // A private .env — the persist half needs a file, and it must never
+    // be the checkout's own user_layer/configs/.env.
     let dir = std::env::temp_dir().join(format!("bk-venue-wire-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
@@ -1696,11 +1712,12 @@ async fn account_venue_set_round_trips_get_and_the_persisted_file() {
         "the same venue on a second account is the deployment model: {reply}"
     );
 
-    // The persist: a FRESH load_account_ledgers over the file — the same
-    // call the next boot makes — sees BOTH bindings and every sibling
+    // The persist: a FRESH single-source load over the same paths — the
+    // same call the next boot makes — sees BOTH bindings and every sibling
     // field (the name rode through untouched).
-    let book = crate::account::config::load_account_ledgers(
+    let book = crate::account::config::load_account_ledgers_single_source(
         &accounts_path,
+        Some(&env_path),
         1,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -1739,8 +1756,9 @@ async fn account_venue_set_round_trips_get_and_the_persisted_file() {
     )
     .await;
     assert_eq!(reply["result"]["venues"][0]["venue"], serde_json::json!(""));
-    let book = crate::account::config::load_account_ledgers(
+    let book = crate::account::config::load_account_ledgers_single_source(
         &accounts_path,
+        Some(&env_path),
         2,
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )

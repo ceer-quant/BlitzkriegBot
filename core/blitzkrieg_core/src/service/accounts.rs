@@ -690,7 +690,7 @@ impl Core {
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.venue.set: no accounts config path configured — \
@@ -699,12 +699,8 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_venue(
-            std::path::Path::new(path),
-            id.as_str(),
-            venue,
-        )
-        .map_err(|e| {
+        crate::account::config::env_persist_account_venue(&legacy, &env_path, id.as_str(), venue)
+            .map_err(|e| {
             CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
@@ -761,7 +757,7 @@ impl Core {
         // asked for a set.
         let rounds =
             crate::account::config::validate_rounds(Some(rounds), &self.config.allowed_round_secs)?;
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.rounds.set: no accounts config path configured — \
@@ -770,8 +766,9 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_rounds(
-            std::path::Path::new(path),
+        crate::account::config::env_persist_account_rounds(
+            &legacy,
+            &env_path,
             id.as_str(),
             &rounds,
         )
@@ -838,14 +835,14 @@ impl Core {
         // Persist first: the file's parse layer re-validates coherence (the
         // same rules the boot runs), so a write that would produce a
         // next-boot-refusing file is refused HERE, before memory moved.
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(err(
                 "arb.config.set: no accounts config path configured — persistence is \
                  disabled for this core (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        crate::account::config::persist_cross_venue_arb(std::path::Path::new(path), cfg).map_err(
+        crate::account::config::env_persist_cross_venue_arb(&legacy, &env_path, cfg).map_err(
             |e| {
                 err(format!(
                     "arb.config.set: persist failed, nothing changed: {}",
@@ -1080,14 +1077,14 @@ impl Core {
     /// spells with `configured: false` after a successful call.
     pub fn arb_config_clear_persisting(&mut self, actor: &str) -> CoreResult<()> {
         let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(err(
                 "arb.config.clear: no accounts config path configured — persistence is \
                  disabled for this core (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        crate::account::config::clear_cross_venue_arb(std::path::Path::new(path)).map_err(|e| {
+        crate::account::config::env_clear_cross_venue_arb(&legacy, &env_path).map_err(|e| {
             err(format!(
                 "arb.config.clear: persist failed, nothing changed: {}",
                 e.message
@@ -1122,7 +1119,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::ipc::schema::ACCOUNT_TRADING_SET_NOTE;
         self.accounts.require(id)?;
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.trading.set: no accounts config path configured — \
@@ -1131,8 +1128,9 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_trading(
-            std::path::Path::new(path),
+        crate::account::config::env_persist_account_trading(
+            &legacy,
+            &env_path,
             id.as_str(),
             enabled,
         )
@@ -1184,7 +1182,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::ipc::schema::DISPLAY_ACCOUNT_SET_NOTE;
         self.accounts.require(id)?;
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "display.account.set: no accounts config path configured — \
@@ -1193,7 +1191,7 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_display_account(std::path::Path::new(path), id.as_str())
+        crate::account::config::env_persist_display_account(&legacy, &env_path, id.as_str())
             .map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::InvalidParams,
@@ -1300,7 +1298,7 @@ impl Core {
             .filter(|p| p.account_id == *id)
             .map(|p| p.strategy.clone())
             .collect();
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.strategies.set: no accounts config path configured — \
@@ -1309,8 +1307,9 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_strategies(
-            std::path::Path::new(path),
+        crate::account::config::env_persist_account_strategies(
+            &legacy,
+            &env_path,
             id.as_str(),
             &requested,
         )
@@ -1401,7 +1400,7 @@ impl Core {
     /// Returns the migrated default enablement set (empty when nothing
     /// migrated) so the caller can report it on stderr.
     pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
-        let Some(path) = self.config.accounts_config_path.clone() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Vec::new();
         };
         // The persisted enabled-set (strategy-state.json) drives the one-time
@@ -1432,8 +1431,9 @@ impl Core {
             // the pre-toggle era. This one-time gate fires only when the file
             // never spelled an assignment; afterwards the accounts file is
             // the sole truth, exactly as the contract above states.
-            if crate::account::config::persist_account_strategies(
-                std::path::Path::new(&path),
+            if crate::account::config::env_persist_account_strategies(
+                &legacy,
+                &env_path,
                 default_id.as_str(),
                 &persisted_enabled,
             )
@@ -1551,7 +1551,7 @@ impl Core {
                 format!("account.create: account `{id}` already exists"),
             ));
         }
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.create: no accounts config path configured — \
@@ -1560,8 +1560,9 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_create(
-            std::path::Path::new(path),
+        crate::account::config::env_persist_account_create(
+            &legacy,
+            &env_path,
             id.as_str(),
             name,
             venue,
@@ -1676,7 +1677,7 @@ impl Core {
                 ),
             ));
         }
-        let Some(path) = self.config.accounts_config_path.as_deref() else {
+        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.remove: no accounts config path configured — \
@@ -1685,7 +1686,7 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::persist_account_remove(std::path::Path::new(path), id.as_str())
+        crate::account::config::env_persist_account_remove(&legacy, &env_path, id.as_str())
             .map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::InvalidParams,

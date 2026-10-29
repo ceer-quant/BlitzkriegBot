@@ -99,6 +99,33 @@ fn env_file_key_set(lines: &[String]) -> std::collections::HashSet<String> {
     lines.iter().filter_map(|l| line_key(l)).collect()
 }
 
+/// Parse one `.env` line into `(key, value)` — the read half of the same
+/// contract [`upsert_env_vars`] writes (issue 751: the kernel reads its
+/// ACCOUNT_*/SHADOW_*/RUNTIME_* config back through this, so file lines and
+/// process env carry one meaning). Comments, blanks, and malformed lines are
+/// skipped (`None`); `export ` prefix allowed; one optional matching-quote
+/// layer stripped — byte-identical to the launcher's parser semantics.
+pub fn parse_line(line: &str) -> Option<(String, String)> {
+    let key = line_key(line)?;
+    let value = line
+        .trim()
+        .strip_prefix("export ")
+        .unwrap_or(line.trim())
+        .trim_start()
+        .split_once('=')
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_default();
+    let value = if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value
+    };
+    Some((key, value))
+}
+
 /// The key of one `.env` line — the same shape judgment as the launcher's
 /// parser (`export ` prefix allowed, identifier-shaped key, first `=` splits).
 /// `None` for comments, blanks, and malformed lines (they are never managed).
@@ -179,6 +206,38 @@ mod tests {
         assert_eq!(removed, vec!["DROP".to_string(), "DROP".to_string()]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "KEEP=1\n# c\n");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn parse_line_is_the_read_half_of_the_write_contract() {
+        assert_eq!(parse_line("A=1").unwrap().0, "A");
+        assert_eq!(parse_line("A=1").unwrap().1, "1");
+        assert_eq!(parse_line("A=\"two words\"").unwrap().1, "two words");
+        assert_eq!(parse_line("export A='it'").unwrap().1, "it");
+        assert_eq!(
+            parse_line("  A = spaced = value ").unwrap().1,
+            "spaced = value"
+        );
+        assert!(parse_line("# comment").is_none());
+        assert!(parse_line("").is_none());
+        assert!(parse_line("not-a-line").is_none());
+        assert!(parse_line("1BAD=2").is_none());
+        // Round-trip: what upsert renders, parse_line reads back identically.
+        let path = tmp_env("roundtrip");
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("K1".to_string(), "plain".to_string());
+        vars.insert("K2".to_string(), "two words".to_string());
+        vars.insert("K3".to_string(), "has \"dquote\"".to_string());
+        upsert_env_vars(&path, &vars).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (k, v) in &vars {
+            let got = text
+                .lines()
+                .find_map(|l| parse_line(l).filter(|(lk, _)| lk == k))
+                .unwrap();
+            assert_eq!(&got.1, v, "key {k}");
+        }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

@@ -236,7 +236,13 @@ pub struct ShadowEvolution {
     /// flip then stays runtime-only and says so, instead of writing into
     /// whatever checkout the caller happens to run from (the same posture as
     /// `runtime_config_path` / `accounts_config_path`).
+    /// NOTE: removed in issue 751 migration; kept for compatibility.
+    #[allow(dead_code)]
     config_path: Option<String>,
+    /// The `.env` file the switch verbs write SHADOW_ENABLED / SHADOW_AUTO_EVOLVE
+    /// into (the durable half of the switch verbs). `None` disables the write
+    /// path (backtester, most in-process tests) — runtime-only switches.
+    env_path: Option<String>,
 }
 
 impl ShadowEvolution {
@@ -257,7 +263,7 @@ impl ShadowEvolution {
     /// "配置文件与运行期开关不一致" state can never exist again. The
     /// bookkeeping keys (`lastCycleMs` / `cycleSeq`) keep their old meaning.
     pub fn new(cfg: ShadowEvolutionConfig, strategies: &[&dyn EngineStrategy]) -> Self {
-        Self::new_with_config_path(cfg, strategies, None)
+        Self::new_with_config_path(cfg, strategies, None, None)
     }
 
     /// [`Self::new`] with the write-back path for the switch verbs. Production
@@ -268,6 +274,7 @@ impl ShadowEvolution {
         cfg: ShadowEvolutionConfig,
         strategies: &[&dyn EngineStrategy],
         config_path: Option<String>,
+        env_path: Option<String>,
     ) -> Self {
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
         // The deep-round clock is the only thing the persisted state still
@@ -301,6 +308,7 @@ impl ShadowEvolution {
             last_cycle_ms,
             cycle_seq,
             config_path,
+            env_path,
             proposal_store: store,
         };
         me.proposal_store.load();
@@ -1218,16 +1226,30 @@ impl ShadowEvolution {
     /// failure are logged and otherwise silent — the in-memory switch has
     /// already moved, and the operator's next flip retries the persist.
     fn persist_switch(&self, key: file::SwitchKey, value: bool) {
-        let Some(path) = self.config_path.as_deref() else {
+        // Map the toml switch key to its .env counterpart.
+        let env_key = match key {
+            file::SwitchKey::Enabled => "SHADOW_ENABLED",
+            file::SwitchKey::AutoEvolve => "SHADOW_AUTO_EVOLVE",
+        };
+        let Some(env_path) = self.env_path.as_deref() else {
             tracing::debug!(
-                switch = key.key(),
-                "no shadow config path on this core — the switch is runtime-only"
+                switch = env_key,
+                "no env path on this core — the switch is runtime-only"
             );
             return;
         };
-        if let Err(e) = file::persist_switch(std::path::Path::new(path), key, value) {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert(
+            env_key.to_string(),
+            if value {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            },
+        );
+        if let Err(e) = crate::env_file::upsert_env_vars(std::path::Path::new(env_path), &vars) {
             tracing::error!(
-                switch = key.key(),
+                switch = env_key,
                 value,
                 "{e} — the switch is in force for this session but NOT persisted"
             );
@@ -2332,17 +2354,34 @@ mod tests {
         let dir = std::path::PathBuf::from(&cfg.audit_dir);
         let _ = std::fs::remove_dir_all(&dir);
 
+        let env_path = root.join(".env");
         let mut m = ShadowEvolution::new_with_config_path(
             cfg,
             &refs,
-            Some(cfg_path.to_string_lossy().into_owned()),
+            None,
+            Some(env_path.to_string_lossy().into_owned()),
         );
         m.enable(0);
         m.set_auto_evolve(true);
-        // The file carries both flips…
-        let cfg = crate::config::FileConfig::load(Some(&cfg_path));
-        assert_eq!(cfg.shadow.enabled, Some(true), "the enable flip landed");
-        assert_eq!(cfg.shadow.auto_evolve, Some(true), "the auto flip landed");
+        // The .env carries both flips…
+        let text = std::fs::read_to_string(&env_path).unwrap();
+        let get = |k: &str| {
+            text.lines().find_map(|l| {
+                crate::env_file::parse_line(l)
+                    .filter(|(kk, _)| kk == k)
+                    .map(|(_, v)| v)
+            })
+        };
+        assert_eq!(
+            get("SHADOW_ENABLED").as_deref(),
+            Some("true"),
+            "the enable flip landed"
+        );
+        assert_eq!(
+            get("SHADOW_AUTO_EVOLVE").as_deref(),
+            Some("true"),
+            "the auto flip landed"
+        );
         // …and state.json carries only the bookkeeping.
         let st = proposal::ProposalStore::new(&dir).load_state().unwrap();
         assert_eq!(st.enabled, None, "state.json no longer speaks for switches");
@@ -2352,13 +2391,21 @@ mod tests {
         // `FileConfig::load` → the [shadow_evolution] section → the manager's
         // config), so the flip survived WITHOUT any state.json switch key.
         let mut boot_cfg = fast_cfg(false, "writeback");
-        let file = crate::config::FileConfig::load(Some(&cfg_path));
-        boot_cfg.enabled = file.shadow.enabled.unwrap_or(false);
-        boot_cfg.auto_evolve = file.shadow.auto_evolve.unwrap_or(false);
+        let text = std::fs::read_to_string(&env_path).unwrap();
+        let get = |k: &str| {
+            text.lines().find_map(|l| {
+                crate::env_file::parse_line(l)
+                    .filter(|(kk, _)| kk == k)
+                    .map(|(_, v)| v)
+            })
+        };
+        boot_cfg.enabled = get("SHADOW_ENABLED").as_deref() == Some("true");
+        boot_cfg.auto_evolve = get("SHADOW_AUTO_EVOLVE").as_deref() == Some("true");
         let m2 = ShadowEvolution::new_with_config_path(
             boot_cfg,
             &refs,
-            Some(cfg_path.to_string_lossy().into_owned()),
+            None,
+            Some(env_path.to_string_lossy().into_owned()),
         );
         assert!(m2.is_enabled(), "the boot honors the file the verb wrote");
         assert!(m2.auto_evolve());

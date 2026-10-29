@@ -223,10 +223,14 @@ fn a_reset_ledger_kills_the_venues_cursor_generation() {
 #[test]
 fn an_account_remove_kills_only_its_own_venues_cursors() {
     let dir = reset_audit_dir("journal-cursor-remove");
-    let accounts_path = dir.join("accounts.toml");
+    // issue 751: the persist half writes .env and refuses while a legacy
+    // toml sits beside it — the fixture keeps the toml path ONLY as the
+    // refusal probe (never written).
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"kalshi-acct\"\nname = \"k\"\nvenue = \"kalshi\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,kalshi-acct\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_KALSHI_ACCT_NAME=\"k\"\nACCOUNT_KALSHI_ACCT_VENUE=\"kalshi\"\n",
     )
     .expect("fixture");
     let acct = |id: &str, name: &str, venue: &str| crate::account::Account {

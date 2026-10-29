@@ -19,8 +19,8 @@ use tokio::sync::Mutex as AsyncMutex;
 /// 「加载中」。
 #[tokio::test]
 async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
-    // A private accounts.toml — the persist half of account.venue.set
-    // refuses without a config path (the same posture the round-duration
+    // A private .env — the persist half of account.venue.set refuses while
+    // a legacy toml sits beside it (the same posture the round-duration
     // card runs), so the fixture must carry one, exactly the way the
     // round-trip test below does. The ENGINE is installed too: the
     // scanner assertion at the bottom reads `engine.scanner().round_state`
@@ -29,10 +29,11 @@ async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
     let dir = std::env::temp_dir().join(format!("bk-venue-mount-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    let accounts_path = dir.join("accounts.toml");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
     std::fs::write(
-        &accounts_path,
-        "[[account]]\nid = \"default\"\nname = \"main\"\n\n[[account]]\nid = \"paper\"\nname = \"paper\"\n",
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
     )
     .expect("fixture");
 
