@@ -1,43 +1,99 @@
--- market_maker — the passive spread harvester, as a Lua strategy package
--- (§6.5 contract).
+-- market_maker — the passive spread harvester, now double-sided where the
+-- kernel allows it (§6.5 contract).
 --
--- One sentence: on a 15-minute binary round, a cheap chip (mid 0.20–0.42)
--- whose book is deep, balanced and NOT one-sided earns a resting MAKER bid
--- 0.02 under its mid; when the chip's mid climbs 0.03 over the bid, the
--- spread is banked — suggest the close and re-arm at once. No direction
--- forecast, no knife-catching, no chasing: the profit thesis is volatility
--- paying the spread, never the outcome paying the holder.
+-- One sentence: on a 15-minute binary round, qualifying cheap chips (mid
+-- 0.20–0.42) whose books are deep, balanced and NOT one-sided earn resting
+-- MAKER bids — one per qualifying side of ONE market, so a genuinely
+-- two-sided cheap book arms both UP and DOWN — and every fill is then
+-- worked out of the position with inventory skew: the held side's bid is
+-- retired, the opposite bid survives only while the pair stays
+-- merge-profitable, the taker close fires only above a fee-cleared profit
+-- band, and a completed pair exits through the kernel's fee-free merge.
+-- No direction forecast, no knife-catching, no chasing: the profit thesis
+-- is volatility paying the spread, never the outcome paying the holder.
 --
 -- The seal (the「止损不归你管」contract, gated by strategy-no-stop-loss-check):
--- this file computes no exit discipline of its own beyond the one take-profit
--- suggestion above, monitors no adverse excursion, and sends no size. The
--- kernel owns survival: its exit ladder (protective stop, time force-exit,
--- profit trailing — exit_policy.rs / user_layer/configs) runs underneath every
+-- this file computes no exit discipline of its own beyond the take-profit
+-- suggestion above (its fee band is a take-profit FLOOR, not a loss rule),
+-- monitors no adverse excursion, and sends no size. The kernel owns
+-- survival: its exit ladder (protective stop, time force-exit, profit
+-- trailing — exit_policy.rs / user_layer/configs) runs underneath every
 -- suggestion, and E26 owns the circuit breakers. `exits` carries only the
--- target-hit close; nothing else ever populates it.
+-- target-hit close and the merge collection; nothing else ever populates it.
 --
--- The state machine (fill-blind by contract — the §6.5 surface has no fill or
--- position view, so "did the resting bid trade?" is unobservable):
---   nil pending            → one qualifying chip arms ONE resting bid.
---   pending {token, price} → mid >= price + spread → exit suggestion AND a
---                            break. The exit closes the filled world; the
---                            break retires the still-resting bid in the
---                            unfilled world (mid ran away from it — the
---                            thesis is done either way). Both land in one
---                            evaluate, so the next evaluate can re-arm: the
---                            spec's「价差到手就平，立刻开下一笔」.
---                          → the chip turns one-sided → break (cancel the
---                            bid; if it already filled, the KERNEL's ladder
---                            owns that position — this file never sells a
---                            loss).
---                          → round slot changes → break (stale bid).
---   Conditions the spec names that no Lua view exposes are disclosed here
---   once and not faked:
---     * 无同向持仓 — approximated by "one pending thesis at a time"; the
---       kernel's funds/risk path is the real gate.
---     * 未处于冷却期 — kernel-owned (E26 breakers); invisible here.
---     * account available — read only when the host surfaces a view (none
---       does today, same as mad_dog's bk.account note).
+-- Kernel channel facts this shape is built on (verified in core, disclosed
+-- here once — the strategy layer cannot change them):
+--   * `entries` land as Buy + MakerThenTaker (the engine hard-codes the
+--     side), so a Lua package CANNOT rest a sell-side maker quote. The
+--     dual side of this strategy is therefore the UP+DOWN pair of maker
+--     BIDs, not bid+ask on one token.
+--   * strategy exit intents are executed as TAKER sells (the kernel's
+--     strategy-exit path pins use_maker=false and prices a marketable
+--     limit). There is no maker exit on the exits channel — so the taker
+--     exit below is guarded by a minimum-profit band: it fires only when
+--     mid clears entry + spread + the round-trip taker fee, otherwise the
+--     spread it banks would be handed straight back to the fee.
+--   * an exit intent with reason exactly "merge" is intercepted BEFORE the
+--     sell path: complete UP+DOWN share pairs of one condition burn into
+--     their collateral at 1.00/pair with NO fee (a merge is not a market
+--     order). That is the maker-grade exit this strategy owns, and the
+--     reason a completed pair never touches the taker path.
+--
+-- The state machine (fill-blind by contract — §6.5 has no fill stream;
+-- `bk.holdings()` is the ONE position observation, refreshed by the host
+-- before every evaluation):
+--   nil thesis            → scan markets; arm a maker bid for EACH
+--                           qualifying side of the first qualifying market
+--                           (one or two entries; the pairs book's complement
+--                           keeps both mids in the cheap band only when the
+--                           book genuinely prices the pair under par).
+--   thesis, holdings FLAT → the fill-blind upkeep, per armed side:
+--                             mid >= bid + spread → the bid's thesis ran
+--                               away: break (retire resting bids; there is
+--                               no position to close, so no exit is faked),
+--                               then re-arm at once —「价差到手就平，立刻
+--                               开下一笔」.
+--                             the chip turns one-sided → break.
+--   thesis/one side HELD  → single-side maintenance (inventory skew):
+--                             the held side's resting bid is BROKEN, not
+--                             re-priced — one internal key per
+--                             (strategy, asset, direction, slot) means a
+--                             resting bid cannot be moved, so cancellation
+--                             is the honest「bid 价下移」(no second entry
+--                             while inventory is open);
+--                             the opposite bid survives only while
+--                             entry_held + bid_other <= 1.00 -
+--                             merge_min_profit — it IS the exit leg (its
+--                             fill completes a pair the merge burns
+--                             fee-free), so it must stay worth resting;
+--                             the taker close fires only above the fee
+--                             band: mid >= entry + take_profit_spread +
+--                             exit_fee_margin_pct% of the round-trip
+--                             taker fee (fee curve read live via
+--                             bk.fees(); no schedule → fail closed, the
+--                             position rides the kernel ladder instead).
+--   BOTH legs HELD        → reason="merge" intents for both tokens; the
+--                           kernel burns complete pairs at 1.00/pair
+--                           fee-free (remainders ride its ladder and
+--                           settlement — never this file's problem), both
+--                           bids are broken, and no new thesis is armed
+--                           until the holdings actually clear.
+--   slot change           → break everything armed; holdings from an older
+--                           slot are ignored (the kernel's ladder and the
+--                           settlement path own them).
+--   An own-slot holding WITHOUT a thesis (a restart between fill and
+--   close) still gets the skew + fee-band upkeep — holdings, not the
+--   thesis, are the source of truth for maintaining a position.
+--
+-- Conditions the spec names that no Lua view exposes are disclosed here
+-- once and not faked:
+--   * 未处于冷却期 — kernel-owned (E26 breakers); invisible here.
+--   * account available — read only when the host surfaces a view (none
+--     does today, same as mad_dog's bk.account note).
+--   * a resting bid cannot be re-priced toward mid when inventory opens
+--     (the duplicate-key rule above) — "ask 更靠近 mid" is therefore
+--     realized as: keep the merge-completion bid resting at its original
+--     aggressive price, cancel everything else.
 --
 -- Data notes (they change what the gates can see):
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule, same
@@ -225,7 +281,8 @@ end
 
 -- END common/decimal.lua
 local DEC_001 = { m = 1, s = 2 }
-local DEC_100 = { m = 100, s = 0 }
+local DEC_100 = { m = 100, s = 0 } -- the percent multiplier, NOT par
+local DEC_ONE = { m = 1, s = 0 }   -- par ($1.00): fee base and merge cap
 
 --- A kernel-derived book decimal (mid/obi are rust_decimal division results,
 --- up to 28 decimals) rounded to the 2dp decision grid before any comparison
@@ -255,6 +312,10 @@ end
 
 local function read_config()
   local p = bk.params()
+  local merge_min_profit = dec_param(p, "merge_min_profit", { m = 2, s = 2 })
+  if merge_min_profit.m < 0 then merge_min_profit = { m = 2, s = 2 } end
+  local fee_margin = dec_param(p, "exit_fee_margin_pct", { m = 100, s = 0 })
+  if fee_margin.m < 0 then fee_margin = { m = 100, s = 0 } end
   return {
     min_mid_price = dec_param(p, "min_mid_price", { m = 20, s = 2 }),
     max_mid_price = dec_param(p, "max_mid_price", { m = 42, s = 2 }),
@@ -270,6 +331,27 @@ local function read_config()
     spot_max_move_pct = dec_param(p, "spot_max_move_pct", { m = 15, s = 1 }),
     spot_missing = p.spot_missing == "pass" and "pass" or "block",
     min_available_usd = dec_param(p, "min_available_usd", { m = 100, s = 2 }),
+    -- Minimum pair discount the merge-exit leg must keep: while one leg is
+    -- held, the opposite bid survives only while
+    --   entry_held + bid_other <= 1.00 - merge_min_profit
+    -- (the completed pair redeems at exactly 1.00/pair, fee-free — the
+    -- discount IS the pair's gross profit and this file's skew amplitude).
+    -- Default 0.02: just under the single-side bank (take_profit_spread
+    -- 0.03) because the merge leg does double duty — its fill ALSO retires
+    -- the held leg's exposure at par, so the pair discount understates the
+    -- leg-level economics and may sit a tick below the fresh-trade spread.
+    merge_min_profit = merge_min_profit,
+    -- Percent of the kernel's own round-trip taker fee added to the profit
+    -- band (the minimum-profit guard on the only exit this file can
+    -- suggest). 100 = the exact fee curve the kernel charges, zero padding —
+    -- the honest default. Raise it to pad for schedule drift (a replay may
+    -- run --fee-model with a different schedule than the live default).
+    -- The curve itself: fee_usd_per_share = rate * (p*(1-p))^exponent — the
+    -- kernel's ONE fee schedule (core exit_policy.rs FeeSchedule; shipped
+    -- default legacy_quadratic 0.125*(p*(1-p))^2, Polymarket's published
+    -- crypto curve 0.07*p*(1-p)) — read LIVE per evaluation via bk.fees(),
+    -- never restated as constants here.
+    exit_fee_margin_pct = fee_margin,
   }
 end
 
@@ -404,12 +486,88 @@ local function spot_ok(cfg, asset, dir_up, now_ms)
   return not (move >= thr)
 end
 
--- ── the pending thesis ──────────────────────────────────────────────────────
--- pending = { token, price (dec), slot } | nil — the one resting bid this
--- strategy has armed. Fill-blind by contract; the kernel retires what did
--- not rest and closes what did.
+-- ── the thesis ──────────────────────────────────────────────────────────────
+-- thesis = { condition_id, up_token, down_token, up = dec|nil, down =
+-- dec|nil, slot } | nil — the ONE market this strategy has armed, with the
+-- resting bid price per ARMED side (nil = that side did not qualify).
+-- Fill-blind by contract; `bk.holdings()` — not the thesis — decides the
+-- position states; the kernel retires what did not rest and closes what did.
 
-local pending = nil
+local thesis = nil
+
+-- ── the kernel's taker-fee curve, read live (bk.fees()) ─────────────────────
+
+--- The active schedule as exact decimals, guarded into the safe mantissa
+--- domain. `nil` = no schedule in force (or an unusable one) — a strategy
+--- that prices fees must fail closed (skip the exit, never assume zero),
+--- exactly the bk.fees() contract. Guards: rate mantissa ≤ 1e4 (real rates
+--- are ≤ 1) and exponent ≤ 3 (the shipped curves are 1 and 2) keep the worst
+--- exact product — base mantissa ≤ 2500 (a 2dp price ≤ 0.50 gives
+--- p*(1-p) ≤ 0.25) cubed, times the rate, times the 4-digit margin ratio —
+--- far inside i64; anything beyond the guards is refused rather than
+--- wrapped.
+local function fee_model()
+  local f = bk.fees and bk.fees() or nil
+  if f == nil then return nil end
+  local rate = dec_parse(f.rate)
+  if not rate or rate.m < 0 or rate.m > 10000 then return nil end
+  local e = f.exponent
+  if type(e) ~= "number" or e ~= math.floor(e) or e < 0 or e > 3 then return nil end
+  return { rate = rate, exponent = math.floor(e) }
+end
+
+--- fee_usd per ONE share at price `p` (2dp decision grid):
+---   rate * (p*(1-p))^exponent
+--- the kernel's own charge curve (exit_policy.rs FeeSchedule), spelled in
+--- exact decimals — the same numbers the kernel charges the fill with.
+local function fee_per_share(model, p)
+  if p.m <= 0 or p.m >= DEC_ONE.m then return { m = 0, s = 2 } end
+  local base = dec_mul(p, dec_sub(DEC_ONE, p))
+  local acc = { m = 1, s = 0 }
+  for _ = 1, model.exponent do acc = dec_mul(acc, base) end
+  return dec_mul(model.rate, acc)
+end
+
+--- The fee-cleared profit band: entry + spread + margin% of the round-trip
+--- taker fee (entry fill + exit fill). `model == nil` → fail closed (never
+--- fires). The taker exit fires only when mid clears the WHOLE band —
+--- otherwise a banked spread is handed straight back to the fee (the smart-
+--- money forensics this rework answers to: net losses were ~100% fees).
+local function fee_band(cfg, model, entry, mid)
+  if not model then return nil end
+  -- pct → fraction, exactly (scale + 2).
+  local ratio = { m = cfg.exit_fee_margin_pct.m, s = cfg.exit_fee_margin_pct.s + 2 }
+  local round_trip = dec_add(fee_per_share(model, entry), fee_per_share(model, mid))
+  return dec_add(dec_add(entry, cfg.take_profit_spread), dec_mul(ratio, round_trip))
+end
+
+-- ── holdings (the one position observation) ─────────────────────────────────
+
+--- THIS slot's open positions from `bk.holdings()` (the host refreshes the
+--- view before every evaluation; rows carry decimal STRINGS). Older-slot
+--- rows are deliberately invisible here: their survival belongs to the
+--- kernel's ladder and the settlement path, never to this file.
+local function slot_holdings(slot)
+  local out = {}
+  local hs = bk.holdings and bk.holdings() or {}
+  for _, h in ipairs(hs) do
+    if h.round_slot == slot then
+      local sh = dec_parse(h.shares)
+      local en = dec_parse(h.entry_price)
+      if sh and en and sh.m > 0 then
+        out[h.token_id] = { shares = sh, entry = dec_round2(en), condition_id = h.condition_id }
+      end
+    end
+  end
+  return out
+end
+
+local function market_of(condition_id)
+  for _, m in ipairs(bk.markets()) do
+    if m.condition_id == condition_id then return m end
+  end
+  return nil
+end
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────
 
@@ -428,17 +586,58 @@ function bk_on_round(round)
   tracker_reset_if_new_round(round.slot)
 end
 
+--- One side's arming verdict: every spec gate, evaluated per token. Returns
+--- the resting bid price (2dp) or nil.
+local function qualify_chip(cfg, m, tok, now_ms)
+  local book = bk.book(tok)
+  if not book or book.fresh ~= true then return nil end
+  local mid = book_dec(book.mid)
+  if not mid or mid.m <= 0 then return nil end
+  if dec_cmp(mid, cfg.min_mid_price) < 0 then return nil end
+  if dec_cmp(mid, cfg.max_mid_price) > 0 then return nil end
+  local bid = book_dec(book.best_bid)
+  local ask = book_dec(book.best_ask)
+  if not bid or not ask or bid.m <= 0 or ask.m <= 0 then return nil end
+  local bd = book_dec(book.bid_depth)
+  if bd and dec_cmp(bd, cfg.min_bid_depth) < 0 then return nil end
+  local ad = book_dec(book.ask_depth)
+  if ad and dec_cmp(ad, cfg.min_ask_depth) < 0 then return nil end
+  local o = book_dec(book.obi)
+  if o then
+    local abs = o.m < 0 and { m = -o.m, s = o.s } or o
+    if dec_cmp(abs, cfg.max_abs_obi) > 0 then return nil end
+  end
+  local st = tracker.tokens[tok]
+  if not st or not chip_calm(cfg, st, now_ms) then return nil end
+  if not spot_ok(cfg, m.asset, tok == m.up_token, now_ms) then return nil end
+  local entry = dec_round2(dec_sub(mid, cfg.bid_offset))
+  if dec_cmp(entry, DEC_001) < 0 or dec_cmp(entry, ask) >= 0 then return nil end
+  return entry
+end
+
+--- Retire every ARMED side's resting bids (the kernel cancels each once —
+--- a break for an order that already filled is a benign no-op).
+local function break_thesis(breaks)
+  if not thesis then return end
+  if thesis.up then
+    breaks[#breaks + 1] = { token = thesis.up_token, broken_price = dec_fmt(thesis.up) }
+  end
+  if thesis.down then
+    breaks[#breaks + 1] = { token = thesis.down_token, broken_price = dec_fmt(thesis.down) }
+  end
+end
+
 --- The suggestion surface. Returns { entries, exits, breaks }.
 function bk_evaluate()
   local cfg = read_config()
   local entries, exits, breaks = {}, {}, {}
 
-  -- A pending thesis whose round is gone (or replaced) retires its bid.
+  -- A thesis whose round is gone (or replaced) retires its armed bids.
   local round = bk.round()
   local slot = round and round.slot or nil
-  if pending and pending.slot ~= slot then
-    breaks[#breaks + 1] = { token = pending.token, broken_price = dec_fmt(pending.price) }
-    pending = nil
+  if thesis and thesis.slot ~= slot then
+    break_thesis(breaks)
+    thesis = nil
   end
 
   if round == nil then
@@ -446,48 +645,133 @@ function bk_evaluate()
   end
 
   local now_ms = bk.now_ms()
+  local held = slot_holdings(slot)
 
-  -- Pending thesis upkeep, round live: bank the spread when the chip's mid
-  -- climbs over bid + spread (exit suggestion + bid retirement in the same
-  -- evaluate — see the state-machine note in the header); cancel the bid
-  -- when the chip turns one-sided. A held position's survival is NEVER
-  -- handled here — the kernel's ladder owns it.
-  if pending then
-    local book = bk.book(pending.token)
-    local mid = book and book_dec(book.mid) or nil
-    if book and book.fresh == true and mid and mid.m > 0 then
-      local target = dec_add(pending.price, cfg.take_profit_spread)
-      if dec_cmp(mid, target) >= 0 then
-        exits[#exits + 1] = {
-          token = pending.token,
-          reason = string.format(
-            "target reached: mid %s >= bid %s + %s",
-            dec_fmt(mid),
-            dec_fmt(pending.price),
-            dec_fmt(cfg.take_profit_spread)
-          ),
-        }
-        breaks[#breaks + 1] = { token = pending.token, broken_price = dec_fmt(pending.price) }
-        pending = nil
-      else
-        local st = tracker.tokens[pending.token]
-        if st and not chip_calm(cfg, st, now_ms) then
-          breaks[#breaks + 1] = { token = pending.token, broken_price = dec_fmt(pending.price) }
-          pending = nil
-        end
+  -- BOTH legs of one condition held: the completed pair exits through the
+  -- kernel's merge channel — fee-free at 1.00/pair, the maker-grade exit.
+  -- Intents repeat every cycle until the burn lands (the kernel drops an
+  -- intent with no complete pair behind it; pair_discount_arb's pattern).
+  -- No new thesis is armed while a merge is pending: the position is not
+  -- closed yet, and the kernel's funds/risk path is the real gate.
+  local merge_tokens = nil
+  local merge_condition = nil
+  for tok, h in pairs(held) do
+    if not merge_condition then
+      local other = nil
+      for tok2, h2 in pairs(held) do
+        if tok2 ~= tok and h2.condition_id == h.condition_id then other = tok2 end
+      end
+      if other then
+        merge_condition = h.condition_id
+        merge_tokens = { tok, other }
       end
     end
   end
+  if merge_tokens then
+    for _, tok in ipairs(merge_tokens) do
+      exits[#exits + 1] = { token = tok, reason = "merge" }
+    end
+    if thesis and thesis.condition_id == merge_condition then
+      break_thesis(breaks)
+      thesis = nil
+    end
+    return { entries = entries, exits = exits, breaks = breaks }
+  end
 
-  -- Entries need the time window; the close suggestion above does not
-  -- (a target hit in the last two minutes still banks the spread).
+  -- ONE leg held: single-side maintenance (the inventory skew). Keyed off
+  -- the HOLDING, not the thesis — a restart between fill and close still
+  -- gets the same upkeep.
+  local held_tok, held_row = nil, nil
+  for tok, h in pairs(held) do
+    held_tok, held_row = tok, h
+    break
+  end
+  if held_tok then
+    local m = market_of(held_row.condition_id)
+    if m then
+      -- Skew, held side: the resting bid is BROKEN, never re-priced — one
+      -- internal key per (strategy, asset, direction, slot) makes a resting
+      -- bid immovable, and no second entry fires while inventory is open.
+      breaks[#breaks + 1] = { token = held_tok, broken_price = dec_fmt(held_row.entry) }
+      -- Skew, opposite side: the surviving bid IS the exit leg (its fill
+      -- completes the fee-free merge), so it rests only while the pair
+      -- keeps its minimum discount. Failing the cap retires it.
+      if thesis and thesis.condition_id == m.condition_id then
+        local other = held_tok == m.up_token and m.down_token or m.up_token
+        local opp_price = other == thesis.up_token and thesis.up or thesis.down
+        if opp_price then
+          local cap = dec_sub(DEC_ONE, cfg.merge_min_profit)
+          if dec_cmp(dec_add(held_row.entry, opp_price), cap) > 0 then
+            breaks[#breaks + 1] = { token = other, broken_price = dec_fmt(opp_price) }
+            if other == thesis.up_token then thesis.up = nil else thesis.down = nil end
+          end
+        end
+      end
+      -- The taker close, above the fee band only. No schedule in force →
+      -- fail closed: the position rides the kernel's ladder instead.
+      local book = bk.book(held_tok)
+      local mid = book and book.fresh == true and book_dec(book.mid) or nil
+      if mid and mid.m > 0 then
+        local band = fee_band(cfg, fee_model(), held_row.entry, mid)
+        if band and dec_cmp(mid, band) >= 0 then
+          exits[#exits + 1] = {
+            token = held_tok,
+            reason = string.format(
+              "target reached: mid %s >= entry %s + %s + fee band %s",
+              dec_fmt(mid),
+              dec_fmt(held_row.entry),
+              dec_fmt(cfg.take_profit_spread),
+              dec_fmt(dec_sub(band, dec_add(held_row.entry, cfg.take_profit_spread)))
+            ),
+          }
+          break_thesis(breaks)
+          thesis = nil
+        end
+      end
+    end
+    -- A position is open: arm nothing (the kernel's funds/risk path is the
+    -- real gate, disclosed in the header).
+    return { entries = entries, exits = exits, breaks = breaks }
+  end
+
+  -- FLAT: the fill-blind thesis upkeep. Per ARMED side: mid cleared
+  -- bid + spread → the thesis ran away from its bid; there is NO position
+  -- to close (holdings are flat), so the old positionless exit is not
+  -- faked — the bids retire and the SAME evaluate may re-arm. A one-sided
+  -- chip retires the bids the same way.
+  if thesis then
+    local ran_away = false
+    for _, side in ipairs({ { thesis.up_token, thesis.up }, { thesis.down_token, thesis.down } }) do
+      local tok, price = side[1], side[2]
+      if price then
+        local book = bk.book(tok)
+        local mid = book and book.fresh == true and book_dec(book.mid) or nil
+        if book and mid and mid.m > 0 then
+          if dec_cmp(mid, dec_add(price, cfg.take_profit_spread)) >= 0 then
+            ran_away = true
+          else
+            local st = tracker.tokens[tok]
+            if st and not chip_calm(cfg, st, now_ms) then ran_away = true end
+          end
+        end
+      end
+    end
+    if ran_away then
+      break_thesis(breaks)
+      thesis = nil
+    end
+  end
+
+  -- Arming needs the time window (a fee-band exit above does not — a target
+  -- hit in the last two minutes still banks the spread, and the merge
+  -- collection never stops: it runs to the last tick by design).
   if round.time_left_sec < cfg.min_time_left_sec then
     return { entries = entries, exits = exits, breaks = breaks }
   end
 
   -- One thesis in flight; the kernel's funds/risk path is the real
   -- position/cooldown gate (disclosed in the header).
-  if pending then
+  if thesis then
     return { entries = entries, exits = exits, breaks = breaks }
   end
 
@@ -499,51 +783,48 @@ function bk_evaluate()
   end
 
   if avail_ok then
+    -- Arm EACH qualifying side of the first qualifying market: the dual
+    -- quote this file can actually rest (the engine takes Buy-side limits
+    -- only). Both mids sit in the cheap band only when the book genuinely
+    -- prices the pair under par — then the merge exit is live from birth.
     for _, m in ipairs(bk.markets()) do
-      for _, tok in ipairs({ m.up_token, m.down_token }) do
-        local book = bk.book(tok)
-        local mid = book and book_dec(book.mid) or nil
-        if book and book.fresh == true and mid and mid.m > 0
-          and dec_cmp(mid, cfg.min_mid_price) >= 0
-          and dec_cmp(mid, cfg.max_mid_price) <= 0 then
-          local bid = book_dec(book.best_bid)
-          local ask = book_dec(book.best_ask)
-          if bid and ask and bid.m > 0 and ask.m > 0 then
-            local depth_ok = true
-            local bd = book_dec(book.bid_depth)
-            if bd and dec_cmp(bd, cfg.min_bid_depth) < 0 then depth_ok = false end
-            local ad = book_dec(book.ask_depth)
-            if ad and dec_cmp(ad, cfg.min_ask_depth) < 0 then depth_ok = false end
-            local obi_ok = true
-            local o = book_dec(book.obi)
-            if o then
-              local abs = o.m < 0 and { m = -o.m, s = o.s } or o
-              if dec_cmp(abs, cfg.max_abs_obi) > 0 then obi_ok = false end
-            end
-            local st = tracker.tokens[tok]
-            if depth_ok and obi_ok and st and chip_calm(cfg, st, now_ms)
-              and spot_ok(cfg, m.asset, tok == m.up_token, now_ms) then
-              local entry = dec_round2(dec_sub(mid, cfg.bid_offset))
-              if dec_cmp(entry, DEC_001) >= 0 and dec_cmp(entry, ask) < 0 then
-                entries[#entries + 1] = {
-                  token = tok,
-                  price = dec_fmt(entry),
-                  reason = string.format(
-                    "%s chip mid %s in band, resting maker bid %s (%ds left)",
-                    tok == m.up_token and "UP" or "DOWN",
-                    dec_fmt(mid),
-                    dec_fmt(entry),
-                    round.time_left_sec
-                  ),
-                }
-                pending = { token = tok, price = entry, slot = slot }
-                break
-              end
-            end
-          end
+      local up_entry = qualify_chip(cfg, m, m.up_token, now_ms)
+      local down_entry = qualify_chip(cfg, m, m.down_token, now_ms)
+      if up_entry or down_entry then
+        if up_entry then
+          entries[#entries + 1] = {
+            token = m.up_token,
+            price = dec_fmt(up_entry),
+            reason = string.format(
+              "UP chip mid %s in band, resting maker bid %s (%ds left)",
+              dec_fmt(book_dec(bk.book(m.up_token).mid)),
+              dec_fmt(up_entry),
+              round.time_left_sec
+            ),
+          }
         end
+        if down_entry then
+          entries[#entries + 1] = {
+            token = m.down_token,
+            price = dec_fmt(down_entry),
+            reason = string.format(
+              "DOWN chip mid %s in band, resting maker bid %s (%ds left)",
+              dec_fmt(book_dec(bk.book(m.down_token).mid)),
+              dec_fmt(down_entry),
+              round.time_left_sec
+            ),
+          }
+        end
+        thesis = {
+          condition_id = m.condition_id,
+          up_token = m.up_token,
+          down_token = m.down_token,
+          up = up_entry,
+          down = down_entry,
+          slot = slot,
+        }
+        break
       end
-      if #entries > 0 then break end
     end
   end
 
