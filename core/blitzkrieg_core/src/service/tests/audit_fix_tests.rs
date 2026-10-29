@@ -967,6 +967,96 @@ fn account_views_carry_the_venue_binding() {
     );
 }
 
+// ── issue 787: live + unloaded credentials project a ZERO balance ───────────
+
+/// A live core whose account book carries a LEFTOVER balance — the shape the
+/// operator reported: the book was seeded by a dry run (or replayed from that
+/// dry run's journal) and the process now boots live without credentials, so
+/// no venue report can ever realign the number. Fixture: seed the ledger
+/// directly (the same end state a dry journal replay lands); `loaded` decides
+/// whether the account's boot credential probe succeeded.
+fn live_core_with_leftover_book(balance: Decimal, loaded: bool, mode: Mode) -> Core {
+    let book = crate::account::AccountLedgers::new(
+        vec![crate::account::Account {
+            id: crate::account::AccountId::from("default"),
+            name: "default".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: crate::account::AccountStatus::Active,
+            credential_keys: crate::account::CredentialKeys {
+                loaded,
+                ..Default::default()
+            },
+            venue: String::new(),
+            trading_enabled: true,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            updated_at_ms: 0,
+        }],
+        crate::account::AccountId::from("default"),
+    );
+    let mut c = Core::with_account_book(
+        CoreConfig {
+            mode,
+            dry_seed_balance: balance,
+            ..Default::default()
+        },
+        book,
+    );
+    // Leftover cash on the book: the dry seed (supervisor passes
+    // `--seed-balance 1000` in every mode) or a replayed dry journal's last
+    // row. Neither is a live fact.
+    c.set_balance(balance);
+    c
+}
+
+#[test]
+fn a_live_account_without_loaded_credentials_projects_zero() {
+    let c = live_core_with_leftover_book(dec!(1000), false, Mode::Live);
+    let views = c.account_views(1);
+    assert_eq!(views.len(), 1);
+    let v = &views[0];
+    assert_eq!(
+        v.balance,
+        Decimal::ZERO,
+        "live + credentials unloaded: the dry seed must not read as the balance"
+    );
+    assert_eq!(v.available, Decimal::ZERO);
+    assert_eq!(v.reserved, Decimal::ZERO);
+    assert!(
+        !v.credentials_loaded,
+        "the zero projection pairs with the honest loaded=false fact"
+    );
+    // The book itself is untouched — the projection folds the view only, so a
+    // later realign (credentials loaded, bridge reports) still has the book.
+    assert_eq!(c.ledger().balance(), dec!(1000));
+}
+
+#[test]
+fn a_live_account_with_loaded_credentials_keeps_its_book() {
+    let c = live_core_with_leftover_book(dec!(1000), true, Mode::Live);
+    let views = c.account_views(1);
+    assert_eq!(
+        views[0].balance,
+        dec!(1000),
+        "loaded live account keeps its book (venue facts flow in through realign)"
+    );
+    assert!(views[0].credentials_loaded);
+}
+
+#[test]
+fn a_dry_account_keeps_the_seed_projection() {
+    // The seed is the whole point of a locally-settling mode: dry + unloaded
+    // credentials must still show the 1000 (the operator's dry runs depend on
+    // it). Same book and leftover, mode flipped.
+    let c = live_core_with_leftover_book(dec!(1000), false, Mode::Dry);
+    let views = c.account_views(1);
+    assert_eq!(
+        views[0].balance,
+        dec!(1000),
+        "dry keeps the seed — the zero-fold is live-only"
+    );
+}
+
 // ── B1c: refuse_unsubscribed_duration — the admission gate's teeth ─────
 
 #[test]

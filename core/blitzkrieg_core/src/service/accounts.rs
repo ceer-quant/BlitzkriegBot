@@ -500,6 +500,17 @@ impl Core {
         self.accounts.active_ledger()
     }
 
+    /// Whether the ACTIVE account's credentials loaded at boot (§9.4). The
+    /// process-level balance view (`ledger.balance`) follows this account, so
+    /// its live-mode zero-projection (issue 787) keys on the same fact the
+    /// per-account rows carry.
+    pub fn active_ledger_credentials_loaded(&self) -> bool {
+        self.accounts
+            .account(self.accounts.active_id())
+            .map(|a| a.credential_keys.loaded)
+            .unwrap_or(false)
+    }
+
     /// Whether THIS core's boot replayed durable cash journals (at least one
     /// account's `data/ledger/<account>.journal.jsonl` existed on disk). The
     /// server boot reads it to skip the post-construction seed: a replayed
@@ -541,7 +552,20 @@ impl Core {
     /// order). Every money field is the account's OWN book — this view is
     /// how cross-account isolation is READ; `dayRealizedUsd` sums the
     /// account's own closes of the current UTC day.
+    ///
+    /// issue 787（live 无凭证余额显示面）: a LIVE account whose credentials
+    /// never loaded has no venue to report its cash — the bridge stays inert
+    /// (`spawn_if_configured` refuses without keys), so no realign can ever
+    /// land and the only numbers the book can hold are leftovers (a dry-mode
+    /// journal replayed at boot, a venue report from before the keys were
+    /// pulled). Reading those as "the balance" shows dry seed money in a live
+    /// panel — the exact 1000 the operator reported. The projection states the
+    /// truth instead: no loaded credentials, no venue truth, ZERO. Dry and
+    /// read-only keep the seed (their book is the money there is); a loaded
+    /// live account keeps its book (venue facts flow in through
+    /// `realign_venue_cash`).
     pub fn account_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::AccountView> {
+        let live = self.config.mode == Mode::Live;
         let today = crate::position::utc_day_index(now_ms);
         self.accounts
             .account_list()
@@ -574,15 +598,30 @@ impl Core {
                     }
                     _ => (a.status.wire_tag(), None),
                 };
+                // The zero-fold only ever hits a live account whose
+                // credentials did not load — `loaded == false` there. The
+                // reserve gate reads the same view, and refusing entries on a
+                // zero book is exactly right: an unauthenticated account must
+                // not spend anything.
+                let unfunded_live = live && !a.credential_keys.loaded;
+                let (balance, available) = if unfunded_live {
+                    (Decimal::ZERO, Decimal::ZERO)
+                } else {
+                    (ledger.balance(), ledger.available())
+                };
                 crate::ipc::schema::AccountView {
                     id: id.as_str().to_string(),
                     name: a.name.clone(),
                     market_type: a.market_type,
                     status: status_tag.to_string(),
                     status_reason,
-                    balance: ledger.balance(),
-                    available: ledger.available(),
-                    reserved: ledger.reserved(),
+                    balance,
+                    available,
+                    reserved: if unfunded_live {
+                        Decimal::ZERO
+                    } else {
+                        ledger.reserved()
+                    },
                     credentials_loaded: a.credential_keys.loaded,
                     venue: a.venue.clone(),
                     trading_enabled: a.trading_enabled,
