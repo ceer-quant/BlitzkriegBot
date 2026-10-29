@@ -100,6 +100,20 @@ pub struct LuaManifest {
     /// strategy knows its own exit doctrine, so it declares it.
     #[serde(default)]
     pub trailing_exit: Option<bool>,
+    /// Entry fill-policy declaration: the strategy's entry candidates are
+    /// PURE MAKER quote-pulls, never taker crossings. The host builds every
+    /// `OrderRequest` for this strategy as `FillPolicy::Maker` (post-only,
+    /// join-the-ask) and submits it with `maker_timeout_ms = -1` — the OME's
+    /// never-escalate clock — so a maker leg that does not fill simply rests
+    /// (and rides the round's own lifecycle); the taker chase that a
+    /// `MakerThenTaker` entry arms at `entry_maker_timeout_ms` never exists
+    /// for a declaring package. Why a declaration and not a per-intent field:
+    /// the doctrine is package-level (a pair collector that pays taker fees on
+    /// either leg is a different, worse trade), so the strategy declares it
+    /// once and every entry inherits it. Default false — every existing
+    /// package keeps today's `MakerThenTaker` behaviour byte-identically.
+    #[serde(default)]
+    pub entry_maker: bool,
     /// Entry-gate exemptions (E2-b, the dylib declaration surface's Lua
     /// mirror). Default: nothing declared = fully gated.
     #[serde(default)]
@@ -233,6 +247,10 @@ pub struct LoadedLua {
     /// The manifest's three-state trailing verdict (`None` = follow the
     /// kernel-wide value).
     pub trailing_exit: Option<bool>,
+    /// The manifest's entry fill-policy declaration (`false` when absent):
+    /// every entry this strategy emits is submitted post-only and never
+    /// escalates to taker.
+    pub entry_maker: bool,
     /// The manifest's entry-gate exemptions. `none()` when absent — every
     /// existing package keeps today's fully-gated behaviour.
     pub gate_exemptions: GateExemptions,
@@ -363,6 +381,7 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
         holds_to_settlement: manifest.holds_to_settlement,
         atomic_batch: manifest.atomic_batch,
         trailing_exit: manifest.trailing_exit,
+        entry_maker: manifest.entry_maker,
         gate_exemptions: GateExemptions {
             timing: manifest.gate_exemptions.timing,
             momentum: manifest.gate_exemptions.momentum,
@@ -405,6 +424,10 @@ pub struct LuaEngineAdapter {
     /// The manifest's three-state trailing verdict (`None` = follow the
     /// kernel-wide `risk.setExit` value).
     trailing_exit: Option<bool>,
+    /// The manifest's entry fill-policy declaration (`entry_maker`): every
+    /// entry this strategy emits is submitted post-only (`FillPolicy::Maker`)
+    /// and never escalates to taker. `false` = today's `MakerThenTaker`.
+    entry_maker: bool,
     /// The strategy's cell of the shared ParamRegistry, when one is attached
     /// (E2-c plumbing; a cell exists only for strategies that declared
     /// evolvable knobs).
@@ -469,6 +492,7 @@ impl LuaEngineAdapter {
             atomic_batch: false,
             consumes_pair_book_stats: false,
             trailing_exit: None,
+            entry_maker: false,
             params_cell: None,
             defaults: tunables,
             specs,
@@ -502,6 +526,7 @@ impl LuaEngineAdapter {
             atomic_batch: false,
             consumes_pair_book_stats: false,
             trailing_exit: None,
+            entry_maker: false,
             params_cell: None,
             defaults: tunables,
             specs: Vec::new(),
@@ -549,6 +574,15 @@ impl LuaEngineAdapter {
     /// path). `None` = follow the kernel-wide `risk.setExit` value.
     pub fn declare_trailing_exit(mut self, trailing_exit: Option<bool>) -> Self {
         self.trailing_exit = trailing_exit;
+        self
+    }
+
+    /// Stamp the manifest's entry fill-policy declaration (the loaded-package
+    /// path). `true` = every entry this strategy emits is submitted post-only
+    /// (`FillPolicy::Maker`) with the OME's never-escalate clock — the taker
+    /// chase a `MakerThenTaker` entry arms never exists for this package.
+    pub fn declare_entry_maker(mut self, entry_maker: bool) -> Self {
+        self.entry_maker = entry_maker;
         self
     }
 
@@ -911,6 +945,10 @@ impl EngineStrategy for LuaEngineAdapter {
 
     fn wants_trailing_exit(&self) -> Option<bool> {
         self.trailing_exit
+    }
+
+    fn entry_maker(&self) -> bool {
+        self.entry_maker
     }
 
     fn atomic_batch(&self) -> bool {

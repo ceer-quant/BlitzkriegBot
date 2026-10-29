@@ -23,6 +23,15 @@
 -- distribution, and 0.50-0.55 is a dead band the strategy refuses rather
 -- than guesses about.
 --
+--   * ENTRY WINDOW — `entry_window` (fraction of the round, 0.5 default)
+--     confines NEW entries to the round's FIRST half: `time_left_sec` must
+--     exceed `(1 − entry_window) × round_sec`. The @almach evidence: in-round
+--     fill density concentrates early and late-round prices are more
+--     expensive. Exact-integer compare, the hot_side_momentum `round_sec`
+--     precedent: `t*100 > (100 − entry_window*100) * round_sec`. `0` = the
+--     whole round. Maker fill doctrine is untouched — this package keeps its
+--     own EV-table entry logic (the kernel routes its entries as before).
+--
 -- How the pieces fit:
 --   * TRIGGER (the book's own declaration, no spot feed — the 15m corpus
 --     carries no spot events, so nothing here reads klines):
@@ -270,6 +279,12 @@ local function read_config()
     min_time_left_sec = int_param(p, "min_time_left_sec", 45),
     max_open_positions = int_param(p, "max_open_positions", 3),
     min_shares = dec_param(p, "min_shares", { m = 1, s = 0 }),
+    -- Entry window: only the FIRST `entry_window` fraction of the round may
+    -- open (0 = the whole round). Exact-integer percent, like the pair
+    -- package; `round_sec` is the declared round total (bk.round() carries
+    -- only `time_left_sec`).
+    entry_window_pct = int_param(p, "entry_window", 50),
+    round_sec = int_param(p, "round_sec", 900),
   }
 end
 
@@ -323,6 +338,13 @@ function bk_evaluate()
   local can_enter = round.time_left_sec >= cfg.min_time_left_sec
     and schedule_ok
     and (opened[slot] or 0) < cfg.max_open_positions
+  -- The in-round entry window: an OPEN needs time_left strictly past the
+  -- window's floor — `(100 − pct)%` of the round still to run. Exact
+  -- integers (`t*100` against `k*round_sec`), inclusive of the boundary
+  -- instant; `pct <= 0` disables the window. Entries only — nothing in this
+  -- package emits exits, so there is nothing else to gate.
+  and (cfg.entry_window_pct <= 0
+    or round.time_left_sec * 100 >= (100 - cfg.entry_window_pct) * cfg.round_sec)
 
   for _, m in ipairs(bk.markets()) do
     if armed[m.condition_id] == slot then

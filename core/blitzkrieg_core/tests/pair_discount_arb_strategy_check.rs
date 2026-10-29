@@ -54,6 +54,23 @@ fn adapter() -> LuaEngineAdapter {
     a
 }
 
+/// Adapter whose `bk.params()` start from a modified default bag (the
+/// manifest-defaults path, overridden the way a param registry would — the
+/// market_maker check's pattern).
+fn adapter_with_params(override_key: &str, override_value: &str) -> LuaEngineAdapter {
+    let loaded = load_lua_package(&package_dir()).expect("pair_discount_arb package must load");
+    let mut tunables = loaded.tunables;
+    tunables.insert(override_key.to_string(), override_value.to_string());
+    let a = LuaEngineAdapter::new(loaded.strategy, tunables)
+        .declare(loaded.holds_to_settlement, loaded.gate_exemptions);
+    a.set_fee_schedule(FeeScheduleView {
+        name: "legacy_quadratic".into(),
+        rate: "0.125".into(),
+        exponent: 2,
+    });
+    a
+}
+
 /// The same adapter WITHOUT a fee schedule — `bk.fees()` answers nil and the
 /// strategy must refuse to price anything.
 fn adapter_feeless() -> LuaEngineAdapter {
@@ -332,6 +349,86 @@ fn the_seal_no_sells_no_breaks_even_while_firing() {
     assert!(
         a.take_breaks().is_empty(),
         "no resting order exists to break"
+    );
+}
+
+// ── entry window (v1.2) ─────────────────────────────────────────────────────
+
+/// `entry_window = 0.5` on the declared 900s family: a NEW pair attempt needs
+/// at least 450s still to run (the boundary instant is INCLUSIVE — `>=`).
+/// T-451 and T-450 fire; T-449 and T-100 refuse. The window gates ATTEMPTS
+/// only — with nothing armed there is nothing to collect, but an ARMED
+/// condition keeps collecting past the window (next row).
+#[test]
+fn the_entry_window_confines_new_attempts_to_the_front_half() {
+    let fresh = pair_fresh(
+        Some((dec!(0.48), dec!(600))),
+        Some((dec!(0.45), dec!(600))),
+        NOW,
+    );
+    let markets = vec![market()];
+
+    let mut a = adapter_with_params("entry_window", "0.5");
+    let got = candidates_of(&mut a, &markets, 451, NOW, &fresh);
+    assert_eq!(got.len(), 2, "T-451 is inside the front half: {got:?}");
+
+    let mut a = adapter_with_params("entry_window", "0.5");
+    let got = candidates_of(&mut a, &markets, 450, NOW, &fresh);
+    assert_eq!(got.len(), 2, "T-450 (the boundary) is inclusive: {got:?}");
+
+    let mut a = adapter_with_params("entry_window", "0.5");
+    let got = candidates_of(&mut a, &markets, 449, NOW, &fresh);
+    assert!(got.is_empty(), "T-449 is the back half: {got:?}");
+
+    let mut a = adapter_with_params("entry_window", "0.5");
+    let got = candidates_of(&mut a, &markets, 100, NOW, &fresh);
+    assert!(got.is_empty(), "T-100 in the back half: {got:?}");
+    assert!(
+        drain_exits(&mut a).is_empty(),
+        "nothing armed, nothing collects"
+    );
+}
+
+/// The window gates ATTEMPTS only: armed inside the window, the condition
+/// keeps merging (and gap-fills) deep into the back half — collection runs to
+/// the last tick.
+#[test]
+fn the_entry_window_does_not_stop_collection() {
+    let mut a = adapter_with_params("entry_window", "0.5");
+    let fresh = pair_fresh(
+        Some((dec!(0.48), dec!(600))),
+        Some((dec!(0.45), dec!(600))),
+        NOW,
+    );
+    let markets = vec![market()];
+    let got = candidates_of(&mut a, &markets, 600, NOW, &fresh);
+    assert_eq!(got.len(), 2, "armed inside the window");
+    drain_exits(&mut a);
+
+    // T-100 — far inside the back half — still emits the merge collection.
+    let got2 = candidates_of(&mut a, &markets, 100, NOW + 1_000, &fresh);
+    assert!(got2.is_empty(), "no NEW attempt in the back half: {got2:?}");
+    let exits = drain_exits(&mut a);
+    assert_eq!(exits.len(), 2, "collection runs past the window");
+    assert!(exits.iter().all(|e| e.reason == "merge"));
+}
+
+/// `entry_window = 0` disables the window: the whole round enters — the v1.1
+/// posture, byte-identical where the old tests sit (T-10, T-500, T-600…).
+#[test]
+fn entry_window_zero_restores_the_whole_round() {
+    let mut a = adapter_with_params("entry_window", "0");
+    let fresh = pair_fresh(
+        Some((dec!(0.48), dec!(600))),
+        Some((dec!(0.45), dec!(600))),
+        NOW,
+    );
+    let markets = vec![market()];
+    let got = candidates_of(&mut a, &markets, 100, NOW, &fresh);
+    assert_eq!(
+        got.len(),
+        2,
+        "window 0: T-100 (back half of 900) still fires"
     );
 }
 
