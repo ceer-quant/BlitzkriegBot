@@ -62,12 +62,19 @@
 //! # Environment layering
 //!
 //! Per setting: per-account env > per-account TOML > global env > global
-//! TOML > compiled default. The global env vars are `BUDGET_RATIO` and
-//! `MAX_BUDGET_USD`; the per-account form is the same name with the account
-//! id uppercased and every non-alphanumeric turned into `_`, e.g.
-//! `BUDGET_RATIO_BINANCE_MAIN` for account `binance-main`. Env is read at
-//! load time only (a restart picks up changes), matching the repo's
-//! restart-to-change knob discipline.
+//! TOML > compiled default. The issue-751 single-source family is the
+//! `POLICY_`-prefixed one — `POLICY_BUDGET_RATIO` / `POLICY_MIN_BUDGET_USD` /
+//! `POLICY_MAX_BUDGET_USD` / `POLICY_MIN_EQUITY_USD` /
+//! `POLICY_MAX_POSITIONS_PER_ASSET` / `POLICY_RULES` (the last a rules JSON
+//! array string), with the account id uppercased and every non-alphanumeric
+//! turned into `_`, e.g. `POLICY_BUDGET_RATIO_BINANCE_MAIN` for account
+//! `binance-main`. The pre-751 bare names (`BUDGET_RATIO`, `MAX_BUDGET_USD`)
+//! stay as read-only aliases. An ACCOUNT_LIST id carrying any `POLICY_<ID>_*
+//!` key forms an env-only section even without a TOML row; the write face
+//! (`execution_policy.set`/`.reset`) writes these keys into the `.env` and
+//! refuses while the legacy toml file still exists. Env is read at load time
+//! only (a restart — or an IPC write's reload — picks up changes), matching
+//! the repo's restart-to-change knob discipline.
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -900,14 +907,21 @@ impl Default for Policy {
 
 impl Policy {
     /// Load + parse + validate the config at `path`. A MISSING file is the
-    /// zero-config deployment (code defaults, no account sections); a file
-    /// that exists but does not parse, misses a field, or carries an
-    /// out-of-range value REFUSES (fail-closed) — the caller refuses the
-    /// boot rather than trading under a policy the operator did not write.
+    /// zero-config deployment (code defaults, no account sections) — with the
+    /// #751 env layer still folded on top (POLICY_* keys in the process
+    /// environment are the whole surface once the toml retires); a file that
+    /// exists but does not parse, misses a field, or carries an out-of-range
+    /// value REFUSES (fail-closed) — the caller refuses the boot rather than
+    /// trading under a policy the operator did not write.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            // A version-1 empty file: the typed empty PolicyFile the env-only
+            // boot layers on top of (the bare empty string would parse as
+            // version 0 and refuse).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Self::load_from_str("version = 1\n");
+            }
             Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
         };
         Self::load_from_str(&text)
@@ -918,6 +932,34 @@ impl Policy {
         Self::load_with_env(text, |key| {
             std::env::var(key).ok().filter(|v| !v.trim().is_empty())
         })
+    }
+
+    /// The single-source load (issue 751): same toml-then-env layering, but
+    /// the env reader ALSO sees the `.env` file the launcher owns — the write
+    /// face lands POLICY_* keys there, and a same-process reload must observe
+    /// them before the next launcher restart puts them into the process
+    /// environment. Process environment first (12-factor), file lines second.
+    pub fn load_single_source(path: &Path, env_path: Option<&Path>) -> Result<Self, String> {
+        let file_map: std::collections::HashMap<String, String> = env_path
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|text| {
+                text.lines()
+                    .filter_map(crate::env_file::parse_line)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let env = move |key: &str| -> Option<String> {
+            std::env::var(key)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| file_map.get(key).cloned())
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "version = 1\n".to_string(),
+            Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
+        };
+        Self::load_with_env(&text, env)
     }
 
     /// Parse with an injected env reader — the test seam (mutating the
@@ -941,8 +983,8 @@ impl Policy {
 
         // Per-account sections: globals < account TOML < account env. The
         // map key is the account id; the env suffix uppercases it and maps
-        // every non-alphanumeric to `_` (§: BUDGET_RATIO_<ACCOUNT_ID大写非
-        // 字母数字转下划线>).
+        // every non-alphanumeric to `_` (§: POLICY_BUDGET_RATIO_<ACCOUNT_ID
+        // 大写非字母数字转下划线>).
         let mut accounts = HashMap::new();
         for (id, section) in &file.accounts {
             let label = format!("[accounts.{id}]");
@@ -951,6 +993,23 @@ impl Policy {
             apply_env(&mut resolved, Some(id), &env)?;
             resolved.validate(&label)?;
             accounts.insert(id.clone(), resolved);
+        }
+        // Env-only account sections (issue 751): an ACCOUNT_LIST id carrying
+        // POLICY_<ID>_* keys but no TOML row still forms a section (defaults
+        // < env), so the per-account surface survives the toml's retirement.
+        // Accounts unknown to the toml AND carrying no keys are skipped —
+        // no section, judge under the globals (the established semantics).
+        if let Some(list) = env("ACCOUNT_LIST") {
+            for id in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if accounts.contains_key(id) || !env_has_policy_section(&env, id) {
+                    continue;
+                }
+                let label = format!("[accounts.{id}] (env)");
+                let mut resolved = defaults.clone();
+                apply_env(&mut resolved, Some(id), &env)?;
+                resolved.validate(&label)?;
+                accounts.insert(id.to_string(), resolved);
+            }
         }
         Ok(Self { defaults, accounts })
     }
@@ -1045,9 +1104,12 @@ impl_section_like!(DefaultsSection);
 impl_section_like!(SectionFields);
 
 /// Read the env layer for one section. `account_id: None` = the global names
-/// (`BUDGET_RATIO`, `MAX_BUDGET_USD`); `Some(id)` = the per-account names
-/// (`BUDGET_RATIO_<ID>`, `MAX_BUDGET_USD_<ID>`). Applied AFTER the TOML
-/// layer so env outranks it.
+/// (`POLICY_BUDGET_RATIO`, `POLICY_MIN_BUDGET_USD`, …); `Some(id)` = the
+/// per-account names (`POLICY_BUDGET_RATIO_<ID>`, …). Applied AFTER the TOML
+/// layer so env outranks it. The two pre-#751 bare names (`BUDGET_RATIO`,
+/// `MAX_BUDGET_USD`) stay as compatibility ALIASES read only when the
+/// POLICY_-prefixed key is absent — the write face only ever writes the
+/// prefixed family.
 fn apply_env(
     section: &mut SectionDefaults,
     account_id: Option<&str>,
@@ -1056,17 +1118,68 @@ fn apply_env(
     let suffix = account_id
         .map(|id| format!("_{}", env_account_suffix(id)))
         .unwrap_or_default();
-    let ratio_key = format!("BUDGET_RATIO{suffix}");
-    let max_key = format!("MAX_BUDGET_USD{suffix}");
-    if let Some(raw) = env(&ratio_key) {
-        section.budget_ratio = Decimal::from_str_exact(raw.trim())
-            .map_err(|_| format!("env {ratio_key}={raw:?} does not parse as a decimal"))?;
+    // Prefixed family first; the pre-#751 bare names stay as read-only
+    // aliases when the prefixed key is absent.
+    let ratio_raw = env(&format!("POLICY_BUDGET_RATIO{suffix}"))
+        .or_else(|| env(&format!("BUDGET_RATIO{suffix}")));
+    if let Some(raw) = ratio_raw {
+        section.budget_ratio = Decimal::from_str_exact(raw.trim()).map_err(|_| {
+            format!("env POLICY_BUDGET_RATIO{suffix}={raw:?} does not parse as a decimal")
+        })?;
     }
-    if let Some(raw) = env(&max_key) {
-        section.max_budget_usd = Decimal::from_str_exact(raw.trim())
-            .map_err(|_| format!("env {max_key}={raw:?} does not parse as a decimal"))?;
+    if let Some(raw) = env(&format!("POLICY_MIN_BUDGET_USD{suffix}")) {
+        section.min_budget_usd = Decimal::from_str_exact(raw.trim()).map_err(|_| {
+            format!("env POLICY_MIN_BUDGET_USD{suffix}={raw:?} does not parse as a decimal")
+        })?;
+    }
+    let max_raw = env(&format!("POLICY_MAX_BUDGET_USD{suffix}"))
+        .or_else(|| env(&format!("MAX_BUDGET_USD{suffix}")));
+    if let Some(raw) = max_raw {
+        section.max_budget_usd = Decimal::from_str_exact(raw.trim()).map_err(|_| {
+            format!("env POLICY_MAX_BUDGET_USD{suffix}={raw:?} does not parse as a decimal")
+        })?;
+    }
+    if let Some(raw) = env(&format!("POLICY_MIN_EQUITY_USD{suffix}")) {
+        section.min_equity_usd = Decimal::from_str_exact(raw.trim()).map_err(|_| {
+            format!("env POLICY_MIN_EQUITY_USD{suffix}={raw:?} does not parse as a decimal")
+        })?;
+    }
+    if let Some(raw) = env(&format!("POLICY_MAX_POSITIONS_PER_ASSET{suffix}")) {
+        let v: u32 = raw.trim().parse().map_err(|_| {
+            format!("env POLICY_MAX_POSITIONS_PER_ASSET{suffix}={raw:?} does not parse as u32")
+        })?;
+        section.max_positions_per_asset = v;
+    }
+    if let Some(raw) = env(&format!("POLICY_RULES{suffix}")) {
+        let rules: Vec<Rule> = serde_json::from_str(raw.trim()).map_err(|e| {
+            format!("env POLICY_RULES{suffix} does not parse as a rules JSON array: {e}")
+        })?;
+        for r in &rules {
+            r.then
+                .validate(&r.name)
+                .map_err(|e| format!("env POLICY_RULES{suffix}: {e}"))?;
+        }
+        section.rules = rules;
     }
     Ok(())
+}
+
+/// Whether ANY per-account POLICY_* key names this id — the "this account has
+/// an env section" probe that registers env-only sections for accounts the
+/// TOML has no `[accounts.<id>]` row for (issue 751: after the toml retires,
+/// ACCOUNT_LIST + these keys ARE the per-account policy surface).
+fn env_has_policy_section(env: &impl Fn(&str) -> Option<String>, id: &str) -> bool {
+    let sfx = env_account_suffix(id);
+    [
+        format!("POLICY_BUDGET_RATIO_{sfx}"),
+        format!("POLICY_MIN_BUDGET_USD_{sfx}"),
+        format!("POLICY_MAX_BUDGET_USD_{sfx}"),
+        format!("POLICY_MIN_EQUITY_USD_{sfx}"),
+        format!("POLICY_MAX_POSITIONS_PER_ASSET_{sfx}"),
+        format!("POLICY_RULES_{sfx}"),
+    ]
+    .iter()
+    .any(|k| env(k).is_some())
 }
 
 /// The env suffix for an account id: uppercased, non-alphanumerics → `_`.
@@ -1870,6 +1983,104 @@ then = { budget_ratio = 0.05 }
             Policy::load_with_env("version = 1\n[defaults]\nbudget_ratio = 0.10\n", no_env)
                 .unwrap();
         assert_eq!(policy.defaults.budget_ratio, dec!(0.10));
+    }
+
+    #[test]
+    fn prefixed_env_keys_layer_over_toml_and_outrank_it() {
+        // The issue 751 family: POLICY_* beats the TOML value; every decimal
+        // knob + the position cap + RULES are settable from env alone.
+        let policy = Policy::load_with_env(
+            "version = 1\n[defaults]\nbudget_ratio = 0.10\nmax_budget_usd = 50\n",
+            |k| match k {
+                "POLICY_BUDGET_RATIO" => Some("0.02".into()),
+                "POLICY_MIN_BUDGET_USD" => Some("1".into()),
+                "POLICY_MAX_BUDGET_USD" => Some("30".into()),
+                "POLICY_MIN_EQUITY_USD" => Some("2".into()),
+                "POLICY_MAX_POSITIONS_PER_ASSET" => Some("3".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        assert_eq!(policy.defaults.budget_ratio, dec!(0.02));
+        assert_eq!(policy.defaults.min_budget_usd, dec!(1));
+        assert_eq!(policy.defaults.max_budget_usd, dec!(30));
+        assert_eq!(policy.defaults.min_equity_usd, dec!(2));
+        assert_eq!(policy.defaults.max_positions_per_asset, 3);
+    }
+
+    #[test]
+    fn bare_env_names_stay_as_read_only_aliases() {
+        // The pre-751 spelling still works, and a POLICY_-prefixed twin
+        // outranks it (the write face only ever writes the prefixed family).
+        let prefixed = Policy::load_with_env("version = 1\n[defaults]\n", |k| {
+            (k == "POLICY_BUDGET_RATIO").then(|| "0.01".to_string())
+        })
+        .unwrap();
+        assert_eq!(prefixed.defaults.budget_ratio, dec!(0.01));
+        let alias = Policy::load_with_env("version = 1\n[defaults]\n", |k| {
+            (k == "BUDGET_RATIO").then(|| "0.02".to_string())
+        })
+        .unwrap();
+        assert_eq!(alias.defaults.budget_ratio, dec!(0.02));
+        let both = Policy::load_with_env("version = 1\n[defaults]\n", |k| match k {
+            "POLICY_BUDGET_RATIO" => Some("0.01".into()),
+            "BUDGET_RATIO" => Some("0.02".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(both.defaults.budget_ratio, dec!(0.01));
+    }
+
+    #[test]
+    fn env_only_account_section_forms_from_the_account_list() {
+        // An ACCOUNT_LIST id carrying POLICY_<ID>_* keys but no TOML row
+        // still gets a section (defaults < env) — the per-account surface
+        // survives the toml's retirement.
+        let policy =
+            Policy::load_with_env(
+                "version = 1\n[defaults]\nbudget_ratio = 0.10\n",
+                |k| match k {
+                    "ACCOUNT_LIST" => Some("default,hft-9".into()),
+                    "POLICY_BUDGET_RATIO_HFT_9" => Some("0.07".into()),
+                    _ => None,
+                },
+            )
+            .unwrap();
+        assert_eq!(policy.section_for("hft-9").budget_ratio, dec!(0.07));
+        assert_eq!(policy.section_for("default").budget_ratio, dec!(0.10));
+    }
+
+    #[test]
+    fn env_rules_json_parses_and_replaces_the_section() {
+        let rules = r#"[{"name":"tiny","priority":1,"enabled":true,"when":"available_balance < 20","then":{"budget_ratio":0.05}}]"#;
+        let policy = Policy::load_with_env("version = 1\n[accounts.acct-a]\n", |k| match k {
+            "ACCOUNT_LIST" => Some("acct-a".into()),
+            "POLICY_RULES_ACCT_A" => Some(rules.into()),
+            _ => None,
+        })
+        .unwrap();
+        let acct = policy.accounts.get("acct-a").unwrap();
+        assert_eq!(acct.rules.len(), 1);
+        assert_eq!(acct.rules[0].name, "tiny");
+        // A malformed array refuses with the key named (fail-closed).
+        let err = Policy::load_with_env("version = 1\n[accounts.acct-a]\n", |k| match k {
+            "ACCOUNT_LIST" => Some("acct-a".into()),
+            "POLICY_RULES_ACCT_A" => Some("[{not json".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(err.contains("POLICY_RULES_ACCT_A"), "{err}");
+    }
+
+    #[test]
+    fn missing_toml_still_layers_the_env() {
+        // load() on a NotFound path is no longer a bare default: the POLICY_*
+        // process env IS the whole surface once the toml retires.
+        let policy = Policy::load_with_env("version = 1\n", |k| {
+            (k == "POLICY_BUDGET_RATIO").then(|| "0.03".to_string())
+        })
+        .unwrap();
+        assert_eq!(policy.defaults.budget_ratio, dec!(0.03));
     }
 
     #[test]

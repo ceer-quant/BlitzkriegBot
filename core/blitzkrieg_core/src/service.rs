@@ -1199,7 +1199,11 @@ impl Core {
             .execution_policy_path
             .as_deref()
             .map(std::path::Path::new)?;
-        match crate::execution_policy::Policy::load(path) {
+        // Single-source read (issue 751): the launcher folds .env into the
+        // process environment, but the file face is read too so a same-checkout
+        // tool spawn (no launcher) still sees the operator's POLICY_* keys.
+        let env_file = config.env_file_path.as_deref().map(std::path::Path::new);
+        match crate::execution_policy::Policy::load_single_source(path, env_file) {
             Ok(policy) => Some(policy),
             Err(reason) => {
                 crate::execution_policy::append_audit_to(
@@ -1420,7 +1424,18 @@ impl Core {
             .execution_policy_path
             .clone()
             .ok_or_else(|| "execution policy disabled (no config path)".to_string())?;
-        match crate::execution_policy::Policy::load(std::path::Path::new(&path)) {
+        // Single-source read (issue 751): the write face lands POLICY_* keys
+        // in the .env the launcher owns — a same-process reload must see them
+        // before the next restart folds the file into the process env.
+        let env_file = self
+            .config
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new);
+        match crate::execution_policy::Policy::load_single_source(
+            std::path::Path::new(&path),
+            env_file,
+        ) {
             Ok(policy) => {
                 let mut positions = self.config.positions.clone();
                 positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;

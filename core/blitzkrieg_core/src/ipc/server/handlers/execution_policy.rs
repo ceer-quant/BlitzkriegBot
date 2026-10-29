@@ -127,10 +127,16 @@ async fn execution_policy_set(
     core: &Arc<AsyncMutex<Core>>,
     p: ExecutionPolicySetParams,
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
-    let path = {
+    let (path, env_path) = {
         let c = core.lock().await;
         match c.config().execution_policy_path.clone() {
-            Some(p) => p,
+            Some(p) => (
+                p,
+                c.config()
+                    .env_file_path
+                    .clone()
+                    .map(std::path::PathBuf::from),
+            ),
             None => {
                 return Err((
                     Failure::INVALID_PARAMS,
@@ -146,7 +152,7 @@ async fn execution_policy_set(
             .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
     };
     let section = section_from_set_params(&p).map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
-    policy_section_write(&path, &p.account_id, Some(section))
+    policy_section_write(&path, env_path.as_deref(), &p.account_id, Some(section))
         .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
     let mut c = core.lock().await;
     c.reload_execution_policy()
@@ -176,10 +182,16 @@ async fn execution_policy_reset(
     core: &Arc<AsyncMutex<Core>>,
     p: ExecutionPolicyGetParams,
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
-    let path = {
+    let (path, env_path) = {
         let c = core.lock().await;
         match c.config().execution_policy_path.clone() {
-            Some(p) => p,
+            Some(p) => (
+                p,
+                c.config()
+                    .env_file_path
+                    .clone()
+                    .map(std::path::PathBuf::from),
+            ),
             None => {
                 return Err((
                     Failure::INVALID_PARAMS,
@@ -194,7 +206,7 @@ async fn execution_policy_reset(
         c.execution_policy_section_view(&p.account_id)
             .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
     };
-    policy_section_write(&path, &p.account_id, None)
+    policy_section_write(&path, env_path.as_deref(), &p.account_id, None)
         .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
     let mut c = core.lock().await;
     c.reload_execution_policy()
@@ -275,42 +287,116 @@ fn section_from_set_params(
         .insert("__probe__".to_string(), s.clone());
     let rendered =
         toml::to_string_pretty(&probe_file).map_err(|e| format!("section does not render: {e}"))?;
-    crate::execution_policy::Policy::load_from_str(&rendered)
+    // Zero-env parse: the probe judges the SECTION's shape, never the
+    // process environment's POLICY_* layer (which must not veto an
+    // operator's unrelated write).
+    crate::execution_policy::Policy::load_with_env(&rendered, |_| None)
         .map_err(|e| format!("section rejected: {e}"))?;
     Ok(s)
 }
 
-/// #363: rewrite ONE account section inside the policy TOML (read file →
-/// swap the map entry → write back). The section is REPLACED wholesale —
-/// `set` never touches another account's lines, and `reset` (section =
-/// None) removes the entry so the account falls back to the globals.
-/// Cross-account safety is structural: the caller names exactly one
-/// account id and this function writes exactly that map key.
+/// #363: write ONE account section to the `.env` single source (issue 751).
+/// The section is REPLACED wholesale — every POLICY_<ID>_* key for the
+/// account is swept first, then the `Some` fields land (an absent field =
+/// no key = inherit from the globals, exactly the TOML section-replacement
+/// semantics). `reset` (section = None) sweeps all keys so the account
+/// falls back to the globals.
+///
+/// Fail-closed precondition: while the legacy `execution_policy.toml` still
+/// exists the write REFUSES — the loader reads env over that file, so a
+/// write here would be dead data the operator believes is live; the
+/// migration script owns the one-way move.
 fn policy_section_write(
     path: &str,
+    env_path: Option<&std::path::Path>,
     account_id: &str,
     section: Option<crate::execution_policy::SectionFields>,
 ) -> Result<(), String> {
     if account_id.trim().is_empty() {
         return Err("account id must not be empty".to_string());
     }
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut file: crate::execution_policy::PolicyFile = toml::from_str(&text)
-        .map_err(|e| format!("existing file does not parse; refusing to edit: {e}"))?;
-    match section {
-        Some(s) => {
-            file.accounts.insert(account_id.to_string(), s);
-        }
-        None => {
-            if file.accounts.remove(account_id).is_none() {
-                return Err(format!(
-                    "execution policy: no section for account `{account_id}` to reset"
-                ));
-            }
+    let Some(env_path) = env_path else {
+        return Err(
+            "execution policy: no .env path configured — persistence is \
+             disabled for this core (backtests and in-process tests); \
+             nothing was applied"
+                .to_string(),
+        );
+    };
+    if std::path::Path::new(path).exists() {
+        return Err(format!(
+            "refusing the policy write: the legacy {path} still exists — run \
+             scripts/migrate-config-to-env.sh first (issue 751: one source; \
+             the loader reads POLICY_* env over this file, so a write here \
+             would be dead data)"
+        ));
+    }
+    // The env suffix the loader's env_account_suffix spells: uppercased,
+    // every non-alphanumeric → `_`. Re-derived here with the same rule — the
+    // loader round-trip test pins the two spellings together.
+    let sfx: String = account_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let key = |tail: &str| format!("POLICY_{tail}_{sfx}");
+    // `reset` of a section that is not ON FILE refuses by name (the fat-finger
+    // contract): the six keys are the section's whole footprint, none present
+    // = nothing to reset. The file face is the truth here — a section that
+    // lives only in the process environment is launcher-owned and this write
+    // face never claimed it.
+    let all_keys = [
+        key("BUDGET_RATIO"),
+        key("MIN_BUDGET_USD"),
+        key("MAX_BUDGET_USD"),
+        key("MIN_EQUITY_USD"),
+        key("MAX_POSITIONS_PER_ASSET"),
+        key("RULES"),
+    ];
+    if section.is_none() {
+        let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(crate::env_file::parse_line)
+            .collect();
+        let present = all_keys.iter().any(|k| on_file.contains_key(k));
+        if !present {
+            return Err(format!(
+                "execution policy: no section for account `{account_id}` to reset"
+            ));
         }
     }
-    let out =
-        toml::to_string_pretty(&file).map_err(|e| format!("policy file does not render: {e}"))?;
-    std::fs::write(path, out).map_err(|e| format!("policy file write failed: {e}"))?;
+    // Sweep-then-write (the account layer's posture): remove EVERY section
+    // key for the account, then upsert the `Some` fields — absent = key gone
+    // = inherit from the globals (the TOML section-replacement semantics),
+    // and `reset` rides the same sweep with nothing re-written.
+    let sweep_refs: Vec<&str> = all_keys.iter().map(|k| k.as_str()).collect();
+    crate::env_file::remove_env_vars(env_path, &sweep_refs)
+        .map_err(|e| format!("policy env sweep failed: {e}"))?;
+    let mut vars: std::collections::BTreeMap<String, String> = Default::default();
+    if let Some(s) = &section {
+        if let Some(v) = s.budget_ratio {
+            vars.insert(key("BUDGET_RATIO"), v.to_string());
+        }
+        if let Some(v) = s.min_budget_usd {
+            vars.insert(key("MIN_BUDGET_USD"), v.to_string());
+        }
+        if let Some(v) = s.max_budget_usd {
+            vars.insert(key("MAX_BUDGET_USD"), v.to_string());
+        }
+        if let Some(v) = s.min_equity_usd {
+            vars.insert(key("MIN_EQUITY_USD"), v.to_string());
+        }
+        if let Some(v) = s.max_positions_per_asset {
+            vars.insert(key("MAX_POSITIONS_PER_ASSET"), v.to_string());
+        }
+        if let Some(rules) = &s.rules {
+            let json = serde_json::to_string(rules)
+                .map_err(|e| format!("rules do not render as JSON: {e}"))?;
+            vars.insert(key("RULES"), json);
+        }
+    }
+    crate::env_file::upsert_env_vars(env_path, &vars)
+        .map_err(|e| format!("policy env write failed: {e}"))?;
     Ok(())
 }
