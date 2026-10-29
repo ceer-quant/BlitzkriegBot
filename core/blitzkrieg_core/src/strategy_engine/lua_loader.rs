@@ -1233,6 +1233,45 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// The hold-to-settlement declaration rides the manifest verbatim: a
+    /// declared `true` lands on the package (the pair-completion exemption
+    /// AND the wide containment stop both key off it), absent stays `false`
+    /// — never a silent default-to-holder.
+    #[test]
+    fn manifest_holds_to_settlement_is_read_verbatim() {
+        let tmp = std::env::temp_dir().join(format!("bk-lua-holds-{}", std::process::id()));
+        let pkg_dir = tmp.join("holds_true");
+        std::fs::create_dir_all(&pkg_dir).expect("mkdir");
+        std::fs::write(pkg_dir.join("strategy.lua"), STRATEGY_LUA).expect("write entry");
+        let digest = super::super::loader::sha256_file(&pkg_dir.join("strategy.lua")).expect("sha");
+        let manifest = serde_json::json!({
+            "name": "holds_true",
+            "version": "0.1.0",
+            "api": "1.0",
+            "entry": "strategy.lua",
+            "sha256": digest,
+            "author": "test",
+            "description": "test",
+            "holds_to_settlement": true,
+        });
+        std::fs::write(pkg_dir.join("manifest.json"), manifest.to_string())
+            .expect("write manifest");
+        let loaded = load_lua_package(&pkg_dir).expect("loads");
+        assert!(
+            loaded.holds_to_settlement,
+            "a declared true must land as a holder declaration"
+        );
+
+        // Absent key = false (the historical per-order exit ladder).
+        let pkg_absent = write_package(&tmp.join("holds_absent"), "holds_absent", &[]);
+        let loaded = load_lua_package(&pkg_absent).expect("loads");
+        assert!(
+            !loaded.holds_to_settlement,
+            "an absent key stays false — never a silent default-to-holder"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     /// §6.4: directory name ≠ manifest name → refuse (two identities).
     #[test]
     fn directory_name_mismatch_refuses() {

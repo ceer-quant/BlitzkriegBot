@@ -879,6 +879,14 @@ pub struct PositionManager {
     /// is a policy fact, not per-position state, so it needs no persistence
     /// beyond the strategies themselves.
     trailing_overrides: std::collections::HashMap<String, bool>,
+    /// Per-strategy stop widths for hold-to-settlement strategies (the
+    /// strategies' own declaration, `EngineStrategy::holds_to_settlement`):
+    /// strategy name → the WIDE containment stop (`ExitConfig::holder_stop_pct`)
+    /// its positions' protective stop runs on. Absent = the ordinary
+    /// `stop_loss_pct` ladder, byte-identical to history. Written by the same
+    /// registration beat as `trailing_overrides` — a declaration is a policy
+    /// fact, not per-position state.
+    holder_stop_overrides: std::collections::HashMap<String, Decimal>,
 }
 
 fn cooldown_key(asset: &str, direction: SignalDirection) -> String {
@@ -934,6 +942,7 @@ impl PositionManager {
             ladder_steps_done: Default::default(),
             ladder_stop_floor: Default::default(),
             trailing_overrides: Default::default(),
+            holder_stop_overrides: Default::default(),
         }
     }
 
@@ -957,6 +966,19 @@ impl PositionManager {
     /// IS the "follow the kernel value" state.
     pub fn set_trailing_overrides(&mut self, overrides: std::collections::HashMap<String, bool>) {
         self.trailing_overrides = overrides;
+    }
+
+    /// Refresh the hold-to-settlement strategies' stop widths (the service
+    /// calls this on the SAME registry-change beat as
+    /// [`PositionManager::set_trailing_overrides`]). A whole-map replace keeps
+    /// stale entries of unregistered strategies from lingering; strategies
+    /// that declared nothing are simply absent, which IS the ordinary
+    /// `stop_loss_pct` ladder.
+    pub fn set_holder_stop_overrides(
+        &mut self,
+        overrides: std::collections::HashMap<String, Decimal>,
+    ) {
+        self.holder_stop_overrides = overrides;
     }
 
     pub fn open_positions(&self) -> &[OpenPosition] {
@@ -1823,14 +1845,36 @@ impl PositionManager {
             // kernel-wide config for THIS position's verdict; every other knob
             // stays shared. Cheap: an absent override short-circuits to the
             // borrowed config via an early match arm.
+            // A hold-to-settlement declaration rides the SAME overlay point:
+            // its positions' protective stop runs on the WIDE containment
+            // width (`holder_effective_stop_pct`) instead of the 12% ladder —
+            // the @almach compromise for the live ladder that keeps walking
+            // until venue settlement is proven. The overlay swaps in the
+            // holder VIEW of the config, so every stop reader downstream
+            // (verdict functions, ladder step, suppressed-stop reports) sees
+            // the same flat wide number the PHYSICS projection composes.
+            let holder = self.holder_stop_overrides.contains_key(&pos.strategy);
+            let trailing = self.trailing_overrides.get(&pos.strategy);
             let overridden;
-            let pos_cfg = match self.trailing_overrides.get(&pos.strategy) {
-                None => &cfg,
-                Some(on) if *on == cfg.trailing_enabled => &cfg,
-                Some(on) => {
+            let pos_cfg = match (holder, trailing.copied()) {
+                // No declaration at all: the borrowed config, byte-identical.
+                (false, None) => &cfg,
+                (false, Some(on)) if on == cfg.trailing_enabled => &cfg,
+                // Trailing declaration only.
+                (false, Some(on)) => {
                     overridden = ExitConfig {
-                        trailing_enabled: *on,
+                        trailing_enabled: on,
                         ..cfg.clone()
+                    };
+                    &overridden
+                }
+                // Holder (with or without a trailing declaration — the
+                // kernel's trailing stays OFF by calibration; a `Some(on)`
+                // still wins).
+                (true, trailing_on) => {
+                    overridden = ExitConfig {
+                        trailing_enabled: trailing_on.unwrap_or(cfg.trailing_enabled),
+                        ..cfg.holder_view()
                     };
                     &overridden
                 }
@@ -1993,7 +2037,7 @@ impl PositionManager {
                         Decimal::ZERO
                     },
                     pnl_pct_at_mid: pnl_pct(judged, pos.entry_price),
-                    stop_pct: effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &cfg),
+                    stop_pct: effective_stop_pct(pos_cfg.stop_loss_pct, time_left_sec, pos_cfg),
                     book_age_ms,
                     unpriceable_for_ms,
                     escalated,
@@ -2012,8 +2056,11 @@ impl PositionManager {
             let ladder_owns_verdicts = !self.config.exit_ladder.is_empty();
             if ladder_owns_verdicts && priceable {
                 let ladder = self.config.exit_ladder.clone();
-                let stop_pct =
-                    effective_stop_pct(cfg.stop_loss_pct, time_left_sec, &self.config.exit);
+                // The bound stop is the position's OWN config view (the
+                // per-strategy overlay included) — a holder's ladder patrols
+                // at the wide containment width, the same number the verdict
+                // functions just judged on.
+                let stop_pct = effective_stop_pct(pos_cfg.stop_loss_pct, time_left_sec, pos_cfg);
                 let verdict = match &decision {
                     Some(d)
                         if matches!(d.reason, ExitReason::TakeProfit | ExitReason::StopLoss) =>
