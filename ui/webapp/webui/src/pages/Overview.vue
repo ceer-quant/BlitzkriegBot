@@ -364,8 +364,16 @@ const counters = computed(() => [
 ])
 
 // 浮动合计读的是上面已按账户过滤后的持仓集合（数字与当前持仓表同口径）。
+// 口径必须是美元（issue 744）：内核 `unrealizedPct` 是百分数
+// （(现价-入场)/入场*100），那是行内「浮动」列的展示口径；合计若拿百分数
+// 乘份额再当钱显示（signedMoney），10 股 @0.50→0.05 会显示 -900「U」而真实
+// 只有 -4.50。美元浮盈 = (现价-入场) × 份额。`shares` 老内核可能缺省，
+// `Number(p.shares) || 0` 兜底成 0；价格缺位产生的 NaN 也被末尾 `|| 0` 吞掉。
 const unrealized = computed(() =>
-  positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0) * (Number(p.shares) || 0), 0),
+  positions.value.reduce(
+    (a, p) => a + ((Number(p.currentPrice) - Number(p.entryPrice)) * (Number(p.shares) || 0) || 0),
+    0,
+  ),
 )
 
 /**
