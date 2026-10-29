@@ -25,6 +25,7 @@ import {
 } from '@/composables/alertSounds'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
+import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
 import SegmentedControl from '@/components/ui/segmented/SegmentedControl.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
@@ -112,10 +113,20 @@ const marketName = computed(() => {
   )
   return row ? row.venue : (snap.value?.marketActiveName ?? null)
 })
+/**
+ * 倒计时卡徽章的短文案：prediction 在徽章里只说「二元预测」——徽章宽度
+ * 换取行情名可读空间；其余类型维持全称。MARKET_TYPE_LABELS 的全称仍是
+ * 其他消费方（插件页 identity 徽章等）的口径，这里只做本卡的展示缩短。
+ */
+function shortMarketType(label: string): string {
+  return label === '二元预测市场' ? '二元预测' : label
+}
 const marketTypeText = computed(() => {
-  if (!identityVenue.value) return marketTypeLabel(snap.value?.marketActiveType ?? null)
+  if (!identityVenue.value) return shortMarketType(marketTypeLabel(snap.value?.marketActiveType ?? null))
   const row = snap.value?.marketPlugins?.find((p) => p.name === identityVenue.value)
-  return row ? marketTypeLabel(row.type ?? row.kind ?? null) : marketTypeLabel(snap.value?.marketActiveType ?? null)
+  return row
+    ? shortMarketType(marketTypeLabel(row.type ?? row.kind ?? null))
+    : shortMarketType(marketTypeLabel(snap.value?.marketActiveType ?? null))
 })
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 
