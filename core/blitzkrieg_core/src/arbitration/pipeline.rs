@@ -88,6 +88,15 @@ pub struct IntentCtx<'a> {
     /// carrying this detail, so the audit trail shows the account gate with
     /// the same vocabulary the submission path uses. `None` = may place.
     pub account_entry_block: Option<String>,
+    /// Whether THIS intent's strategy declared hold-to-settlement
+    /// (`Engine::strategy_holds_to_settlement`, read by the caller that also
+    /// owns the engine — the pipeline stays a pure shape). The PHYSICS
+    /// projection then binds the WIDE containment stop
+    /// (`holder_effective_stop_pct`) instead of the 12% ladder: the @almach
+    /// compromise for the live ladder that keeps walking until venue
+    /// settlement is proven. `false` = the ordinary projection,
+    /// byte-identical to history.
+    pub strategy_holds_to_settlement: bool,
     /// E26 (§4.2): the aggregates the systemic limits judge, read from the
     /// books by the caller. Carried rather than computed here so this module
     /// stays a pure shape (rule 1) and never needs a second path to the
@@ -398,12 +407,20 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
         // `effective_stop_pct`, one full-close step at take-profit. The
         // `stop_pct` re-read below is the trace's own wording — the same pure
         // function of the same inputs, not a second judgment.
-        let stop_pct =
-            effective_stop_pct(ctx.exit_cfg.stop_loss_pct, ctx.time_left_sec, ctx.exit_cfg);
+        // A hold-to-settlement strategy's binding runs the WIDE containment
+        // stop (`holder_effective_stop_pct`, flat — no tightening ramp) — the
+        // same number the position walker's overlay enforces, so the audit
+        // binding and the live discipline cannot quote different numbers.
+        let base_cfg = if ctx.strategy_holds_to_settlement {
+            ctx.exit_cfg.holder_view()
+        } else {
+            ctx.exit_cfg.clone()
+        };
+        let stop_pct = effective_stop_pct(base_cfg.stop_loss_pct, ctx.time_left_sec, &base_cfg);
         let physics = apply_physics(
             intent.request.price,
             ctx.time_left_sec,
-            ctx.exit_cfg,
+            &base_cfg,
             &ctx.risk.config().explicit_ladder,
         );
         let stop_price = physics.stop_price;
@@ -513,6 +530,7 @@ mod tests {
             equity: dec!(1000),
             account_entry_block: None,
             systemic_facts: SystemicFacts::default(),
+            strategy_holds_to_settlement: false,
         }
     }
 
@@ -569,6 +587,65 @@ mod tests {
         assert_eq!(physics.stop_price, want_stop);
         // The probe released: the ledger is net-unchanged.
         assert_eq!(ledger.reserved(), Decimal::ZERO);
+    }
+
+    /// A hold-to-settlement strategy's PHYSICS projection binds the WIDE
+    /// containment stop — flat at `holder_stop_pct` (50% shipped) at every
+    /// time-left, no tightening ramp — while a non-holder's stays the
+    /// ordinary 12% projection byte-identically. The audit binding quotes
+    /// the same discipline the position walker enforces.
+    #[test]
+    fn holder_projection_binds_the_wide_containment_stop() {
+        let (mut ledger, risk, breaker, exit_cfg, tokens) = setup();
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c.strategy_holds_to_settlement = true;
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c,
+        );
+        let Decision::Approved { physics, .. } = &out.decision else {
+            panic!("expected Approved: {:?}", out.decision);
+        };
+        // Flat at 50%: 0.40 * (1 - 0.50) = 0.20 — the pre-settlement 0.4 →
+        // 0.25 drift survives unrealized, a slide to zero does not.
+        assert_eq!(
+            physics.stop_price,
+            dec!(0.40) * (Decimal::ONE - exit_cfg.holder_stop_pct / Decimal::from(100)),
+            "holder projection must bind at the wide containment width"
+        );
+        assert_eq!(physics.stop_price, dec!(0.20));
+
+        // Tightening-ramp immunity: near expiry (10 s left, deep inside the
+        // 300 s ramp) the holder's stop is STILL the wide width — the ramp
+        // may not re-open the 12% bleed through the back door.
+        let mut c_near = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c_near.strategy_holds_to_settlement = true;
+        c_near.time_left_sec = 10;
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c_near,
+        );
+        let Decision::Approved { physics, .. } = &out.decision else {
+            panic!("expected Approved: {:?}", out.decision);
+        };
+        assert_eq!(physics.stop_price, dec!(0.20), "flat at expiry approach");
+
+        // A non-holder under the SAME config keeps the ordinary 12% stop,
+        // byte-identical to the shipped projection.
+        let mut c_plain = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        c_plain.time_left_sec = 600;
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
+            &mut c_plain,
+        );
+        let Decision::Approved { physics, .. } = &out.decision else {
+            panic!("expected Approved: {:?}", out.decision);
+        };
+        assert_eq!(
+            physics.stop_price,
+            dec!(0.40) * (Decimal::ONE - exit_cfg.stop_loss_pct / Decimal::from(100)),
+            "non-holder keeps the 12% projection"
+        );
     }
 
     /// Gate 1: a price outside the prediction band is refused at LEGALITY and

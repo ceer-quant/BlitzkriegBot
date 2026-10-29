@@ -72,6 +72,28 @@ impl Core {
             })
             .unwrap_or_default();
         self.positions.set_trailing_overrides(overrides);
+        // Hold-to-settlement declarations ride the SAME beat: a holder's
+        // positions get the WIDE containment stop (`ExitConfig::holder_stop_
+        // pct`) instead of the 12% ladder — the @almach compromise for the
+        // live ladder that keeps walking until venue settlement is proven.
+        // Whole-map replace, same staleness rule.
+        let holder_stops: std::collections::HashMap<String, Decimal> = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.strategy_refs()
+                    .into_iter()
+                    .filter(|s| s.holds_to_settlement())
+                    .map(|s| {
+                        (
+                            s.name().to_string(),
+                            self.config.positions.exit.holder_stop_pct,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.positions.set_holder_stop_overrides(holder_stops);
     }
 
     pub(super) fn emit_shadow_outcome(&self, outcome: EvolutionOutcome) {
@@ -1361,6 +1383,13 @@ impl Core {
                 // the account borrow — resting BUY notional joins the
                 // exposure (cash already promised).
                 let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
+                // The PHYSICS projection needs the strategy's own doctrine:
+                // a hold-to-settlement declaration widens the bound stop
+                // (the wide containment width, not the 12% ladder).
+                let strategy_holds_to_settlement = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.strategy_holds_to_settlement(&intent.request.strategy));
                 // E28 (§9.3): the pipeline's reserve happens in THIS account's
                 // book. An unknown account is refused — no implicit empty book,
                 // ever (reverse acceptance C) — with the same Gate-2 accounting
@@ -1391,6 +1420,7 @@ impl Core {
                             equity,
                             account_entry_block,
                             systemic_facts,
+                            strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)
                     }
@@ -1780,6 +1810,12 @@ impl Core {
                 // #461: the systemic aggregates are read BEFORE the account
                 // borrow — resting BUY notional joins the exposure.
                 let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
+                // Same PHYSICS doctrine read as the real cycle: a
+                // hold-to-settlement declaration widens the bound stop.
+                let strategy_holds_to_settlement = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.strategy_holds_to_settlement(&intent.request.strategy));
                 // E28 (§9.3): the reserve happens in THIS account's book.
                 match self.accounts.get_mut(&account_id) {
                     Err(e) => crate::arbitration::Outcome {
@@ -1804,6 +1840,7 @@ impl Core {
                             equity,
                             account_entry_block,
                             systemic_facts,
+                            strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)
                     }

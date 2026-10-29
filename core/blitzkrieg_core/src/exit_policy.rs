@@ -105,6 +105,18 @@ pub struct ExitConfig {
     pub min_time_left_sec: i64,
     pub take_profit_pct: Decimal,
     pub stop_loss_pct: Decimal,
+    /// The stop width a hold-to-settlement strategy's positions run on when
+    /// the exit ladder is still LIVE-enforced (the ladder skip at
+    /// `risk_admission` only holds where the kernel settles locally — the
+    /// live ladder keeps walking until venue resolution is proven, by
+    /// design). @almach's containment compromise: a holder's exit is SUPPOSED
+    /// to be the settlement, so the shipped 12% stop keeps converting the
+    /// normal 0.4 → 0.25 pre-settlement drift into realized losses (the
+    /// live line's managed window bled net -$9.77 with 63% of exits
+    /// stop_loss); 50% only guards the tail before a total wipeout. Wider
+    /// than `stop_loss_pct`, still a stop — nothing here re-enables the
+    /// profit side (trailing stays OFF by calibration).
+    pub holder_stop_pct: Decimal,
     pub simple_exit_enabled: bool,
     pub dynamic_stop_enabled: bool,
     pub stop_tighten_start_sec: i64,
@@ -172,6 +184,40 @@ const QUOTE_TRUST_SEC: i64 = 30;
 /// while a remembered price has no one standing behind it.
 const BOOK_TRUST_SEC: i64 = QUOTE_TRUST_SEC * 2;
 
+/// The stop width a hold-to-settlement strategy's positions run on (`HOLDS_
+/// STOP_PCT`, the task's calibration): containment only — see
+/// [`ExitConfig::holder_stop_pct`]. A `const` because it is the calibrated
+/// DEFAULT the config ships with, not a runtime variable; an operator can
+/// still pin a different width in the config file.
+pub const HOLDS_STOP_PCT: Decimal = Decimal::from_parts(50, 0, 0, false, 0);
+
+impl ExitConfig {
+    /// The config-in-force for a position whose strategy declared
+    /// hold-to-settlement: the protective stop's BASE (both the simple and
+    /// the tight-stop form) and the tightening ramp's FLOOR all sit at
+    /// [`ExitConfig::holder_stop_pct`], so `effective_stop_pct` — the one
+    /// function every stop reader already calls — comes out FLAT at that
+    /// width. Flat on purpose: the ramp's job is to close the exit window as
+    /// settlement approaches, which is exactly the window a holder must ride
+    /// out (a re-tightened stop would re-open the 12%-style bleed through
+    /// the back door).
+    ///
+    /// Why a view and not a parameter: the verdict functions, the ladder
+    /// step, the suppressed-stop reports and the PHYSICS projection all read
+    /// a `&ExitConfig`. Rewiring the view at the two points that KNOW the
+    /// declaration (the position walker's per-strategy overlay, the
+    /// arbitration ctx) keeps one arithmetic and one number everywhere —
+    /// no threshold has two truths.
+    pub fn holder_view(&self) -> ExitConfig {
+        ExitConfig {
+            stop_loss_pct: self.holder_stop_pct,
+            stop_min_pct: self.holder_stop_pct,
+            tight_stop_pct: self.holder_stop_pct,
+            ..self.clone()
+        }
+    }
+}
+
 impl Default for ExitConfig {
     fn default() -> Self {
         // Calibrated against the one proven-profitable on-chain operator the
@@ -201,6 +247,10 @@ impl Default for ExitConfig {
             // 12% caps the loss near $0.55; the canonical exit sweep over 62
             // path-recorded trades puts SL12 as the profit/PF sweet spot.
             stop_loss_pct: dec!(12),
+            // Hold-to-settlement containment (see the field's doc): 50% —
+            // wide enough that the 0.4 → 0.25 pre-settlement drift survives
+            // unrealized, narrow enough to catch a real slide to zero.
+            holder_stop_pct: HOLDS_STOP_PCT,
             simple_exit_enabled: true,
             dynamic_stop_enabled: true,
             stop_tighten_start_sec: 300,
@@ -322,6 +372,17 @@ pub fn effective_stop_pct(base: Decimal, time_left_sec: i64, cfg: &ExitConfig) -
     }
     let frac = Decimal::from(time_left_sec - floor_t) / Decimal::from(start - floor_t);
     min_pct + (base - min_pct) * frac
+}
+
+/// The stop percent the exit ladder enforces on a position whose strategy
+/// declared hold-to-settlement: the holder view's numbers through the SAME
+/// [`effective_stop_pct`] the ordinary path walks (which, for the holder
+/// view, is flat at [`ExitConfig::holder_stop_pct`]). Called by BOTH
+/// enforcement points — the position walker's overlay and the PHYSICS
+/// projection — so the binding and the walker cannot quote different
+/// numbers.
+pub fn holder_effective_stop_pct(time_left_sec: i64, cfg: &ExitConfig) -> Decimal {
+    effective_stop_pct(cfg.holder_stop_pct, time_left_sec, &cfg.holder_view())
 }
 
 // ── The taker-fee schedule (#182, #203) ─────────────────────────────────────
@@ -1448,6 +1509,42 @@ mod tests {
         assert_eq!(s.name, "legacy_quadratic");
         assert_eq!(s.rate, dec!(0.125));
         assert_eq!(s.exponent, 2);
+    }
+
+    /// The holder view: the protective stop comes out FLAT at the wide
+    /// containment width (no ramp), while a non-holder's stop keeps its
+    /// tightening ramp — and the shipped widths are the calibrated ones.
+    #[test]
+    fn holder_view_flattens_the_stop_at_the_wide_width() {
+        let cfg = ExitConfig::default();
+        // The @almach containment compromise, pinned: 50% wide vs 12% base.
+        assert_eq!(cfg.holder_stop_pct, HOLDS_STOP_PCT);
+        assert_eq!(cfg.stop_loss_pct, dec!(12));
+
+        // Non-holder: the ramp tightens from 12% (far) toward the 10% floor
+        // (at expiry itself — force_exit 0 makes the floor time the expiry).
+        let far = effective_stop_pct(cfg.stop_loss_pct, 600, &cfg);
+        let near = effective_stop_pct(cfg.stop_loss_pct, 10, &cfg);
+        let floor = effective_stop_pct(cfg.stop_loss_pct, 0, &cfg);
+        assert_eq!(far, dec!(12));
+        assert_eq!(floor, dec!(10));
+        assert!(
+            near > floor && near < far,
+            "mid-ramp between 10 and 12: {near}"
+        );
+
+        // Holder: flat at the wide width at EVERY time-left — the ramp may
+        // not re-open the bleed through the back door.
+        for t in [600i64, 300, 60, 10, 1] {
+            assert_eq!(
+                holder_effective_stop_pct(t, &cfg),
+                dec!(50),
+                "holder stop must be flat 50% at t={t}s"
+            );
+        }
+        // The view is a pure projection: the kernel-wide config is untouched.
+        assert_eq!(cfg.stop_loss_pct, dec!(12));
+        assert_eq!(cfg.stop_min_pct, dec!(10));
     }
 
     /// The legacy curve as charged: `0.125*(p*(1-p))^2` per share, quoted as a

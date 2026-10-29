@@ -630,11 +630,23 @@ impl Core {
             let limits = self.risk.systemic_snapshot();
             if limits.any_armed() {
                 let facts = self.systemic_facts(&req.asset, now_ms);
-                let bound_stop_pct = crate::exit_policy::effective_stop_pct(
-                    self.config.positions.exit.stop_loss_pct,
-                    0,
-                    &self.config.positions.exit,
-                );
+                // The bound stop is the discipline that will ACTUALLY fire:
+                // a hold-to-settlement strategy's ladder walks the wide
+                // containment width, so the cap judges on that number too
+                // (the same doctrine the PHYSICS projection binds).
+                let holder = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy));
+                let bound_stop_pct = if holder {
+                    crate::exit_policy::holder_effective_stop_pct(0, &self.config.positions.exit)
+                } else {
+                    crate::exit_policy::effective_stop_pct(
+                        self.config.positions.exit.stop_loss_pct,
+                        0,
+                        &self.config.positions.exit,
+                    )
+                };
                 match crate::risk::limits::judge_entry(
                     limits,
                     &facts,
@@ -1833,13 +1845,24 @@ impl Core {
                     .sum(),
                 day_realized_usd: self.positions.daily_pnl_total(),
             };
-            let bound_stop_pct = crate::exit_policy::effective_stop_pct(
-                self.config.positions.exit.stop_loss_pct,
-                // Time left is unknown on this path; 0 = the bound stop at its
-                // tightest (no time-adjustment relief), the conservative read.
-                0,
-                &self.config.positions.exit,
-            );
+            // Same doctrine as the pipeline gate: a holder's bound stop is
+            // the wide containment width the walker will actually enforce.
+            let holder = self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy));
+            let bound_stop_pct = if holder {
+                crate::exit_policy::holder_effective_stop_pct(0, &self.config.positions.exit)
+            } else {
+                crate::exit_policy::effective_stop_pct(
+                    self.config.positions.exit.stop_loss_pct,
+                    // Time left is unknown on this path; 0 = the bound stop at
+                    // its tightest (no time-adjustment relief), the
+                    // conservative read.
+                    0,
+                    &self.config.positions.exit,
+                )
+            };
             if let crate::risk::limits::EntryJudgment::Reject { detail, .. } =
                 crate::risk::limits::judge_entry(
                     limits,

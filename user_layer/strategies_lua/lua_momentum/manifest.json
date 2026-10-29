@@ -5,8 +5,9 @@
   "entry": "strategy.lua",
   "sha256": "943ed8fee5f0503c6d305ed02e431e667b90f7ceff444d73468d16d0827bc8f2",
   "author": "BlitzkriegBot",
-  "description": "Official Lua EXAMPLE (E30/#336) — teaching fixture, NOT for production: measured net -$17,575.78 over 20,038 closed trades on the v2 corpus census (RETEST-2026-10-10); single-tick confirmation rides naked legs into settlement zeros. Do not enable.",
-  "trailing_exit": true,
+  "description": "Official Lua example (E30/issue 336) — v2-corpus census (RETEST-2026-10-10) measured the taker shape at net -$17,575.78 over 20,038 closed trades. After issue 742 (pure-maker entries) the live line's UNMANAGED window (2026-10-24→26) went net +$12.65, all-positive; this package now declares hold-to-settlement — its exits are expiry redemption, not stop ladders.",
+  "trailing_exit": false,
+  "holds_to_settlement": true,
   "tunables": {
     "threshold": {
       "type": "decimal",

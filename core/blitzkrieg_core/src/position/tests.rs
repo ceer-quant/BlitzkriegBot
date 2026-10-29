@@ -988,6 +988,99 @@ fn a_strategy_trailing_declaration_overrides_the_kernel_value_for_its_positions(
     );
 }
 
+/// A hold-to-settlement strategy's protective stop runs the WIDE containment
+/// width (`holder_stop_pct`, flat — the tightening ramp may not creep back in
+/// as expiry approaches), while a non-holder's stays the 12% ladder
+/// byte-identically. The @almach compromise: a holder's exit is SUPPOSED to
+/// be the settlement, so the normal 0.4 → 0.25 pre-settlement drift must ride
+/// unrealized; only a real slide to zero (−50%) may be cut.
+#[test]
+fn a_holder_declaration_widens_the_protective_stop_for_its_positions() {
+    let mut pm = PositionManager::new(PositionConfig::default());
+    // lua_momentum declared; the default fixture strategy did not.
+    pm.set_holder_stop_overrides(
+        [("holder".into(), pm.config.exit.holder_stop_pct)]
+            .into_iter()
+            .collect(),
+    );
+
+    // Same entry and same price path for both: 0.40 entry, drifting to 0.26
+    // (−35%) — inside the old 12%+tightening window, inside a holder's ride.
+    let mut held = params("BTC", SignalDirection::Up, dec!(0.40));
+    held.strategy = "holder".into();
+    let holder_pos = enter(&mut pm, held, OrderRole::Maker, 0);
+    let mut plain = params("ETH", SignalDirection::Up, dec!(0.40));
+    plain.strategy = "bystander".into();
+    let plain_pos = enter(&mut pm, plain, OrderRole::Maker, 0);
+
+    let drift = |token: &str| -> Option<BookView> {
+        if token != "tok_BTC" && token != "tok_ETH" {
+            return None;
+        }
+        Some(BookView::from_snapshot(&two_sided_book(
+            dec!(0.26),
+            dec!(0.28),
+            0,
+        )))
+    };
+
+    // Far from expiry: the 12% ladder would already have fired at 0.348; the
+    // holder rides the drift, the non-holder is cut.
+    let now = holder_pos.expires_at_ms - 400_000;
+    let reqs = pm.check_exits(&drift, now);
+    assert_eq!(reqs.len(), 1, "exactly the non-holder exits: {reqs:?}");
+    assert_eq!(reqs[0].position_id, plain_pos.id);
+    assert_eq!(reqs[0].reason, ExitReason::StopLoss);
+    assert!(
+        !reqs.iter().any(|r| r.position_id == holder_pos.id),
+        "a holder rides a −35% drift: {reqs:?}"
+    );
+
+    // Near expiry (inside the 300 s tightening ramp): the ramp's floor would
+    // pull a widened stop back to ~10% — the holder's width stays FLAT, so
+    // the very same drift is still not exitable.
+    let mut pm2 = PositionManager::new(PositionConfig::default());
+    pm2.set_holder_stop_overrides(
+        [("holder".into(), pm2.config.exit.holder_stop_pct)]
+            .into_iter()
+            .collect(),
+    );
+    let mut held2 = params("BTC", SignalDirection::Up, dec!(0.40));
+    held2.strategy = "holder".into();
+    let holder2 = enter(&mut pm2, held2, OrderRole::Maker, 0);
+    let now = holder2.expires_at_ms - 10_000;
+    let reqs = pm2.check_exits(&drift, now);
+    assert!(
+        reqs.is_empty(),
+        "no ramp re-tightening near expiry for a holder: {reqs:?}"
+    );
+
+    // Containment still bites: a slide past the wide width (0.40 → 0.18 is
+    // −55% > 50%) IS cut — the compromise is a wider stop, not no stop.
+    let mut pm3 = PositionManager::new(PositionConfig::default());
+    pm3.set_holder_stop_overrides(
+        [("holder".into(), pm3.config.exit.holder_stop_pct)]
+            .into_iter()
+            .collect(),
+    );
+    let mut held3 = params("BTC", SignalDirection::Up, dec!(0.40));
+    held3.strategy = "holder".into();
+    let holder3 = enter(&mut pm3, held3, OrderRole::Maker, 0);
+    let now = holder3.expires_at_ms - 400_000;
+    let reqs = pm3.check_exits(
+        &|_| {
+            Some(BookView::from_snapshot(&two_sided_book(
+                dec!(0.18),
+                dec!(0.20),
+                now,
+            )))
+        },
+        now,
+    );
+    assert_eq!(reqs.len(), 1, "the tail guard fires at −55%: {reqs:?}");
+    assert_eq!(reqs[0].reason, ExitReason::StopLoss);
+}
+
 /// #268, item 2: a stale book is an outage, not a thin market. Nothing is
 /// sold while it lasts; when a fresh book arrives the very same rule exits
 /// normally — the hold is a wait, never a permanent trap — and the outage
