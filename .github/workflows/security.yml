@@ -3,7 +3,13 @@ name: Security
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
   schedule:
     # Run weekly on Monday at 9am UTC
     - cron: '0 9 * * 1'

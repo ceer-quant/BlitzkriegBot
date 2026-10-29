@@ -1,0 +1,59 @@
+name: CodeQL
+
+# During migration, default setup remains authoritative. Enable SARIF uploads
+# with CODEQL_ADVANCED_ENABLED=true only after disabling default setup.
+# Workflow filters skip prose-only changes, not code inside documentation dirs.
+on:
+  push:
+    branches: [main, develop, 'release/**']
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python, rust]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          # Default setup rejects advanced SARIF uploads. Still run analysis
+          # during migration and retain the reports for inspection.
+          upload: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' && 'always' || 'never' }}
+          output: codeql-results
+          category: /language:${{ matrix.language }}
+      - name: Retain migration analysis
+        if: vars.CODEQL_ADVANCED_ENABLED != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-migration-${{ matrix.language }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
