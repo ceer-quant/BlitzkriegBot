@@ -2064,7 +2064,18 @@ impl Engine {
                 token_id: sig.token_id.clone(),
                 condition_id: sig.condition_id,
                 side: crate::model::Side::Buy,
-                mode: crate::model::FillPolicy::MakerThenTaker,
+                // `entry_maker` doctrine (manifest `entry_maker` / trait
+                // `entry_maker`): a pure-maker package's legs rest post-only
+                // at their quoted price and NEVER escalate — the submission
+                // sites answer with `maker_timeout_ms = -1` (the OME's
+                // never-escalate clock). Every other strategy keeps the
+                // `MakerThenTaker` entry (maker first, taker chase at
+                // `entry_maker_timeout_ms`), byte-identically.
+                mode: if self.strategy_entry_maker(&sig.strategy) {
+                    crate::model::FillPolicy::Maker
+                } else {
+                    crate::model::FillPolicy::MakerThenTaker
+                },
                 price: sig.price,
                 size,
                 internal_key: if sig.account_id == blitzkrieg_market_api::DEFAULT_ACCOUNT_ID {
@@ -2381,6 +2392,17 @@ impl Engine {
             .iter()
             .find(|s| s.strategy.name() == name)
             .is_some_and(|s| s.strategy.atomic_batch())
+    }
+
+    /// The entry fill-policy doctrine (`entry_maker`) of the named strategy:
+    /// `true` = the host submits this strategy's entries post-only with the
+    /// never-escalate clock. Unknown strategy → false (the default trait
+    /// verdict; fail-closed to today's `MakerThenTaker`).
+    pub fn strategy_entry_maker(&self, name: &str) -> bool {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == name)
+            .is_some_and(|s| s.strategy.entry_maker())
     }
 
     /// RFC-645 A-1 (决议③): whether the named strategy's DECLARATION to

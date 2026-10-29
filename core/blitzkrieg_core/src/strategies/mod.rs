@@ -429,6 +429,23 @@ pub trait EngineStrategy: Send + Sync {
         None
     }
 
+    /// Entry fill-policy doctrine: every entry this strategy emits is a PURE
+    /// MAKER quote-pull — the host builds its `OrderRequest`s as
+    /// `FillPolicy::Maker` (post-only, join the ask) and submits them with the
+    /// OME's never-escalate clock (`maker_timeout_ms < 0`), so an unfilled
+    /// maker leg simply rests to the round's own end-of-life; the taker chase
+    /// a `MakerThenTaker` entry arms never exists. The doctrine is
+    /// package-level (a pair collector that pays taker fees on either leg is a
+    /// different, worse trade), so it declares once and every entry inherits
+    /// it — the same authority shape as [`EngineStrategy::wants_trailing_exit`]:
+    /// NOT a safety bypass (risk gates, sizing, quotas and the batch pre-check
+    /// all still apply; only WHERE the order rests changes). Default false —
+    /// every existing strategy keeps today's `MakerThenTaker` +
+    /// `entry_maker_timeout_ms` behaviour byte-identically.
+    fn entry_maker(&self) -> bool {
+        false
+    }
+
     /// Close intents accumulated since the last drain. The host resolves each
     /// token to a live position and routes it through the SAME exit submission
     /// path as an automated/policy exit (live-sell dedup, `sell_shares`, risk +

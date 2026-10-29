@@ -53,6 +53,11 @@ local state = {
   slot = 1, time_left = 200,
   fees = { name = "official", rate = "0.125", exponent = 2 },
   markets = {}, books = {},
+  -- `bk.params()` bag. The legacy rows run with `entry_window = "0"` — the
+  -- WHOLE-ROUND posture the package shipped in before v1.1 — so every row
+  -- below proves the window addition changed nothing there; the dedicated
+  -- window block overrides the bag per world() call.
+  params = { entry_window = "0" },
 }
 
 local bk = {}
@@ -73,7 +78,7 @@ bk.markets = function()
   return out
 end
 bk.book = function(symbol) return state.books[symbol] end
-bk.params = function() return {} end
+bk.params = function() return state.params end
 bk.fees = function()
   if state.fees == "none" then return nil end
   return state.fees
@@ -118,6 +123,9 @@ local function world(markets, books, time_left, fees, slot)
   end
   state.fees = fees
   state.slot = slot or 1
+  -- Reset the params bag to the legacy (whole-round) posture every row;
+  -- the window block replaces the bag explicitly.
+  state.params = { entry_window = "0" }
 end
 
 local function cond(id)
@@ -366,6 +374,77 @@ do
   world({ cond("c1") },
     { ["up-c1"] = mkbook("0.52", "100"), ["down-c1"] = mkbook("0", "1") }, 10, nil, 2)
   ok(#evaluate().exits == 0, "the previous round leaks no exits")
+end
+
+-- ═══ ENTRY WINDOW (v1.1) ════════════════════════════════════════════════════
+
+-- entry_window = 0.5, round_sec = 900: only time_left >= 450 may OPEN.
+-- The window block sets the params bag explicitly after every world()
+-- (world() resets to the legacy whole-round posture the other rows prove).
+local function window_world(markets, books, time_left, pct, round_sec)
+  world(markets, books, time_left)
+  state.params = { entry_window = pct or "0.5", round_sec = round_sec or "900" }
+end
+
+do
+  reset()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 451)
+  ok(#evaluate().entries == 1, "T-451 is inside the front half (0.5 of 900): fires")
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 450)
+  ok(#evaluate().entries == 0, "T-450 (the boundary) starts the back half: refused")
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 100)
+  ok(#evaluate().entries == 0, "T-100 in the back half: refused")
+end
+
+-- The back-half refusal is SILENT (no latch burned, nothing armed): a fresh
+-- strategy that only ever SAW a closed window still fires the moment the
+-- window opens.
+do
+  reset()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.52", "100"), ["down-c1"] = mkbook("0", "1") }, 100)
+  evaluate()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 800)
+  ok(#evaluate().entries == 1, "back-half look does NOT burn the latch")
+end
+
+-- a 5m family (round_sec = 300): same fraction, its own clock.
+do
+  reset()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 151, "0.5", "300")
+  ok(#evaluate().entries == 1, "5m family: T-151 is inside the front half")
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 150, "0.5", "300")
+  ok(#evaluate().entries == 0, "5m family: T-150 starts the back half")
+end
+
+-- entry_window = 0 disables the window: the whole round enters (the kernel
+-- floor min_time_left_sec=45 still applies — T-50 is back-half but legal).
+do
+  reset()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 50, "0")
+  ok(#evaluate().entries == 1, "window 0 = whole round (back-half T-50 fires)")
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 5, "0")
+  ok(#evaluate().entries == 0, "window 0 does NOT lift the kernel time floor (T-5 refuses)")
+end
+
+-- a corrupt window value falls back to the default (0.5) — the param
+-- reader's nil-guard posture.
+do
+  reset()
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 451, "abc")
+  ok(#evaluate().entries == 1, "corrupt window parses to the 0.5 default (T-451 fires)")
+  window_world({ cond("c1") },
+    { ["up-c1"] = mkbook("0.66", "100"), ["down-c1"] = mkbook("0", "1") }, 100, "abc")
+  ok(#evaluate().entries == 0, "corrupt window parses to the 0.5 default (T-100 refused)")
 end
 
 -- ═══ SEAL ═══════════════════════════════════════════════════════════════════

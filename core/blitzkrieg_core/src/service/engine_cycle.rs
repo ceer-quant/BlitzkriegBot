@@ -1508,7 +1508,21 @@ impl Core {
             if req.side == Side::Buy {
                 self.pair_bind_key(&name, placed_account.as_str(), &token, &req.internal_key);
             }
-            match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
+            // `entry_maker` doctrine: a pure-maker package's leg carries the
+            // OME's never-escalate clock (`maker_timeout_ms < 0` — see
+            // `escalation_delay_ms`); an unfilled quote rests to the round's
+            // own end-of-life. Every other strategy keeps the configured
+            // maker→taker window, byte-identically.
+            let maker_timeout = if self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_entry_maker(&name))
+            {
+                -1
+            } else {
+                self.config.entry_maker_timeout_ms
+            };
+            match self.place(req, maker_timeout, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
                         .entry(strategy_acc_key(&name, placed_account.as_str()))
@@ -1891,7 +1905,21 @@ impl Core {
             if req.side == Side::Buy {
                 self.pair_bind_key(&name, placed_account.as_str(), &token, &req.internal_key);
             }
-            match self.place(req, self.config.entry_maker_timeout_ms, now_ms) {
+            // `entry_maker` doctrine: a pure-maker package's leg carries the
+            // OME's never-escalate clock (`maker_timeout_ms < 0` — see
+            // `escalation_delay_ms`); an unfilled quote rests to the round's
+            // own end-of-life. Every other strategy keeps the configured
+            // maker→taker window, byte-identically.
+            let maker_timeout = if self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.strategy_entry_maker(&name))
+            {
+                -1
+            } else {
+                self.config.entry_maker_timeout_ms
+            };
+            match self.place(req, maker_timeout, now_ms) {
                 Ok((_id, _)) => {
                     self.strategy_accounting
                         .entry(strategy_acc_key(&name, placed_account.as_str()))

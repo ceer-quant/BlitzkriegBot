@@ -1,12 +1,13 @@
 {
   "name": "pair_discount_arb",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "ece8f44b5bb98ce7f494e7364dc2d9bc927b8a9a0b3faf38a0f24243d78a0ae7",
+  "sha256": "02f24adf368193b8f05ffc3cbabb4428fde9b898961974e34687b53028f51fd9",
   "author": "BlitzkriegBot",
-  "description": "Pair-discount collector for binary rounds (@almach mechanism): when ask_UP + ask_DOWN + entry taker fees < max_pair_cost, buy BOTH legs at their asks with EQUAL declared share counts and collect by merging the complete pairs into $1.00/pair of collateral. Profit is locked at entry; the exit is a collection, not a decision — the kernel intercepts the strategy's merge intents before the sell ladder. v1.1 adds the GAP-FILL loop: a partially-filled leg is topped up at its current ask (shortfall = counterpart holding − held, priced ask+fee vs $1 via max_top_up_cost) so partial fills no longer strand a naked remainder at settlement. Fees priced from bk.fees(); no schedule in force means no entries. Signal-only: the kernel adjudicates, sizes, gates, merges and settles every intent.",
+  "description": "Pair-discount collector for binary rounds (@almach mechanism): when ask_UP + ask_DOWN + entry fees < max_pair_cost, buy BOTH legs at their asks with EQUAL declared share counts and collect by merging the complete pairs into $1.00/pair of collateral. Profit is locked at entry; the exit is a collection, not a decision — the kernel intercepts the strategy's merge intents before the sell ladder. v1.2 moves the entry to the maker side of the book (entry_maker: both legs rest post-only at their quoted asks and NEVER escalate to taker — at the current fee schedule a taker-filled pair pays ~3.5% round-trip against a ~2.5% discount, so the taker doctrine is dead; maker legs pay no taker fee) and confines NEW pair attempts to the round's FIRST half (entry_window 0.5 default — the @almach in-round evidence: fill density concentrates early, tail discounts are more expensive; maker_mode=0/entry_window=0 revert each). v1.1's GAP-FILL loop is unchanged: a partially-filled leg is topped up at its current ask (shortfall = counterpart holding − held, priced ask+fee vs $1 via max_top_up_cost). Fees priced from bk.fees(); no schedule in force means no entries. Signal-only: the kernel adjudicates, sizes, gates, merges and settles every intent.",
   "holds_to_settlement": true,
+  "entry_maker": true,
   "gate_exemptions": {
     "timing": true,
     "momentum": true,
@@ -48,6 +49,18 @@
       "default": "0.995",
       "min": "0.98",
       "max": "0.999"
+    },
+    "entry_window": {
+      "type": "decimal",
+      "default": "0.5",
+      "min": "0",
+      "max": "1"
+    },
+    "round_sec": {
+      "type": "int",
+      "default": "900",
+      "min": "60",
+      "max": "86400"
     }
   },
   "modes": [

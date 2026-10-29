@@ -990,6 +990,7 @@ impl Core {
                 let exemptions = loaded.gate_exemptions;
                 let atomic = loaded.atomic_batch;
                 let trailing = loaded.trailing_exit;
+                let entry_maker = loaded.entry_maker;
                 // E27 (§8.2): the SAME handshake verdict BEFORE registration.
                 let refusal =
                     Self::modes_refusal(&self.plugin_modes, &name, &loaded.declared_modes);
@@ -1013,6 +1014,7 @@ impl Core {
                     .declare(holds, exemptions)
                     .declare_atomic_batch(atomic)
                     .declare_trailing_exit(trailing)
+                    .declare_entry_maker(entry_maker)
                     // RFC-645 A-1: the ONE arbiter package declares the
                     // pair-book statistics surface (决议②: the loader answers
                     // for the Lua side); every other package keeps the

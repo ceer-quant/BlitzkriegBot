@@ -728,7 +728,15 @@ fn a_pre_pairing_kernel_bundle_loads_and_trades_unchanged() {
     let mut eng = blitzkrieg_core::engine::Engine::new(cfg.clone());
     let loaded =
         load_lua_package(&pair_discount_dir()).expect("pair_discount_arb package must load");
-    let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables)
+    // This test's subject is the PAIR-DECLARATION absence, not the v1.2
+    // entry window: it evaluates in the round's back half (time_left ~98 s),
+    // so the new `entry_window = 0.5` default would rightly refuse the
+    // attempt. Pin the legacy whole-round posture explicitly — the same
+    // stub the package's own selfcheck uses — so the test keeps judging
+    // what it was written to judge.
+    let mut tunables = loaded.tunables;
+    tunables.insert("entry_window".to_string(), "0".to_string());
+    let adapter = LuaEngineAdapter::new(loaded.strategy, tunables)
         .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
         .declare_atomic_batch(loaded.atomic_batch);
     adapter.set_fee_schedule(FeeScheduleView {

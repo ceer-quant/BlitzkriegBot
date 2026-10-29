@@ -9,12 +9,28 @@
 --
 -- How the pieces fit:
 --   * ENTRY — one candidate per leg per condition, priced AT its own ask
---     (the kernel routes entries as MakerThenTaker: the top of the book
---     maker-fills immediately at that price, a remainder escalates), with
---     `shares` DECLARED so both legs match in share count — a pair merges
---     per share-pair, and a naked leg has no collateral claim. Shares size
---     to the smaller leg's visible ask depth (floored to the 0.01 grid);
+--     (the manifest declares `entry_maker`: the kernel submits these legs as
+--     post-only maker quotes at the quoted price — join the ask, never cross
+--     — and they NEVER escalate to taker; an unfilled leg simply rests to the
+--     round's own end-of-life and the kernel's round-expiry sweep closes it.
+--     v1.2 moved the strategy here: at the current fee schedule a
+--     taker-filled pair pays ~3.5% round-trip on a ~2.5% discount — the edge
+--     dies in fees; maker legs pay no taker fee. A/B vs the old doctrine =
+--     remove the manifest declaration and reload the package).
+--     `shares` are DECLARED so both legs match in share count — a pair
+--     merges per share-pair, and a naked leg has no collateral claim. Shares
+--     size to the smaller leg's visible ask depth (floored to the 0.01 grid);
 --     the kernel still caps at its own `max_shares`.
+--   * ENTRY WINDOW — `entry_window` (fraction of the round, 0.5 default)
+--     confines NEW pair attempts to the round's FIRST half: `time_left_sec`
+--     must be at or past `(1 − entry_window) × round_sec` still to run.
+--     The @almach evidence: in-round fill density concentrates early and
+--     late-round discounts are more expensive (pair cost median 1.0257 in
+--     the tail vs the early window). Exact-integer compare, the
+--     hot_side_momentum `round_sec` precedent:
+--     `t*100 >= (100 − entry_window*100) * round_sec`. `0` = the whole
+--     round. The window gates ATTEMPTS only — an armed condition keeps
+--     collecting (merge + gap-fill) to the last tick.
 --   * COLLECTION — once a condition's pair attempt is armed, every later
 --     evaluation emits `reason = "merge"` exit intents for BOTH legs until
 --     the round ends. The kernel intercepts "merge" intents BEFORE the sell
@@ -251,6 +267,14 @@ local function read_config()
     max_leg_price = dec_param(p, "max_leg_price", { m = 99, s = 2 }),
     min_pair_shares = dec_param(p, "min_pair_shares", { m = 1, s = 0 }),
     min_time_left_sec = int_param(p, "min_time_left_sec", 30),
+    -- Entry window: only the FIRST `entry_window` fraction of the round may
+    -- arm a NEW pair attempt (0 = the whole round). Read as an exact integer
+    -- percent so the comparison never touches floats.
+    entry_window_pct = int_param(p, "entry_window", 50),
+    -- The round's total length, the hot_side_momentum precedent: bk.round()
+    -- carries only `time_left_sec`, so progress needs the declared total
+    -- (900 = the 15m wheel; a 5m family sets 300 via --round-sec).
+    round_sec = int_param(p, "round_sec", 900),
   }
 end
 
@@ -334,6 +358,15 @@ function bk_evaluate()
   local can_enter = round.time_left_sec >= cfg.min_time_left_sec
     and rate ~= nil and exponent ~= nil
 
+  -- The in-round entry window: a NEW pair attempt needs time_left strictly
+  -- past the window's floor — `(100 − pct)%` of the round still to run.
+  -- Exact integers (`t*100` against `k*round_sec`), inclusive of the boundary
+  -- instant; `pct <= 0` disables the window (the whole round enters). The
+  -- window gates ATTEMPTS only: an armed condition's merge collection and
+  -- gap-fill top-ups run to the last tick regardless.
+  local window_open = cfg.entry_window_pct <= 0
+    or round.time_left_sec * 100 >= (100 - cfg.entry_window_pct) * cfg.round_sec
+
   for _, m in ipairs(bk.markets()) do
     -- COLLECTION: the pair attempt for this round is live — ask the kernel
     -- to merge both legs. Complete pairs pay $1/pair; one-sided remainders
@@ -390,7 +423,7 @@ function bk_evaluate()
           end
         end
       end
-    elseif can_enter then
+    elseif can_enter and window_open then
       local bu = bk.book(m.up_token)
       local bd = bk.book(m.down_token)
       if bu and bu.fresh == true and bd and bd.fresh == true then
@@ -412,13 +445,14 @@ function bk_evaluate()
                 local shares = dec_floor2(dec_cmp(du, dd) < 0 and du or dd)
                 if dec_cmp(shares, cfg.min_pair_shares) >= 0 then
                   local edge_pct = ((1 - total.m / POW10[total.s]) * 100)
+                  local template = "pair %s (%s+%s+fee) vs $1, edge %.2f%%, maker post-only, %ds left"
                   entries[#entries + 1] = {
                     token = m.up_token,
                     price = dec_fmt(au),
                     shares = dec_fmt(shares),
                     reason = string.format(
-                      "pair %.4f (%s+%s+fee) vs $1, edge %.2f%%, %ds left",
-                      total.m / POW10[total.s],
+                      template,
+                      dec_fmt(total),
                       dec_fmt(au), dec_fmt(ad),
                       edge_pct,
                       round.time_left_sec
@@ -429,8 +463,8 @@ function bk_evaluate()
                     price = dec_fmt(ad),
                     shares = dec_fmt(shares),
                     reason = string.format(
-                      "pair %.4f (%s+%s+fee) vs $1, edge %.2f%%, %ds left",
-                      total.m / POW10[total.s],
+                      template,
+                      dec_fmt(total),
                       dec_fmt(au), dec_fmt(ad),
                       edge_pct,
                       round.time_left_sec
