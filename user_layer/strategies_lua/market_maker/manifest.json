@@ -1,11 +1,11 @@
 {
   "name": "market_maker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "550f7c2987c13fdaf2a8c0752fdbdfae14246e4d5d04c7e4f1ed360db41f6c09",
+  "sha256": "c616bcb0c1231fcd6163c38c2e4f6506590fed05935f7b046fdbf3f9f04c489a",
   "author": "BlitzkriegBot",
-  "description": "Passive spread harvester for 15-minute binary rounds: a cheap chip (mid 0.20-0.42) with a deep, balanced, non-one-sided book and a calm underlying earns one resting maker bid 0.02 under its mid; when the mid climbs 0.03 over the bid the close is suggested and the thesis re-arms. Signal-only: the kernel adjudicates, sizes, gates every intent and owns the exit ladder.",
+  "description": "Passive spread harvester for 15-minute binary rounds, double-sided: qualifying cheap chips (mid 0.20-0.42) with deep, balanced, non-one-sided books and a calm underlying earn resting maker bids - one per qualifying side of ONE market (UP and DOWN), because the engine only takes Buy-side limits. Inventory skew on a fill: the held side's bid retires, the opposite bid survives only while entry_held + bid_other keeps a minimum merge discount (its fill completes the fee-free kernel merge at 1.00/pair), and the taker close fires only above entry + spread + the round-trip taker fee band (fee curve read live via bk.fees; no schedule = fail closed). Signal-only: the kernel adjudicates, sizes, gates every intent and owns the exit ladder.",
   "tunables": {
     "min_mid_price": {
       "type": "decimal",
@@ -88,6 +88,18 @@
       "default": "1.00",
       "min": "0",
       "max": "1000"
+    },
+    "merge_min_profit": {
+      "type": "decimal",
+      "default": "0.02",
+      "min": "0",
+      "max": "0.30"
+    },
+    "exit_fee_margin_pct": {
+      "type": "decimal",
+      "default": "100",
+      "min": "0",
+      "max": "500"
     }
   },
   "modes": [

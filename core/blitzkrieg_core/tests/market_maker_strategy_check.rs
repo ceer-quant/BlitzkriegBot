@@ -2,17 +2,22 @@
 //! strategies_lua/market_maker`) driven through the engine adapter, exactly
 //! the surface the kernel runs.
 //!
-//! The spec's acceptance rows, mapped:
+//! The spec's acceptance rows, mapped (v1.1 — the dual-side rework):
 //!   positive  — band (0.20–0.42) + time floor + two-sided depth + OBI band
-//!               + calm chip + calm underlying → ONE resting maker bid
-//!               mid − 0.02, no shares (the kernel sizes);
-//!               target hit (mid >= bid + 0.03) → one exit suggestion AND
-//!               one bid retirement, then the thesis re-arms at once;
+//!               + calm chip + calm underlying → maker bids for EACH
+//!               qualifying side of the first qualifying market (both UP and
+//!               DOWN when both books qualify — the engine takes Buy-side
+//!               limits only, so the dual quote is the UP+DOWN pair of bids);
+//!   holdings  — `bk.holdings()` is the ONE fill-blind position observation:
+//!               one held leg retires its own bid, keeps the opposite bid
+//!               only while the pair keeps its merge discount (the skew),
+//!               closes above the fee-cleared band, and a completed pair
+//!               emits reason="merge" intents for both tokens;
 //!   negative  — below/above the band, inside the time floor, thin bid side,
 //!               thin ask side, extreme OBI, one-sided chip decline, spot
 //!               waterfall (UP veto) / pump (DOWN veto), missing spot data
 //!               (default block, disclosed `spot_missing=pass` diagnostic),
-//!               underwater account, second bid while one is in flight;
+//!               underwater account, second thesis while one is in flight;
 //!   teeth     — a milder decline (under the threshold) arms: proves the
 //!               trend gate, not a neighbour gate, refused in the negative.
 //!
@@ -23,10 +28,10 @@
 
 use std::path::PathBuf;
 
-use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx};
+use blitzkrieg_core::strategies::{EngineStrategy, HeldPosition, StrategyCtx};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_core::{kline::Kline, model::CryptoMarket, model::OrderbookSnapshot};
-use blitzkrieg_lua_runtime::bk_api::AccountView;
+use blitzkrieg_lua_runtime::bk_api::{AccountView, FeeScheduleView};
 use blitzkrieg_market_api::kline::KlineInterval;
 use blitzkrieg_market_api::{MarketStructure, MarketType};
 use rust_decimal::Decimal;
@@ -68,6 +73,22 @@ fn adapter_with_account(available: &str) -> LuaEngineAdapter {
             balance: Some(available.to_string()),
             available: Some(available.to_string()),
             reserved: None,
+        });
+    }
+    LuaEngineAdapter::new(loaded.strategy, loaded.tunables)
+}
+
+/// Adapter with the kernel's shipped taker-fee schedule pushed (the shape the
+/// live adapter installs; the fee-band exit reads it through `bk.fees()`).
+fn adapter_with_fees() -> LuaEngineAdapter {
+    let loaded = load_lua_package(&package_dir()).expect("market_maker package must load");
+    {
+        let state = loaded.strategy.state();
+        let mut st = state.lock().expect("lock");
+        st.fee_schedule = Some(FeeScheduleView {
+            name: "legacy_quadratic".into(),
+            rate: "0.125".into(),
+            exponent: 2,
         });
     }
     LuaEngineAdapter::new(loaded.strategy, loaded.tunables)
@@ -219,6 +240,76 @@ fn armed_setup(adapter: &mut LuaEngineAdapter, token: &str, spot: &[Decimal]) ->
     book
 }
 
+/// The DUAL passing setup: BOTH chips of one market qualify (32s calm at
+/// 0.30 each side, calm spot, deep balanced books).
+fn dual_armed_setup(
+    adapter: &mut LuaEngineAdapter,
+    up_spot: &[Decimal],
+) -> (OrderbookSnapshot, OrderbookSnapshot) {
+    feed_flat(adapter, UP, NOW, 32, dec!(0.30));
+    feed_flat(adapter, DOWN, NOW, 32, dec!(0.30));
+    feed_spot(adapter, NOW, up_spot);
+    let up_book = token_book(
+        UP,
+        dec!(0.29),
+        dec!(0.31),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    adapter.on_book(UP, &up_book, NOW + 32_000);
+    let down_book = token_book(
+        DOWN,
+        dec!(0.29),
+        dec!(0.31),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    adapter.on_book(DOWN, &down_book, NOW + 32_000);
+    (up_book, down_book)
+}
+
+/// A held UP leg of THIS slot, filled at `entry` — the `bk.holdings()` row.
+fn held_up(entry: Decimal) -> Vec<HeldPosition> {
+    vec![HeldPosition {
+        account_id: "default".into(),
+        strategy: "market_maker".into(),
+        condition_id: "cond".into(),
+        token_id: UP.into(),
+        direction: "up".into(),
+        shares: "10".into(),
+        entry_price: entry.to_string(),
+        round_slot: NOW / 900_000,
+    }]
+}
+
+/// Both legs of THIS slot held — the completed pair the merge burns.
+fn held_pair(up_entry: Decimal, down_entry: Decimal) -> Vec<HeldPosition> {
+    vec![
+        HeldPosition {
+            account_id: "default".into(),
+            strategy: "market_maker".into(),
+            condition_id: "cond".into(),
+            token_id: UP.into(),
+            direction: "up".into(),
+            shares: "10".into(),
+            entry_price: up_entry.to_string(),
+            round_slot: NOW / 900_000,
+        },
+        HeldPosition {
+            account_id: "default".into(),
+            strategy: "market_maker".into(),
+            condition_id: "cond".into(),
+            token_id: DOWN.into(),
+            direction: "down".into(),
+            shares: "10".into(),
+            entry_price: down_entry.to_string(),
+            round_slot: NOW / 900_000,
+        },
+    ]
+}
+
 // ── positive ────────────────────────────────────────────────────────────────
 
 /// The spec's row 1: price 0.30, > 120s left, depth on both sides, calm
@@ -244,11 +335,39 @@ fn band_depth_and_calm_suggest_one_maker_bid() {
     );
 }
 
-/// The spec's row 2: after the bid armed, the chip's mid climbs to bid + 0.03
-/// → one close suggestion and one bid retirement, then the thesis re-arms at
-/// once (「价差到手就平，立刻开下一笔」).
+/// The DUAL row: both chips qualify → both sides of the ONE market arm
+/// (UP and DOWN maker bids at 0.28 each). The engine takes Buy-side limits
+/// only, so this pair of bids IS the dual quote.
 #[test]
-fn target_hit_suggests_the_close_then_re_arms() {
+fn both_chips_qualifying_arms_both_sides() {
+    let mut a = adapter();
+    let (up_book, down_book) = dual_armed_setup(&mut a, &flat_spot(NOW, 32));
+
+    let markets = vec![market()];
+    let up_b = up_book.clone();
+    let down_b = down_book.clone();
+    let fresh = move |t: &str| {
+        if t == UP {
+            Some(up_b.clone())
+        } else {
+            (t == DOWN).then(|| down_b.clone())
+        }
+    };
+    let got = candidates_of(&mut a, &markets, 600, NOW + 32_000, &fresh);
+
+    assert_eq!(got.len(), 2, "both sides arm: {got:?}");
+    assert_eq!(got[0].token_id, UP);
+    assert_eq!(got[0].price, dec!(0.28));
+    assert_eq!(got[1].token_id, DOWN);
+    assert_eq!(got[1].price, dec!(0.28));
+}
+
+/// The fill-blind upkeep, flat world: the armed bid's mid clears
+/// bid + spread → the thesis ran away — the resting bids retire (breaks),
+/// NO exit is suggested (there is no position to close), and the SAME
+/// evaluate re-arms at the new mid (「价差到手就平，立刻开下一笔」).
+#[test]
+fn flat_target_hit_breaks_then_re_arms_without_a_fake_exit() {
     let mut a = adapter();
     let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
     let markets = vec![market()];
@@ -265,20 +384,16 @@ fn target_hit_suggests_the_close_then_re_arms() {
     let rearmed = candidates_of(&mut a, &markets, 600, bounced_ts, &fresh2);
 
     let exits = a.take_exit_intents();
-    assert_eq!(exits.len(), 1, "one close suggestion: {exits:?}");
-    assert_eq!(exits[0].token_id, UP);
     assert!(
-        exits[0].reason.contains("target reached"),
-        "reason should name the target: {}",
-        exits[0].reason
+        exits.is_empty(),
+        "flat world: nothing to close, no exit faked: {exits:?}"
     );
     let breaks = a.take_breaks();
-    assert_eq!(breaks.len(), 1, "the resting bid is retired too");
+    assert_eq!(breaks.len(), 1, "the resting bid is retired");
     assert_eq!(breaks[0].0, UP);
     assert_eq!(breaks[0].1, dec!(0.28));
 
-    // 「价差到手就平，立刻开下一笔」— the SAME evaluate that banks the spread
-    // already arms the next bid at the new mid.
+    // 「价差到手就平，立刻开下一笔」— the SAME evaluate re-arms at the new mid.
     assert_eq!(rearmed.len(), 1, "re-armed at once: {rearmed:?}");
     assert_eq!(rearmed[0].price, dec!(0.30), "new bid follows the new mid");
 
@@ -325,6 +440,276 @@ fn modes_declare_type_and_structure_only() {
     assert!(
         manifest["modes"][0].get("capabilities").is_none(),
         "a strategy manifest must not declare capabilities: {manifest}"
+    );
+}
+
+// ── holdings: the skew, the merge, the fee band ─────────────────────────────
+
+/// One held leg: the held side's bid retires (the skew), the OPPOSITE bid is
+/// NOT armed again (a resting entry cannot be re-priced and no second entry
+/// fires under inventory), and NO exit fires — the mid is far below the
+/// fee band.
+#[test]
+fn one_held_leg_breaks_its_own_bid_and_arms_nothing() {
+    let mut a = adapter_with_fees();
+    let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let fresh = move |t: &str| (t == UP).then(|| book.clone());
+
+    let held = held_up(dec!(0.28));
+    let got = {
+        let c = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+        a.find_candidates(&c)
+    };
+    assert!(
+        got.is_empty(),
+        "inventory open: no new entry may arm: {got:?}"
+    );
+    let breaks = a.take_breaks();
+    assert_eq!(breaks.len(), 1, "the held side's resting bid retires");
+    assert_eq!(breaks[0].0, UP);
+    let exits = a.take_exit_intents();
+    assert!(
+        exits.is_empty(),
+        "mid 0.30 is far under the fee band: no close: {exits:?}"
+    );
+}
+
+/// The merge row: BOTH legs of one condition held → reason="merge" intents
+/// for both tokens (the kernel burns complete pairs at 1.00/pair fee-free),
+/// everything breaks, nothing arms.
+#[test]
+fn both_legs_held_emit_merge_intents() {
+    let mut a = adapter();
+    let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let fresh = move |t: &str| (t == UP).then(|| book.clone());
+
+    let held = held_pair(dec!(0.28), dec!(0.30));
+    let got = {
+        let c = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+        a.find_candidates(&c)
+    };
+    assert!(
+        got.is_empty(),
+        "no entries while a merge is pending: {got:?}"
+    );
+    let exits = a.take_exit_intents();
+    assert_eq!(exits.len(), 2, "both tokens go to the merge: {exits:?}");
+    for e in &exits {
+        assert_eq!(e.reason, "merge");
+    }
+    let _ = a.take_breaks();
+}
+
+/// TEETH for the merge row: a single leg does NOT merge (a one-sided exit
+/// intent would be a taker sell) — covered by the one-held-leg test above;
+/// this one proves the dual-row test did not pass by accident: rename the
+/// DOWN token to a foreign condition and the merge disappears (the kernel
+/// merges ONE condition's legs only).
+#[test]
+fn legs_of_different_conditions_do_not_merge() {
+    let mut a = adapter();
+    let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let fresh = move |t: &str| (t == UP).then(|| book.clone());
+
+    let mut held = held_pair(dec!(0.28), dec!(0.30));
+    held[1].condition_id = "other-cond".into();
+    held[1].token_id = "down-x".into();
+    let got = {
+        let c = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+        a.find_candidates(&c)
+    };
+    // The foreign row is invisible (a different condition), so the state
+    // machine sees ONE held leg of THIS market: skew upkeep, no merge.
+    assert!(got.is_empty(), "still no re-arm under inventory: {got:?}");
+    let exits = a.take_exit_intents();
+    assert!(
+        !exits.iter().any(|e| e.reason == "merge"),
+        "one condition's leg alone never merges: {exits:?}"
+    );
+    let _ = a.take_breaks();
+}
+
+/// The skew's merge-discount cap: one leg held at 0.28 with the opposite bid
+/// armed at 0.98 — entry + bid = 1.26 > 1.00 - 0.02, so the opposite bid is
+/// RETIRED (its fill would complete a pair that LOSES 0.26/pair).
+#[test]
+fn an_unprofitable_opposite_bid_is_retired() {
+    let mut a = adapter_with_params("max_mid_price", "0.98");
+    // Arm a two-side thesis on a market whose DOWN chip sits at 0.98
+    // (max_mid_price raised so both qualify; UP stays at 0.30).
+    feed_flat(&mut a, UP, NOW, 32, dec!(0.30));
+    feed_flat(&mut a, DOWN, NOW, 32, dec!(0.98));
+    feed_spot(&mut a, NOW, &flat_spot(NOW, 32));
+    let up_book = token_book(
+        UP,
+        dec!(0.29),
+        dec!(0.31),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    a.on_book(UP, &up_book, NOW + 32_000);
+    let down_book = token_book(
+        DOWN,
+        dec!(0.97),
+        dec!(0.99),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    a.on_book(DOWN, &down_book, NOW + 32_000);
+    let markets = vec![market()];
+    let up_b = up_book.clone();
+    let down_b = down_book.clone();
+    let fresh = move |t: &str| {
+        if t == UP {
+            Some(up_b.clone())
+        } else {
+            (t == DOWN).then(|| down_b.clone())
+        }
+    };
+    let got = candidates_of(&mut a, &markets, 600, NOW + 32_000, &fresh);
+    assert_eq!(got.len(), 2, "both sides arm: {got:?}");
+    assert_eq!(got[0].price, dec!(0.28));
+    assert_eq!(got[1].price, dec!(0.96));
+
+    // The UP leg fills. 0.28 + 0.96 = 1.24 > 0.98 cap → the DOWN bid retires.
+    let held = held_up(dec!(0.28));
+    let held_ctx = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+    let _ = a.find_candidates(&held_ctx);
+    let mut breaks = a.take_breaks();
+    breaks.sort();
+    assert_eq!(
+        breaks.len(),
+        2,
+        "held bid AND the unprofitable opposite: {breaks:?}"
+    );
+    assert_eq!(breaks[0], (DOWN.to_string(), dec!(0.96)));
+    assert_eq!(breaks[1], (UP.to_string(), dec!(0.28)));
+}
+
+/// The skew keeps a PROFITABLE opposite bid resting: entries 0.28 + 0.30 =
+/// 0.58 <= 0.98 cap → only the held side's bid breaks; the DOWN bid survives
+/// (no break for DOWN) — it IS the exit leg.
+#[test]
+fn a_profitable_opposite_bid_survives_the_held_leg() {
+    let mut a = adapter();
+    let (up_book, down_book) = dual_armed_setup(&mut a, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let up_b = up_book.clone();
+    let down_b = down_book.clone();
+    let fresh = move |t: &str| {
+        if t == UP {
+            Some(up_b.clone())
+        } else {
+            (t == DOWN).then(|| down_b.clone())
+        }
+    };
+    let got = candidates_of(&mut a, &markets, 600, NOW + 32_000, &fresh);
+    assert_eq!(got.len(), 2, "both sides arm: {got:?}");
+
+    let held = held_up(dec!(0.28));
+    let _ = {
+        let c = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+        a.find_candidates(&c)
+    };
+    let breaks = a.take_breaks();
+    assert_eq!(breaks.len(), 1, "only the held side's bid: {breaks:?}");
+    assert_eq!(breaks[0], (UP.to_string(), dec!(0.28)));
+}
+
+/// The fee-band close: entry 0.28, the shipped legacy_quadratic curve
+/// (0.125*(p(1-p))^2). fee(0.28) = 0.00508, fee(0.31) = 0.00572,
+/// fee(0.34) = 0.00629; with the default 100% margin the band is
+/// 0.28 + 0.03 + (fee(0.28) + fee(mid)): ~0.3208 at mid 0.31,
+/// ~0.3214 at mid 0.34. At mid 0.31: no exit. At mid 0.34: one taker
+/// exit, reason naming the band.
+#[test]
+fn the_taker_close_respects_the_fee_band() {
+    // FEE BAND ARM: mid 0.31 < ~0.3208 → no close.
+    let mut a = adapter_with_fees();
+    let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let fresh = move |t: &str| (t == UP).then(|| book.clone());
+    let held = held_up(dec!(0.28));
+    let below = token_book(
+        UP,
+        dec!(0.30),
+        dec!(0.32),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    a.on_book(UP, &below, NOW + 32_000);
+    {
+        let c = ctx(&markets, 600, NOW + 32_000, &fresh).with_positions(&held);
+        let _ = a.find_candidates(&c);
+    }
+    let exits = a.take_exit_intents();
+    assert!(
+        exits.is_empty(),
+        "mid 0.31 does not clear the fee band: {exits:?}"
+    );
+    let _ = a.take_breaks();
+
+    // FEE BAND CLEAR: mid 0.34 >= ~0.3214 → exactly one exit.
+    let mut b = adapter_with_fees();
+    armed_setup(&mut b, UP, &flat_spot(NOW, 32));
+    let above = token_book(
+        UP,
+        dec!(0.33),
+        dec!(0.35),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    b.on_book(UP, &above, NOW + 32_000);
+    let above_fresh = move |t: &str| (t == UP).then(|| above.clone());
+    let held_above = held_up(dec!(0.28));
+    let above_ctx = ctx(&markets, 600, NOW + 32_000, &above_fresh).with_positions(&held_above);
+    let _ = b.find_candidates(&above_ctx);
+    let exits = b.take_exit_intents();
+    assert_eq!(exits.len(), 1, "mid 0.34 clears the band: {exits:?}");
+    assert_eq!(exits[0].token_id, UP);
+    assert!(
+        exits[0].reason.contains("fee band"),
+        "reason should name the fee band: {}",
+        exits[0].reason
+    );
+}
+
+/// No fee schedule in force (`bk.fees()` = nil): the band cannot be computed
+/// → fail closed, no exit ever fires (a strategy that prices fees must
+/// never assume zero).
+#[test]
+fn no_fee_schedule_fails_closed_no_exit() {
+    let mut a = adapter(); // no set_fee_schedule
+    let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
+    let markets = vec![market()];
+    let fresh = move |t: &str| (t == UP).then(|| book.clone());
+    let moon = token_book(
+        UP,
+        dec!(0.69),
+        dec!(0.71),
+        dec!(400),
+        dec!(400),
+        NOW + 32_000,
+    );
+    a.on_book(UP, &moon, NOW + 32_000);
+    let moon_fresh = move |t: &str| (t == UP).then(|| moon.clone());
+    let held = held_up(dec!(0.28));
+    {
+        let c = ctx(&markets, 600, NOW + 32_000, &moon_fresh).with_positions(&held);
+        let _ = a.find_candidates(&c);
+    }
+    let _ = fresh; // the pre-arm book; the moon book replaces it for the close
+    let exits = a.take_exit_intents();
+    assert!(
+        exits.is_empty(),
+        "unknown fee curve = no band = no taker exit: {exits:?}"
     );
 }
 
@@ -597,10 +982,10 @@ fn refuses_an_underwater_account() {
     assert!(got.is_empty(), "available < $1 must refuse: {got:?}");
 }
 
-/// One thesis in flight: while a bid is armed (target not yet hit, chip
-/// still calm) the next evaluate arms nothing new.
+/// One thesis in flight: while a thesis is armed (target not yet run away,
+/// chip still calm, holdings flat) the next evaluate arms nothing new.
 #[test]
-fn a_second_bid_waits_while_one_is_in_flight() {
+fn a_second_thesis_waits_while_one_is_in_flight() {
     let mut a = adapter();
     let book = armed_setup(&mut a, UP, &flat_spot(NOW, 32));
     let markets = vec![market()];
@@ -608,7 +993,7 @@ fn a_second_bid_waits_while_one_is_in_flight() {
     let got = candidates_of(&mut a, &markets, 600, NOW + 32_000, &fresh);
     assert_eq!(got.len(), 1, "setup must arm: {got:?}");
     let got2 = candidates_of(&mut a, &markets, 600, NOW + 32_000, &fresh);
-    assert!(got2.is_empty(), "one in flight, no second bid: {got2:?}");
+    assert!(got2.is_empty(), "one in flight, no second thesis: {got2:?}");
     assert!(
         a.take_exit_intents().is_empty(),
         "no close before the target"
