@@ -1,6 +1,29 @@
 /** Shared shaping for the closed-trade rows the gateway hands the panel. */
 
 /**
+ * 持仓过期判定（issue 733 单源）：按钮态（清除 vs 强平）与清除动词分流
+ * 共用这一处，两处判据分叉会把同一行送错动词。轮次号匹配（slot N 覆盖
+ * [N·dur, (N+1)·dur)），族长优先用行自带的 roundDurationSec（内核按本仓
+ * 三态回落解析，与 force_close 门同源）——页面级族长属于身份 venue 的族，
+ * 多族部署下对别的族是错钟。行缺轮次号/族长（老内核）回落倒计时符号
+ * （remaining_sec 整数除法把到期前不足 1 秒截成 0，边界差由内核门兜住：
+ * 两动词都过内核判定，分错只会被拒不会误清）。
+ */
+export function positionExpired(p: {
+  roundSlot?: number
+  roundDurationSec?: number
+  remainingSec?: number
+}, fallbackDurSec: number): boolean {
+  if (p.roundSlot !== undefined && p.roundSlot > 0) {
+    const dur = p.roundDurationSec && p.roundDurationSec > 0
+      ? p.roundDurationSec
+      : fallbackDurSec
+    return Date.now() / 1000 >= (p.roundSlot + 1) * dur
+  }
+  return p.remainingSec !== undefined && p.remainingSec <= 0
+}
+
+/**
  * The identity of a *trade*, as opposed to the id the row carries.
  *
  * `hft-N` is an in-process counter that restarts at 1 on every boot, and the

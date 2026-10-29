@@ -229,6 +229,12 @@ export interface Position {
    * 快照没有该字段，回落 remainingSec 的符号。
    */
   roundSlot?: number
+  /**
+   * 本仓自己的族长（秒，内核已做三态回落）。轮次号乘法用 THIS——多族
+   * 部署下页面级 identityDurSec 属于另一个族（issue 733）；0 = 老内核
+   * 没有该字段，回落页面级提示值。
+   */
+  roundDurationSec?: number
   /** #427: the venue the position's market listed on (older cores omit). */
   venue?: string
   /**

@@ -14,7 +14,7 @@ import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import type { Position, TradeRow, OrderRow } from '@/api/client'
 import { money, signedMoney, signedPct, duration, dateTime } from '@/lib/format'
-import { tradeIdentity } from '@/lib/trades'
+import { tradeIdentity, positionExpired } from '@/lib/trades'
 
 const props = defineProps<{
   /** 'positions' | 'orders' | 'history' — which tab body to render. */
@@ -67,16 +67,10 @@ function positionRemainingLabel(p: Position): string {
   return p.remainingSec > 0 ? duration(p.remainingSec) : '已结束'
 }
 /** 过期持仓的强平不再询问场地（下单通道已关）——改走清除确认语义。
- *  判定按轮次号匹配（slot N 覆盖 [N·dur, (N+1)·dur)，与挂单页 orderExpired
- *  同一公式、同一族长回落链），不看倒计时符号——倒计时是墙钟坐标，轮次号
- *  是网格坐标，轮次切换/时钟抖动下只有网格坐标与内核判定同源。roundSlot
- *  0（老快照没有戳）回落倒计时符号。 */
-function positionExpired(p: Position): boolean {
-  if (p.roundSlot !== undefined && p.roundSlot > 0) {
-    const dur = props.identityDurSec ?? 900
-    return Date.now() / 1000 >= (p.roundSlot + 1) * dur
-  }
-  return p.remainingSec !== undefined && p.remainingSec <= 0
+ *  判定单源在 lib/trades positionExpired（轮次号匹配 + 行族长优先），按钮
+ *  与页面分流同用一处（issue 733）。 */
+function expired(p: Position): boolean {
+  return positionExpired(p, props.identityDurSec ?? 900)
 }
 
 function orderStatusLabel(s: string): string {
@@ -150,10 +144,10 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
                 variant="danger"
                 size="sm"
                 :disabled="busy || !controlCanStop"
-                :title="busy ? '正在下发命令…' : controlCanStop ? (positionExpired(p) ? '市场已结束：按兜底价平账清除（人工审计）' : '人工强行平仓') : (controlBlockedReason ?? '当前网关不允许人工操作')"
+                :title="busy ? '正在下发命令…' : controlCanStop ? (expired(p) ? '市场已结束：按兜底价平账清除（人工审计）' : '人工强行平仓') : (controlBlockedReason ?? '当前网关不允许人工操作')"
                 @click="emit('forceClose', p)"
               >
-                {{ positionExpired(p) ? '清除' : '强平' }}
+                {{ expired(p) ? '清除' : '强平' }}
               </Button>
             </td>
           </tr>

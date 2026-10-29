@@ -1693,6 +1693,13 @@ pub struct PositionView {
     /// to `remaining_sec`'s sign).
     #[serde(default)]
     pub round_slot: i64,
+    /// The position's OWN family duration in seconds (three-state fallback
+    /// already resolved kernel-side). The panel multiplies `round_slot` by
+    /// THIS — never by a page-level duration, which under multi-family
+    /// deployment belongs to a different family (issue 733). `0` = legacy
+    /// core without the field (panel falls back to its page-level hint).
+    #[serde(default)]
+    pub round_duration_sec: i64,
     /// The ACTUAL cash flows accrued on this position so far (E17). Exposed so an
     /// external monitor can verify the accounting identity at any instant, not
     /// only once the position is closed:

@@ -444,7 +444,10 @@ pub fn render_json_full(
             // Slot matching for the panel's expiry judgment: the entry
             // order's grid slot rides the positions wire (0 = legacy
             // snapshot, panel falls back to remainingSec's sign).
-            "roundSlot": p.round_slot })).collect::<Vec<_>>(),
+            "roundSlot": p.round_slot,
+            // The row's OWN family duration — the panel's slot arithmetic
+            // multiplies by this, never by a page-level duration (issue 733).
+            "roundDurationSec": p.round_duration_sec })).collect::<Vec<_>>(),
         // issue 456: the order book as the kernel tracks it (orders.list wire
         // shape, camelCase). The WebUI's 挂单 card renders it and derives its
         // per-row force-close button from `status`; the bulk sweep targets the

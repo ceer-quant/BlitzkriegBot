@@ -16,7 +16,7 @@ import {
 } from '@/lib/format'
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
-import { newestFirst } from '@/lib/trades'
+import { newestFirst, positionExpired } from '@/lib/trades'
 import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import { useRoundDuration } from '@/lib/round-duration'
@@ -786,11 +786,14 @@ async function send(cmd: 'start' | 'stop'): Promise<void> {
 
 async function forceClose(position: Position): Promise<void> {
   if (!control.value.canStop || busy.value) return
-  // 已结束市场（remainingSec 负值 = 内核已判过期）走 `positions.force_close`
-  // 清除动词，不再问场地：下单通道已关，flatten 只会被 MARKET_HALTED 拒掉
-  // 弹一屏错误横幅。清除 = 按兜底价平账入历史（写人工审计），现金真值由
-  // 对账 sweep 跟平——判定门在内核，按钮只管点名。
-  const expired = position.remainingSec !== undefined && position.remainingSec <= 0
+  // 已结束市场走 `positions.force_close` 清除动词，不再问场地：下单通道已
+  // 关，flatten 只会被 MARKET_HALTED 拒掉弹一屏错误横幅。清除 = 按兜底价
+  // 平账入历史（写人工审计），现金真值由对账 sweep 跟平——判定门在内核，
+  // 按钮只管点名。分流与按钮共用 positionExpired（行族长轮次公式，回落
+  // 倒计时）——两处判据分叉会把「按钮说可清、确认框按平仓」的行送错动词
+  //（issue 733）。remaining_sec 整数除法把到期前不足 1 秒截成 0，与轮次
+  // 公式的边界差由内核门兜住（两动词都过内核判定，分错只会被拒不会误清）。
+  const expired = positionExpired(position, identityDurSec.value ?? 900)
   if (expired) {
     const ok = window.confirm(
       `确认清除该已结束市场的持仓？\n\n${position.asset} ${position.direction.toUpperCase()} · ${Number(position.shares).toFixed(3)} 份\n最后价 ${Number(position.currentPrice).toFixed(3)}\n\n市场已结算、下单通道已关：按兜底价平账入历史（写人工审计），现金真值由对账 sweep 跟平。`,
