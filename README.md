@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="assets/logo.png" alt="BlitzkriegBot" width="96"/>
+<img src="assets/logo.png" alt="BlitzkriegBot" width="200"/>
 
 ### 把交易想法，变成可运行的策略。
 
