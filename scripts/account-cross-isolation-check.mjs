@@ -4,7 +4,8 @@
  *
  * The contract: accounts are SEPARATE WALLETS (§9.3), not one ledger with
  * aliases. Driven over the real UDS wire against a real dry core booted from
- * a scratch `user_layer/configs/accounts.toml` declaring TWO accounts:
+ * a scratch `.env` (issue 751's ACCOUNT_* single source) declaring TWO
+ * accounts:
  *
  *   1. `account.list` reports both books (sorted ids, per-account money,
  *      `version: "1.1"`), and the reported default is the process-level one;
@@ -26,7 +27,7 @@
  * Exit: 0 pass / 1 failure / 2 environment missing.
  */
 
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { CoreClient, rpc } from './lib/core-client.mjs';
@@ -111,22 +112,25 @@ function teeth() {
 
 // ── the real probes ──────────────────────────────────────────────────────────
 
-const BOOK_TOML = `\
-# Scratch book for the isolation gate: two wallets, not aliases (§9.3).
-[[account]]
-id = "default"
-name = "default"
+// The scratch book (issue 751, the .env single source): two wallets, not
+// aliases (§9.3), under the ACCOUNT_* grammar in a per-script scratch `.env`.
+// The legacy toml face is deliberately left ABSENT — a scratch accounts.toml
+// beside ACCOUNT_LIST is exactly the two-sources shape the ruling refuses.
+const ACCOUNT_ENV = {
+  ACCOUNT_LIST: 'default,paper',
+  ACCOUNT_DEFAULT_NAME: 'default',
+  ACCOUNT_PAPER_NAME: 'paper trading',
+};
+const ENV_FIXTURE =
+  Object.entries(ACCOUNT_ENV).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
 
-[[account]]
-id = "paper"
-name = "paper trading"
-`;
-
-/** A dry core in a scratch dir whose cwd CARRIES the two-account book. */
+/** A dry core in a scratch dir whose cwd CARRIES the two-account book;
+ * `envExtra` plays the launcher (load `.env` into the child's environment —
+ * the kernel injects nothing at boot). The mkdtemp cwd is unique per label,
+ * so parallel gates cannot pollute one another. */
 function makeCore(label) {
   const cwd = mkdtempSync(join(tmpdir(), `bk-e28-iso-${label}-`));
-  mkdirSync(join(cwd, 'user_layer', 'configs'), { recursive: true });
-  writeFileSync(join(cwd, 'user_layer', 'configs', 'accounts.toml'), BOOK_TOML);
+  writeFileSync(join(cwd, '.env'), ENV_FIXTURE);
   return new CoreClient({
     binaryPath: BIN,
     socketPath: scratchSocketPath(label),
@@ -140,6 +144,7 @@ function makeCore(label) {
     noOrderLog: true,
     noPositionLog: true,
     extraArgs: ['--no-auto-exits'],
+    envExtra: { ...ACCOUNT_ENV },
   });
 }
 

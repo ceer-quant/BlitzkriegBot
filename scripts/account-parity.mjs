@@ -47,7 +47,7 @@
  */
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { CoreClient, rpc } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { coreBinaryPath, checkCoreProvenance } from './lib/core-provenance.mjs';
@@ -84,24 +84,27 @@ let takerFeeUsd = () => {
   throw new Error('fee quotes not loaded yet — the kernel must be running before fees can be asserted');
 };
 
-/** The two-account scratch book (E28 §9.3): separate wallets, not aliases. */
-const BOOK_TOML = `\
-[[account]]
-id = "default"
-name = "default"
-
-[[account]]
-id = "paper"
-name = "paper trading"
-`;
+/** The two-account scratch book (E28 §9.3): separate wallets, not aliases.
+ * Issue 751's single source — the book lives in a scratch `.env` under the
+ * ACCOUNT_* grammar; the legacy toml face is deliberately left ABSENT (a
+ * scratch accounts.toml beside ACCOUNT_LIST is the two-sources shape the
+ * ruling refuses). */
+const ACCOUNT_ENV = {
+  ACCOUNT_LIST: 'default,paper',
+  ACCOUNT_DEFAULT_NAME: 'default',
+  ACCOUNT_PAPER_NAME: 'paper trading',
+};
+const ENV_FIXTURE =
+  Object.entries(ACCOUNT_ENV).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
 
 /** A core in an isolated scratch dir, with nothing persisted or restored.
- * The cwd carries the two-account book so both accounts start on their OWN
- * seed (`seed_all`). */
+ * The cwd carries the two-account `.env` book so both accounts start on their
+ * OWN seed (`seed_all`); `envExtra` plays the launcher (load `.env` into the
+ * child's environment — the kernel injects nothing at boot). The mkdtemp cwd
+ * is unique per label, so parallel gates cannot pollute one another. */
 function makeCore(label) {
   const cwd = mkdtempSync(join(tmpdir(), `blitzkrieg-acct-${label}-`));
-  mkdirSync(join(cwd, 'user_layer', 'configs'), { recursive: true });
-  writeFileSync(join(cwd, 'user_layer', 'configs', 'accounts.toml'), BOOK_TOML);
+  writeFileSync(join(cwd, '.env'), ENV_FIXTURE);
   return new CoreClient({
     binaryPath: BIN,
     socketPath: scratchSocketPath(label),
@@ -115,6 +118,7 @@ function makeCore(label) {
     noOrderLog: true,
     noPositionLog: true,
     extraArgs: ['--no-auto-exits', '--max-positions', '99'],
+    envExtra: { ...ACCOUNT_ENV },
   });
 }
 
