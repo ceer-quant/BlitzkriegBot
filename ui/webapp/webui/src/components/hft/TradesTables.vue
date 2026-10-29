@@ -59,6 +59,26 @@ function orderExpired(o: OrderRow): boolean {
   return o.roundSlot > 0 && Date.now() / 1000 >= (o.roundSlot + 1) * dur
 }
 
+// 内核对 remaining_sec 恒发数值（过期后为负）；负值 = 市场已结束——显示
+// 「已结束」而不是把负秒喂给 duration()（它对负值回落 '—'，看起来像数据
+// 缺失）。undefined 只来自老内核。
+function positionRemainingLabel(p: Position): string {
+  if (p.remainingSec === undefined) return '—'
+  return p.remainingSec > 0 ? duration(p.remainingSec) : '已结束'
+}
+/** 过期持仓的强平不再询问场地（下单通道已关）——改走清除确认语义。
+ *  判定按轮次号匹配（slot N 覆盖 [N·dur, (N+1)·dur)，与挂单页 orderExpired
+ *  同一公式、同一族长回落链），不看倒计时符号——倒计时是墙钟坐标，轮次号
+ *  是网格坐标，轮次切换/时钟抖动下只有网格坐标与内核判定同源。roundSlot
+ *  0（老快照没有戳）回落倒计时符号。 */
+function positionExpired(p: Position): boolean {
+  if (p.roundSlot !== undefined && p.roundSlot > 0) {
+    const dur = props.identityDurSec ?? 900
+    return Date.now() / 1000 >= (p.roundSlot + 1) * dur
+  }
+  return p.remainingSec !== undefined && p.remainingSec <= 0
+}
+
 function orderStatusLabel(s: string): string {
   const map: Record<string, string> = {
     PENDING: '待确认', LIVE: '挂单中', PARTIALLY_FILLED: '部分成交',
@@ -123,17 +143,17 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
               <RollingNumber :value="`${Number(p.unrealizedPct) >= 0 ? '+' : ''}${Number(p.unrealizedPct).toFixed(2)}%`" />
             </td>
             <td class="px-2 py-2.5 text-right num text-faint-fg">
-              <RollingNumber :value="p.remainingSec !== undefined ? duration(p.remainingSec) : '—'" />
+              <RollingNumber :value="positionRemainingLabel(p)" />
             </td>
             <td class="px-2 py-2.5 text-right">
               <Button
                 variant="danger"
                 size="sm"
                 :disabled="busy || !controlCanStop"
-                :title="busy ? '正在下发命令…' : controlCanStop ? '人工强行平仓' : (controlBlockedReason ?? '当前网关不允许人工操作')"
+                :title="busy ? '正在下发命令…' : controlCanStop ? (positionExpired(p) ? '市场已结束：按兜底价平账清除（人工审计）' : '人工强行平仓') : (controlBlockedReason ?? '当前网关不允许人工操作')"
                 @click="emit('forceClose', p)"
               >
-                强平
+                {{ positionExpired(p) ? '清除' : '强平' }}
               </Button>
             </td>
           </tr>

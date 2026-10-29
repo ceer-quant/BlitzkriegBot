@@ -415,6 +415,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
                 was_maker: true,
                 target_exit_price: None,
                 round_duration_sec: 0,
+                round_slot: 0,
             },
             now_ms(),
         );
@@ -433,6 +434,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
                 was_maker: true,
                 target_exit_price: None,
                 round_duration_sec: 0,
+                round_slot: 0,
             },
             now_ms(),
         );

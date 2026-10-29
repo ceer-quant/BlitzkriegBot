@@ -3260,6 +3260,9 @@ impl Core {
                 entered_at_ms: p.entered_at_ms,
                 expires_at_ms: p.expires_at_ms,
                 remaining_sec: (p.expires_at_ms - now_ms) / 1000,
+                // Slot matching for the panel's expiry judgment — same
+                // grid coordinate the orders tab already carries.
+                round_slot: p.round_slot,
                 // Cash actually moved on this position, so an external monitor
                 // can check the ledger identity without waiting for a flat book.
                 // `entry_cost_usd` is the TOTAL entry notional (what left the

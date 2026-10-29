@@ -230,6 +230,7 @@ fn the_oldest_entry_is_evicted_when_all_of_them_are_live() {
                 venue: String::new(),
                 partner_token_id: String::new(),
                 round_duration_sec: 0,
+                round_slot: 0,
             },
             1_000,
         );

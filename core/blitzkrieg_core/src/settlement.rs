@@ -1405,6 +1405,7 @@ mod tests {
             // F6 (main): no book has been seen for this fixture position.
             last_book_ts: 0,
             round_duration_sec: 0,
+            round_slot: 0,
             state: crate::exit_policy::ExitState::new(dec!(0.40), entered_ms),
             flows: CashFlows {
                 entry_cost_usd: dec!(4),

@@ -606,6 +606,16 @@ pub struct OpenPosition {
     /// three-state fallback (own > market declaration > global).
     #[serde(default, skip_serializing_if = "position_zero_i64")]
     pub round_duration_sec: i64,
+    /// The round slot the entry order traded (B1b grid coordinate: slot N
+    /// covers [N·dur, (N+1)·dur)). Expiry is judged by SLOT MATCHING, not a
+    /// countdown: the position's round is over once the current grid position
+    /// passes slot N — the same formula as the order-side
+    /// `force_close_order`. `0` = pre-slot legacy snapshot (serde default
+    /// keeps old positions.jsonl lines byte-identical); those fall back to
+    /// the `expires_at_ms` countdown, which the open path anchors to
+    /// `(slot+1)·dur` anyway.
+    #[serde(default, skip_serializing_if = "position_zero_i64")]
+    pub round_slot: i64,
     pub state: ExitState,
     /// Actual cash flows since the position opened. Snapshots written before E17
     /// carry the serde default (all zero) and are repaired by [`OpenPosition::flows`].
@@ -779,6 +789,10 @@ pub struct OpenParams {
     /// expiry/force-close consumers may still stamp it later, and the B1a
     /// readers fall back through the market declaration as before.
     pub round_duration_sec: i64,
+    /// The entry order's round slot (grid coordinate). `0` = no slot fact
+    /// (older callers / legacy snapshots): expiry judgment falls back to the
+    /// `expires_at_ms` countdown.
+    pub round_slot: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1452,6 +1466,10 @@ impl PositionManager {
             // B1b: stamped from the opening path's family resolution — `0`
             // only when the caller had no family fact (older callers).
             round_duration_sec: p.round_duration_sec,
+            // The entry order's grid slot, stamped by the opening path. `0`
+            // = the caller had no slot fact; expiry then falls back to the
+            // `expires_at_ms` countdown (legacy behavior).
+            round_slot: p.round_slot,
             state: ExitState::new(p.entry_price, now_ms),
             flows: CashFlows::default(),
         };

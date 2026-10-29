@@ -814,6 +814,10 @@ impl Core {
                             expires_at_ms,
                             was_maker: d.role.is_maker(),
                             target_exit_price: None,
+                            // Slot matching (not a countdown) judges this
+                            // position's expiry later: stamp the entry
+                            // order's own grid slot.
+                            round_slot: d.round_slot,
                             // E28 (§9.2): the position belongs to the account
                             // whose fill opened it.
                             account_id: d.account_id.clone(),
@@ -2294,13 +2298,24 @@ impl Core {
                     format!("positions.force_close: no open position \"{position_id}\""),
                 )
             })?;
-        if now_ms <= pos.expires_at_ms {
+        // Expiry by SLOT MATCHING, mirroring the order-side force_close_order:
+        // slot N covers [N·dur, (N+1)·dur) on the position's OWN family clock,
+        // so the round is over once now passes the slot's end. `0` = legacy
+        // snapshot without a slot fact — fall back to the expires_at_ms
+        // countdown the open path anchored to (slot+1)·dur anyway.
+        let expired = if pos.round_slot > 0 {
+            let eff = pos.effective_round_duration_sec(None, self.config.round_duration_sec);
+            now_ms >= (pos.round_slot + 1) * eff * 1000
+        } else {
+            now_ms > pos.expires_at_ms
+        };
+        if !expired {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidOrderState,
                 format!(
-                    "positions.force_close: position {position_id}'s round is still live until {} — \
-                     use positions.exit for a position the venue can still settle",
-                    pos.expires_at_ms
+                    "positions.force_close: position {position_id}'s round is still live (slot {}, \
+                     expires_at {}) — use positions.exit for a position the venue can still settle",
+                    pos.round_slot, pos.expires_at_ms
                 ),
             ));
         }

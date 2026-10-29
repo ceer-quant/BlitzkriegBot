@@ -582,6 +582,7 @@ fn a_hand_built_naked_leg_carries_the_partner_stamp() {
             was_maker: false,
             target_exit_price: None,
             round_duration_sec: 0,
+            round_slot: 0,
         },
         NOW,
     );
