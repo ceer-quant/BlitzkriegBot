@@ -1415,9 +1415,31 @@ pub fn env_lookup_from_sources(env_path: Option<&Path>) -> impl Fn(&str) -> Opti
 // Every runtime write face upserts ACCOUNT_* keys through `crate::env_file`
 // (atomic temp+rename, owner-only 0600, every line outside the managed keys
 // preserved byte-for-byte — the same primitive `market.credentials.set`
-// runs). Read-modify-write over the CURRENT env state (process env first,
-// file second — the loader's own order), so a write can never shrink the
-// book: sibling accounts' keys survive untouched.
+// runs). Read-modify-write uses the CURRENT file first: the process env is a
+// boot snapshot and is stale after the first hot write. Process values remain
+// a fallback for keys absent from the file, preserving explicit launch-time
+// overrides without resurrecting an old ACCOUNT_LIST after account.remove.
+
+fn env_lookup_for_write_with<'a>(
+    env_path: &'a Path,
+    fallback: impl Fn(&str) -> Option<String> + 'a,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    let file_map: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
+        .ok()
+        .map(|text| {
+            text.lines()
+                .filter_map(crate::env_file::parse_line)
+                .collect()
+        })
+        .unwrap_or_default();
+    move |key: &str| file_map.get(key).cloned().or_else(|| fallback(key))
+}
+
+fn env_lookup_for_write(env_path: &Path) -> impl Fn(&str) -> Option<String> + '_ {
+    env_lookup_for_write_with(env_path, |key| {
+        std::env::var(key).ok().filter(|value| !value.is_empty())
+    })
+}
 
 /// The full ACCOUNT_* key set ONE account id owns — the remove face's sweep
 /// list.
@@ -1530,7 +1552,7 @@ pub fn env_persist_account_create(
     credential_keys: &CredentialKeys,
 ) -> Result<(), CoreError> {
     refuse_while_legacy_toml(toml_path, "create")?;
-    let lookup = env_lookup_from_sources(Some(env_path));
+    let lookup = env_lookup_for_write(env_path);
     let list = current_account_list(&lookup)?;
     if list.iter().any(|a| a == account_id) {
         return Err(CoreError::new(
@@ -1671,7 +1693,7 @@ pub fn env_persist_account_remove(
     account_id: &str,
 ) -> Result<(), CoreError> {
     refuse_while_legacy_toml(toml_path, "remove")?;
-    let lookup = env_lookup_from_sources(Some(env_path));
+    let lookup = env_lookup_for_write(env_path);
     let list = current_account_list(&lookup)?;
     if !list.iter().any(|a| a == account_id) {
         return Err(CoreError::new(
@@ -2116,6 +2138,45 @@ id = "legacy"
         assert!(!text.contains("ACCOUNT_PAPER_"), "{text}");
         // Removing the last account refuses (an empty book fails the boot).
         assert!(env_persist_account_remove(toml, &dot_env, "default").is_err());
+        std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn env_remove_then_same_name_create_uses_the_hot_file_state() {
+        let toml = Path::new("/nonexistent/bk-none/accounts.toml");
+        let dot_env = fresh_env_file("remove-recreate");
+        std::fs::write(
+            &dot_env,
+            "ACCOUNT_LIST=\"default,polysimulator\"\nACCOUNT_POLYSIMULATOR_VENUE=\"polysimulator\"\n",
+        )
+        .unwrap();
+
+        env_persist_account_remove(toml, &dot_env, "polysimulator").expect("remove");
+
+        // The launcher-loaded process environment still carries this boot
+        // snapshot. A hot writer must prefer the file changed above.
+        let stale_boot = |key: &str| match key {
+            "ACCOUNT_LIST" => Some("default,polysimulator".to_string()),
+            _ => None,
+        };
+        let lookup = env_lookup_for_write_with(&dot_env, stale_boot);
+        assert_eq!(current_account_list(&lookup).unwrap(), vec!["default"]);
+        drop(lookup);
+
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "polysimulator",
+            None,
+            Some("polysimulator"),
+            &CredentialKeys::default(),
+        )
+        .expect("same-name re-create reads the hot file, not the boot snapshot");
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(
+            text.contains("ACCOUNT_LIST=\"default,polysimulator\""),
+            "{text}"
+        );
         std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
     }
 
