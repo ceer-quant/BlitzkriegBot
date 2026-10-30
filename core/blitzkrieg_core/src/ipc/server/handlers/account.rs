@@ -612,11 +612,20 @@ pub(crate) async fn handle_account(
                         ));
                     }
                     let id = AccountId::from(p.id.as_str());
+                    let credential_keys = venue
+                        .and_then(|v| registry.get(v))
+                        .map(|plugin| {
+                            crate::account::CredentialKeys::from_plugin_env(
+                                plugin.required_credential_env(),
+                            )
+                        })
+                        .unwrap_or_default();
                     let mut c = core.lock().await;
                     c.create_account_persisting(
                         &id,
                         p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
                         venue,
+                        credential_keys,
                         &actor,
                         p.reason.as_deref().unwrap_or(""),
                         now_ms(),
