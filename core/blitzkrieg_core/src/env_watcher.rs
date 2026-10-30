@@ -40,7 +40,8 @@ pub async fn run(env_path: &Path, sender: mpsc::UnboundedSender<ReloadRequest>) 
                 }
             },
             notify::Config::default(),
-        ).expect("failed to create watcher");
+        )
+        .expect("failed to create watcher");
 
         watcher
             .watch(&env_path, RecursiveMode::NonRecursive)

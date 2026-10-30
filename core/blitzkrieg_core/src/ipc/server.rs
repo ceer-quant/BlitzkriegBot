@@ -1010,7 +1010,8 @@ pub async fn run(
     if let Some(env_path) = config.env_file_path.as_deref() {
         let env_path = std::path::Path::new(env_path);
         if env_path.exists() {
-            let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel::<crate::env_watcher::ReloadRequest>();
+            let (reload_tx, mut reload_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::env_watcher::ReloadRequest>();
             let core = core.clone();
             let env_path_buf = env_path.to_path_buf();
 
@@ -1056,7 +1057,10 @@ pub async fn run(
                 }
             });
 
-            eprintln!("blitzkrieg-core: .env hot reload enabled (monitoring {})", env_path.display());
+            eprintln!(
+                "blitzkrieg-core: .env hot reload enabled (monitoring {})",
+                env_path.display()
+            );
         }
     }
 
