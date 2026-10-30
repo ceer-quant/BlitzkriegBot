@@ -962,6 +962,22 @@ impl Policy {
         Self::load_with_env(&text, env)
     }
 
+    /// Same parser as boot, but an explicit reload reads the edited file
+    /// directly instead of the startup process-environment snapshot.
+    pub fn load_for_reload(path: &Path, env_path: &Path) -> Result<Self, String> {
+        let file_map: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
+            .map_err(|e| format!("{} unreadable: {e}", env_path.display()))?
+            .lines()
+            .filter_map(crate::env_file::parse_line)
+            .collect();
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "version = 1\n".to_string(),
+            Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
+        };
+        Self::load_with_env(&text, |key| file_map.get(key).cloned())
+    }
+
     /// Parse with an injected env reader — the test seam (mutating the
     /// process environment to test precedence would be global state that
     /// parallel tests race on, the same reason `main.rs` has `EnvVars`).

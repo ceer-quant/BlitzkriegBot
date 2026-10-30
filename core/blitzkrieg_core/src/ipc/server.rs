@@ -1004,66 +1004,6 @@ pub async fn run(
         }
     }
 
-    // .env hot reload: monitor the .env file for changes and trigger reloads.
-    // PRODUCTION-ONLY: replay/backtest never enter this block. The watcher
-    // runs in a background task and sends reload requests to the main loop.
-    if let Some(env_path) = config.env_file_path.as_deref() {
-        let env_path = std::path::Path::new(env_path);
-        if env_path.exists() {
-            let (reload_tx, mut reload_rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::env_watcher::ReloadRequest>();
-            let core = core.clone();
-            let env_path_buf = env_path.to_path_buf();
-
-            // Spawn the watcher task
-            tokio::spawn(async move {
-                crate::env_watcher::run(&env_path_buf, reload_tx).await;
-            });
-
-            // Spawn the reload handler task
-            tokio::spawn(async move {
-                while let Some(request) = reload_rx.recv().await {
-                    let mut c = core.lock().await;
-                    match request {
-                        crate::env_watcher::ReloadRequest::Accounts => {
-                            if let Err(e) = c.reload_accounts() {
-                                tracing::error!("env reload: accounts failed: {}", e);
-                            } else {
-                                tracing::info!("env reload: accounts succeeded");
-                            }
-                        }
-                        crate::env_watcher::ReloadRequest::Policy => {
-                            if let Err(e) = c.reload_execution_policy() {
-                                tracing::error!("env reload: policy failed: {}", e);
-                            } else {
-                                tracing::info!("env reload: policy succeeded");
-                            }
-                        }
-                        crate::env_watcher::ReloadRequest::Shadow => {
-                            if let Err(e) = c.reload_shadow() {
-                                tracing::error!("env reload: shadow failed: {}", e);
-                            } else {
-                                tracing::info!("env reload: shadow succeeded");
-                            }
-                        }
-                        crate::env_watcher::ReloadRequest::Runtime => {
-                            if let Err(e) = c.reload_runtime() {
-                                tracing::error!("env reload: runtime failed: {}", e);
-                            } else {
-                                tracing::info!("env reload: runtime succeeded");
-                            }
-                        }
-                    }
-                }
-            });
-
-            eprintln!(
-                "blitzkrieg-core: .env hot reload enabled (monitoring {})",
-                env_path.display()
-            );
-        }
-    }
-
     // The data plane's runtime handle: feeds/discovery mount THROUGH this
     // host, at boot AND later (account.venue.set re-binding an account to a
     // venue whose plugin never booted mounts that venue's components here —
@@ -1780,6 +1720,7 @@ async fn handle_line(
         method::BLUEPRINT_SAVE,
         method::BLUEPRINT_SAVE_SOURCE,
         method::SYSTEM_UPDATE_CONFIGURE,
+        method::SYSTEM_ENV_RELOAD,
         method::ROUND_DURATION_SET,
         method::MARKET_PLUGIN_SET,
         method::ACCOUNT_VENUE_SET,
@@ -1812,6 +1753,9 @@ async fn handle_line(
             handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
         }
         method::SYSTEM_VERSION => {
+            handlers::system::handle_system(method, core, peer, update_state, session, params).await
+        }
+        method::SYSTEM_ENV_RELOAD => {
             handlers::system::handle_system(method, core, peer, update_state, session, params).await
         }
         method::RISK_LIMITS => handlers::risk::handle_risk(method, core, peer, params).await,

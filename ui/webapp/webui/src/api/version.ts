@@ -5,6 +5,10 @@
 import { request } from './core.ts'
 
 export const versionApi = {
+  envReload: () => request<{ ok: boolean; accounts: string | null; policy: string | null; shadow: string | null; runtime: string; error?: string }>(
+    '/system/env-reload',
+    { method: 'POST' },
+  ),
   /**
    * 设置页「检查更新」按钮（VERSIONING.md §6.3）。网关只负责把请求转给内核并
    * 立即返回 —— 内核拨 GitHub 以秒计，网关的单线程接受循环绝不等它。轮询

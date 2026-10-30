@@ -2322,6 +2322,11 @@ impl WebServer {
                 // reshaped here, the kernel's typed deserialization validates.
                 self.proxy_backtest_body("system.reset_trading", &req.body)
             }
+            ("POST", "/api/system/env-reload") => {
+                // Explicit operator action: reload the subset of `.env` that
+                // the running core can safely apply without replacing books.
+                self.proxy_read("system.env.reload", serde_json::json!({}))
+            }
             ("GET", "/api/orders") => {
                 // issue 456: the order book as the kernel tracks it — the
                 // 挂单 card's data source. Read-only proxy; the wire shape is

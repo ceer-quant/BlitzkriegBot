@@ -553,6 +553,24 @@ impl AccountLedgers {
         v
     }
 
+    /// Apply freshly parsed account metadata without replacing any money book.
+    /// Hot reload may change account settings, but adding or removing an account
+    /// needs a restart because that changes the ledger topology.
+    pub fn reload_config(&mut self, fresh: AccountLedgers) -> Result<(), String> {
+        let mut current_ids: Vec<_> = self.accounts.keys().cloned().collect();
+        let mut fresh_ids: Vec<_> = fresh.accounts.keys().cloned().collect();
+        current_ids.sort();
+        fresh_ids.sort();
+        if current_ids != fresh_ids {
+            return Err("account ids changed; restart the core to add or remove accounts".into());
+        }
+
+        self.accounts = fresh.accounts;
+        self.active = fresh.active;
+        self.display = fresh.display;
+        Ok(())
+    }
+
     /// Replace ONE account's round-family declaration (轮次多族) in memory.
     /// The durable half is the caller's job (B2's `account.rounds.set`
     /// persists into accounts.toml beside this write — the venue.set
@@ -1266,5 +1284,29 @@ mod book_tests {
         bound.remove(&default_account_id()).unwrap();
         bound.repair_display_after_removal(&default_account_id());
         assert_eq!(bound.display_id(), "paper");
+    }
+
+    #[test]
+    fn config_reload_keeps_money_and_refuses_ledger_topology_changes() {
+        let mut book = two_accounts();
+        book.get_mut(&default_account_id())
+            .unwrap()
+            .set_balance(dec!(42));
+
+        let mut fresh = two_accounts();
+        fresh.accounts.get_mut(&default_account_id()).unwrap().name = "renamed".into();
+        book.reload_config(fresh).unwrap();
+        assert_eq!(
+            book.ledger_of(&default_account_id()).unwrap().balance(),
+            dec!(42)
+        );
+        assert_eq!(book.account(&default_account_id()).unwrap().name, "renamed");
+
+        let changed = AccountLedgers::single_default(2);
+        assert!(book.reload_config(changed).is_err());
+        assert_eq!(
+            book.ledger_of(&default_account_id()).unwrap().balance(),
+            dec!(42)
+        );
     }
 }

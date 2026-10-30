@@ -362,6 +362,29 @@ pub fn load_account_ledgers_single_source(
     }
 }
 
+/// Reload entry: the edited file must beat the process copy loaded at startup.
+pub fn load_account_ledgers_for_reload(
+    toml_path: &Path,
+    env_path: &Path,
+    now_ms: i64,
+    allowed: &[i64],
+) -> Result<AccountLedgers, CoreError> {
+    let text = std::fs::read_to_string(env_path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("{} unreadable: {e}", env_path.display()),
+        )
+    })?;
+    let file_map: std::collections::HashMap<String, String> = text
+        .lines()
+        .filter_map(crate::env_file::parse_line)
+        .collect();
+    match load_account_ledgers_from_env(now_ms, allowed, &|key| file_map.get(key).cloned())? {
+        Some(book) => Ok(book),
+        None => load_account_ledgers(toml_path, now_ms, allowed),
+    }
+}
+
 /// Parse the toml text into the book. Split from [`load_account_ledgers`] so
 /// tests (and a future CLI override) can feed strings directly.
 pub fn from_str(text: &str, now_ms: i64, allowed: &[i64]) -> Result<AccountLedgers, CoreError> {
