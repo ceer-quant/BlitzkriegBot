@@ -723,6 +723,7 @@ impl Ome {
             execute_at_ms: p.execute_at_ms,
             report_at_ms: p.report_at_ms,
             venue_order_id: None,
+            place_uncertain: false,
             escalate_at_ms: None,
             maker_timeout_ms: p.maker_timeout_ms,
             role: OrderRole::Pending,
@@ -788,6 +789,19 @@ impl Ome {
     pub fn bind_venue(&mut self, id: &str, venue_order_id: String, now_ms: i64) -> CoreResult<()> {
         self.mutate(id, now_ms, |o| {
             o.venue_order_id = Some(venue_order_id);
+            Ok(())
+        })
+    }
+
+    /// A place POST TIMED OUT: the venue may or may not hold this order.
+    /// Stamping the flag removes it from [`Self::live_orders`]-driven drains
+    /// (`Core::pending_unbound`) so the executor stops re-submitting it — a
+    /// second signed POST is a second real order at any venue that does not
+    /// dedupe by client id (polymarket). The #462 retirement sweep still owns
+    /// the order: the reservation stays held and the sweep decides its fate.
+    pub fn mark_place_uncertain(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
+        self.mutate(id, now_ms, |o| {
+            o.place_uncertain = true;
             Ok(())
         })
     }

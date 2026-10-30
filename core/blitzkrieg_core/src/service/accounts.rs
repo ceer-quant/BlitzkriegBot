@@ -2244,11 +2244,16 @@ impl Core {
 
     /// Live orders accepted locally but not yet submitted to the venue (no
     /// venue id bound). The live bridge submits these each tick.
+    ///
+    /// `place_uncertain` orders are excluded: their POST already timed out, so
+    /// the venue's answer is unknown and a re-submit would be a SECOND real
+    /// order at any venue without a client-id dedupe. The #462 retirement sweep
+    /// (`resolve_place_timeouts`) still sees them and decides their fate.
     pub fn pending_unbound(&self) -> Vec<TrackedOrder> {
         self.ome
             .live_orders()
             .into_iter()
-            .filter(|o| o.venue_order_id.is_none())
+            .filter(|o| o.venue_order_id.is_none() && !o.place_uncertain)
             .cloned()
             .collect()
     }

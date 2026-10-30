@@ -85,6 +85,7 @@ fn restored_live_orders_push_the_id_counter_past_their_ids() {
         execute_at_ms: 1,
         report_at_ms: 1,
         venue_order_id: None,
+        place_uncertain: false,
         escalate_at_ms: None,
         maker_timeout_ms: 0,
         account_id: crate::model::default_account_id(),

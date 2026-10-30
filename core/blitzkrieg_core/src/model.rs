@@ -249,6 +249,15 @@ pub struct TrackedOrder {
     /// or before the POST resolves). Reconciliation matches WS/REST on this.
     #[serde(default)]
     pub venue_order_id: Option<String>,
+    /// The place POST timed out: the venue's answer is UNKNOWN, so this order
+    /// must not be re-submitted. `take_pending_orders` is a live VIEW over
+    /// unbound pending orders, so without this flag a timed-out order is
+    /// handed to the executor again every tick and a venue without an
+    /// idempotency key (polymarket signs a fresh order) gets a second REAL
+    /// order. Cleared only by the terminal transition (bind/ack, reject, or
+    /// the #462 retirement sweep); persisted so a restart keeps the verdict.
+    #[serde(default)]
+    pub place_uncertain: bool,
     /// Pending simulated maker→taker escalation deadline (ms), dry mode only.
     #[serde(default)]
     pub escalate_at_ms: Option<i64>,
@@ -449,6 +458,7 @@ mod round_duration_tests {
             execute_at_ms: 0,
             report_at_ms: 0,
             venue_order_id: None,
+            place_uncertain: false,
             escalate_at_ms: None,
             maker_timeout_ms: 0,
             role: super::OrderRole::Pending,
