@@ -2,7 +2,7 @@
 #
 # scripts/migrate-config-to-env.sh — .env single-source migration (issue #751).
 #
-# Moves the four legacy config sources into the .env single source and retires
+# Moves the five legacy config sources into the .env single source and retires
 # the files: each source is MOVED (never rm'd, never copied-and-left) into
 # data/config-backup-<timestamp>/. Key grammar, spelled exactly as the kernel
 # parses it — read the authorities before editing either side:
@@ -28,6 +28,10 @@
 #       array-of-tables is NOT parsed here — the script prints a hand-migration
 #       recipe for POLICY_RULES / POLICY_<ID>_RULES instead.
 #       (authority: core/blitzkrieg_core/src/execution_policy.rs)
+#   user_layer/configs/update.toml
+#     → BLITZKRIEG_UPDATE_CHECK / BLITZKRIEG_UPDATE_AUTO /
+#       BLITZKRIEG_UPDATE_INTERVAL_SECS (authority:
+#       core/blitzkrieg_core/src/bin_support/boot.rs)
 #
 # Safety posture (§9.4 + the #751 ruling):
 #   - Credential fields carry the NAMES of environment variables, never values;
@@ -683,6 +687,58 @@ print(v)' "$f" 2>/dev/null)" || rc=$?
   esac
 }
 
+# ── user_layer/configs/update.toml ─────────────────────────────────────────────
+# [update] section → BLITZKRIEG_UPDATE_* env vars.
+migrate_update_toml() {
+  local f="$CONFIG_DIR/update.toml"
+  if [ ! -f "$f" ]; then
+    SKIPPED="${SKIPPED}user_layer/configs/update.toml"$'\n'
+    return 0
+  fi
+  ANY_SOURCE=1
+  say "── user_layer/configs/update.toml"
+  local ev="$WORKDIR/update.events"
+  scan_toml "$f" > "$ev"
+
+  local tag p1 p2 p3 sec="" v_check="" v_auto="" v_interval=""
+  while IFS=$'\t' read -r tag p1 p2 p3; do
+    case "$tag" in
+      T) sec="$p1" ;;
+      K)
+        if [ "$sec" != "update" ]; then continue; fi
+        case "$p1" in
+          check_enabled)
+            case "$p3" in
+              true) v_check="true" ;;
+              false) v_check="false" ;;
+              *) warn "update.check_enabled 不是布尔——该键不迁移" ;;
+            esac ;;
+          auto_update)
+            case "$p3" in
+              true) v_auto="true" ;;
+              false) v_auto="false" ;;
+              *) warn "update.auto_update 不是布尔——该键不迁移" ;;
+            esac ;;
+          interval_secs)
+            if [ "$p2" = "b" ] || [ "$p2" = "s" ]; then
+              v_interval="$p3"
+            else
+              warn "update.interval_secs 不是整数——该键不迁移"
+            fi ;;
+        esac ;;
+    esac
+  done < "$ev"
+  if [ -n "$v_check" ] || [ -n "$v_auto" ] || [ -n "$v_interval" ]; then
+    emit "BLITZKRIEG_UPDATE_CHECK" "$v_check"
+    emit "BLITZKRIEG_UPDATE_AUTO" "$v_auto"
+    emit "BLITZKRIEG_UPDATE_INTERVAL_SECS" "$v_interval"
+    commit "$f"
+  else
+    warn "update.toml 没有可迁移的键值"
+    abandon "$f"
+  fi
+}
+
 # ── backup move ──────────────────────────────────────────────────────────────
 ensure_backup_dir() {
   [ -n "$BACKUP_DIR" ] && return 0
@@ -784,10 +840,11 @@ migrate_accounts_toml
 migrate_shadow_toml
 migrate_policy_toml
 migrate_runtime_json
+migrate_update_toml
 
 say ""
 if [ "$ANY_SOURCE" = 0 ]; then
-  say "四个迁移源都不存在——本次为 no-op（配置已迁移过，或本目录从无这些文件）。"
+  say "五个迁移源都不存在——本次为 no-op（配置已迁移过，或本目录从无这些文件）。"
 fi
 
 # Move the retired sources (move = backup + exit the workspace in one step).
