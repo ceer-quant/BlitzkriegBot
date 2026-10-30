@@ -829,3 +829,117 @@ fn a_wouldcross_escalation_chases_only_the_unfilled_remainder() {
         "2 + 3 shares, never 2 + the stale 5"
     );
 }
+
+/// #776, the ghost arm: a BUY the sweep force-closes (the venue neither lists
+/// it open nor has a trade for it) must run the SAME money bookkeeping an
+/// explicit cancel does. Before the fix the sweep only stamped `ForceClosed`,
+/// so the reservation stayed in the ledger forever, `run_accounting_audit`
+/// flagged it as a stray hold, halted new entries and never let go.
+#[test]
+fn ghost_sweep_releases_the_buy_reservation_and_keeps_entries_open() {
+    use crate::reconcile::{ReconcileAction, VenueSnapshot};
+
+    let mut c = live_core(dec!(10));
+    let (id, _) = c
+        .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+        .unwrap();
+    c.bind_venue(&id, "venue-1".to_string(), 2).expect("bind");
+    assert_eq!(c.ledger().reserved(), dec!(2), "0.40 × 5 reserved");
+
+    // The venue snapshot omits the id and carries no trade for it: a ghost.
+    let report = c
+        .reconcile(VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 3,
+        })
+        .unwrap();
+    assert!(report.suspect_ghost_ids.contains(&id));
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|a| matches!(a, ReconcileAction::MarkedForceClosed { .. }))
+    );
+    assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::ForceClosed);
+
+    // The terminal transition released the hold (the pre-fix reservation
+    // survived here, and every assertion below failed with it).
+    assert_eq!(
+        c.ledger().reserved(),
+        Decimal::ZERO,
+        "a reconciled-away BUY must not keep its reservation"
+    );
+    assert_eq!(
+        c.ledger().available(),
+        c.ledger().balance(),
+        "the released cash is usable again"
+    );
+
+    // No stray reservation => no structural audit failure => no halt.
+    let audit = c.run_accounting_audit(4);
+    assert!(audit.ok, "{}", audit.note);
+    assert!(!c.audit_blocks_entries());
+
+    // And a fresh entry is still admitted (the pre-fix halt refused it).
+    c.place_pending(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k2"), 5)
+        .expect("entries stay open after the sweep");
+}
+
+/// #776, the plain `Cancelled` arm: a partially-filled BUY the venue no longer
+/// lists is stamped `Cancelled`; its REMAINING reservation must be released
+/// exactly as an explicit cancel would release it.
+#[test]
+fn vanished_partial_sweep_releases_the_remaining_reservation() {
+    use crate::reconcile::{ReconcileAction, VenueSnapshot};
+
+    let mut c = live_core(dec!(10));
+    let (id, _) = c
+        .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+        .unwrap();
+    c.bind_venue(&id, "venue-1".to_string(), 2).expect("bind");
+    // 2 of 5 executed before the order vanished from the venue.
+    c.ingest_fill(
+        Fill {
+            order_id: id.clone(),
+            trade_id: Some("t1".into()),
+            token_id: "tok".into(),
+            side: Side::Buy,
+            price: dec!(0.40),
+            size: dec!(2),
+            status: FillStatus::Confirmed,
+            ts_ms: 3,
+            tx_hash: None,
+            maker: Some(true),
+            account_id: crate::model::default_account_id(),
+        },
+        3,
+    )
+    .unwrap();
+    assert_eq!(
+        c.ledger().reserved(),
+        dec!(1.2),
+        "0.40 × 3 unfilled shares stay committed"
+    );
+
+    let report = c
+        .reconcile(VenueSnapshot {
+            open_order_ids: vec![],
+            trades: vec![],
+            now_ms: 4,
+        })
+        .unwrap();
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|a| matches!(a, ReconcileAction::MarkedCancelled { .. }))
+    );
+    assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Cancelled);
+    assert_eq!(
+        c.ledger().reserved(),
+        Decimal::ZERO,
+        "the remaining hold leaves with the cancelled order"
+    );
+    assert!(c.run_accounting_audit(5).ok);
+}

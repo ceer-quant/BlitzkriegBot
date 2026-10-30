@@ -2345,6 +2345,17 @@ impl Core {
         snap: crate::reconcile::VenueSnapshot,
         venue: &str,
     ) -> CoreResult<crate::reconcile::ReconcileReport> {
+        // Which orders actually rested at sweep time. The OME mutation below
+        // stamps them terminal in one pass, so this is the only place the
+        // `was_live` guard `cancel` uses can still be read (#776). Taken over
+        // ALL live orders: the scoped sweep below only touches its own venue's
+        // rows, so a sibling's id here is simply never consulted.
+        let live_before: HashSet<OrderId> = self
+            .ome
+            .live_orders()
+            .into_iter()
+            .map(|o| o.order_id.clone())
+            .collect();
         let report = if venue.is_empty() {
             crate::reconcile::reconcile(&mut self.ome, &snap)?
         } else {
@@ -2408,15 +2419,32 @@ impl Core {
         // same way every other status change does — otherwise a restart
         // re-adopts terminal orders as LIVE and force-closes them all over
         // again. emit_order already persists; these mutations bypass it.
-        for id in report.actions.iter().filter_map(|a| match a {
-            crate::reconcile::ReconcileAction::MarkedFilled { core_order_id }
-            | crate::reconcile::ReconcileAction::MarkedCancelled { core_order_id }
-            | crate::reconcile::ReconcileAction::MarkedForceClosed { core_order_id } => {
-                Some(core_order_id.as_str())
+        //
+        // #776: a CANCELLED/FORCE-CLOSED order also owes the money bookkeeping
+        // every other terminal transition runs — its BUY reservation released,
+        // the strategy's virtual hold returned, the pair slot marked dead and
+        // (for a hold-to-settlement strategy) the pending token lifted. The
+        // sweep used to stamp the status alone, so a reconciled-away BUY kept
+        // its reservation forever: the audit called it a stray hold, halted,
+        // and every later entry was refused. One implementation
+        // (`release_order_bookkeeping`), two callers — the explicit cancel and
+        // this sweep. `was_live` comes from the pre-sweep snapshot, so the
+        // operation is idempotent exactly like the cancel path.
+        for action in &report.actions {
+            match action {
+                crate::reconcile::ReconcileAction::MarkedFilled { core_order_id } => {
+                    self.persist_order(core_order_id);
+                }
+                crate::reconcile::ReconcileAction::MarkedCancelled { core_order_id }
+                | crate::reconcile::ReconcileAction::MarkedForceClosed { core_order_id } => {
+                    if let Some(order) = self.ome.get(core_order_id).cloned() {
+                        let was_live = live_before.contains(order.order_id.as_str());
+                        self.release_order_bookkeeping(&order, was_live, "reconcile");
+                    }
+                    self.persist_order(core_order_id);
+                }
+                crate::reconcile::ReconcileAction::FilledGap { .. } => {}
             }
-            crate::reconcile::ReconcileAction::FilledGap { .. } => None,
-        }) {
-            self.persist_order(id);
         }
         // #462: retire place-timeout orders the venue never gave evidence for
         // (see `resolve_place_timeouts`).

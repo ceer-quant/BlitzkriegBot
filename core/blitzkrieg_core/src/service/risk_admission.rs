@@ -1373,34 +1373,8 @@ impl Core {
             .cloned()
             .ok_or_else(|| CoreError::new(CoreErrorCode::UnknownOrder, id))?;
         let was_live = order.status.is_live();
-        if order.side == Side::Buy {
-            // E28: the reservation is released in the ORDER'S OWN book — a
-            // cancel must never refund another account's cash.
-            if let Ok(l) = self.accounts.get_mut(&order.account_id) {
-                l.release(id);
-            }
-            // E-VA: the same precision for the strategy's VIRTUAL pot — the
-            // cancelled order's whole remaining hold leaves the book.
-            self.virtual_release_order(&order);
-        }
+        self.release_order_bookkeeping(&order, was_live, "cancel");
         self.ome.mark_terminal(id, OrderStatus::Cancelled, now_ms)?;
-        // RFC 568 阶段一：死亡事实（撤单）喂配对簿。
-        self.pair_on_order_event(&order.internal_key, Decimal::ZERO, true);
-        // The token's repeat-suppression ends with the order: a cancelled
-        // entry leaves no resting order behind, so a later cycle may re-attempt
-        // (the strategy's own latch still bounds it to one attempt per book).
-        if was_live && let Some(engine) = self.engine.as_mut() {
-            engine.release_pending_token_for_strategy(
-                order.account_id.as_str(),
-                &order.strategy,
-                &order.token_id,
-            );
-        }
-        // Replay fast path: a live order just left the book — the escalation
-        // sweep and the audit input changed.
-        if was_live && self.replay_sched() {
-            self.fast_orders_dirty = true;
-        }
         // The venue may still hold the order resting: hand its id to the live
         // bridge for a real cancel. Nothing to cancel when the venue never
         // acknowledged the order (no id — the venue never heard of it).
@@ -1410,6 +1384,64 @@ impl Core {
         }
         self.emit_order(id);
         Ok(())
+    }
+
+    /// Release every bookkeeping hold an order took when it was placed.
+    ///
+    /// The terminal transition has TWO callers — an explicit [`Self::cancel`]
+    /// and the reconcile sweep's `Cancelled`/`ForceClosed` repair (#776) — and
+    /// they must run the SAME bookkeeping: a reservation released on one path
+    /// but not the other outlives its order, and `run_accounting_audit` flags
+    /// the stray hold, halts new entries and never lets go. Keeping one
+    /// implementation here is the whole point of the extraction.
+    ///
+    /// `was_live` is the same guard the cancel path spelled inline: only an
+    /// order that actually rested may lift the token's repeat suppression (the
+    /// hold-to-settlement gap-fill gate) or dirty the replay schedule. Every
+    /// release below is itself idempotent (a keyed remove / a `dead` flag set),
+    /// so a second sweep over an already-terminal order is a no-op.
+    pub(super) fn release_order_bookkeeping(
+        &mut self,
+        order: &crate::model::TrackedOrder,
+        was_live: bool,
+        why: &str,
+    ) {
+        if order.side == Side::Buy {
+            // E28: the reservation is released in the ORDER'S OWN book — a
+            // terminal transition must never refund another account's cash.
+            if let Ok(l) = self.accounts.get_mut(&order.account_id) {
+                l.release(&order.order_id);
+            }
+            // E-VA: the same precision for the strategy's VIRTUAL pot — the
+            // order's whole remaining hold leaves the book.
+            self.virtual_release_order(order);
+        }
+        // RFC 568 阶段一：死亡事实（撤单/对账终态）喂配对簿。
+        self.pair_on_order_event(&order.internal_key, Decimal::ZERO, true);
+        if was_live {
+            // The token's repeat-suppression ends with the order: a terminal
+            // entry leaves no resting order behind, so a later cycle may
+            // re-attempt (the strategy's own latch still bounds it to one
+            // attempt per book). Only hold-to-settlement strategies release
+            // through this gate — see `release_pending_token_for_strategy`.
+            if let Some(engine) = self.engine.as_mut() {
+                engine.release_pending_token_for_strategy(
+                    order.account_id.as_str(),
+                    &order.strategy,
+                    &order.token_id,
+                );
+            }
+            // Replay fast path: a live order just left the book — the
+            // escalation sweep and the audit input changed.
+            if self.replay_sched() {
+                self.fast_orders_dirty = true;
+            }
+        }
+        tracing::debug!(
+            order = order.order_id.as_str(),
+            why,
+            "terminal order bookkeeping released"
+        );
     }
 
     /// Enqueue one venue cancel (deduped by id, bounded so a pathological loop
