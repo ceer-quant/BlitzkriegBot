@@ -626,8 +626,7 @@ pub(crate) async fn handle_account(
                         p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
                         venue,
                         credential_keys,
-                        &actor,
-                        p.reason.as_deref().unwrap_or(""),
+                        (&actor, p.reason.as_deref().unwrap_or("")),
                         now_ms(),
                     )?;
                     // The lock guard is dropped BEFORE the runtime mount

@@ -1518,11 +1518,11 @@ impl Core {
         name: Option<&str>,
         venue: Option<&str>,
         credential_keys: crate::account::CredentialKeys,
-        actor: &str,
-        reason: &str,
+        audit: (&str, &str),
         now_ms: i64,
     ) -> CoreResult<()> {
         use crate::ipc::schema::ACCOUNT_CREATE_NOTE;
+        let (actor, reason) = audit;
         // Reserved name first — BEFORE the empty-id check, so the refusal
         // names the contract, not the spelling (`"default"` trimmed and
         // whitespace-padded variants land on the same reserved refusal).

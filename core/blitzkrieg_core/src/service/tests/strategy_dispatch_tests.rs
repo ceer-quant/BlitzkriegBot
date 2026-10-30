@@ -246,8 +246,7 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         Some("probe two"),
         Some("polymarket"),
         crate::account::CredentialKeys::default(),
-        "test",
-        "mint",
+        ("test", "mint"),
         5,
     )
     .expect("the mint lands");
@@ -304,8 +303,7 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         None,
         None,
         crate::account::CredentialKeys::default(),
-        "test",
-        "mint live",
+        ("test", "mint live"),
         6,
     )
     .expect("the live mint lands");
