@@ -1,3 +1,5 @@
+# RETIRED (2026-10-28): no active configuration keys remain — engine config now
+# lives in .env (BK_* variables; see .env.example). This file is documentation only.
 # User-layer runtime configuration. Parameters only; no credentials here.
 # Credentials are read by the kernel process from its own environment.
 #
@@ -25,7 +27,6 @@
 # was shadowing (issue 499, 2026-10-16 six-answers finding 1). Per-experiment
 # overrides go in `.env` as BK_* variables or on the command line.
 
-[engine]
 # (keys intentionally absent — see the env single-source note above)
 
 # ── The engine-level exit ladder (E17/#264) ──────────────────────────────────

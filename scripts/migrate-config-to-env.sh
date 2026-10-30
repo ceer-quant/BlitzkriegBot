@@ -22,6 +22,11 @@
 #     → RUNTIME_ROUND_DURATION_SEC (JSON field roundDurationSec; authority:
 #       core/blitzkrieg_core/src/ipc/runtime_config.rs)
 #   user_layer/configs/execution_policy.toml
+#
+# NOTE: user_layer/configs/default.toml is RETIRED (2026-10-28) — it carries no
+# active configuration keys (engine keys moved to BK_* env in #588; exit/risk
+# knobs stay at their compiled defaults unless uncommented in a copy). It is
+# documentation only and is NOT migrated by this script; nothing to move.
 #     → POLICY_BUDGET_RATIO / POLICY_MIN_BUDGET_USD / POLICY_MAX_BUDGET_USD /
 #       POLICY_MIN_EQUITY_USD / POLICY_MAX_POSITIONS_PER_ASSET, global and
 #       per-account (POLICY_<ID>_<TAIL>, same suffix spelling). The [[*.rules]]

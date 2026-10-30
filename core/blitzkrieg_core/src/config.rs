@@ -494,7 +494,11 @@ impl FileConfig {
                 }
             }
         }
-        if !known_section {
+        // A retired / documentation-only file (all comments, no sections) is a
+        // legitimate empty table — not a typo, so it stays silent (issue: default.toml
+        // retirement). A file that carries sections but none we recognise still
+        // warns, so a typo'd section header cannot hide.
+        if !root.is_empty() && !known_section {
             self.warnings
                 .push(format!("{}: no known sections", path.display()));
         }

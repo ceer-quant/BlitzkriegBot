@@ -17,7 +17,7 @@
 | --- | --- | --- | --- |
 | `.env`（git-ignored） | **唯一可信配置源**（凭证 + 运行键） | **保留并加冕**；生产重写由主窗口在升级时执行 | 本文档 §3 逐键判定 |
 | `.env.example` | env 全集模板（随发布打包） | **保留，本 PR 补齐漂移**（§5） | `scripts/package-release.mjs:267` |
-| `user_layer/configs/default.toml` | 内核配置文件壳（出厂四键已于 #588 退役，现零显式键） | **保留为文档壳**：承载 `[exit]`/`[risk]` 的「显式 act 面」（注释即出厂承诺，取消注释即显式变更 + 启动日志点名）。文件缺失内核照常启动（`FileConfig::load` 对 NotFound 回落编译缺省，`core/blitzkrieg_core/src/config.rs:15`） | 后续阶段可评估删除文档壳；本轮不动 |
+| `user_layer/configs/default.toml` | 内核配置文件壳（出厂四键已于 #588 退役，现零显式键） | **退役为纯注释文档**（2026-10-28）：不再含任何有效配置行；引擎配置走 .env 的 BK_* 变量，exit/risk 保持编译默认。文件缺失内核照常启动（`FileConfig::load` 对 NotFound 回落编译缺省） | PR-4 完成：文档壳退役为注释-only；读取点保留（缺失容忍） |
 | `user_layer/configs/accounts.toml` | **账户簿持久态 + 账户合同**（`[[account]]`、status 姿态、strategies 启用集、rounds 族、`[cross_venue_arb]` 腿） | **保留，绝不迁 .env**：面板热写回（`account.venue.set` / `account.rounds.set` / `account.strategies.set`）以它为持久化目标——`.env` 是「人写、进程只读」的文件，进程写回的键放 `.env` 会制造第二个可信源。缺文件时内核以单一 `default` 账户照常启动（`core/blitzkrieg_core/src/account/mod.rs:334` `single_default`） | §6 处置提案 |
 | `user_layer/configs/shadow_evolution.toml` | 进化开关与参数；`enabled`/`auto_evolve` 两开关的**唯一可信源**（面板翻转写回本文件） | **保留**（写回型持久态，同 accounts.toml 理由）。`BK_SE_*` env 是它的上层覆盖，已在 `.env.example` 全列出 | `core/blitzkrieg_core/src/config.rs`（load 侧边文件） |
 | `user_layer/configs/update.toml` | 更新检查出厂缺省（读序 CLI > `BLITZKRIEG_UPDATE_*` env > 此文件 > 内置） | **保留为出厂缺省面**；运行态在 `data/update/state.json`，env 面已存在 | `core/blitzkrieg_core/src/main.rs:1810-1835` |
