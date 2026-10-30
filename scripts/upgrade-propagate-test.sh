@@ -24,10 +24,14 @@
 #      missing install is stale, and a lockfile-less tree is left to the
 #      build's own loud failure;
 #   8. the operator's live state is NOT in the upgrade carry face (issue 751,
-#      the .env single source): every runtime write lands in `.env` (ACCOUNT_*
-#      / SHADOW_* keys), so `UA_OPERATOR_STATE_CONFIGS` is empty by ruling and
-#      the operator's `.env` is never staged, never drifted, never installed
-#      over and never rolled back.
+#      the .env single source): ua_stage ships no toml at all, so a normal
+#      upgrade never seeds, drifts, installs over or rolls back operator
+#      config, and the operator's `.env` is never touched. If an older bundle
+#      DOES stage configs/, the #758 rules apply: on an unmigrated deployment
+#      (no migrated keys in `.env`) a legacy toml is operator state and is
+#      preserved; once `.env` confirms that family is migrated, the same file
+#      is retired legacy and is NEVER reinstalled — reinstalling it would trip
+#      the kernel's "legacy toml still exists" write gate.
 #
 # Run it from anywhere: `sh scripts/upgrade-propagate-test.sh` (exit 0 = pass).
 
@@ -50,6 +54,14 @@ no() {
 check() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1" "$2" "$3"; fi; }
 check_same() { # check_same <name> <expected file> <actual file>
   if cmp -s "$2" "$3"; then ok "$1"; else no "$1" "same bytes as $2" "differs from $2"; fi
+}
+expect_state() { # expect_state <name> <config> <yes|no>
+  if ua_config_is_operator_state "$2"; then got=yes; else got=no; fi
+  check "$1" "$3" "$got"
+}
+expect_retired() { # expect_retired <name> <config> <yes|no>
+  if ua_config_is_retired_legacy "$2"; then got=yes; else got=no; fi
+  check "$1" "$3" "$got"
 }
 
 ua_die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
@@ -213,6 +225,103 @@ ua_rollback
 check_same "rollback leaves the operator .env byte-identical too" "$tmp/operator-dot-env" "$REPO_ROOT/.env"
 rm "$REPO_ROOT/.env"
 
+# ── 5d. legacy configs vs migration state (#758) ────────────────────────────
+# #763 removed the factory toml carry face, but an older release bundle can
+# still stage one. These two arms pin the guards that make that safe in both
+# deployment states. They drive ua_drift/install/verify/rollback directly.
+printf '\nlegacy configs: unmigrated deployment keeps operator state (#758)\n'
+rm -f "$REPO_ROOT/$CONFIG_DIR"/*.toml
+rm -rf "$ROLLBACK/configs"
+# No migrated key in .env: the account loader still falls back to accounts.toml.
+printf 'BLITZKRIEG_PANEL_ADDR=127.0.0.1:51888\n' > "$REPO_ROOT/.env"
+
+printf '[[account]]\nid = "live"\n' > "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+printf 'enabled = false\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+printf 'version = 1\n[defaults]\nmax_budget_usd = 7\n' > "$REPO_ROOT/$CONFIG_DIR/execution_policy.toml"
+printf '[update]\ncheck_enabled = false\n' > "$REPO_ROOT/$CONFIG_DIR/update.toml"
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  cp "$REPO_ROOT/$CONFIG_DIR/$t" "$tmp/op-$t"
+done
+
+ua_stage
+mkdir -p "$STAGE/configs"
+printf '[[account]]\nid = "factory"\n' > "$STAGE/configs/accounts.toml"
+printf 'enabled = true\n' > "$STAGE/configs/shadow_evolution.toml"
+printf 'version = 1\n[defaults]\nmax_budget_usd = 1\n' > "$STAGE/configs/execution_policy.toml"
+printf '[update]\ncheck_enabled = true\n' > "$STAGE/configs/update.toml"
+
+expect_state "accounts.toml is operator state (unmigrated)" accounts.toml yes
+expect_state "shadow_evolution.toml is operator state (unmigrated)" shadow_evolution.toml yes
+expect_state "execution_policy.toml is operator state (unmigrated)" execution_policy.toml yes
+expect_state "update.toml is operator state (unmigrated)" update.toml yes
+expect_state "default.toml is never operator state" default.toml no
+expect_retired "accounts.toml is not retired (unmigrated)" accounts.toml no
+
+ua_drift > "$tmp/drift-unmigrated.txt"
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check "drift: $t kept as operator state" "1" \
+    "$(grep -cF "= $t (operator state kept" "$tmp/drift-unmigrated.txt" || true)"
+done
+
+ua_install > "$tmp/install-unmigrated.txt"
+ua_verify
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check_same "install preserves operator $t" "$tmp/op-$t" "$REPO_ROOT/$CONFIG_DIR/$t"
+done
+check "nothing was backed up (nothing was replaced)" "0" \
+  "$(find "$ROLLBACK" -name '*.toml' | wc -l | tr -d ' ')"
+ua_rollback
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check_same "rollback preserves operator $t" "$tmp/op-$t" "$REPO_ROOT/$CONFIG_DIR/$t"
+done
+
+printf '\nlegacy configs: migrated deployment never reinstalls them (#758)\n'
+rm -f "$REPO_ROOT/$CONFIG_DIR"/*.toml
+# Every family confirmed migrated in .env: the legacy files are dead residue.
+printf 'ACCOUNT_LIST=default\nSHADOW_ENABLED=true\nPOLICY_MAX_BUDGET_USD=50\nBLITZKRIEG_UPDATE_CHECK=true\n' \
+  > "$REPO_ROOT/.env"
+cp "$REPO_ROOT/.env" "$tmp/migrated-dot-env"
+
+expect_state "accounts.toml is not operator state (migrated)" accounts.toml no
+expect_state "shadow_evolution.toml is not operator state (migrated)" shadow_evolution.toml no
+expect_state "execution_policy.toml is not operator state (migrated)" execution_policy.toml no
+expect_state "update.toml is not operator state (migrated)" update.toml no
+expect_retired "accounts.toml is retired legacy (migrated)" accounts.toml yes
+expect_retired "shadow_evolution.toml is retired legacy (migrated)" shadow_evolution.toml yes
+expect_retired "execution_policy.toml is retired legacy (migrated)" execution_policy.toml yes
+expect_retired "update.toml is retired legacy (migrated)" update.toml yes
+expect_retired "default.toml is retired legacy on any migrated deployment" default.toml yes
+
+ua_drift > "$tmp/drift-migrated.txt"
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check "drift: $t marked retired" "1" \
+    "$(grep -cF -- "- $t (legacy retired" "$tmp/drift-migrated.txt" || true)"
+done
+
+ua_install > "$tmp/install-migrated.txt"
+ua_verify
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  if [ -f "$REPO_ROOT/$CONFIG_DIR/$t" ]; then
+    no "install does not resurrect $t" "absent (write gate stays clear)" "reinstalled"
+  else
+    ok "install does not resurrect $t"
+  fi
+done
+check_same "install leaves the migrated .env byte-identical" "$tmp/migrated-dot-env" "$REPO_ROOT/.env"
+check "still nothing backed up (it was not installed)" "0" \
+  "$(find "$ROLLBACK" -name '*.toml' | wc -l | tr -d ' ')"
+ua_rollback
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  if [ -f "$REPO_ROOT/$CONFIG_DIR/$t" ]; then
+    no "rollback does not resurrect $t" "absent" "reinstalled"
+  else
+    ok "rollback does not resurrect $t"
+  fi
+done
+check_same "rollback leaves the migrated .env byte-identical" "$tmp/migrated-dot-env" "$REPO_ROOT/.env"
+rm -f "$REPO_ROOT/.env"
+rm -rf "$STAGE/configs"
+
 # ── 6. the rollback pruner keeps the three newest ────────────────────────────
 printf '\nrollback pruner\n'
 for n in 1 2 3 4 5; do
@@ -223,8 +332,11 @@ mkdir -p "$REPO_ROOT/target/keepme-20260101T000000"
 ua_prune_rollbacks
 check "three newest rollback sets survive" "3" \
   "$(ls -1d "$REPO_ROOT"/target/rollback-* | wc -l | tr -d ' ')"
+# Basenames via sed, not `xargs basename`: xargs splits its input on blanks, so
+# a checkout under a path with a space (".../Hard Disk/...") turned each path
+# segment into a survivor and the check failed on a correct pruner.
 check "the survivors are the three newest" "rollback-20260103T000000 rollback-20260104T000000 rollback-20260105T000000" \
-  "$(ls -1d "$REPO_ROOT"/target/rollback-* | xargs -n1 basename | sort | tr '\n' ' ' | sed 's/ $//')"
+  "$(ls -1d "$REPO_ROOT"/target/rollback-* | sed 's|.*/||' | sort | tr '\n' ' ' | sed 's/ $//')"
 check "an unrelated target/ dir is untouched" "1" \
   "$(ls -1d "$REPO_ROOT"/target/keepme-* | wc -l | tr -d ' ')"
 
@@ -348,6 +460,10 @@ srv.serve_forever()
   else
     no "the probe fixture came up" "listener on $live_port" "no listener"
   fi
+  # The fixture is a real listener; leaving it running outlives the test (and
+  # holds the caller's pipe open, so a `| tail` never sees EOF).
+  kill "$fixture_pid" 2>/dev/null || true
+  wait "$fixture_pid" 2>/dev/null || true
 fi
 
 printf '\n%s\n' "upgrade-propagate: $pass passed, $fail failed"

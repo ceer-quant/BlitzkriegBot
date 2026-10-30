@@ -29,10 +29,15 @@
 # documentation only and is NOT migrated by this script; nothing to move.
 #     → POLICY_BUDGET_RATIO / POLICY_MIN_BUDGET_USD / POLICY_MAX_BUDGET_USD /
 #       POLICY_MIN_EQUITY_USD / POLICY_MAX_POSITIONS_PER_ASSET, global and
-#       per-account (POLICY_<ID>_<TAIL>, same suffix spelling). The [[*.rules]]
-#       array-of-tables is NOT parsed here — the script prints a hand-migration
-#       recipe for POLICY_RULES / POLICY_<ID>_RULES instead.
-#       (authority: core/blitzkrieg_core/src/execution_policy.rs)
+#       per-account in the kernel's EXACT grammar `POLICY_<TAIL>_<ID>` (the
+#       tail first, the upper-cased account suffix last — e.g.
+#       POLICY_MAX_BUDGET_USD_PAPER, NOT POLICY_PAPER_MAX_BUDGET_USD).
+#       The [[*.rules]] arrays migrate for real into POLICY_RULES /
+#       POLICY_RULES_<ID>, the JSON array `apply_env` parses. A rule or
+#       section this script cannot convert faithfully refuses the WHOLE policy
+#       source: non-zero exit, source file and .env both untouched.
+#       (authority: core/blitzkrieg_core/src/execution_policy.rs —
+#        apply_env / env_has_policy_section / env_account_suffix)
 #   user_layer/configs/update.toml
 #     → BLITZKRIEG_UPDATE_CHECK / BLITZKRIEG_UPDATE_AUTO /
 #       BLITZKRIEG_UPDATE_INTERVAL_SECS (authority:
@@ -50,7 +55,13 @@
 #     state, not configuration.
 #   - Any parse anomaly abandons that source BEFORE the .env is written: the
 #     file stays in place, none of its keys land, and the report says so
-#     (fail-closed, the same discipline the kernel's loaders run).
+#     (fail-closed, the same discipline the kernel's loaders run). An
+#     unconvertible execution_policy.toml is stricter still: the WHOLE run
+#     refuses with a non-zero exit and neither the source nor the .env moves.
+#   - A source is retired (moved to the backup dir) only AFTER the .env has
+#     been written atomically and verified: every rendered key line must be
+#     present. If a move fails, the .env is already consistent and the source
+#     stays in place; the run exits non-zero so the next invocation retries.
 #
 # Usage: scripts/migrate-config-to-env.sh [ROOT]
 #   ROOT defaults to the repo root (this script's grandparent). Every path —
@@ -97,6 +108,11 @@ FILES_TO_MOVE=""  # sources whose migration fully succeeded
 SKIPPED=""        # absent sources
 LEFT_BEHIND=""    # sources that failed to migrate
 NOTES=""          # manual follow-ups for the final report
+# The account ids the account source migrated (ACCOUNT_LIST). The policy
+# migration cross-checks against it: the kernel only registers an env-only
+# policy section for an id ACCOUNT_LIST names, so a policy section for any
+# other id would silently fall back to the global policy (issue #760).
+MIGRATED_ACCOUNT_IDS=""
 ANY_SOURCE=0
 BACKUP_DIR=""
 MOVED_LIST=""
@@ -466,6 +482,7 @@ migrate_accounts_toml() {
     return 0
   fi
   # ACCOUNT_LIST first, then the per-account lines, then the display pointer.
+  MIGRATED_ACCOUNT_IDS="$ids"
   PENDING="ACCOUNT_LIST=\"${ids}\""$'\n'"${PENDING}"
   PENDING_KEYS=" ACCOUNT_LIST${PENDING_KEYS}"
   if [ -n "$display" ]; then
@@ -544,10 +561,22 @@ migrate_shadow_toml() {
 }
 
 # ── execution_policy.toml ────────────────────────────────────────────────────
-# [defaults] / [accounts.<id>] scalars → POLICY_* keys. The [[*.rules]]
-# array-of-tables is NOT parsed — POLICY_RULES / POLICY_<ID>_RULES get a
-# hand-migration recipe instead (fail-safe: rules only ever SHRINK intents,
-# and silently dropping them would silently un-guard the kernel).
+# [defaults] / [accounts.<id>] scalars and [[*.rules]] arrays → POLICY_* keys.
+# The account grammar is the kernel's `POLICY_<TAIL>_<ID>` (apply_env appends
+# `_<suffix>` AFTER the tail), e.g. POLICY_MAX_BUDGET_USD_PAPER. Rules become
+# the JSON array apply_env parses (`POLICY_RULES` / `POLICY_RULES_<ID>`).
+#
+# The TOML is parsed with Python's tomllib (a real parser, not the line
+# scanner the other sources use) because rules are nested tables and inline
+# tables: a half-understood rule is exactly the "silently un-guarded kernel"
+# this migration must not produce. EVERY rule/section is validated against the
+# kernel's grammar before anything is emitted. An unconvertible rule or
+# section refuses the WHOLE source (non-zero exit; the source and .env stay
+# byte-identical) — a printed recipe is not a migration. A `[accounts.<id>]`
+# section whose id is not in the migrated ACCOUNT_LIST is refused too: the
+# kernel discovers env-only policy sections FROM ACCOUNT_LIST, so those keys
+# would never be read and the account would silently inherit the global
+# policy (issue #760).
 migrate_policy_toml() {
   local f="$CONFIG_DIR/execution_policy.toml"
   if [ ! -f "$f" ]; then
@@ -556,97 +585,332 @@ migrate_policy_toml() {
   fi
   ANY_SOURCE=1
   say "── user_layer/configs/execution_policy.toml"
-  local ev="$WORKDIR/policy.events"
-  scan_toml "$f" > "$ev"
 
-  local tag p1 p2 p3 sec="" mode="none" acc_id="" acc_sfx="" rules_global=0 rules_ids=""
+  local out rc=0 err="$WORKDIR/policy.err"
+  # The account ids the kernel will know after this migration. A policy section
+  # for any other id would migrate to keys the kernel never registers (its
+  # env-only sections are discovered FROM ACCOUNT_LIST), silently dropping that
+  # account back to the global policy — the exact relaxation #760 forbids. The
+  # account source's migration result comes first in the run; an
+  # already-migrated `.env` is the fallback when it did not run.
+  local known_ids="${MIGRATED_ACCOUNT_IDS:-}"
+  if [ -z "$known_ids" ] && [ -f "$ENV_FILE" ]; then
+    known_ids="$(sed -n 's/^[[:space:]]*ACCOUNT_LIST[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" |
+      tail -n 1 | sed 's/^["'\'']//; s/["'\'']$//')"
+  fi
+  out="$(python3 - "$f" "$known_ids" 2>"$err" <<'PY'
+import json
+import math
+import sys
 
-  # mode: none (top-level) / defaults / account / skip (unmappable id) / rules
-  while IFS=$'\t' read -r tag p1 p2 p3; do
-    case "$tag" in
-      T)
-        sec="$p1"
-        case "$sec" in
-          defaults)
-            mode="defaults" ;;
-          accounts.*)
-            case "$sec" in
-              *#arr)
-                # [[accounts.<id>.rules]] — the id sits between accounts. and .rules
-                acc_id="${sec#accounts.}"
-                acc_id="${acc_id%%.rules#*}"
-                if [ -n "$acc_id" ] && [ "$acc_id" != "$sec" ] && [ "$acc_id" != "${sec#accounts.}" ]; then
-                  rules_ids="$rules_ids $acc_id"
-                fi
-                mode="rules" ;;
-              *)
-                acc_id="${sec#accounts.}"
-                case "$acc_id" in
-                  *'"'* | *"'"* | *.* | *" "*)
-                    warn "[accounts.$acc_id] 的 id 含引号/点/空格——env 后缀文法无法表达，该段请手动迁移"
-                    mode="skip" ;;
-                  *)
-                    acc_sfx="$(env_suffix "$acc_id")"
-                    mode="account" ;;
-                esac ;;
-            esac ;;
-          defaults.rules*)
-            rules_global=1
-            mode="rules" ;;
-          *)
-            mode="none" ;;
-        esac ;;
-      K)
-        case "$mode" in
-          none)
-            case "$p1" in
-              version)
-                if [ "$p3" != "1" ]; then
-                  warn "execution_policy.toml version=$p3 而本内核讲 version=1——照迁标量（该文件本身会被内核拒绝启动）"
-                fi ;;
-            esac ;;
-          defaults)
-            case "$p1" in
-              budget_ratio)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_BUDGET_RATIO" "$p3"; fi ;;
-              min_budget_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_MIN_BUDGET_USD" "$p3"; fi ;;
-              max_budget_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_MAX_BUDGET_USD" "$p3"; fi ;;
-              min_equity_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_MIN_EQUITY_USD" "$p3"; fi ;;
-              max_positions_per_asset)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_MAX_POSITIONS_PER_ASSET" "$p3"; fi ;;
-            esac ;;
-          account)
-            case "$p1" in
-              budget_ratio)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_${acc_sfx}_BUDGET_RATIO" "$p3"; fi ;;
-              min_budget_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_${acc_sfx}_MIN_BUDGET_USD" "$p3"; fi ;;
-              max_budget_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_${acc_sfx}_MAX_BUDGET_USD" "$p3"; fi ;;
-              min_equity_usd)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_${acc_sfx}_MIN_EQUITY_USD" "$p3"; fi ;;
-              max_positions_per_asset)
-                if [ "$p2" = "s" ] || [ "$p2" = "b" ]; then emit "POLICY_${acc_sfx}_MAX_POSITIONS_PER_ASSET" "$p3"; fi ;;
-            esac ;;
-        esac ;;
-    esac
-  done < "$ev"
-  if [ "$rules_global" = 1 ] || [ -n "$rules_ids" ]; then
-    local per=""
-    if [ -n "$rules_ids" ]; then
-      per="（带 [[accounts.<id>.rules]] 的账户写 POLICY_<ID>_RULES，本文件涉及的 id:${rules_ids} ）"
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    try:
+        import tomli as tomllib
+    except ImportError:
+        print("需要 Python 3.11+ 的 tomllib（或 tomli）来忠实解析规则数组", file=sys.stderr)
+        sys.exit(3)
+
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(3)
+
+
+SCALARS = (
+    "budget_ratio",
+    "min_budget_usd",
+    "max_budget_usd",
+    "min_equity_usd",
+    "max_positions_per_asset",
+)
+DECIMAL_SCALARS = {
+    "budget_ratio": "BUDGET_RATIO",
+    "min_budget_usd": "MIN_BUDGET_USD",
+    "max_budget_usd": "MAX_BUDGET_USD",
+    "min_equity_usd": "MIN_EQUITY_USD",
+}
+TAIL_MAX_POSITIONS = "MAX_POSITIONS_PER_ASSET"
+NUMERIC_FIELDS = {
+    "available_balance",
+    "total_equity",
+    "open_positions",
+    "current_price",
+    "time_left_sec",
+    "recent_pnl_1h",
+    "consecutive_losses",
+}
+TEXT_FIELDS = {"symbol"}
+FIELDS = NUMERIC_FIELDS | TEXT_FIELDS
+TABLE_OPS = {"<", "<=", ">", ">=", "==", "=", "!=", "in", "lt", "le", "gt", "ge", "eq", "ne"}
+
+
+def is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def decimal_text(v, what):
+    # wire_dec accepts numbers AND decimal strings; pass both through in the
+    # spelling the kernel's Decimal::from_str_exact reads.
+    if isinstance(v, str):
+        return v
+    if not is_number(v):
+        fail(f"{what} 必须是数字或十进制字符串")
+    if isinstance(v, float) and not math.isfinite(v):
+        fail(f"{what} 必须是有限数字")
+    return repr(v) if isinstance(v, float) else str(v)
+
+
+def u32_text(v, what):
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        fail(f"{what} 必须是非负整数")
+    return str(v)
+
+
+def env_suffix(account_id):
+    return "".join(c if c.isascii() and c.isalnum() else "_" for c in account_id).upper()
+
+
+def scalar_pairs(section, label):
+    out = []
+    for key in SCALARS:
+        if key not in section:
+            continue
+        if key == "max_positions_per_asset":
+            out.append((TAIL_MAX_POSITIONS, u32_text(section[key], f"{label}.{key}")))
+        else:
+            out.append((DECIMAL_SCALARS[key], decimal_text(section[key], f"{label}.{key}")))
+    return out
+
+
+def parse_decimal(text):
+    try:
+        from decimal import Decimal, InvalidOperation
+
+        d = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return d if d.is_finite() else None
+
+
+def validate_when_string(text, label):
+    text = text.strip()
+    if not text:
+        fail(f"{label}: when 不能为空")
+    found = None
+    for op in (">=", "<=", "!=", "==", "<", ">"):
+        idx = text.find(op)
+        if idx >= 0:
+            found = (op, idx, len(op))
+            break
+    if found is None:
+        idx = text.find(" in ")
+        if idx >= 0:
+            found = ("in", idx + 1, 2)
+    if found is None:
+        fail(f"{label}: when `{text}` 没有运算符")
+    op, idx, oplen = found
+    field = text[:idx].strip()
+    rest = text[idx + oplen :].strip()
+    if field not in FIELDS:
+        fail(f"{label}: when 的字段 `{field}` 不是内核支持的 8 个字段之一")
+    if field in TEXT_FIELDS:
+        if rest.startswith("[") and rest.endswith("]"):
+            items = [p.strip().strip("\"'") for p in rest[1:-1].split(",")]
+            if not [p for p in items if p]:
+                fail(f"{label}: when 的列表 `{rest}` 为空")
+            return
+        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+            return
+        fail(f"{label}: when 的 `{rest}` 既不是带引号的 symbol 也不是列表")
+    else:
+        if parse_decimal(rest) is None:
+            fail(f"{label}: when 的 `{rest}` 不是数字")
+
+
+def validate_when_table(when, label):
+    extra = set(when) - {"field", "op", "value"}
+    if extra:
+        fail(f"{label}: when 含不支持的键: {', '.join(sorted(extra))}")
+    for req in ("field", "op", "value"):
+        if req not in when:
+            fail(f"{label}: when 缺少 `{req}`")
+    field, op, val = when["field"], when["op"], when["value"]
+    if not isinstance(field, str) or field not in FIELDS:
+        fail(f"{label}: when.field `{field}` 不是内核支持的字段")
+    if not isinstance(op, str) or op not in TABLE_OPS:
+        fail(f"{label}: when.op `{op}` 不是内核支持的运算符")
+    if field in TEXT_FIELDS:
+        if isinstance(val, str):
+            return
+        if isinstance(val, list) and all(isinstance(x, str) for x in val):
+            return
+        fail(f"{label}: when.value 对 symbol 字段必须是字符串或字符串列表")
+    else:
+        if not is_number(val):
+            fail(f"{label}: when.value 对数值字段必须是数字")
+        if isinstance(val, float) and not math.isfinite(val):
+            fail(f"{label}: when.value 必须是有限数字")
+
+
+def validate_rule(rule, label):
+    if not isinstance(rule, dict):
+        fail(f"{label} 必须是一个规则表")
+    allowed = {"name", "priority", "enabled", "when", "then", "reason"}
+    extra = set(rule) - allowed
+    if extra:
+        fail(f"{label} 含不支持的键: {', '.join(sorted(extra))}")
+    name = rule.get("name")
+    if not isinstance(name, str) or not name:
+        fail(f"{label}.name 必须是非空字符串")
+    enabled = rule.get("enabled")
+    if not isinstance(enabled, bool):
+        fail(f"{label}.enabled 必须是布尔值")
+    if "priority" in rule:
+        u32_text(rule["priority"], f"{label}.priority")
+    when = rule.get("when")
+    if isinstance(when, str):
+        validate_when_string(when, label)
+    elif isinstance(when, dict):
+        validate_when_table(when, label)
+    else:
+        fail(f"{label}.when 必须是字符串或表")
+    then = rule.get("then")
+    if not isinstance(then, dict):
+        fail(f"{label}.then 必须是表")
+    allowed_then = {"action", "budget_ratio", "min_budget_usd", "max_budget_usd", "cooldown_sec"}
+    extra = set(then) - allowed_then
+    if extra:
+        fail(f"{label}.then 含不支持的键: {', '.join(sorted(extra))}")
+    present = [k for k in allowed_then if k in then]
+    if len(present) != 1:
+        fail(f"{label}.then 必须恰好有一个动作（当前 {len(present)} 个）")
+    action = present[0]
+    if action == "action":
+        if then[action] != "skip":
+            fail(f'{label}.then.action 只能是 "skip"')
+    elif action == "cooldown_sec":
+        v = then[action]
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            fail(f"{label}.then.cooldown_sec 必须是正整数")
+    else:
+        decimal_text(then[action], f"{label}.then.{action}")
+    if "reason" in rule and not isinstance(rule["reason"], str):
+        fail(f"{label}.reason 必须是字符串")
+    out = {
+        "name": name,
+        "priority": rule.get("priority", 100),
+        "enabled": enabled,
+        "when": when,
+        "then": then,
+    }
+    if "reason" in rule:
+        out["reason"] = rule["reason"]
+    return out
+
+
+def rules_json(rules, label):
+    if not isinstance(rules, list):
+        fail(f"{label} 必须是规则表数组")
+    validated = [validate_rule(r, f"{label}[{i}]") for i, r in enumerate(rules)]
+    text = json.dumps(validated, ensure_ascii=True, separators=(",", ":"))
+    # The .env format has no escapes. JSON syntax never uses a single quote, so
+    # encoding every one as \u0027 keeps the whole value free of a literal
+    # apostrophe; it can then live inside a single-quoted .env value even when
+    # a rule's reason carries both quote kinds. serde_json reads it back
+    # verbatim.
+    return text.replace("'", "\\u0027")
+
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        doc = tomllib.load(fh)
+except Exception as e:
+    fail(f"无法解析 TOML: {e}")
+
+if not isinstance(doc, dict):
+    fail("顶层必须是表")
+extra = set(doc) - {"version", "defaults", "accounts"}
+if extra:
+    fail(f"顶层含不支持的键: {', '.join(sorted(extra))}")
+if "version" not in doc:
+    fail("缺少 version（内核只讲 version = 1）")
+version = doc["version"]
+if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+    fail(f"version={version!r} 不受支持（内核讲 version = 1）")
+
+pairs = []
+
+defaults = doc.get("defaults", {})
+if not isinstance(defaults, dict):
+    fail("defaults 必须是表")
+extra = set(defaults) - (set(SCALARS) | {"rules"})
+if extra:
+    fail(f"[defaults] 含不支持的键: {', '.join(sorted(extra))}")
+pairs.extend(scalar_pairs(defaults, "[defaults]"))
+if "rules" in defaults:
+    pairs.append(("RULES", rules_json(defaults["rules"], "[defaults].rules")))
+
+accounts = doc.get("accounts", {})
+if not isinstance(accounts, dict):
+    fail("accounts 必须是表")
+# The ids ACCOUNT_LIST will carry after this migration. Guarded per section,
+# not silently skipped: a section for an unknown id would migrate to keys the
+# kernel never reads (it discovers env-only policy sections from ACCOUNT_LIST),
+# so that account would quietly inherit the GLOBAL policy — the relaxation
+# #760 exists to prevent.
+known_ids = set()
+if len(sys.argv) > 2 and sys.argv[2].strip():
+    known_ids = {x.strip() for x in sys.argv[2].split(",") if x.strip()}
+seen = {}
+for account_id, section in accounts.items():
+    if not isinstance(account_id, str) or not account_id:
+        fail("账户 id 必须是非空字符串")
+    if account_id not in known_ids:
+        fail(
+            f"[accounts.{account_id}] 的 id 不在迁移后的 ACCOUNT_LIST 里"
+            f"（当前: {', '.join(sorted(known_ids)) or '空'}）——内核只为 ACCOUNT_LIST "
+            "里的账户注册 policy 段，该段会静默回落到全局策略；请先在账户源里登记该 "
+            "id（或从 policy 里删掉该段）再迁移"
+        )
+    sfx = env_suffix(account_id)
+    if not sfx:
+        fail(f"账户 id {account_id!r} 的 env 后缀为空")
+    if sfx in seen:
+        fail(f"账户 id {seen[sfx]!r} 与 {account_id!r} 折成同一个 env 后缀 {sfx}")
+    seen[sfx] = account_id
+    if not isinstance(section, dict):
+        fail(f"[accounts.{account_id}] 必须是表")
+    extra = set(section) - (set(SCALARS) | {"rules"})
+    if extra:
+        fail(f"[accounts.{account_id}] 含不支持的键: {', '.join(sorted(extra))}")
+    for tail, val in scalar_pairs(section, f"[accounts.{account_id}]"):
+        pairs.append((f"{tail}_{sfx}", val))
+    if "rules" in section:
+        pairs.append((f"RULES_{sfx}", rules_json(section["rules"], f"[accounts.{account_id}].rules")))
+
+for key, val in pairs:
+    print(f"POLICY_{key}\t{val}")
+PY
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ -s "$err" ]; then
+      sed 's/^/  ! /' "$err" >&2
     fi
-    add_note "POLICY_RULES 请手动迁移：TOML 的 [[*.rules]] 数组表不由本脚本解析。打开备份里的 execution_policy.toml，把每个规则表（name/enabled/priority/when/then/reason 原样）写成 JSON 数组字符串 upsert 进 .env，例如 POLICY_RULES='[{\"name\":\"global_backstop\",\"enabled\":true,\"priority\":100,\"when\":\"open_positions >= 2\",\"then\":{\"action\":\"skip\"},\"reason\":\"…\"}]'${per}"
+    die "execution_policy.toml 无法忠实迁移（退出码 $rc）——源文件与 .env 均未改动"
   fi
-  if [ -n "$PENDING" ] || [ "$rules_global" = 1 ] || [ -n "$rules_ids" ]; then
-    commit "$f"
-  else
-    warn "execution_policy.toml 没有可迁移的标量"
-    abandon "$f"
+  if [ -n "$out" ]; then
+    local key val
+    while IFS=$'\t' read -r key val; do
+      [ -n "$key" ] || continue
+      emit "$key" "$val"
+    done <<EOF
+$out
+EOF
   fi
+  commit "$f"
 }
 
 # ── data/runtime/config.json ─────────────────────────────────────────────────
@@ -755,20 +1019,26 @@ ensure_backup_dir() {
     cand="$base-$n"
     n=$((n + 1))
   done
-  mkdir -p "$cand"
-  chmod 700 "$cand"
+  mkdir -p "$cand" || return 1
+  chmod 700 "$cand" || return 1
   BACKUP_DIR="$cand"
 }
 
 move_to_backup() {
   local src="$1" name
   [ -f "$src" ] || return 0
-  ensure_backup_dir
+  if ! ensure_backup_dir; then
+    printf '  ! 无法创建备份目录，源文件保留: %s\n' "$src" >&2
+    return 1
+  fi
   name="$(basename "$src")"
   while [ -e "$BACKUP_DIR/$name" ]; do
     name="${name}.bak"
   done
-  mv "$src" "$BACKUP_DIR/$name"
+  if ! mv "$src" "$BACKUP_DIR/$name"; then
+    printf '  ! 退役失败（.env 已写入且一致；源文件保留）: %s\n' "$src" >&2
+    return 1
+  fi
   MOVED_LIST="${MOVED_LIST}  ${src#"$ROOT"/} → ${BACKUP_DIR#"$ROOT"/}/$name"$'\n'
 }
 
@@ -836,6 +1106,23 @@ merge_env_file() {
   chmod 600 "$ENV_FILE"
 }
 
+# Verify that every key this run rendered landed in the .env exactly as
+# rendered. The merge keeps the FIRST rendered line per key and drops later
+# duplicates, so the check walks the first occurrence per key. A failure means
+# the atomic write did not round-trip — refuse to retire any source.
+verify_env_merge() {
+  [ -s "$VARS_FILE" ] || return 0
+  local line
+  awk '{ k = $0; sub(/=.*/, "", k); if (!(k in seen)) { seen[k] = 1; print } }' \
+    "$VARS_FILE" > "$WORKDIR/verify.lines"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if ! grep -Fqx -- "$line" "$ENV_FILE"; then
+      die "迁移校验失败：.env 中找不到本次写入的键行（键名与值均不打印）"
+    fi
+  done < "$WORKDIR/verify.lines"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────
 say "=== .env 单源配置迁移（issue #751）==="
 say "root: $ROOT"
@@ -852,28 +1139,38 @@ if [ "$ANY_SOURCE" = 0 ]; then
   say "五个迁移源都不存在——本次为 no-op（配置已迁移过，或本目录从无这些文件）。"
 fi
 
-# Move the retired sources (move = backup + exit the workspace in one step).
-if [ -n "$FILES_TO_MOVE" ]; then
-  say "备份并退役源文件（move，不 rm）……"
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    move_to_backup "$p"
-  done <<EOF
-$FILES_TO_MOVE
-EOF
-  say "备份目录: ${BACKUP_DIR#"$ROOT"/}"
-  printf '%s' "$MOVED_LIST"
-fi
-
-# Single atomic .env write, only when there is something to write.
+# Single atomic .env write, only when there is something to write. The write
+# happens BEFORE any source is retired: a parse/refusal leaves every source in
+# place, and a failed write never loses a source.
 if [ -s "$VARS_FILE" ]; then
   if [ ! -f "$ENV_FILE" ]; then
     : > "$ENV_FILE"
   fi
   merge_env_file
+  verify_env_merge
   read -r REPLACED APPENDED DROPPED < "$WORKDIR/merge.summary"
   say ""
   say ".env 更新完成：替换 ${REPLACED} 行，追加 ${APPENDED} 行，删除重复 ${DROPPED} 行（权限 0600；未涉及行逐字节保留）。"
+fi
+
+# Retire the sources (move = backup + exit the workspace in one step) only
+# after the target is written and verified. A move failure leaves the .env
+# consistent and the source in place; the non-zero exit asks for a re-run.
+MOVE_FAILED=0
+if [ -n "$FILES_TO_MOVE" ]; then
+  say "备份并退役源文件（move，不 rm）……"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if ! move_to_backup "$p"; then
+      MOVE_FAILED=1
+    fi
+  done <<EOF
+$FILES_TO_MOVE
+EOF
+  if [ "$MOVE_FAILED" = 0 ]; then
+    say "备份目录: ${BACKUP_DIR#"$ROOT"/}"
+    printf '%s' "$MOVED_LIST"
+  fi
 fi
 
 say ""
@@ -894,3 +1191,9 @@ fi
 say ""
 say "polysim 提醒：若运行簿里有 accounts.toml 未记录的账户（例如 polysimulator，或面板上创建的账户），请手动把 id 追加进 ACCOUNT_LIST 并补 ACCOUNT_<ID>_* 键。"
 say "迁移后 .env 是唯一配置源：内核在 ACCOUNT_* 生效时拒绝与遗留 toml 并存（loader fail-closed），请以备份目录为准核对后删除残留文件。"
+
+if [ "$MOVE_FAILED" = 1 ]; then
+  say ""
+  say "!! 部分源文件未能退役：.env 已写入并保持一致，源文件仍在原位。请修复后重跑本脚本（幂等，不会重复写键）。" >&2
+  exit 1
+fi
