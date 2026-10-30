@@ -11,6 +11,104 @@ use crate::ipc::schema::*;
 // the pre-split ones; the shared skeleton (READONLY gate, version gate, reply
 // encoding) stays in `server.rs`.
 
+/// #777: the bounded wait for the core lock on `account.create`'s runtime-mount
+/// half. The create guard is already dropped when this runs, so a plain
+/// `lock().await` cannot deadlock — but an unbounded wait would hang the IPC
+/// reply forever if the maintenance loop wedged. Five seconds is far beyond a
+/// normal acquisition and short enough that a stuck session answers with an
+/// explicit error the caller can retry.
+const ACCOUNT_CREATE_CORE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The `(venue, duration)` family walk `account.create` mounts: the boot's
+/// global family PLUS every `rounds` row of an account bound to `venue`.
+/// Pure (the account list is supplied) so the collection step is testable
+/// without the IPC harness.
+fn round_families_for_venue(
+    venue: &str,
+    global_duration_sec: i64,
+    accounts: &[&crate::account::Account],
+) -> Vec<(String, i64)> {
+    let mut fams = vec![(venue.to_string(), global_duration_sec)];
+    for a in accounts {
+        if a.venue == venue {
+            for &dur in &a.rounds {
+                let pair = (venue.to_string(), dur);
+                if !fams.contains(&pair) {
+                    fams.push(pair);
+                }
+            }
+        }
+    }
+    fams
+}
+
+/// #777: the runtime-mount half of `account.create` for a newly bound venue.
+///
+/// The caller has ALREADY dropped the create guard; this re-acquires the core
+/// under [`ACCOUNT_CREATE_CORE_LOCK_TIMEOUT`]. On timeout the whole mount is
+/// REFUSED: no partial family set is mounted and NOTHING is marked mounted, so
+/// the caller's `?` surfaces an explicit `Timeout` and `account.create` stays
+/// retryable. The old `try_lock()` shape silently mounted only the global
+/// family, marked it, and never retried the account's `rounds` families.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mount_account_create_families(
+    core: &Arc<AsyncMutex<Core>>,
+    plugin: &dyn blitzkrieg_market_api::MarketPlugin,
+    host: &std::sync::Arc<dyn blitzkrieg_market_api::MarketHost>,
+    registry: &crate::market::registry::MarketPluginRegistry,
+    data_plane: &DataPlaneRuntime,
+    venue: &str,
+    lock_budget: std::time::Duration,
+) -> Result<bool, CoreError> {
+    let c = tokio::time::timeout(lock_budget, core.lock())
+        .await
+        .map_err(|_| {
+            CoreError::new(
+                CoreErrorCode::Timeout,
+                format!(
+                    "account.create: the core lock was not acquired within {} ms while \
+                     resolving venue `{venue}`'s round families — the runtime mount was \
+                     refused (nothing mounted, nothing marked mounted); retry account.create",
+                    lock_budget.as_millis()
+                ),
+            )
+        })?;
+    let mut fams = round_families_for_venue(
+        venue,
+        data_plane.discovery_round_duration_sec,
+        &c.accounts().account_list(),
+    );
+    drop(c);
+    fams.retain(|(v, d)| v != venue || !data_plane.discovery_mounted_at(v, *d));
+    if fams.is_empty() {
+        return Ok(false);
+    }
+    enable_venue_at_runtime(
+        plugin,
+        host.clone(),
+        data_plane.feed_ws_enabled,
+        data_plane.discovery_enabled,
+        &data_plane.discovery_assets,
+        data_plane.discovery_round_duration_sec,
+        &fams,
+        registry,
+        data_plane,
+    )
+    .await;
+    // A feed_source consumer owns NO components (same posture as the venue.set
+    // arm): the mounts above were keyed by the SOURCE's name inside
+    // `enable_venue_at_runtime`, so the consumer's name is never marked.
+    if plugin.feed_source().is_none() {
+        for (_, d) in &fams {
+            data_plane.mark_discovery_mounted(venue, *d);
+        }
+        // The feed side keeps its per-venue guard (a re-bind must not restart
+        // the feed).
+        data_plane.mark_mounted(venue);
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_account(
     method: &str,
@@ -659,53 +757,23 @@ pub(crate) async fn handle_account(
                         && !data_plane.venue_mounted(v)
                         && let Some(plugin) = registry.get(v)
                     {
-                        // 轮次多族: the same family walk venue.set runs —
-                        // the boot's global family plus the new account's
-                        // `rounds` rows (idempotent per pair; the venue is
-                        // fresh, so in practice nothing is filtered).
-                        let mut fams =
-                            vec![(v.to_string(), data_plane.discovery_round_duration_sec)];
-                        if let Ok(c) = core.try_lock() {
-                            for a in c.accounts().account_list() {
-                                if a.venue == v {
-                                    for &dur in &a.rounds {
-                                        let pair = (v.to_string(), dur);
-                                        if !fams.contains(&pair) {
-                                            fams.push(pair);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        fams.retain(|(vv, d)| vv != v || !data_plane.discovery_mounted_at(vv, *d));
-                        if !fams.is_empty() {
-                            enable_venue_at_runtime(
-                                plugin.as_ref(),
-                                host.clone(),
-                                data_plane.feed_ws_enabled,
-                                data_plane.discovery_enabled,
-                                &data_plane.discovery_assets,
-                                data_plane.discovery_round_duration_sec,
-                                &fams,
-                                registry,
-                                data_plane,
-                            )
-                            .await;
-                            // A feed_source consumer owns NO components (same
-                            // posture as the venue.set arm): the mounts above
-                            // were keyed by the SOURCE's name inside
-                            // `enable_venue_at_runtime`, so the consumer's name
-                            // is never marked.
-                            if plugin.feed_source().is_none() {
-                                for (_, d) in &fams {
-                                    data_plane.mark_discovery_mounted(v, *d);
-                                }
-                                // The feed side keeps its per-venue guard (a
-                                // re-bind must not restart the feed).
-                                data_plane.mark_mounted(v);
-                            }
-                            runtime_enabled = true;
-                        }
+                        // #777: the runtime mount re-reads the account book to
+                        // add the new account's `rounds` families. A failed
+                        // lock acquisition must FAIL CLOSED — no partial family
+                        // set, no `mark_discovery_mounted` — so a retry of
+                        // account.create can still mount them. The old
+                        // `try_lock()` swallowed the failure and marked only
+                        // the global family, permanently losing the rest.
+                        runtime_enabled = mount_account_create_families(
+                            &core,
+                            plugin.as_ref(),
+                            host,
+                            registry,
+                            data_plane,
+                            v,
+                            ACCOUNT_CREATE_CORE_LOCK_TIMEOUT,
+                        )
+                        .await?;
                     }
                     Ok(serde_json::to_value(AccountCreateResult {
                         id: id.as_str().to_string(),
