@@ -656,17 +656,80 @@ impl Core {
         // (pool pro-rata) once a corpus exposes real pool data; the
         // CashFlows.maker_rebate_usd channel below would not change.
         let mut maker_rebate_usd = Decimal::ZERO;
+        // #779: a VENUE fill price out of band must not panic the order path.
+        // ONE guarded signed notional serves both the fee block and the cash
+        // settlement below; on overflow the cash/fee/rebate terms are SKIPPED
+        // (logged loudly, never booked at a fabricated value). The reservation
+        // resync further down reads the order's own price/remaining and is
+        // authoritative, so a skipped term here cannot corrupt the release.
+        let notional = match px.checked_mul(d.delta) {
+            Some(notional) => notional,
+            None => {
+                tracing::error!(
+                    order = %d.order_id,
+                    price = %px,
+                    delta = %d.delta,
+                    "fill notional overflow — cash/fee/rebate terms skipped (#779)"
+                );
+                Decimal::ZERO
+            }
+        };
+        // #779: the reserved basis release multiplies the venue-trusted LIMIT
+        // price as well. On overflow skip the release (0) — the
+        // `sync_buy_reservation` below re-derives the order's true outstanding
+        // commitment, so the reservation table still lands exactly right.
+        let reserved_release = match d.limit_price.checked_mul(d.delta) {
+            Some(release) => release,
+            None => {
+                tracing::error!(
+                    order = %d.order_id,
+                    limit_price = %d.limit_price,
+                    delta = %d.delta,
+                    "fill reservation release overflow — released 0; the resync below \
+                     lands the true commitment (#779)"
+                );
+                Decimal::ZERO
+            }
+        };
         if d.delta > Decimal::ZERO {
-            let notional = px * d.delta;
             let fee_pct = if d.role.is_maker() {
                 Decimal::ZERO
             } else {
                 self.live_taker_fee_pct(px)
             };
-            fee_usd = (fee_pct / Decimal::ONE_HUNDRED) * notional;
+            fee_usd = match fee_pct
+                .checked_div(Decimal::ONE_HUNDRED)
+                .and_then(|rate| rate.checked_mul(notional))
+            {
+                Some(fee) => fee,
+                None => {
+                    tracing::error!(
+                        order = %d.order_id,
+                        fee_pct = %fee_pct,
+                        notional = %notional,
+                        "fill fee overflow — fee term skipped (#779)"
+                    );
+                    Decimal::ZERO
+                }
+            };
             if d.role.is_maker() && self.config.model_maker_rebate {
                 let schedule = crate::exit_policy::fee_schedule();
-                maker_rebate_usd = schedule.fee_per_share(px) * dec!(0.20) * d.delta;
+                maker_rebate_usd = match schedule
+                    .fee_per_share(px)
+                    .checked_mul(dec!(0.20))
+                    .and_then(|rebate| rebate.checked_mul(d.delta))
+                {
+                    Some(rebate) => rebate,
+                    None => {
+                        tracing::error!(
+                            order = %d.order_id,
+                            price = %px,
+                            delta = %d.delta,
+                            "maker rebate overflow — rebate term skipped (#779)"
+                        );
+                        Decimal::ZERO
+                    }
+                };
             }
         }
         // E28 (§9.3): every cash movement below lands in the fill's OWN book —
@@ -691,12 +754,11 @@ impl Core {
         // Fee applies to the incremental delta (not the cumulative), so partial
         // fills charge exactly once per share; rollbacks (delta <= 0) charge none.
         if d.delta > Decimal::ZERO {
-            let notional = px * d.delta;
             match d.side {
                 Side::Buy => {
                     // Release the notional reserved at the LIMIT price for these
                     // shares, and pay the execution price in cash.
-                    ledger.settle_buy_fill(&d.order_id, notional, d.limit_price * d.delta);
+                    ledger.settle_buy_fill(&d.order_id, notional, reserved_release);
                     ledger.charge_fee(fee_usd);
                 }
                 Side::Sell => ledger.settle_sell_fill(notional, fee_usd),
@@ -713,11 +775,11 @@ impl Core {
         } else {
             // Rollback/correction: revert the cash with no fee.
             match d.side {
-                Side::Buy => ledger.settle_sell_fill(-px * d.delta, Decimal::ZERO),
+                Side::Buy => ledger.settle_sell_fill(-notional, Decimal::ZERO),
                 // A reversed SELL gives the cash back to the venue; no reservation
                 // is involved (SELLs never reserve), so the release is zero.
                 Side::Sell => {
-                    ledger.settle_buy_fill(&d.order_id, -px * d.delta, Decimal::ZERO);
+                    ledger.settle_buy_fill(&d.order_id, -notional, Decimal::ZERO);
                 }
             }
         }
@@ -750,13 +812,12 @@ impl Core {
                 let account = order.account_id.clone();
                 let strategy = order.strategy.clone();
                 let internal_key = order.internal_key.clone();
-                let limit = d.limit_price;
-                let shares = d.delta;
+                // #779: same guarded LIMIT-price basis as the ledger release.
                 self.virtual_accounts.release(
                     account.as_str(),
                     &strategy,
                     &internal_key,
-                    limit * shares,
+                    reserved_release,
                 );
             }
         }

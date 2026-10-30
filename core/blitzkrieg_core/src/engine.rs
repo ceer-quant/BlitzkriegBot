@@ -3052,7 +3052,22 @@ impl Engine {
         if price <= Decimal::ZERO {
             return sizing.min_shares;
         }
-        let raw = (sizing.size_usd / price).round();
+        // #779: a tiny positive price passes the `<= ZERO` guard but makes
+        // `size_usd / price` overflow (`Decimal::div` PANICS). A ticket that
+        // large is nonsense — emit no order.
+        let raw = match sizing.size_usd.checked_div(price) {
+            Some(raw) => raw.round(),
+            None => {
+                tracing::warn!(
+                    strategy = %strategy,
+                    account = %account,
+                    size_usd = %sizing.size_usd,
+                    price = %price,
+                    "sizing overflow: size_usd / price does not fit Decimal — no ticket (#779)"
+                );
+                return Decimal::ZERO;
+            }
+        };
         raw.max(sizing.min_shares).min(sizing.max_shares)
     }
 
@@ -3094,20 +3109,37 @@ impl Engine {
         if equity <= Decimal::ZERO || price <= Decimal::ZERO {
             return Decimal::ZERO;
         }
+        // #779: every term below is guarded — an out-of-band equity, percentage
+        // or price must not overflow `Decimal::mul`/`div` (both PANIC). Any
+        // overflow means "no ticket", never a crash on the sizing path.
+        let Some(pct_notional) = equity.checked_mul(sizing.size_pct) else {
+            tracing::warn!(account = %account, equity = %equity, pct = %sizing.size_pct,
+                "equity sizing overflow: equity * size_pct does not fit Decimal — no ticket (#779)");
+            return Decimal::ZERO;
+        };
+        let Some(raw) = pct_notional.checked_div(Decimal::ONE_HUNDRED) else {
+            return Decimal::ZERO;
+        };
         let budget = match sizing.size_weight {
             Some(w) => {
-                let raw = equity * sizing.size_pct / Decimal::ONE_HUNDRED;
-                (raw * w).max(Decimal::ZERO).min(raw)
+                let Some(weighted) = raw.checked_mul(w) else {
+                    tracing::warn!(account = %account, budget = %raw, weight = %w,
+                        "equity sizing overflow: budget * weight does not fit Decimal — no ticket (#779)");
+                    return Decimal::ZERO;
+                };
+                weighted.max(Decimal::ZERO).min(raw)
             }
-            None => equity * sizing.size_pct / Decimal::ONE_HUNDRED,
+            None => raw,
         };
         if budget <= Decimal::ZERO || sizing.max_shares <= Decimal::ZERO {
             return Decimal::ZERO;
         }
-        (budget / price)
-            .floor()
-            .max(Decimal::ZERO)
-            .min(sizing.max_shares)
+        let Some(ticket) = budget.checked_div(price) else {
+            tracing::warn!(account = %account, budget = %budget, price = %price,
+                "equity sizing overflow: budget / price does not fit Decimal — no ticket (#779)");
+            return Decimal::ZERO;
+        };
+        ticket.floor().max(Decimal::ZERO).min(sizing.max_shares)
     }
 
     /// The freshness budget in force (#205): the engine refuses to price a book

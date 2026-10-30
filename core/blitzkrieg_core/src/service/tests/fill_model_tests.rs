@@ -525,3 +525,48 @@ fn a_maker_that_rests_first_keeps_its_honest_fill() {
     assert_eq!(pos.entry_price, dec!(0.40));
     assert_eq!(pos.flows.entry_fee_usd, Decimal::ZERO);
 }
+
+/// PRE-FIX: the weighted-average term `(cur + price * effective) / capped`
+/// overflows `Decimal::mul` — a PANIC — for an out-of-band venue fill price.
+/// The fill itself must still land; only the derived average is skipped.
+#[test]
+fn an_absurd_fill_price_does_not_panic_the_avg_price_update() {
+    let mut c = core_with(FillModel::default());
+    let (id, _) = c
+        .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    let report = |trade: &str, size: Decimal, price: Decimal| Fill {
+        order_id: id.clone(),
+        trade_id: Some(trade.into()),
+        token_id: "tok".into(),
+        side: Side::Buy,
+        price,
+        size,
+        status: FillStatus::Confirmed,
+        ts_ms: 2_000,
+        tx_hash: None,
+        maker: None,
+        account_id: crate::model::default_account_id(),
+    };
+    // A normal partial fill: the average is 0.40.
+    c.ome
+        .apply_fill_report(report("t1", dec!(5), dec!(0.40)), 2_000)
+        .unwrap();
+    assert_eq!(c.ome().get(&id).unwrap().avg_fill_price, Some(dec!(0.40)));
+
+    // The absurd remainder (2e28 × 5 shares overflows the weighted term):
+    // no panic; the fill lands and the previous average stands.
+    c.ome
+        .apply_fill_report(
+            report("t2", dec!(5), dec!(20000000000000000000000000000)),
+            3_000,
+        )
+        .unwrap();
+    let o = c.ome().get(&id).unwrap();
+    assert_eq!(o.filled_size, dec!(10), "the fill still lands");
+    assert_eq!(
+        o.avg_fill_price,
+        Some(dec!(0.40)),
+        "the overflowing derived average is skipped, not fabricated"
+    );
+}

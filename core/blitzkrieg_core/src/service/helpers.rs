@@ -342,6 +342,16 @@ pub(super) fn virtual_batch_commit_impl(
         .reserve_batch(account_id, strategy, batch, committed)
 }
 
+/// Whole-share ticket for the execution-policy budget cap: `floor(budget / price)`.
+///
+/// `None` means the division overflowed. A tiny positive price (e.g. `1e-28`)
+/// passes the `price <= ZERO` guard yet `Decimal::div` overflows and PANICS
+/// (#779) — the entry path must refuse instead of killing the trading task.
+/// Callers treat `None` as "no order": an absurd ticket is not a trade.
+pub(super) fn budget_to_shares(budget_usd: Decimal, price: Decimal) -> Option<Decimal> {
+    budget_usd.checked_div(price).map(|shares| shares.floor())
+}
+
 /// E9-c: classify a rejection message into a stable bucket label. Messages
 /// come from `Risk::check`, `breaker.is_halted`, `positions.can_open`,
 /// `strategy_limit_ok` and the ledger/OME reserve paths — matched by their

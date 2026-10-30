@@ -2837,6 +2837,12 @@ impl Core {
                     p.strategy == strategy
                         && p.account_id.as_str() == account_id
                         && !p.partner_token_id.is_empty()
+                        // #779: the chase budget prices the per-share basis as
+                        // `cost_usd / shares`. A zero-share row (an entry
+                        // rolled back to zero, or a shell `drop_if_empty` has
+                        // not removed yet) is not a naked leg — dividing by it
+                        // PANICS. Never a candidate.
+                        && p.shares > Decimal::ZERO
                         // Settlement-dead positions belong to the settlement
                         // ladder, not the unwind desk: a hold-to-settlement
                         // pair rides PAST its round end by design (the same
