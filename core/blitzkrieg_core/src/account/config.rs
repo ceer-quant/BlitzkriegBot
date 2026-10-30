@@ -271,6 +271,16 @@ pub(crate) fn validate_rounds(
     rounds: Option<Vec<i64>>,
     allowed: &[i64],
 ) -> Result<Vec<i64>, CoreError> {
+    validate_rounds_from("accounts.toml: `rounds`", rounds, allowed)
+}
+
+/// [`validate_rounds`] with a caller-supplied source label so the env grammar
+/// can name the actual key (`ACCOUNT_<ID>_ROUNDS`) in a refusal.
+fn validate_rounds_from(
+    source: &str,
+    rounds: Option<Vec<i64>>,
+    allowed: &[i64],
+) -> Result<Vec<i64>, CoreError> {
     let Some(rounds) = rounds else {
         return Ok(Vec::new());
     };
@@ -280,7 +290,7 @@ pub(crate) fn validate_rounds(
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "accounts.toml: `rounds` names {sec}s, which is not declared by any \
+                    "{source} names {sec}s, which is not declared by any \
                      market plugin (declared union: {allowed:?}) — fix the value or delete \
                      the key (fail-closed: a declared set that cannot be honoured must not \
                      degrade into \"no restriction\")"
@@ -401,6 +411,16 @@ pub fn from_str(text: &str, now_ms: i64, allowed: &[i64]) -> Result<AccountLedge
              the file (single default account) or declare at least one account",
         ));
     }
+    // issue 753: reject ids that collapse to one ACCOUNT_<SFX>_* key space
+    // BEFORE parsing any table — the boot must not accept a legacy book the
+    // migration would later turn into colliding env keys.
+    refuse_env_suffix_collisions(
+        &file
+            .account
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let mut accounts = Vec::new();
     for entry in file.account {
         let mut account = entry.into_account(now_ms, allowed)?;
@@ -774,6 +794,14 @@ pub fn persist_account_create(
             CoreErrorCode::InvalidParams,
             format!("accounts.toml already declares `[[account]]` with id `{account_id}`"),
         ));
+    }
+    // issue 753: a new row may not alias an existing id in the env key space
+    // (`paper-a` vs `paper_a`) — checked before the push/render, so a refusal
+    // leaves the original file byte-identical.
+    {
+        let mut ids: Vec<String> = file.account.iter().map(|a| a.id.clone()).collect();
+        ids.push(account_id.to_string());
+        refuse_env_suffix_collisions(&ids)?;
     }
     file.account.push(AccountFileEntry {
         id: account_id.to_string(),
@@ -1173,6 +1201,90 @@ fn env_suffix(account_id: &str) -> String {
         .collect()
 }
 
+/// Refuse two DISTINCT ids that normalize to the same `ACCOUNT_<SFX>_*` key
+/// space (issue 753). The env grammar folds case and every non-alphanumeric
+/// byte to `_`, so `paper-a`, `paper_a` (and `a`/`A`) would silently share
+/// venue/strategies/trading/credential keys — and `account.remove`'s sweep
+/// would wipe the OTHER account's row. Fail-closed, naming BOTH ids: the
+/// operator must rename one rather than discover the alias at trade time.
+/// Equal raw ids are skipped here (the caller's duplicate check owns that
+/// message).
+fn refuse_env_suffix_collisions(ids: &[String]) -> Result<(), CoreError> {
+    let mut seen: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::with_capacity(ids.len());
+    for id in ids {
+        let sfx = env_suffix(id);
+        match seen.get(&sfx) {
+            Some(other) if *other != id.as_str() => {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account ids `{other}` and `{id}` both normalize to \
+                         `ACCOUNT_{sfx}_*` — they would share venue/strategies/\
+                         trading/credential keys (and deleting one would sweep \
+                         the other's config); ids must stay distinct after \
+                         uppercasing and folding every non-alphanumeric to `_` \
+                         (fail-closed: rename one of them)"
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(sfx, id.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `true`/`false` switch parsed STRICTLY (issue 754): `None` = the key is
+/// genuinely absent (the documented default applies); a present value the
+/// grammar cannot read refuses the boot instead of falling back to `true`
+/// (the pre-fix `and_then` turned a typo into "trading enabled").
+fn parse_env_bool(key: &str, raw: Option<String>) -> Result<Option<bool>, CoreError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Ok(Some(true)),
+        "false" | "0" | "off" | "no" => Ok(Some(false)),
+        _ => Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "{key}=`{raw}` is not a boolean (true/false, 1/0, on/off, yes/no) \
+                 — fix .env and restart (fail-closed: a switch the kernel cannot \
+                 read must never fall back to `true` and enable trading)"
+            ),
+        )),
+    }
+}
+
+/// Parse a comma-separated ROUNDS value STRICTLY (issue 754): `None` = the key
+/// is absent (no declared family set); a present entry that is not an `i64`
+/// (a typo or an overflow) refuses the boot instead of collapsing the WHOLE
+/// list to "absent" — the pre-fix `collect::<Option<Vec<_>>>` turned one bad
+/// entry into an empty set, which the risk gate reads as "no round limit".
+fn parse_env_rounds(key: &str, raw: Option<String>) -> Result<Option<Vec<i64>>, CoreError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let sec = entry.parse::<i64>().map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "{key}=`{raw}` carries `{entry}`, not an i64 round duration \
+                     ({e}) — fix .env and restart (fail-closed: one bad entry \
+                     must not empty the declared restriction set)"
+                ),
+            )
+        })?;
+        out.push(sec);
+    }
+    Ok(Some(out))
+}
+
 /// Parse one comma-separated env value into a Vec (empty → empty vec).
 fn env_list(raw: Option<String>) -> Vec<String> {
     raw.map(|v| {
@@ -1198,31 +1310,24 @@ struct EnvAccount {
     private_key_env: Option<String>,
 }
 
-fn parse_env_account(id: &str, env: &dyn Fn(&str) -> Option<String>) -> EnvAccount {
+fn parse_env_account(
+    id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<EnvAccount, CoreError> {
     let sfx = env_suffix(id);
     let key = |tail: &str| format!("ACCOUNT_{sfx}_{tail}");
-    let bool_of = |raw: Option<String>| -> Option<bool> {
-        raw.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "on" | "yes" => Some(true),
-            "false" | "0" | "off" | "no" => Some(false),
-            _ => None,
-        })
-    };
-    EnvAccount {
+    Ok(EnvAccount {
         name: env(&key("NAME")),
         venue: env(&key("VENUE")),
         status: env_status(env(&key("STATUS"))),
-        trading_enabled: bool_of(env(&key("TRADING_ENABLED"))),
+        trading_enabled: parse_env_bool(&key("TRADING_ENABLED"), env(&key("TRADING_ENABLED")))?,
         strategies: env_list(env(&key("STRATEGIES"))),
-        rounds: env_list(env(&key("ROUNDS")))
-            .iter()
-            .map(|s| s.parse::<i64>().ok())
-            .collect::<Option<Vec<_>>>(),
+        rounds: parse_env_rounds(&key("ROUNDS"), env(&key("ROUNDS")))?,
         api_key_env: env(&key("API_KEY_ENV")),
         secret_env: env(&key("SECRET_ENV")),
         passphrase_env: env(&key("PASSPHRASE_ENV")),
         private_key_env: env(&key("PRIVATE_KEY_ENV")),
-    }
+    })
 }
 
 /// Load the account book from ACCOUNT_* environment keys (issue 751).
@@ -1243,6 +1348,10 @@ pub fn load_account_ledgers_from_env(
     else {
         return Ok(None);
     };
+    // issue 753: reject the alias BEFORE reading any per-account key, so a
+    // `paper-a`/`paper_a` list never lands a book whose rows share one
+    // ACCOUNT_<SFX>_* key space.
+    refuse_env_suffix_collisions(&list)?;
     let mut seen = std::collections::HashSet::new();
     let mut accounts = Vec::with_capacity(list.len());
     for id in &list {
@@ -1259,9 +1368,10 @@ pub fn load_account_ledgers_from_env(
                  identity cannot be addressed or audited",
             ));
         }
-        let row = parse_env_account(id, env);
+        let row = parse_env_account(id, env)?;
         let status = row.status.clone()?;
         let rounds = row.rounds.clone();
+        let rounds_key = format!("ACCOUNT_{}_ROUNDS", env_suffix(id));
         accounts.push(Account {
             id: AccountId::from(id.as_str()),
             name: row.name.clone().unwrap_or_else(|| id.clone()),
@@ -1277,7 +1387,7 @@ pub fn load_account_ledgers_from_env(
             venue: row.venue.clone().unwrap_or_default(),
             trading_enabled: row.trading_enabled.unwrap_or(true),
             strategies: row.strategies.clone(),
-            rounds: validate_rounds(rounds, allowed)?,
+            rounds: validate_rounds_from(&rounds_key, rounds, allowed)?,
             updated_at_ms: now_ms,
         });
     }
@@ -1560,6 +1670,14 @@ pub fn env_persist_account_create(
             format!("ACCOUNT_LIST already names `{account_id}`"),
         ));
     }
+    // issue 753: a new id may not alias an existing one in the env key space.
+    // This runs BEFORE the ACCOUNT_LIST upsert, so a refusal leaves .env
+    // byte-identical (no partial row, no list growth).
+    {
+        let mut ids = list.clone();
+        ids.push(account_id.to_string());
+        refuse_env_suffix_collisions(&ids)?;
+    }
     let mut new_list = list;
     new_list.push(account_id.to_string());
     let mut vars = std::collections::BTreeMap::new();
@@ -1695,6 +1813,10 @@ pub fn env_persist_account_remove(
     refuse_while_legacy_toml(toml_path, "remove")?;
     let lookup = env_lookup_for_write(env_path);
     let list = current_account_list(&lookup)?;
+    // issue 753: never sweep a key space two ids share — the loader refuses
+    // such a book at boot, and the delete face must refuse it too rather than
+    // silently wipe the alias's venue/trading/credential row.
+    refuse_env_suffix_collisions(&list)?;
     if !list.iter().any(|a| a == account_id) {
         return Err(CoreError::new(
             CoreErrorCode::InvalidParams,
@@ -1895,6 +2017,202 @@ mod tests {
         let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &bad_rounds)
             .expect_err("a round duration no plugin declared refuses");
         assert!(err.message.contains("424242"), "{}", err.message);
+        assert!(
+            err.message.contains("ACCOUNT_A_ROUNDS"),
+            "the refusal names the key: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn env_book_refuses_ids_that_share_the_normalized_key_space() {
+        // Pre-fix ONLY the raw id was compared, so `paper-a` + `paper_a`
+        // (and `a` + `A`) both loaded and shared one `ACCOUNT_PAPER_A_*` /
+        // `ACCOUNT_A_*` key space: venue, strategies, trading switch and
+        // credential names aliased, and deleting either swept the other's
+        // config. The collision is now fail-closed and names BOTH ids.
+        for (list, first, second) in [("paper-a,paper_a", "paper-a", "paper_a"), ("a,A", "a", "A")]
+        {
+            let pairs = [("ACCOUNT_LIST", list)];
+            let env = static_lookup(&pairs);
+            let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &env)
+                .expect_err("a normalized-id collision refuses the boot");
+            assert_eq!(err.code, CoreErrorCode::InvalidParams);
+            assert!(err.message.contains(first), "{}", err.message);
+            assert!(err.message.contains(second), "{}", err.message);
+        }
+
+        // The legacy toml face runs the same guard, so a book the migration
+        // would turn into colliding env keys never boots either.
+        let toml = "[[account]]\nid = \"paper-a\"\n\n[[account]]\nid = \"paper_a\"\n";
+        let err = from_str(toml, 5, TEST_ALLOWED_ROUNDS)
+            .expect_err("the toml face also refuses the alias");
+        assert!(err.message.contains("paper-a"), "{}", err.message);
+        assert!(err.message.contains("paper_a"), "{}", err.message);
+    }
+
+    #[test]
+    fn env_create_refuses_a_normalized_alias_and_leaves_the_file_untouched() {
+        let toml = Path::new("/nonexistent/bk-none/accounts.toml");
+        let dot_env = fresh_env_file("alias-create");
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "paper_a",
+            None,
+            Some("polymarket"),
+            &CredentialKeys::default(),
+        )
+        .expect("the first create lands");
+        let before = std::fs::read_to_string(&dot_env).unwrap();
+
+        // Pre-fix `env_persist_account_create` compared the RAW id only, so
+        // `paper-a` was accepted and its NAME/VENUE/credential writes landed
+        // on the SAME `ACCOUNT_PAPER_A_*` keys `paper_a` owns. Now the create
+        // refuses before any write — the file stays byte-identical.
+        let err = env_persist_account_create(
+            toml,
+            &dot_env,
+            "paper-a",
+            None,
+            None,
+            &CredentialKeys::default(),
+        )
+        .expect_err("an aliased create refuses");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(err.message.contains("paper_a"), "{}", err.message);
+        assert!(err.message.contains("paper-a"), "{}", err.message);
+        assert_eq!(
+            std::fs::read_to_string(&dot_env).unwrap(),
+            before,
+            "the refusal must not touch .env"
+        );
+        std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn non_colliding_accounts_read_write_and_delete_independently() {
+        let toml = Path::new("/nonexistent/bk-none/accounts.toml");
+        let dot_env = fresh_env_file("independent");
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "alpha",
+            Some("Alpha"),
+            Some("polymarket"),
+            &CredentialKeys::default(),
+        )
+        .unwrap();
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "beta",
+            Some("Beta"),
+            Some("kalshi"),
+            &CredentialKeys::default(),
+        )
+        .unwrap();
+        // A write on one account must not reach the other's keys.
+        env_persist_account_trading(toml, &dot_env, "alpha", false).unwrap();
+
+        let lookup = env_lookup_from_sources(Some(&dot_env));
+        let book = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &lookup)
+            .unwrap()
+            .expect("the env grammar produced a book");
+        let alpha = book.account(&AccountId::from("alpha")).unwrap();
+        let beta = book.account(&AccountId::from("beta")).unwrap();
+        assert!(!alpha.trading_enabled);
+        assert!(beta.trading_enabled, "beta keeps the default");
+        assert_eq!(alpha.venue, "polymarket");
+        assert_eq!(beta.venue, "kalshi");
+
+        // Delete one: the other's row survives untouched.
+        env_persist_account_remove(toml, &dot_env, "alpha").expect("remove alpha");
+        let text = std::fs::read_to_string(&dot_env).unwrap();
+        assert!(!text.contains("ACCOUNT_ALPHA_"), "{text}");
+        assert!(text.contains("ACCOUNT_LIST=\"beta\""), "{text}");
+        assert!(text.contains("ACCOUNT_BETA_NAME=\"Beta\""), "{text}");
+        assert!(text.contains("ACCOUNT_BETA_VENUE=\"kalshi\""), "{text}");
+        std::fs::remove_dir_all(dot_env.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn env_book_refuses_an_unparsable_trading_switch() {
+        // Pre-fix an invalid boolean became `None` and
+        // `trading_enabled.unwrap_or(true)` then ENABLED trading — a typo
+        // expanded permissions (fail OPEN). It must now refuse the boot.
+        let env = static_lookup(&[
+            ("ACCOUNT_LIST", "paper"),
+            ("ACCOUNT_PAPER_TRADING_ENABLED", "flase"),
+        ]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &env)
+            .expect_err("an unparsable switch refuses");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("ACCOUNT_PAPER_TRADING_ENABLED"),
+            "the refusal names the key: {}",
+            err.message
+        );
+        assert!(err.message.contains("flase"), "{}", err.message);
+    }
+
+    #[test]
+    fn env_book_refuses_a_non_integer_round_instead_of_emptying_the_set() {
+        // Pre-fix `collect::<Option<Vec<i64>>>` collapsed the WHOLE list to
+        // `None` on `typo`; `validate_rounds(None)` produced `[]`, which
+        // risk_admission reads as "no round limit" — one typo silently
+        // REMOVED the restriction (fail OPEN). It must now refuse.
+        let env = static_lookup(&[
+            ("ACCOUNT_LIST", "paper"),
+            ("ACCOUNT_PAPER_ROUNDS", "300,typo"),
+        ]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &env)
+            .expect_err("a non-integer round refuses");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("ACCOUNT_PAPER_ROUNDS"),
+            "the refusal names the key: {}",
+            err.message
+        );
+        assert!(err.message.contains("typo"), "{}", err.message);
+
+        // Overflow is the same class of unreadable entry, not a silent drop.
+        let overflow = static_lookup(&[
+            ("ACCOUNT_LIST", "paper"),
+            ("ACCOUNT_PAPER_ROUNDS", "999999999999999999999"),
+        ]);
+        let err = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &overflow)
+            .expect_err("an overflowing round refuses");
+        assert_eq!(err.code, CoreErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("ACCOUNT_PAPER_ROUNDS"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn env_book_keeps_valid_switches_rounds_and_documented_defaults() {
+        // Pre-fix these values already parsed; this guards the strict rewrite
+        // did not over-tighten: explicit `false` stays false, a valid rounds
+        // list survives verbatim, and only GENUINELY ABSENT keys get the
+        // documented defaults (trading true, rounds empty = no declared
+        // restriction, name = id).
+        let env = static_lookup(&[
+            ("ACCOUNT_LIST", "paper,spare"),
+            ("ACCOUNT_PAPER_TRADING_ENABLED", "false"),
+            ("ACCOUNT_PAPER_ROUNDS", "300,900"),
+        ]);
+        let book = load_account_ledgers_from_env(5, TEST_ALLOWED_ROUNDS, &env)
+            .unwrap()
+            .expect("the env grammar produced a book");
+        let paper = book.account(&AccountId::from("paper")).unwrap();
+        assert!(!paper.trading_enabled);
+        assert_eq!(paper.rounds, vec![300, 900]);
+        let spare = book.account(&AccountId::from("spare")).unwrap();
+        assert!(spare.trading_enabled, "absent key defaults to true");
+        assert!(spare.rounds.is_empty(), "absent rounds = no restriction");
+        assert_eq!(spare.name, "spare");
     }
 
     #[test]
