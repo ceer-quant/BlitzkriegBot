@@ -511,7 +511,7 @@ pub(crate) async fn handle_account(
                     let mut c = core.lock().await;
                     c.accounts_mut().require(&id)?;
                     if p.frozen {
-                        c.freeze_account(
+                        c.freeze_account_manual(
                             id.as_str(),
                             p.reason
                                 .clone()

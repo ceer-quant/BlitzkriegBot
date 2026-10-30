@@ -196,6 +196,36 @@ fn manual_freeze_not_lifted_by_venue_health() {
     );
 }
 
+/// P0 (v0.4.2 audit): the operator freezing an account the kernel had ALREADY
+/// auto-frozen must outrank the self-heal. `freeze_account` is idempotent, so
+/// the old manual route left the `auto_frozen` stamp in place and the next
+/// healthy-venue sweep resumed the account — the kill switch was silently
+/// lifted ten minutes after the operator pulled it.
+///
+/// Negative: on the pre-fix code the reason is gone after the sweep.
+#[test]
+fn manual_freeze_after_an_auto_freeze_is_never_self_healed() {
+    let mut c = core();
+    c.freeze_account_auto("default", "venue rejecting (3)".into(), 1_000_000);
+    assert!(c.account_freeze_reason("default").is_some(), "auto-frozen");
+
+    // The operator now pulls the kill switch on the SAME account.
+    c.freeze_account_manual("default", "operator: investigating".into());
+
+    // Far past the debounce, with positive venue evidence.
+    c.reconcile(crate::reconcile::VenueSnapshot {
+        open_order_ids: vec![],
+        trades: vec![],
+        now_ms: 1_000_000 + FREEZE_AUTO_LIFT_MIN_MS + 60_000,
+    })
+    .unwrap();
+
+    assert!(
+        c.account_freeze_reason("default").is_some(),
+        "an operator freeze must never be lifted by the self-heal"
+    );
+}
+
 /// The reconcile auto-lift is debounced: a successful sweep inside
 /// FREEZE_AUTO_LIFT_MIN_MS of the freeze leaves it on (the outage may still
 /// be flickering); only after the ten quiet minutes does the sweep lift it.
