@@ -32,16 +32,15 @@
 #
 # STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/, configs/
 
-# Operator-state configs the kernel REWRITES AT RUNTIME, kept as-is by an
-# upgrade ("the running copy wins"). EMPTY by ruling (issue 751, the .env
-# single source): every runtime write face moved to `.env` — the account verbs
-# upsert ACCOUNT_* keys and the shadow-evolution switches write SHADOW_* — so
-# no shipped toml carries operator state anymore, and the operator's live
-# state is not in the upgrade carry face AT ALL (ua_stage stages only
-# $CONFIG_DIR/*.toml; `.env` never travels with a release). The mechanism
-# stays as an extension point for a future runtime-written config; today every
-# entry of $CONFIG_DIR is a factory default that installs (and rolls back)
-# like any other file.
+# Operator-state configs the kernel REWRITES AT RUNTIME. EMPTY — and now
+# structurally so (issue 751, the .env single source): the upgrade carry face
+# no longer ships ANY toml file at all, so there is no shipped config that
+# could be operator state, and no factory toml can resurrect over the
+# operator's `.env` truth. Every runtime write face lands in `.env` — the
+# account verbs upsert ACCOUNT_* keys and the shadow-evolution switches write
+# SHADOW_* — and `.env` is the sole configuration source. The list stays as
+# an extension point for a future runtime-written config file, but today no
+# operator state lives in any toml.
 UA_OPERATOR_STATE_CONFIGS=""
 
 # Is this shipped config operator state? Matched by name, one entry per line.
@@ -55,7 +54,7 @@ ua_config_is_operator_state() {
 # Stage everything the release carries. Fails loudly on an empty set: "the build
 # produced nothing here" must never be read as "nothing to ship".
 ua_stage() {
-  mkdir -p "$STAGE/bin" "$STAGE/dist" "$STAGE/configs"
+  mkdir -p "$STAGE/bin" "$STAGE/dist"
 
   for f in $ARTIFACTS; do
     if [ ! -f "$BUILD_WT/target/release/$f" ]; then
@@ -84,11 +83,9 @@ ua_stage() {
   fi
   cp -a "$BUILD_WT/$DIST_DIR/." "$STAGE/dist/"
 
-  for f in "$BUILD_WT/$CONFIG_DIR"/*.toml; do
-    [ -f "$f" ] || continue
-    cp "$f" "$STAGE/configs/$(basename "$f")"
-  done
-  ls "$STAGE/configs" | grep -q . || ua_die "the source has no $CONFIG_DIR/*.toml to ship"
+  # No factory toml is carried: `.env` is the sole configuration source (issue
+  # 751), so shipping $CONFIG_DIR/*.toml would only resurrect stale factory
+  # values over the operator's live state on upgrade.
 
   ( cd "$STAGE" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 shasum -a 256 > SHA256SUMS )
 }
@@ -97,26 +94,6 @@ ua_stage() {
 # upgrade, because "the deploy is green" and "the deploy changed something" are
 # different questions and only the second one explains behaviour that did not move.
 ua_drift() {
-  printf '  %s:\n' "$CONFIG_DIR"
-  for f in "$STAGE/configs"/*.toml; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    live="$REPO_ROOT/$CONFIG_DIR/$name"
-    if [ ! -f "$live" ]; then
-      printf '    + %s (new)\n' "$name"
-    elif ua_config_is_operator_state "$name"; then
-      # Operator state the kernel rewrites at runtime: the running copy WINS,
-      # the shipped copy is never installed over it. Naming the winner here is
-      # the point — "the deploy is green" must not silently mean "your account
-      # bindings were reverted to factory".
-      printf '    = %s (operator state kept — the running copy wins)\n' "$name"
-    elif cmp -s "$f" "$live"; then
-      printf '    = %s\n' "$name"
-    else
-      printf '    ~ %s (the shipped value differs; the running copy is backed up and replaced)\n' "$name"
-    fi
-  done
-
   printf '  strategy cdylibs:\n'
   while read -r d name; do
     live="$REPO_ROOT/$d/$name"
@@ -151,7 +128,7 @@ ua_rm_tree() {
 # Install the staged set, keeping every replaced file under ROLLBACK first.
 # Callers stop the stack before this and verify after it.
 ua_install() {
-  mkdir -p "$ROLLBACK/bin" "$ROLLBACK/configs" "$ROLLBACK/dylibs"
+  mkdir -p "$ROLLBACK/bin" "$ROLLBACK/dylibs"
   # Files the running checkout did NOT have before this install. Rollback restores
   # what it replaced; these are the ones it has to take away again, and recording
   # them here is what keeps that list exact instead of guessed.
@@ -184,25 +161,8 @@ ua_install() {
   mkdir -p "$REPO_ROOT/$DIST_DIR"
   cp -a "$STAGE/dist/." "$REPO_ROOT/$DIST_DIR/"
 
-  for f in "$STAGE/configs"/*.toml; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    live="$REPO_ROOT/$CONFIG_DIR/$name"
-    if ua_config_is_operator_state "$name" && [ -f "$live" ]; then
-      # Kernel-persisted operator state (see UA_OPERATOR_STATE_CONFIGS): the
-      # running copy wins. Backing it up into ROLLBACK would be wrong too —
-      # ua_rollback then "restores" the pre-upgrade copy over a NEWER runtime
-      # write from the post-upgrade kernel. Leave it exactly where it is.
-      continue
-    fi
-    if [ -f "$live" ]; then
-      cp -a "$live" "$ROLLBACK/configs/$name"
-    else
-      printf '%s\n' "$CONFIG_DIR/$name" >> "$ROLLBACK/added.list"
-    fi
-    cp "$f" "$live.new"
-    mv "$live.new" "$live"
-  done
+  # No factory toml is carried or installed (see ua_stage): `.env` is the sole
+  # configuration source, so an upgrade never touches $CONFIG_DIR.
 }
 
 # Byte-for-byte comparison of what landed against what was staged. A `cp` that
