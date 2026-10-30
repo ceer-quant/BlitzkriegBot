@@ -6,7 +6,7 @@
  * 提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw } from 'lucide-vue-next'
+import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw, FileKey } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
 import type { ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
@@ -26,6 +26,28 @@ import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import ConfirmWordDialog from '@/components/ui/confirm/ConfirmWordDialog.vue'
 
 const settings = useSettingsStore()
+const envReloadBusy = ref(false)
+const envReloadErr = ref<string | null>(null)
+const envReloadMsg = ref<string | null>(null)
+
+async function reloadEnv(): Promise<void> {
+  envReloadBusy.value = true
+  envReloadErr.value = null
+  envReloadMsg.value = null
+  try {
+    const result = await api.envReload()
+    if (result.error || !result.ok) {
+      const failures = [result.accounts, result.policy, result.shadow].filter(Boolean).join('；')
+      envReloadErr.value = (result.error ?? failures) || '重新加载失败'
+    } else {
+      envReloadMsg.value = '已重新加载账户元数据、执行策略与影子进化开关；轮次等启动期设置仍需重启。'
+    }
+  } catch (e) {
+    envReloadErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    envReloadBusy.value = false
+  }
+}
 /** 指引卡跳转到顶栏账户切换器（添加账户弹窗；requestNav 是面板级导航的统一入口）。 */
 function navToPlugins(): void {
   usePanelStore().requestNav('plugins')
@@ -197,6 +219,28 @@ async function doResetTrading(): Promise<void> {
           </Button>
         </div>
       </div>
+    </Card>
+
+    <Card class="mt-3.5">
+      <CardHeader label="环境变量">
+        <template #title>
+          <FileKey class="size-4 text-faint-fg" />
+        </template>
+      </CardHeader>
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-[12.5px] font-semibold">重新读取 .env</div>
+          <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
+            原地更新账户元数据、执行策略和影子进化开关，并保留余额、挂单与持仓。新增或删除账户、轮次等启动期设置仍需重启。
+          </p>
+        </div>
+        <Button size="sm" class="shrink-0" :disabled="envReloadBusy" @click="reloadEnv">
+          <RefreshCw class="size-3.5" :class="{ 'animate-spin': envReloadBusy }" />
+          {{ envReloadBusy ? '加载中…' : '重新加载' }}
+        </Button>
+      </div>
+      <AlertBanner v-if="envReloadErr" class="mt-3" tone="error">{{ envReloadErr }}</AlertBanner>
+      <AlertBanner v-if="envReloadMsg" class="mt-3" tone="info">{{ envReloadMsg }}</AlertBanner>
     </Card>
 
     <!-- ── 轮次时间周期（next_session）────────────────────────────────── -->

@@ -71,8 +71,6 @@ toml = "1"
 # file (proc-macro-crate pulls it), so no new transitive tree here either.
 toml_edit = "0.25"
 anyhow = "1"
-# .env hot reload (file monitoring): macOS kqueue via notify-rs
-notify = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust_decimal = "1"
@@ -141,4 +139,3 @@ dhat = "0.3"
 [[bench]]
 name = "hot_path"
 harness = false
-

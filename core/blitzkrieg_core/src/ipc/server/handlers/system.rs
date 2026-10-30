@@ -25,6 +25,21 @@ pub(crate) async fn handle_system(
             ),
         )
         .unwrap_or(Value::Null)),
+        method::SYSTEM_ENV_RELOAD => {
+            let mut c = core.lock().await;
+            let accounts = c.reload_accounts();
+            let policy = c.reload_execution_policy();
+            let shadow = c.reload_shadow();
+            let failed = accounts.is_err() || policy.is_err() || shadow.is_err();
+            let result = serde_json::json!({
+                "ok": !failed,
+                "accounts": accounts.err(),
+                "policy": policy.err(),
+                "shadow": shadow.err(),
+                "runtime": "restart required",
+            });
+            Ok(result)
+        }
         method::SYSTEM_UPDATE_CONFIGURE => {
             match serde_json::from_value::<crate::ipc::version::UpdateConfigureParams>(
                 params.clone(),

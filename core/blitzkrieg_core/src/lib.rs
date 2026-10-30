@@ -38,7 +38,6 @@ pub mod data_source;
 /// contract.
 pub mod env_file;
 /// .env file watcher for hot reload.
-pub mod env_watcher;
 pub use blitzkrieg_market_api::decimal;
 pub mod engine;
 /// #363: the account-isolated execution policy rule engine. Strategy emits

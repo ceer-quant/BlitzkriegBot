@@ -287,6 +287,8 @@ pub mod method {
     /// Request: empty params `{}`; reply: a `SystemVersion` payload. Read-only,
     /// side-effect-free, takes no Core lock.
     pub const SYSTEM_VERSION: &str = "system.version";
+    /// Explicitly re-read reload-safe values from `.env`.
+    pub const SYSTEM_ENV_RELOAD: &str = "system.env.reload";
     /// Read/write of the update switches (§7.4). The write lands an audit record.
     pub const SYSTEM_UPDATE_CONFIGURE: &str = "system.update.configure";
     /// One manual update check (the UI's "check for updates" button).

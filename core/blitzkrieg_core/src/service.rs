@@ -1431,8 +1431,9 @@ impl Core {
             .config
             .env_file_path
             .as_deref()
-            .map(std::path::Path::new);
-        match crate::execution_policy::Policy::load_single_source(
+            .map(std::path::Path::new)
+            .ok_or_else(|| "env_file_path not set".to_string())?;
+        match crate::execution_policy::Policy::load_for_reload(
             std::path::Path::new(&path),
             env_file,
         ) {
@@ -1468,17 +1469,15 @@ impl Core {
             .config
             .env_file_path
             .as_deref()
-            .map(std::path::Path::new);
+            .map(std::path::Path::new)
+            .ok_or_else(|| "env_file_path not set".to_string())?;
         let path = std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH);
         let now_ms = blitzkrieg_market_api::net::now_ms();
         let allowed = &self.config.allowed_round_secs;
-        match crate::account::config::load_account_ledgers_single_source(
+        match crate::account::config::load_account_ledgers_for_reload(
             path, env_file, now_ms, allowed,
         ) {
-            Ok(accounts) => {
-                self.accounts = accounts;
-                Ok(())
-            }
+            Ok(accounts) => self.accounts.reload_config(accounts),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -1536,60 +1535,10 @@ impl Core {
         if enabled {
             self.shadow_evolution
                 .enable(blitzkrieg_market_api::net::now_ms() as i64);
+        } else {
+            self.shadow_evolution.disable();
         }
         self.shadow_evolution.set_auto_evolve(auto_evolve);
-        Ok(())
-    }
-
-    /// Reload runtime configuration from .env (RUNTIME_* keys).
-    /// Currently only RUNTIME_ROUND_DURATION_SEC is supported.
-    /// Fails closed if the .env is malformed, keeping the current configuration.
-    pub fn reload_runtime(&mut self) -> Result<(), String> {
-        let env_path = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new);
-
-        let env_path = env_path.ok_or_else(|| "env_file_path not set".to_string())?;
-
-        // Read the .env file and find RUNTIME_ROUND_DURATION_SEC
-        let content =
-            std::fs::read_to_string(env_path).map_err(|e| format!("failed to read .env: {}", e))?;
-
-        let mut round_sec: Option<i64> = None;
-
-        for line in content.lines() {
-            if let Some((key, value)) = crate::env_file::parse_line(line)
-                && key == "RUNTIME_ROUND_DURATION_SEC"
-            {
-                round_sec = Some(value.parse().map_err(|_| {
-                    format!(
-                        "RUNTIME_ROUND_DURATION_SEC must be an integer, got: {}",
-                        value
-                    )
-                })?);
-            }
-        }
-
-        if let Some(round_sec) = round_sec {
-            let runtime_config_path = self
-                .config
-                .runtime_config_path
-                .as_deref()
-                .map(std::path::Path::new)
-                .ok_or_else(|| "runtime_config_path not set".to_string())?;
-
-            crate::ipc::runtime_config::persist_round_duration_to_with_env(
-                runtime_config_path,
-                Some(round_sec),
-                "env_hot_reload",
-                blitzkrieg_market_api::net::now_ms() as i64,
-                Some(env_path),
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
         Ok(())
     }
 
