@@ -612,11 +612,20 @@ pub(crate) async fn handle_account(
                         ));
                     }
                     let id = AccountId::from(p.id.as_str());
+                    // from_plugin_env only carries NAMES; the §9.4 boot probe
+                    // (`read_credential_keys`) is what answers the panel's
+                    // `credentialsLoaded`. A runtime-minted account must run
+                    // the same probe HERE — otherwise the badge reads
+                    // 凭证未载 forever, even when the env vars are already in
+                    // this process (keys written by a previous session and
+                    // applied by the launcher's restart).
                     let credential_keys = venue
                         .and_then(|v| registry.get(v))
                         .map(|plugin| {
-                            crate::account::CredentialKeys::from_plugin_env(
-                                plugin.required_credential_env(),
+                            crate::account::config::read_credential_keys(
+                                &crate::account::CredentialKeys::from_plugin_env(
+                                    plugin.required_credential_env(),
+                                ),
                             )
                         })
                         .unwrap_or_default();

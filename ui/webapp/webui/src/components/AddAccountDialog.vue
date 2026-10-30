@@ -4,8 +4,9 @@
  *
  * 流程：选交易所（必选）→ 可选显示名 → 填该交易所执行器要求的凭据字段
  * （字段名来自 `market.credentials.status`，内核单一事实源；值只下行、
- * 从不回显）。确认后两步落盘：`account.create` 建身份（accounts.toml），
- * `market.credentials.set` 写凭据格（值进内核进程环境，重启后注入）。
+ * 从不回显）。确认后两步落盘：`account.create` 建身份（.env 账户簿），
+ * `market.credentials.set` 写凭据格（值写入 .env；进程环境在下次启动时
+ * 才携带新值，所以「凭证已载」徽章要重启一次才翻绿）。
  * 建户成功但凭据被拒时不回滚账户 —— 面板如实报两步各自的结果。
  *
  * 凭据纪律：组件不持有任何凭据字面量；draft 只存在于输入框，
@@ -113,7 +114,10 @@ async function submit(): Promise<void> {
         emit('created', id)
         return
       }
-      okMsg.value = `账户 ${id} 已创建，${cred.written?.length ?? 0} 项凭据已保存 —— 重启后注入生效。`
+      // 凭据写入的是 .env 持久格；本进程环境要等下一次启动（launcher 启动
+      // 时加载 .env）才携带新值，执行器也是启动时挂载的 —— 切换器徽章此刻
+      // 仍读「凭证未载」，重启一次内核才翻绿（.env 里已有同名值时无需重启）。
+      okMsg.value = `账户 ${id} 已创建，${cred.written?.length ?? 0} 项凭据已写入 .env —— 重启内核后生效（执行器在启动时读取凭据）。`
     } else {
       okMsg.value = `账户 ${id} 已创建（未填凭据 —— 下单执行器启动时会缺凭据，稍后可补）。`
     }

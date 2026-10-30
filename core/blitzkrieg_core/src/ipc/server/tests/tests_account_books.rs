@@ -1079,3 +1079,114 @@ async fn account_journal_default_follows_display_then_session_wins() {
         "an explicit session switch still wins over display (compat)"
     );
 }
+
+/// 运行时建户的凭证探针（「凭证未载」徽章修复）：stub 插件声明一个凭据
+/// 变量名，进程环境里已带该变量（上一会话写 .env、重启后 launcher 装进
+/// 环境的形态）。`account.create` 必须跑 boot 同款 §9.4 探针 —— 新账户
+/// 在 `account.list` 里 `credentialsLoaded: true`，而不是 from_plugin_env
+/// 的 `loaded: false` 默认值把徽章钉死在「凭证未载」。变量缺席时探针
+/// 如实报 false（fail-closed 姿态不变：探针只读名字的存在性，值永不上
+/// 线）。环境变量跨测试共享进程，变量名用本测试专属的名字并在结尾清理。
+#[tokio::test]
+async fn account_create_probes_credential_env_like_boot() {
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    registry.register(Box::new(CredStubPlugin {
+        name: "credvenue".to_string(),
+    }));
+
+    // The env var the stub declares IS present in this process (the
+    // restarted-launcher shape), but the fresh fixture book has never
+    // probed it. edition 2024: env mutation in a test thread is unsafe
+    // (process-wide resource) — same posture as arb_batch_precheck_check.
+    let var = "BK_TEST_CRED_PROBE_KEY";
+    unsafe {
+        std::env::set_var(var, "test-value-not-a-real-credential");
+    }
+
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"account.create","params":{"id":"cred-acct","venue":"credvenue","actor":"panel","reason":"cred probe regression"}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(
+        reply.get("error").is_none(),
+        "the create must land: {reply}"
+    );
+
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":2,"method":"account.list","params":{}}"#.to_string(),
+    )
+    .await;
+    let accounts = reply["result"]["accounts"].as_array().expect("views");
+    let created = accounts
+        .iter()
+        .find(|a| a["id"] == "cred-acct")
+        .expect("the created account is listed");
+    assert_eq!(
+        created["credentialsLoaded"],
+        serde_json::json!(true),
+        "the runtime mint ran the boot's §9.4 probe: {}",
+        created
+    );
+
+    // A venue with NO env var present probes false — the fail-closed
+    // posture survives (no probe would report true here by accident).
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":3,"method":"account.create","params":{"id":"cred-acct-2","venue":"credvenue","actor":"panel","reason":"cred probe absent arm"}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "second create: {reply}");
+    unsafe {
+        std::env::remove_var(var);
+    }
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":4,"method":"account.create","params":{"id":"cred-acct-3","venue":"credvenue","actor":"panel","reason":"cred probe absent arm"}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "third create: {reply}");
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":5,"method":"account.list","params":{}}"#.to_string(),
+    )
+    .await;
+    let accounts = reply["result"]["accounts"].as_array().expect("views");
+    let loaded = accounts
+        .iter()
+        .find(|a| a["id"] == "cred-acct")
+        .expect("first account still listed")["credentialsLoaded"]
+        .as_bool()
+        .expect("bool");
+    assert!(loaded, "the probed account keeps its loaded verdict");
+    let unloaded = accounts
+        .iter()
+        .find(|a| a["id"] == "cred-acct-3")
+        .expect("absent-env account listed")["credentialsLoaded"]
+        .as_bool()
+        .expect("bool");
+    assert!(
+        !unloaded,
+        "a minted account whose declared vars are absent stays 凭证未载"
+    );
+
+    let scratch = env_path
+        .parent()
+        .expect("the fixture file has a parent")
+        .to_path_buf();
+    let _ = std::fs::remove_dir_all(scratch);
+}
