@@ -92,6 +92,16 @@ jobs:
       # log transport, and it reuses the artifacts the Test step just built.
       - name: dhat allocation summary (E14, log-only)
         run: cargo test -p blitzkrieg-core --locked --test dhat_profile -- --nocapture
+      # #760's acceptance: the .env migration must produce keys the REAL policy
+      # loader reads back, not keys that merely look right. The script builds a
+      # scratch deployment, runs scripts/migrate-config-to-env.sh, and then asks
+      # this repo's kernel to reload the migrated .env (tests/policy_env_oracle.rs,
+      # ignored by default). It also pins the fail-closed arms: an unconvertible
+      # rule refuses the whole source with `.env` and the toml untouched, a
+      # second run is a no-op, and the source is retired only after a verified
+      # write. Runs here because it needs a compiled kernel.
+      - name: Config migration oracle (#760)
+        run: sh scripts/migrate-config-to-env-test.sh
       # E14 memory GATE (#206). RSS is the system-level view of allocation
       # growth; the archived baseline's platform is macOS, so the ratio rule is
       # NOT comparable on this runner — the script says so instead of skipping

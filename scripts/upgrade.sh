@@ -37,12 +37,13 @@
 #     .env single source) every runtime write face lands in `.env` — the
 #     account verbs upsert ACCOUNT_* keys, the shadow-evolution switches write
 #     SHADOW_* — so every shipped toml is a factory default and none is a
-#     kernel runtime write target anymore. A locally edited copy is backed up
-#     under the rollback directory and named in the log before it is replaced.
-#     The operator's live state (`.env`) is NOT in the carry face at all:
-#     only $CONFIG_DIR/*.toml is staged, so an upgrade can never touch it
-#     (the former operator-state keep rule and its
-#     `UA_OPERATOR_STATE_CONFIGS` list are retired — the list is empty now).
+#     kernel runtime write target anymore. #763 therefore removed the toml
+#     carry face from ua_stage entirely, and the operator's live state (`.env`)
+#     is not in it either. An older bundle that still stages configs/ is
+#     handled by the migration-aware rules (#758): on an UNMIGRATED deployment
+#     the legacy toml is operator state and the running copy is preserved; once
+#     `.env` confirms that family migrated, the same file is retired residue
+#     and is never reinstalled (it would trip the kernel's write gate).
 #   * user_layer/*/target/release/*.dylib — strategy code the kernel `dlopen`s
 #     out of the running checkout. It is code, not build residue: a stale cdylib
 #     makes the running kernel execute a previous build.

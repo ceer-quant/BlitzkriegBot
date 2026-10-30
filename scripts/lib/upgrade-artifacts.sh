@@ -30,23 +30,93 @@
 #   DIST_DIR    checkout-relative webui bundle directory
 # and provides one reporter: `ua_die <text>` (fatal, never returns).
 #
-# STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/, configs/
+# STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/,
+# configs/ (only when a caller stages one — ua_stage itself ships no toml).
 
-# Operator-state configs the kernel REWRITES AT RUNTIME. EMPTY — and now
-# structurally so (issue 751, the .env single source): the upgrade carry face
-# no longer ships ANY toml file at all, so there is no shipped config that
-# could be operator state, and no factory toml can resurrect over the
-# operator's `.env` truth. Every runtime write face lands in `.env` — the
-# account verbs upsert ACCOUNT_* keys and the shadow-evolution switches write
-# SHADOW_* — and `.env` is the sole configuration source. The list stays as
-# an extension point for a future runtime-written config file, but today no
-# operator state lives in any toml.
-UA_OPERATOR_STATE_CONFIGS=""
+# Legacy config files the kernel read before the `.env` single source (issue
+# 751). On an UNMIGRATED deployment these are OPERATOR STATE: the account
+# loader still falls back to accounts.toml when ACCOUNT_LIST is absent, so an
+# upgrade must never replace them with factory copies (#758). On a MIGRATED
+# deployment the same files are dead residue: `.env` is the truth and every
+# runtime write face refuses while a legacy toml exists, so an upgrade must
+# never (re)install them either — both directions are enforced below.
+UA_LEGACY_CONFIGS="accounts.toml shadow_evolution.toml execution_policy.toml update.toml default.toml"
+# Which legacy files actually carry operator state while the deployment is
+# unmigrated. default.toml is documentation-only and is NOT state.
+UA_OPERATOR_STATE_CONFIGS="accounts.toml shadow_evolution.toml execution_policy.toml update.toml"
 
-# Is this shipped config operator state? Matched by name, one entry per line.
+# The last assignment of one key in $REPO_ROOT/.env, one optional matching
+# quote layer stripped (env_file.rs / the launcher's parser semantics). Prints
+# nothing when the key is absent.
+ua_env_value() {
+  key="$1"
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  v=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$REPO_ROOT/.env" | tail -n 1)
+  case "$v" in
+    \"*\") v=${v#\"}; v=${v%\"} ;;
+    \'*\') v=${v#\'}; v=${v%\'} ;;
+  esac
+  printf '%s\n' "$v"
+}
+
+# Migration confirmation, per config family (#758: "does the target actually
+# carry the migrated keys?" — never "the new release supports env"). ACCOUNT_LIST
+# is the account loader's switch (absent => it falls back to accounts.toml);
+# the other families use their own env keys.
+ua_account_config_migrated() {
+  [ -n "$(ua_env_value ACCOUNT_LIST)" ]
+}
+ua_shadow_config_migrated() {
+  [ -n "$(ua_env_value SHADOW_ENABLED)" ] || [ -n "$(ua_env_value SHADOW_AUTO_EVOLVE)" ]
+}
+ua_policy_config_migrated() {
+  [ -f "$REPO_ROOT/.env" ] &&
+    grep -qE '^[[:space:]]*POLICY_[A-Za-z0-9_]+[[:space:]]*=' "$REPO_ROOT/.env"
+}
+ua_update_config_migrated() {
+  [ -f "$REPO_ROOT/.env" ] &&
+    grep -qE '^[[:space:]]*BLITZKRIEG_UPDATE_[A-Za-z0-9_]+[[:space:]]*=' "$REPO_ROOT/.env"
+}
+ua_deployment_is_migrated() {
+  ua_account_config_migrated || ua_shadow_config_migrated ||
+    ua_policy_config_migrated || ua_update_config_migrated
+}
+
+# Is this shipped config operator state? Only while its OWN family has not
+# been confirmed migrated. A migrated family's legacy file is residue, so the
+# keep rule deliberately does not fire (replacement is allowed by the guard;
+# whether it is actually installed is a separate question, see
+# ua_config_is_retired_legacy).
 ua_config_is_operator_state() {
+  case "$1" in
+    accounts.toml) ua_account_config_migrated && return 1 ;;
+    shadow_evolution.toml) ua_shadow_config_migrated && return 1 ;;
+    execution_policy.toml) ua_policy_config_migrated && return 1 ;;
+    update.toml) ua_update_config_migrated && return 1 ;;
+    default.toml) return 1 ;;
+  esac
   for known in $UA_OPERATOR_STATE_CONFIGS; do
     [ "$1" = "$known" ] && return 0
+  done
+  return 1
+}
+
+# A legacy toml whose family IS already migrated. `.env` is the source of
+# truth and the kernel's write faces refuse while the file exists, so the
+# artifact step must never put it back (#758's "已迁移部署也需避免重新安装
+# legacy TOML").
+ua_config_is_retired_legacy() {
+  for known in $UA_LEGACY_CONFIGS; do
+    [ "$1" = "$known" ] || continue
+    case "$1" in
+      accounts.toml) ua_account_config_migrated ;;
+      shadow_evolution.toml) ua_shadow_config_migrated ;;
+      execution_policy.toml) ua_policy_config_migrated ;;
+      update.toml) ua_update_config_migrated ;;
+      default.toml) ua_deployment_is_migrated ;;
+      *) return 1 ;;
+    esac
+    return $?
   done
   return 1
 }
@@ -94,6 +164,33 @@ ua_stage() {
 # upgrade, because "the deploy is green" and "the deploy changed something" are
 # different questions and only the second one explains behaviour that did not move.
 ua_drift() {
+  # Config files are NOT staged by ua_stage any more (#763): `.env` is the
+  # sole source, so shipping a factory toml could only resurrect stale values.
+  # A caller that DOES stage a configs/ dir (an older release bundle, or the
+  # #758 preserve/replace acceptance test) still gets an honest report — and
+  # the migration-aware keep/retire verdicts that protect operator state.
+  if [ -d "$STAGE/configs" ]; then
+    printf '  %s:\n' "$CONFIG_DIR"
+    for f in "$STAGE/configs"/*.toml; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f")
+      live="$REPO_ROOT/$CONFIG_DIR/$name"
+      if ua_config_is_operator_state "$name" && [ -f "$live" ]; then
+        # Unmigrated operator state: the running copy wins, the shipped copy
+        # is never installed over it.
+        printf '    = %s (operator state kept — migration not confirmed)\n' "$name"
+      elif ua_config_is_retired_legacy "$name"; then
+        printf '    - %s (legacy retired — .env is the source; not reinstalled)\n' "$name"
+      elif [ ! -f "$live" ]; then
+        printf '    + %s (new)\n' "$name"
+      elif cmp -s "$f" "$live"; then
+        printf '    = %s\n' "$name"
+      else
+        printf '    ~ %s (the shipped value differs; the running copy is backed up and replaced)\n' "$name"
+      fi
+    done
+  fi
+
   printf '  strategy cdylibs:\n'
   while read -r d name; do
     live="$REPO_ROOT/$d/$name"
@@ -129,6 +226,10 @@ ua_rm_tree() {
 # Callers stop the stack before this and verify after it.
 ua_install() {
   mkdir -p "$ROLLBACK/bin" "$ROLLBACK/dylibs"
+  # Configs this install deliberately did NOT touch (operator state on an
+  # unmigrated deployment, or a legacy toml on a migrated one). ua_verify
+  # skips them; ua_rollback leaves them alone.
+  : > "$ROLLBACK/configs-skipped.list"
   # Files the running checkout did NOT have before this install. Rollback restores
   # what it replaced; these are the ones it has to take away again, and recording
   # them here is what keeps that list exact instead of guessed.
@@ -161,8 +262,43 @@ ua_install() {
   mkdir -p "$REPO_ROOT/$DIST_DIR"
   cp -a "$STAGE/dist/." "$REPO_ROOT/$DIST_DIR/"
 
-  # No factory toml is carried or installed (see ua_stage): `.env` is the sole
-  # configuration source, so an upgrade never touches $CONFIG_DIR.
+  # No factory toml is carried or installed by ua_stage (see ua_stage): `.env`
+  # is the sole configuration source, so a normal upgrade never touches
+  # $CONFIG_DIR. If a caller DOES stage configs/ (an older bundle, or the #758
+  # test), the migration-aware rules below still apply:
+  #   * unmigrated + live file   -> preserve the operator copy (the account
+  #                                loader would otherwise fall back to factory
+  #                                values after the upgrade);
+  #   * migrated legacy toml     -> never reinstall it (the kernel's write
+  #                                faces refuse while it exists; `.env` is the
+  #                                truth now);
+  #   * everything else          -> normal install with rollback support.
+  if [ -d "$STAGE/configs" ]; then
+    for f in "$STAGE/configs"/*.toml; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f")
+      live="$REPO_ROOT/$CONFIG_DIR/$name"
+      if ua_config_is_operator_state "$name" && [ -f "$live" ]; then
+        printf '  = %s (operator state kept — migration not confirmed)\n' "$name"
+        printf '%s\n' "$name" >> "$ROLLBACK/configs-skipped.list"
+        continue
+      fi
+      if ua_config_is_retired_legacy "$name"; then
+        printf '  - %s (legacy retired — .env is the source; not reinstalled)\n' "$name"
+        printf '%s\n' "$name" >> "$ROLLBACK/configs-skipped.list"
+        continue
+      fi
+      mkdir -p "$REPO_ROOT/$CONFIG_DIR"
+      if [ -f "$live" ]; then
+        mkdir -p "$ROLLBACK/configs"
+        cp -a "$live" "$ROLLBACK/configs/$name"
+      else
+        printf '%s\n' "$CONFIG_DIR/$name" >> "$ROLLBACK/added.list"
+      fi
+      cp "$f" "$live.new"
+      mv "$live.new" "$live"
+    done
+  fi
 }
 
 # Byte-for-byte comparison of what landed against what was staged. A `cp` that
@@ -186,8 +322,8 @@ ua_verify() {
   for f in "$STAGE/configs"/*.toml; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
-    if ua_config_is_operator_state "$name" && [ -f "$REPO_ROOT/$CONFIG_DIR/$name" ]; then
-      continue # the running copy won in ua_install; there is nothing to verify
+    if grep -qxF "$name" "$ROLLBACK/configs-skipped.list" 2>/dev/null; then
+      continue # preserved operator state or a retired legacy toml: not installed
     fi
     cmp -s "$f" "$REPO_ROOT/$CONFIG_DIR/$name" ||
       ua_die "$name did not land intact"
