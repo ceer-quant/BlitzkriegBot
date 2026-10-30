@@ -472,11 +472,14 @@ pub fn from_str(text: &str, now_ms: i64, allowed: &[i64]) -> Result<AccountLedge
                 .collect::<Vec<_>>(),
         )?;
     }
-    Ok(AccountLedgers::new_with_display(
-        accounts,
-        active,
-        AccountId::from(display.as_str()),
-    ))
+    let book =
+        AccountLedgers::new_with_display(accounts, active, AccountId::from(display.as_str()));
+    // #778(a): boot configured several accounts on one venue — they will share
+    // that venue's GLOBAL env credential (one wallet, several ledgers). Warn
+    // per collision; the binding is still accepted (live configs may rely on
+    // it) — the operator owns the ban/per-order-credentials decision.
+    book.warn_shared_venue_bindings();
+    Ok(book)
 }
 
 /// The file-section → public-config lift shared by the boot loader and the
@@ -1320,11 +1323,12 @@ pub fn load_account_ledgers_from_env(
                 .collect::<Vec<_>>(),
         )?;
     }
-    Ok(Some(AccountLedgers::new_with_display(
-        accounts,
-        active,
-        AccountId::from(display.as_str()),
-    )))
+    let book =
+        AccountLedgers::new_with_display(accounts, active, AccountId::from(display.as_str()));
+    // #778(a): the env-configured book's shared-venue sweep — the same warning
+    // the toml loader runs (one wallet, several ledgers behind one credential).
+    book.warn_shared_venue_bindings();
+    Ok(Some(book))
 }
 
 /// The `[cross_venue_arb]` section read from ACCOUNT_ARB_* env keys.

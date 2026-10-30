@@ -455,15 +455,38 @@ impl AccountLedgers {
             .unwrap_or("")
     }
 
-    /// The first ACTIVE-status account bound to `venue` (#505 account↔venue
+    /// The ACTIVE-status account bound to `venue` (#505 account↔venue
     /// binding). Venue-scoped cash truth routes through here: a venue's
     /// balance belongs to the account that trades it. None = no active
     /// account carries that binding (the caller decides the fallback — the
     /// legacy single-account routing lands on the active ledger).
+    ///
+    /// #778: the result is DETERMINISTIC even when several active accounts
+    /// share one venue. The book is a `HashMap`, so a plain `values().find`
+    /// picked whoever iteration order produced first and venue cash landed on
+    /// an arbitrary account. The rule is the book's own fallback order (the
+    /// same one `repair_active_after_removal` / `repair_display_after_removal`
+    /// run): the explicit `default` account wins when it is Active and bound
+    /// to `venue`, otherwise the lexicographically SMALLEST account id.
+    ///
+    /// Note that same-venue accounts still share the venue's GLOBAL env
+    /// credential at the executor (one wallet, several ledgers) — the
+    /// collision itself needs an operator decision (ban the shared binding or
+    /// give each account per-order credentials), referenced by issue 778; a
+    /// loud warning fires at every binding write
+    /// ([`Self::warn_shared_venue_binding`]). Determinism here only makes the
+    /// cash ATTRIBUTION stable, it does not make the wallet split real.
     pub fn account_for_venue(&self, venue: &str) -> Option<&Account> {
+        if let Some(a) = self.accounts.get(&default_account_id())
+            && a.status == AccountStatus::Active
+            && a.venue == venue
+        {
+            return Some(a);
+        }
         self.accounts
             .values()
-            .find(|a| a.status == AccountStatus::Active && a.venue == venue)
+            .filter(|a| a.status == AccountStatus::Active && a.venue == venue)
+            .min_by(|a, b| a.id.cmp(&b.id))
     }
 
     /// Every ACTIVE-status account bound to `venue` — the venue-scoped
@@ -670,13 +693,81 @@ impl AccountLedgers {
     /// write — this in-memory one and the accounts.toml persist beside it —
     /// must stay exactly correct.
     pub fn set_venue(&mut self, id: &AccountId, venue: &str, now_ms: i64) -> CoreResult<()> {
-        let account = self
-            .accounts
-            .get_mut(id)
-            .ok_or_else(|| unknown_account(id))?;
-        account.venue = venue.to_string();
-        account.updated_at_ms = now_ms;
+        {
+            let account = self
+                .accounts
+                .get_mut(id)
+                .ok_or_else(|| unknown_account(id))?;
+            account.venue = venue.to_string();
+            account.updated_at_ms = now_ms;
+        }
+        // #778(a): the binding is now written — shout when it makes two
+        // accounts share the venue's GLOBAL credential (one wallet split
+        // across two ledgers).
+        self.warn_shared_venue_binding(id, venue);
         Ok(())
+    }
+
+    /// #778(a): WARN — loudly and per occurrence — when `id`'s binding to
+    /// `venue` means another account already owns that venue. The executor
+    /// signs with the venue's GLOBAL environment credential, so the two
+    /// accounts trade ONE wallet while the ledger books them separately: fills
+    /// land in one book, the other's risk math sees cash that is not its own.
+    /// Uniqueness is deliberately NOT enforced (that would break live operator
+    /// configs); the collision still needs an operator decision — ban the
+    /// shared binding or give each account per-order credentials (issue 778).
+    /// One warn per already-bound sibling, naming both ids and the venue.
+    fn warn_shared_venue_binding(&self, id: &AccountId, venue: &str) {
+        if venue.is_empty() {
+            return;
+        }
+        let mut owners: Vec<&str> = self
+            .accounts
+            .values()
+            .filter(|a| a.id != *id && a.venue == venue)
+            .map(|a| a.id.as_str())
+            .collect();
+        owners.sort_unstable();
+        for owner in owners {
+            tracing::warn!(
+                account = %id,
+                other_account = %owner,
+                venue = %venue,
+                "account `{id}` is bound to venue `{venue}` which `{owner}` already \
+                 owns: both accounts will sign with the venue's GLOBAL env credential \
+                 — ONE wallet, two ledgers (#778). Not refused (live configs may rely \
+                 on it); the same-wallet collision needs an operator decision: ban the \
+                 shared binding or give each account per-order credentials",
+            );
+        }
+    }
+
+    /// #778(a): the boot-time sweep — warn for every configured account whose
+    /// venue binding collides with an EARLIER (sorted-id) account's. Runtime
+    /// writes warn through [`Self::warn_shared_venue_binding`] directly; the
+    /// file/env loaders construct the book wholesale, so they call this once
+    /// after construction.
+    pub(crate) fn warn_shared_venue_bindings(&self) {
+        let sorted = self.account_list();
+        for (i, account) in sorted.iter().enumerate() {
+            if account.venue.is_empty() {
+                continue;
+            }
+            for owner in sorted[..i].iter().filter(|p| p.venue == account.venue) {
+                tracing::warn!(
+                    account = %account.id,
+                    other_account = %owner.id,
+                    venue = %account.venue,
+                    "account `{}` is bound to venue `{}` which `{}` already owns: both \
+                     accounts will sign with the venue's GLOBAL env credential — ONE \
+                     wallet, two ledgers (#778). Not refused; the same-wallet collision \
+                     needs an operator decision (ban or per-order credentials)",
+                    account.id,
+                    account.venue,
+                    owner.id,
+                );
+            }
+        }
     }
 
     /// The trading-switch write (`account.trading.set`): `false` = the
@@ -757,7 +848,12 @@ impl AccountLedgers {
             ));
         }
         self.ledgers.insert(account.id.clone(), Ledger::new());
+        // #778(a): account.create's binding path — `insert` bypasses
+        // `set_venue`, so the shared-venue warning must fire here too.
+        let id = account.id.clone();
+        let venue = account.venue.clone();
         self.accounts.insert(account.id.clone(), account);
+        self.warn_shared_venue_binding(&id, &venue);
         Ok(())
     }
 
@@ -1034,6 +1130,90 @@ mod book_tests {
         let a = book.account(&default_account_id()).unwrap();
         assert!(matches!(a.status, AccountStatus::Active));
         assert!(!a.credential_keys.loaded, "no keys named, nothing loaded");
+    }
+
+    /// An ACTIVE/inactive account bound to one venue — #778's collision input.
+    fn bound_account(id: &str, venue: &str, status: AccountStatus) -> Account {
+        Account {
+            id: AccountId(id.into()),
+            name: id.into(),
+            market_type: MarketType::Prediction,
+            status,
+            credential_keys: CredentialKeys::default(),
+            venue: venue.into(),
+            trading_enabled: true,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            updated_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn account_for_venue_is_deterministic_across_insertion_order() {
+        // #778(b): two ACTIVE accounts on ONE venue. The book is a HashMap,
+        // so the old `values().find` result depended on iteration order. The
+        // rule is: the explicit `default` account when it is Active and bound,
+        // else the lexicographically smallest id. Neither id here is
+        // `default`, so `alpha` (< `zeta`) must win in every construction.
+        let build = |order: [&str; 2]| {
+            AccountLedgers::new(
+                order
+                    .iter()
+                    .map(|id| bound_account(id, "kalshi", AccountStatus::Active))
+                    .collect(),
+                AccountId(order[0].into()),
+            )
+        };
+        let forward = build(["alpha", "zeta"]);
+        let reversed = build(["zeta", "alpha"]);
+        for _ in 0..16 {
+            assert_eq!(
+                forward.account_for_venue("kalshi").map(|a| a.id.as_str()),
+                Some("alpha"),
+                "the smallest bound id must win, not HashMap order"
+            );
+            assert_eq!(
+                reversed.account_for_venue("kalshi").map(|a| a.id.as_str()),
+                Some("alpha"),
+                "reversed insertion must not change the winner"
+            );
+        }
+        assert!(
+            forward.account_for_venue("polymarket").is_none(),
+            "an unowned venue still names nobody"
+        );
+    }
+
+    #[test]
+    fn account_for_venue_prefers_the_default_account_and_skips_inactive_siblings() {
+        // The explicit `default` account wins even though "alpha" < "default".
+        let book = AccountLedgers::new(
+            vec![
+                bound_account("alpha", "kalshi", AccountStatus::Active),
+                bound_account("default", "kalshi", AccountStatus::Active),
+            ],
+            default_account_id(),
+        );
+        assert_eq!(
+            book.account_for_venue("kalshi").map(|a| a.id.as_str()),
+            Some("default"),
+            "the explicit default account is the venue's owner"
+        );
+
+        // A non-Active default does NOT win: status gates ownership, and the
+        // smallest ACTIVE id takes the fallback.
+        let book = AccountLedgers::new(
+            vec![
+                bound_account("alpha", "kalshi", AccountStatus::Active),
+                bound_account("default", "kalshi", AccountStatus::ReadOnly),
+            ],
+            AccountId("alpha".into()),
+        );
+        assert_eq!(
+            book.account_for_venue("kalshi").map(|a| a.id.as_str()),
+            Some("alpha"),
+            "a read-only default cannot own venue cash"
+        );
     }
 
     #[test]
