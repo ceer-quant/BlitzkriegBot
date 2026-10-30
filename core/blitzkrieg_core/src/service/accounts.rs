@@ -2323,7 +2323,42 @@ impl Core {
         &mut self,
         snap: crate::reconcile::VenueSnapshot,
     ) -> CoreResult<crate::reconcile::ReconcileReport> {
-        let report = crate::reconcile::reconcile(&mut self.ome, &snap)?;
+        self.reconcile_for_venue(snap, "")
+    }
+
+    /// [`Self::reconcile`] scoped to the REPORTING venue.
+    ///
+    /// With several plugins live every executor runs its own sweep carrying
+    /// only ITS venue's open order ids. Unscoped, each sweep judged every
+    /// venue's live orders and force-closed the other venues' resting orders as
+    /// ghosts — they kept resting at their own venue, unmanaged, and the orphan
+    /// sweep skipped them because `known_venue_ids` still listed them. `""`
+    /// keeps the unscoped behaviour (single-venue hosts, in-process tests,
+    /// replay).
+    pub fn reconcile_for_venue(
+        &mut self,
+        snap: crate::reconcile::VenueSnapshot,
+        venue: &str,
+    ) -> CoreResult<crate::reconcile::ReconcileReport> {
+        let report = if venue.is_empty() {
+            crate::reconcile::reconcile(&mut self.ome, &snap)?
+        } else {
+            // Orders whose execution venue is a DIFFERENT one are not this
+            // sweep's business. An order whose venue cannot be resolved today
+            // (engine down, token delisted) stays in scope: no other sweep can
+            // prove anything about it either.
+            let skip: std::collections::HashSet<crate::model::OrderId> = self
+                .ome
+                .live_orders()
+                .into_iter()
+                .filter(|o| {
+                    let own = self.execution_venue_of(o.account_id.as_str(), &o.token_id);
+                    !own.is_empty() && own != venue
+                })
+                .map(|o| o.order_id.clone())
+                .collect();
+            crate::reconcile::reconcile_scoped(&mut self.ome, &snap, &skip)?
+        };
         // The sweep channel just proved itself alive — a failed-sweep streak
         // only counts failures in a row (E31-b). The per-venue table clears
         // with it (the snapshot does not carry the reporting venue; one

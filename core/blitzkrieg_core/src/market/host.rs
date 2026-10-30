@@ -654,6 +654,14 @@ impl MarketHost for CoreHost {
 
     fn on_reconcile(&self, snapshot: api::ReconcileSnapshot) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            // This handle is the executor's own bucket (`for_plugin`), so the
+            // name it carries IS the venue that fetched this snapshot — the
+            // sweep is authoritative for that venue only.
+            let venue = self
+                .active_plugin
+                .read()
+                .expect("core host active plugin lock poisoned")
+                .clone();
             let mut c = self.core.lock().await;
             // Trades for KNOWN orders go through the OME reconcile; trades for
             // orders the core never issued (manual closes on the venue) ride
@@ -671,7 +679,7 @@ impl MarketHost for CoreHost {
                 tracked,
                 snap.trades.len() - tracked
             );
-            match c.reconcile(snap) {
+            match c.reconcile_for_venue(snap, &venue) {
                 Ok(report) => {
                     for a in &report.actions {
                         eprintln!("core: reconcile action: {a:?}");

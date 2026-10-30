@@ -599,6 +599,58 @@ fn an_order_for_another_venue_is_refused_when_the_account_is_bound() {
     assert!(c.list_orders().is_empty());
 }
 
+/// P0 (v0.4.2 audit): with several executors live, each one's reconcile
+/// snapshot only speaks for ITS venue. Before the scope, the kalshi sweep
+/// judged this polymarket order (absent from kalshi's own open list) as a
+/// ghost and force-closed it LOCALLY while it kept resting at polymarket —
+/// unmanaged, and skipped by the orphan sweep because `known_venue_ids`
+/// still listed it.
+///
+/// Negative: on the pre-fix code the order becomes `ForceClosed` here.
+#[test]
+fn reconcile_from_another_venue_leaves_the_resting_order_alone() {
+    let mut c = venue_bound_core();
+    let (id, _) = c.place(bound_order("poly-up", "k1"), 0, 1).unwrap();
+    c.bind_venue(&id, "poly-1".into(), 2).unwrap();
+    assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Live);
+
+    // The kalshi sweep cannot see a polymarket resting id.
+    let foreign = c
+        .reconcile_for_venue(
+            crate::reconcile::VenueSnapshot {
+                open_order_ids: vec![],
+                trades: vec![],
+                now_ms: 3,
+            },
+            "kalshi",
+        )
+        .unwrap();
+    assert!(
+        foreign.actions.is_empty(),
+        "another venue's snapshot must not judge this order: {:?}",
+        foreign.actions
+    );
+    assert_eq!(
+        c.ome().get(&id).unwrap().status,
+        OrderStatus::Live,
+        "the order still rests at polymarket — a local force-close strands it"
+    );
+
+    // Its OWN sweep still repairs a real ghost (the scope is not a blanket skip).
+    let own = c
+        .reconcile_for_venue(
+            crate::reconcile::VenueSnapshot {
+                open_order_ids: vec![],
+                trades: vec![],
+                now_ms: 4,
+            },
+            "polymarket",
+        )
+        .unwrap();
+    assert_eq!(own.suspect_ghost_ids, vec![id.clone()]);
+    assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::ForceClosed);
+}
+
 #[test]
 fn a_bound_account_trades_its_own_venue_and_an_unbound_one_trades_anywhere() {
     let mut c = venue_bound_core();
