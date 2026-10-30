@@ -83,7 +83,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 mod part1;
-pub(crate) use part1::*;
+// The split moved `PolicyInput` / `PolicyOutput` / `PolicyRefusal` / `evaluate`
+// and the audit helpers into `part1`; they were public at this module's root
+// before, so the re-export stays public — `tests/policy_env_oracle.rs` is an
+// integration test and only sees this file's surface.
+pub use part1::*;
 mod part2;
 
 /// The config file, resolved against the INSTALL ROOT (the executable's
