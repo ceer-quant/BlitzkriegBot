@@ -92,6 +92,22 @@ pub struct ReconcileReport {
 /// `ome.apply_fill` stays the only mutator of fill state. Status repair for
 /// ghosts is done through mark_terminal so the state machine stays consistent.
 pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileReport> {
+    reconcile_scoped(ome, snap, &std::collections::HashSet::new())
+}
+
+/// [`reconcile`] scoped to ONE reporting venue.
+///
+/// `skip` holds the core ids that belong to a DIFFERENT venue's executor: that
+/// snapshot is not authoritative for them, so they are left untouched. Without
+/// the scope every sweep judged every venue's live orders, and with two plugins
+/// running each one force-closed the other's resting orders as ghosts — while
+/// they kept resting at their own venue, unmanaged (the orphan sweep skips ids
+/// `known_venue_ids` still lists).
+pub fn reconcile_scoped(
+    ome: &mut Ome,
+    snap: &VenueSnapshot,
+    skip: &std::collections::HashSet<OrderId>,
+) -> CoreResult<ReconcileReport> {
     let mut report = ReconcileReport::default();
     let open: std::collections::HashSet<&str> =
         snap.open_order_ids.iter().map(String::as_str).collect();
@@ -151,6 +167,11 @@ pub fn reconcile(ome: &mut Ome, snap: &VenueSnapshot) -> CoreResult<ReconcileRep
         .collect();
 
     for (core_id, venue_id) in candidates {
+        if skip.contains(&core_id) {
+            // Another venue's executor owns this order: this snapshot cannot
+            // speak for it (its own sweep decides).
+            continue;
+        }
         let Some(venue_id) = venue_id else {
             // Dry orders have no venue id; never touch them from a venue snapshot.
             continue;
