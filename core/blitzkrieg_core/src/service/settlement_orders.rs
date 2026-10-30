@@ -240,13 +240,33 @@ impl Core {
                 // extreme, there is nothing to escalate to — the intent goes
                 // to the normal rejection accounting (backoff/freeze) and a
                 // later tick re-enters if the signal persists.
+                // issue #774: same correction as the timer sweep. `o` is the
+                // snapshot cloned BEFORE the order was retired; a fill that
+                // reached the OME in the meantime has moved `filled_size`, so
+                // re-read the order now and chase only the remainder. A maker
+                // the late fill consumed gets NO replacement.
+                //
+                // What remains uncertain: a fill still in flight at the venue
+                // when this read runs (one the OME has not seen yet) is not
+                // covered; closing that needs the venue's acknowledgement,
+                // out of scope here.
+                let remaining = self.ome.remaining(id);
+                if remaining <= Decimal::ZERO {
+                    tracing::info!(
+                        order = %id,
+                        strategy = %o.strategy,
+                        size = %o.size,
+                        "escalation finished as fully filled after WouldCross: no replacement placed"
+                    );
+                    return Ok(());
+                }
                 let cap = if o.side == Side::Buy {
                     Decimal::new(99, 2)
                 } else {
                     Decimal::new(1, 2)
                 };
                 if let Some((_, worst)) =
-                    self.marketable_walk(o.side, &o.token_id, o.size, cap, now_ms)
+                    self.marketable_walk(o.side, &o.token_id, remaining, cap, now_ms)
                 {
                     // issue 568 阶段一：追单是同一入腿事实链的续段 —— 其
                     // 成交/死亡事实必须寻址回声明腿。原腿的 key 已随死亡
@@ -263,7 +283,7 @@ impl Core {
                         side: o.side,
                         mode: FillPolicy::Taker,
                         price: worst,
-                        size: o.size,
+                        size: remaining,
                         // Only the engine's ENTRY order is `maker_then_taker`
                         // (exits are Maker or Taker), so this escalated leg is
                         // always new exposure and rightly stays subject to the

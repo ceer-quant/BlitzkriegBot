@@ -686,3 +686,146 @@ fn an_armed_size_cap_shrinks_a_manual_entry_at_the_submission_gate() {
     assert_eq!(placed.filled_size, dec!(5));
     assert_eq!(c.positions().open_positions()[0].shares, dec!(5));
 }
+
+// ── #774: the escalation's snapshot must be re-read after the cancel ─────
+
+/// #774 (timer escalation): the sweep snapshots `remaining = size -
+/// filled_size` when it collects the due orders, then cancels the maker and
+/// places the taker. A fill the venue books in that window moves
+/// `filled_size`, so the stale remainder overshoots. The sweep must re-read
+/// the order AFTER the cancel and chase only what is still unfilled.
+///
+/// The staged fill is applied at exactly that seam (a single-threaded test
+/// has no other mutation point there).
+#[test]
+fn a_fill_landing_between_the_escalation_snapshot_and_the_cancel_shrinks_the_chase() {
+    let mut c = live_core(dec!(10));
+    let (id, st) = c
+        .place(
+            order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+            5_000,
+            1,
+        )
+        .unwrap();
+    assert_eq!(st, OrderStatus::Pending, "a live POST awaits the venue");
+    c.bind_venue(&id, "v1".into(), 2).unwrap();
+    c.confirm_live(&id, 3).unwrap(); // arms the escalation at 5_003
+
+    // The book the chase will cross: ask 0.45 rests ABOVE the maker's 0.40,
+    // so feeding it does not fill the maker itself.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.45), dec!(100))], 4);
+
+    // The fill the venue books after the sweep's snapshot (5 - 0 unfilled)
+    // and before the cancel.
+    c.stage_escalation_snapshot_fill_for_test(fill(&id, dec!(2), dec!(0.40), None));
+
+    c.tick(5_003).unwrap();
+
+    let chase_key = format!("{id}:escalated");
+    let chase = c
+        .ome()
+        .all()
+        .into_iter()
+        .find(|o| o.internal_key == chase_key)
+        .cloned()
+        .expect("the unfilled remainder is still chased");
+    assert_eq!(
+        chase.size,
+        dec!(3),
+        "#774: the replacement is size - filled INCLUDING the late fill (5 - 2), \
+         never the stale snapshot (5 - 0)"
+    );
+    assert_eq!(
+        chase.status,
+        OrderStatus::Pending,
+        "the venue still owes the fill"
+    );
+}
+
+/// #774 (timer escalation): when the late fill consumed the maker, there is
+/// nothing left to chase — NO replacement may be placed, and the escalation
+/// ends fully filled.
+#[test]
+fn an_escalation_is_not_placed_when_the_late_fill_consumed_the_maker() {
+    let mut c = live_core(dec!(10));
+    let (id, _) = c
+        .place(
+            order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+            5_000,
+            1,
+        )
+        .unwrap();
+    c.bind_venue(&id, "v1".into(), 2).unwrap();
+    c.confirm_live(&id, 3).unwrap();
+    c.book_snapshot("tok", vec![], vec![(dec!(0.45), dec!(100))], 4);
+
+    // The late fill takes the WHOLE maker (5 of 5) in the same window.
+    c.stage_escalation_snapshot_fill_for_test(fill(&id, dec!(5), dec!(0.40), None));
+
+    c.tick(5_003).unwrap();
+
+    assert_eq!(
+        c.ome().get(&id).unwrap().filled_size,
+        dec!(5),
+        "the whole maker is filled"
+    );
+    assert!(
+        c.ome()
+            .all()
+            .iter()
+            .all(|o| !o.internal_key.ends_with(":escalated")),
+        "#774: a fully filled maker gets no replacement"
+    );
+    assert_eq!(
+        c.positions().open_positions()[0].shares,
+        dec!(5),
+        "exactly the intended size, never 5 + stale remainder"
+    );
+}
+
+/// #774 (the post-only `WouldCross` reaction): the taker was built from the
+/// order snapshot (`size`) and ignored the shares already filled. It must
+/// re-read the OME after the order was retired and chase only the remainder.
+#[test]
+fn a_wouldcross_escalation_chases_only_the_unfilled_remainder() {
+    let mut c = dry_core(dec!(10));
+    let (id, st) = c
+        .place(
+            order(FillPolicy::MakerThenTaker, dec!(0.40), dec!(5), "k1"),
+            5_000,
+            1,
+        )
+        .unwrap();
+    assert_eq!(st, OrderStatus::Live, "the maker rests");
+
+    // A fill that landed first: 2 of 5.
+    c.ingest_fill(fill(&id, dec!(2), dec!(0.40), None), 2)
+        .unwrap();
+    // The book the chase crosses: ask 0.45 is above the maker's limit, so the
+    // resting maker does not fill while the book is fed.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.45), dec!(100))], 3);
+
+    // The venue refuses the post-only POST: WouldCross.
+    let err = CoreError::new(CoreErrorCode::WouldCross, "post only would cross");
+    c.reject_live_result(&id, Some(err), 4).unwrap();
+
+    let chase_key = format!("{id}:escalated");
+    let chase = c
+        .ome()
+        .all()
+        .into_iter()
+        .find(|o| o.internal_key == chase_key)
+        .cloned()
+        .expect("the unfilled remainder is chased");
+    assert_eq!(
+        chase.size,
+        dec!(3),
+        "#774: 5 requested - 2 already filled, never the full 5"
+    );
+    assert_eq!(chase.status, OrderStatus::Filled);
+    assert_eq!(
+        c.positions().open_positions()[0].shares,
+        dec!(5),
+        "2 + 3 shares, never 2 + the stale 5"
+    );
+}
