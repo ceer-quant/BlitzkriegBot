@@ -226,10 +226,20 @@ pub type PollAdmissionGate =
 #[derive(Clone)]
 pub struct CoreHost {
     core: Arc<AsyncMutex<Core>>,
-    /// The registry's active plugin name (the executor's plugin), resolved at
-    /// assembly. Untagged round lists (legacy corpora, hosts that do not
-    /// label markets) route their subscription here — the single-plugin
-    /// behaviour — instead of a hardcoded plugin name.
+    /// This handle's OWN plugin identity (set only by [`CoreHost::for_plugin`];
+    /// the shared data-plane handle carries `""`). Scoped drains may compare
+    /// against it — the settlement queues are venue-bucketed and carry no
+    /// caller name across the frozen [`MarketHost`] ABI, so they need the
+    /// handle to know itself.
+    own_plugin: String,
+    /// The SHARED "who owns untagged orders" cell, resolved once at assembly
+    /// ([`CoreHost::set_active_plugin`]). Untagged round lists (legacy corpora,
+    /// hosts that do not label markets) route their subscription here, and an
+    /// order whose execution venue resolves to nothing drains to this plugin's
+    /// executor — the single-plugin fallback. Crucially a per-plugin handle
+    /// does NOT overwrite this: every executor registering itself into the
+    /// shared cell would make every executor believe it owns every untagged
+    /// order (issue #775).
     active_plugin: std::sync::Arc<std::sync::RwLock<String>>,
     /// B2 (轮次多族 软卸): an optional gate the session assembly installs —
     /// `None` keeps `on_round_markets` byte-identical with the historical
@@ -259,6 +269,7 @@ impl CoreHost {
     pub fn new(core: Arc<AsyncMutex<Core>>) -> Self {
         Self {
             core,
+            own_plugin: String::new(),
             active_plugin: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
             poll_admission: std::sync::Arc::new(std::sync::Mutex::new(None)),
             feed_reuse: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -308,21 +319,26 @@ impl CoreHost {
             .unwrap_or_default()
     }
 
-    /// #647: a handle naming ONE plugin for the settlement drains. The
-    /// settlement queues are venue-bucketed inside the host, and the trait's
-    /// `take_pending_redemptions`/`take_pending_merges` carry no caller name
-    /// (frozen ABI — the signature stays), so the session assembly hands each
-    /// executor a handle whose bucket cell names ITS OWN plugin: the executor
-    /// drains only the claims whose request venue names that plugin (plus the
-    /// untagged ones, the single-plugin fallback the orders drain uses). The
-    /// cell is per-handle (a fresh `RwLock`), unlike the shared cell a plain
-    /// `clone` re-sees, so sibling executors never inherit each other's
-    /// bucket; data-plane handles (`clone`, the assembly default) keep the
-    /// assembly's active-plugin answer exactly as before.
+    /// #647 / #775: a handle naming ONE plugin for the executor's drains.
+    ///
+    /// - `own_plugin` is set to `name`: the settlement queues are
+    ///   venue-bucketed inside the host and the trait's
+    ///   `take_pending_redemptions`/`take_pending_merges` carry no caller name
+    ///   (frozen ABI), so the handle must know itself to pull only its own
+    ///   venue's claims.
+    /// - `active_plugin` is SHARED (`Arc`) and deliberately NOT touched: that
+    ///   cell answers "who owns untagged orders" for the whole host. A
+    ///   per-handle overwrite made every executor compare itself equal to the
+    ///   active owner, so every executor drained every untagged order and the
+    ///   same order was submitted to multiple venues (issue #775).
+    ///
+    /// Data-plane handles (`clone`) keep `own_plugin == ""` and the shared
+    /// active-plugin answer, exactly as before.
     pub fn for_plugin(&self, name: &str) -> Self {
         Self {
             core: Arc::clone(&self.core),
-            active_plugin: std::sync::Arc::new(std::sync::RwLock::new(name.to_string())),
+            own_plugin: name.to_string(),
+            active_plugin: Arc::clone(&self.active_plugin),
             poll_admission: std::sync::Arc::clone(&self.poll_admission),
             feed_reuse: std::sync::Arc::clone(&self.feed_reuse),
         }
@@ -537,7 +553,10 @@ impl MarketHost for CoreHost {
             // the REAL venue's executor, and the reverse). An order whose
             // execution venue resolves to nothing is UNTAGGED and routes to
             // the ACTIVE plugin's drain — the single-plugin fallback the
-            // task pins. When no active plugin was ever set (hosts that
+            // task pins. `active` is the SHARED assembly cell (issue #775):
+            // a per-handle copy would make every executor believe it is the
+            // active owner, and every untagged order would be submitted by
+            // every executor. When no active plugin was ever set (hosts that
             // skipped `set_active_plugin`, most in-process tests), the
             // legacy "" bucket takes ALL orders: the exact pre-routing
             // behaviour. Single pass over `live_orders()` order, so the
@@ -775,21 +794,19 @@ impl MarketHost for CoreHost {
 
     fn take_pending_redemptions(&self) -> BoxFuture<'_, Vec<api::RedemptionRequest>> {
         // #647: the request now carries its own venue, and this drain hands
-        // out only ITS bucket — the handle's plugin name (set at assembly:
-        // each executor gets a `for_plugin` handle naming itself, the shared
-        // data-plane handle names the active plugin). Legacy hosts that never
-        // set a bucket name take ALL claims: the pre-routing single-consumer
-        // behaviour, byte-identical. A sibling executor can therefore never
-        // redeem a foreign venue's claim (the old global-queue cross-post
-        // burned only a retry — the bytes32 parse or zero-payout audit refused
-        // it — but the retry-and-alert churn is exactly what this split ends).
+        // out only ITS bucket — the handle's OWN plugin name (`for_plugin`
+        // sets it at assembly; the shared data-plane handle carries ""). It
+        // is deliberately NOT the shared `active_plugin` cell (issue #775):
+        // that cell is host-wide, and every executor reading it would drain
+        // the same requests. Legacy hosts that never set a bucket name take
+        // ALL claims: the pre-routing single-consumer behaviour,
+        // byte-identical. A sibling executor can therefore never redeem a
+        // foreign venue's claim (the old global-queue cross-post burned only
+        // a retry — the bytes32 parse or zero-payout audit refused it — but
+        // the retry-and-alert churn is exactly what this split ends).
         Box::pin(async move {
             let now = now_ms();
-            let bucket = self
-                .active_plugin
-                .read()
-                .expect("core host active plugin lock poisoned")
-                .clone();
+            let bucket = self.own_plugin.clone();
             let mut c = self.core.lock().await;
             if bucket.is_empty() {
                 c.take_pending_redemptions(now)
@@ -813,16 +830,13 @@ impl MarketHost for CoreHost {
     fn take_pending_merges(&self) -> BoxFuture<'_, Vec<api::MergeRequest>> {
         // #647: same verdict as `take_pending_redemptions` — the request
         // carries its own venue, this drain hands out only its bucket (the
-        // handle's plugin name; empty = legacy all-take), and a foreign
-        // condition_id merge (burned nothing, reverts no-op) can no longer be
-        // handed to a sibling venue's bridge at all.
+        // handle's OWN plugin name from `for_plugin`, never the shared
+        // assembly-wide `active_plugin` cell; empty = legacy all-take), and a
+        // foreign condition_id merge (burned nothing, reverts no-op) can no
+        // longer be handed to a sibling venue's bridge at all.
         Box::pin(async move {
             let now = now_ms();
-            let bucket = self
-                .active_plugin
-                .read()
-                .expect("core host active plugin lock poisoned")
-                .clone();
+            let bucket = self.own_plugin.clone();
             let mut c = self.core.lock().await;
             if bucket.is_empty() {
                 c.take_pending_merges(now)
@@ -1089,6 +1103,66 @@ mod tests {
         assert!(
             host.take_pending_orders("kalshi").await.is_empty(),
             "a sibling executor must not take the untagged order"
+        );
+    }
+
+    /// #775 (negative, the multi-executor shape): every executor reaches the
+    /// host through its own `for_plugin` handle. An untagged order must land
+    /// on EXACTLY ONE of them — the one whose name is the SHARED active
+    /// owner — while a venue-tagged order keeps draining on its own venue's
+    /// executor.
+    ///
+    /// Pre-fix this test fails: `for_plugin` overwrote the handle's
+    /// `active_plugin` cell with the handle's own name, so BOTH A and B saw
+    /// `plugin == active` and both drained the same untagged order — one
+    /// order submitted to two venues. The fix keeps `active_plugin` a single
+    /// shared cell (written only by `set_active_plugin`) and puts the
+    /// handle's identity in the separate `own_plugin` field.
+    #[tokio::test]
+    async fn untagged_orders_drain_to_exactly_one_for_plugin_executor() {
+        let mut c = two_venue_live_core();
+        // One order on a token no labelled round market knows: the execution
+        // venue resolves to "" (engine not ready / binding removed). Two more
+        // carry a real venue each, so the venue-scoped half stays pinned too.
+        let (ghost_id, _) = c.place(live_order("ghost-token", "k1"), 0, 1).unwrap();
+        let (poly_id, _) = c.place(live_order("poly-up", "k2"), 0, 2).unwrap();
+        let (kal_id, _) = c.place(live_order("kal-up", "k3"), 0, 3).unwrap();
+
+        // The assembly's shared host: its active owner is `actives[0]`, and
+        // every executor starts on a `for_plugin` handle derived from it.
+        let shared = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
+        shared.set_active_plugin("polymarket");
+        let a = shared.for_plugin("polymarket");
+        let b = shared.for_plugin("kalshi");
+
+        let a_drain = a.take_pending_orders("polymarket").await;
+        let a_ids: Vec<&str> = a_drain.iter().map(|o| o.core_order_id.as_str()).collect();
+        assert_eq!(
+            a_ids,
+            vec![ghost_id.as_str(), poly_id.as_str()],
+            "A is the shared active owner: it takes the untagged order and its \
+             own venue's order"
+        );
+
+        let b_drain = b.take_pending_orders("kalshi").await;
+        let b_ids: Vec<&str> = b_drain.iter().map(|o| o.core_order_id.as_str()).collect();
+        assert_eq!(
+            b_ids,
+            vec![kal_id.as_str()],
+            "B must NOT take the untagged order — only the shared active owner \
+             does (#775: pre-fix both A and B saw it)"
+        );
+        assert!(
+            !b_ids.contains(&ghost_id.as_str()),
+            "the untagged order reached a sibling executor"
+        );
+        // Exactly one executor saw the untagged order, counted across the
+        // whole board, and the active owner is that one.
+        let ghost_hits = usize::from(a_ids.contains(&ghost_id.as_str()))
+            + usize::from(b_ids.contains(&ghost_id.as_str()));
+        assert_eq!(
+            ghost_hits, 1,
+            "one untagged order must be drained by exactly one executor"
         );
     }
 

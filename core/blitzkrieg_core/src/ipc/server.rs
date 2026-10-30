@@ -1087,10 +1087,11 @@ pub async fn run(
         }
         h
     };
-    // The trait-erased handle every feed/discovery/session share. The
-    // settlement-drain bucket it carries is the assembly's active-plugin
-    // answer (the shared data-plane default); the executor loop below
-    // re-buckets per plugin with `for_plugin` handles.
+    // The trait-erased handle every feed/discovery/session share. It carries
+    // no own-plugin identity ("" = legacy all-take on the scoped settlement
+    // drains) but re-sees the SHARED active-plugin cell set above — the
+    // untagged-order owner — through the Arc; the executor loop below
+    // additionally names each handle with `for_plugin`.
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> = Arc::new(concrete_host.clone());
 
     // RFC-661 M2: the fan-out rides the CONCRETE host (every clone shares the
@@ -1297,12 +1298,14 @@ pub async fn run(
         // Multi-plugin: EVERY selected plugin with an executor starts its own
         // instance. Orders/cancels drain venue-routed by their `plugin`
         // argument; the settlement drains carry no caller name (frozen ABI),
-        // so the executor gets a `for_plugin` host handle whose bucket cell
+        // so the executor gets a `for_plugin` host handle whose `own_plugin`
         // names ITSELF (#647) — the redemption/merge queues inside the host
         // are venue-bucketed and this handle pulls only its own venue's
-        // claims (plus untagged ones, the single-plugin fallback). Data-plane
-        // handles keep the shared assembly default; only the executor is
-        // re-bucketed.
+        // claims (plus untagged ones, the single-plugin fallback). The shared
+        // `active_plugin` cell is NOT touched (#775): it stays the assembly's
+        // `actives[0]`, the one owner untagged ORDERS fall back to. Data-plane
+        // handles keep the empty own-plugin (legacy all-take); only the
+        // executor is named.
         for p in &actives {
             if let Some(exec) = p.executor() {
                 // `markets` is the operator's global `--market` condition-id
