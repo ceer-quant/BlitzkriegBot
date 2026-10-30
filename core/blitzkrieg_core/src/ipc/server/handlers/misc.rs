@@ -77,15 +77,18 @@ pub(crate) async fn handle_misc(
                 // seed — reporting none would misdescribe a funded simulation.
                 Mode::ReadOnly => Some(c.config().dry_seed_balance),
             };
-            // issue 787（live 无凭证余额显示面）: same projection as
-            // `account_views` — a live core whose active account's credentials
-            // never loaded has no venue report behind its book (the bridge is
-            // inert without keys), so whatever sits there is leftover (a
+            // issue 787 + issue 749: same projection as `account_views` — a
+            // live core whose ACTIVE book no venue has ever reported has no
+            // venue number behind it, so whatever sits there is leftover (a
             // replayed dry journal, a stale seed). It must not cross the wire
-            // as "the balance". The ACTIVE account's loaded fact is the one
-            // this process-level view follows (`ledger()` is the active
-            // ledger); per-account rows carry their own in `account.list`.
-            let unfunded_live = c.mode() == Mode::Live && !c.active_ledger_credentials_loaded();
+            // as "the balance".
+            //
+            // The gate keys on the venue-report fact, NOT on
+            // `CredentialKeys::loaded` (issue 749): a plugin that signs with
+            // its own env declares nothing here, and an account whose keys did
+            // load still has no number until the venue actually answers. The
+            // first venue report re-establishes it after every boot.
+            let unfunded_live = c.mode() == Mode::Live && !c.active_ledger_venue_reported();
             let (balance, reserved, available) = if unfunded_live {
                 (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
             } else {

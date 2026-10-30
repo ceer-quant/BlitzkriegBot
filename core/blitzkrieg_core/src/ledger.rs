@@ -97,6 +97,15 @@ pub struct Ledger {
     /// `None` = memory-only (backtester, in-process tests): nothing is
     /// written or replayed.
     journal_path: Option<PathBuf>,
+    /// issue 749: a VENUE reported this book's cash. Distinct from the
+    /// balance itself (a seed, a replay, a local funding call all move the
+    /// number without the venue ever speaking) and from
+    /// `CredentialKeys::loaded` (an account may never declare the env names
+    /// the plugin actually signs with). The live balance projection keys on
+    /// THIS fact: confirmed venue money is shown, everything else is not.
+    /// Deliberately not serialized and not replayed — the first venue report
+    /// after a boot re-establishes it, which is the honest answer for the gap.
+    venue_reported: bool,
 }
 
 impl Ledger {
@@ -239,6 +248,22 @@ impl Ledger {
     pub fn set_balance(&mut self, balance: Decimal) {
         let target = balance.max(Decimal::ZERO);
         self.apply(JournalKind::Realign, target - self.balance, "venue");
+    }
+
+    /// issue 749: apply a VENUE's reported cash balance, recording that the
+    /// number came from the venue. [`Self::set_balance`] moves the number
+    /// without that claim (boot seed, local funding, reset) — the two are not
+    /// interchangeable, because only a venue report makes a live balance
+    /// something the panel may show.
+    pub fn apply_venue_report(&mut self, balance: Decimal) {
+        self.venue_reported = true;
+        self.set_balance(balance);
+    }
+
+    /// issue 749: whether a venue has reported this book's cash since the
+    /// last reset (see [`Self::apply_venue_report`]).
+    pub fn venue_reported(&self) -> bool {
+        self.venue_reported
     }
 
     /// Set a BUY order's outstanding commitment to exactly `remaining_notional`
@@ -422,6 +447,7 @@ impl Ledger {
     /// refuses a reset outright; a Dry/ReadOnly wipe leaves the audit trail).
     /// kind = `Reset`, `ref` = `reset`.
     pub fn reset_to_seed(&mut self, seed: Decimal) {
+        self.venue_reported = false;
         let target = seed.max(Decimal::ZERO);
         self.apply(JournalKind::Reset, target - self.balance, "reset");
     }
@@ -449,6 +475,8 @@ impl Ledger {
         self.reservations.clear();
         self.balance = target;
         self.journal.clear();
+        // issue 749: the book is a seed again, not venue truth.
+        self.venue_reported = false;
         // issue 723: every path below appends exactly one `Reset` row — the
         // global row counter moves with it, monotonically (a rebuilt
         // generation never reissues the previous one's seqs).
@@ -498,6 +526,9 @@ impl Ledger {
     /// 败更糟（旧文件会复活），所以调用方在 false 时拒绝整个 remove。
     pub fn retire_journal_file(&mut self) -> bool {
         self.journal.clear();
+        // issue 749: the identity is gone; a survivor must not keep claiming
+        // venue-reported money.
+        self.venue_reported = false;
         match self.journal_path.clone() {
             Some(path) => match std::fs::remove_file(&path) {
                 Ok(()) => true,
@@ -1007,5 +1038,43 @@ mod tests {
             l.balance() - evicted,
             "retained rows sum to everything after the evicted prefix"
         );
+    }
+
+    /// issue 749: `venue_reported` records ONE fact — a venue spoke about this
+    /// book. Local cash mutations (a seed, a funding call) must never set it,
+    /// and every path that retires the book's identity (a re-seed, an account
+    /// retirement) must clear it: the next venue report re-establishes it.
+    #[test]
+    fn venue_reported_tracks_only_venue_words() {
+        let mut l = Ledger::new();
+        assert!(!l.venue_reported(), "a fresh book has heard from nobody");
+
+        l.set_balance(dec!(1000));
+        assert!(
+            !l.venue_reported(),
+            "a local seed is not a venue report — this is the leftover the \
+             live projection must keep folding"
+        );
+
+        l.apply_venue_report(dec!(25));
+        assert!(l.venue_reported());
+        assert_eq!(l.balance(), dec!(25));
+
+        l.reset_to_seed(dec!(10));
+        assert!(
+            !l.venue_reported(),
+            "a re-seed retires the reported identity"
+        );
+        assert_eq!(l.balance(), dec!(10));
+
+        l.apply_venue_report(dec!(25));
+        assert!(l.venue_reported());
+        l.reset_account_to_seed(dec!(3));
+        assert!(!l.venue_reported(), "the per-account reset retires it too");
+
+        l.apply_venue_report(dec!(7));
+        assert!(l.venue_reported());
+        assert!(l.retire_journal_file());
+        assert!(!l.venue_reported(), "a retired identity claims nothing");
     }
 }
