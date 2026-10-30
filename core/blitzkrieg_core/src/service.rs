@@ -357,6 +357,15 @@ pub struct Core {
     /// deployment): every default then matches the historical hardcoded
     /// behaviour bit for bit.
     execution_policy: Option<crate::execution_policy::Policy>,
+    /// #757: the POLICY_* keys the IPC write face has made authoritative in
+    /// THIS process (`Some` = the value written, `None` = swept by a reset /
+    /// an absent section field). The launcher exported the boot `.env` into
+    /// the process environment, so a same-process reload that read the
+    /// process env first would judge under the OLD value: `set` wrote 5, the
+    /// file said 5, and the effective policy still read 100. `reload_
+    /// execution_policy` resolves these keys from here; keys never written
+    /// through IPC are absent and keep resolving from the deployment env.
+    execution_policy_env_writes: std::collections::BTreeMap<String, Option<String>>,
     /// #363: account-level cooldowns a policy rule opened, keyed by account
     /// id, holding the ms instant entries may resume. Checked (and expired)
     /// in `engine_evaluate`; set by the same path when a rule answers
@@ -1160,6 +1169,9 @@ impl Core {
             kline_preview_last_ms: std::collections::HashMap::new(),
             // #363: the boot-loaded policy (None = no config file found).
             execution_policy,
+            // #757: nothing written through IPC yet — every key resolves from
+            // the file / deployment env exactly as at boot.
+            execution_policy_env_writes: std::collections::BTreeMap::new(),
             policy_cooldowns: HashMap::new(),
             // Replay fast path: nothing dirty, no deadlines known yet — the
             // first tick always runs the full sweeps (MAX stamps force them).
@@ -1413,6 +1425,18 @@ impl Core {
         }
     }
 
+    /// #757: remember the keys the IPC section write just made authoritative
+    /// (`Some` = the value written, `None` = the key was swept). The write
+    /// face calls this BEFORE [`Self::reload_execution_policy`] so the reload
+    /// resolves those keys from memory rather than the stale startup export
+    /// of the process environment.
+    pub fn execution_policy_record_env_write(
+        &mut self,
+        written: std::collections::BTreeMap<String, Option<String>>,
+    ) {
+        self.execution_policy_env_writes.extend(written);
+    }
+
     /// Replace the in-memory policy wholesale after a file write (set/reset
     /// arms). Re-derives the per-asset cap the way boot did — CLI flag wins
     /// over the file — and lands one `load-refused` audit line + keeps the
@@ -1426,7 +1450,10 @@ impl Core {
             .ok_or_else(|| "execution policy disabled (no config path)".to_string())?;
         // Single-source read (issue 751): the write face lands POLICY_* keys
         // in the .env the launcher owns — a same-process reload must see them
-        // before the next restart folds the file into the process env.
+        // before the next restart folds the file into the process env. The
+        // in-memory write snapshot (#757) rides between the file and the
+        // process env so a stale boot export can neither shadow a write nor
+        // resurface after a reset.
         let env_file = self
             .config
             .env_file_path
@@ -1436,6 +1463,7 @@ impl Core {
         match crate::execution_policy::Policy::load_for_reload(
             std::path::Path::new(&path),
             env_file,
+            &self.execution_policy_env_writes,
         ) {
             Ok(policy) => {
                 let mut positions = self.config.positions.clone();

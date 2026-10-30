@@ -962,9 +962,41 @@ impl Policy {
         Self::load_with_env(&text, env)
     }
 
-    /// Same parser as boot, but an explicit reload reads the edited file
-    /// directly instead of the startup process-environment snapshot.
-    pub fn load_for_reload(path: &Path, env_path: &Path) -> Result<Self, String> {
+    /// Same parser as boot, but an explicit reload resolves the writable
+    /// `.env` file first instead of the startup process-environment snapshot.
+    ///
+    /// `written` is the in-memory snapshot of the keys the IPC write face has
+    /// made authoritative (`Some` = the value written, `None` = the key was
+    /// swept by a reset / an absent section field). It lets a same-process
+    /// reload see a just-written tightening before the next launcher restart
+    /// exports the file into the process env — and, for a key the write face
+    /// REMOVED, stops the stale boot-time export from resurrecting it (#757:
+    /// `set` wrote 5, the file said 5, but the effective policy still read the
+    /// 100 the launcher had exported; `reset` was shadowed the same way).
+    ///
+    /// Precedence: file line > IPC write snapshot > process environment. The
+    /// file stays first so an operator editing `.env` by hand still wins;
+    /// keys that only ever arrived from the deployment env are absent from
+    /// both the file and `written`, so they keep resolving exactly as at boot.
+    pub fn load_for_reload(
+        path: &Path,
+        env_path: &Path,
+        written: &std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<Self, String> {
+        Self::load_for_reload_with_env(path, env_path, written, |key| {
+            std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+        })
+    }
+
+    /// The test seam for [`Self::load_for_reload`]: the process-environment
+    /// reader is injected so the precedence can be proven without mutating
+    /// global state (parallel tests race on `std::env`).
+    fn load_for_reload_with_env(
+        path: &Path,
+        env_path: &Path,
+        written: &std::collections::BTreeMap<String, Option<String>>,
+        process_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
         let file_map: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
             .map_err(|e| format!("{} unreadable: {e}", env_path.display()))?
             .lines()
@@ -975,7 +1007,19 @@ impl Policy {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => "version = 1\n".to_string(),
             Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
         };
-        Self::load_with_env(&text, |key| file_map.get(key).cloned())
+        let env = |key: &str| -> Option<String> {
+            if let Some(v) = file_map.get(key) {
+                return Some(v.clone());
+            }
+            // An IPC write owns its keys even when the file no longer
+            // carries them: `None` is a reset tombstone, and the stale
+            // process value must NOT come back through the fallback.
+            if let Some(v) = written.get(key) {
+                return v.clone();
+            }
+            process_env(key)
+        };
+        Self::load_with_env(&text, env)
     }
 
     /// Parse with an injected env reader — the test seam (mutating the
@@ -1178,6 +1222,60 @@ fn apply_env(
         section.rules = rules;
     }
     Ok(())
+}
+
+/// The `.env` footprint of ONE account section under the issue-751 spelling:
+/// every key the section owns, mapped to the value a section write gives it
+/// (`Some` = written, `None` = swept/absent).
+///
+/// This is the write-side twin of [`apply_env`]. The IPC writer renders the
+/// `Some` values into the file; the whole map is ALSO kept in the in-memory
+/// snapshot a same-process reload consults (#757), so a stale deployment
+/// value cannot shadow the write, and a `None` tombstone stops a `reset`
+/// from resurrecting the value the process env still carries.
+pub fn section_env_state(
+    account_id: &str,
+    section: Option<&SectionFields>,
+) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
+    let sfx = env_account_suffix(account_id);
+    let key = |tail: &str| format!("POLICY_{tail}_{sfx}");
+    // The six keys are the section's whole footprint — absent fields are
+    // swept, exactly the TOML section-replacement semantics.
+    let mut state: std::collections::BTreeMap<String, Option<String>> = [
+        "BUDGET_RATIO",
+        "MIN_BUDGET_USD",
+        "MAX_BUDGET_USD",
+        "MIN_EQUITY_USD",
+        "MAX_POSITIONS_PER_ASSET",
+        "RULES",
+    ]
+    .into_iter()
+    .map(|tail| (key(tail), None))
+    .collect();
+    let Some(s) = section else {
+        return Ok(state);
+    };
+    if let Some(v) = s.budget_ratio {
+        state.insert(key("BUDGET_RATIO"), Some(v.to_string()));
+    }
+    if let Some(v) = s.min_budget_usd {
+        state.insert(key("MIN_BUDGET_USD"), Some(v.to_string()));
+    }
+    if let Some(v) = s.max_budget_usd {
+        state.insert(key("MAX_BUDGET_USD"), Some(v.to_string()));
+    }
+    if let Some(v) = s.min_equity_usd {
+        state.insert(key("MIN_EQUITY_USD"), Some(v.to_string()));
+    }
+    if let Some(v) = s.max_positions_per_asset {
+        state.insert(key("MAX_POSITIONS_PER_ASSET"), Some(v.to_string()));
+    }
+    if let Some(rules) = &s.rules {
+        let json = serde_json::to_string(rules)
+            .map_err(|e| format!("rules do not render as JSON: {e}"))?;
+        state.insert(key("RULES"), Some(json));
+    }
+    Ok(state)
 }
 
 /// Whether ANY per-account POLICY_* key names this id — the "this account has
@@ -2405,6 +2503,207 @@ then = { action = "skip" }
 "#;
         let err = Policy::load_with_env(text, no_env).unwrap_err();
         assert!(err.contains("compares against text"), "{err}");
+    }
+
+    // ── #757: a same-process reload must not be shadowed by the boot env ──
+
+    /// Replay the IPC write face at the loader seam: sweep the section's six
+    /// keys, write the `Some` values, and return the snapshot the handler
+    /// records before reloading. Same primitives the handler uses
+    /// (`env_file`), so this exercises the real file face.
+    fn ipc_section_write(
+        env_path: &Path,
+        account_id: &str,
+        section: Option<&SectionFields>,
+    ) -> std::collections::BTreeMap<String, Option<String>> {
+        let state = section_env_state(account_id, section).expect("section state");
+        let keys: Vec<&str> = state.keys().map(|k| k.as_str()).collect();
+        crate::env_file::remove_env_vars(env_path, &keys).expect("section sweep");
+        let vars: std::collections::BTreeMap<String, String> = state
+            .iter()
+            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
+            .collect();
+        crate::env_file::upsert_env_vars(env_path, &vars).expect("section write");
+        state
+    }
+
+    /// Read one key back through the launcher's read half — the file face as
+    /// the next boot (and the operator) sees it.
+    fn file_value(env_path: &Path, key: &str) -> Option<String> {
+        std::fs::read_to_string(env_path)
+            .unwrap()
+            .lines()
+            .filter_map(crate::env_file::parse_line)
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+    }
+
+    #[test]
+    fn set_written_value_wins_over_the_startup_env_on_reload() {
+        // #757 repro: the launcher exported POLICY_MAX_BUDGET_USD_PAPER=100
+        // into the process environment at boot (injected here — no global
+        // state mutation). `set` to 5 writes the file and the write snapshot.
+        // PRE-FIX (`load_single_source`, process env first): the reload read
+        // the stale 100, so `after` and the effective policy were 100 while
+        // the file said 5 — the requested risk tightening never applied.
+        let dir = scratch("issue757-set");
+        let env_path = dir.join(".env");
+        let toml_path = dir.join("execution_policy.toml");
+        std::fs::write(
+            &env_path,
+            "ACCOUNT_LIST=paper\nPOLICY_MAX_BUDGET_USD_PAPER=\"100\"\n",
+        )
+        .expect("seed deployment env");
+        let startup = |key: &str| match key {
+            "POLICY_MAX_BUDGET_USD_PAPER" => Some("100".to_string()),
+            _ => None,
+        };
+        let no_writes = std::collections::BTreeMap::new();
+        let before =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &no_writes, startup).unwrap();
+        assert_eq!(before.section_for("paper").max_budget_usd, dec!(100));
+
+        // execution_policy.set { accountId: "paper", maxBudgetUsd: "5" }.
+        let section = SectionFields {
+            max_budget_usd: Some(dec!(5)),
+            ..Default::default()
+        };
+        let written = ipc_section_write(&env_path, "paper", Some(&section));
+        let after =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &written, startup).unwrap();
+
+        // What the handler returns as `after` (and what `evaluate` judges
+        // under) is this reloaded section view: 5, the tightening.
+        assert_eq!(after.section_for("paper").max_budget_usd, dec!(5));
+        // The file holds the just-written value, not the stale 100.
+        assert_eq!(
+            file_value(&env_path, "POLICY_MAX_BUDGET_USD_PAPER").as_deref(),
+            Some("5")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_does_not_resurrect_the_startup_env() {
+        // #757: after the set the account owns the file keys, then `reset`
+        // sweeps them. The process env still carries the boot export 100; the
+        // snapshot's tombstone (`None`) must outrank it. PRE-FIX
+        // (`load_single_source`, process env first): the reload fell back to
+        // 100 instead of the documented default. (The file-only reload also
+        // lands the default here, but loses env-only keys — next test.)
+        let dir = scratch("issue757-reset");
+        let env_path = dir.join(".env");
+        let toml_path = dir.join("execution_policy.toml");
+        std::fs::write(
+            &env_path,
+            "ACCOUNT_LIST=paper\nPOLICY_MAX_BUDGET_USD_PAPER=\"100\"\n",
+        )
+        .expect("seed deployment env");
+        let startup = |key: &str| match key {
+            "POLICY_MAX_BUDGET_USD_PAPER" => Some("100".to_string()),
+            _ => None,
+        };
+        let section = SectionFields {
+            max_budget_usd: Some(dec!(5)),
+            ..Default::default()
+        };
+        let written = ipc_section_write(&env_path, "paper", Some(&section));
+        let after_set =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &written, startup).unwrap();
+        assert_eq!(after_set.section_for("paper").max_budget_usd, dec!(5));
+
+        // execution_policy.reset { accountId: "paper" }.
+        let swept = ipc_section_write(&env_path, "paper", None);
+        assert!(
+            swept.values().all(Option::is_none),
+            "reset sweeps every key"
+        );
+        let after_reset =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &swept, startup).unwrap();
+
+        assert_eq!(
+            after_reset.section_for("paper").max_budget_usd,
+            code_defaults().max_budget_usd,
+            "reset inherits the documented default"
+        );
+        assert_ne!(
+            after_reset.section_for("paper").max_budget_usd,
+            dec!(100),
+            "the stale deployment value must not come back"
+        );
+        assert_eq!(file_value(&env_path, "POLICY_MAX_BUDGET_USD_PAPER"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deployment_env_only_key_still_resolves_on_reload() {
+        // Constraint: a key that only ever arrived from the deployment env
+        // (never written through IPC) must keep working exactly as at boot.
+        // Nothing on file and nothing in the write snapshot, so the reload
+        // must still see the exported ACCOUNT_LIST + 100. PRE-FIX on the
+        // file-only reload (#767): no section and the code default
+        // (1_000_000_000) — this is why the process-env fallback stays.
+        let dir = scratch("issue757-env-only");
+        let env_path = dir.join(".env");
+        let toml_path = dir.join("execution_policy.toml");
+        std::fs::write(&env_path, "# no policy keys on file\n").expect("empty deployment env");
+        let startup = |key: &str| match key {
+            "ACCOUNT_LIST" => Some("paper".to_string()),
+            "POLICY_MAX_BUDGET_USD_PAPER" => Some("100".to_string()),
+            _ => None,
+        };
+        let no_writes = std::collections::BTreeMap::new();
+        let reloaded =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &no_writes, startup).unwrap();
+        assert_eq!(reloaded.section_for("paper").max_budget_usd, dec!(100));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_rules_are_the_rules_the_reload_returns() {
+        // #757 rules face: the boot export carries a looser backstop;
+        // `set` writes the tighter rule set. PRE-FIX (`load_single_source`,
+        // process env first) the reload returned the OLD rules while the
+        // file said the new ones. The write snapshot must make the written
+        // set the one the loader returns.
+        let dir = scratch("issue757-rules");
+        let env_path = dir.join(".env");
+        let toml_path = dir.join("execution_policy.toml");
+        let old = r#"[{"name":"old_backstop","priority":100,"enabled":true,"when":"open_positions >= 2","then":{"action":"skip"},"reason":"old"}]"#;
+        std::fs::write(
+            &env_path,
+            format!("ACCOUNT_LIST=paper\nPOLICY_RULES_PAPER='{old}'\n"),
+        )
+        .expect("seed deployment env");
+        let startup = |key: &str| match key {
+            "POLICY_RULES_PAPER" => Some(old.to_string()),
+            _ => None,
+        };
+        let no_writes = std::collections::BTreeMap::new();
+        let before =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &no_writes, startup).unwrap();
+        assert_eq!(before.section_for("paper").rules[0].name, "old_backstop");
+
+        // The tightening: skip as soon as ANY position is open.
+        let tight: Vec<Rule> = serde_json::from_str(
+            r#"[{"name":"tight_backstop","priority":1,"enabled":true,"when":"open_positions >= 1","then":{"action":"skip"},"reason":"tighten"}]"#,
+        )
+        .expect("tight rules");
+        let section = SectionFields {
+            rules: Some(tight),
+            ..Default::default()
+        };
+        let written = ipc_section_write(&env_path, "paper", Some(&section));
+        let after =
+            Policy::load_for_reload_with_env(&toml_path, &env_path, &written, startup).unwrap();
+
+        assert_eq!(after.section_for("paper").rules.len(), 1);
+        assert_eq!(after.section_for("paper").rules[0].name, "tight_backstop");
+        // The file carries the same set through the launcher's read half.
+        let on_file = file_value(&env_path, "POLICY_RULES_PAPER").expect("rules on file");
+        let parsed: Vec<Rule> = serde_json::from_str(&on_file).expect("file rules JSON");
+        assert_eq!(parsed[0].name, "tight_backstop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── #380: the default config path resolves against the install root ────
