@@ -1504,9 +1504,9 @@ impl Core {
     /// 身份合同在这里钉死：id 非空 / trim 后非空 / 不允许保留名 `default` /
     /// 不允许与簿内现有 id 重复；status 恒 `Active`（运行时铸造一个受限账户
     /// 等于变相放宽，收紧是 `account.status` 的事）；market_type 恒
-    /// `Prediction`（0.3 唯一有插件的市场类型，与文件缺省一致）。凭据面完全
-    /// 不存在（§9.4：值永不进内核）—— 面板在身份落地后走既有
-    /// `market.credentials.set`（env var 名 → 值，值不出内核）自己组织。
+    /// `Prediction`（0.3 唯一有插件的市场类型，与文件缺省一致）。调用方从
+    /// 插件声明传入凭据变量名并与身份一起落盘；值仍由
+    /// `market.credentials.set` 写入，永不进入账户请求或响应。
     /// 无 [`CoreConfig::accounts_config_path`] 的内核（回测、多数进程内测试）
     /// 拒绝 —— 同 venue.set 的 "persistence is disabled" 文案形状。
     ///
@@ -1517,11 +1517,12 @@ impl Core {
         id: &crate::account::AccountId,
         name: Option<&str>,
         venue: Option<&str>,
-        actor: &str,
-        reason: &str,
+        credential_keys: crate::account::CredentialKeys,
+        audit: (&str, &str),
         now_ms: i64,
     ) -> CoreResult<()> {
         use crate::ipc::schema::ACCOUNT_CREATE_NOTE;
+        let (actor, reason) = audit;
         // Reserved name first — BEFORE the empty-id check, so the refusal
         // names the contract, not the spelling (`"default"` trimmed and
         // whitespace-padded variants land on the same reserved refusal).
@@ -1566,6 +1567,7 @@ impl Core {
             id.as_str(),
             name,
             venue,
+            &credential_keys,
         )
         .map_err(|e| {
             CoreError::new(
@@ -1581,7 +1583,7 @@ impl Core {
             name: name.unwrap_or(id.as_str()).to_string(),
             market_type: blitzkrieg_market_api::MarketType::Prediction,
             status: crate::account::AccountStatus::Active,
-            credential_keys: crate::account::CredentialKeys::default(),
+            credential_keys,
             venue: venue.filter(|v| !v.is_empty()).unwrap_or("").to_string(),
             trading_enabled: true,
             strategies: Vec::new(),
@@ -1622,7 +1624,7 @@ impl Core {
             venue = %venue.unwrap_or(""),
             reason = %reason,
             "account created — ACTIVE prediction account minted and persisted; \
-             credentials ride market.credentials.set (names only, never values) \
+             plugin credential names attached (values ride market.credentials.set) \
              ({ACCOUNT_CREATE_NOTE})",
         );
         Ok(())

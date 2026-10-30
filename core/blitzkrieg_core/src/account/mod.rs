@@ -135,6 +135,30 @@ pub struct CredentialKeys {
     pub loaded: bool,
 }
 
+impl CredentialKeys {
+    /// Convert a plugin's declared credential variable names into the legacy
+    /// four-slot account declaration. These fields carry names only; execution
+    /// still reads the plugin's own environment directly.
+    pub fn from_plugin_env(names: &[&str]) -> Self {
+        let mut out = Self::default();
+        for name in names {
+            let slot = if name.contains("PASSPHRASE") {
+                &mut out.passphrase_env
+            } else if name.contains("SECRET") {
+                &mut out.secret_env
+            } else if name.contains("PRIVATE") || name.contains("RSA") {
+                &mut out.private_key_env
+            } else {
+                &mut out.api_key_env
+            };
+            if slot.is_none() {
+                *slot = Some((*name).to_string());
+            }
+        }
+        out
+    }
+}
+
 // ── E28 (§9.1 / §9.3): the account book ─────────────────────────────────────
 
 pub mod config;
