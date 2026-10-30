@@ -332,8 +332,11 @@ mkdir -p "$REPO_ROOT/target/keepme-20260101T000000"
 ua_prune_rollbacks
 check "three newest rollback sets survive" "3" \
   "$(ls -1d "$REPO_ROOT"/target/rollback-* | wc -l | tr -d ' ')"
+# Basenames via sed, not `xargs basename`: xargs splits its input on blanks, so
+# a checkout under a path with a space (".../Hard Disk/...") turned each path
+# segment into a survivor and the check failed on a correct pruner.
 check "the survivors are the three newest" "rollback-20260103T000000 rollback-20260104T000000 rollback-20260105T000000" \
-  "$(ls -1d "$REPO_ROOT"/target/rollback-* | xargs -n1 basename | sort | tr '\n' ' ' | sed 's/ $//')"
+  "$(ls -1d "$REPO_ROOT"/target/rollback-* | sed 's|.*/||' | sort | tr '\n' ' ' | sed 's/ $//')"
 check "an unrelated target/ dir is untouched" "1" \
   "$(ls -1d "$REPO_ROOT"/target/keepme-* | wc -l | tr -d ' ')"
 

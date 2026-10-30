@@ -27,7 +27,11 @@ fn policy_env_oracle() {
         std::env::var("BK_ORACLE_ENV").expect("BK_ORACLE_ENV must name the migrated .env");
     let toml_path = std::env::var("BK_ORACLE_TOML")
         .unwrap_or_else(|_| "/nonexistent/execution_policy.toml".to_string());
-    let policy = Policy::load_for_reload(Path::new(&toml_path), Path::new(&env_path))
+    // The third argument is the same-process IPC write snapshot (#757). The
+    // oracle is a fresh process reading only the file, so it is empty: the
+    // migrated `.env` must stand on its own.
+    let written = std::collections::BTreeMap::new();
+    let policy = Policy::load_for_reload(Path::new(&toml_path), Path::new(&env_path), &written)
         .expect("the migrated .env must load through the real policy loader");
 
     println!(
