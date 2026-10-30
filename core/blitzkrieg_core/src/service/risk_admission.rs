@@ -92,6 +92,19 @@ impl Core {
         }
     }
 
+    /// The OPERATOR freeze route: [`Self::freeze_account`] plus dropping any
+    /// `auto_frozen` stamp first.
+    ///
+    /// `freeze_account` is idempotent, so freezing an account the kernel had
+    /// ALREADY auto-frozen used to leave the auto stamp in place — the next
+    /// healthy-venue sweep (`auto_lift_if_venue_healthy`) then resumed the
+    /// account and the operator's kill switch was silently lifted. Clearing the
+    /// ledger makes the operator verdict outrank the self-heal by construction.
+    pub fn freeze_account_manual(&mut self, account: &str, reason: String) {
+        self.auto_frozen.remove(account);
+        self.freeze_account(account, reason);
+    }
+
     /// 冻结自愈的解冻半边：only an AUTO-frozen account may self-lift, and
     /// only on positive evidence the venue recovered (`trigger` names it).
     /// A manual freeze is never touched — `auto_frozen` is the ledger that
