@@ -569,6 +569,17 @@ impl Core {
         self.test_duration_subscriptions = Some(subs);
     }
 
+    /// #774 test seam: stage a fill that reaches the OME after the escalation
+    /// sweep has taken its `size - filled_size` snapshot, but before it cancels
+    /// the maker — the venue-race window the sweep's fresh re-read exists for.
+    /// A single-threaded unit test has no interleaving point there, so the
+    /// staged fill is applied at that seam by `run_escalation_sweep`. Never
+    /// compiled outside tests.
+    #[cfg(test)]
+    pub(crate) fn stage_escalation_snapshot_fill_for_test(&mut self, fill: Fill) {
+        self.test_escalation_snapshot_fill = Some(fill);
+    }
+
     pub(super) fn place_gated(
         &mut self,
         mut req: OrderRequest,
@@ -1942,6 +1953,14 @@ impl Core {
                 )
             })
             .collect();
+        // #774 test seam: a fill that lands exactly between the snapshot just
+        // taken and the cancel below. Production has no mutation point there
+        // (the sweep runs under the core lock), so the regression test stages
+        // the fill and it is applied — through the ordinary fill path — here.
+        #[cfg(test)]
+        if let Some(fill) = self.test_escalation_snapshot_fill.take() {
+            self.ingest_fill(fill, now_ms)?;
+        }
         for (
             id,
             side,
@@ -1984,7 +2003,7 @@ impl Core {
                 &token,
                 &format!("{id}:escalated"),
             );
-            let req = OrderRequest {
+            let mut req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
                 side,
@@ -2030,6 +2049,34 @@ impl Core {
             }
             self.escalation_skips.remove(&id);
             self.cancel(&id, now_ms)?;
+            // issue #774: the snapshot above predates the cancel, and cancelling
+            // is a venue round-trip. A fill the venue booked in that window (the
+            // event path has already projected it into the OME) moved
+            // `filled_size`, so the true remainder is smaller than the one the
+            // request above was built with — placing it would overshoot the
+            // intended size (total filled > size). Re-read the order AFTER the
+            // retire and chase only what is still unfilled.
+            //
+            // If the late fill consumed the order there is nothing left to
+            // chase: place NO replacement and let the escalation end fully
+            // filled.
+            //
+            // What remains uncertain: a fill still in flight at the venue when
+            // this read runs (one the OME has not seen yet) is NOT covered — the
+            // replacement can still overshoot by that in-flight size. Closing
+            // that window needs the venue's cancel acknowledgement and a final
+            // fill read after it; that protocol is out of scope here.
+            let fresh = self.ome.remaining(&id);
+            if fresh <= Decimal::ZERO {
+                tracing::info!(
+                    order = %id,
+                    strategy = %req.strategy,
+                    stale_size = %req.size,
+                    "escalation finished as fully filled: the maker filled between the snapshot and the cancel; no replacement placed"
+                );
+                continue;
+            }
+            req.size = fresh;
             // Past the gate, a placement can still fail (a reservation, a
             // venue refusal). The maker is already gone, so that entry is
             // lost — but ONE dead escalation must not abort the maintenance

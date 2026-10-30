@@ -422,6 +422,11 @@ pub struct Core {
     /// constant empty set and admits everything (today's behaviour).
     #[cfg(test)]
     test_duration_subscriptions: Option<HashSet<(String, i64)>>,
+    /// #774 test seam: a fill staged to land exactly between the escalation
+    /// sweep's size snapshot and its maker cancel. Consumed once by
+    /// `run_escalation_sweep`; `None` outside tests.
+    #[cfg(test)]
+    test_escalation_snapshot_fill: Option<Fill>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -1176,6 +1181,8 @@ impl Core {
             pair_chase_attempts: HashMap::new(),
             #[cfg(test)]
             test_duration_subscriptions: None,
+            #[cfg(test)]
+            test_escalation_snapshot_fill: None,
             // 跨所套利弹窗 v2: the boot-loaded leg configuration (memory
             // mirror of accounts.toml's `[cross_venue_arb]` — the file is the
             // durable truth, this cell feeds the engine hot). None =
