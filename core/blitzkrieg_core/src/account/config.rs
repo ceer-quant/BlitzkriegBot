@@ -2047,8 +2047,17 @@ mod tests {
         let toml = "[[account]]\nid = \"paper-a\"\n\n[[account]]\nid = \"paper_a\"\n";
         let err = from_str(toml, 5, TEST_ALLOWED_ROUNDS)
             .expect_err("the toml face also refuses the alias");
-        assert!(err.message.contains("paper-a"), "{}", err.message);
-        assert!(err.message.contains("paper_a"), "{}", err.message);
+        // Static messages only: the refusal text carries account ids, and
+        // formatting it into a panic payload is a log sink to the scanning
+        // gate (rust/cleartext-logging). The ids are here literally.
+        assert!(
+            err.message.contains("paper-a"),
+            "the refusal must name paper-a"
+        );
+        assert!(
+            err.message.contains("paper_a"),
+            "the refusal must name paper_a"
+        );
     }
 
     #[test]
