@@ -878,7 +878,9 @@ fn ghost_sweep_releases_the_buy_reservation_and_keeps_entries_open() {
 
     // No stray reservation => no structural audit failure => no halt.
     let audit = c.run_accounting_audit(4);
-    assert!(audit.ok, "{}", audit.note);
+    // Static message only: `audit.note` narrates the ledger figures, and a
+    // panic payload is a log sink as far as the scanning gate is concerned.
+    assert!(audit.ok, "the sweep must leave no structural audit failure");
     assert!(!c.audit_blocks_entries());
 
     // And a fresh entry is still admitted (the pre-fix halt refused it).
