@@ -479,8 +479,9 @@ async function doResetTrading(): Promise<void> {
           </table>
         </div>
         <p class="text-[11.5px] text-faint-fg">
-          安全：值只下行不回显，保存在 <span class="font-mono">data/runtime/config.json</span>（仅属主可读），
-          随 .env 一样留在本机；Live 模式风控与审计照常生效。改完凭据记得重启内核（凭据卡会自动安排）。
+          安全：值只下行不回显，保存在 <span class="font-mono">.env</span>（唯一持久凭据格，仅属主可读），
+          留在本机；Live 模式风控与审计照常生效。写入后重启一次内核生效（执行器在启动时读取凭据）；
+          账户切换器里的「凭证已载」徽章在重启后翻绿。
         </p>
       </div>
     </Card>

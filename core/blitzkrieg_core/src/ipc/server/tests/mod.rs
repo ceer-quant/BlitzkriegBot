@@ -17,6 +17,25 @@ impl blitzkrieg_market_api::MarketPlugin for VenueStubPlugin {
     }
 }
 
+/// A credential-BEARING stub: declares one env var name so the
+/// `account.create` §9.4 probe path has something to resolve. The name is
+/// the test-owned `BK_TEST_*` sentinel family (never a real credential
+/// shape); only presence is probed, values never leave the process.
+struct CredStubPlugin {
+    name: String,
+}
+impl blitzkrieg_market_api::MarketPlugin for CredStubPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn market_type(&self) -> blitzkrieg_market_api::MarketType {
+        blitzkrieg_market_api::MarketType::Prediction
+    }
+    fn required_credential_env(&self) -> &'static [&'static str] {
+        &["BK_TEST_CRED_PROBE_KEY"]
+    }
+}
+
 /// The runtime-enablement stub: a plugin whose feed and discovery really
 /// START and really REACH THE CORE — the feed installs a subscription
 /// control keyed under the plugin name (what `subscribe_feed_tokens`
