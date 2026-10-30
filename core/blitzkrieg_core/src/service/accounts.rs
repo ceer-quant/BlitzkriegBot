@@ -117,7 +117,10 @@ impl Core {
             self.venue_free_by_venue.insert(venue.to_string(), (ts, b));
         }
         if let Ok(ledger) = self.accounts.get_mut(&target) {
-            ledger.set_balance(b);
+            // issue 749: this is VENUE truth, not a local funding number —
+            // record it so a live account shows the balance even when it
+            // never declared credential env names.
+            ledger.apply_venue_report(b);
         }
         tracing::debug!(account = %target.as_str(), venue = %venue, balance = %b, "venue cash routed");
     }
@@ -500,15 +503,14 @@ impl Core {
         self.accounts.active_ledger()
     }
 
-    /// Whether the ACTIVE account's credentials loaded at boot (§9.4). The
+    /// issue 749: whether a VENUE has reported the ACTIVE account's cash. The
     /// process-level balance view (`ledger.balance`) follows this account, so
-    /// its live-mode zero-projection (issue 787) keys on the same fact the
-    /// per-account rows carry.
-    pub fn active_ledger_credentials_loaded(&self) -> bool {
-        self.accounts
-            .account(self.accounts.active_id())
-            .map(|a| a.credential_keys.loaded)
-            .unwrap_or(false)
+    /// its live-mode zero-projection keys on the same fact the per-account
+    /// rows carry. `CredentialKeys::loaded` is deliberately NOT consulted: an
+    /// account can trade on a plugin that signs with its own env while
+    /// declaring nothing, and a real venue report is the honest evidence.
+    pub fn active_ledger_venue_reported(&self) -> bool {
+        self.accounts.active_ledger().venue_reported()
     }
 
     /// Whether THIS core's boot replayed durable cash journals (at least one
@@ -553,17 +555,20 @@ impl Core {
     /// how cross-account isolation is READ; `dayRealizedUsd` sums the
     /// account's own closes of the current UTC day.
     ///
-    /// issue 787（live 无凭证余额显示面）: a LIVE account whose credentials
-    /// never loaded has no venue to report its cash — the bridge stays inert
-    /// (`spawn_if_configured` refuses without keys), so no realign can ever
-    /// land and the only numbers the book can hold are leftovers (a dry-mode
-    /// journal replayed at boot, a venue report from before the keys were
-    /// pulled). Reading those as "the balance" shows dry seed money in a live
-    /// panel — the exact 1000 the operator reported. The projection states the
-    /// truth instead: no loaded credentials, no venue truth, ZERO. Dry and
-    /// read-only keep the seed (their book is the money there is); a loaded
-    /// live account keeps its book (venue facts flow in through
-    /// `realign_venue_cash`).
+    /// issue 787 + issue 749（live 无场外余额显示面）: a LIVE account whose
+    /// book no VENUE has ever reported has no venue truth behind it, so the
+    /// only numbers it can hold are leftovers (a dry-mode journal replayed at
+    /// boot, a stale seed, a report from before the keys were pulled). Reading
+    /// those as "the balance" shows dry seed money in a live panel — the exact
+    /// 1000 the operator reported. The projection states the truth instead: no
+    /// venue report, ZERO. Dry and read-only keep the seed (their book is the
+    /// money there is); a live account whose venue has reported keeps its book
+    /// (the fact is set by `realign_venue_cash`).
+    ///
+    /// The gate is `Ledger::venue_reported`, NOT `CredentialKeys::loaded`
+    /// (issue 749): a plugin can sign with its own env while the account
+    /// declares nothing, so the credential fact both over- and under-reported.
+    /// The live balance is the venue's word, so the venue's word is the gate.
     pub fn account_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::AccountView> {
         let live = self.config.mode == Mode::Live;
         let today = crate::position::utc_day_index(now_ms);
@@ -598,12 +603,16 @@ impl Core {
                     }
                     _ => (a.status.wire_tag(), None),
                 };
-                // The zero-fold only ever hits a live account whose
-                // credentials did not load — `loaded == false` there. The
-                // reserve gate reads the same view, and refusing entries on a
-                // zero book is exactly right: an unauthenticated account must
-                // not spend anything.
-                let unfunded_live = live && !a.credential_keys.loaded;
+                // issue 749: the zero-fold asks "has a VENUE ever reported
+                // this book's cash?", not "did the account declare credential
+                // env names?". A plugin can sign with its own env (e.g. the
+                // polymarket extension) while the account declares nothing, so
+                // `credential_keys.loaded` was the wrong proxy: it hid real,
+                // venue-reported money from the panel forever. A live book
+                // with no venue report yet is still folded — whatever sits
+                // there is a replay or a seed, and must not cross the wire as
+                // "the balance".
+                let unfunded_live = live && !ledger.venue_reported();
                 let (balance, available) = if unfunded_live {
                     (Decimal::ZERO, Decimal::ZERO)
                 } else {

@@ -1019,14 +1019,15 @@ fn account_views_carry_the_venue_binding() {
     );
 }
 
-// ── issue 787: live + unloaded credentials project a ZERO balance ───────────
+// ── issue 787 + 749: a live book with no venue report projects ZERO ────────
 
 /// A live core whose account book carries a LEFTOVER balance — the shape the
 /// operator reported: the book was seeded by a dry run (or replayed from that
-/// dry run's journal) and the process now boots live without credentials, so
-/// no venue report can ever realign the number. Fixture: seed the ledger
-/// directly (the same end state a dry journal replay lands); `loaded` decides
-/// whether the account's boot credential probe succeeded.
+/// dry run's journal) and the process now boots live, so no venue has ever
+/// reported this book and the number is not the venue's truth. Fixture: seed
+/// the ledger directly (the same end state a dry journal replay lands);
+/// `loaded` is carried so the credential state can be varied independently —
+/// issue 749: it must NOT decide the projection.
 fn live_core_with_leftover_book(balance: Decimal, loaded: bool, mode: Mode) -> Core {
     let book = crate::account::AccountLedgers::new(
         vec![crate::account::Account {
@@ -1084,15 +1085,32 @@ fn a_live_account_without_loaded_credentials_projects_zero() {
 }
 
 #[test]
-fn a_live_account_with_loaded_credentials_keeps_its_book() {
+fn a_live_account_folds_its_book_even_with_loaded_credentials() {
+    // issue 749: `loaded` describes a boot probe of DECLARED env names. It is
+    // not "a venue told us this book's cash", so it must not open the view —
+    // the leftover 1000 is still a leftover.
     let c = live_core_with_leftover_book(dec!(1000), true, Mode::Live);
     let views = c.account_views(1);
+    assert!(views[0].credentials_loaded);
     assert_eq!(
         views[0].balance,
-        dec!(1000),
-        "loaded live account keeps its book (venue facts flow in through realign)"
+        Decimal::ZERO,
+        "a loaded credential declaration is not a venue report"
     );
-    assert!(views[0].credentials_loaded);
+}
+
+#[test]
+fn a_venue_report_opens_a_live_accounts_book() {
+    // …and the fact that DOES open it is the venue's own word.
+    let mut c = live_core_with_leftover_book(dec!(1000), false, Mode::Live);
+    c.realign_venue_cash("polymarket", dec!(25));
+    let views = c.account_views(1);
+    assert!(!views[0].credentials_loaded, "no declaration was needed");
+    assert_eq!(
+        views[0].balance,
+        dec!(25),
+        "the venue's number is the balance, credential declaration or not"
+    );
 }
 
 #[test]
