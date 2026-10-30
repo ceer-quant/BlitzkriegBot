@@ -245,6 +245,7 @@ WebUI 画布产出蓝图 JSON，一切碰盘的动作都请内核做——UI 永
 | `system.update.configure` | `{ checkEnabled?, autoUpdate? }` | `{ checkEnabled, autoUpdate }` —— 更新开关读写（§7.4）；写落审计记录**且必须持久化**（静默回退的开关是撒谎的开关），持久化失败如实报错 |
 | `system.update.check` | `{}` | `system.version` 同形状 payload —— 手动检查一次；`checkEnabled=false` 时拒绝（开关含义是「可以出去查」，不是「可以自动装」）；结论**持久化**（手动臂历史上跳过落盘，失败检查重启即蒸发——已修）；失败明细进 `data/update/audit.jsonl` |
 | `system.update.stage` | `{}` | `StageState`：`{phase, detail?, version?, asset?, sha256?, stagedAtMs?}` —— #379：下载+校验新版到 `data/update/staging/`；`autoUpdate=false` 时拒绝（调度器与手动调用同一开关）；**替换是 launcher 的活**（§7.5）——本臂只推进状态机到 restart-ready，永不触碰在跑的二进制 |
+| `system.env.reload` | `{}` | `{ ok, accounts, policy, shadow, runtime: "restart required" }` —— 显式重读 `.env` 中可安全热生效的账户元数据、执行策略和影子进化开关；余额/预留金等账户账本原地保留，账户 ID 集变化拒绝并要求重启，轮次等启动期设置不热切。写方法：ReadOnly 模式拒绝 |
 | `system.reset_trading` | `{ confirm: "RESET", reason?, accountId? }` —— `confirm` 必须逐字 `"RESET"`（自由文本确认门，不是勾选框）；`accountId` 缺省 = 本连接缺省账户（§9.5 链，与 `orders.place` 同一解析），显式 id 照字面 | `ResetTradingResult`：`{ disabledStrategies[], cancelledOrders, clearedOpenPositions, clearedClosedTrades, accountId, balances: [[id, seed]…], preSummary: {orderLogLines, tradeLogLines, positionLogLines, openPositions, liveOrders, balance}, atMs, actor, reason? }` —— 停用策略、撤挂单、清该账户的订单/成交/持仓记录与内存盘口、现金重置为 seed；**Live 模式拒绝**（真金白银记录是 append-only 证据）；每次调用追加 manual-ops 审计行 |
 
 ### 2.15 零散补册（费用报价 / 盘口深度 / 影子进化工作流，2026-10-26 补册）
