@@ -122,10 +122,14 @@ check "both sources are in the backup dir" "2" \
 
 # The oracle: the REAL loader reads the REAL migrated .env. A wrong key order
 # or a rules array the loader cannot parse fails here even if the lines match
-# this script's own expectations.
+# this script's own expectations. The report lands in its own file (the oracle
+# writes it there, not to stdout) — a budget is a money figure, which CodeQL
+# rightly refuses to see interpolated into a logging call.
 oracle_out="$tmp/oracle.txt"
+oracle_lines="$tmp/oracle.lines"
 if ( cd "$repo" && \
      BK_ORACLE_ENV="$root/.env" BK_ORACLE_ACCOUNTS="default,paper" \
+     BK_ORACLE_OUT="$oracle_lines" \
      cargo test -p blitzkrieg-core --test policy_env_oracle -- --ignored --nocapture ) \
      > "$oracle_out" 2>&1; then
   ok "kernel oracle ran"
@@ -134,10 +138,10 @@ else
   sed 's/^/         | /' "$oracle_out" >&2
 fi
 check_oracle() { # check_oracle <name> <exact ORACLE line>
-  if grep -qxF "$2" "$oracle_out"; then
+  if grep -qxF "$2" "$oracle_lines"; then
     ok "$1"
   else
-    no "$1" "$2" "$(grep '^ORACLE ' "$oracle_out" | tr '\n' ' ' || true)"
+    no "$1" "$2" "$(grep '^ORACLE ' "$oracle_lines" 2>/dev/null | tr '\n' ' ' || true)"
   fi
 }
 check_oracle "oracle: defaults.max_budget_usd = 50" "ORACLE defaults.max_budget_usd=50"
