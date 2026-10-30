@@ -1518,15 +1518,16 @@ pub fn env_persist_account_venue(
 }
 
 /// `account.create`'s persisted half — append the id to ACCOUNT_LIST and
-/// write its NAME/VENUE keys. No credential names are written (§9.4: the
-/// create call carries no credential surface; the panel edits .env or a
-/// later verb names keys).
+/// write its NAME/VENUE keys plus the selected plugin's credential variable
+/// names. Values remain owned by `market.credentials.set` and never enter the
+/// account request or response.
 pub fn env_persist_account_create(
     toml_path: &Path,
     env_path: &Path,
     account_id: &str,
     name: Option<&str>,
     venue: Option<&str>,
+    credential_keys: &CredentialKeys,
 ) -> Result<(), CoreError> {
     refuse_while_legacy_toml(toml_path, "create")?;
     let lookup = env_lookup_from_sources(Some(env_path));
@@ -1548,6 +1549,20 @@ pub fn env_persist_account_create(
     if let Some(v) = venue.filter(|v| !v.is_empty()) {
         let sfx = env_suffix(account_id);
         vars.insert(format!("ACCOUNT_{sfx}_VENUE"), v.to_string());
+    }
+    let sfx = env_suffix(account_id);
+    for (tail, value) in [
+        ("API_KEY_ENV", credential_keys.api_key_env.as_deref()),
+        ("SECRET_ENV", credential_keys.secret_env.as_deref()),
+        ("PASSPHRASE_ENV", credential_keys.passphrase_env.as_deref()),
+        (
+            "PRIVATE_KEY_ENV",
+            credential_keys.private_key_env.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            vars.insert(format!("ACCOUNT_{sfx}_{tail}"), value.to_string());
+        }
     }
     env_upsert(env_path, &vars, "create")
 }
@@ -2039,15 +2054,51 @@ id = "legacy"
     fn env_create_appends_to_the_list_and_remove_sweeps_the_row() {
         let toml = Path::new("/nonexistent/bk-none/accounts.toml");
         let dot_env = fresh_env_file("create-remove");
-        env_persist_account_create(toml, &dot_env, "default", Some("Main"), Some("polymarket"))
-            .expect("first create writes the list");
-        env_persist_account_create(toml, &dot_env, "paper", None, None)
-            .expect("second create appends");
+        let credentials = CredentialKeys::from_plugin_env(&[
+            "POLYMARKET_PRIVATE_KEY",
+            "POLYMARKET_FUNDER_ADDRESS",
+        ]);
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "default",
+            Some("Main"),
+            Some("polymarket"),
+            &credentials,
+        )
+        .expect("first create writes the list");
+        env_persist_account_create(
+            toml,
+            &dot_env,
+            "paper",
+            None,
+            None,
+            &CredentialKeys::default(),
+        )
+        .expect("second create appends");
         let text = std::fs::read_to_string(&dot_env).unwrap();
         assert!(text.contains("ACCOUNT_LIST=\"default,paper\""), "{text}");
         assert!(text.contains("ACCOUNT_DEFAULT_NAME=\"Main\""), "{text}");
+        assert!(
+            text.contains("ACCOUNT_DEFAULT_PRIVATE_KEY_ENV=\"POLYMARKET_PRIVATE_KEY\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("ACCOUNT_DEFAULT_API_KEY_ENV=\"POLYMARKET_FUNDER_ADDRESS\""),
+            "{text}"
+        );
         // Duplicate create refuses.
-        assert!(env_persist_account_create(toml, &dot_env, "paper", None, None).is_err());
+        assert!(
+            env_persist_account_create(
+                toml,
+                &dot_env,
+                "paper",
+                None,
+                None,
+                &CredentialKeys::default(),
+            )
+            .is_err()
+        );
 
         // The book the two writes produced loads and reads back.
         let lookup = env_lookup_from_sources(Some(&dot_env));

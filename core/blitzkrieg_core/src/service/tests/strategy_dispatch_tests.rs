@@ -245,6 +245,7 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         &probe,
         Some("probe two"),
         Some("polymarket"),
+        crate::account::CredentialKeys::default(),
         "test",
         "mint",
         5,
@@ -298,8 +299,16 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         .unwrap(),
     );
     let probe_live = crate::account::AccountId::from("probe3");
-    live.create_account_persisting(&probe_live, None, None, "test", "mint live", 6)
-        .expect("the live mint lands");
+    live.create_account_persisting(
+        &probe_live,
+        None,
+        None,
+        crate::account::CredentialKeys::default(),
+        "test",
+        "mint live",
+        6,
+    )
+    .expect("the live mint lands");
     assert_eq!(
         live.accounts
             .ledger_of(&probe_live)

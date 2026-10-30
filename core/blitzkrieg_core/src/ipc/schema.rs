@@ -2426,8 +2426,8 @@ pub struct AccountCreateResult {
 /// log line.
 pub const ACCOUNT_CREATE_NOTE: &str = "creates one ACTIVE prediction account (a restricted one is \
      account.status's job, never a runtime mint); persisted to accounts.toml, \
-     re-read at next boot; credentials are wired separately through \
-     market.credentials.set — no credential value ever travels IPC";
+     re-read at next boot; plugin credential names are attached automatically, \
+     while values travel separately through market.credentials.set";
 
 /// `account.remove` params: the account to retire. `actor`/`reason`
 /// audit-only.
