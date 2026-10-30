@@ -109,6 +109,7 @@ mod tests {
             execute_at_ms: 1,
             report_at_ms: 1,
             venue_order_id: Some("0xabc".into()),
+            place_uncertain: false,
             escalate_at_ms: None,
             maker_timeout_ms: 0,
             role: OrderRole::Maker,

@@ -241,6 +241,49 @@ fn a_place_timeout_keeps_the_order_pending_with_its_reservation() {
     assert_eq!(c.ledger().reserved(), Decimal::ZERO);
 }
 
+/// P0 (v0.4.2 audit): a timed-out place must LEAVE the executor drain.
+///
+/// `take_pending_orders` is a live VIEW over [`Core::pending_unbound`], not a
+/// consuming queue, so before this flag the bridge re-submitted the same
+/// order on every 500 ms tick for the whole 30 s retirement window. Polymarket
+/// signs a brand-new order per POST (no client-id dedupe), so a timed-out POST
+/// that had actually filled was filled a SECOND time — real money, real
+/// exposure. The flag keeps the order Pending (its reservation stays held, the
+/// #462 sweep still owns it) but takes it out of the re-submit view.
+///
+/// Negative: on the pre-fix code `pending_unbound()` still returns the order.
+#[test]
+fn a_place_timeout_leaves_the_executor_drain() {
+    let mut c = live_core(dec!(10));
+    let (timed_out, _) = c
+        .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k1"), 0, 1)
+        .unwrap();
+    let (healthy, _) = c
+        .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k2"), 0, 2)
+        .unwrap();
+
+    c.note_place_timeout(&timed_out);
+
+    let drained: Vec<String> = c
+        .pending_unbound()
+        .into_iter()
+        .map(|o| o.order_id.clone())
+        .collect();
+    assert!(
+        !drained.contains(&timed_out),
+        "a timed-out place must not be handed to the executor again"
+    );
+    assert!(
+        drained.contains(&healthy),
+        "an order whose POST is still in flight must keep draining"
+    );
+    assert_eq!(
+        c.ome().get(&timed_out).unwrap().status,
+        OrderStatus::Pending,
+        "still Pending: the 30 s retirement sweep decides, not the drain"
+    );
+}
+
 /// #462 fix 2, acceptance: an external BUY the venue really filled (a
 /// timed-out place) is folded into the position book through the SAME
 /// ledger+position path every fill takes — shares exist afterwards, the

@@ -164,17 +164,25 @@ impl Core {
     /// here (the old behaviour) would release cash the venue may already have
     /// spent and strand a real BUY as an unmanaged position.
     pub fn note_place_timeout(&mut self, id: &str) {
-        let Some(o) = self.ome.get(id) else {
+        let Some((side, submitted_at)) = self
+            .ome
+            .get(id)
+            .filter(|o| o.status.is_live())
+            .map(|o| (o.side, o.submitted_at_ms))
+        else {
             return;
         };
-        if !o.status.is_live() {
-            return;
-        }
         tracing::warn!(
             order = %id,
-            side = ?o.side,
+            side = ?side,
             "venue place timed out — order stays pending; reconciliation will decide"
         );
+        // Stop the re-submit: the drain is a live VIEW, so an unflagged order
+        // is handed to the executor again on the next tick (500 ms) and
+        // re-signed as a brand-new order at venues without a client-id dedupe.
+        if let Err(e) = self.ome.mark_place_uncertain(id, submitted_at) {
+            tracing::warn!(order = %id, error = %e, "could not stamp place-timeout flag");
+        }
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::Timeout,
             message: format!(
