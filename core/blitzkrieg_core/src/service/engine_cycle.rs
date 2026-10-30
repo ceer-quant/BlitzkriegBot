@@ -18,8 +18,8 @@ use super::Core;
 use super::FAST_EVAL_FALLBACK_MS;
 use super::config::StrategyLimit;
 use super::helpers::{
-    ARB_STRATEGY, SWEEP_FAILURE_FREEZE, arb_name_branch_warn_once, classify_rejection,
-    strategy_acc_key,
+    ARB_STRATEGY, SWEEP_FAILURE_FREEZE, arb_name_branch_warn_once, budget_to_shares,
+    classify_rejection, strategy_acc_key,
 };
 use super::helpers::{
     CycleLeg, StrategyAccounting, dec_json, per_account_shares, virtual_batch_commit_impl,
@@ -1301,7 +1301,20 @@ impl Core {
                     // when the shares cost more than the account's budget allows.
                     // With the shipped defaults the bound never bites (see the
                     // comment at the verdict map), so no existing order changes.
-                    let shares = (budget_usd / req.price).floor();
+                    // #779: a tiny positive price passes the illegal-price
+                    // guard but overflows `Decimal::div` (a panic that kills
+                    // the trading task). Refuse the entry instead — the
+                    // `shares < ONE` arm below emits no order.
+                    let shares = match budget_to_shares(*budget_usd, req.price) {
+                        Some(shares) => shares,
+                        None => {
+                            tracing::warn!(target: "strategy",
+                                "policy budget sizing overflow: strategy={name} account={} \
+                                 internal_key={} budget={budget_usd} price={} — entry refused",
+                                req.account_id, req.internal_key, req.price);
+                            Decimal::ZERO
+                        }
+                    };
                     if shares >= Decimal::ONE && req.size > shares {
                         tracing::info!(target: "strategy",
                             "policy budget shrink: strategy={} account={} {} -> {shares} shares \
@@ -1748,7 +1761,20 @@ impl Core {
                     continue;
                 }
                 Some(Ok(crate::execution_policy::PolicyOutput::Place { budget_usd, .. })) => {
-                    let shares = (budget_usd / req.price).floor();
+                    // #779: a tiny positive price passes the illegal-price
+                    // guard but overflows `Decimal::div` (a panic that kills
+                    // the trading task). Refuse the entry instead — the
+                    // `shares < ONE` arm below emits no order.
+                    let shares = match budget_to_shares(budget_usd, req.price) {
+                        Some(shares) => shares,
+                        None => {
+                            tracing::warn!(target: "strategy",
+                                "policy budget sizing overflow: strategy={name} account={} \
+                                 internal_key={} budget={budget_usd} price={} — entry refused",
+                                req.account_id, req.internal_key, req.price);
+                            Decimal::ZERO
+                        }
+                    };
                     if shares >= Decimal::ONE && req.size > shares {
                         tracing::info!(target: "strategy",
                             "policy budget shrink: strategy={} account={} {} -> {shares} shares \

@@ -1107,12 +1107,36 @@ impl Ome {
         // Weighted average only for positive fills.
         if effective > Decimal::ZERO {
             let new_avg = if capped > Decimal::ZERO {
-                let cur = order.avg_fill_price.unwrap_or(Decimal::ZERO) * prev;
-                (cur + price * effective) / capped
+                let cur = order
+                    .avg_fill_price
+                    .unwrap_or(Decimal::ZERO)
+                    .checked_mul(prev);
+                let weighted = price.checked_mul(effective);
+                match (cur, weighted) {
+                    (Some(cur), Some(weighted)) => cur
+                        .checked_add(weighted)
+                        .and_then(|total| total.checked_div(capped)),
+                    _ => None,
+                }
             } else {
-                price
+                Some(price)
             };
-            order.avg_fill_price = Some(new_avg);
+            match new_avg {
+                Some(avg) => order.avg_fill_price = Some(avg),
+                // #779: an out-of-band fill price can overflow the weighted
+                // average. SKIP the derived average (the previous one stands)
+                // — it is a report value; the fill itself (filled_size, status)
+                // and the reservation release downstream must still land, so
+                // this is the one term that can safely be skipped.
+                None => tracing::error!(
+                    order = %id,
+                    price = %price,
+                    effective = %effective,
+                    prev = %prev,
+                    capped = %capped,
+                    "fill average price overflow — average left unchanged (#779)"
+                ),
+            }
         }
         order.filled_size = capped;
         if absorbed_by.is_none() {

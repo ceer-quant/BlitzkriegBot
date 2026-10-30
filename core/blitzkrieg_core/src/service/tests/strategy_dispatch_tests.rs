@@ -4674,3 +4674,193 @@ fn empty_set_teardown_then_enable_scoped_write_still_lands_ok() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── #779: Decimal panic guards on the live order path ───────────────────
+//
+// `rust_decimal`'s `Mul`/`Div` PANIC on overflow and on division by zero.
+// A tiny positive price or an out-of-band share count used to kill the
+// trading task, leaving in-flight orders unmanaged. These tests pin the
+// failure mode shut.
+
+/// Emits ONE UP signal for its fixed token at a shared, mutable price —
+/// the value the sizing paths divide by. A test flips it between an absurd
+/// tiny quote and a normal one.
+struct FixedPriceProbe {
+    price: std::sync::Arc<std::sync::Mutex<Decimal>>,
+    token: String,
+    asset: String,
+    condition: String,
+}
+
+impl crate::strategies::EngineStrategy for FixedPriceProbe {
+    fn name(&self) -> &str {
+        "fixed_price_probe"
+    }
+    fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _n: i64) {}
+    fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+    fn gate_exemptions(&self) -> crate::strategies::GateExemptions {
+        crate::strategies::GateExemptions::all()
+    }
+    fn find_candidates(
+        &mut self,
+        _ctx: &crate::strategies::StrategyCtx<'_>,
+    ) -> Vec<crate::signal::TradeSignal> {
+        let price = *self.price.lock().expect("price lock");
+        vec![crate::signal::TradeSignal {
+            strategy: "fixed_price_probe".into(),
+            account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+            asset: self.asset.clone(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: self.token.clone(),
+            condition_id: self.condition.clone(),
+            price,
+            reason: "fixed price probe".into(),
+            shares: None,
+            pair: None,
+        }]
+    }
+}
+
+fn core_with_fixed_price_probe(price: std::sync::Arc<std::sync::Mutex<Decimal>>) -> Core {
+    let mut c = Core::new(CoreConfig {
+        risk: RiskConfig {
+            max_order_notional: dec!(10000),
+            ..Default::default()
+        },
+        dry_seed_balance: dec!(1000),
+        engine_enabled: true,
+        round_duration_sec: 900,
+        min_round_age_sec: 0,
+        auto_exits_enabled: false,
+        assets: vec!["BTC".into()],
+        size_usd: dec!(2.5),
+        min_shares: dec!(1),
+        max_shares: dec!(10),
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        execution_policy_path: None,
+        ..Default::default()
+    });
+    let cfg = c.config().engine_config();
+    let mut eng = Engine::new(cfg);
+    eng.register_user_strategy(
+        Box::new(FixedPriceProbe {
+            price,
+            token: "probe-up".into(),
+            asset: "BTC".into(),
+            condition: "probe-cond".into(),
+        }),
+        "test".into(),
+    )
+    .expect("the probe registers");
+    assert!(eng.set_strategy_enabled("fixed_price_probe", true));
+    c.enable_engine(eng);
+    c
+}
+
+fn feed_probe_market(c: &mut Core, now: i64) {
+    c.engine_on_data(
+        DataEvent::RoundMarkets {
+            markets: vec![CryptoMarket {
+                asset: "BTC".into(),
+                condition_id: "probe-cond".into(),
+                question_id: "q".into(),
+                up_token_id: "probe-up".into(),
+                down_token_id: "probe-down".into(),
+                up_price: dec!(0.6),
+                down_price: dec!(0.4),
+                expires_at_ms: now + 900_000,
+                round_slot: now / 1000 / 900 + 1,
+                round_duration_sec: 900,
+                archive_verdict: false,
+                venue: String::new(),
+                neg_risk: true,
+                question: "probe".into(),
+            }],
+            now_ms: now,
+        },
+        now,
+    );
+}
+
+/// PRE-FIX: `(budget_usd / req.price).floor()` in the policy `Place` arm
+/// overflows `Decimal::div` — a PANIC — for a tiny positive quote.
+#[test]
+fn a_tiny_positive_price_is_refused_without_panicking_the_trading_task() {
+    let price = std::sync::Arc::new(std::sync::Mutex::new(dec!(0.0000000000000000000000000001)));
+    let mut c = policy_core(
+        core_with_fixed_price_probe(price.clone()),
+        crate::execution_policy::Policy::default(),
+    );
+    let now = 1_700_000_000_000i64;
+    feed_probe_market(&mut c, now);
+
+    // No panic; the absurd ticket is refused (no order reaches the OME).
+    assert_eq!(
+        c.engine_evaluate(now + 1_000),
+        0,
+        "an overflowing ticket is not an order"
+    );
+    assert!(c.list_orders().is_empty(), "nothing was placed");
+
+    // The trading task is still alive: a normal quote sizes and places.
+    *price.lock().expect("price lock") = dec!(0.40);
+    assert_eq!(
+        c.engine_evaluate(now + 2_000),
+        1,
+        "a subsequent normal order still works"
+    );
+    assert_eq!(c.list_orders().len(), 1);
+}
+
+/// PRE-FIX: the orphan-chase snapshot divides `p.cost_usd / p.shares` for
+/// every governed naked leg; a zero-share row PANICS on division by zero.
+#[test]
+fn a_zero_share_orphan_is_not_divided_by_in_the_chase_snapshot() {
+    let mut virtual_limits = HashMap::new();
+    virtual_limits.insert(
+        "pairstrat".to_string(),
+        VirtualAccountLimit {
+            max_batch_notional_usd: Some(dec!(1000)),
+            accounts: vec![blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string()],
+        },
+    );
+    let mut c = Core::new(CoreConfig {
+        virtual_limits,
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        execution_policy_path: None,
+        ..Default::default()
+    });
+    let entered = 1_000_000i64;
+    let p = c.positions.open(
+        crate::position::OpenParams {
+            strategy: "pairstrat".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "naked-up".into(),
+            condition_id: "cond".into(),
+            account_id: crate::model::default_account_id(),
+            venue: String::new(),
+            partner_token_id: "partner-down".into(),
+            entry_price: dec!(0.40),
+            expires_at_ms: entered + 60_000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: 900,
+            round_slot: 1,
+        },
+        entered,
+    );
+    assert_eq!(p.shares, Decimal::ZERO, "the premise: a zero-share row");
+
+    // No panic; the zero-share row is not a naked leg.
+    c.run_pair_orphan_sweep(entered + 10_000);
+    assert_eq!(c.positions.open_positions().len(), 1);
+    assert!(
+        c.list_orders().is_empty(),
+        "no chase/flatten order is emitted for a zero-share row"
+    );
+}
