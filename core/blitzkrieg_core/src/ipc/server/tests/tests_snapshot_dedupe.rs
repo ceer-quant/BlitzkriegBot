@@ -530,7 +530,7 @@ async fn multi_family_rows_surface_in_both_read_views() {
     // ④ the wire's price rows judge the same predicate — the ENGINE_ROUND
     // assembly's filter keeps exactly the two traded family rows.
     let c = core.lock().await;
-    let e = c.engine.as_ref().expect("engine");
+    let e = c.engine().expect("engine");
     let scanner = e.scanner();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let surfaced: Vec<String> = scanner

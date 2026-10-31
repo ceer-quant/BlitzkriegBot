@@ -234,8 +234,13 @@ impl Core {
         self.risk.is_killed()
     }
 
-    /// Hot-swap the live risk gate configuration without a restart (test and
-    /// runtime-config path; `place()` reads it on every check).
+    /// TEST SEAM ONLY (feature `test-support`; #780 boundary hygiene — the
+    /// same gate [`Core::ledger_mut`] carries): blunt access to the live risk
+    /// gate configuration. The runtime-config path does NOT come through
+    /// here — it applies audited, hot-reload-checked limits via
+    /// [`Core::apply_risk_limits`] / [`Core::apply_systemic_limits`]
+    /// (`place()` reads the config on every check).
+    #[cfg(feature = "test-support")]
     pub fn risk_config_mut(&mut self) -> &mut RiskConfig {
         self.risk.config_mut()
     }

@@ -89,8 +89,7 @@ pub(crate) async fn handle_engine(
             // 网格，判定与升级前逐位一致。
             let now = now_ms();
             let markets: Vec<serde_json::Value> = c
-                .engine
-                .as_ref()
+                .engine()
                 .map(|e| {
                     let scanner = e.scanner();
                     let mut seen: std::collections::HashSet<(String, String)> =
@@ -134,8 +133,7 @@ pub(crate) async fn handle_engine(
             // 时走现行为；`durationSec` 为向后兼容增量字段（见 PR 正文
             // 契约段），旧面板忽略该字段，新面板 feature-detect 在场才用。
             let venue_rounds: Vec<serde_json::Value> = c
-                .engine
-                .as_ref()
+                .engine()
                 .map(|e| {
                     e.scanner()
                         .observed_clock_keys()
@@ -170,8 +168,7 @@ pub(crate) async fn handle_engine(
                             .get("upTokenId")
                             .and_then(Value::as_str)
                             .map(|tok| {
-                                c.engine
-                                    .as_ref()
+                                c.engine()
                                     .and_then(|e| e.venue_of(tok))
                                     .unwrap_or_default()
                             })

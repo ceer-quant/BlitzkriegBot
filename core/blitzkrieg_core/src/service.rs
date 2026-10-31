@@ -87,9 +87,13 @@ pub struct Core {
     pair_book: crate::pair::PairBook,
     /// Optional self-driving engine (P3). When present, book/spot/round events
     /// flow in and the core evaluates strategies and places orders on its own.
-    /// Crate-visible so the replay driver can host strategies without going
-    /// through the loader path (the kernel ships none to load).
-    pub(crate) engine: Option<crate::engine::Engine>,
+    /// Private to `service` (#780 boundary hygiene): the replay driver hosts
+    /// strategies and swaps counterfactual params through the narrow seams
+    /// ([`Core::host_replay_strategy`] / [`Core::set_engine_hot_params`]) and
+    /// out-of-service readers take [`Core::engine`] — the crate-visible field
+    /// let backtest (and any future IPC caller) bypass the install-time
+    /// invariants `enable_engine` wires.
+    engine: Option<crate::engine::Engine>,
     /// E27 (§8.2): market-mode declarations of loaded user strategies, keyed
     /// by strategy name. In-tree strategies and libraries without a
     /// declaration are ABSENT = undeclared = the handshake does not apply

@@ -117,8 +117,7 @@ async fn account_create_mounts_a_never_booted_venues_data_plane_at_runtime() {
     {
         let c = core.lock().await;
         let venues: Vec<String> = c
-            .engine
-            .as_ref()
+            .engine()
             .map(|e| {
                 e.scanner()
                     .round_state(now_ms())
