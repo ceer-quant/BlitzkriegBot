@@ -418,7 +418,10 @@ impl WebServer {
         Some(token)
     }
 
-    pub(super) fn evict_expired(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64) {
+    pub(super) fn evict_expired(
+        sessions: &mut std::collections::BTreeMap<String, Session>,
+        now: u64,
+    ) {
         sessions.retain(|_, s| {
             now.saturating_sub(s.issued_ms) < SESSION_TTL_MS
                 && now.saturating_sub(s.seen_ms) < SESSION_IDLE_MS

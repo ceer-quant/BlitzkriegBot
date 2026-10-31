@@ -12,7 +12,11 @@ impl WebServer {
     /// the E25 audit tail, …) is a one-line call into this. The error document
     /// shape (`{ "error": … }`, with the kernel's own message — the frontend's
     /// `rpc -32601` feature-detect rides inside) is frozen wire contract.
-    pub(super) fn proxy_read(&self, verb: &str, params: serde_json::Value) -> (u16, &'static str, Vec<u8>) {
+    pub(super) fn proxy_read(
+        &self,
+        verb: &str,
+        params: serde_json::Value,
+    ) -> (u16, &'static str, Vec<u8>) {
         let doc = match self.snapshot_src.lock() {
             Ok(mut c) => match c.call(verb, params) {
                 Ok(v) => v,
@@ -26,7 +30,11 @@ impl WebServer {
     /// #353: the POST trio (`onchain-pull` / `run`) — the body IS the IPC
     /// params object; a body that is not valid JSON is a 400 that never
     /// reaches the kernel. A thin wrapper over [`Self::proxy_read`].
-    pub(super) fn proxy_backtest_body(&self, method: &str, body: &str) -> (u16, &'static str, Vec<u8>) {
+    pub(super) fn proxy_backtest_body(
+        &self,
+        method: &str,
+        body: &str,
+    ) -> (u16, &'static str, Vec<u8>) {
         match body_params(body) {
             Ok(p) => self.proxy_read(method, p),
             Err(e) => (
@@ -41,7 +49,11 @@ impl WebServer {
     /// query param forwarded verbatim; a missing id reaches the kernel's own
     /// validation, which names the field. A thin wrapper over
     /// [`Self::proxy_read`].
-    pub(super) fn proxy_backtest_id(&self, method: &str, id: Option<String>) -> (u16, &'static str, Vec<u8>) {
+    pub(super) fn proxy_backtest_id(
+        &self,
+        method: &str,
+        id: Option<String>,
+    ) -> (u16, &'static str, Vec<u8>) {
         let params = id
             .map(|i| serde_json::json!({ "id": i }))
             .unwrap_or_else(|| serde_json::json!({}));

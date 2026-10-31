@@ -651,7 +651,10 @@ pub fn render_json_full(
 ///     (#186) — the give-up alert, with the core's own last words;
 ///   * this panel is listening on a non-loopback address (#185), so its plaintext
 ///     HTTP surface is reachable from the network.
-pub(super) fn panel_notices_html(lifecycle: Option<&LifecycleView>, bind_warning: Option<&str>) -> String {
+pub(super) fn panel_notices_html(
+    lifecycle: Option<&LifecycleView>,
+    bind_warning: Option<&str>,
+) -> String {
     let mut out = String::new();
     if let Some(w) = bind_warning {
         out.push_str(&format!(

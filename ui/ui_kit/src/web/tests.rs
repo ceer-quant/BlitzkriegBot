@@ -106,8 +106,7 @@ fn render_json_reports_gateway_capabilities() {
         last_exit: None,
         give_up: None,
     };
-    let doc: serde_json::Value =
-        serde_json::from_str(&render_json(&snap, Some(&adopted))).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, Some(&adopted))).unwrap();
     assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(true));
     assert_eq!(doc["gateway"]["managed"], serde_json::json!(false));
     assert_eq!(doc["gateway"]["corePid"], serde_json::Value::Null);
@@ -130,8 +129,7 @@ fn render_json_reports_gateway_capabilities() {
         }),
         give_up: None,
     };
-    let doc: serde_json::Value =
-        serde_json::from_str(&render_json(&snap, Some(&owned))).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, Some(&owned))).unwrap();
     assert_eq!(doc["gateway"]["managed"], serde_json::json!(true));
     assert_eq!(doc["gateway"]["corePid"], serde_json::json!(4242));
     // E12-c: the crash must reach the panel as structured fact, not as a
@@ -275,13 +273,12 @@ fn a_pre_e28_core_without_account_ids_still_parses_and_renders() {
     assert_eq!(order.account_id, "");
 
     // And a NEW-core row (accountId present) parses through the same views.
-    let attributed: crate::core::types::PositionView =
-        serde_json::from_value(serde_json::json!({
-            "id": "p2", "asset": "BTC_UP", "direction": "up", "tokenId": "tok-1",
-            "entryPrice": 0.4, "currentPrice": 0.5, "shares": 10,
-            "unrealizedPct": 25.0, "accountId": "paper"
-        }))
-        .expect("an E28 position row parses with accountId");
+    let attributed: crate::core::types::PositionView = serde_json::from_value(serde_json::json!({
+        "id": "p2", "asset": "BTC_UP", "direction": "up", "tokenId": "tok-1",
+        "entryPrice": 0.4, "currentPrice": 0.5, "shares": 10,
+        "unrealizedPct": 25.0, "accountId": "paper"
+    }))
+    .expect("an E28 position row parses with accountId");
     assert_eq!(attributed.account_id, "paper");
 
     // The gateway's snapshot mapping forwards whatever it parsed: empty
@@ -549,8 +546,7 @@ fn a_give_up_alert_reaches_the_panel_with_its_reason() {
         }),
     };
 
-    let doc: serde_json::Value =
-        serde_json::from_str(&render_json(&snap, Some(&give_up))).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&render_json(&snap, Some(&give_up))).unwrap();
     assert_eq!(doc["gateway"]["restartGivenUp"], serde_json::json!(true));
     let alert = &doc["gateway"]["giveUp"];
     assert_eq!(alert["attempts"], serde_json::json!(5));
