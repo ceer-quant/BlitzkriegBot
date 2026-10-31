@@ -308,10 +308,12 @@ impl Core {
             intent_audit,
             positions,
             books: HashMap::new(),
-            exit_reasons: HashMap::new(),
-            exit_reason_order: VecDeque::new(),
-            exit_reasons_evicted: 0,
-            exit_reasons_swept: 0,
+            exit_reason_ledger: ExitReasonLedger {
+                exit_reasons: HashMap::new(),
+                exit_reason_order: VecDeque::new(),
+                exit_reasons_evicted: 0,
+                exit_reasons_swept: 0,
+            },
             strategy_exits: Vec::new(),
             engine: None,
             strategy_declarations: HashMap::new(),
@@ -360,15 +362,17 @@ impl Core {
             stats: CoreStats::default(),
             // 探针从零开始：没有 tick/spot/NTP 历史（与 stats 同一生命期，
             // 会话作用域）。
-            probe_ticks: crate::probe::TickHealth::default(),
-            probe_spot: crate::probe::SpotWatch::default(),
-            probe_ntp: crate::probe::NtpWatch::default(),
-            probe_last_window_ticks: 0,
-            probe_last_zero: Vec::new(),
-            probe_last_max_silence_ms: 0,
-            probe_last_spot_stale_ms: None,
-            stats_probe_stream_breaks: 0,
-            stats_probe_spot_stales: 0,
+            probe_health: ProbeHealth {
+                probe_ticks: crate::probe::TickHealth::default(),
+                probe_spot: crate::probe::SpotWatch::default(),
+                probe_ntp: crate::probe::NtpWatch::default(),
+                probe_last_window_ticks: 0,
+                probe_last_zero: Vec::new(),
+                probe_last_max_silence_ms: 0,
+                probe_last_spot_stale_ms: None,
+                stats_probe_stream_breaks: 0,
+                stats_probe_spot_stales: 0,
+            },
             archive_verdicts: HashSet::new(),
             // The session clock for the accounting identity (issue #200). Read
             // once, at construction: the ledger below is seeded at the same
@@ -417,16 +421,18 @@ impl Core {
             policy_cooldowns: HashMap::new(),
             // Replay fast path: nothing dirty, no deadlines known yet — the
             // first tick always runs the full sweeps (MAX stamps force them).
-            fast_dirty_tokens: HashSet::new(),
-            fast_eval_wake: true,
-            fast_next_timing_ms: 0,
-            fast_orders_dirty: true,
-            fast_positions_dirty: true,
-            fast_next_escalation_ms: 0,
-            fast_next_expiry_ms: 0,
-            fast_last_eval_ms: 0,
-            // Issue #390 (nofast): 0 = due on the first tick.
-            fast_next_exit_deadline_ms: 0,
+            fast_path: ReplayFastPath {
+                fast_dirty_tokens: HashSet::new(),
+                fast_eval_wake: true,
+                fast_next_timing_ms: 0,
+                fast_orders_dirty: true,
+                fast_positions_dirty: true,
+                fast_next_escalation_ms: 0,
+                fast_next_expiry_ms: 0,
+                fast_last_eval_ms: 0,
+                // Issue #390 (nofast): 0 = due on the first tick.
+                fast_next_exit_deadline_ms: 0,
+            },
             pair_chase_attempts: HashMap::new(),
             #[cfg(test)]
             test_duration_subscriptions: None,

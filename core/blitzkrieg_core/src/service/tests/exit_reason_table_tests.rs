@@ -104,16 +104,16 @@ fn a_close_retires_the_pending_exit_reason() {
     // The exit policy decided to leave (a stop); the reason stays pending
     // until the closing sell fills.
     c.note_exit_reason("tok", ExitReason::StopLoss);
-    assert_eq!(c.exit_reasons.len(), 1);
+    assert_eq!(c.exit_reason_ledger.exit_reasons.len(), 1);
     assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(1));
     assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
 
     venue_close(&mut c, "tok", 1_100);
 
     assert!(
-        c.exit_reasons.is_empty(),
+        c.exit_reason_ledger.exit_reasons.is_empty(),
         "a closed position must not leave its exit reason behind: {:?}",
-        c.exit_reasons
+        c.exit_reason_ledger.exit_reasons
     );
     assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
     assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
@@ -141,9 +141,9 @@ fn a_local_settlement_retires_the_pending_exit_reason() {
         "the settlement, not the dead stop, is what closed this position"
     );
     assert!(
-        c.exit_reasons.is_empty(),
+        c.exit_reason_ledger.exit_reasons.is_empty(),
         "a settled position must not leave its exit reason behind: {:?}",
-        c.exit_reasons
+        c.exit_reason_ledger.exit_reasons
     );
     assert_eq!(c.exit_reasons_view()["tracked"], serde_json::json!(0));
     assert_eq!(c.exit_reasons_view()["orphaned"], serde_json::json!(0));
@@ -195,17 +195,20 @@ fn the_table_is_bounded_and_evicts_dead_entries_first() {
         c.note_exit_reason(&format!("dead-{i}"), ExitReason::StopLoss);
     }
     assert_eq!(
-        c.exit_reasons.len(),
+        c.exit_reason_ledger.exit_reasons.len(),
         EXIT_REASON_TABLE_MAX,
         "the table must never exceed its bound"
     );
     assert_eq!(
-        c.exit_reasons.get("live"),
+        c.exit_reason_ledger.exit_reasons.get("live"),
         Some(&ExitReason::TakeProfit),
         "a live position's reason must survive while dead entries remain"
     );
     assert_eq!(c.exit_reasons_view()["evictedTotal"], serde_json::json!(1));
-    assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    assert_eq!(
+        c.exit_reason_ledger.exit_reason_order.len(),
+        c.exit_reason_ledger.exit_reasons.len()
+    );
 }
 
 /// …and when EVERY entry still has an open position, the oldest is the one
@@ -236,16 +239,23 @@ fn the_oldest_entry_is_evicted_when_all_of_them_are_live() {
         );
         c.note_exit_reason(&token, ExitReason::TakeProfit);
     }
-    assert_eq!(c.exit_reasons.len(), EXIT_REASON_TABLE_MAX);
+    assert_eq!(
+        c.exit_reason_ledger.exit_reasons.len(),
+        EXIT_REASON_TABLE_MAX
+    );
     assert!(
-        !c.exit_reasons.contains_key("tok-0"),
+        !c.exit_reason_ledger.exit_reasons.contains_key("tok-0"),
         "the oldest entry is the one evicted"
     );
     assert!(
-        c.exit_reasons
+        c.exit_reason_ledger
+            .exit_reasons
             .contains_key(&format!("tok-{EXIT_REASON_TABLE_MAX}"))
     );
-    assert_eq!(c.exit_reason_order.len(), c.exit_reasons.len());
+    assert_eq!(
+        c.exit_reason_ledger.exit_reason_order.len(),
+        c.exit_reason_ledger.exit_reasons.len()
+    );
 }
 
 /// The round rollover is the backstop: an entry whose position is gone by
@@ -270,11 +280,11 @@ fn a_round_rollover_sweeps_reasons_whose_position_is_gone() {
     );
 
     assert!(
-        !c.exit_reasons.contains_key("ghost"),
+        !c.exit_reason_ledger.exit_reasons.contains_key("ghost"),
         "a round rollover must sweep a reason whose position is gone"
     );
     assert_eq!(
-        c.exit_reasons.get("live"),
+        c.exit_reason_ledger.exit_reasons.get("live"),
         Some(&ExitReason::TakeProfit),
         "the live position's reason is not swept"
     );

@@ -48,7 +48,10 @@ impl Core {
         // changes, or when the earliest open position's expiry passes (that is
         // the instant `track_markets` would first admit the market). Between
         // those, the scan re-derives the same list — skip it.
-        if self.replay_sched() && !self.fast_positions_dirty && now_ms < self.fast_next_expiry_ms {
+        if self.replay_sched()
+            && !self.fast_path.fast_positions_dirty
+            && now_ms < self.fast_path.fast_next_expiry_ms
+        {
             return;
         }
         // #377 (治 #2): markets the archive promised a verdict for are settled
@@ -71,7 +74,7 @@ impl Core {
             }
         }
         if self.replay_sched() {
-            self.fast_positions_dirty = false;
+            self.fast_path.fast_positions_dirty = false;
             // The next expiry wake is the earliest expiry still IN THE
             // FUTURE. An already-expired position needs no wake: it is
             // either tracked (its re-query clock is `next_query_deadline_ms`,
@@ -86,7 +89,7 @@ impl Core {
             // sync (its settlement event arrives around then), and letting
             // the minimum collapse to `i64::MAX` would reopen this gate on
             // every tick — the exact hot path #375 closed.
-            self.fast_next_expiry_ms = all
+            self.fast_path.fast_next_expiry_ms = all
                 .iter()
                 .map(|p| p.expires_at_ms)
                 .filter(|t| *t > now_ms)
