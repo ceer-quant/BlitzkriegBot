@@ -9,7 +9,7 @@
  * 导航本身是纯数据（lib/nav.ts），门禁与页表同源；组只是导航归拢，页签集合
  * 不变。
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { useIntervalFn, useNow } from '@vueuse/core'
 import { usePanelStore } from './stores/panel'
@@ -19,15 +19,6 @@ import { useTheme } from './lib/theme'
 import { clockTime } from './lib/format'
 import { NAV, groupOf, type TabId } from './lib/nav'
 import brandMark from './assets/logo.png'
-import OverviewPage from './pages/Overview.vue'
-import HftPage from './pages/HftPage.vue'
-import BacktestPage from './pages/BacktestPage.vue'
-import BlueprintPage from './pages/BlueprintPage.vue'
-import StrategiesPage from './pages/Strategies.vue'
-import DecisionsPage from './pages/Decisions.vue'
-import EvolutionPage from './pages/EvolutionPage.vue'
-import PluginsPage from './pages/Plugins.vue'
-import SettingsPage from './pages/SettingsPage.vue'
 import LoginView from './components/LoginView.vue'
 import OnboardingTour from './components/OnboardingTour.vue'
 import AccountSwitcher from './components/AccountSwitcher.vue'
@@ -60,16 +51,22 @@ const themeTitle = computed(() => {
 const authed = ref(hasToken())
 const tab = ref<TabId>('overview')
 
+/**
+ * Route pages load on demand (item 781): the shell no longer ships every page
+ * in the entry chunk, so first paint only pays for the shell. Each loader is a
+ * static `import()` specifier — Vite emits one chunk per page and preloads it
+ * when the tab is opened.
+ */
 const pages = {
-  overview: OverviewPage,
-  hft: HftPage,
-  backtest: BacktestPage,
-  blueprint: BlueprintPage,
-  strategies: StrategiesPage,
-  decisions: DecisionsPage,
-  evolution: EvolutionPage,
-  plugins: PluginsPage,
-  settings: SettingsPage,
+  overview: defineAsyncComponent(() => import('./pages/Overview.vue')),
+  hft: defineAsyncComponent(() => import('./pages/HftPage.vue')),
+  backtest: defineAsyncComponent(() => import('./pages/BacktestPage.vue')),
+  blueprint: defineAsyncComponent(() => import('./pages/BlueprintPage.vue')),
+  strategies: defineAsyncComponent(() => import('./pages/Strategies.vue')),
+  decisions: defineAsyncComponent(() => import('./pages/Decisions.vue')),
+  evolution: defineAsyncComponent(() => import('./pages/EvolutionPage.vue')),
+  plugins: defineAsyncComponent(() => import('./pages/Plugins.vue')),
+  settings: defineAsyncComponent(() => import('./pages/SettingsPage.vue')),
 } as const
 const activePage = computed(() => pages[tab.value])
 

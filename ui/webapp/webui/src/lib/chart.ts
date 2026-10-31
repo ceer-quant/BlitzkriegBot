@@ -1,10 +1,44 @@
 /**
  * ECharts theming — diagrams read the same palette as the DOM so the two never
  * drift. `useChart` owns the instance lifecycle (init / resize / theme re-skin).
+ *
+ * `echarts/core` + explicit `use()` registers only what the panel draws (issue 781).
+ * Every option under `components/charts/` and `pages/BacktestPage.vue` uses
+ * one of these three series (`line`, `bar`, `candlestick`) plus grid, tooltip,
+ * axis pointer and markLine; importing the full `echarts` barrel pulled in
+ * every chart type (sunburst / treemap / sankey included) and defeated
+ * tree-shaking. A new series type must be added here, not imported ad hoc —
+ * otherwise its renderer is missing at runtime.
+ *
+ * Note: `echarts/core` itself still bundles the EN/ZH locale tables, the
+ * default theme and the option normalizer, so strings like `sunburst` /
+ * `treemap` / `sankey` remain as i18n/theme keys after this change. Those are
+ * the names of types the panel never registers; the chart implementations
+ * themselves are no longer in the bundle.
  */
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { BarChart, CandlestickChart, LineChart } from 'echarts/charts'
+import {
+  AxisPointerComponent,
+  GridComponent,
+  MarkLineComponent,
+  TooltipComponent,
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+import type { EChartsOption } from 'echarts'
 import { onUnmounted, shallowRef, watch, type Ref } from 'vue'
 import { useTheme } from './theme'
+
+echarts.use([
+  BarChart,
+  CandlestickChart,
+  LineChart,
+  AxisPointerComponent,
+  GridComponent,
+  MarkLineComponent,
+  TooltipComponent,
+  CanvasRenderer,
+])
 
 export interface Palette {
   gold: string
@@ -116,7 +150,7 @@ export function areaFade(hex: string, topAlpha = '5c'): Record<string, unknown> 
  */
 export function useChart(
   el: Ref<HTMLDivElement | null>,
-  option: () => echarts.EChartsOption,
+  option: () => EChartsOption,
   opts: { notMerge?: boolean } = {},
 ) {
   // shallowRef: the instance is opaque to the reactivity system and its class
