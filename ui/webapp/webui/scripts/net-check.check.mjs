@@ -227,13 +227,14 @@ for (const [field, rustFnName, heading, tsFnName] of TABLES) {
 // 网关缓存带 venue 维度 —— 切户后读数必须立刻换到新账户的 venue，不许在 TTL
 // 内继续端旧账户的网络。三个钉各守一层。
 // （issue 699 拆分后动词臂住进 ipc/server/handlers/ —— 钉「调用形态」的检查
-// 扫 server.rs + handlers/ 全体，钉到的是单一入口这个事实，不是文件名。）
-const IPC_DISPATCH_SOURCES = [
-  read('core', 'blitzkrieg_core', 'src', 'ipc', 'server.rs'),
-  ...readdirSync(join(here, '..', '..', '..', '..', 'core', 'blitzkrieg_core', 'src', 'ipc', 'server', 'handlers'), { recursive: true })
-    .filter((f) => f.endsWith('.rs'))
-    .map((f) => read('core', 'blitzkrieg_core', 'src', 'ipc', 'server', 'handlers', f)),
-]
+// 扫 ipc/server/ 全体，钉到的是单一入口这个事实，不是文件名。issue 780 之后
+// server.rs 本身也成了 ipc/server/mod.rs，所以这里读整个目录而不是某个文件：
+// 再拆一次不该让这条钉变红。）
+const IPC_SERVER_DIR = join(here, '..', '..', '..', '..', 'core', 'blitzkrieg_core', 'src', 'ipc', 'server')
+const IPC_DISPATCH_SOURCES = readdirSync(IPC_SERVER_DIR, { recursive: true })
+  .filter((f) => f.endsWith('.rs'))
+  .sort()
+  .map((f) => readFileSync(join(IPC_SERVER_DIR, f), 'utf8'))
 const ipcSourcesJoined = IPC_DISPATCH_SOURCES.join('\n')
 
 check('内核 NET_CHECK 按 display venue 解析插件（net_check_plugin 单一入口）', () => {
