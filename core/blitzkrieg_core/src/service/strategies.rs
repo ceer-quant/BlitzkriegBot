@@ -26,25 +26,46 @@ impl Core {
         &self.positions
     }
 
-    /// Mutable access to the position manager — the same seam `config_mut`
-    /// opens for engine wiring (backtest hosting re-points the config; the
-    /// #364 IPC tests seed closed rows to replay). Not for moving money:
-    /// every cash path routes through the ledgers, not this book.
+    /// Mutable access to the position manager — TEST SEAM ONLY (feature
+    /// `test-support`; #780 boundary hygiene, the same gate
+    /// [`Self::ledger_mut`] carries). The #364 IPC tests seed closed rows to
+    /// replay. Not for moving money: every cash path routes through the
+    /// ledgers, not this book — and no production caller may reach the book
+    /// bluntly.
+    #[cfg(feature = "test-support")]
     pub fn positions_mut(&mut self) -> &mut PositionManager {
         &mut self.positions
     }
 
-    /// Mutable handle on the account book — test/seed seams only (the #364
-    /// IPC tests prime a ledger before replaying history). The LIVE money
-    /// paths never come through here: they route by the order's own
-    /// `account_id` at each site (§9.3).
+    /// Mutable handle on the account book — TEST SEAM ONLY (feature
+    /// `test-support`; #780 boundary hygiene, the same gate
+    /// [`Self::ledger_mut`] carries). The #364 IPC tests prime a ledger
+    /// before replaying history. The LIVE money paths never come through
+    /// here: they route by the order's own `account_id` at each site (§9.3).
+    #[cfg(feature = "test-support")]
     pub fn accounts_mut(&mut self) -> &mut crate::account::AccountLedgers {
         &mut self.accounts
     }
 
-    /// Mutable access to config (engine wiring adjusts exits/positions live).
+    /// Mutable access to config — TEST SEAM ONLY (feature `test-support`;
+    /// #780 boundary hygiene). Production writers go through narrow mutators
+    /// (e.g. [`Self::set_tick_schedule_ms`]) or the runtime-config paths, so
+    /// a naked config write can no longer bypass their validation from
+    /// outside `service`.
+    #[cfg(feature = "test-support")]
     pub fn config_mut(&mut self) -> &mut CoreConfig {
         &mut self.config
+    }
+
+    /// Point the exit ladder's deadline grid at the step the caller will
+    /// actually drive (#390 replay nofast). `tick_schedule_ms` is the grid
+    /// the counter ratchets backfill over (consumed by
+    /// `check_exits_interval`), so a non-positive step would corrupt the
+    /// schedule — normalized to 1ms, the same floor the replay driver used
+    /// to apply at its call site before the naked `config_mut` write was
+    /// closed (#780).
+    pub fn set_tick_schedule_ms(&mut self, tick_ms: i64) {
+        self.config.tick_schedule_ms = tick_ms.max(1);
     }
 
     /// Read-only view of the active config (diagnostics/backtest reports).

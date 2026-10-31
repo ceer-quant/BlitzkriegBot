@@ -556,6 +556,15 @@ impl Core {
         &self.accounts
     }
 
+    /// Existence check only (#780 boundary hygiene): the IPC `account.freeze`
+    /// path must refuse an UNKNOWN account before the verdict write, and the
+    /// blunt mutator ([`Self::accounts_mut`]) is test-support-only now —
+    /// production validates through this narrow read of the same
+    /// `AccountLedgers::require` gate.
+    pub fn require_account(&self, id: &crate::account::AccountId) -> CoreResult<()> {
+        self.accounts.require(id)
+    }
+
     /// E28 `account.list` (§12.1): one [`crate::ipc::schema::AccountView`]
     /// per configured account, sorted by id (`AccountLedgers::account_list`
     /// order). Every money field is the account's OWN book — this view is

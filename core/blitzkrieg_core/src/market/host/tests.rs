@@ -527,13 +527,9 @@ async fn on_books_applies_the_whole_batch_under_one_lock() {
         now,
     );
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    {
-        let engine = c.engine.as_mut().expect("engine present");
-        engine
-            .register_user_strategy(Box::new(BatchProbe { seen: seen.clone() }), "test".into())
-            .expect("probe registers");
-        engine.set_strategy_enabled("batch_probe_host", true);
-    }
+    c.host_replay_strategy(Box::new(BatchProbe { seen: seen.clone() }), "test")
+        .expect("probe registers");
+    c.set_strategy_enabled("batch_probe_host", true);
 
     let host = CoreHost::new(std::sync::Arc::new(tokio::sync::Mutex::new(c)));
     let mk = |token: &str, bid: rust_decimal::Decimal| blitzkrieg_market_api::BookUpdate {
@@ -602,8 +598,7 @@ fn reuse_batch(source: &str, up: &str, down: &str) -> Vec<blitzkrieg_market_api:
 /// The scanner rows a token holds, as (venue, up_token) pairs — the
 /// dual-key read the fan-out assertions walk.
 fn rows_for(c: &Core, token: &str) -> Vec<(String, String)> {
-    c.engine
-        .as_ref()
+    c.engine()
         .map(|e| {
             e.scanner()
                 .markets()
@@ -650,7 +645,7 @@ async fn a_feed_source_consumer_re_registers_the_source_batch_under_its_own_venu
     // The M1 read-back: each venue resolves the token to ITS OWN row, and
     // the token-only legacy lookup refuses as ambiguous (never first-hit).
     assert_eq!(c.venue_of_token("share-down"), "");
-    let scanner = c.engine.as_ref().expect("engine").scanner();
+    let scanner = c.engine().expect("engine").scanner();
     assert!(
         scanner
             .market_for_token_on_venue("simspace", "share-up")
@@ -666,12 +661,7 @@ async fn a_feed_source_consumer_re_registers_the_source_batch_under_its_own_venu
         "two venues hold the token: the token-only lookup must refuse, not first-hit"
     );
     // The consumer's own round clock opened (its row spoke its own expiry).
-    let clocks = c
-        .engine
-        .as_ref()
-        .expect("engine")
-        .scanner()
-        .observed_venue_keys();
+    let clocks = c.engine().expect("engine").scanner().observed_venue_keys();
     assert!(
         clocks.iter().any(|v| v == "simspace"),
         "the consumer's re-registered row opens its own round clock: {clocks:?}"
@@ -756,8 +746,7 @@ async fn consumer_rows_read_the_reused_stream_and_stay_venue_distinct() {
     // bytes, two owners — the OME cannot tell the consumer from a native.
     for venue in ["polymarket", "simspace"] {
         let m = c
-            .engine
-            .as_ref()
+            .engine()
             .expect("engine")
             .scanner()
             .market_for_token_on_venue(venue, "flow-up")

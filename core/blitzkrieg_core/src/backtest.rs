@@ -662,8 +662,8 @@ impl EventBacktester {
         };
         // Issue #390: the exit ladder's deadline schedule backfills its counter
         // ratchets over the grid the replay actually drives — tell the core the
-        // step it will be stepped with.
-        core.config_mut().tick_schedule_ms = cfg.tick_ms.max(1);
+        // step it will be stepped with (the mutator owns the ≥1ms floor).
+        core.set_tick_schedule_ms(cfg.tick_ms);
         // Counterfactual knobs go in AFTER the engine registered its strategies
         // (the registry forwards to what is already wired), through the same
         // cell a Shadow Evolution proposal writes.
@@ -681,9 +681,7 @@ impl EventBacktester {
             for (strategy, params) in by_strategy {
                 registry.publish(strategy, params);
             }
-            if let Some(engine) = core.engine.as_mut() {
-                engine.set_hot_params(Some(registry));
-            }
+            core.set_engine_hot_params(Some(registry));
         }
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
         core.set_event_sink(tx);
@@ -726,9 +724,7 @@ impl EventBacktester {
     /// after construction and before `run`; like every registration the strategy
     /// starts DISABLED, so enable it by name on the core's engine.
     pub fn host_strategy(&mut self, strategy: Box<dyn crate::strategies::EngineStrategy>) {
-        if let Some(engine) = self.core.engine.as_mut() {
-            let _ = engine.register_user_strategy(strategy, "replay-hosted".into());
-        }
+        let _ = self.core.host_replay_strategy(strategy, "replay-hosted");
     }
 
     /// Advance the virtual clock one maintenance step: the live loop's

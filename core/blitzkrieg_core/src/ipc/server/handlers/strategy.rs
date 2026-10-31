@@ -43,8 +43,7 @@ pub(crate) async fn handle_strategy(
                     // 用按钮按「账户+策略」读写（feature-detect），不直接
                     // 消费这个位。is_on 只在单账户/老面板降级面上近似正确。
                     let accounts = c
-                        .engine
-                        .as_ref()
+                        .engine()
                         .map(|e| {
                             let mut v = e.strategy_scopes(&name);
                             v.sort();
