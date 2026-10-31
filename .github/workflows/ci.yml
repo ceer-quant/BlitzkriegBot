@@ -509,6 +509,20 @@ jobs:
           node scripts/lua-sandbox-check.mjs
           node scripts/no-venue-branch-check.mjs
           node scripts/lua-decimal-check.mjs
+      # #780: the file-size ratchet — no `.rs` file over 1500 lines in the
+      # trading-repo scope (core/, tools/, user_layer/, extensions/; `ui/` is a
+      # different owner and out of scope). The split campaigns (#699 family,
+      # #780's service-test split) only hold if the files cannot quietly grow
+      # back together; this gate is the enforcement arm. Allowlist semantics:
+      # a debt marker, not a licence — an entry whose file died or shrank to
+      # ≤1500 reds (prune it; the ratchet only tightens). --self-test pins the
+      # judge against fixtures first (§A.4 order: prove it can go red, then
+      # the real verdict), and the real verdict is pure text over 356 files,
+      # well under a second.
+      - name: File-size ratchet gate (#780)
+        run: |
+          node scripts/file-size-check.mjs --self-test
+          node scripts/file-size-check.mjs
       # #644: the contract-ledger gate. `docs/rust-core/INTERFACES.md` §2 claims
       # to be the single source of truth for the IPC surface; schema.rs IS the
       # compiled one. When they drift the documentation quietly stops being a
