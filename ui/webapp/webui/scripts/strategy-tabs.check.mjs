@@ -18,7 +18,8 @@
  * What this gate pins (source-level, following the repo's .check.mjs teeth
  * pattern):
  *   1. SegmentedControl 双段：'single' 单交易所策略 / 'arb' 套利策略，badge=行数。
- *   2. 可见性门：arbConfigGet 读一次；arbArbVisible 谓词消费 displayAccount 与
+ *   2. 可见性门：arbConfigGet 由 loadArbConfig 统一读取（挂载 + 套利段激活 +
+ *      创建/保存提交后重读）；arbArbVisible 谓词消费 displayAccount 与
  *      legAAccount/legBAccount；读失败回落单所（照实降级不猜）。
  *   3. 行切分：ARB_STRATEGY 单实例合同 + 切分谓词，套利 tab 净 PnL 消费
  *      arbNetPnlUsd ?? netPnlUsd。
@@ -67,8 +68,19 @@ check('两段 badge = 各自的行数', () => {
 })
 
 // ── 2. 可见性门 ─────────────────────────────────────────────────────────────
-check('挂载时读一次 arbConfigGet（api.arbConfigGet 消费在场）', () => {
+check('arbConfigGet 读数收敛到 loadArbConfig（挂载 / 段激活 / 提交后重读）', () => {
   assert.match(page, /api\s*\.\s*arbConfigGet\(\)/, '页面缺 arbConfigGet 读数 —— 可见性门无从判定')
+  assert.match(page, /async function loadArbConfig\(\)/, '缺 loadArbConfig —— 重读路径必须收敛为一个读数口')
+  assert.match(page, /onMounted\(\(\) => \{\s*void loadArbConfig\(\)/, '挂载时未读 arb 配置')
+  // issue 781 item 7：切到套利段就重读，新建的配置不依赖「离开页面再回来」。
+  assert.match(
+    page,
+    /watch\(perfTab,[\s\S]*?loadArbConfig\(\)/,
+    '套利段激活时不重读配置 —— 停在页面上新建的配置不会出现',
+  )
+  const commit = page.match(/async function onArbCommitted\(\)[\s\S]*?\n\}/)
+  assert.ok(commit, 'onArbCommitted 缺失')
+  assert.match(commit[0], /loadArbConfig\(\)/, '创建/保存提交后不重读配置 —— 新建配置要刷新才出现')
 })
 
 check('arb 段可见性 = configured && 显示账户是腿账户（arbTabVisible 谓词在场）', () => {

@@ -24,10 +24,11 @@
  * 持久化）。
  *
  * 策略表现 tab 化（2026-10）：「单交易所策略 / 套利策略」双段。套利段仅当
- * 当前显示账户是已配置套利的腿账户时渲染（arb.config.get 挂载读一次，
- * configured && displayAccount ∈ {legA, legB}）；行集合仍 = store.strategyRows
- * （账户跟随的切片由 store 保证），tab 只按策略身份切分，不丢行。「创建套利」
- * 按钮固定在 header —— 它是弹窗的唯一入口，可达性优先于 tab 归属。
+ * 当前显示账户是已配置套利的腿账户时渲染（arb.config.get 在挂载、套利段
+ * 激活、配置提交后重读，configured && displayAccount ∈ {legA, legB}）；行集合
+ * 仍 = store.strategyRows（账户跟随的切片由 store 保证），tab 只按策略身份
+ * 切分，不丢行。「创建套利」按钮固定在 header —— 它是弹窗的唯一入口，可达性
+ * 优先于 tab 归属。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, ChevronDown, Link2, Pencil, Plus, Search, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-vue-next'
@@ -261,7 +262,8 @@ async function onArbCommitted(): Promise<void> {
     msg: '套利策略双腿配置已写入并启用 —— 表格里的策略行即生效读数；套利 tab 可见时那里就是两腿合计口径。',
   }
   setTimeout(() => { arbFlash.value = null }, 6000)
-  await store.refresh()
+  // issue 781 item 7：提交后重读配置 —— 新建的配置无需离开页面即可让套利段出现。
+  await Promise.all([loadArbConfig(), store.refresh()])
 }
 const arbFlash = ref<{ ok: boolean; msg: string } | null>(null)
 /** Lua 策略的来源拼法（engine.stats 的 `source`）；蓝图编辑只对 Lua 包有意义。 */
@@ -358,9 +360,9 @@ const singleRows = computed<StrategyStatsRow[]>(() => rows.value.filter((r) => r
 
 /**
  * 套利 tab 可见性门：`configured && 显示账户是 A/B 腿账户之一`。数据源 =
- * 挂载时读一次 `arb.config.get`（弹窗同一读数）；displayAccount 是
- * issue 561 的面板唯一可信账户源。读失败 / 老内核（error 在场）= 无读数
- * —— 照实降级为只有单所 tab，不猜。
+ * `arb.config.get`（弹窗同一读数）；displayAccount 是 issue 561 的面板唯一
+ * 可信账户源。读失败 / 老内核（error 在场）= 无读数 —— 照实降级为只有单所
+ * tab，不猜。
  */
 const arbConfigured = ref(false)
 const arbLegAccounts = ref<string[]>([])
@@ -370,6 +372,23 @@ const arbTabVisible = computed(() => {
   return arbLegAccounts.value.includes(acct)
 })
 
+/**
+ * 重读 arb 配置。issue 781：只在挂载时读一次会让「本页停留期间新建的配置」直到
+ * 离开再回来才出现 —— 挂载、切到套利段、创建/保存提交后都走这里。
+ */
+async function loadArbConfig(): Promise<void> {
+  try {
+    const doc = await api.arbConfigGet()
+    if (doc.error) return // 老内核/读失败：无读数即无套利 tab（不猜）
+    arbConfigured.value = !!doc.configured
+    arbLegAccounts.value = [doc.legAAccount, doc.legBAccount].filter(
+      (x): x is string => typeof x === 'string' && !!x,
+    )
+  } catch {
+    // 网络失败同上：单所 tab 照常，套利 tab 不渲染
+  }
+}
+
 // 段消失时把选中 tab 拨回单所：账户从腿账户切走（或配置被解除）后
 // `arb` 不再是 segments 里的一员，v-model 悬空会让 SegmentedControl
 // 失去高亮匹配段（变黑），行过滤也会按悬空的 'arb' 继续裁行。
@@ -377,17 +396,13 @@ watch(arbTabVisible, (visible) => {
   if (!visible && perfTab.value === 'arb') perfTab.value = 'single'
 })
 
+// issue 781 item 7：套利段每次激活都重读配置，不依赖「离开页面再回来」。
+watch(perfTab, (target) => {
+  if (target === 'arb') void loadArbConfig()
+})
+
 onMounted(() => {
-  void api
-    .arbConfigGet()
-    .then((doc) => {
-      if (doc.error) return // 老内核/读失败：无读数即无套利 tab（不猜）
-      arbConfigured.value = !!doc.configured
-      arbLegAccounts.value = [doc.legAAccount, doc.legBAccount].filter(
-        (x): x is string => typeof x === 'string' && !!x,
-      )
-    })
-    .catch(() => {}) // 网络失败同上：单所 tab 照常，套利 tab 不渲染
+  void loadArbConfig()
 })
 </script>
 
