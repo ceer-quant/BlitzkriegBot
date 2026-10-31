@@ -9,7 +9,7 @@
  *   cd ui/webapp/webui && npm run check:position-expiry
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -87,8 +87,21 @@ check('the button and the verb routing share the one predicate', () => {
 })
 
 check('the row carries its own family duration on the wire', () => {
-  // gateway projection keeps roundDurationSec (ui_kit 转译层)
-  const kit = readFileSync(join(here, '..', '..', '..', '..', 'ui', 'ui_kit', 'src', 'web', 'mod.rs'), 'utf8')
+  // gateway projection keeps roundDurationSec (ui_kit 转译层) — the web module
+  // is split into domain children, so read the whole `web/` Rust subtree
+  // instead of one filename (the #803/#816 gate rule).
+  const rustTree = (dir) =>
+    readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .flatMap((e) => {
+        const p = join(dir, e.name)
+        return e.isDirectory()
+          ? rustTree(p)
+          : e.name.endsWith('.rs')
+            ? [readFileSync(p, 'utf8')]
+            : []
+      })
+  const kit = rustTree(join(here, '..', '..', '..', '..', 'ui', 'ui_kit', 'src', 'web')).join('\n')
   assert.match(kit, /"roundDurationSec": p\.round_duration_sec/)
   // the panel interface declares it
   const snap = readFileSync(join(here, '..', 'src', 'api', 'snapshot.ts'), 'utf8')

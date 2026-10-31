@@ -256,7 +256,21 @@ check('绑定 venue 无插件时走 no-op（诚实 unsupported），绝不去探
 })
 
 check('网关缓存的 venue 维度：切户即失效（displayVenue 变化 → 重新探针）', () => {
-  const web = read('ui', 'ui_kit', 'src', 'web', 'mod.rs')
+  // The web module is split into domain children (render/auth/http/server/
+  // routes/checks) — the pin is on the cache's CONTENT, so read the whole
+  // `web/` Rust subtree instead of one filename (the #803/#816 gate rule).
+  const rustTree = (dir) =>
+    readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .flatMap((e) => {
+        const p = join(dir, e.name)
+        return e.isDirectory()
+          ? rustTree(p)
+          : e.name.endsWith('.rs')
+            ? [readFileSync(p, 'utf8')]
+            : []
+      })
+  const web = rustTree(join(here, '..', '..', '..', '..', 'ui', 'ui_kit', 'src', 'web')).join('\n')
   assert.ok(
     web.includes('cache.venue != display_venue'),
     'NetCheckCache does not compare venues — a display-account switch serves the stale reading',
