@@ -148,7 +148,6 @@ use rust_decimal::Decimal;
 // 路径与拆分前完全一致（零逻辑改动）。
 mod bin_support;
 #[cfg(test)]
-#[path = "bin_tests.rs"]
 mod bin_tests;
 
 use bin_support::boot::{
