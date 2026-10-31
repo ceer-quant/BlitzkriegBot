@@ -20,8 +20,9 @@
  * the fix promises, each one on the artifact that ships:
  *
  *   1. `--help` / `-h` — exit 0, and the list names EVERY flag the parser in
- *      `core/blitzkrieg_core/src/bin_support/boot.rs` accepts (#699 moved it
- *      there from main.rs; both directions: no accepted
+ *      `core/blitzkrieg_core/src/bin_support/boot/` accepts (#699 moved it out
+ *      of main.rs, #780 split it into that directory module; both directions:
+ *      no accepted
  *      flag unlisted, no listed flag unaccepted). A help list that drifts from
  *      the parser is this defect in a new spelling.
  *   2. `--version` / `-V` — exit 0, `<semver>+g<sha>`, and NO boot (#197's
@@ -81,20 +82,43 @@ const { check } = gate;
  * was written to verify, so it fails and says which marker moved — the alternative
  * (comparing the help list against an empty set) would pass forever.
  */
+function bootModuleSource() {
+  // #699/#780: the parse loop moved from main.rs into bin_support/boot.rs and
+  // then into the bin_support/boot/ directory module (both pure code moves).
+  // This gate reads the SOURCE the binary is built from, so it follows the loop:
+  // read every module file when the directory exists, the single file otherwise.
+  const dir = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot');
+  if (existsSync(dir)) {
+    return readdirSync(dir)
+      .filter((name) => name.endsWith('.rs'))
+      .sort()
+      .map((name) => readFileSync(join(dir, name), 'utf8'))
+      .join('\n');
+  }
+  return readFileSync(join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot.rs'), 'utf8');
+}
+
+/**
+ * The flag-match tail `parse_args` delegates to in the directory module. The
+ * parse-loop markers both live in `args.rs`, so the slice below stops before
+ * this file; it is scanned too, exactly like `cli.rs`'s unit-test extractor.
+ */
+function delegatedTail() {
+  const p = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot', 'replay_flags.rs');
+  return existsSync(p) ? readFileSync(p, 'utf8') : '';
+}
+
 function parserFlags() {
-  // #699: the parse loop moved from main.rs into bin_support/boot.rs (pure
-  // code move). This gate reads the SOURCE the binary is built from, so it
-  // follows the loop — same markers, same extraction, new path.
-  const src = readFileSync(join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot.rs'), 'utf8');
+  const src = bootModuleSource();
   const start = src.indexOf('let mut it = argv.iter().cloned();');
   const end = src.indexOf('// ── Resolve the file-settable settings');
   if (start < 0 || end < 0 || end <= start) {
-    check('parse-loop markers found in core/blitzkrieg_core/src/bin_support/boot.rs', false,
+    check('parse-loop markers found in core/blitzkrieg_core/src/bin_support/boot', false,
       `the help/parser comparison cannot run (start=${start}, end=${end})`);
     return [];
   }
   const out = new Set();
-  for (const line of src.slice(start, end).split('\n')) {
+  for (const line of [src.slice(start, end), delegatedTail()].join('\n').split('\n')) {
     const trimmed = line.trimStart();
     if (trimmed.startsWith('"--')) {
       const close = trimmed.indexOf('"', 1);
