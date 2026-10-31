@@ -35,25 +35,27 @@ const check = (label, fn) => {
   }
 }
 
-const app = read('..', '..', 'ui_kit_panel', 'src', 'app.rs')
-const ui = read('..', '..', 'ui_kit_panel', 'src', 'ui.rs')
-/** The gateway's command table — where the bar's vocabulary lives. Read the
- * whole `gateway/` Rust subtree (sorted, recursive) instead of one file: the
- * module is split across `command.rs`/`supervisor.rs` children, and the pin is
- * on the table's content, not on a filename, so the gate survives future
- * splits the same way `net-check.check.mjs` does. */
-const gatewaySources = (dir) =>
+/** Rust subtree reader (sorted, recursive). The pins below are on CONTENT, not
+ * filenames: the panel's ui/app faces and the gateway's command/supervisor
+ * module are each split across domain children, and a pin on the table's
+ * content survives future splits the same way `net-check.check.mjs` does. */
+const rustSources = (dir) =>
   readdirSync(dir, { withFileTypes: true })
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .flatMap((e) => {
       const p = join(dir, e.name)
       return e.isDirectory()
-        ? gatewaySources(p)
+        ? rustSources(p)
         : e.name.endsWith('.rs')
           ? [readFileSync(p, 'utf8')]
           : []
     })
-const gatewayCommands = gatewaySources(
+/** The panel's two faces, split into domain modules by the ui/ hard rule:
+ * `app/` carries the tab enum + key handling, `ui/` the TUI renderers. */
+const app = rustSources(join(here, '..', '..', '..', 'ui_kit_panel', 'src', 'app')).join('\n')
+const ui = rustSources(join(here, '..', '..', '..', 'ui_kit_panel', 'src', 'ui')).join('\n')
+/** The gateway's command table — where the bar's vocabulary lives. */
+const gatewayCommands = rustSources(
   join(here, '..', '..', '..', 'ui_kit', 'src', 'gateway'),
 ).join('\n')
 // #381: the nav moved into `src/lib/nav.ts` (pure data) so the shell and this
