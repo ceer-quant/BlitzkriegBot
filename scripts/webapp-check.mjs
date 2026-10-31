@@ -72,8 +72,12 @@ check('artifact ships hashed JS+CSS assets',
 // no error anywhere to notice. Assert the *built* CSS still carries the
 // unprefixed property, per rule.
 {
-  const cssFile = bundles.find((f) => f.endsWith('.css'));
-  const css = cssFile ? readFileSync(join(assetsDir, cssFile), 'utf8') : '';
+  // #781 split the bundle into async chunks, and Vite now emits one CSS file
+  // per chunk — the glass rules can live in any of them. Search the
+  // concatenation: the pin is on the shipped CSS, not on which chunk carries
+  // it (same rule as the other gates that survived a module split).
+  const css = bundles.filter((f) => f.endsWith('.css')).sort()
+    .map((f) => readFileSync(join(assetsDir, f), 'utf8')).join('\n');
   const rule = (sel) => {
     const i = css.indexOf(sel + '{');
     return i < 0 ? '' : css.slice(i, css.indexOf('}', i));
