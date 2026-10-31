@@ -19,8 +19,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod part1;
-pub use part1::*;
+mod views;
+pub use views::*;
 
 pub const JSONRPC: &str = "2.0";
 pub const EVENT_METHOD: &str = "core.event";
