@@ -3,8 +3,8 @@
  * file-size-check — the file-size ratchet gate (#780).
  *
  * The campaign rule it enforces: no `.rs` file in the trading-repo scope
- * (core/, tools/, user_layer/, extensions/ — `ui/` is a different owner and
- * OUT of scope) may exceed 1500 lines. A file that big is where review
+ * (core/, tools/, user_layer/, extensions/ — and, since the #819-#821 ui
+ * split wave, `ui/` too) may exceed 1500 lines. A file that big is where review
  * coverage dies and where the split campaigns (#699 family, #780's
  * service-test split) come to rot back together; this gate is the arm that
  * keeps them split.
@@ -33,8 +33,10 @@ import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// Code-bearing trees in scope. `ui/` is deliberately absent: different owner.
-const SCOPES = ['core', 'tools', 'user_layer', 'extensions'];
+// Code-bearing trees in scope. `ui/` joined when its five oversized files
+// were split by domain (#819 gateway command/supervisor, #820 panel ui/app,
+// #821 web) — same rule, same owner of the debt now.
+const SCOPES = ['core', 'tools', 'user_layer', 'extensions', 'ui'];
 
 // Machine-generated trees a checkout can legitimately carry; never scanned.
 const SKIP_DIRS = ['target', 'dist', 'node_modules'];
@@ -46,7 +48,10 @@ const LIMIT = 1500;
 // (#795-#816) retired the last oversized files — risk_gates.rs became the
 // tests/risk_gates/ directory, strategy_dispatch_tests.rs 4866→490 and
 // audit_fix_tests.rs 2191→299 with every child ≤1461 — and the largest
-// in-scope file is now lua_loader.rs at 1495. An entry here is a debt
+// in-scope file is now lua_loader.rs at 1495. The ui split wave (#819-#821)
+// brought `ui/` into scope the same day its last oversized file fell (the
+// largest ui file is web/auth_tests.rs at 1302), so the allowlist stays
+// empty across the whole tree. An entry here is a debt
 // marker — the file may shrink or die, never grow into a bigger exception,
 // and once it is ≤ LIMIT the entry must be pruned (rule 3 above).
 const ALLOW = [];
