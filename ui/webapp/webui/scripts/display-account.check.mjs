@@ -35,7 +35,7 @@
  *   cd ui/webapp/webui && npm run check:display
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -60,7 +60,21 @@ const snapshotClient = read('src', 'api', 'snapshot.ts')
 const store = read('src', 'stores', 'panel.ts')
 const page = read('src', 'pages', 'HftPage.vue')
 const switcher = read('src', 'components', 'AccountSwitcher.vue')
-const gateway = read('../../..', 'ui', 'ui_kit', 'src', 'web', 'mod.rs')
+// The web server module is split into domain children (render/auth/http/
+// server/routes/checks) — the pins below are on CONTENT, so read the whole
+// `web/` Rust subtree instead of one filename (the #803/#816 gate rule).
+const rustTree = (dir) =>
+  readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .flatMap((e) => {
+      const p = join(dir, e.name)
+      return e.isDirectory()
+        ? rustTree(p)
+        : e.name.endsWith('.rs')
+          ? [readFileSync(p, 'utf8')]
+          : []
+    })
+const gateway = rustTree(join(here, '..', '..', '..', '..', 'ui', 'ui_kit', 'src', 'web')).join('\n')
 
 // ── 1. the wire contract ─────────────────────────────────────────────────────
 check('Snapshot 合同声明 displayAccount/displayVenue（可选字段，老内核缺省）', () => {
