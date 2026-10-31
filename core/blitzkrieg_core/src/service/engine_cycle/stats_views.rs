@@ -617,26 +617,26 @@ impl Core {
             // * fd: P0 #670 的 fd 配额使用率（函数开头算好的 probe_fd_json）。
             "probe": serde_json::json!({
                 "ntp": {
-                    "synced": self.probe_ntp.last_offset_ms.is_some(),
-                    "offsetMs": self.probe_ntp.last_offset_ms,
-                    "skewRed": self.probe_ntp.skew_red(),
-                    "failures": self.probe_ntp.failures,
-                    "lastCheckMs": self.probe_ntp.last_check_ms,
+                    "synced": self.probe_health.probe_ntp.last_offset_ms.is_some(),
+                    "offsetMs": self.probe_health.probe_ntp.last_offset_ms,
+                    "skewRed": self.probe_health.probe_ntp.skew_red(),
+                    "failures": self.probe_health.probe_ntp.failures,
+                    "lastCheckMs": self.probe_health.probe_ntp.last_check_ms,
                 },
                 "tickHealth": {
                     // 进行中的窗口计数（实时）。汇总不立刻清零：值被
                     // capture 留档，下一个非汇总 tick 才重新计数——
                     // 汇总瞬间读 stats 必须还能看到刚结束的窗口。
-                    "windowTicks": self.probe_ticks.window_ticks,
-                    "zeroTickTokens": self.probe_last_zero,
-                    "maxSilenceMs": self.probe_last_max_silence_ms,
-                    "streamBreakWarnings": self.probe_ticks.stream_break_warnings,
-                    "lastSummaryMs": self.probe_ticks.last_summary_ms,
+                    "windowTicks": self.probe_health.probe_ticks.window_ticks,
+                    "zeroTickTokens": self.probe_health.probe_last_zero,
+                    "maxSilenceMs": self.probe_health.probe_last_max_silence_ms,
+                    "streamBreakWarnings": self.probe_health.probe_ticks.stream_break_warnings,
+                    "lastSummaryMs": self.probe_health.probe_ticks.last_summary_ms,
                 },
                 "spot": {
-                    "lastSeenMs": self.probe_spot.last_seen_ms,
-                    "staleMs": self.probe_last_spot_stale_ms,
-                    "staleWarnings": self.probe_spot.stale_warnings,
+                    "lastSeenMs": self.probe_health.probe_spot.last_seen_ms,
+                    "staleMs": self.probe_health.probe_last_spot_stale_ms,
+                    "staleWarnings": self.probe_health.probe_spot.stale_warnings,
                 },
                 "fd": probe_fd_json,
             }),

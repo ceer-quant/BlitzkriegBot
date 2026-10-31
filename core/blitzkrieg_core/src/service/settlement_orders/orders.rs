@@ -637,8 +637,8 @@ impl Core {
         // its output lands at the same virtual instant the every-tick pass
         // would have produced it.
         if self.replay_sched() {
-            self.fast_orders_dirty = true;
-            self.fast_eval_wake = true;
+            self.fast_path.fast_orders_dirty = true;
+            self.fast_path.fast_eval_wake = true;
         }
         // The fee reads only the schedule in force (an &self read), so it is
         // computed BEFORE the account's ledger is taken mutably (E28: the two
@@ -862,9 +862,9 @@ impl Core {
         // replay's deadline-scheduled ladder reads the same marker — a fill
         // is a book-level input to the ladder's next verdict.
         if self.replay_sched() {
-            self.fast_positions_dirty = true;
+            self.fast_path.fast_positions_dirty = true;
         }
-        self.fast_dirty_tokens.insert(token.clone());
+        self.fast_path.fast_dirty_tokens.insert(token.clone());
         match d.side {
             Side::Buy => {
                 let existing = self

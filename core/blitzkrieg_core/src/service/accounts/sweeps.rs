@@ -552,7 +552,7 @@ impl Core {
             );
         }
         if self.replay_sched() {
-            self.fast_orders_dirty = true;
+            self.fast_path.fast_orders_dirty = true;
         }
         if was_live && let Some(vid) = order.venue_order_id {
             let venue = self.execution_venue_of(order.account_id.as_str(), &order.token_id);

@@ -11,7 +11,7 @@ impl Core {
         // close all funnel here) — the settlement watch and audit input must
         // resync on the next tick.
         if self.replay_sched() {
-            self.fast_positions_dirty = true;
+            self.fast_path.fast_positions_dirty = true;
         }
         // The pending-close reason for this token died with the position it
         // belonged to (issue #190). Every close path funnels through here, and
@@ -127,11 +127,14 @@ impl Core {
     /// Record the reason an in-flight close of `token` was submitted with.
     pub(crate) fn note_exit_reason(&mut self, token: &str, reason: ExitReason) {
         if self
+            .exit_reason_ledger
             .exit_reasons
             .insert(token.to_string(), reason)
             .is_none()
         {
-            self.exit_reason_order.push_back(token.to_string());
+            self.exit_reason_ledger
+                .exit_reason_order
+                .push_back(token.to_string());
         }
         self.enforce_exit_reason_bound();
     }
@@ -139,9 +142,11 @@ impl Core {
     /// Consume the pending reason for `token`: the close that fills uses it, and
     /// it must not outlive that close.
     pub(crate) fn take_exit_reason(&mut self, token: &str) -> Option<ExitReason> {
-        let reason = self.exit_reasons.remove(token);
+        let reason = self.exit_reason_ledger.exit_reasons.remove(token);
         if reason.is_some() {
-            self.exit_reason_order.retain(|t| t != token);
+            self.exit_reason_ledger
+                .exit_reason_order
+                .retain(|t| t != token);
         }
         reason
     }
@@ -150,8 +155,10 @@ impl Core {
     /// that landed carried its own reason (a settlement, a reconciled venue
     /// close), so the in-flight one is stale either way.
     pub(crate) fn clear_exit_reason(&mut self, token: &str) {
-        if self.exit_reasons.remove(token).is_some() {
-            self.exit_reason_order.retain(|t| t != token);
+        if self.exit_reason_ledger.exit_reasons.remove(token).is_some() {
+            self.exit_reason_ledger
+                .exit_reason_order
+                .retain(|t| t != token);
         }
     }
 
@@ -162,7 +169,7 @@ impl Core {
     /// longer belong to anything live, and an entry whose position is gone would
     /// otherwise be inherited by the next position on that token.
     pub(crate) fn sweep_exit_reasons(&mut self) {
-        if self.exit_reasons.is_empty() {
+        if self.exit_reason_ledger.exit_reasons.is_empty() {
             return;
         }
         let open: HashSet<String> = self
@@ -172,14 +179,15 @@ impl Core {
             .map(|p| p.token_id.clone())
             .collect();
         let stale: Vec<String> = self
+            .exit_reason_ledger
             .exit_reasons
             .keys()
             .filter(|t| !open.contains(*t))
             .cloned()
             .collect();
         for token in stale {
-            self.exit_reasons.remove(&token);
-            self.exit_reasons_swept += 1;
+            self.exit_reason_ledger.exit_reasons.remove(&token);
+            self.exit_reason_ledger.exit_reasons_swept += 1;
         }
         self.repair_exit_reason_order();
     }
@@ -188,7 +196,7 @@ impl Core {
     /// likely to still be needed: first the entries whose token has no open
     /// position (stale by construction), then the oldest.
     pub(crate) fn enforce_exit_reason_bound(&mut self) {
-        if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+        if self.exit_reason_ledger.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
             return;
         }
         let open: HashSet<String> = self
@@ -198,24 +206,30 @@ impl Core {
             .map(|p| p.token_id.clone())
             .collect();
         let ghosts: Vec<String> = self
+            .exit_reason_ledger
             .exit_reason_order
             .iter()
             .filter(|t| !open.contains(*t))
             .cloned()
             .collect();
         for token in ghosts {
-            if self.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
+            if self.exit_reason_ledger.exit_reasons.len() <= EXIT_REASON_TABLE_MAX {
                 break;
             }
-            self.exit_reasons.remove(&token);
-            self.exit_reasons_evicted += 1;
+            self.exit_reason_ledger.exit_reasons.remove(&token);
+            self.exit_reason_ledger.exit_reasons_evicted += 1;
         }
-        while self.exit_reasons.len() > EXIT_REASON_TABLE_MAX {
-            let Some(oldest) = self.exit_reason_order.pop_front() else {
+        while self.exit_reason_ledger.exit_reasons.len() > EXIT_REASON_TABLE_MAX {
+            let Some(oldest) = self.exit_reason_ledger.exit_reason_order.pop_front() else {
                 break;
             };
-            if self.exit_reasons.remove(&oldest).is_some() {
-                self.exit_reasons_evicted += 1;
+            if self
+                .exit_reason_ledger
+                .exit_reasons
+                .remove(&oldest)
+                .is_some()
+            {
+                self.exit_reason_ledger.exit_reasons_evicted += 1;
             }
         }
         self.repair_exit_reason_order();
@@ -225,11 +239,12 @@ impl Core {
     /// always describes exactly the map's key set (the invariant the eviction
     /// path relies on to name the oldest entry).
     pub(crate) fn repair_exit_reason_order(&mut self) {
-        self.exit_reason_order
-            .retain(|t| self.exit_reasons.contains_key(t));
+        self.exit_reason_ledger
+            .exit_reason_order
+            .retain(|t| self.exit_reason_ledger.exit_reasons.contains_key(t));
         debug_assert_eq!(
-            self.exit_reason_order.len(),
-            self.exit_reasons.len(),
+            self.exit_reason_ledger.exit_reason_order.len(),
+            self.exit_reason_ledger.exit_reasons.len(),
             "exit_reason_order must mirror exit_reasons"
         );
     }
@@ -246,16 +261,17 @@ impl Core {
             .map(|p| p.token_id.as_str())
             .collect();
         let orphaned = self
+            .exit_reason_ledger
             .exit_reasons
             .keys()
             .filter(|t| !open.contains(t.as_str()))
             .count();
         serde_json::json!({
-            "tracked": self.exit_reasons.len(),
+            "tracked": self.exit_reason_ledger.exit_reasons.len(),
             "capacity": EXIT_REASON_TABLE_MAX,
             "orphaned": orphaned,
-            "evictedTotal": self.exit_reasons_evicted,
-            "sweptTotal": self.exit_reasons_swept,
+            "evictedTotal": self.exit_reason_ledger.exit_reasons_evicted,
+            "sweptTotal": self.exit_reason_ledger.exit_reasons_swept,
         })
     }
 

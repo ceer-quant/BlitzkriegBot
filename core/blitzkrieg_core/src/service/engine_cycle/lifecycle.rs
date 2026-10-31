@@ -145,10 +145,14 @@ impl Core {
     /// 警告 → 测试必须红"验收的日志面；红线（100ms）在
     /// `engine.stats.probe.ntp.skewRed` 打标。
     pub fn note_ntp_offset(&mut self, offset_ms: Option<i64>, now_ms: i64) {
-        let warn = self.probe_ntp.apply(offset_ms, now_ms);
+        let warn = self.probe_health.probe_ntp.apply(offset_ms, now_ms);
         if warn {
-            let ms = self.probe_ntp.last_offset_ms.unwrap_or_default();
-            let red = self.probe_ntp.skew_red();
+            let ms = self
+                .probe_health
+                .probe_ntp
+                .last_offset_ms
+                .unwrap_or_default();
+            let red = self.probe_health.probe_ntp.skew_red();
             tracing::warn!(
                 offset_ms = ms,
                 red_line = red,
@@ -168,8 +172,9 @@ impl Core {
     /// 10s，之后每 10s 一次。间隔判定基于调用方的时钟（间隔不等式，不是
     /// 固定墙钟窗口——memory: wallclock-test-flake 处方）。
     pub(crate) fn probe_summary_due(&self, now_ms: i64) -> bool {
-        match self.probe_ticks.last_summary_ms {
+        match self.probe_health.probe_ticks.last_summary_ms {
             None => self
+                .probe_health
                 .probe_ticks
                 .first_data_ms
                 .is_some_and(|first| now_ms - first >= crate::probe::SUMMARY_INTERVAL_MS),
@@ -187,12 +192,14 @@ impl Core {
             .as_ref()
             .map(|e| e.round_token_ids())
             .unwrap_or_default();
-        let (ticks, zero, max_silence, newly_broken) =
-            self.probe_ticks
-                .summarize(now_ms, &round_tokens, crate::probe::TICK_STALE_WARN_MS);
+        let (ticks, zero, max_silence, newly_broken) = self.probe_health.probe_ticks.summarize(
+            now_ms,
+            &round_tokens,
+            crate::probe::TICK_STALE_WARN_MS,
+        );
         // 把 venue 标签留在断流行里——排查时"哪个所的流断了"是第一问。
         for token in &newly_broken {
-            let (venue, silence_ms) = match self.probe_ticks.per_token.get(token) {
+            let (venue, silence_ms) = match self.probe_health.probe_ticks.per_token.get(token) {
                 Some((v, at)) => (v.clone(), now_ms - *at),
                 None => (String::new(), 0),
             };
@@ -219,12 +226,13 @@ impl Core {
                 "tick health summary"
             );
         }
-        self.probe_last_window_ticks = ticks;
-        self.probe_last_zero = zero;
-        self.probe_last_max_silence_ms = max_silence;
+        self.probe_health.probe_last_window_ticks = ticks;
+        self.probe_health.probe_last_zero = zero;
+        self.probe_health.probe_last_max_silence_ms = max_silence;
 
         // spot 停更（信号失效监控）。
         let (spot_warn, stale) = self
+            .probe_health
             .probe_spot
             .check(now_ms, crate::probe::SPOT_STALE_WARN_MS);
         if spot_warn {
@@ -235,16 +243,16 @@ impl Core {
                  are unverified (signal invalidation watch)"
             );
         }
-        self.probe_last_spot_stale_ms = stale;
+        self.probe_health.probe_last_spot_stale_ms = stale;
     }
 
     // 探针的三个曝光计数（stats 面从 probe_ticks/probe_spot 直接读，
     // 这两个只是把 warn 事件也钉在 CoreStats 里以防未来挪动）。
     pub(super) fn stats_probe_stream_break(&mut self) {
-        self.stats_probe_stream_breaks += 1;
+        self.probe_health.stats_probe_stream_breaks += 1;
     }
 
     pub(super) fn stats_probe_spot_stale(&mut self) {
-        self.stats_probe_spot_stales += 1;
+        self.probe_health.stats_probe_spot_stales += 1;
     }
 }

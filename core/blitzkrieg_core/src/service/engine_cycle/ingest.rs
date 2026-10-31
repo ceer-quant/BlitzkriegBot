@@ -30,9 +30,11 @@ impl Core {
                 // 拿不到记空标签（untagged）。纯内存 insert——回放性能
                 // 影响可忽略，且不改变任何既有语义。
                 let venue = self.venue_of_token(token_id);
-                self.probe_ticks.note_tick(token_id, &venue, now_ms);
+                self.probe_health
+                    .probe_ticks
+                    .note_tick(token_id, &venue, now_ms);
                 if self.replay_sched() {
-                    self.fast_eval_wake = true;
+                    self.fast_path.fast_eval_wake = true;
                 }
             }
             // 盘口批次原子化：批次是 N 本书的合体 —— 每本各计一次 books（与
@@ -43,28 +45,32 @@ impl Core {
                 // 路径同口径）。
                 for (token, _, _) in books {
                     let venue = self.venue_of_token(token);
-                    self.probe_ticks.note_tick(token, &venue, now_ms);
+                    self.probe_health
+                        .probe_ticks
+                        .note_tick(token, &venue, now_ms);
                 }
                 if self.replay_sched() {
-                    self.fast_eval_wake = true;
+                    self.fast_path.fast_eval_wake = true;
                 }
             }
             crate::engine::DataEvent::TopOfBook { token_id, .. } => {
                 self.stats.tops += 1;
                 let venue = self.venue_of_token(token_id);
-                self.probe_ticks.note_tick(token_id, &venue, now_ms);
+                self.probe_health
+                    .probe_ticks
+                    .note_tick(token_id, &venue, now_ms);
                 if self.replay_sched() {
-                    self.fast_eval_wake = true;
+                    self.fast_path.fast_eval_wake = true;
                 }
             }
             crate::engine::DataEvent::Spot { .. } => {
                 self.stats.spots += 1;
                 // 探针：spot 源仍在更新（信号失效监控的"活着"信号）；
                 // spot 也算数据——spot-only 部署的停更监控才有起点。
-                self.probe_spot.note(now_ms);
-                self.probe_ticks.note_any_data(now_ms);
+                self.probe_health.probe_spot.note(now_ms);
+                self.probe_health.probe_ticks.note_any_data(now_ms);
                 if self.replay_sched() {
-                    self.fast_eval_wake = true;
+                    self.fast_path.fast_eval_wake = true;
                 }
             }
             // #352: observed on-chain prints / round boundaries are archived
@@ -84,7 +90,7 @@ impl Core {
             } => {
                 self.stats.resolutions += 1;
                 if self.replay_sched() {
-                    self.fast_eval_wake = true;
+                    self.fast_path.fast_eval_wake = true;
                 }
                 self.on_market_resolution(
                     blitzkrieg_market_api::MarketResolution {
@@ -193,9 +199,9 @@ impl Core {
                     // 探针：新一轮的 token 覆盖掉上一轮的——per_token 表键随
                     // 轮替换保持有界（旧 token 不再被汇总点名）。round 声明
                     // 也算数据（零 tick 探针的起点）。
-                    self.probe_ticks.per_token.clear();
-                    self.probe_ticks.broken.clear();
-                    self.probe_ticks.note_any_data(now_ms);
+                    self.probe_health.probe_ticks.per_token.clear();
+                    self.probe_health.probe_ticks.broken.clear();
+                    self.probe_health.probe_ticks.note_any_data(now_ms);
                     // ④ 统一映射：新的一轮带来新市场 ⇒ 重新提议跨所配对候选
                     // （只提议不 confirm）。top-up 跳过：#498 增量合并不换轮，
                     // 旧候选仍然有效，重复刷只是日志噪声。
@@ -213,8 +219,8 @@ impl Core {
                     // list and restarts the round clock — the next evaluation sees
                     // a different round context, and the timing verdict flips.
                     if self.replay_sched() {
-                        self.fast_eval_wake = true;
-                        self.fast_next_timing_ms = now_ms;
+                        self.fast_path.fast_eval_wake = true;
+                        self.fast_path.fast_next_timing_ms = now_ms;
                     }
                     // A round rollover replaces the whole round (`engine.markets`
                     // carries the new list), so it is the moment any pending-close
@@ -387,7 +393,7 @@ impl Core {
         // plus dirty tokens, so a book event must reach the next tick's pass
         // there too. The set is a pure dirty marker; both paths consume it.
         for (token, _) in &mirrored_tokens {
-            self.fast_dirty_tokens.insert(token.clone());
+            self.fast_path.fast_dirty_tokens.insert(token.clone());
         }
 
         // KI-1: the market path must also settle resting maker orders the way
@@ -560,7 +566,9 @@ impl Core {
         // 同口径）。归档/探针都只读 books 的形状，镜像写入在两者之后。
         for (token, _, _) in &books {
             let venue = self.venue_of_token(token);
-            self.probe_ticks.note_tick(token, &venue, ts_ms);
+            self.probe_health
+                .probe_ticks
+                .note_tick(token, &venue, ts_ms);
         }
 
         // 镜像（exit/mark 路径）：与 Batch 事件同语义 —— 每本 received_ms
@@ -576,7 +584,7 @@ impl Core {
             );
         }
         for (token_id, _, _) in &books {
-            self.fast_dirty_tokens.insert(token_id.clone());
+            self.fast_path.fast_dirty_tokens.insert(token_id.clone());
         }
         // KI-1：与 engine_on_data 同规则 —— 本地结算内核在盘口事件落地时
         // 结算 resting maker 单（逐 token，跨整批）。
@@ -632,7 +640,7 @@ impl Core {
         // 计数在 stats match 外由调用方 on_books 完成 —— 这里补计数）。
         self.stats.books += books.len() as u64;
         if self.replay_sched() {
-            self.fast_eval_wake = true;
+            self.fast_path.fast_eval_wake = true;
         }
     }
 }

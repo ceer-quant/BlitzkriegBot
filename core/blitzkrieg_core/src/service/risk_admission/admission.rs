@@ -63,7 +63,7 @@ impl Core {
         // Replay fast path: a placed order is a live order — the escalation
         // sweep and the audit input changed.
         if outcome.is_ok() && self.replay_sched() {
-            self.fast_orders_dirty = true;
+            self.fast_path.fast_orders_dirty = true;
         }
         outcome
     }

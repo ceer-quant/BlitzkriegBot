@@ -894,10 +894,10 @@ impl Core {
         let live_before = pre.live_orders;
         self.ome.remove_account_orders(account_id.as_str());
         self.inflight_takers.clear();
-        self.fast_dirty_tokens.clear();
-        self.fast_eval_wake = false;
-        self.fast_orders_dirty = true;
-        self.fast_positions_dirty = true;
+        self.fast_path.fast_dirty_tokens.clear();
+        self.fast_path.fast_eval_wake = false;
+        self.fast_path.fast_orders_dirty = true;
+        self.fast_path.fast_positions_dirty = true;
         // exit 路由三态：exit_reasons 的键是 token——只清仍归属目标账户的
         // token（其他账户可能持有同一 token 的独立行，账户↔venue 解耦后
         // 双账户可同持一 token）。strategy_exits 按意图自带 account_id 过滤。
@@ -928,11 +928,11 @@ impl Core {
             account_tokens.union(&before).cloned().collect()
         };
         for t in &doomed_tokens {
-            if let Some(reason) = self.exit_reasons.remove(t) {
-                self.exit_reasons_evicted += 0; // 计数语义未变：清的是重置面
+            if let Some(reason) = self.exit_reason_ledger.exit_reasons.remove(t) {
+                self.exit_reason_ledger.exit_reasons_evicted += 0; // 计数语义未变：清的是重置面
                 let _ = reason;
             }
-            self.exit_reason_order.retain(|k| k != t);
+            self.exit_reason_ledger.exit_reason_order.retain(|k| k != t);
         }
         self.strategy_exits
             .retain(|x| x.account_id.as_str() != account_id.as_str());
