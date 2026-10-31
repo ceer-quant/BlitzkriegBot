@@ -13,9 +13,9 @@ impl Core {
     /// or the fallback window elapsed. Between those, the same inputs
     /// reproduce the same output, so the call is skipped.
     pub(super) fn fast_eval_due(&self, now_ms: i64) -> bool {
-        self.fast_eval_wake
-            || now_ms >= self.fast_next_timing_ms
-            || now_ms - self.fast_last_eval_ms >= FAST_EVAL_FALLBACK_MS
+        self.fast_path.fast_eval_wake
+            || now_ms >= self.fast_path.fast_next_timing_ms
+            || now_ms - self.fast_path.fast_last_eval_ms >= FAST_EVAL_FALLBACK_MS
     }
 
     pub fn engine_evaluate(&mut self, now_ms: i64) -> usize {
@@ -59,9 +59,9 @@ impl Core {
         if self.replay_sched() {
             // A real evaluation consumes the wake; the timing boundary is
             // recomputed after the engine borrow ends (below).
-            self.fast_eval_wake = false;
-            self.fast_last_eval_ms = now_ms;
-            self.fast_next_timing_ms = i64::MAX;
+            self.fast_path.fast_eval_wake = false;
+            self.fast_path.fast_last_eval_ms = now_ms;
+            self.fast_path.fast_next_timing_ms = i64::MAX;
         }
         // Shadow Evolution: evaluate FIRST so any applied hot-swap is in force
         // for this very cycle's order decision (next-tick semantics, no restart).
@@ -133,7 +133,8 @@ impl Core {
         // beat, or a new engine input). #390: nofast replay re-arms the same
         // boundary. (`replay_sched` was read before the engine borrow opened.)
         if replay_sched {
-            self.fast_next_timing_ms = engine.next_timing_boundary_ms(now_ms).unwrap_or(i64::MAX);
+            self.fast_path.fast_next_timing_ms =
+                engine.next_timing_boundary_ms(now_ms).unwrap_or(i64::MAX);
         }
         // E30 (§6.3): drain the sandbox poison alerts now; each is raised as
         // ONE RISK_ALERT after the engine borrow ends below — the message

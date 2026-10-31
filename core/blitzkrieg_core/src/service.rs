@@ -52,25 +52,11 @@ pub struct Core {
     intent_audit: crate::arbitration::AuditSink,
     positions: PositionManager,
     books: HashMap<TokenId, Book>,
-    /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
-    /// full sell fill closes the position with the right reason.
-    ///
-    /// A PENDING-CLOSE ledger, not a history (issue #190): an entry exists only
-    /// while the token still has an open position, and the table can never
-    /// exceed [`EXIT_REASON_TABLE_MAX`]. A leaked entry would be inherited by
-    /// the NEXT position on the same token and mis-attribute its exit.
-    exit_reasons: HashMap<TokenId, ExitReason>,
-    /// Insertion order of [`Self::exit_reasons`], oldest first. The map cannot
-    /// name its own oldest entry and the bound has to evict one; kept in
-    /// lockstep with the map's key set by the four helpers below.
-    exit_reason_order: VecDeque<TokenId>,
-    /// Entries dropped by the [`EXIT_REASON_TABLE_MAX`] bound, session-scoped
-    /// and surfaced in `engine.stats`: an eviction loses real exit attribution,
-    /// so it is counted rather than silent.
-    exit_reasons_evicted: u64,
-    /// Entries dropped because their token no longer has an open position — the
-    /// expected path (a close, a round rollover).
-    exit_reasons_swept: u64,
+    /// The pending-close exit-reason ledger — map, insertion order and the
+    /// eviction/sweep counters as one grouped state machine (issue #780).
+    /// The four helpers in `settlement_orders/closing.rs` are its only way
+    /// in or out.
+    exit_reason_ledger: ExitReasonLedger,
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
@@ -127,27 +113,10 @@ pub struct Core {
     position_db: Option<crate::position_db::PositionDb>,
     /// Feed/decision counters for observability (P4 diagnostics).
     stats: CoreStats,
-    /// 环境差异排查探针（任务二 1-3）：tick 断流 / spot 失效 / NTP 偏移的
-    /// 内核侧记账。只观测——日志 + 计数器，从不拦截数据或订单路径；所有
-    /// 时间判定吃调用方的 `now_ms`（回放里是虚拟时钟）。NTP 的网络查询
-    /// 不在这里：`probe::spawn_loop` 只由生产的 `server::run()` 启动，
-    /// 测量结果经 `note_ntp_offset` 灌回。
-    probe_ticks: crate::probe::TickHealth,
-    probe_spot: crate::probe::SpotWatch,
-    probe_ntp: crate::probe::NtpWatch,
-    /// 最近一次汇总的窗口 tick 数（stats 面直读 probe_ticks 会拿走窗口，
-    /// 汇总清零——所以汇总瞬间留档）。
-    probe_last_window_ticks: u64,
-    /// 最近一次汇总点名的零 tick token（已排序）。
-    probe_last_zero: Vec<String>,
-    /// 最近一次汇总的最长静默 ms。
-    probe_last_max_silence_ms: i64,
-    /// 最近一次汇总时 spot 的停更时长（None = 从未见 spot）。
-    probe_last_spot_stale_ms: Option<i64>,
-    /// 断流 warn 总次数与 spot 停更 warn 总次数（事件计数，独立于
-    /// probe_ticks.broken 的当前状态）。
-    stats_probe_stream_breaks: u64,
-    stats_probe_spot_stales: u64,
+    /// 环境差异排查探针（任务二 1-3）的全部内核侧记账，分组收拢（issue
+    /// #780）：三个 live watcher、最近一次汇总的快照与 warn 计数。只观测
+    /// ——日志 + 计数器，从不拦截数据或订单路径。
+    probe_health: ProbeHealth,
     /// #377 (治 #2): conditions the archive declared to carry an on-chain
     /// verdict (`RoundMarkets` markets flagged `archive_verdict`). The dry
     /// settlement ladder must not query these markets — the stream settles
@@ -372,7 +341,92 @@ pub struct Core {
     /// in `engine_evaluate`; set by the same path when a rule answers
     /// `PolicyOutput::Cooldown`.
     policy_cooldowns: HashMap<String, i64>,
-    /// Replay fast path (`backtest_fast`): tokens whose book changed in the
+    /// Replay fast path (`backtest_fast` / nofast replay scheduling) state,
+    /// grouped (issue #780): dirty-input wakes and the deadline stamps the
+    /// maintenance passes schedule against. Consumed and recomputed by the
+    /// engine cycle; nothing here is observable behaviour — the flags only
+    /// decide WHICH ticks do work.
+    fast_path: ReplayFastPath,
+    /// #531 pair-chase state: the chase this scope last offered for a naked
+    /// leg, keyed (account, strategy, naked_token) → (missing_token, at_ms).
+    /// The window reader (`run_pair_orphan_sweep`) is the only consumer — a
+    /// chase placed within its window buys the leg the benefit of the doubt
+    /// before the sweep's flatten fallback fires, and the record retires
+    /// when the fallback does. Process-local (an in-memory debounce, not a
+    /// durable fact): a restart simply re-judges from the book.
+    pair_chase_attempts: HashMap<(String, String, String), (String, i64)>,
+    /// B1c test seam: a staged (venue, duration) subscription set the
+    /// admission gate reads instead of the (still empty, pre-B1d) real one.
+    /// `None` outside tests and before staging — the gate then reads the
+    /// constant empty set and admits everything (today's behaviour).
+    #[cfg(test)]
+    test_duration_subscriptions: Option<HashSet<(String, i64)>>,
+    /// #774 test seam: a fill staged to land exactly between the escalation
+    /// sweep's size snapshot and its maker cancel. Consumed once by
+    /// `run_escalation_sweep`; `None` outside tests.
+    #[cfg(test)]
+    test_escalation_snapshot_fill: Option<Fill>,
+}
+
+/// The pending-close exit-reason ledger (issue #190), grouped as one state
+/// machine (issue #780): the map keyed by token, its insertion order, and the
+/// two counters the bound's clean-up paths feed. The co-occurrence survey of
+/// the Core fields put this family at the top: every method that touches one
+/// of these fields touches only the others — no method mixes them with any
+/// outside field — so the group is self-contained by construction.
+struct ExitReasonLedger {
+    /// Exit reason chosen for an in-flight closing SELL, keyed by token id, so a
+    /// full sell fill closes the position with the right reason.
+    ///
+    /// A PENDING-CLOSE ledger, not a history (issue #190): an entry exists only
+    /// while the token still has an open position, and the table can never
+    /// exceed [`EXIT_REASON_TABLE_MAX`]. A leaked entry would be inherited by
+    /// the NEXT position on the same token and mis-attribute its exit.
+    exit_reasons: HashMap<TokenId, ExitReason>,
+    /// Insertion order of [`Self::exit_reasons`], oldest first. The map cannot
+    /// name its own oldest entry and the bound has to evict one; kept in
+    /// lockstep with the map's key set by the four helpers in `closing.rs`.
+    exit_reason_order: VecDeque<TokenId>,
+    /// Entries dropped by the [`EXIT_REASON_TABLE_MAX`] bound, session-scoped
+    /// and surfaced in `engine.stats`: an eviction loses real exit attribution,
+    /// so it is counted rather than silent.
+    exit_reasons_evicted: u64,
+    /// Entries dropped because their token no longer has an open position — the
+    /// expected path (a close, a round rollover).
+    exit_reasons_swept: u64,
+}
+
+/// 环境差异排查探针（任务二 1-3）的内核侧记账（issue #780 分组）：三个
+/// live watcher、最近一次汇总的快照与 warn 事件计数。只观测——日志 +
+/// 计数器，从不拦截数据或订单路径；所有时间判定吃调用方的 `now_ms`
+/// （回放里是虚拟时钟）。NTP 的网络查询不在这里：`probe::spawn_loop`
+/// 只由生产的 `server::run()` 启动，测量结果经 `note_ntp_offset` 灌回。
+struct ProbeHealth {
+    probe_ticks: crate::probe::TickHealth,
+    probe_spot: crate::probe::SpotWatch,
+    probe_ntp: crate::probe::NtpWatch,
+    /// 最近一次汇总的窗口 tick 数（stats 面直读 probe_ticks 会拿走窗口，
+    /// 汇总清零——所以汇总瞬间留档）。
+    probe_last_window_ticks: u64,
+    /// 最近一次汇总点名的零 tick token（已排序）。
+    probe_last_zero: Vec<String>,
+    /// 最近一次汇总的最长静默 ms。
+    probe_last_max_silence_ms: i64,
+    /// 最近一次汇总时 spot 的停更时长（None = 从未见 spot）。
+    probe_last_spot_stale_ms: Option<i64>,
+    /// 断流 warn 总次数与 spot 停更 warn 总次数（事件计数，独立于
+    /// probe_ticks.broken 的当前状态）。
+    stats_probe_stream_breaks: u64,
+    stats_probe_spot_stales: u64,
+}
+
+/// Replay fast path (`backtest_fast`) state, grouped (issue #780): the dirty
+/// input sets and wake flags the engine cycle consumes, plus the deadline
+/// stamps (`*_ms`) every maintenance pass recomputes and schedules against.
+/// Consumed (cleared / recomputed) by each pass; a quiet tick skips the work
+/// until a deadline passes.
+struct ReplayFastPath {
+    /// Replay fast path: tokens whose book changed in the
     /// latest `engine_on_data` or fill application — the only positions whose
     /// marks can move on the next maintenance tick, and the only cycles a
     /// Lua evaluation can change its output on (entry eligibility demands a
@@ -418,25 +472,6 @@ pub struct Core {
     /// this flag covers already rides its own deadline in `tick`.
     /// `i64::MAX` = nothing scheduled.
     fast_next_exit_deadline_ms: i64,
-    /// #531 pair-chase state: the chase this scope last offered for a naked
-    /// leg, keyed (account, strategy, naked_token) → (missing_token, at_ms).
-    /// The window reader (`run_pair_orphan_sweep`) is the only consumer — a
-    /// chase placed within its window buys the leg the benefit of the doubt
-    /// before the sweep's flatten fallback fires, and the record retires
-    /// when the fallback does. Process-local (an in-memory debounce, not a
-    /// durable fact): a restart simply re-judges from the book.
-    pair_chase_attempts: HashMap<(String, String, String), (String, i64)>,
-    /// B1c test seam: a staged (venue, duration) subscription set the
-    /// admission gate reads instead of the (still empty, pre-B1d) real one.
-    /// `None` outside tests and before staging — the gate then reads the
-    /// constant empty set and admits everything (today's behaviour).
-    #[cfg(test)]
-    test_duration_subscriptions: Option<HashSet<(String, i64)>>,
-    /// #774 test seam: a fill staged to land exactly between the escalation
-    /// sweep's size snapshot and its maker cancel. Consumed once by
-    /// `run_escalation_sweep`; `None` outside tests.
-    #[cfg(test)]
-    test_escalation_snapshot_fill: Option<Fill>,
 }
 
 /// F4: what a fill-driven full close changed, so a later FAILED status for the
@@ -623,16 +658,18 @@ impl Core {
                 *best = t;
             }
         };
-        consider(self.fast_next_timing_ms, &mut best);
+        consider(self.fast_path.fast_next_timing_ms, &mut best);
         // The eval fallback fires at the first grid tick at or after
         // last_eval + window — the exact tick the every-tick walk used.
         consider(
-            self.fast_last_eval_ms.saturating_add(FAST_EVAL_FALLBACK_MS),
+            self.fast_path
+                .fast_last_eval_ms
+                .saturating_add(FAST_EVAL_FALLBACK_MS),
             &mut best,
         );
-        consider(self.fast_next_exit_deadline_ms, &mut best);
-        consider(self.fast_next_escalation_ms, &mut best);
-        consider(self.fast_next_expiry_ms, &mut best);
+        consider(self.fast_path.fast_next_exit_deadline_ms, &mut best);
+        consider(self.fast_path.fast_next_escalation_ms, &mut best);
+        consider(self.fast_path.fast_next_expiry_ms, &mut best);
         consider(self.settlement.next_query_deadline_ms(), &mut best);
         consider(self.settlement.next_redemption_ms(), &mut best);
         for cd in self.place_cooldowns.values() {
@@ -692,7 +729,9 @@ impl Core {
     /// jumping driver forces that landing; skipping it could move a stamp
     /// or a verdict the every-tick walk produced.
     pub fn has_forced_next_tick(&self) -> bool {
-        !self.strategy_exits.is_empty() || self.fast_orders_dirty || self.fast_positions_dirty
+        !self.strategy_exits.is_empty()
+            || self.fast_path.fast_orders_dirty
+            || self.fast_path.fast_positions_dirty
     }
 
     /// Issue #390 (replay nofast): true when the standing-candidate cache

@@ -69,7 +69,7 @@ impl Core {
             // Replay fast path: a live order just left the book — the
             // escalation sweep and the audit input changed.
             if self.replay_sched() {
-                self.fast_orders_dirty = true;
+                self.fast_path.fast_orders_dirty = true;
             }
         }
         tracing::debug!(
@@ -341,8 +341,8 @@ impl Core {
         // A pending merge claim joins the deadlines: its dispatch clock must
         // keep ticking even when nothing else in the pass moves.
         let settlement_pass = !self.replay_sched()
-            || self.fast_positions_dirty
-            || now_ms >= self.fast_next_expiry_ms
+            || self.fast_path.fast_positions_dirty
+            || now_ms >= self.fast_path.fast_next_expiry_ms
             || now_ms >= self.settlement.next_query_deadline_ms()
             || now_ms >= self.settlement.next_redemption_ms()
             || now_ms >= self.settlement.next_merge_ms();
@@ -392,7 +392,7 @@ impl Core {
             self.probe_run_summary(now_ms);
         } else {
             // 非汇总 tick：汇总读过的窗口自此重新计数。
-            self.probe_ticks.clear_window_if_consumed();
+            self.probe_health.probe_ticks.clear_window_if_consumed();
         }
 
         // Persist finalized near-miss records (blocked signals + their paths).
@@ -427,7 +427,7 @@ impl Core {
         // construction, so nothing is lost. #390 (nofast): the same set wakes
         // the deadline-scheduled ladder, so it is cleared here on the nofast
         // path too — after `run_exit_checks` had its look.
-        self.fast_dirty_tokens.clear();
+        self.fast_path.fast_dirty_tokens.clear();
         if self.replay_sched() && !self.config.backtest_fast {
             // #390 (merged maintenance): re-arm the single maintenance
             // deadline — the merged pass's own 1 s beat (report stamps are
@@ -435,7 +435,7 @@ impl Core {
             // (time-to-expiry rules). Between these, a quiet grid re-observes
             // the previous run's inputs; dirty tokens wake the pass early on
             // their own.
-            self.fast_next_exit_deadline_ms = self
+            self.fast_path.fast_next_exit_deadline_ms = self
                 .positions
                 .next_maintenance_deadline_ms(now_ms, EXIT_REPORT_BEAT_MS)
                 .unwrap_or(i64::MAX);
@@ -460,12 +460,14 @@ impl Core {
         // deadline has arrived — between those, no `escalate_at_ms` can be
         // due (arming never moves a deadline earlier than the sweep that
         // would notice it recomputes the floor).
-        if !self.replay_sched() || self.fast_orders_dirty || now_ms >= self.fast_next_escalation_ms
+        if !self.replay_sched()
+            || self.fast_path.fast_orders_dirty
+            || now_ms >= self.fast_path.fast_next_escalation_ms
         {
             self.run_escalation_sweep(now_ms)?;
             if self.replay_sched() {
-                self.fast_orders_dirty = false;
-                self.fast_next_escalation_ms = self.ome.next_escalation_ms();
+                self.fast_path.fast_orders_dirty = false;
+                self.fast_path.fast_next_escalation_ms = self.ome.next_escalation_ms();
             }
         }
         Ok(())
@@ -805,8 +807,8 @@ impl Core {
         // interval backfill inside the ladder.
         if !self.config.backtest_fast {
             let marks_all = !self.config.replay_scheduling
-                || !self.fast_dirty_tokens.is_empty()
-                || now_ms >= self.fast_next_exit_deadline_ms;
+                || !self.fast_path.fast_dirty_tokens.is_empty()
+                || now_ms >= self.fast_path.fast_next_exit_deadline_ms;
             // Issue #390: the scalar projection (BookView) instead of the
             // full snapshot — the marks refresh reads best_bid/mid_price/
             // timestamp only, so the two owned level-vector clones and the
@@ -821,8 +823,12 @@ impl Core {
                     .get(token)
                     .map(|b| crate::exit_policy::BookView::from_book(b, b.received_ms))
             };
-            self.positions
-                .refresh_marks(&book_fn, now_ms, marks_all, &self.fast_dirty_tokens);
+            self.positions.refresh_marks(
+                &book_fn,
+                now_ms,
+                marks_all,
+                &self.fast_path.fast_dirty_tokens,
+            );
         }
         let (merge_intents, sell_intents): (Vec<_>, Vec<_>) =
             intents.into_iter().partition(|i| i.reason == "merge");
@@ -920,8 +926,11 @@ impl Core {
                 .map(|b| crate::exit_policy::BookView::from_book(b, b.received_ms))
         };
         if all_hold {
-            self.positions
-                .valuate_dirty_tokens(&book_fn, now_ms, &self.fast_dirty_tokens);
+            self.positions.valuate_dirty_tokens(
+                &book_fn,
+                now_ms,
+                &self.fast_path.fast_dirty_tokens,
+            );
         } else if !self.config.replay_scheduling || self.config.backtest_fast {
             // Legacy spelling (live kernels and plain --backtest-fast without
             // all-hold): the base's every-tick valuate, unchanged.
@@ -1013,7 +1022,8 @@ impl Core {
                 (true, false)
             } else if self.config.replay_scheduling {
                 (
-                    !self.fast_dirty_tokens.is_empty() || now_ms >= self.fast_next_exit_deadline_ms,
+                    !self.fast_path.fast_dirty_tokens.is_empty()
+                        || now_ms >= self.fast_path.fast_next_exit_deadline_ms,
                     true,
                 )
             } else {
@@ -1025,7 +1035,7 @@ impl Core {
                 ladder_run,
                 interval_mode,
                 self.config.tick_schedule_ms,
-                &self.fast_dirty_tokens,
+                &self.fast_path.fast_dirty_tokens,
             ) {
                 let Some(pos) = self
                     .positions
@@ -1138,7 +1148,7 @@ impl Core {
         let residual_scan = if self.config.backtest_fast {
             true
         } else if self.config.replay_scheduling {
-            self.fast_orders_dirty || now_ms >= self.fast_next_exit_deadline_ms
+            self.fast_path.fast_orders_dirty || now_ms >= self.fast_path.fast_next_exit_deadline_ms
         } else {
             true
         };
