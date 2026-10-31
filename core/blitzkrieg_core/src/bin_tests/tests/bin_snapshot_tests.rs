@@ -393,7 +393,7 @@ fill_prob_bps=None\n\
 maker_depth_share_bps=None\n\
 dry_redeem_fail=0\n\
 dry_redeem_manual=false\n\
-shadow_evolution_echo[0]=shadow evolution: evaluator OFF at startup (default); the persisted runtime switch in state.json wins over it, and any disagreement is reported below\n";
+shadow_evolution_echo[0]=shadow evolution: evaluator OFF at startup (default); the switches live in the `.env` single source (issue 751) and a legacy state.json switch key is read past, never honored\n";
     let got = snapshot(&a);
     // Diff line-by-line so a failure NAMES the drifted field instead of
     // dumping 120 lines at the reader.

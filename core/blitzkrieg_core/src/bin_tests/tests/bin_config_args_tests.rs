@@ -761,6 +761,56 @@ fn the_env_layer_alone_can_supply_a_value() {
     assert_eq!(a.se_cooldown_secs, Some(45));
 }
 
+/// The factory-revival pin (issue 751). The migration writes the two
+/// evolution switches into `.env` as `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`
+/// and retires `shadow_evolution.toml` — but the boot still reads that file
+/// as the compat fallback, so an old checkout (or a restored backup) can
+/// carry a toml that arms the evaluator. The `.env` single source must
+/// out-talk it in BOTH directions: a file saying ON under an env saying OFF
+/// boots OFF (no silent revival), and the report names the env tier.
+#[test]
+fn the_shadow_switches_answer_to_the_env_over_the_legacy_file() {
+    // The legacy file arms everything; `.env` (as read by the launcher into
+    // the env layer) says both switches stay off.
+    let file = file_with("[shadow_evolution]\nenabled = true\nauto_evolve = true\n");
+    let env = env_of(&[("SHADOW_ENABLED", "false"), ("SHADOW_AUTO_EVOLVE", "false")]);
+    let a = parse_args(&file, &[], &env);
+    assert!(
+        !a.shadow_evolution,
+        "SHADOW_ENABLED=false outranks the legacy file's enabled=true"
+    );
+    assert_eq!(
+        a.se_auto_evolve,
+        Some(false),
+        "SHADOW_AUTO_EVOLVE=false outranks the legacy file's auto_evolve=true"
+    );
+    for line in [
+        "shadow_evolution.enabled=false (env)",
+        "shadow_evolution.auto_evolve=false (env)",
+    ] {
+        assert!(
+            a.config_report.iter().any(|l| l == line),
+            "{line} missing from {:?}",
+            a.config_report
+        );
+    }
+
+    // And the other direction: `.env` arming under a file that says OFF
+    // still boots ON (the file never vetoes the single source).
+    let file = file_with("[shadow_evolution]\nenabled = false\n");
+    let env = env_of(&[("SHADOW_ENABLED", "true")]);
+    let a = parse_args(&file, &[], &env);
+    assert!(
+        a.shadow_evolution,
+        "the env ON is not undone by the file's OFF"
+    );
+    assert!(
+        a.config_report
+            .iter()
+            .any(|l| l == "shadow_evolution.enabled=true (env)")
+    );
+}
+
 #[test]
 fn bk_config_none_turns_the_file_off() {
     let env = env_of(&[("BK_CONFIG", "none")]);

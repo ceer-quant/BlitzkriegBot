@@ -881,11 +881,12 @@ pub struct EvolutionStatusView {
     /// UI cannot print "72 hours" over a different setting.
     #[serde(default)]
     pub cycle_secs: i64,
-    // The switches live in the config FILE (`shadow_evolution.toml`), which the
-    // runtime verbs write back into — no `switchConflicts` field here, because
-    // a file/runtime disagreement cannot exist. The kernel still sends an
-    // always-empty `switchConflicts` list on the wire for an older WebUI; serde
-    // ignores the key it no longer knows.
+    // The switches live in the `.env` single source (`SHADOW_ENABLED` /
+    // `SHADOW_AUTO_EVOLVE`, issue 751), which the runtime verbs upsert —
+    // no `switchConflicts` field here, because a config/runtime disagreement
+    // cannot exist. The kernel still sends an always-empty `switchConflicts`
+    // list on the wire for an older WebUI; serde ignores the key it no longer
+    // knows.
 }
 
 // ── core.event notifications (kind-tagged) ───────────────────────────────────

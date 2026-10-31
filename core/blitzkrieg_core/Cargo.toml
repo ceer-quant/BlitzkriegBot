@@ -65,11 +65,6 @@ serde_json = "1"
 # config source, resolved as CLI > env > TOML > default. The 1.x line's parser and
 # datetime deps are already in the lock file, so this adds no new transitive tree.
 toml = "1"
-# The switch write-back (`shadow_evolution/file.rs`): edits ONE key in
-# shadow_evolution.toml while keeping the operator's comments and layout —
-# a full re-render would destroy a header this long. Already in the lock
-# file (proc-macro-crate pulls it), so no new transitive tree here either.
-toml_edit = "0.25"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

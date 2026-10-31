@@ -12,13 +12,14 @@
 #     command-line flag  >  BK_* environment variable  >  this file  >
 #     built-in default
 #
-# The TWO SWITCHES (`enabled` and `auto_evolve`) answer to THIS FILE and to
-# nothing else: it is their single source of truth. A WebUI/TUI flip is written
-# BACK into this file (with the operator's comments preserved), so a restart
-# reads the flip back from here and a deploy that edits the file and an
-# operator's click can never disagree — the "runtime switch (state.json) wins"
-# second source of truth (and the conflict banner it forced onto the panel) is
-# gone. `state.json` keeps only the deep-round bookkeeping; a legacy file that
+# The TWO SWITCHES (`enabled` and `auto_evolve`) live in the `.env` single
+# source now (issue 751): `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`, and a
+# WebUI/TUI flip upserts those keys into `.env`. This file is the LEGACY
+# fallback: the boot still honors it when the env keys are absent (the read
+# order is CLI > env > this file > built-in default), and
+# `scripts/migrate-config-to-env.sh` retires it (moves it to
+# `data/config-backup-<ts>/`) once the two keys have landed in `.env`.
+# `state.json` keeps only the deep-round bookkeeping; a legacy file that
 # still carries `enabled`/`autoEvolve` keys is read past and ignored, never
 # honored.
 # Note the units: the two windows below are written in MINUTES here, while the
@@ -72,8 +73,8 @@
 # backlog as `auto`, through the same guards and the same promotion log a
 # hand-clicked acceptance writes.
 #
-# BOTH switches live HERE now (the file is their single source of truth): a
-# panel/TUI flip is written back into this file, so editing it IS how the
+# BOTH switches live in `.env` now (issue 751): a panel/TUI flip upserts
+# `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE` there, so editing `.env` IS how the
 # switches change across a restart. A legacy `data/evolution/state.json` that
 # still carries `enabled`/`autoEvolve` keys from an older kernel is read past
 # and ignored — one INFO line says so at boot.
@@ -93,12 +94,13 @@
 #   2. There is no trustworthy WR/PF baseline for the evolution targets yet
 #      (#262). Measurement that can drift while nobody watches is not
 #      measurement.
-# Turning it on is a deliberate act: flip it in the panel (which writes back
-# into this file), pass `--shadow-evolution`, or set the two switches below —
+# Turning it on is a deliberate act: flip it in the panel (which upserts
+# SHADOW_ENABLED / SHADOW_AUTO_EVOLVE into `.env`), pass `--shadow-evolution`,
+# or set the two switches below —
 # then re-evaluate this default once P0 and #262 have landed.
 
 [shadow_evolution]
-enabled = false                      # evaluator OFF out of the box (#269); the panel flip writes here
+enabled = false                      # evaluator OFF out of the box (#269); the panel flip lands in .env
 evaluation_window_minutes = 30       # rolling metrics window
 min_sample_count = 30                # >=30 virtual trades before judging
 min_win_rate_improvement = 0.05      # variant WR must beat live by +5pp

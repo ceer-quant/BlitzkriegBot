@@ -262,15 +262,6 @@ pub struct CoreConfig {
     pub shadow_evolution_enabled: bool,
     /// Optional Shadow Evolution tuning (tests/ops). None = crate defaults.
     pub shadow_evolution_tuning: Option<ShadowEvolutionTuning>,
-    /// The shadow-evolution CONFIG FILE the switch verbs write back into
-    /// (`user_layer/configs/shadow_evolution.toml` in production). The file is
-    /// the single source of truth for `enabled` / `auto_evolve`: a runtime
-    /// flip persists here and the next boot reads it back, so the panel's
-    /// file/runtime conflict state cannot exist. `None` disables the write
-    /// path — the backtester and most in-process tests run with `None`, and a
-    /// switch flip then stays runtime-only (the same posture as
-    /// `runtime_config_path` / `accounts_config_path`).
-    pub shadow_config_path: Option<String>,
     /// Optional per-strategy entry caps, keyed by strategy name (P-1.1). An
     /// absent entry means unlimited — a strategy keeps its current behaviour
     /// unless an operator configures a cap.
@@ -1012,7 +1003,6 @@ impl Default for CoreConfig {
             update_interval_secs: 0,
             shadow_evolution_enabled: false,
             shadow_evolution_tuning: None,
-            shadow_config_path: None,
             strategy_limits: HashMap::new(),
             virtual_limits: HashMap::new(),
             entry_maker_timeout_ms: 5000,

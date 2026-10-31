@@ -293,9 +293,10 @@ impl Core {
         // runtime config mutation cannot move a quota mid-session).
         let virtual_accounts =
             crate::risk::virtual_account::VirtualAccounts::new(&config.virtual_limits);
-        // The shadow manager reads the write-back path off the config before
-        // the config moves into the struct (same ordering concern as above).
-        let shadow_config_path = config.shadow_config_path.clone();
+        // The shadow manager reads the switch write-back path off the config
+        // before the config moves into the struct (same ordering concern as
+        // above). Issue 751: the flips land in `.env`, not the retired
+        // `shadow_evolution.toml`.
         let shadow_env_path = config.env_file_path.clone();
         Self {
             risk: RiskGate::new(config.risk.clone()),
@@ -352,12 +353,7 @@ impl Core {
                 reg.install(Box::new(ext), cfg.path);
                 reg
             },
-            shadow_evolution: ShadowEvolution::new_with_config_path(
-                shadow_cfg,
-                &[],
-                shadow_config_path,
-                shadow_env_path,
-            ),
+            shadow_evolution: ShadowEvolution::new_with_env_path(shadow_cfg, &[], shadow_env_path),
             trade_db,
             order_db,
             position_db,

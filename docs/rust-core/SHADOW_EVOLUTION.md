@@ -2,8 +2,9 @@
 
 > 模块：`core/blitzkrieg_core/src/shadow_evolution/`
 > 默认状态：**出厂文件里是关闭的**（`enabled = false` + `auto_evolve = false`，见 §5，
-> 原因见「出厂即关」一段）；两个开关以 `shadow_evolution.toml` 文件为**唯一可信源**，
-> 面板/`evolve on|off` 的翻转写回该文件，随时可开可关，关掉即完全惰性
+> 原因见「出厂即关」一段）；两个开关以 `.env` 的 `SHADOW_ENABLED` /
+> `SHADOW_AUTO_EVOLVE` 为**唯一可信源**（issue 751），面板/`evolve on|off` 的翻转
+> 写回 `.env`，随时可开可关，关掉即完全惰性
 > 一句话：**让每个策略各自在实盘运行中，通过影子孪生的反事实推演发现更优参数，
 > 并毫秒级无停机热切到新参数；彼此互不串扰。**
 
@@ -100,19 +101,22 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 **CLI > `BK_*` env > 本文件 > 代码默认**，启动时会打印每个非默认值的来源。
 文件里的窗口/观察/冷却用**分钟**，内核内部用秒，换算在加载处做一次。
 
-**两个开关，两个问题（#249）**，它们的**唯一可信源是本文件**
-（`shadow_evolution.toml`）：
+**两个开关，两个问题（#249）**，它们的**唯一可信源是 `.env`**
+（`SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`，issue 751；本 toml 文件是
+env 键缺席时的兼容回退，迁移脚本 `scripts/migrate-config-to-env.sh`
+把两键落进 `.env` 后将它退役进 `data/config-backup-<ts>/`）：
 
 | 开关 | 问题 | 关掉它 | 打开它 |
 |:---|:---|:---|:---|
 | `enabled` | 评估器**在跑吗**？（有孪生、会排深度轮、能产提案） | 不评估、不采纳、不排深度轮——待决队列原地冻结（TTL 仍会到期） | 影子变异体开始评估 |
 | `auto_evolve` | 够格的变异**谁落盘**？ | 挂成提案等人拍板 | 内核自行采纳，并把此前积压的待决队列一并结清 |
 
-规则只有一句：**文件说了算。** 面板/命令动词（`evolve on`、`auto-evolve on|off`）
-把翻转**写回本文件**（`toml_edit` 保留注释与排版，与 `account.venue.set`、
-`round_duration.set` 的落盘模式同形），重启从文件读回——所以改文件与面板翻开关
-从此**不可能**不一致，历史上的第二种可信源（`state.json` 里的开关位）及其
-「配置文件与运行期开关不一致」横幅、「拨回文件值」按钮一并废除。
+规则只有一句：**`.env` 说了算。** 面板/命令动词（`evolve on`、`auto-evolve on|off`）
+把翻转 upsert 进 `.env`（`env_file::upsert`，原子写 + 0600 + 逐字节保留无关行，
+与 `market.credentials.set` 同一原语），重启从 `.env` 读回——所以改 `.env` 与
+面板翻开关从此**不可能**不一致，历史上的第二种可信源（`state.json` 里的开关位）及其
+「配置文件与运行期开关不一致」横幅、「拨回文件值」按钮一并废除；
+`shadow_evolution/file.rs` 的 toml 写回模块随 issue 751 撤除。
 `state.json` 只保留深度轮簿记（`lastCycleMs` / `cycleSeq`）；旧内核写的
 `enabled` / `autoEvolve` 键读到时**忽略**（启动日志一行 INFO 说明），不再有裁决权，
 也不报错、不删除用户盘上的旧文件。
@@ -125,12 +129,13 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 变体与实盘走的是**同一条**退出阶梯，于是「少交易、躲开坏的盈利端退出」这种变体
 会被判成进步并被无人值守地采纳；其二，进化目标的 WR/PF 基线尚不可信（同 #262）。
 作为可追溯性的最小补丁，每条 promotions 记录现在带 `caliber` 字段（退出阶梯的
-`exit-fnv1a64:` 指纹）。要打开它是**主动动作**：面板开关（写回本文件）、
+`exit-fnv1a64:` 指纹）。要打开它是**主动动作**：面板开关（写回 `.env` 的
+`SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`，issue 751）、
 `--shadow-evolution`，或改下面两行；等 P0 与 #262 落地后应重新评估这个出厂值。
 
 ```toml
 [shadow_evolution]
-enabled = false                       # 评估器是否在跑（面板翻转写回本行；本行就是裁决）
+enabled = false                       # 评估器是否在跑（面板翻转落 .env；env 缺席时本行是兼容回退）
 evaluation_window_minutes = 30
 min_sample_count = 30
 min_win_rate_improvement = 0.05
@@ -189,8 +194,9 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 
 影子评估器发现更优变异后不再直接改参数，而是先产出一个 **EvolutionProposal**
 （含基线/变异两侧的六指标对比、理由、置信度、样本数、7 天 TTL）。谁拍板由
-`auto_evolve` 决定；两个开关（`enabled` / `auto_evolve`）以配置文件
-`shadow_evolution.toml` 为唯一可信源，运行时翻转写回该文件，**重启不丢**（见 §5）。
+`auto_evolve` 决定；两个开关（`enabled` / `auto_evolve`）以 `.env` 的
+`SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE` 为唯一可信源，运行时翻转写回 `.env`，
+**重启不丢**（见 §5）。
 
 - **人工模式（`auto_evolve = false`）**：提案挂到待决区（每策略最多一个在挂——同参数重复提案是
   no-op，目标不同则旧提案标记 superseded）。三端 UI（webui「进化」页 / TUI
@@ -226,8 +232,8 @@ IPC 增量：
 |:---|:---|:---|
 | `shadow_evolution.proposals` | `{ limit? }` | 提案列表（待决在前） |
 | `shadow_evolution.decide` | `{ id, decision }` | accept / reject / defer（accept 重跑全部锁） |
-| `shadow_evolution.set_auto` | `{ enabled }` | 自动/人工开关（写回配置文件，重启保留） |
-| `shadow_evolution.enable` / `.disable` | `{}` | 引擎总闸（同样写回配置文件，重启保留；关闭时不评估也不采纳） |
+| `shadow_evolution.set_auto` | `{ enabled }` | 自动/人工开关（写回 `.env`，重启保留） |
+| `shadow_evolution.enable` / `.disable` | `{}` | 引擎总闸（同样写回 `.env`，重启保留；关闭时不评估也不采纳） |
 
 `status` 增量键：`autoEvolve`、`enabled`、`lastCycleMs`、`nextCycleAtMs`、
 `cycleSeq`、`cycleSecs`、`pendingProposals`。（`enabled` 与
@@ -330,9 +336,10 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
    写的 `{"autoEvolve":true,...}`（没有 `enabled` 键）。这正是「自动模式却没有自动」
    的现场：开关记着、什么都没跑、还挂着 1 张 7 天后过期的待决提案。**现已按 #269
    把出厂值改为 `enabled = false` + `auto_evolve = false`**；其后「文件为唯一可信源」
-   的裁决（本 PR）进一步废除了 state.json 的开关位——生产那份
+   的裁决（本 PR）废除了 state.json 的开关位——生产那份
    `{"autoEvolve":true,"enabled":true,...}` 的 state.json 从此对开关无发言权
-   （读到即忽略 + 一行 INFO），引擎是否运行完全由 `shadow_evolution.toml` 说了算。
+   （读到即忽略 + 一行 INFO）；issue 751 再把开关落进 `.env`（引擎是否运行由
+   `SHADOW_ENABLED` 说了算，`shadow_evolution.toml` 只是 env 缺席时的兼容回退）。
 
 ## 11. 设计哲学
 
