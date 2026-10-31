@@ -40,13 +40,27 @@
  *       2 environment error (a source file unreadable)
  */
 
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SCHEMA = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'ipc', 'schema.rs');
+const SCHEMA = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'ipc', 'schema');
 const DOC = join(ROOT, 'docs', 'rust-core', 'INTERFACES.md');
+
+// #780 split the schema into a module directory. Read every part and search the
+// concatenation: the gate cares about the `pub mod method` block, not the path,
+// so it must survive the module being re-arranged again.
+function schemaSource() {
+  if (existsSync(SCHEMA)) {
+    return readdirSync(SCHEMA)
+      .filter((f) => f.endsWith('.rs'))
+      .sort()
+      .map((f) => readFileSync(join(SCHEMA, f), 'utf8'))
+      .join('\n');
+  }
+  return readFileSync(`${SCHEMA}.rs`, 'utf8');
+}
 
 const TEETH = process.argv.includes('--teeth');
 
@@ -162,7 +176,7 @@ function fail(env, message) {
 }
 
 try {
-  const schemaSrc = readFileSync(SCHEMA, 'utf8');
+  const schemaSrc = schemaSource();
   const docSrc = readFileSync(DOC, 'utf8');
 
   if (TEETH) {
