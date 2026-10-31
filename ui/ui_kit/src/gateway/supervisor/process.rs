@@ -1,37 +1,17 @@
-//! Core process supervisor — the Rust replacement for the lifecycle half of the
-//! deleted Node client (`BlitzkriegCoreClient`, gone with the source layer in
-//! 62b16c88).
-//!
-//! It does exactly three things: spawn `blitzkrieg-core` with parameters,
-//! stop it, or **adopt** a core that is already serving the socket. It holds no
-//! trading logic — every decision stays inside the Rust core. This is what let
-//! the Node shell be removed (D-4, step ②) without losing the `/crypto-hft
-//! start|stop` control channel; the shell itself is now gone too.
-//!
-//! Safety rules carried over from that Node client:
-//!   * **Adopt, never double-spawn.** If the socket is already served we connect
-//!     to that core instead of spawning a second one (which would abort with
-//!     "already listening"). An adopted core is *not ours* — `stop()` will not
-//!     kill it.
-//!   * `stop()` only signals a process we spawned.
-//!   * On drop, a spawned (owned) core is stopped so the gateway never leaks an
-//!     unmanaged core. An adopted one is left running.
-//!
-//! Zero extra dependencies: SIGTERM is sent by invoking the system `kill(1)`
-//! (present at `/bin/kill` on macOS and Linux). If that is unavailable we fall
-//! back to the std `Child::kill` (SIGKILL). The core's order/position
-//! persistence is per-state-change (verified crash-safe under SIGKILL in
-//! `scripts/order-recovery-check.mjs` / `position-recovery-check.mjs`), so
-//! either signal is safe.
+//! The child-process lifecycle: spawn (or adopt), observe, stop, and the config that shapes the command line.
+
+use super::*;
 
 use crate::socket_served;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::alert::emit_give_up;
 
 /// How long to wait for the core to bind its socket after spawn.
 const STARTUP_DEADLINE: Duration = Duration::from_secs(15);
@@ -46,66 +26,6 @@ const STDERR_TAIL_LINES: usize = 40;
 /// Upper bound on one retained stderr line, so a core streaming without newlines
 /// cannot grow the ring without bound.
 const STDERR_TAIL_LINE_BYTES: usize = 4_000;
-/// Opt-in: `<prefix>_ALERT_NOTIFY=1` also pushes the give-up alert to the
-/// desktop notifier (`osascript` / `notify-send`). Off by default — a supervisor
-/// should not pop windows on a machine that never asked for them — but a
-/// keep-alive wrapper on an unattended box wants exactly this.
-const ENV_ALERT_NOTIFY: &str = "BLITZKRIEG_ALERT_NOTIFY";
-
-/// Whether an owned core's exit was asked for.
-///
-/// The distinction is the whole point of E12(c): a UI that cannot tell "the
-/// operator stopped it" from "it died" will either cry wolf on every clean stop
-/// or stay silent through a crash. Classifying by *intent* rather than by exit
-/// code is deliberate — a core that exits 0 because it lost a write still died
-/// unexpectedly, and a core we SIGKILL after a refused SIGTERM must not be
-/// reported as a crash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitKind {
-    /// We called `stop()`; the process ended as instructed.
-    Clean,
-    /// It ended while some part of the system still expected it to be running.
-    Crashed,
-}
-
-/// Why an owned core is no longer running.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExitReport {
-    pub pid: u32,
-    pub kind: ExitKind,
-    /// Shell-style exit code, when it exited normally.
-    pub code: Option<i32>,
-    /// Terminating signal, when it was killed.
-    pub signal: Option<i32>,
-}
-
-impl ExitReport {
-    fn classify(pid: u32, status: ExitStatus, stopping: bool) -> Self {
-        Self {
-            pid,
-            kind: if stopping {
-                ExitKind::Clean
-            } else {
-                ExitKind::Crashed
-            },
-            code: status.code(),
-            signal: status.signal(),
-        }
-    }
-
-    /// One line an operator or a panel can show without interpreting fields.
-    pub fn describe(&self) -> String {
-        let how = match (self.code, self.signal) {
-            (Some(c), _) => format!("exit code {c}"),
-            (None, Some(s)) => format!("killed by signal {s}"),
-            (None, None) => "ended without a status".to_string(),
-        };
-        match self.kind {
-            ExitKind::Clean => format!("core pid {} stopped ({how})", self.pid),
-            ExitKind::Crashed => format!("core pid {} CRASHED ({how})", self.pid),
-        }
-    }
-}
 
 /// Bounded ring of the child's most recent stderr lines, shared with the reader
 /// thread that drains the pipe.
@@ -133,196 +53,6 @@ impl StderrTail {
             .cloned()
             .collect()
     }
-}
-
-/// The supervisor has stopped trying to keep the core up.
-///
-/// This exists because the alternative was silent: the restart budget ran out,
-/// `restart_given_up` flipped to `true` in a status struct, and an unattended
-/// deployment sat with a dead kernel and no notification anywhere. The alert is
-/// produced exactly once per give-up, carries the last exit AND the tail of the
-/// core's own stderr (the only place the reason for the crash is written), and is
-/// delivered on three channels: our stderr banner, [`AlertSink`] (whatever the
-/// embedding gateway already uses for alerts), and [`CoreHealth::alert`] — which
-/// is what the panel renders as "已放弃重启".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GiveUpAlert {
-    /// Replacement attempts made before giving up.
-    pub attempts: u32,
-    /// Why the last owned core stopped.
-    pub last_exit: Option<ExitReport>,
-    /// Unix milliseconds, so a panel can show when this happened.
-    pub at_ms: i64,
-    /// Last lines the core wrote to stderr before it died.
-    pub stderr_tail: Vec<String>,
-    /// Operator-readable one-liner.
-    pub message: String,
-}
-
-impl GiveUpAlert {
-    /// The multi-line banner written to the gateway's own stderr (and thus the
-    /// run log). Loud on purpose: this is the log line an operator greps for
-    /// after finding a dead core.
-    pub fn banner(&self) -> String {
-        let mut out = format!(
-            "\n=== BLITZKRIEG ALERT: core NOT running — supervisor gave up ===\n\
-             {}\n\
-             attempts={} last_exit={}\n",
-            self.message,
-            self.attempts,
-            self.last_exit
-                .as_ref()
-                .map(ExitReport::describe)
-                .unwrap_or_else(|| "no recorded exit".to_string()),
-        );
-        if self.stderr_tail.is_empty() {
-            out.push_str("the core wrote nothing to stderr before it died\n");
-        } else {
-            out.push_str("last stderr from the core:\n");
-            for line in &self.stderr_tail {
-                out.push_str("  | ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        out.push_str(
-            "the kernel is DOWN and will not be restarted; trading is stopped until it is \
-             started again\n===\n",
-        );
-        out
-    }
-}
-
-/// Extra delivery channel for a give-up alert.
-///
-/// The supervisor is deliberately transport-free — it does not know about the
-/// panel, the event bus or a webhook — so a gateway that already has an alert
-/// channel installs one sink and every give-up reaches it. Implementations must
-/// not block: this is called from the UI's refresh tick.
-pub trait AlertSink: Send + Sync {
-    fn give_up(&self, alert: &GiveUpAlert);
-}
-
-/// The always-on channels: a loud stderr banner, plus the desktop notifier when
-/// the operator opted in with `<prefix>_ALERT_NOTIFY=1`.
-fn emit_give_up(alert: &GiveUpAlert) {
-    eprint!("{}", alert.banner());
-    if std::env::var(ENV_ALERT_NOTIFY)
-        .map(|v| v != "false")
-        .unwrap_or(false)
-    {
-        desktop_notify(alert);
-    }
-}
-
-/// Best-effort OS notification. Fire-and-forget on a thread so the supervisor's
-/// refresh tick never waits on a notifier that may not exist.
-fn desktop_notify(alert: &GiveUpAlert) {
-    let title = "BlitzkriegBot: 内核已停机，停止重启";
-    let body = format!("{}（尝试 {} 次）", alert.message, alert.attempts);
-    std::thread::spawn(move || {
-        let cmds: [(&str, Vec<String>); 2] = [
-            (
-                "osascript",
-                vec![
-                    "-e".into(),
-                    format!(
-                        "display notification {} with title {}",
-                        applescript_quote(&body),
-                        applescript_quote(title)
-                    ),
-                ],
-            ),
-            ("notify-send", vec![title.into(), body]),
-        ];
-        for (bin, args) in cmds {
-            let Ok(mut child) = Command::new(bin)
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
-                continue;
-            };
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                break;
-            }
-        }
-    });
-}
-
-/// Quote a string for an AppleScript literal (only `\` and `"` are special).
-fn applescript_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-/// How hard the supervisor should try to keep an owned core alive.
-///
-/// Default is **off**: replacing a process the operator did not ask to replace
-/// is a policy, and a supervisor should not acquire one by accident. A launcher
-/// whose entire job is "keep the kernel up" turns it on explicitly, and the
-/// attempt budget is finite so an instantly-dying core cannot be respawned
-/// forever — the attempt counter is surfaced so the UI can say "gave up" rather
-/// than showing a healthy-looking process that will never come back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RestartPolicy {
-    pub enabled: bool,
-    /// Total respawns allowed for this supervisor's lifetime.
-    pub max_attempts: u32,
-    /// First backoff; doubles per attempt up to `max_backoff`.
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
-}
-
-impl RestartPolicy {
-    pub const fn off() -> Self {
-        Self {
-            enabled: false,
-            max_attempts: 0,
-            base_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(8),
-        }
-    }
-
-    pub const fn keep_alive() -> Self {
-        Self {
-            enabled: true,
-            max_attempts: 5,
-            ..RestartPolicy::off()
-        }
-    }
-
-    /// Backoff before the `attempt`-th respawn (0-based).
-    fn backoff_for(&self, attempt: u32) -> Duration {
-        let shift = attempt.min(16);
-        let ms = self
-            .base_backoff
-            .as_millis()
-            .saturating_mul(1u128 << shift)
-            .min(self.max_backoff.as_millis());
-        Duration::from_millis(ms as u64)
-    }
-}
-
-/// What the UI needs to answer "is the core up, and if not, why".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreHealth {
-    /// A core is reachable on the socket right now (ours or adopted).
-    pub running: bool,
-    /// This supervisor spawned the running core.
-    pub managed: bool,
-    pub pid: Option<u32>,
-    /// How many times an unexpected exit has been replaced with a new core.
-    pub restarts: u32,
-    /// Why the last owned core stopped. `None` until one of ours has ended.
-    pub last_exit: Option<ExitReport>,
-    /// The restart budget is spent; no further replacement will be attempted.
-    pub restart_given_up: bool,
-    /// Set once, at the moment the budget was spent. Carries the crash reason and
-    /// the core's last stderr lines, so the panel can show WHY instead of only
-    /// that it is over.
-    pub alert: Option<GiveUpAlert>,
 }
 
 #[derive(Debug)]
@@ -1040,463 +770,454 @@ fn send_sigterm(pid: u32) {
     }
 }
 
+#[test]
+fn args_include_engine_and_assets() {
+    let mut cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+    cfg.assets = vec!["BTC".into(), "ETH".into()];
+    let args = cfg.to_args();
+    assert!(args.contains(&"--engine".to_string()));
+    assert!(args.contains(&"--feed-ws".to_string()));
+    let i = args.iter().position(|a| a == "--assets").unwrap();
+    assert_eq!(args[i + 1], "BTC,ETH");
+}
+
+#[test]
+fn silent_round_sec_leaves_the_persisted_cell_in_charge() {
+    // No HFT_ROUND_SEC and no CLI flag: the launcher must NOT pass
+    // --round-sec — the core's own tier resolution (TOML default, then the
+    // UI card's persisted cell) is what owns the round length. A launcher
+    // flag here outranked the cell by design and pinned every session to
+    // the launcher default (the 15m-forever defect).
+    std::env::remove_var("HFT_ROUND_SEC");
+    let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+    assert!(cfg.round_sec.is_none());
+    assert!(!cfg.to_args().contains(&"--round-sec".to_string()));
+
+    // An explicit spoke still reaches the core.
+    std::env::set_var("HFT_ROUND_SEC", "300");
+    let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+    std::env::remove_var("HFT_ROUND_SEC");
+    assert_eq!(cfg.round_sec, Some(300));
+    let args = cfg.to_args();
+    let i = args.iter().position(|a| a == "--round-sec").unwrap();
+    assert_eq!(args[i + 1], "300");
+}
+
+#[test]
+fn socket_served_false_for_missing_path() {
+    assert!(!socket_served("/tmp/definitely-not-a-socket-12345.sock"));
+}
+
+#[test]
+fn extra_args_split_on_whitespace() {
+    assert_eq!(
+        split_extra_args("--engine --feed-ws --no-trade-log"),
+        ["--engine", "--feed-ws", "--no-trade-log"]
+    );
+    assert_eq!(split_extra_args("   "), Vec::<String>::new());
+}
+
+#[test]
+fn extra_args_keep_quoted_paths_whole() {
+    // A checkout under a directory whose name contains a space is ordinary on
+    // macOS; the strategy dir has to survive as ONE argument.
+    assert_eq!(
+        split_extra_args("--strategy-dir \"/Volumes/Hard Disk/repo/ul/parity\" --engine"),
+        [
+            "--strategy-dir",
+            "/Volumes/Hard Disk/repo/ul/parity",
+            "--engine"
+        ]
+    );
+    assert_eq!(
+        split_extra_args("--strategy-dir '/a b c'"),
+        ["--strategy-dir", "/a b c"]
+    );
+}
+
+#[test]
+fn adopted_stop_does_not_kill() {
+    // No child ever spawned → stop must be a no-op (NotOwned), never a signal.
+    let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    assert_eq!(sup.stop(), StopOutcome::NotOwned);
+}
+
+#[test]
+fn restart_is_off_by_default() {
+    // The default policy must not acquire the ability to respawn anything:
+    // replacing a process the operator did not ask to replace is a policy,
+    // and a supervisor should not hold one by accident.
+    let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
+    let sup = Supervisor::new(cfg);
+    assert!(!sup.policy.enabled);
+    assert_eq!(sup.policy.max_attempts, 0);
+}
+
+/// Give this supervisor a real, controllable child. `sleep` is used because
+/// it can be killed deterministically and binds no socket, so the tests below
+/// exercise reap/classify without the 15-second readiness handshake.
 #[cfg(test)]
-mod tests {
-    use super::*;
+fn give_it_a_sleeper(sup: &mut Supervisor) {
+    let child = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    sup.child = Some(child);
+    sup.owns = true;
+}
 
-    #[test]
-    fn args_include_engine_and_assets() {
-        let mut cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
-        cfg.assets = vec!["BTC".into(), "ETH".into()];
-        let args = cfg.to_args();
-        assert!(args.contains(&"--engine".to_string()));
-        assert!(args.contains(&"--feed-ws".to_string()));
-        let i = args.iter().position(|a| a == "--assets").unwrap();
-        assert_eq!(args[i + 1], "BTC,ETH");
+#[test]
+fn a_restart_is_not_retired_before_it_has_had_time_to_bind() {
+    // The poll path spawns without waiting, so right after a restart "alive
+    // but not yet serving" is the normal state — a core needs a moment to
+    // bind. Retiring it here would turn every successful restart into a kill
+    // a fraction of a second later: a restart loop the operator sees as
+    // instability, caused entirely by looking too early.
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-6.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    give_it_a_sleeper(&mut sup);
+    sup.spawned_at = Some(Instant::now());
+
+    assert!(
+        sup.retire_unready_restart().is_none(),
+        "a replacement that is still within its startup window must be left alone"
+    );
+    assert!(sup.owns(), "and it is still ours while it comes up");
+    // The next tick must still be able to observe it normally.
+    assert!(sup.pump().is_none(), "a live child is not an exit");
+
+    // Past the deadline with the socket still unserved, it is not a recovery.
+    // A hung pid that the UI reports as managed is the same lie as a crash
+    // nobody noticed, so it gets an ending and is charged to the budget.
+    sup.spawned_at = Some(Instant::now() - STARTUP_DEADLINE - Duration::from_millis(1));
+    let report = sup
+        .retire_unready_restart()
+        .expect("a hung replacement must be retired");
+    assert_eq!(report.kind, ExitKind::Crashed, "nobody asked for this exit");
+    assert!(!sup.owns());
+    assert_eq!(sup.health().last_exit.unwrap().kind, ExitKind::Crashed);
+}
+
+#[test]
+fn the_poll_path_does_not_wait_for_the_handshake() {
+    // `try_restart` must return promptly: it runs on the UI's refresh tick,
+    // and a tick that blocks for up to 15 s would stall the very channel the
+    // panel uses to learn that the core is back. Measured rather than
+    // asserted by reading the code, because the expensive path is the one
+    // that already exists.
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-7.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    // A real, long-lived binary that will never bind this socket.
+    sup.cfg.binary_path = PathBuf::from("/bin/sleep");
+    sup.cfg.extra_args = vec!["120".into()];
+
+    let t0 = Instant::now();
+    let out = sup.start_within(Duration::ZERO);
+    let took = t0.elapsed();
+
+    assert!(
+        matches!(out, Ok(StartOutcome::Started { .. })),
+        "the spawn itself succeeded; readiness is a later observation"
+    );
+    assert!(
+        took < Duration::from_secs(2),
+        "a poll-path spawn waited {took:?} — it must not block on the handshake"
+    );
+    assert!(
+        !sup.health().restart_given_up,
+        "a spawn that has not had time to fail yet must not report giving up"
+    );
+    let _ = sup.stop();
+}
+
+#[test]
+fn a_killed_core_is_reported_as_a_crash() {
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-1.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    give_it_a_sleeper(&mut sup);
+    let pid = sup.pid().unwrap();
+
+    // Kill it behind the supervisor's back — this is the crash case, and it
+    // is exactly what the old `reap()` swallowed (it cleared the handle and
+    // kept no record, so the UI went on reporting a process that was gone).
+    sup.child.as_mut().unwrap().kill().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    let report = sup.pump().expect("a killed child must be observed");
+    assert_eq!(report.pid, pid);
+    assert_eq!(report.kind, ExitKind::Crashed);
+    assert_eq!(
+        report.signal,
+        Some(9),
+        "SIGKILL must be named, not inferred"
+    );
+    assert!(!sup.owns());
+    assert!(report.describe().contains("CRASHED"));
+    // The health view must carry the same fact, since that is what the UI reads.
+    let health = sup.health();
+    assert!(!health.running);
+    assert_eq!(health.last_exit.as_ref().unwrap().kind, ExitKind::Crashed);
+}
+
+#[test]
+fn a_stop_we_asked_for_is_not_a_crash() {
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-2.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    give_it_a_sleeper(&mut sup);
+
+    assert!(matches!(sup.stop(), StopOutcome::Stopped { .. }));
+    let report = sup
+        .health()
+        .last_exit
+        .expect("a stop must still be recorded — just as Clean");
+    assert_eq!(
+        report.kind,
+        ExitKind::Clean,
+        "an operator-requested stop must never be reported as a crash: \
+         a UI that cannot tell them apart either cries wolf or stays silent"
+    );
+    assert!(report.describe().contains("stopped"));
+}
+
+#[test]
+fn a_crash_is_not_replaced_when_the_policy_is_off() {
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-3.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    give_it_a_sleeper(&mut sup);
+    sup.child.as_mut().unwrap().kill().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    sup.pump();
+    assert_eq!(sup.restarts, 0, "off means off");
+    assert!(!sup.health().restart_given_up);
+}
+
+#[test]
+fn a_late_crash_is_repaired_by_pump_when_the_policy_is_on() {
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-4.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    // A non-existent binary makes the respawn attempt fail fast, so this test
+    // measures the DECISION (attempt counted, budget respected) rather than
+    // paying a 15-second readiness handshake.
+    sup.cfg.binary_path = PathBuf::from("/nonexistent/blitzkrieg-core-xyz");
+    sup.set_restart_policy(RestartPolicy {
+        max_attempts: 1,
+        ..RestartPolicy::keep_alive()
+    });
+    give_it_a_sleeper(&mut sup);
+    sup.child.as_mut().unwrap().kill().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    sup.pump();
+    assert_eq!(
+        sup.restarts, 1,
+        "the crash must be answered with one attempt"
+    );
+    // The original crash stays in last_exit: a failed respawn has no status
+    // of its own to report, and the reason it died is what an operator needs.
+    assert_eq!(
+        sup.health().last_exit.unwrap().kind,
+        ExitKind::Crashed,
+        "the recorded exit must remain the crash, not the failed retry"
+    );
+    assert!(
+        sup.health().restart_given_up,
+        "a spent budget must be visible, or the UI shows a core that will never return"
+    );
+
+    // And a given-up supervisor must stop trying rather than spin.
+    sup.pump();
+    assert_eq!(sup.restarts, 1);
+}
+
+#[test]
+fn restarts_are_spaced_out_while_backing_off() {
+    let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-5.sock".into());
+    let mut sup = Supervisor::new(cfg);
+    sup.cfg.binary_path = PathBuf::from("/nonexistent/blitzkrieg-core-xyz");
+    sup.set_restart_policy(RestartPolicy::keep_alive());
+    give_it_a_sleeper(&mut sup);
+    sup.child.as_mut().unwrap().kill().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    sup.pump();
+    assert_eq!(sup.restarts, 1);
+    // Immediately trying again must be held off by the backoff: a core that
+    // cannot boot must not be respawned in a tight loop.
+    sup.child = Some(Command::new("/bin/sleep").arg("120").spawn().unwrap());
+    sup.owns = true;
+    sup.child.as_mut().unwrap().kill().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    sup.pump();
+    assert_eq!(
+        sup.restarts, 1,
+        "the second attempt must wait for the backoff"
+    );
+}
+
+/// A real executable that writes one line to stderr and exits non-zero —
+/// the cheapest faithful stand-in for a core that dies on boot with an
+/// explanation. Returns its path.
+#[cfg(test)]
+fn a_dying_binary(tag: &str, stderr_line: &str, code: i32) -> PathBuf {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("bk-sup-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dying-core.sh");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "#!/bin/sh").unwrap();
+    writeln!(f, "echo '{stderr_line}' >&2").unwrap();
+    writeln!(f, "exit {code}").unwrap();
+    drop(f);
+    let mut perm = std::fs::metadata(&path).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&path, perm).unwrap();
+    path
+}
+
+/// Records every alert it is handed, so the test asserts the delivery
+/// channel rather than only the internal field.
+#[cfg(test)]
+#[derive(Default)]
+struct RecordingSink(Mutex<Vec<GiveUpAlert>>);
+
+#[cfg(test)]
+impl AlertSink for RecordingSink {
+    fn give_up(&self, alert: &GiveUpAlert) {
+        self.0.lock().unwrap().push(alert.clone());
     }
+}
 
-    #[test]
-    fn silent_round_sec_leaves_the_persisted_cell_in_charge() {
-        // No HFT_ROUND_SEC and no CLI flag: the launcher must NOT pass
-        // --round-sec — the core's own tier resolution (TOML default, then the
-        // UI card's persisted cell) is what owns the round length. A launcher
-        // flag here outranked the cell by design and pinned every session to
-        // the launcher default (the 15m-forever defect).
-        std::env::remove_var("HFT_ROUND_SEC");
-        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
-        assert!(cfg.round_sec.is_none());
-        assert!(!cfg.to_args().contains(&"--round-sec".to_string()));
+/// A supervisor whose respawns are instant (no backoff) and whose child dies
+/// immediately, so "N crashes in a row" is a fast, deterministic test.
+#[cfg(test)]
+fn a_flapping_core(tag: &str, stderr_line: &str, max_attempts: u32) -> Supervisor {
+    let cfg = SupervisorConfig::from_env(format!("/tmp/bk-flap-{tag}.sock"));
+    let mut sup = Supervisor::new(cfg);
+    sup.cfg.binary_path = a_dying_binary(tag, stderr_line, 3);
+    sup.cfg.extra_args = Vec::new();
+    sup.set_restart_policy(RestartPolicy {
+        max_attempts,
+        base_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+        ..RestartPolicy::keep_alive()
+    });
+    sup
+}
 
-        // An explicit spoke still reaches the core.
-        std::env::set_var("HFT_ROUND_SEC", "300");
-        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
-        std::env::remove_var("HFT_ROUND_SEC");
-        assert_eq!(cfg.round_sec, Some(300));
-        let args = cfg.to_args();
-        let i = args.iter().position(|a| a == "--round-sec").unwrap();
-        assert_eq!(args[i + 1], "300");
-    }
-
-    #[test]
-    fn socket_served_false_for_missing_path() {
-        assert!(!socket_served("/tmp/definitely-not-a-socket-12345.sock"));
-    }
-
-    #[test]
-    fn extra_args_split_on_whitespace() {
-        assert_eq!(
-            split_extra_args("--engine --feed-ws --no-trade-log"),
-            ["--engine", "--feed-ws", "--no-trade-log"]
-        );
-        assert_eq!(split_extra_args("   "), Vec::<String>::new());
-    }
-
-    #[test]
-    fn extra_args_keep_quoted_paths_whole() {
-        // A checkout under a directory whose name contains a space is ordinary on
-        // macOS; the strategy dir has to survive as ONE argument.
-        assert_eq!(
-            split_extra_args("--strategy-dir \"/Volumes/Hard Disk/repo/ul/parity\" --engine"),
-            [
-                "--strategy-dir",
-                "/Volumes/Hard Disk/repo/ul/parity",
-                "--engine"
-            ]
-        );
-        assert_eq!(
-            split_extra_args("--strategy-dir '/a b c'"),
-            ["--strategy-dir", "/a b c"]
-        );
-    }
-
-    #[test]
-    fn adopted_stop_does_not_kill() {
-        // No child ever spawned → stop must be a no-op (NotOwned), never a signal.
-        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        assert_eq!(sup.stop(), StopOutcome::NotOwned);
-    }
-
-    #[test]
-    fn backoff_grows_and_is_capped() {
-        let p = RestartPolicy::keep_alive();
-        assert_eq!(p.backoff_for(0), Duration::from_millis(250));
-        assert_eq!(p.backoff_for(1), Duration::from_millis(500));
-        assert_eq!(p.backoff_for(2), Duration::from_millis(1000));
-        // Far enough out it saturates at max_backoff rather than overflowing.
-        assert_eq!(p.backoff_for(40), p.max_backoff);
-    }
-
-    #[test]
-    fn restart_is_off_by_default() {
-        // The default policy must not acquire the ability to respawn anything:
-        // replacing a process the operator did not ask to replace is a policy,
-        // and a supervisor should not hold one by accident.
-        let cfg = SupervisorConfig::from_env("/tmp/x.sock".into());
-        let sup = Supervisor::new(cfg);
-        assert!(!sup.policy.enabled);
-        assert_eq!(sup.policy.max_attempts, 0);
-    }
-
-    /// Give this supervisor a real, controllable child. `sleep` is used because
-    /// it can be killed deterministically and binds no socket, so the tests below
-    /// exercise reap/classify without the 15-second readiness handshake.
-    fn give_it_a_sleeper(sup: &mut Supervisor) {
-        let child = Command::new("/bin/sleep").arg("120").spawn().unwrap();
-        sup.child = Some(child);
-        sup.owns = true;
-    }
-
-    #[test]
-    fn a_restart_is_not_retired_before_it_has_had_time_to_bind() {
-        // The poll path spawns without waiting, so right after a restart "alive
-        // but not yet serving" is the normal state — a core needs a moment to
-        // bind. Retiring it here would turn every successful restart into a kill
-        // a fraction of a second later: a restart loop the operator sees as
-        // instability, caused entirely by looking too early.
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-6.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        give_it_a_sleeper(&mut sup);
-        sup.spawned_at = Some(Instant::now());
-
+/// Pump until an exit is observed, or fail. A bounded poll rather than a
+/// fixed sleep: these tests are about the alert, and a fixed sleep would make
+/// them flaky on a loaded machine for a reason unrelated to the alert.
+#[cfg(test)]
+fn pump_until_crash(sup: &mut Supervisor) -> ExitReport {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(report) = sup.pump() {
+            return report;
+        }
         assert!(
-            sup.retire_unready_restart().is_none(),
-            "a replacement that is still within its startup window must be left alone"
+            Instant::now() < deadline,
+            "no exit was observed within 5s of a crash"
         );
-        assert!(sup.owns(), "and it is still ours while it comes up");
-        // The next tick must still be able to observe it normally.
-        assert!(sup.pump().is_none(), "a live child is not an exit");
-
-        // Past the deadline with the socket still unserved, it is not a recovery.
-        // A hung pid that the UI reports as managed is the same lie as a crash
-        // nobody noticed, so it gets an ending and is charged to the budget.
-        sup.spawned_at = Some(Instant::now() - STARTUP_DEADLINE - Duration::from_millis(1));
-        let report = sup
-            .retire_unready_restart()
-            .expect("a hung replacement must be retired");
-        assert_eq!(report.kind, ExitKind::Crashed, "nobody asked for this exit");
-        assert!(!sup.owns());
-        assert_eq!(sup.health().last_exit.unwrap().kind, ExitKind::Crashed);
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
 
-    #[test]
-    fn the_poll_path_does_not_wait_for_the_handshake() {
-        // `try_restart` must return promptly: it runs on the UI's refresh tick,
-        // and a tick that blocks for up to 15 s would stall the very channel the
-        // panel uses to learn that the core is back. Measured rather than
-        // asserted by reading the code, because the expensive path is the one
-        // that already exists.
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-7.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        // A real, long-lived binary that will never bind this socket.
-        sup.cfg.binary_path = PathBuf::from("/bin/sleep");
-        sup.cfg.extra_args = vec!["120".into()];
+#[test]
+fn six_consecutive_crashes_raise_a_visible_give_up_alert() {
+    // The acceptance case for #186: a core that crashes on every start must
+    // not simply stop being restarted in silence. Six crashes, a budget of
+    // five replacements, and the alert has to be on every channel — the
+    // internal field the panel reads, the stderr banner, and the sink the
+    // embedding gateway installed.
+    let mut sup = a_flapping_core("giveup", "boom: no market plugin", 5);
+    let sink = Arc::new(RecordingSink::default());
+    sup.set_alert_sink(sink.clone());
+    assert!(sup.start_within(Duration::ZERO).is_ok());
 
-        let t0 = Instant::now();
-        let out = sup.start_within(Duration::ZERO);
-        let took = t0.elapsed();
-
-        assert!(
-            matches!(out, Ok(StartOutcome::Started { .. })),
-            "the spawn itself succeeded; readiness is a later observation"
-        );
-        assert!(
-            took < Duration::from_secs(2),
-            "a poll-path spawn waited {took:?} — it must not block on the handshake"
-        );
-        assert!(
-            !sup.health().restart_given_up,
-            "a spawn that has not had time to fail yet must not report giving up"
-        );
-        let _ = sup.stop();
-    }
-
-    #[test]
-    fn a_killed_core_is_reported_as_a_crash() {
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-1.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        give_it_a_sleeper(&mut sup);
-        let pid = sup.pid().unwrap();
-
-        // Kill it behind the supervisor's back — this is the crash case, and it
-        // is exactly what the old `reap()` swallowed (it cleared the handle and
-        // kept no record, so the UI went on reporting a process that was gone).
-        sup.child.as_mut().unwrap().kill().unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-
-        let report = sup.pump().expect("a killed child must be observed");
-        assert_eq!(report.pid, pid);
+    // Six crashes, observed one at a time. The wait is a bounded poll rather
+    // than a fixed sleep: the point of the test is the ALERT, and a fixed
+    // sleep would make it fail on a loaded machine for a reason that has
+    // nothing to do with the alert.
+    for crash in 1..=6 {
+        let report = pump_until_crash(&mut sup);
         assert_eq!(report.kind, ExitKind::Crashed);
-        assert_eq!(
-            report.signal,
-            Some(9),
-            "SIGKILL must be named, not inferred"
-        );
-        assert!(!sup.owns());
-        assert!(report.describe().contains("CRASHED"));
-        // The health view must carry the same fact, since that is what the UI reads.
-        let health = sup.health();
-        assert!(!health.running);
-        assert_eq!(health.last_exit.as_ref().unwrap().kind, ExitKind::Crashed);
-    }
-
-    #[test]
-    fn a_stop_we_asked_for_is_not_a_crash() {
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-2.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        give_it_a_sleeper(&mut sup);
-
-        assert!(matches!(sup.stop(), StopOutcome::Stopped { .. }));
-        let report = sup
-            .health()
-            .last_exit
-            .expect("a stop must still be recorded — just as Clean");
-        assert_eq!(
-            report.kind,
-            ExitKind::Clean,
-            "an operator-requested stop must never be reported as a crash: \
-             a UI that cannot tell them apart either cries wolf or stays silent"
-        );
-        assert!(report.describe().contains("stopped"));
-    }
-
-    #[test]
-    fn a_crash_is_not_replaced_when_the_policy_is_off() {
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-3.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        give_it_a_sleeper(&mut sup);
-        sup.child.as_mut().unwrap().kill().unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-
-        sup.pump();
-        assert_eq!(sup.restarts, 0, "off means off");
-        assert!(!sup.health().restart_given_up);
-    }
-
-    #[test]
-    fn a_late_crash_is_repaired_by_pump_when_the_policy_is_on() {
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-4.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        // A non-existent binary makes the respawn attempt fail fast, so this test
-        // measures the DECISION (attempt counted, budget respected) rather than
-        // paying a 15-second readiness handshake.
-        sup.cfg.binary_path = PathBuf::from("/nonexistent/blitzkrieg-core-xyz");
-        sup.set_restart_policy(RestartPolicy {
-            max_attempts: 1,
-            ..RestartPolicy::keep_alive()
-        });
-        give_it_a_sleeper(&mut sup);
-        sup.child.as_mut().unwrap().kill().unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-
-        sup.pump();
-        assert_eq!(
-            sup.restarts, 1,
-            "the crash must be answered with one attempt"
-        );
-        // The original crash stays in last_exit: a failed respawn has no status
-        // of its own to report, and the reason it died is what an operator needs.
-        assert_eq!(
-            sup.health().last_exit.unwrap().kind,
-            ExitKind::Crashed,
-            "the recorded exit must remain the crash, not the failed retry"
-        );
-        assert!(
-            sup.health().restart_given_up,
-            "a spent budget must be visible, or the UI shows a core that will never return"
-        );
-
-        // And a given-up supervisor must stop trying rather than spin.
-        sup.pump();
-        assert_eq!(sup.restarts, 1);
-    }
-
-    #[test]
-    fn restarts_are_spaced_out_while_backing_off() {
-        let cfg = SupervisorConfig::from_env("/tmp/bk-not-served-5.sock".into());
-        let mut sup = Supervisor::new(cfg);
-        sup.cfg.binary_path = PathBuf::from("/nonexistent/blitzkrieg-core-xyz");
-        sup.set_restart_policy(RestartPolicy::keep_alive());
-        give_it_a_sleeper(&mut sup);
-        sup.child.as_mut().unwrap().kill().unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-
-        sup.pump();
-        assert_eq!(sup.restarts, 1);
-        // Immediately trying again must be held off by the backoff: a core that
-        // cannot boot must not be respawned in a tight loop.
-        sup.child = Some(Command::new("/bin/sleep").arg("120").spawn().unwrap());
-        sup.owns = true;
-        sup.child.as_mut().unwrap().kill().unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-        sup.pump();
-        assert_eq!(
-            sup.restarts, 1,
-            "the second attempt must wait for the backoff"
-        );
-    }
-
-    /// A real executable that writes one line to stderr and exits non-zero —
-    /// the cheapest faithful stand-in for a core that dies on boot with an
-    /// explanation. Returns its path.
-    fn a_dying_binary(tag: &str, stderr_line: &str, code: i32) -> PathBuf {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("bk-sup-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("dying-core.sh");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "echo '{stderr_line}' >&2").unwrap();
-        writeln!(f, "exit {code}").unwrap();
-        drop(f);
-        let mut perm = std::fs::metadata(&path).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&path, perm).unwrap();
-        path
-    }
-
-    /// Records every alert it is handed, so the test asserts the delivery
-    /// channel rather than only the internal field.
-    #[derive(Default)]
-    struct RecordingSink(Mutex<Vec<GiveUpAlert>>);
-
-    impl AlertSink for RecordingSink {
-        fn give_up(&self, alert: &GiveUpAlert) {
-            self.0.lock().unwrap().push(alert.clone());
-        }
-    }
-
-    /// A supervisor whose respawns are instant (no backoff) and whose child dies
-    /// immediately, so "N crashes in a row" is a fast, deterministic test.
-    fn a_flapping_core(tag: &str, stderr_line: &str, max_attempts: u32) -> Supervisor {
-        let cfg = SupervisorConfig::from_env(format!("/tmp/bk-flap-{tag}.sock"));
-        let mut sup = Supervisor::new(cfg);
-        sup.cfg.binary_path = a_dying_binary(tag, stderr_line, 3);
-        sup.cfg.extra_args = Vec::new();
-        sup.set_restart_policy(RestartPolicy {
-            max_attempts,
-            base_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-            ..RestartPolicy::keep_alive()
-        });
-        sup
-    }
-
-    /// Pump until an exit is observed, or fail. A bounded poll rather than a
-    /// fixed sleep: these tests are about the alert, and a fixed sleep would make
-    /// them flaky on a loaded machine for a reason unrelated to the alert.
-    fn pump_until_crash(sup: &mut Supervisor) -> ExitReport {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(report) = sup.pump() {
-                return report;
-            }
+        if crash < 6 {
             assert!(
-                Instant::now() < deadline,
-                "no exit was observed within 5s of a crash"
+                sup.health().alert.is_none(),
+                "crash {crash} of 6 must be answered by a restart, not an alert"
             );
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    #[test]
-    fn six_consecutive_crashes_raise_a_visible_give_up_alert() {
-        // The acceptance case for #186: a core that crashes on every start must
-        // not simply stop being restarted in silence. Six crashes, a budget of
-        // five replacements, and the alert has to be on every channel — the
-        // internal field the panel reads, the stderr banner, and the sink the
-        // embedding gateway installed.
-        let mut sup = a_flapping_core("giveup", "boom: no market plugin", 5);
-        let sink = Arc::new(RecordingSink::default());
-        sup.set_alert_sink(sink.clone());
-        assert!(sup.start_within(Duration::ZERO).is_ok());
+    let health = sup.health();
+    assert!(
+        health.restart_given_up,
+        "a spent budget must be visible in the health view"
+    );
+    let alert = health
+        .alert
+        .expect("giving up must produce an alert, not only a status flag");
+    assert_eq!(alert.attempts, 5, "the budget spent is what is reported");
+    assert_eq!(
+        alert.last_exit.as_ref().unwrap().code,
+        Some(3),
+        "the alert names how the core died"
+    );
+    assert!(alert.at_ms > 0, "an alert without a time is not actionable");
+    assert!(
+        alert.message.contains("放弃重启"),
+        "the message must say the supervisor gave up: {}",
+        alert.message
+    );
+    assert!(alert.banner().contains("core NOT running"));
+    assert!(
+        alert.stderr_tail.iter().any(|l| l.contains("boom")),
+        "the core's own stderr is the reason; the alert must carry it: {:?}",
+        alert.stderr_tail
+    );
 
-        // Six crashes, observed one at a time. The wait is a bounded poll rather
-        // than a fixed sleep: the point of the test is the ALERT, and a fixed
-        // sleep would make it fail on a loaded machine for a reason that has
-        // nothing to do with the alert.
-        for crash in 1..=6 {
-            let report = pump_until_crash(&mut sup);
-            assert_eq!(report.kind, ExitKind::Crashed);
-            if crash < 6 {
-                assert!(
-                    sup.health().alert.is_none(),
-                    "crash {crash} of 6 must be answered by a restart, not an alert"
-                );
-            }
-        }
+    // Exactly one alert per give-up: a sink that fires on every tick would
+    // page an operator forever.
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+    sup.pump();
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+}
 
-        let health = sup.health();
-        assert!(
-            health.restart_given_up,
-            "a spent budget must be visible in the health view"
-        );
-        let alert = health
-            .alert
-            .expect("giving up must produce an alert, not only a status flag");
-        assert_eq!(alert.attempts, 5, "the budget spent is what is reported");
-        assert_eq!(
-            alert.last_exit.as_ref().unwrap().code,
-            Some(3),
-            "the alert names how the core died"
-        );
-        assert!(alert.at_ms > 0, "an alert without a time is not actionable");
-        assert!(
-            alert.message.contains("放弃重启"),
-            "the message must say the supervisor gave up: {}",
-            alert.message
-        );
-        assert!(alert.banner().contains("core NOT running"));
-        assert!(
-            alert.stderr_tail.iter().any(|l| l.contains("boom")),
-            "the core's own stderr is the reason; the alert must carry it: {:?}",
-            alert.stderr_tail
-        );
+#[test]
+fn a_core_that_comes_back_clears_the_give_up_alert() {
+    // The alert is a current-state notice, not a permanent scar: once a core
+    // answers on the socket again the panel must stop saying "gave up".
+    let mut sup = a_flapping_core("recover", "boom", 1);
+    assert!(sup.start_within(Duration::ZERO).is_ok());
+    pump_until_crash(&mut sup); // crash 1 → attempt 1 (the dying binary)
+    pump_until_crash(&mut sup); // crash 2 → budget spent → alert
+    assert!(sup.health().restart_given_up);
+    assert!(sup.health().alert.is_some());
 
-        // Exactly one alert per give-up: a sink that fires on every tick would
-        // page an operator forever.
-        assert_eq!(sink.0.lock().unwrap().len(), 1);
-        sup.pump();
-        assert_eq!(sink.0.lock().unwrap().len(), 1);
-    }
+    // Something else brings a core up on the same socket (the operator ran
+    // `start` again, or another launcher did); the give-up notice must go.
+    sup.cfg.binary_path = PathBuf::from("/bin/sleep");
+    sup.cfg.extra_args = vec!["120".into()];
+    let out = sup.start_within(Duration::ZERO);
+    assert!(out.is_ok(), "the operator's start must succeed");
+    let health = sup.health();
+    assert!(
+        health.alert.is_none() && !health.restart_given_up,
+        "a core that is up again must not keep showing a give-up alert"
+    );
+    let _ = sup.stop();
+}
 
-    #[test]
-    fn a_core_that_comes_back_clears_the_give_up_alert() {
-        // The alert is a current-state notice, not a permanent scar: once a core
-        // answers on the socket again the panel must stop saying "gave up".
-        let mut sup = a_flapping_core("recover", "boom", 1);
-        assert!(sup.start_within(Duration::ZERO).is_ok());
-        pump_until_crash(&mut sup); // crash 1 → attempt 1 (the dying binary)
-        pump_until_crash(&mut sup); // crash 2 → budget spent → alert
-        assert!(sup.health().restart_given_up);
-        assert!(sup.health().alert.is_some());
-
-        // Something else brings a core up on the same socket (the operator ran
-        // `start` again, or another launcher did); the give-up notice must go.
-        sup.cfg.binary_path = PathBuf::from("/bin/sleep");
-        sup.cfg.extra_args = vec!["120".into()];
-        let out = sup.start_within(Duration::ZERO);
-        assert!(out.is_ok(), "the operator's start must succeed");
-        let health = sup.health();
-        assert!(
-            health.alert.is_none() && !health.restart_given_up,
-            "a core that is up again must not keep showing a give-up alert"
-        );
-        let _ = sup.stop();
-    }
-
-    #[test]
-    fn the_alert_is_only_raised_while_the_budget_is_spent() {
-        // Off means off: with no restart policy a crash is reported (as before)
-        // but never escalated into a give-up alert.
-        let mut sup = a_flapping_core("noalert", "boom", 0);
-        sup.set_restart_policy(RestartPolicy::off());
-        assert!(sup.start_within(Duration::ZERO).is_ok());
-        pump_until_crash(&mut sup);
-        let health = sup.health();
-        assert_eq!(health.last_exit.as_ref().unwrap().kind, ExitKind::Crashed);
-        assert!(!health.restart_given_up);
-        assert!(health.alert.is_none());
-    }
+#[test]
+fn the_alert_is_only_raised_while_the_budget_is_spent() {
+    // Off means off: with no restart policy a crash is reported (as before)
+    // but never escalated into a give-up alert.
+    let mut sup = a_flapping_core("noalert", "boom", 0);
+    sup.set_restart_policy(RestartPolicy::off());
+    assert!(sup.start_within(Duration::ZERO).is_ok());
+    pump_until_crash(&mut sup);
+    let health = sup.health();
+    assert_eq!(health.last_exit.as_ref().unwrap().kind, ExitKind::Crashed);
+    assert!(!health.restart_given_up);
+    assert!(health.alert.is_none());
 }

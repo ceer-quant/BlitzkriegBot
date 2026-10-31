@@ -17,7 +17,7 @@
  *   cd ui/webapp/webui && npm run check:parity
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,8 +37,25 @@ const check = (label, fn) => {
 
 const app = read('..', '..', 'ui_kit_panel', 'src', 'app.rs')
 const ui = read('..', '..', 'ui_kit_panel', 'src', 'ui.rs')
-/** The gateway's single command table — where the bar's vocabulary lives. */
-const gatewayCommands = read('..', '..', 'ui_kit', 'src', 'gateway', 'command.rs')
+/** The gateway's command table — where the bar's vocabulary lives. Read the
+ * whole `gateway/` Rust subtree (sorted, recursive) instead of one file: the
+ * module is split across `command.rs`/`supervisor.rs` children, and the pin is
+ * on the table's content, not on a filename, so the gate survives future
+ * splits the same way `net-check.check.mjs` does. */
+const gatewaySources = (dir) =>
+  readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .flatMap((e) => {
+      const p = join(dir, e.name)
+      return e.isDirectory()
+        ? gatewaySources(p)
+        : e.name.endsWith('.rs')
+          ? [readFileSync(p, 'utf8')]
+          : []
+    })
+const gatewayCommands = gatewaySources(
+  join(here, '..', '..', '..', 'ui_kit', 'src', 'gateway'),
+).join('\n')
 // #381: the nav moved into `src/lib/nav.ts` (pure data) so the shell and this
 // gate parse ONE source. Leaves are flat; groups are a presentation concern.
 const shell = read('src', 'lib', 'nav.ts')
