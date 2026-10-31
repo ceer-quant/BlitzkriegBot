@@ -4,9 +4,11 @@
  *
  * Self-contained by territory: the component talks to the SAME gateway
  * command surface the TUI command bar uses (`accounts` / `account <id>` —
- * gateway/command.rs), so no second client surface is minted here. One fetch
- * on open, one on switch; every account row comes verbatim from the core's
- * `account.list` reply.
+ * gateway/command.rs), so no second client surface is minted here. issue 781:
+ * the read now goes through the store's `refreshAccounts` (which speaks the
+ * shared `api.command` client and owns the one account-row projection) —
+ * this component no longer hand-rolls a fetch, the auth header, or a second
+ * copy of the projection. One read on open, one on switch.
  *
  * §9.4 discipline extends to the pixel layer: credentials appear only as the
  * presence fact `credentialsLoaded` — there is no field in the wire to leak
@@ -14,14 +16,18 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Wallet, ChevronDown, Check, RefreshCw, Link2, Plus, Trash2, Timer } from 'lucide-vue-next'
-import { getToken, api } from '../api/client'
+import { api } from '../api/client'
 import { money } from '../lib/format'
-import { usePanelStore } from '../stores/panel'
+import { usePanelStore, type PanelAccountRow } from '../stores/panel'
 import AddAccountDialog from './AddAccountDialog.vue'
 import ConfirmWordDialog from './ui/confirm/ConfirmWordDialog.vue'
 import Button from './ui/button/Button.vue'
 
-/** Mirror of the core's AccountView (ipc/schema.rs) — camelCase wire.
+/**
+ * 账户行 = store 的 PanelAccountRow（issue 781）：行投影的唯一实现是
+ * `stores/panel.ts` 的 `refreshAccounts`，本组件只渲染，不再复制一份。
+ *
+ * 字段语义（wire = 内核 AccountView，camelCase）：
  *  `venue` 是账户↔交易所绑定（market-plugin 名），只在建户时设定（绑定
  *  即启用）——已有账户不改绑（改绑面已收，数据不混乱），要换交易所 =
  *  删户重建。老内核不回该字段 → undefined，按未绑定（''）渲染。
@@ -33,44 +39,9 @@ import Button from './ui/button/Button.vue'
  *  解耦裁决 —— 分配编辑器退场）。
  *  `rounds` 是该账户的轮次周期集（轮次多族 B1d；秒，白名单五档）——
  *  空数组 = 未声明限制（许可轴空集放行）；undefined = 老内核缺字段，
- *  周期集编辑段据此降级为只读提示（issue 550）。 */
-interface AccountRow {
-  id: string
-  name: string
-  marketType: string
-  status: string
-  statusReason?: string
-  balance: string | number
-  available: string | number
-  credentialsLoaded: boolean
-  /** 账户绑定的交易所（market-plugin 名）；空串 = 未绑定（可交易任意交易所）。 */
-  venue?: string
-  /** 交易开关（多账户扇出）；false = 拒开仓、平仓照放。老内核缺省 = 开。 */
-  tradingEnabled?: boolean
-  /** 策略启用集（多账户扇出）；非空 = 逐字集合，空 = 显式不跑。老内核缺省 = 未启用。 */
-  strategies?: string[]
-  /** 轮次周期集（轮次多族 B1d；秒）；空数组 = 不限制。老内核缺省 = undefined。 */
-  rounds?: number[]
-  reserved?: string | number
-  openPositions: number
-  dayRealizedUsd: string | number
-}
-
-/** Mirror of AccountListResult: `active` is the kernel-side session default
- *  (§9.5). issue 561 起它不再驱动显示 —— 面板唯一可信源是 displayAccount。*/
-interface AccountsDoc {
-  version: string
-  active: string
-  displayAccount?: string
-  accounts: AccountRow[]
-}
-
-/** gateway CommandOutcome — `data` carries the raw account.list reply. */
-interface CommandOutcome {
-  ok: boolean
-  message?: string
-  data?: AccountsDoc
-}
+ *  周期集编辑段据此降级为只读提示（issue 550）。
+ */
+type AccountRow = PanelAccountRow
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   active: { label: '正常', tone: 'var(--up)' },
@@ -88,24 +59,14 @@ const loading = ref(false)
 const switching = ref<string | null>(null)
 const error = ref<string | null>(null)
 const switchErr = ref<string | null>(null)
-const doc = ref<AccountsDoc | null>(null)
 
 /** issue 561：按钮与选中勾都读 store 的 display 账户（唯一可信源）——
- *  不再读本组件私有 `doc.active`（会话格语义，随 dispatcher 重连漂移）。
- *  doc 仍负责下拉列表数据。快照轮询每拍带回内核读数，Header 与页面从此
- *  同源同节拍。 */
+ *  本组件不持有第二份账户文档（issue 781：行数据也来自 store 的
+ *  refreshAccounts 镜像，会话格语义随 dispatcher 重连漂移的旧读数不再
+ *  有落点）。快照轮询每拍带回内核读数，Header 与页面从此同源同节拍。 */
 const active = computed(() => store.displayAccount || '')
-const rows = computed(() => doc.value?.accounts ?? [])
-async function command(cmd: string): Promise<CommandOutcome> {
-  const res = await fetch('/api/command', {
-    method: 'POST',
-    headers: { 'X-Auth-Token': getToken(), 'Content-Type': 'application/json' },
-    body: cmd,
-  })
-  if (res.status === 401) throw new Error('未登录或会话已失效，请重新登录。')
-  if (!res.ok) throw new Error(`网关返回 ${res.status}`)
-  return (await res.json()) as CommandOutcome
-}
+/** 行数据的唯一源：store.refreshAccounts 的镜像（issue 781）。 */
+const rows = computed(() => store.accounts)
 
 /**
  * issue 561（2026-10-20 操作者裁决）：display account 升格为面板唯一可信
@@ -149,37 +110,18 @@ async function switchTo(id: string): Promise<void> {
   }
 }
 
+/**
+ * issue 781：账户簿读数唯一走 store.refreshAccounts —— 共享客户端
+ * （api.command → core.request：401/ApiError 统一处理，401 由 store 的
+ * classifyOutcome 送回登录面）、账户行投影唯一实现在 store。这里只保留
+ * 本浮层的 loading / inline 错误呈现。
+ */
 async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const out = await command('accounts')
-    if (!out.ok) throw new Error(out.message ?? '账户列表不可用')
-    if (!out.data) throw new Error('网关未返回账户数据')
-    doc.value = out.data
-    // Mirror into the store: pages read the display account id + rows from
-    // here to label their figures (余额瓦片 / 挂单卡 / 插件页信息行) without
-    // each re-speaking the command surface. issue 561：镜像走 setAccounts
-    // 的 display 兜底通道（报文 displayAccount 在场采纳；快照在场时镜像
-    // 不覆盖内核读数）。
-    store.setAccounts(
-      out.data.active,
-      out.data.accounts.map((a) => ({
-        id: a.id,
-        name: a.name,
-        marketType: a.marketType,
-        status: a.status,
-        balance: a.balance,
-        available: a.available,
-        venue: a.venue ?? '',
-        strategies: Array.isArray(a.strategies) ? [...a.strategies] : undefined,
-        rounds: Array.isArray(a.rounds) ? [...a.rounds] : undefined,
-        reserved: a.reserved ?? '',
-      })),
-      out.data.displayAccount ?? undefined,
-    )
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    const failure = await store.refreshAccounts()
+    if (failure) error.value = failure
   } finally {
     loading.value = false
   }

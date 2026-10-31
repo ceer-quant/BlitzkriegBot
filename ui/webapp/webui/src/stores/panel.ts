@@ -23,8 +23,19 @@ export interface PanelAccountRow {
   name: string
   marketType: string
   status: string
+  /** 该账户的拒绝/暂停原因（账户卡行内展示）；老内核缺省 = 不渲染。 */
+  statusReason?: string
   balance: string | number
   available: string | number
+  /**
+   * 凭证是否已从进程环境加载（§9.4：值永不出内核）——只读存在事实。
+   * 账户卡只渲染这个布尔，不渲染任何凭证值（线里也没有该字段）。
+   */
+  credentialsLoaded: boolean
+  /** 该账户当前持仓数（停止交易时卡片披露「N 笔持仓管理中」）。 */
+  openPositions: number
+  /** 交易开关（多账户扇出）；false = 拒开仓、平仓照放。老内核缺省 = 开。 */
+  tradingEnabled?: boolean
   /** 只读：老内核回读缺该字段时以 '' 渲染（未绑定，可交易任意交易所）。 */
   venue?: string
   /**
@@ -105,16 +116,35 @@ export const usePanelStore = defineStore('panel', () => {
   const accounts = ref<PanelAccountRow[]>([])
 
   /**
-   * setAccounts：AccountSwitcher 与 refreshAccounts 的镜像入口。行数据
-   * （账户簿）始终镜像更新；display id 只在快照尚未说话时兜底采纳
-   * （快照在场 = 内核说了话，镜像不得降格覆盖它）。写动作本身只经
+   * issue 781：写回世代号。`refreshSeq` 每开一拍轮询自增，只有最新一拍
+   * 允许写回；`accountsSeq` 是账户簿读数的同一机制；`displayEpoch` 在显示
+   * 账户/venue 身份变化时自增 —— 在途的旧身份请求全部作废。三者都是普通
+   * 递增整数（不含时间戳等易变字段），且活在 Pinia setup store 的闭包里，
+   * 重绘不会重置（身份记忆必须跨重绘存活）。
+   */
+  let refreshSeq = 0
+  let accountsSeq = 0
+  let displayEpoch = 0
+
+  /**
+   * setAccounts：refreshAccounts 的镜像入口（issue 781 后切换器不再自建
+   * 投影）。行数据（账户簿）始终镜像更新；display id 只在快照尚未说话时
+   * 兜底采纳（快照在场 = 内核说了话，镜像不得降格覆盖它）。写动作本身只经
    * `setDisplayAccount`。
    */
   function setAccounts(active: string, rows: PanelAccountRow[], mirrorDisplay?: string): void {
     const snapshotInForce = snapshot.value?.displayAccount !== undefined
     if (!snapshotInForce) {
-      if (mirrorDisplay) displayAccount.value = mirrorDisplay
-      else if (active && !displayAccount.value) displayAccount.value = active
+      if (mirrorDisplay && mirrorDisplay !== displayAccount.value) {
+        // 已知身份 A → 镜像 B 是真切换，世代自增把在途旧响应作废；
+        // 首次采纳（'' → default）不是切换 —— 那一拍的快照/全局读数
+        // 仍是当前那一拍的数据，不能把它作废（否则首屏要等下一拍）。
+        if (displayAccount.value) displayEpoch++
+        displayAccount.value = mirrorDisplay
+      } else if (active && !displayAccount.value) {
+        // 同上：首次从空身份采纳不推进世代。
+        displayAccount.value = active
+      }
     }
     accounts.value = rows
   }
@@ -125,6 +155,8 @@ export const usePanelStore = defineStore('panel', () => {
    * 到时空串占位，下一拍快照带回内核读数）。
    */
   function setDisplayAccount(id: string): void {
+    // issue 781：切换即换身份 —— 自增世代，任何在途的旧账户批处理不得写回。
+    displayEpoch++
     displayAccount.value = id
     displayVenue.value = accounts.value.find((a) => a.id === id)?.venue ?? ''
   }
@@ -278,13 +310,19 @@ export const usePanelStore = defineStore('panel', () => {
    * 手动刷新才见变化（stale-readout 缺陷，2026-10 操作者报告）。
    *
    * 失败不抛：账户列表读不到时保留现有行（比清空好 —— 旧集只是陈旧，
-   * 清空会把按钮读数打到降级面）。AccountSwitcher 的 setAccounts 调用方
-   * 语义不变（active id 由该组件的切换流写）。
+   * 清空会把按钮读数打到降级面）；返回错误文案（null = 成功），供
+   * AccountSwitcher 在自己的浮层里 inline 展示 —— 行投影只此一份，切换
+   * 器不再复制投影（issue 781）。
    */
-  async function refreshAccounts(): Promise<void> {
+  async function refreshAccounts(): Promise<string | null> {
+    // issue 781：账户簿读数的请求序号 + 身份世代。只有最新一次读数、且
+    // 显示身份未变时才允许镜像写回；旧响应静默丢弃（不清行、不报错）。
+    const requestId = ++accountsSeq
+    const epoch = displayEpoch
     try {
       const out = await api.command('accounts')
-      if (!out.ok || !out.data) return
+      if (requestId !== accountsSeq || epoch !== displayEpoch) return null
+      if (!out.ok) return out.message ?? '账户列表不可用'
       const doc = out.data as {
         active?: string
         displayAccount?: string
@@ -293,22 +331,31 @@ export const usePanelStore = defineStore('panel', () => {
           name: string
           marketType: string
           status: string
+          statusReason?: string
           balance: string | number
           available: string | number
+          credentialsLoaded?: boolean
+          openPositions?: number
+          tradingEnabled?: boolean
           venue?: string
           strategies?: unknown
           rounds?: unknown
           reserved?: string
         }>
-      }
-      if (!Array.isArray(doc.accounts) || !doc.accounts.length) return
+      } | undefined
+      if (!doc) return '网关未返回账户数据'
+      if (!Array.isArray(doc.accounts) || !doc.accounts.length) return null
       const rows: PanelAccountRow[] = doc.accounts.map((a) => ({
         id: a.id,
         name: a.name,
         marketType: a.marketType,
         status: a.status,
+        statusReason: a.statusReason,
         balance: a.balance,
         available: a.available,
+        credentialsLoaded: a.credentialsLoaded === true,
+        openPositions: typeof a.openPositions === 'number' ? a.openPositions : 0,
+        tradingEnabled: a.tradingEnabled,
         venue: a.venue ?? '',
         strategies: Array.isArray(a.strategies) ? [...(a.strategies as string[])] : undefined,
         rounds: Array.isArray(a.rounds) ? [...(a.rounds as number[])] : undefined,
@@ -322,8 +369,18 @@ export const usePanelStore = defineStore('panel', () => {
           ? doc.displayAccount
           : displayAccount.value
       setAccounts(mirrorDisplay ?? '', rows, mirrorDisplay || undefined)
-    } catch {
-      // 静默：与 noteOutcome 的降级纪律一致 —— 读数失败不退登录态、不清行。
+      return null
+    } catch (e) {
+      // 失败不抛：保留现有行（旧集只是陈旧，清空会把按钮读数打到降级面）。
+      // 401 仍走统一会话判定（classifyOutcome）：账号簿读数的失效与轮询
+      // 读数一样，把面板送回登录面而不是停在错误提示上。
+      const verdict = classifyOutcome([{ status: 'rejected', reason: e }])
+      if (verdict.kind === 'expired') {
+        clearToken()
+        sessionExpired.value = true
+        return '未登录或会话已失效，请重新登录。'
+      }
+      return e instanceof Error ? e.message : String(e)
     }
   }
 
@@ -342,6 +399,24 @@ export const usePanelStore = defineStore('panel', () => {
 
   async function refresh(): Promise<void> {
     if (!hasToken()) return
+    // issue 781：每拍轮询有单调序号 + 请求时刻的 (display 账户, venue) 身份
+    // 捕获。15s / 2s 等多个计时器并发时，只有「最新一拍且身份仍匹配」的
+    // 响应可以写回 —— 切户/切所后迟到的旧账户快照静默丢弃，不再覆盖新
+    // 账户的读数。身份只用账户 id + venue，不用时间戳（易变字段会让去重
+    // 永远失配）；序号活在 store 闭包里，重绘不重置。
+    const requestId = ++refreshSeq
+    const epoch = displayEpoch
+    const identityAccount = displayAccount.value
+    const identityVenue = activeAccountVenue.value
+    // 空 display 账户 = 尚未知道身份：这一拍发起的是全局读数（acct
+    // undefined），首拍被账户簿镜像补充上默认账户后仍可落地 —— 否则首屏
+    // 快照会被自家镜像作废，空等下一拍（15s）。已知身份则必须逐字匹配。
+    const identityKnown = identityAccount !== ''
+    const isCurrent = (): boolean =>
+      requestId === refreshSeq &&
+      epoch === displayEpoch &&
+      (!identityKnown || identityAccount === displayAccount.value) &&
+      (!identityKnown || identityVenue === activeAccountVenue.value)
     loading.value = true
     try {
       // PR H: the account-scoped aggregates ride their own proxy routes
@@ -349,7 +424,7 @@ export const usePanelStore = defineStore('panel', () => {
       // 回落 snapshot 值（单账户部署与老面板逐字节一致）。
       // issue 561: `acct` 跟随 display 账户（唯一可信源）——聚合读数与页
       // 面过滤同源，不再有「Header 一样、数字两套」的双节拍。
-      const acct = displayAccount.value || undefined
+      const acct = identityAccount || undefined
       const [snap, plug, accSummary, accStats, acctList] = await Promise.allSettled([
         api.snapshot(),
         api.plugins(),
@@ -357,18 +432,29 @@ export const usePanelStore = defineStore('panel', () => {
         api.engineStatsFor({ accountId: acct }),
         refreshAccounts(),
       ])
-      if (snap.status === 'fulfilled') {
+      // 本拍的写回裁决只做一次：这是单线程同步段，裁决后不会被别的响应
+      // 插入。内部写身份字段（快照带回新 display）也不会把本拍自己的其余
+      // 写回误判成陈旧。
+      const current = isCurrent()
+      if (snap.status === 'fulfilled' && current) {
         snapshot.value = snap.value
         // issue 561: 快照顶层的 displayAccount/displayVenue 是内核的账户
         // 事实 —— 轮询每拍镜像（乐观写在两拍之间由 setDisplayAccount 维
         // 持，快照到达后以内核读数为准）。缺字段（老内核）保留现值。
         const snapDisplay = snap.value.displayAccount
         if (typeof snapDisplay === 'string' && snapDisplay) {
-          displayAccount.value = snapDisplay
-          displayVenue.value =
+          const nextVenue =
             snap.value.displayVenue ??
             accounts.value.find((a) => a.id === snapDisplay)?.venue ??
             ''
+          // 已知身份被内核改掉（或 venue 改绑）同样要作废在途的其它批
+          // 处理；首次从空身份采纳不算切换，不推进世代（同 setAccounts）。
+          if (displayAccount.value &&
+            (snapDisplay !== displayAccount.value || nextVenue !== displayVenue.value)) {
+            displayEpoch++
+          }
+          displayAccount.value = snapDisplay
+          displayVenue.value = nextVenue
         }
         const progress = feedProgress(snap.value.stats?.books, snap.value.stats?.tops)
         if (progress !== lastProgress) {
@@ -376,16 +462,18 @@ export const usePanelStore = defineStore('panel', () => {
           feedAt.value = Date.now()
         }
       }
-      if (plug.status === 'fulfilled') plugins.value = plug.value
-      accountTradeSummary.value =
-        acct && accSummary.status === 'fulfilled' ? accSummary.value.summary ?? null : null
-      accountStrategyStats.value =
-        acct && accStats.status === 'fulfilled' ? accStats.value.strategies ?? [] : []
-      noteOutcome([snap, plug, accSummary, accStats])
-      lastUpdated.value = Date.now()
+      if (plug.status === 'fulfilled' && current) plugins.value = plug.value
+      if (current) {
+        accountTradeSummary.value =
+          acct && accSummary.status === 'fulfilled' ? accSummary.value.summary ?? null : null
+        accountStrategyStats.value =
+          acct && accStats.status === 'fulfilled' ? accStats.value.strategies ?? [] : []
+        noteOutcome([snap, plug, accSummary, accStats])
+        lastUpdated.value = Date.now()
+      }
       void acctList
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
+      if (isCurrent()) error.value = e instanceof Error ? e.message : String(e)
     } finally {
       loading.value = false
     }

@@ -34,6 +34,12 @@
  *      session cell is not the panel's business any more).
  *   3. The switcher's copy states the contract (切换不启停任何东西) so the
  *      operator reads the guarantee the code enforces.
+ *   4. issue 781: the account READ is the store's shared-client read, not a
+ *      second hand-rolled fetch/projection; and the two polling surfaces
+ *      (KlineChart + the panel store's snapshot batch) carry a monotonic
+ *      request id plus an account/venue(/symbol) identity capture, so a
+ *      late response fetched for the OLD identity can never overwrite the
+ *      new account's readings after a switch.
  *
  * Note the granularity: the ban applies to the switchTo function body and
  * everything it alone calls — NOT to the file's per-row actions (askTrading /
@@ -64,6 +70,8 @@ const check = (label, fn) => {
 console.log('切换不启停 — the account-switch purity contract')
 
 const switcher = read('src', 'components', 'AccountSwitcher.vue')
+const store = read('src', 'stores', 'panel.ts')
+const chart = read('src', 'components', 'charts', 'KlineChart.vue')
 
 /** The switchTo body (balanced braces from the `async function switchTo` line). */
 function switchToBody(src) {
@@ -170,6 +178,124 @@ check('全文件无「切账户时顺手停策略」的隐藏入口（watch acti
       'watch(active*) 里藏着命令调用 —— 切换事件的又一个停策略入口',
     )
   }
+})
+
+// ── issue 781: one client, one projection, no stale write-back ──────────────
+check('账户读数走共享 API 客户端：无裸 fetch(/api/command)、无手抄 X-Auth-Token', () => {
+  // The shared client (api.command → core.request) is the ONLY place that
+  // speaks /api/command or attaches the token. A hand-rolled copy here
+  // bypasses the 401 → sessionExpired path and mints a second projection.
+  assert.doesNotMatch(
+    switcher,
+    /fetch\(\s*['"`]\/api\/command/,
+    'AccountSwitcher 又自建 fetch(/api/command) —— 绕过共享客户端与统一错误处理',
+  )
+  assert.doesNotMatch(
+    switcher,
+    /X-Auth-Token/,
+    'AccountSwitcher 手抄 X-Auth-Token —— 令牌头只属于 src/api/core.ts',
+  )
+  assert.doesNotMatch(
+    switcher,
+    /\bgetToken\b/,
+    'AccountSwitcher 直接读令牌 —— 账户读数必须经共享客户端',
+  )
+  // The store function is the single source of the account projection.
+  assert.match(
+    switcher,
+    /store\.refreshAccounts\(\)/,
+    '切换器的账户读数未走 store.refreshAccounts（唯一投影源）',
+  )
+  assert.match(
+    store,
+    /api\.command\('accounts'\)/,
+    'store.refreshAccounts 未通过共享 api.command 读账户簿',
+  )
+  assert.doesNotMatch(
+    switcher,
+    /accounts\.map\(/,
+    '切换器又自行投影账户行 —— 行投影只许留在 store.refreshAccounts',
+  )
+})
+
+check('K线响应带请求序号 + (账户,venue,symbol) 身份守卫：旧账户/旧所响应静默丢弃', () => {
+  assert.match(chart, /let requestSeq = 0/, 'KlineChart 缺单调请求序号（旧响应会覆盖新数据）')
+  const identity = chart.match(/function captureIdentity\(\): KlineIdentity \{[\s\S]*?\n\}/)
+  assert.ok(identity, 'KlineChart 缺请求时刻的身份捕获')
+  assert.match(identity[0], /account: store\.displayAccount/, '身份捕获缺账户')
+  assert.match(identity[0], /venue: store\.activeAccountVenue/, '身份捕获缺 venue')
+  assert.match(identity[0], /symbol: props\.symbol/, '身份捕获缺 symbol')
+  const guard = chart.match(/function responseIsCurrent\([\s\S]*?\n\}/)
+  assert.ok(guard, 'KlineChart 缺响应守卫（序号 + 身份比对）')
+  assert.match(guard[0], /requestId === requestSeq/, '守卫未比对请求序号')
+  assert.match(guard[0], /identity\.account === store\.displayAccount/, '守卫未比对账户身份')
+  assert.match(guard[0], /identity\.venue === store\.activeAccountVenue/, '守卫未比对 venue 身份')
+  assert.match(guard[0], /identity\.symbol === props\.symbol/, '守卫未比对 symbol 身份')
+  const fn = chart.match(/async function refresh\(\): Promise<void> \{[\s\S]*?\n\}/)
+  assert.ok(fn, 'KlineChart 缺 refresh')
+  assert.match(fn[0], /const requestId = \+\+requestSeq/, 'refresh 未取新请求序号')
+  assert.match(fn[0], /const identity = captureIdentity\(\)/, 'refresh 未捕获请求时刻身份')
+  const guarded = fn[0].match(/responseIsCurrent\(requestId, identity\)/g) ?? []
+  assert.ok(
+    guarded.length >= 2,
+    `成功与失败路径都必须过守卫（当前只有 ${guarded.length} 处）`,
+  )
+})
+
+check('store 快照写回按世代 + 身份门控：旧账户的迟到快照不得覆盖新账户读数', () => {
+  const setter = store.match(/function setDisplayAccount\(id: string\): void \{[\s\S]*?\n  \}/)
+  assert.ok(setter, 'store 缺 setDisplayAccount')
+  assert.match(setter[0], /displayEpoch\+\+/, '切换动作未推进世代号 —— 在途旧请求不会作废')
+  const accountsFn = store.match(/async function refreshAccounts\(\): Promise<string \| null> \{[\s\S]*?\n  \}/)
+  assert.ok(accountsFn, 'store.refreshAccounts 形状变了（本门禁按 token 形状钉住）')
+  assert.match(accountsFn[0], /const requestId = \+\+accountsSeq/, '账户簿读数缺请求序号')
+  assert.match(accountsFn[0], /const epoch = displayEpoch/, '账户簿读数未捕获世代')
+  assert.match(
+    accountsFn[0],
+    /requestId !== accountsSeq \|\| epoch !== displayEpoch/,
+    '账户簿镜像写回未按序号/世代门控',
+  )
+  const fn = store.match(/async function refresh\(\): Promise<void> \{[\s\S]*?\n  \}/)
+  assert.ok(fn, 'store 缺 refresh')
+  // The request id + captured identity (no volatile fields in the key).
+  assert.match(fn[0], /const requestId = \+\+refreshSeq/, '快照批次缺单调请求序号')
+  assert.match(fn[0], /const epoch = displayEpoch/, '快照批次未捕获世代')
+  assert.match(fn[0], /const identityAccount = displayAccount\.value/, '快照批次未捕获账户身份')
+  assert.match(fn[0], /const identityVenue = activeAccountVenue\.value/, '快照批次未捕获 venue 身份')
+  assert.match(fn[0], /requestId === refreshSeq/, '写回守卫未比对请求序号')
+  assert.match(fn[0], /epoch === displayEpoch/, '写回守卫未比对世代')
+  assert.match(fn[0], /identityAccount === displayAccount\.value/, '写回守卫未比对账户身份')
+  assert.match(fn[0], /identityVenue === activeAccountVenue\.value/, '写回守卫未比对 venue 身份')
+  // 首拍身份未知（''）时发起的是全局读数，采用默认账户后仍须落地 ——
+  // 不然首屏会被自家账户簿镜像作废，空等 15s 的下一拍。
+  assert.match(fn[0], /const identityKnown = identityAccount !== ''/, '缺「身份未知 = 全局读数」判定')
+  assert.match(
+    fn[0],
+    /!identityKnown \|\| identityAccount === displayAccount\.value/,
+    '首拍身份未知时被自家镜像作废（首屏空等下一拍）',
+  )
+  // Every snapshot / account-scoped write rides the same one-shot verdict.
+  assert.match(fn[0], /const current = isCurrent\(\)/, '写回裁决未一次性取定（内部身份写会误伤本拍）')
+  assert.match(
+    fn[0],
+    /if \(snap\.status === 'fulfilled' && current\)/,
+    '快照写回未过守卫 —— 旧账户快照可覆盖新读数',
+  )
+  assert.match(
+    fn[0],
+    /if \(plug\.status === 'fulfilled' && current\)/,
+    '插件写回未过守卫',
+  )
+  assert.match(
+    fn[0],
+    /if \(current\) \{[\s\S]*?accountTradeSummary\.value/,
+    '账户聚合读数写回未过守卫',
+  )
+  assert.match(
+    fn[0],
+    /if \(current\) \{[\s\S]*?accountStrategyStats\.value/,
+    '账户策略统计写回未过守卫',
+  )
 })
 
 process.exit(failures ? 1 : 0)
