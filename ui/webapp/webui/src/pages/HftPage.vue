@@ -3,6 +3,14 @@
  * 行情面板 — 二元预测市场通用模板页（源自 ui/hft.html）。倒计时条、行情卡、
  * 权益曲线、胜率分布、交易统计、持仓/历史瀑布流（全量、过滤器、分页），
  * 以及 hft.html 的提示音（盈/亏/开仓/熔断）。数据全部来自 /api/snapshot。
+ *
+ * issue 781：脚本按职责拆成四个 domain composable（useAlertSounds /
+ * useTradeBook / useEngineControl / useOrders）。**身份与 venue 跟随链留在
+ * 本页**：identityVenue / activeVenue / venue* 门 / visiblePrices /
+ * visibleBooks / venueRound / identityDurSec / balanceAccount* 被
+ * hft-venue-switch、account-venue、round-header、display-account、
+ * account-rounds、history-tab 等门禁按逐字源码形状钉住 —— 搬走即门禁红灯，
+ * 不是瘦身。页面仍是这些读数的唯一出口，模板绑定逐字未动。
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
@@ -17,12 +25,12 @@ import {
 import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import { newestFirst, positionExpired } from '@/lib/trades'
-import { controlState, exitNotice } from '@/lib/lifecycle'
 import { feedStaleness } from '@/lib/feed'
 import { useRoundDuration } from '@/lib/round-duration'
-import {
-  playDang, playDing, playOrder, playProfit, playWuwu,
-} from '@/composables/alertSounds'
+import { useAlertSounds } from '@/composables/useAlertSounds'
+import { useTradeBook } from '@/composables/useTradeBook'
+import { useEngineControl } from '@/composables/useEngineControl'
+import { useOrders } from '@/composables/useOrders'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -53,41 +61,11 @@ const { pause: stopFast } = useIntervalFn(() => {
 onUnmounted(() => { stopFast() })
 
 // ── alert sounds: diff each snapshot against the previous one ────────────────
-let primedWins: number | null = null
-let primedLosses: number | null = null
-let primedPositions: number | null = null
-let wasHalted = false
-
-watch(snap, (s) => {
-  if (!s) return
-  // Deduped: the raw rows can carry the same `hft-N` id from an earlier run, and
-  // counting those twice would fire an alert sound for a trade that never closed.
-  const rows = store.tradeRows
-  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
-  const losses = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0).length
-  const pos = s.positions?.length ?? 0
-  // first frame only establishes the baseline (no replay storm on reload)
-  if (primedWins === null || primedLosses === null || primedPositions === null) {
-    primedWins = wins; primedLosses = losses; primedPositions = pos
-    return
-  }
-  if (wins > primedWins) for (let i = 0; i < Math.min(wins - primedWins, 3); i++) playProfit()
-  if (losses > primedLosses) for (let i = 0; i < Math.min(losses - primedLosses, 3); i++) playDang()
-  if (pos > primedPositions) playOrder()
-  primedWins = wins; primedLosses = losses; primedPositions = pos
-
-  // Trading halted: the sound's source is the kernel's freeze state
-  // (`stats.tradingFrozen`), not `snapshot.lastError` — that one is the
-  // GATEWAY's "core not reachable" string, which never contains "breaker", so
-  // this pair of sounds could never fire (issue 236 shook this loose). The
-  // daily-loss breaker is a DIFFERENT signal (`dailyLoss.tripped`, still not
-  // carried through the seam) and would need its own line here if the panel
-  // should hear it too.
-  const halted = s.stats?.tradingFrozen?.active === true
-  if (halted && !wasHalted) playWuwu()
-  if (!halted && wasHalted) playDing()
-  wasHalted = halted
-})
+// issue 781：快照差分（成交行计数增长 → 盈/亏声、持仓行增长 → 开仓声、
+// 交易冻结翻转 → 熔断/恢复声）搬到了 composables/useAlertSounds.ts；首帧只
+// 建基线，不补放历史。行源仍是 store.tradeRows 原始读数（未经账户/venue
+// 过滤 —— 与搬出前逐字节一致），回调时才读。
+useAlertSounds(snap, () => store.tradeRows)
 
 // ── market identity ─────────────────────────────────────────────────────────
 // 倒计时卡的身份行（徽章/名字/slot/已过秒数）的身份唯一源（issue 559，随
@@ -377,42 +355,12 @@ const venueUnbound = computed(() => {
   return activeVenue.value === ''
 })
 
-const depthAsset = ref('')
-// 资产选择跟随 venue 过滤后的可见行：旧所的资产不会成为新所页面的选中项
-// （切换账户清空旧所行时，选中资产随 visibleBooks 重置到新所首行）。
-watch(visibleBooks, (b) => {
-  if (!b.length) {
-    depthAsset.value = ''
-    return
-  }
-  if (!b.some((x) => x.asset === depthAsset.value)) depthAsset.value = b[0].asset
-}, { immediate: true })
-
-/** UP or DOWN token of the selected asset — the two halves of the round. */
-const depthToken = ref<'up' | 'down'>('up')
-
-const activeBook = computed(() => visibleBooks.value.find((b) => b.asset === depthAsset.value) ?? null)
-// ── K线 (E29, kline.history) ─────────────────────────────────────────────────
-/**
- * The aggregator keys prediction-token bars by TOKEN id (what `feed_klines`
- * was fed), not by asset name — the same key the books view now exposes.
- * Empty on older cores: the card hides rather than queries a wrong key.
- *
- * K线只属于 CEX 现货/合约：二元预测市场（prediction）的价格就是 0..1 概率，
- * 没有 OHLC 概念，卡片必须藏——哪怕行情插件带了真 token id。
- */
-const KLINE_MARKET_TYPES = new Set(['spot', 'futures', 'options'])
-const klineReady = computed(() => {
-  if (!KLINE_MARKET_TYPES.has(snap.value?.marketActiveType ?? '')) return false
-  const b = activeBook.value
-  if (!b) return false
-  return depthToken.value === 'up' ? !!b.upTokenId : !!b.downTokenId
-})
-const klineSymbol = computed(() => {
-  const b = activeBook.value
-  if (!b) return ''
-  return depthToken.value === 'up' ? b.upTokenId : b.downTokenId
-})
+// ── 盘口/K线选中态（issue 781：搬到了 composables/useTradeBook.ts）────────────
+// depthAsset / depthToken / activeBook / klineReady / klineSymbol 五件套在该
+// composable 里；输入是页面钉住的 visibleBooks（venue Loading 门 + 过滤的
+// 唯一出口），所以选中项随可见行重绑的行为不变。immediate watch 在调用点
+// 同步建立（与搬出前的声明位置一致 —— 渲染值的 TDZ 时序未动）。
+const { depthAsset, depthToken, activeBook, klineReady, klineSymbol } = useTradeBook(snap, visibleBooks)
 
 /**
  * Feed liveness, so a stalled market-data feed cannot masquerade as a quiet market.
@@ -609,9 +557,13 @@ const winBands = computed(() => {
   return bands.map((b, i) => ({ ...b, count: counts[i], frac: counts[i] / max }))
 })
 
-// ── engine control ──────────────────────────────────────────────────────────
-const busy = ref(false)
-const cmdMsg = ref<string | null>(null)
+// ── engine control（issue 781：搬到了 composables/useEngineControl.ts）────────
+// busy / cmdMsg / control（--manage 与领养核的按钮可用性）/ exit + exitText
+// （E12-c 崩溃告知）/ startHint / stopHint / send 的推导在该 composable 里；
+// `engineUp` 仍由上方倒计时块持有（重臂 watch 必须先于 watch(snap) 建立，
+// composable 只消费它）。在这里调用：snap 与 engineUp 均已声明，模板绑定的
+// 名字逐字不变。
+const { busy, cmdMsg, control, exit, exitText, startHint, stopHint, send } = useEngineControl(snap, engineUp)
 // engineUp 已上移到倒计时块（引擎生命周期重臂 watch 需要它先于该块声明）。
 
 // ── 空行情的判因（issue 488 空态的轮次分支）────────────────────────────────
@@ -733,67 +685,8 @@ const switcherLocked = computed(
   () => venueRoundSecs.value !== undefined && switcherSegments.value.length <= 1,
 )
 
-/**
- * What the two controls can actually do here.
- *
- * Reachability alone is not enough to offer a live 停止: a gateway started
- * without `--manage` refuses both verbs, and even with `--manage` it only stops
- * a core it spawned itself (`Supervisor::stop` leaves an adopted core running).
- * `controlState` folds those in so the buttons are disabled with a stated
- * reason instead of being clickable and failing.
- */
-const control = computed(() => controlState(snap.value?.gateway, engineUp.value))
-
-/**
- * The last core exit, when the operator needs to know about it (E12-c).
- *
- * A crashed core used to be invisible: the gateway cleared its handle and the
- * panel went on showing whatever the socket said, so a core that died and was
- * replaced looked identical to one that never died. The sentence below is the
- * gateway's own classification (`kind`), not something this page infers.
- */
-const exit = computed(() => exitNotice(snap.value?.gateway, engineUp.value))
-const exitText = computed(() => {
-  const e = exit.value
-  if (!e) return ''
-  if (e.kind === 'clean') return `内核已停止：${e.description}`
-  if (e.givenUp) {
-    return `内核崩溃且已放弃重启（${e.description}）。请检查日志后手动启动。`
-  }
-  if (engineUp.value && e.restarts > 0) {
-    return `内核曾崩溃（${e.description}），已自动重启 ${e.restarts} 次，当前运行中。`
-  }
-  return `内核崩溃：${e.description}`
-})
-
-/** Tooltip/title explaining why a control is unavailable (empty when usable). */
-const startHint = computed(() => {
-  if (busy.value) return '正在下发命令…'
-  if (control.value.canStart) return '启动引擎'
-  if (engineUp.value) return '引擎运行中，无需重复启动'
-  return control.value.blockedReason ?? '无法启动引擎'
-})
-const stopHint = computed(() => {
-  if (busy.value) return '正在下发命令…'
-  if (control.value.canStop) return '停止引擎'
-  if (!engineUp.value) return '引擎未运行'
-  return control.value.blockedReason ?? '无法停止引擎'
-})
-
-async function send(cmd: 'start' | 'stop'): Promise<void> {
-  busy.value = true
-  cmdMsg.value = null
-  try {
-    const res = await api.command(cmd)
-    cmdMsg.value = res.message ?? `${cmd} 已下发`
-    await store.refresh()
-  } catch (e) {
-    cmdMsg.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    busy.value = false
-    setTimeout(() => { cmdMsg.value = null }, 4000)
-  }
-}
+// control / exit / exitText / startHint / stopHint / send 已在上方
+// useEngineControl(snap, engineUp) 调用点声明（issue 781 拆分）。
 
 async function forceClose(position: Position): Promise<void> {
   if (!control.value.canStop || busy.value) return
@@ -899,143 +792,34 @@ function orderExpired(o: OrderRow): boolean {
  * nothing is filtered — the label below says 范围, not 已过滤, accordingly.
  * Null id = book never fetched.
  */
-const accountBadge = computed(() => {
-  const id = store.activeAccount
-  if (!id) return ''
-  const row = store.accounts.find((a) => a.id === id)
-  return row?.name ? `${id} · ${row.name}` : id
-})
-const accountFiltered = computed(() =>
-  accountBadge.value !== '' &&
-  (filterByAccount(snap.value?.positions ?? [], store.activeAccount).attributed ||
-    filterByAccount(store.tradeRows, store.activeAccount).attributed),
-)
-// venue 层标注：display 账户绑定了 venue 且行数据带 venue 标签时，过滤真的
-// 在生效 —— 标注要说清「过滤器在哪、为什么在」（显示账户绑定，不是独立控件）。
-const venueFiltered = computed(() =>
-  activeVenue.value !== '' &&
-  (filterByVenue(snap.value?.positions ?? [], activeVenue.value).attributed ||
-    filterByVenue(store.tradeRows, activeVenue.value).attributed),
-)
-const orderRows = computed<OrderRow[]>(() => {
-  // snapshot 里已带 orders（网关从 orders.list 拉的同一份）；不在时回落
-  // 到专用读路径，两边都是内核的 TrackedOrder wire 形状。
-  // E28 (§9.5) + issue 561: rows are scoped to the display account — same
-  // discipline as positions/history (pre-E28 unattributed rows stay visible).
-  const fromSnap = (snap.value as unknown as { orders?: OrderRow[] } | null)?.orders
-  return filterByVenue(
-    filterByAccount(fromSnap ?? [], store.activeAccount).rows,
-    activeVenue.value,
-  ).rows
-})
+
+// ── 挂单簿与强平动作（issue 781：搬到了 composables/useOrders.ts）─────────────
+// orderRows（账户→venue 双过滤）/ openOrderRows（内核 is_live 三态）/
+// terminalOrderRows（终态死单合成历史行）/ accountBadge / accountFiltered /
+// venueFiltered 与强平动作（askForceClose / doForceClose / doSweepExpired，
+// 确认词门 + 逐单审计）在该 composable 里。页面保留轮长回落链
+//（identityDurSec / orderExpired —— account-rounds 门禁逐字钉住）与过期行
+// 计算 expiredOrderRows，以 getter 传给 composable：批量清理点击时才读，
+// 无创建序耦合。
+const {
+  orderRows,
+  openOrderRows,
+  terminalOrderRows,
+  accountBadge,
+  accountFiltered,
+  venueFiltered,
+  orderBusy,
+  orderErr,
+  orderMsg,
+  forceOpen,
+  forceTarget,
+  sweepOpen,
+  askForceClose,
+  doForceClose,
+  doSweepExpired,
+} = useOrders(snap, activeVenue, () => expiredOrderRows.value)
+
 const expiredOrderRows = computed(() => orderRows.value.filter((o) => o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING').filter(orderExpired))
-// 内核 is_live 的三态（service.rs 活单判定同口径）：挂单页签只显活单 ——
-// 终态死单（REJECTED/FAILED/FORCE_CLOSED/CANCELLED/FILLED）不再堆在挂单
-// 表里当「当前挂单 N」充数。FORCE_CLOSED 的活单走内核 run_expiry_sweep
-// 自动收（reason="round expired"），强平按钮保留作手动兜底；死单全部
-// 分流到历史页签（下方 terminalOrderRows），挂单页签的徽标 = 真挂单数。
-const isLiveOrder = (o: OrderRow): boolean =>
-  o.status === 'LIVE' || o.status === 'PARTIALLY_FILLED' || o.status === 'PENDING'
-const openOrderRows = computed(() => orderRows.value.filter(isLiveOrder))
-
-// ── 终态死单自动落历史页签（裁决「过期轮次订单自动进入历史订单」）─────────
-// 历史页签的行源是 trades（成交流水），从未成交的死单在里面没有行 —— 35 行
-// REJECTED/FORCE_CLOSED 曾经只能在挂单页签烂着。这里把 orderRows 里的终态
-// 行合成 TradeRow 形状补进历史页签：
-//   * 只并四种「无成交终态」（REJECTED/FAILED/FORCE_CLOSED/CANCELLED）。
-//     FILLED 天然有成交，trades 里已有（或将有）对应行，并进去必然重复，
-//     故不合成 —— 这就是去重：按状态语义划界，不做 (asset, side, price,
-//     size, submittedAtMs) 的近似匹配（那是在给两个独立台账硬造一致性）。
-//   * 合成行是「未成交」不是「亏了零块钱」：净利/收益率/费用/出场全占位
-//     （—），字段给 0 只为 TradeRow 形状完整，盈亏统计（cumStats /
-//     filteredStats / winBands / 权益曲线）全部只吃 historyRows（成交行），
-//     口径不动 —— 历史徽标（cumStats.total）也不改，两口径差异是既有语义。
-//   * entryTime = submittedAtMs（wire 一直带，见 OrderRow 注释），exitTime
-//     不设：时间筛选与 newestFirst 都回落 entryTime（lib/trades 同一处理），
-//     买入时间 = 提交时刻、卖出时间 = —（从未出场，诚实）；更重要的是
-//     tradeIdentity 的键——双时间戳齐会按 (asset, entry, exit) 合成键，同毫秒
-//     批量提交的两单会撞键（Vue patch 错乱），缺 exitTime 落 i:order:<orderId>
-//     的 id 键，orderId 内核唯一，天然不撞。
-//   * strategy/venue 照抄订单行：历史页签的资产/策略筛选器对合成行照常
-//     生效；「结果」筛选（仅盈利/仅亏损）按净利 0 把合成行划进「亏损」
-//     桶的边界之外（pnl > 0 才算盈），「全部」下总能看到。
-const terminalOrderRows = computed<TradeRow[]>(() =>
-  orderRows.value
-    .filter((o) => o.status === 'REJECTED' || o.status === 'FAILED' || o.status === 'FORCE_CLOSED' || o.status === 'CANCELLED')
-    .map((o) => ({
-      id: `order:${o.orderId}`,
-      strategy: o.strategy || undefined,
-      asset: o.asset,
-      direction: o.direction,
-      entryPrice: Number(o.price) || 0,
-      exitPrice: 0,
-      shares: Number(o.size) || 0,
-      netPnlUsd: 0,
-      feesUsd: 0,
-      entryTime: o.submittedAtMs,
-      venue: o.venue,
-      orderStatus: o.status,
-      orderRoundSlot: o.roundSlot,
-    })),
-)
-
-const orderBusy = ref(false)
-const orderErr = ref<string | null>(null)
-const orderMsg = ref<string | null>(null)
-const forceOpen = ref(false)
-const forceTarget = ref<OrderRow | null>(null)
-const sweepOpen = ref(false)
-
-function askForceClose(o: OrderRow): void {
-  orderErr.value = null
-  forceTarget.value = o
-  forceOpen.value = true
-}
-
-async function doForceClose(): Promise<void> {
-  const target = forceTarget.value
-  if (!target || orderBusy.value) return
-  orderBusy.value = true
-  orderErr.value = null
-  try {
-    await api.forceCloseOrder({ orderId: target.orderId })
-    orderMsg.value = `已强平 ${target.orderId}（审计已写）`
-    forceOpen.value = false
-    await store.refresh()
-  } catch (e) {
-    orderErr.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    orderBusy.value = false
-    setTimeout(() => { orderMsg.value = null }, 5000)
-  }
-}
-
-/** 批量清理过期挂单：逐单调内核，一单失败不挡下一单（各自审计）。 */
-async function doSweepExpired(): Promise<void> {
-  if (orderBusy.value) return
-  orderBusy.value = true
-  orderErr.value = null
-  let closed = 0
-  const failed: string[] = []
-  try {
-    for (const o of expiredOrderRows.value) {
-      try {
-        await api.forceCloseOrder({ orderId: o.orderId })
-        closed += 1
-      } catch {
-        failed.push(o.orderId)
-      }
-    }
-    orderMsg.value = failed.length
-      ? `清理完成：${closed} 笔强平，${failed.length} 笔被内核拒绝（${failed.slice(0, 3).join('、')}${failed.length > 3 ? '…' : ''}）`
-      : `清理完成：${closed} 笔挂单已强平（各写一条审计）`
-    sweepOpen.value = false
-    await store.refresh()
-  } finally {
-    orderBusy.value = false
-    setTimeout(() => { orderMsg.value = null }, 6000)
-  }
-}
 const positionUnrealized = computed(() =>
   positions.value.reduce((a, p) => a + (Number(p.unrealizedPct) || 0), 0),
 )
