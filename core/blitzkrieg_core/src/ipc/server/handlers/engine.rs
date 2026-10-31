@@ -167,11 +167,7 @@ pub(crate) async fn handle_engine(
                         _ => row
                             .get("upTokenId")
                             .and_then(Value::as_str)
-                            .map(|tok| {
-                                c.engine()
-                                    .and_then(|e| e.venue_of(tok))
-                                    .unwrap_or_default()
-                            })
+                            .map(|tok| c.engine().and_then(|e| e.venue_of(tok)).unwrap_or_default())
                             .unwrap_or_default(),
                     };
                     row["venue"] = serde_json::json!(venue);

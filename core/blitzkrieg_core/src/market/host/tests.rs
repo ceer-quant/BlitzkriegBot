@@ -661,11 +661,7 @@ async fn a_feed_source_consumer_re_registers_the_source_batch_under_its_own_venu
         "two venues hold the token: the token-only lookup must refuse, not first-hit"
     );
     // The consumer's own round clock opened (its row spoke its own expiry).
-    let clocks = c
-        .engine()
-        .expect("engine")
-        .scanner()
-        .observed_venue_keys();
+    let clocks = c.engine().expect("engine").scanner().observed_venue_keys();
     assert!(
         clocks.iter().any(|v| v == "simspace"),
         "the consumer's re-registered row opens its own round clock: {clocks:?}"

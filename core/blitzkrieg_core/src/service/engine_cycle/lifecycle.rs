@@ -328,7 +328,9 @@ mod replay_seam_tests {
     #[test]
     fn a_replay_hosted_strategy_starts_disabled() {
         let mut c = Core::new(CoreConfig::default());
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         c.host_replay_strategy(
             Box::new(crate::strategies::test_support::TestSpreadArb::new(
                 Default::default(),
@@ -339,7 +341,8 @@ mod replay_seam_tests {
         .expect("hosting into a present engine registers");
         assert!(c.engine().is_some());
         assert!(
-            !c.enabled_strategy_names().contains(&"spread_arb".to_string()),
+            !c.enabled_strategy_names()
+                .contains(&"spread_arb".to_string()),
             "registration starts DISABLED; the seam must not enable it"
         );
     }
@@ -351,7 +354,9 @@ mod replay_seam_tests {
             crate::shadow_evolution::ParamRegistry::new(),
         )));
         assert!(!c.has_hot_params(), "no engine — no ghost overlay");
-        c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig::default()));
+        c.enable_engine(crate::engine::Engine::new(
+            crate::engine::EngineConfig::default(),
+        ));
         c.set_engine_hot_params(Some(std::sync::Arc::new(
             crate::shadow_evolution::ParamRegistry::new(),
         )));
