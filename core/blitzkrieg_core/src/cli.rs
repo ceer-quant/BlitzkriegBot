@@ -1022,8 +1022,12 @@ mod tests {
     /// with the reason instead of silently comparing two empty sets.
     /// #699: the loop itself now lives in the bin's `bin_support/boot.rs`
     /// (a pure main.rs size split), so the source is read from there.
+    /// #780: `parse_args` moved to `bin_support/boot/args.rs`, and the
+    /// contiguous tail of its flag match to `bin_support/boot/replay_flags.rs`;
+    /// both are read so the comparison still sees every accepted spelling.
     fn flags_matched_by_the_parser() -> Vec<String> {
-        const SRC: &str = include_str!("bin_support/boot.rs");
+        const SRC: &str = include_str!("bin_support/boot/args.rs");
+        const TAIL: &str = include_str!("bin_support/boot/replay_flags.rs");
         const START: &str = "let mut it = argv.iter().cloned();";
         const END: &str = "// ── Resolve the file-settable settings";
         let start = SRC
@@ -1034,24 +1038,27 @@ mod tests {
             .expect("the resolve-section marker is missing from main.rs");
         assert!(end > start, "the parse loop markers are out of order");
         let mut out = Vec::new();
-        for line in SRC[start..end].lines() {
-            let trimmed = line.trim_start();
-            // The escape hatch's arm names the const instead of repeating the
-            // spelling, so the const is read here rather than skipped: the point
-            // of the comparison is the SET of accepted spellings, and the hatch
-            // is one of them.
-            if trimmed.starts_with("blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS") {
-                out.push(ALLOW_UNKNOWN_ARGS.to_string());
-                continue;
+        let sources = [&SRC[start..end], TAIL];
+        for src in sources {
+            for line in src.lines() {
+                let trimmed = line.trim_start();
+                // The escape hatch's arm names the const instead of repeating the
+                // spelling, so the const is read here rather than skipped: the point
+                // of the comparison is the SET of accepted spellings, and the hatch
+                // is one of them.
+                if trimmed.starts_with("blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS") {
+                    out.push(ALLOW_UNKNOWN_ARGS.to_string());
+                    continue;
+                }
+                if !trimmed.starts_with("\"--") {
+                    continue;
+                }
+                let literal = &trimmed[1..];
+                let Some(close) = literal.find('"') else {
+                    continue;
+                };
+                out.push(literal[..close].to_string());
             }
-            if !trimmed.starts_with("\"--") {
-                continue;
-            }
-            let literal = &trimmed[1..];
-            let Some(close) = literal.find('"') else {
-                continue;
-            };
-            out.push(literal[..close].to_string());
         }
         assert!(
             out.len() > 50,
