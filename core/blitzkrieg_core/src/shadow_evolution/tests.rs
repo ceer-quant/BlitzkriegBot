@@ -840,44 +840,44 @@ fn accepting_a_proposal_hot_swaps_and_logs_a_durable_promotion() {
     );
 }
 
-/// Without a write-back path the auto switch is runtime-only by design
-/// (durable writers are disabled), so a restart falls back to the file —
-/// with one, the flip lives in the file and the restart keeps it (that is
-/// `a_switch_flip_writes_back_into_the_config_file`).
+/// Without an `.env` write-back path the auto switch is runtime-only by
+/// design (durable writers are disabled), so a restart falls back to the
+/// resolved boot config — with one, the flip lives in `.env` and the restart
+/// keeps it (that is `a_switch_flip_writes_back_into_the_dotenv`).
 #[test]
-fn the_auto_evolve_switch_without_a_config_path_falls_back_to_the_file() {
+fn the_auto_evolve_switch_without_an_env_path_falls_back_to_the_boot_config() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
     let cfg = fast_cfg(false, "autoswitch");
     let dir = std::path::PathBuf::from(&cfg.audit_dir);
     let _ = std::fs::remove_dir_all(&dir);
     let mut m = ShadowEvolution::new(cfg, &refs);
-    assert!(!m.auto_evolve(), "file default is manual");
+    assert!(!m.auto_evolve(), "the resolved boot config starts manual");
     m.set_auto_evolve(true);
     assert!(m.auto_evolve(), "the in-session flip is in force");
 
-    // No config path was configured, so the flip had nowhere durable to
-    // land: the next boot reads the file again.
+    // No env path was configured, so the flip had nowhere durable to land:
+    // the next boot resolves the switch from config again.
     let m2 = ShadowEvolution::new(fast_cfg(false, "autoswitch"), &refs);
     assert!(
         !m2.auto_evolve(),
-        "runtime-only flip: the file decides at the next boot"
+        "runtime-only flip: the resolved boot config decides at the next boot"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The operator's ruling: the config FILE is the single source of truth
-/// for the switches. A legacy `state.json` that carries conflicting
+/// The operator's ruling: the resolved boot config is the single source of
+/// truth for the switches. A legacy `state.json` that carries conflicting
 /// switch keys is read past, not honored — the exact production sample
-/// (file OFF, state.json `{autoEvolve:true, enabled:true}`) boots OFF
+/// (config OFF, state.json `{autoEvolve:true, enabled:true}`) boots OFF
 /// with a log line, and the panel's "配置文件与运行期开关不一致" banner
 /// can never describe reality again.
 #[test]
-fn a_legacy_state_json_switch_conflict_is_ignored_the_file_wins() {
+fn a_legacy_state_json_switch_conflict_is_ignored_the_boot_config_wins() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
-    // The shipped file says OFF; an older kernel's panel flip said ON and
-    // was persisted in state.json.
+    // The resolved boot config says OFF; an older kernel's panel flip said ON
+    // and was persisted in state.json.
     let cfg = fast_cfg(false, "conflict");
     let dir = std::path::PathBuf::from(&cfg.audit_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -890,15 +890,15 @@ fn a_legacy_state_json_switch_conflict_is_ignored_the_file_wins() {
     let m = ShadowEvolution::new(cfg, &refs);
     assert!(
         !m.is_enabled(),
-        "the FILE decides: the legacy state.json switch key is ignored"
+        "the boot config decides: the legacy state.json switch key is ignored"
     );
     assert!(
         !m.auto_evolve(),
-        "the auto switch follows the file just as strictly"
+        "the auto switch follows the boot config just as strictly"
     );
 
-    // And the reverse direction: a legacy file that says OFF under a file
-    // saying ON cannot hold the engine down either.
+    // And the reverse direction: a legacy state that says OFF under a boot
+    // config saying ON cannot hold the engine down either.
     let dir2 = std::path::PathBuf::from(&fast_cfg(true, "conflict-off").audit_dir);
     let _ = std::fs::remove_dir_all(&dir2);
     proposal::ProposalStore::new(&dir2).save_state(proposal::PersistedState {
@@ -910,38 +910,31 @@ fn a_legacy_state_json_switch_conflict_is_ignored_the_file_wins() {
     let m2 = ShadowEvolution::new(fast_cfg(true, "conflict-off"), &refs);
     assert!(
         m2.is_enabled(),
-        "the file's ON is not undone by legacy state"
+        "the boot config's ON is not undone by legacy state"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dir2);
 }
 
 /// With a write-back path configured, a runtime switch flip persists into
-/// the CONFIG FILE (the file is the single source of truth), the
-/// bookkeeping keeps flowing to state.json, and the next boot reads the
-/// flip back from the file.
+/// the `.env` single source (issue 751: the retired `shadow_evolution.toml`
+/// write-back was removed), the bookkeeping keeps flowing to state.json, and
+/// the next boot resolves the flip back from `.env`.
 #[test]
-fn a_switch_flip_writes_back_into_the_config_file() {
+fn a_switch_flip_writes_back_into_the_dotenv() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
     let root = std::env::temp_dir().join(format!("bkevo-writeback-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let cfg_path = root.join("shadow_evolution.toml");
-    std::fs::write(
-        &cfg_path,
-        "[shadow_evolution]\nenabled = false\nauto_evolve = false\n",
-    )
-    .unwrap();
     let cfg = fast_cfg(false, "writeback");
     let dir = std::path::PathBuf::from(&cfg.audit_dir);
     let _ = std::fs::remove_dir_all(&dir);
 
     let env_path = root.join(".env");
-    let mut m = ShadowEvolution::new_with_config_path(
+    let mut m = ShadowEvolution::new_with_env_path(
         cfg,
         &refs,
-        None,
         Some(env_path.to_string_lossy().into_owned()),
     );
     m.enable(0);
@@ -970,9 +963,9 @@ fn a_switch_flip_writes_back_into_the_config_file() {
     assert_eq!(st.enabled, None, "state.json no longer speaks for switches");
     assert_eq!(st.auto_evolve, None);
 
-    // The next boot reads the switches FROM THE FILE (what main.rs does:
-    // `FileConfig::load` → the [shadow_evolution] section → the manager's
-    // config), so the flip survived WITHOUT any state.json switch key.
+    // The next boot resolves the switches FROM `.env` (what the launcher and
+    // `bin_support/boot` do: SHADOW_* env outranks the legacy toml section),
+    // so the flip survived WITHOUT any state.json switch key.
     let mut boot_cfg = fast_cfg(false, "writeback");
     let text = std::fs::read_to_string(&env_path).unwrap();
     let get = |k: &str| {
@@ -984,13 +977,12 @@ fn a_switch_flip_writes_back_into_the_config_file() {
     };
     boot_cfg.enabled = get("SHADOW_ENABLED").as_deref() == Some("true");
     boot_cfg.auto_evolve = get("SHADOW_AUTO_EVOLVE").as_deref() == Some("true");
-    let m2 = ShadowEvolution::new_with_config_path(
+    let m2 = ShadowEvolution::new_with_env_path(
         boot_cfg,
         &refs,
-        None,
         Some(env_path.to_string_lossy().into_owned()),
     );
-    assert!(m2.is_enabled(), "the boot honors the file the verb wrote");
+    assert!(m2.is_enabled(), "the boot honors the .env the verb wrote");
     assert!(m2.auto_evolve());
 
     // The bookkeeping file itself: written, readable, switch-free.
@@ -1008,7 +1000,7 @@ fn a_switch_flip_writes_back_into_the_config_file() {
 /// checkout the caller happens to run from — the same posture as every
 /// other `None`-path durable writer.
 #[test]
-fn a_switch_flip_without_a_config_path_stays_runtime_only() {
+fn a_switch_flip_without_an_env_path_stays_runtime_only() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
     // cwd here is the crate during tests; nothing may appear beside it.
@@ -1337,18 +1329,18 @@ fn a_restart_restores_the_adopted_parameters() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Without a write-back path the engine switch is runtime-only: the
-/// in-session flip is in force, and the next boot falls back to the file.
-/// The durable flip (the production posture) is
-/// `a_switch_flip_writes_back_into_the_config_file`.
+/// Without an `.env` write-back path the engine switch is runtime-only: the
+/// in-session flip is in force, and the next boot falls back to the resolved
+/// boot config. The durable flip (the production posture) is
+/// `a_switch_flip_writes_back_into_the_dotenv`.
 #[test]
-fn the_engine_switch_without_a_config_path_falls_back_to_the_file() {
+fn the_engine_switch_without_an_env_path_falls_back_to_the_boot_config() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
     let dir = std::path::PathBuf::from(&fast_cfg(false, "engineswitch").audit_dir);
     let _ = std::fs::remove_dir_all(&dir);
 
-    // The file says off, the operator switches it on (runtime-only).
+    // The boot config says off, the operator switches it on (runtime-only).
     let mut m = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
     assert!(!m.is_enabled());
     m.enable(0);
@@ -1356,17 +1348,17 @@ fn the_engine_switch_without_a_config_path_falls_back_to_the_file() {
     let m2 = ShadowEvolution::new(fast_cfg(false, "engineswitch"), &refs);
     assert!(
         !m2.is_enabled(),
-        "no durable writer: the file decides at the next boot"
+        "no durable writer: the boot config decides at the next boot"
     );
     assert_eq!(
         m2.variant_count(),
         0,
-        "no twins behind a file that says off"
+        "no twins behind a boot config that says off"
     );
 
-    // A file saying ON arms the engine without any state.json in play.
+    // A boot config saying ON arms the engine without any state.json in play.
     let m3 = ShadowEvolution::new(fast_cfg(true, "engineswitch"), &refs);
-    assert!(m3.is_enabled(), "the file's ON stands on its own");
+    assert!(m3.is_enabled(), "the boot config's ON stands on its own");
     assert_eq!(m3.variant_count(), 3, "and carries its twins");
     let _ = std::fs::remove_dir_all(&dir);
 }

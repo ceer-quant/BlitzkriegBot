@@ -19,7 +19,7 @@
 | `.env.example` | env 全集模板（随发布打包） | **保留，本 PR 补齐漂移**（§5） | `scripts/package-release.mjs:267` |
 | `user_layer/configs/default.toml` | 内核配置文件壳（出厂四键已于 #588 退役，现零显式键） | **退役为纯注释文档**（2026-10-28）：不再含任何有效配置行；引擎配置走 .env 的 BK_* 变量，exit/risk 保持编译默认。文件缺失内核照常启动（`FileConfig::load` 对 NotFound 回落编译缺省） | PR-4 完成：文档壳退役为注释-only；读取点保留（缺失容忍） |
 | `user_layer/configs/accounts.toml` | **账户簿持久态 + 账户合同**（`[[account]]`、status 姿态、strategies 启用集、rounds 族、`[cross_venue_arb]` 腿） | **保留，绝不迁 .env**：面板热写回（`account.venue.set` / `account.rounds.set` / `account.strategies.set`）以它为持久化目标——`.env` 是「人写、进程只读」的文件，进程写回的键放 `.env` 会制造第二个可信源。缺文件时内核以单一 `default` 账户照常启动（`core/blitzkrieg_core/src/account/mod.rs:334` `single_default`） | §6 处置提案 |
-| `user_layer/configs/shadow_evolution.toml` | 进化开关与参数；`enabled`/`auto_evolve` 两开关的**唯一可信源**（面板翻转写回本文件） | **保留**（写回型持久态，同 accounts.toml 理由）。`BK_SE_*` env 是它的上层覆盖，已在 `.env.example` 全列出 | `core/blitzkrieg_core/src/config.rs`（load 侧边文件） |
+| `user_layer/configs/shadow_evolution.toml` | 进化开关与参数 | **〔issue 751 推翻本行判决，2026-10-28〕** 两开关迁 `.env`（`SHADOW_ENABLED`/`SHADOW_AUTO_EVOLVE`），面板翻转 upsert `.env`；toml 写回模块 `shadow_evolution/file.rs` 撤除，本文件降级为 env 键缺席时的兼容回退（读序仍 env > 本文件），由 `scripts/migrate-config-to-env.sh` 退役进备份 | `core/blitzkrieg_core/src/config.rs`（load 侧边文件）、`bin_support/boot/args.rs`（SHADOW_* 读点） |
 | `user_layer/configs/update.toml` | 更新检查出厂缺省（读序 CLI > `BLITZKRIEG_UPDATE_*` env > 此文件 > 内置） | **保留为出厂缺省面**；运行态在 `data/update/state.json`，env 面已存在 | `core/blitzkrieg_core/src/main.rs:1810-1835` |
 | `user_layer/configs/execution_policy.toml` | 执行策略合同（账户级 sizing/门禁），`BUDGET_RATIO[_<ID>]`/`MAX_BUDGET_USD[_<ID>]` env 在其上层 | **保留**：per-account 复杂结构用 toml 表达；env 只覆盖两个标量（已补进 `.env.example`）。缺文件 = 中性内核（文件头明示） | `core/blitzkrieg_core/src/execution_policy.rs:65` |
 | `extensions/binance_spot/config.toml` | 扩展结构声明（[meta] 与链接的 dylib 对账） | **保留为包合同** | `core/blitzkrieg_core/src/config.rs:566` |
@@ -170,9 +170,12 @@ BLITZKRIEG_*    面板 / 网关 / 更新检查 / 启动脚本进程设置
 ## 9. 「toml/json 可以删了吗」的直接回答
 
 - **可以删（待生产验证后）**：live `.env` 里的 4 个死键（§4）。
-- **不能删**：`accounts.toml`（写回型持久态）、`shadow_evolution.toml`（两开关
-  唯一可信源）、`data/runtime/config.json`（面板持久意图）——它们是进程**写**
-  的文件，env 做不了这件事。
+- **不能删**：`accounts.toml`（写回型持久态）、`data/runtime/config.json`（面板持久意图）
+  ——它们是进程**写**的文件，env 做不了这件事。
+  〔issue 751 推翻 shadow 部分判决，2026-10-28〕`shadow_evolution.toml` 的两开关
+  写回面已切 `.env`（`env_file::upsert`，`SHADOW_ENABLED`/`SHADOW_AUTO_EVOLVE`），
+  该文件不再是写回型持久态，只剩兼容回退读面，由迁移脚本退役；
+  `shadow_evolution/file.rs` 随之撤除。
 - **不该删**：`manifest.json`（包合同）、`execution_policy.toml`（结构化合同）、
   `update.toml`（出厂缺省）、`default.toml`（显式 act 面文档；PR-4 可再评估）。
   它们各有 env 之上的独立身份，删除只会把结构化数据压平成 env 键名拼接。

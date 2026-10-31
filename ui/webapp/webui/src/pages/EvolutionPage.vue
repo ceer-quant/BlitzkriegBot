@@ -408,8 +408,9 @@ const cycleAgo = (ms: number): string => {
         内核当前不评估、不采纳、也不排深度轮 —— 下面的「已采纳的变异」只是历史记录，
         待决提案不会被自动处理（自动开关记录的是模式，不是运行状态）。
         打开上方「进化引擎」开关即可让它跑起来；开关状态以
-        <span class="num">user_layer/configs/shadow_evolution.toml</span> 为唯一可信源，
-        面板翻转会写回该文件，重启后仍然有效。
+        <span class="num">.env</span> 的
+        <span class="num">SHADOW_ENABLED</span>/<span class="num">SHADOW_AUTO_EVOLVE</span>
+        为唯一可信源（issue 751），面板翻转会写回 .env，重启后仍然有效。
       </AlertBanner>
     </div>
 

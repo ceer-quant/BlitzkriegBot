@@ -69,7 +69,6 @@ fn adoption_signal(proposal: &EvolutionProposal, now_ms: i64) -> EvolveSignal {
 pub mod audit;
 pub mod config;
 pub mod evaluator;
-pub mod file;
 pub mod guard;
 pub mod knobs;
 pub mod proposal;
@@ -230,15 +229,6 @@ pub struct ShadowEvolution {
     /// E13: wall-clock ms of the last DEEP round (0 = clock not started).
     last_cycle_ms: i64,
     cycle_seq: u64,
-    /// The config FILE the switch verbs write back into (the file as the
-    /// single source of truth for `enabled` / `auto_evolve`). `None` — the
-    /// backtester, most in-process tests — disables the write path: a switch
-    /// flip then stays runtime-only and says so, instead of writing into
-    /// whatever checkout the caller happens to run from (the same posture as
-    /// `runtime_config_path` / `accounts_config_path`).
-    /// NOTE: removed in issue 751 migration; kept for compatibility.
-    #[allow(dead_code)]
-    config_path: Option<String>,
     /// The `.env` file the switch verbs write SHADOW_ENABLED / SHADOW_AUTO_EVOLVE
     /// into (the durable half of the switch verbs). `None` disables the write
     /// path (backtester, most in-process tests) — runtime-only switches.
@@ -254,26 +244,27 @@ impl ShadowEvolution {
     /// published with the declared values, so the overlay is a no-op rather than
     /// an invented parameter.
     ///
-    /// The switches (`enabled` / `auto_evolve`) come from the CONFIG FILE and
-    /// from nothing else: the file is the single source of truth, and the
-    /// runtime verbs write their flips back into it (`config_path`). A
+    /// The switches (`enabled` / `auto_evolve`) come from the resolved boot
+    /// config — `.env`'s `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE` (or `BK_SE_*`)
+    /// outrank the legacy `shadow_evolution.toml` section — and the runtime
+    /// verbs write their flips into the `.env` single source (issue 751). A
     /// legacy `state.json` may still carry `enabled` / `autoEvolve` keys
     /// written by an older kernel; they are IGNORED — logged once, never
-    /// honored — so a production file that says OFF stays off, and the
+    /// honored — so a production config that says OFF stays off, and the
     /// "配置文件与运行期开关不一致" state can never exist again. The
     /// bookkeeping keys (`lastCycleMs` / `cycleSeq`) keep their old meaning.
     pub fn new(cfg: ShadowEvolutionConfig, strategies: &[&dyn EngineStrategy]) -> Self {
-        Self::new_with_config_path(cfg, strategies, None, None)
+        Self::new_with_env_path(cfg, strategies, None)
     }
 
     /// [`Self::new`] with the write-back path for the switch verbs. Production
-    /// passes the shadow-evolution config file (`user_layer/configs/shadow_
-    /// evolution.toml`); the backtester and most in-process tests pass `None`
-    /// and get runtime-only switches.
-    pub fn new_with_config_path(
+    /// passes the `.env` file the launcher owns (issue 751: the switches live
+    /// in `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`, and the legacy
+    /// `shadow_evolution.toml` write-back is retired); the backtester and most
+    /// in-process tests pass `None` and get runtime-only switches.
+    pub fn new_with_env_path(
         cfg: ShadowEvolutionConfig,
         strategies: &[&dyn EngineStrategy],
-        config_path: Option<String>,
         env_path: Option<String>,
     ) -> Self {
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
@@ -287,8 +278,8 @@ impl ShadowEvolution {
         if st.enabled.is_some() || st.auto_evolve.is_some() {
             tracing::info!(
                 "state.json carries legacy switch keys (enabled/autoEvolve); they are \
-                 ignored — the switches live in the config file now (and the runtime \
-                 verbs write back into it)"
+                 ignored — the switches live in the `.env` single source now (and the \
+                 runtime verbs write back into it)"
             );
         }
         let enabled = cfg.enabled;
@@ -307,7 +298,6 @@ impl ShadowEvolution {
             auto_evolve,
             last_cycle_ms,
             cycle_seq,
-            config_path,
             env_path,
             proposal_store: store,
         };
@@ -552,9 +542,9 @@ impl ShadowEvolution {
     }
 
     /// Enable evolution: scaffold every unit around the parameters in force.
-    /// The flip is persisted INTO THE CONFIG FILE (the file is the single
-    /// source of truth for the switches — a restart reads it back), so a
-    /// deploy that edits the file and an operator's flip can no longer
+    /// The flip is persisted into the `.env` single source as `SHADOW_ENABLED`
+    /// (issue 751: the legacy `shadow_evolution.toml` write-back is retired),
+    /// so a deploy that edits `.env` and an operator's flip can no longer
     /// disagree. `state.json` keeps only the bookkeeping.
     pub fn enable(&mut self, now_ms: i64) {
         self.enabled = true;
@@ -563,7 +553,7 @@ impl ShadowEvolution {
         for i in 0..self.units.len() {
             self.units[i].scaffold(&self.cfg, now_ms);
         }
-        self.persist_switch(file::SwitchKey::Enabled, true);
+        self.persist_switch("SHADOW_ENABLED", true);
         self.persist_state();
     }
 
@@ -574,7 +564,7 @@ impl ShadowEvolution {
         for u in self.units.iter_mut() {
             u.set = VariantSet::empty(&u.strategy);
         }
-        self.persist_switch(file::SwitchKey::Enabled, false);
+        self.persist_switch("SHADOW_ENABLED", false);
         self.persist_state();
     }
 
@@ -1178,9 +1168,9 @@ impl ShadowEvolution {
         self.proposal_store.pending_count()
     }
 
-    /// The unattended switch (the UIs' auto-evolve checkbox). Persisted INTO
-    /// THE CONFIG FILE, same as the engine switch — the file is the single
-    /// source of truth, `state.json` keeps only the bookkeeping.
+    /// The unattended switch (the UIs' auto-evolve checkbox). Persisted into
+    /// the `.env` single source as `SHADOW_AUTO_EVOLVE`, same as the engine
+    /// switch — `state.json` keeps only the bookkeeping.
     pub fn set_auto_evolve(&mut self, on: bool) {
         if self.auto_evolve == on {
             return;
@@ -1188,7 +1178,7 @@ impl ShadowEvolution {
         self.auto_evolve = on;
         self.cfg.auto_evolve = on;
         tracing::info!(auto_evolve = on, "shadow evolution auto-evolve switched");
-        self.persist_switch(file::SwitchKey::AutoEvolve, on);
+        self.persist_switch("SHADOW_AUTO_EVOLVE", on);
         self.persist_state();
     }
 
@@ -1203,7 +1193,7 @@ impl ShadowEvolution {
 
     /// Seconds between DEEP rounds (the status surface's period display). Sent
     /// with the status because a UI that hard-codes "72 hours" lies the moment
-    /// the config file says otherwise.
+    /// the resolved configuration says otherwise.
     pub fn cycle_secs(&self) -> i64 {
         self.cfg.evolution_cycle_secs
     }
@@ -1220,17 +1210,12 @@ impl ShadowEvolution {
         Some(self.last_cycle_ms + self.cfg.evolution_cycle_secs * 1000).filter(|t| *t > now_ms)
     }
 
-    /// Write ONE switch flip back into the config file (the durable half of
-    /// the switch verbs). Best-effort like every config write face: a core
-    /// without `config_path` (backtester, most in-process tests) and a write
+    /// Write ONE switch flip into the `.env` single source (the durable half
+    /// of the switch verbs). Best-effort like every config write face: a core
+    /// without `env_path` (backtester, most in-process tests) and a write
     /// failure are logged and otherwise silent — the in-memory switch has
     /// already moved, and the operator's next flip retries the persist.
-    fn persist_switch(&self, key: file::SwitchKey, value: bool) {
-        // Map the toml switch key to its .env counterpart.
-        let env_key = match key {
-            file::SwitchKey::Enabled => "SHADOW_ENABLED",
-            file::SwitchKey::AutoEvolve => "SHADOW_AUTO_EVOLVE",
-        };
+    fn persist_switch(&self, env_key: &'static str, value: bool) {
         let Some(env_path) = self.env_path.as_deref() else {
             tracing::debug!(
                 switch = env_key,
@@ -1257,12 +1242,13 @@ impl ShadowEvolution {
     }
 
     /// Persist the pure bookkeeping (the deep-round clock). The switch keys
-    /// are NO LONGER written: the file is their single source of truth, and a
-    /// state.json that carries them at all is legacy read-past.
+    /// are NO LONGER written: `.env` is their single source of truth (issue
+    /// 751), and a state.json that carries them at all is legacy read-past.
     fn persist_state(&self) {
         self.proposal_store.save_state(proposal::PersistedState {
-            // The legacy switch keys stay `None`: the file is their single
-            // source of truth, and writing them would resurrect it.
+            // The legacy switch keys stay `None`: `.env` is their single
+            // source of truth, and writing them would resurrect this file as
+            // a second one.
             enabled: None,
             auto_evolve: None,
             last_cycle_ms: self.last_cycle_ms,

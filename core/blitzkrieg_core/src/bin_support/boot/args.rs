@@ -1268,8 +1268,9 @@ pub(crate) fn parse_args(
         ));
     }
     let shadow_evolution_echo = vec![format!(
-        "shadow evolution: evaluator {} at startup ({}); the persisted runtime switch in \
-         state.json wins over it, and any disagreement is reported below",
+        "shadow evolution: evaluator {} at startup ({}); the switches live in the `.env` \
+         single source (issue 751) and a legacy state.json switch key is read past, \
+         never honored",
         if shadow_evolution_enabled {
             "ON"
         } else {

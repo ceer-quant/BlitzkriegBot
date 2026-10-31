@@ -520,27 +520,6 @@ async fn main() -> anyhow::Result<()> {
         update_auto: args.update_auto.unwrap_or(false),
         update_interval_secs: args.update_interval_secs.unwrap_or(0).max(0) as u64,
         shadow_evolution_enabled: args.shadow_evolution,
-        // The shadow-evolution config file the switch verbs write back into
-        // (the file as the single source of truth for `enabled`/`auto_evolve`).
-        // Derived from the SAME file choice the boot read the switches from:
-        // the section file is a sibling of the main config (`config.rs`
-        // loads it beside whatever `--config` named, default
-        // `user_layer/configs/shadow_evolution.toml`), so the verb's write
-        // target and the boot's read source are always the one file. A run
-        // with `--no-config` has no file to be the truth, so the write path
-        // is off and the switches are runtime-only for that process (same
-        // posture as `--no-config` for every other durable writer).
-        shadow_config_path: match &choice {
-            ConfigChoice::Off => None,
-            ConfigChoice::Path(p) => Some(
-                std::path::Path::new(p)
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(blitzkrieg_core::config::SHADOW_SECTION_FILE)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-        },
         shadow_evolution_tuning: if args.se_min_samples.is_some()
             || args.se_cooldown_secs.is_some()
             || args.se_min_obs_secs.is_some()
