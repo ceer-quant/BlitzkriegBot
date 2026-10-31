@@ -212,8 +212,10 @@ export function isAllowedPath(rel) {
   // a /tests/ or /benches/ directory segment anywhere marks test code
   const dir = norm.slice(0, norm.lastIndexOf('/') + 1);
   if (TEST_SEGMENTS.some((s) => dir.includes(`/${s}/`))) return true;
-  // integrations test files live as tests_<x>.rs or <x>_tests.rs
+  // integrations test files live as tests_<x>.rs or <x>_tests.rs, and the
+  // 2018 nested layout puts a module's tests in `<stem>/tests.rs` (#780)
   const base = norm.slice(norm.lastIndexOf('/') + 1);
+  if (base === 'tests.rs' || base === 'benches.rs') return true;
   return /^tests?_.*\.rs$/.test(base) || /_tests\.rs$/.test(base);
 }
 
