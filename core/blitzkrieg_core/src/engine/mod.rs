@@ -293,8 +293,8 @@ pub use blitzkrieg_data_model::BatchBook;
 /// unchanged.
 pub use blitzkrieg_data_model::DataEvent;
 
-mod part1;
-mod part2;
+mod evaluate;
+mod submit;
 
 /// A strategy registered with the engine, plus its enablement and provenance.
 pub struct HostedStrategy {
