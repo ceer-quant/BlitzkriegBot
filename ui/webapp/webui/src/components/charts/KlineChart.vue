@@ -22,6 +22,7 @@ import { useChart, palette, tooltipStyle } from '@/lib/chart'
 import { clockTime, dateTime, compact } from '@/lib/format'
 import { api, KLINE_INTERVALS, type KlineBar, type KlineIntervalWire } from '@/api/client'
 import { useSettingsStore } from '@/stores/settings'
+import { usePanelStore } from '@/stores/panel'
 
 const props = withDefaults(defineProps<{
   symbol: string
@@ -30,20 +31,58 @@ const props = withDefaults(defineProps<{
 }>(), { height: 260, defaultInterval: 'min1' })
 
 const settings = useSettingsStore()
+const store = usePanelStore()
 const el = ref<HTMLDivElement | null>(null)
 const interval = ref<KlineIntervalWire>(props.defaultInterval)
 const bars = ref<KlineBar[]>([])
 const loaded = ref(false)
 const failed = ref<string | null>(null)
 
+/**
+ * issue 781：请求序号 + 请求时刻的身份捕获。切换账户/venue/symbol 后，
+ * 旧请求的在途响应绝不允许覆盖新数据 —— 一个响应只有在「序号仍是最新」
+ * 且「账户、venue、symbol 三项身份都没变」时才可以落地；否则静默丢弃。
+ *
+ * 序号是单调递增整数（普通 `let`，活在组件实例闭包里，重绘不重置）；
+ * 身份只含稳定字段（账户 id / venue / symbol），不含时间戳等易变值 ——
+ * 时间戳进身份会让每拍都「不匹配」，守卫反而失效。
+ */
+let requestSeq = 0
+
+interface KlineIdentity {
+  account: string
+  venue: string
+  symbol: string
+}
+
+function captureIdentity(): KlineIdentity {
+  return {
+    account: store.displayAccount,
+    venue: store.activeAccountVenue,
+    symbol: props.symbol,
+  }
+}
+
+function responseIsCurrent(requestId: number, identity: KlineIdentity): boolean {
+  return requestId === requestSeq &&
+    identity.account === store.displayAccount &&
+    identity.venue === store.activeAccountVenue &&
+    identity.symbol === props.symbol
+}
+
 async function refresh(): Promise<void> {
   if (!props.symbol) return
+  const requestId = ++requestSeq
+  const identity = captureIdentity()
   try {
     const doc = await api.klineHistory({
       symbol: props.symbol,
       interval: interval.value,
       limit: 120,
     })
+    // Drop a response that belongs to a superseded request or an old
+    // account/venue/symbol — silently (its data must not rewrite this chart).
+    if (!responseIsCurrent(requestId, identity)) return
     if (doc.error) {
       failed.value = doc.error
       return
@@ -52,6 +91,8 @@ async function refresh(): Promise<void> {
     bars.value = doc.klines
     loaded.value = true
   } catch (e) {
+    // A stale failure must not paint an error over the new chart either.
+    if (!responseIsCurrent(requestId, identity)) return
     failed.value = e instanceof Error ? e.message : String(e)
   }
 }
