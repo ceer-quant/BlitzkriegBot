@@ -13,7 +13,10 @@
 --              off the running high refuses, a stale book refuses, a
 --              missing fee schedule refuses, a non-BTC market refuses, a
 --              ring younger than the drift window refuses, a round longer
---              than round_sec refuses;
+--              than round_sec refuses, a mid-round start (first sample at
+--              elapsed 60s — no round-open reference) refuses, and two
+--              conditions qualifying in the SAME round still leave exactly
+--              ONE opening (the per-round cap is re-judged per market);
 --   latches  — one attempt per condition per round, one opening per round,
 --              a new round retires every latch;
 --   seal     — exits and breaks are ALWAYS empty, entries carry no shares.
@@ -41,7 +44,8 @@ local function ok(cond, name)
 end
 
 -- ── the stub bk surface (§6.5 shapes) ───────────────────────────────────────
--- state = { now, slot, time_left, params, books = { [tok] = book }, fees }
+-- state = { now, slot, time_left, params, books = { [tok] = book }, fees,
+--           asset, markets (override: two-market rows) }
 
 local T0 = 1700000000000
 
@@ -58,7 +62,7 @@ bk.round = function()
   return { slot = state.slot, time_left_sec = state.time_left, now_ms = state.now }
 end
 bk.markets = function()
-  return {
+  return state.markets or {
     {
       asset = state.asset or "BTC", condition_id = "c1",
       up_token = "up-1", down_token = "down-1",
@@ -96,6 +100,7 @@ local function reset()
   state.books = {}
   state.fees = { name = "legacy_quadratic", rate = "0.125", exponent = 2 }
   state.asset = "BTC"
+  state.markets = nil
   -- the kernel calls on_round at every round switch — the stub emulates it
   -- before the row's books flow (the strategy clears its state there).
   S.bk_on_round({ slot = state.slot })
@@ -130,6 +135,22 @@ local function feed_up(up_mid, t_ms)
   local bu = book_row("up-1", up_mid)
   state.books["up-1"] = bu
   S.bk_on_book(bu)
+end
+
+--- Feed BOTH markets of a two-market state.markets the mirrored pair shape
+--- (up_mid_a for the first market's up leg, up_mid_b for the second's).
+local function feed_both_markets(up_mid_a, up_mid_b, t_ms)
+  if t_ms then state.now = T0 + t_ms end
+  local mids = { [state.markets[1].up_token] = up_mid_a,
+                 [state.markets[2].up_token] = up_mid_b }
+  for _, m in ipairs(state.markets) do
+    local bu = book_row(m.up_token, mids[m.up_token])
+    local bd = book_row(m.down_token, 1.0 - mids[m.up_token])
+    state.books[m.up_token] = bu
+    state.books[m.down_token] = bd
+    S.bk_on_book(bu)
+    S.bk_on_book(bd)
+  end
 end
 
 local function evaluate() return S.bk_evaluate() end
@@ -283,6 +304,50 @@ do
   feed_pair(0.62, 120000)
   state.time_left = 780 -- a 900s round: elapsed would be negative
   ok(#evaluate().entries == 0, "round_sec=300 default: a 15m round never fires")
+end
+
+-- ═══ AUDIT REPRO — the two blockers, pinned as negative rows ════════════════
+
+-- Blocker 1 (P1): TWO conditions qualify in the SAME evaluation — each market
+-- carries the same established-plateau shape on its up leg. The per-round
+-- opening cap is re-judged per market, so exactly ONE entry may leave this
+-- evaluation (one opening per round SLOT, not one per condition).
+do
+  reset()
+  state.markets = {
+    { asset = "BTC", condition_id = "cA", up_token = "up-a",
+      down_token = "down-a", expires_at_ms = 0, slot = 1, neg_risk = false },
+    { asset = "BTC", condition_id = "cB", up_token = "up-b",
+      down_token = "down-b", expires_at_ms = 0, slot = 1, neg_risk = false },
+  }
+  feed_both_markets(0.50, 0.50, 0)
+  feed_both_markets(0.56, 0.56, 45000)
+  feed_both_markets(0.62, 0.62, 120000)
+  state.time_left = 180
+  local r = evaluate()
+  ok(#r.entries == 1,
+    "two qualifying conditions, one round: exactly ONE entry, got "
+      .. #r.entries)
+  -- and the cap stays spent across re-evaluations (cB never latched, but the
+  -- re-judged budget holds the round shut):
+  feed_both_markets(0.64, 0.64, 125000)
+  state.time_left = 175
+  ok(#evaluate().entries == 0,
+    "the round is still spent after a double-condition evaluation")
+end
+
+-- Blocker 2 (P2): the strategy (re)joins at elapsed 60s — its first fresh
+-- mid is NOT the round-open reference. Every OTHER gate passes on this tape
+-- (established 0.12, drift 0.06, at high, in band); the reference
+-- qualification alone must hold the round shut: fail-closed, zero entries.
+do
+  reset()
+  feed_pair(0.50, 60000)  -- first-ever sample: already 60s into the round
+  feed_pair(0.56, 105000)
+  feed_pair(0.62, 180000)
+  state.time_left = 120   -- elapsed 180: inside [90, 240]
+  ok(#evaluate().entries == 0,
+    "a mid-round start has no round-open reference: fail-closed, zero entries")
 end
 
 -- ═══ LATCHES ════════════════════════════════════════════════════════════════

@@ -12,7 +12,8 @@ mid has:
 
 1. **Established** — priced at/above `min_entry_price` (0.55) AND moved at
    least `min_established_move` (0.05) off the round-open reference (the
-   leg's own first fresh mid of the round);
+   leg's own first fresh mid sampled inside the round's opening window —
+   first 2s; a mid-round start leaves the leg unqualified for that round);
 2. **Plateaued** — reached that level with a `|move over
    `drift_window_sec`|` (default 60s) of at most `max_drift_60s` (0.10) —
    NOT mid-spike;
@@ -75,9 +76,10 @@ shape at −$17.6k over 20,038 trades. The anti-chase gate is the wall.
   for the footprint: an established mid-round level is the proxy trigger.
   The strategy cannot see who accumulated and cannot distinguish a whale
   from any other repricing — it prices only what the whole market sees.
-- **The round-open reference is the leg's own first fresh mid.** A strategy
-  (re)start mid-round leaves the reference unknown and the leg silently
-  unqualified for the establishment gate — fail-closed, never guessed.
+- **The round-open reference is the leg's own first fresh mid sampled inside
+  the round's opening window (first 2s).** A strategy (re)start mid-round
+  never holds a trusted reference and the leg stays unqualified for that
+  whole round — fail-closed, never guessed.
 - **The drift gate needs a full drift window of ring coverage** (ring =
   drift window + 30s at 250ms buckets). Sparse feeds inside the window
   refuse (fail-closed).
@@ -133,4 +135,6 @@ seal rows on a stub `bk` surface (pure Lua 5.4, no dependencies):
 lua user_layer/strategies_lua/whale_follow/selfcheck.lua
 ```
 
-Exit 0 = all 34 rows hold.
+Exit 0 = all 37 rows hold — including the two audit-repro negatives: two
+conditions qualifying in one round leave exactly ONE opening, and a mid-round
+start (first sample at elapsed 60s) leaves the round shut.

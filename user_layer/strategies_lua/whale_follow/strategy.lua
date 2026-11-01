@@ -41,9 +41,10 @@
 --     observed only through its market footprint — an established mid-round
 --     level IS the proxy trigger. The strategy cannot see who accumulated;
 --     it prices only the footprint the whole market sees.
---   * No klines are read. The round-open reference is the leg's own FIRST
---     fresh mid this round: a strategy (re)start mid-round leaves the
---     reference unknown and the leg silently unqualified — fail-closed by
+--   * No klines are read. The round-open reference is the leg's own first
+--     fresh mid SAMPLED INSIDE the round's opening window (first 2s): a
+--     strategy (re)start mid-round never holds a trusted reference and the
+--     leg stays unqualified for that whole round — fail-closed by
 --     construction, never guessed.
 --   * The 60s drift gate needs a full drift window of ring coverage; a
 --     younger ring refuses (fail-closed).
@@ -268,7 +269,9 @@ end
 -- ── per-token state (250ms bucket ring) ─────────────────────────────────────
 -- tokens[tok] = {
 --   samples   = { {ts, p=mid}, ... } oldest first (ring: drift window + 5s)
---   open_ref  = dec|nil  (first fresh mid this round — the round-open proxy)
+--   open_ref  = dec|nil  (round-open proxy: the first fresh mid, trusted
+--                         only when sampled inside the opening window)
+--   open_ts   = ms|nil   (when open_ref was sampled — its qualification)
 --   runmax    = dec|nil  (round running high of mid)
 --   runmin    = dec|nil  (round running low of mid)
 --   at_high   = bool     (latest sample sits at the running high)
@@ -285,12 +288,20 @@ local BUCKET_MS = 250
 -- reference the gate can use and stays bounded (360 buckets).
 local RING_PAD_SEC = 30
 
+-- The round-open reference is TRUSTED only when it was sampled inside the
+-- round's opening window (first 2s): later than that it is a mid-round price,
+-- and an establishment measured from it is a guess, not evidence — the leg
+-- stays unqualified for the whole round (fail-closed). 2s absorbs the
+-- kernel's 1s time_left quantization plus the first book tick after the open.
+local OPEN_REF_QUALIFY_SEC = 2
+
 local tracker = { slot = nil, tokens = {}, latched = {}, opened = {} }
 
 local function token_state(tok)
   local st = tracker.tokens[tok]
   if not st then
-    st = { samples = {}, open_ref = nil, runmax = nil, runmin = nil,
+    st = { samples = {}, open_ref = nil, open_ts = nil,
+           runmax = nil, runmin = nil,
            at_high = false, at_low = false, last_ts = 0 }
     tracker.tokens[tok] = st
   end
@@ -325,7 +336,7 @@ local function push_sample(st, ts, mid, cfg)
   st.at_low = (st.runmin == nil) or dec_cmp(mid, st.runmin) <= 0
   if st.runmax == nil or dec_cmp(mid, st.runmax) > 0 then st.runmax = mid end
   if st.runmin == nil or dec_cmp(mid, st.runmin) < 0 then st.runmin = mid end
-  if st.open_ref == nil then st.open_ref = mid end
+  if st.open_ref == nil then st.open_ref = mid; st.open_ts = ts end
   -- trim the ring
   local cutoff = ts - ring_sec(cfg) * 1000
   local kept, m = {}, 0
@@ -402,8 +413,12 @@ function bk_evaluate()
   local elapsed = cfg.round_sec - round.time_left_sec
   local in_window = elapsed >= cfg.entry_elapsed_min_sec
     and elapsed <= cfg.entry_elapsed_max_sec
+  -- in_window / schedule_ok are loop-invariant. The per-round opening cap is
+  -- NOT cached here: it is re-judged PER MARKET inside the loop (bk.markets()
+  -- order is the kernel's, not a best-first ranking), so an intent emitted
+  -- earlier in this same evaluation closes the budget for every later market
+  -- — two qualifying conditions in one round may not each fire.
   local can_enter = in_window and schedule_ok
-    and (tracker.opened[slot] or 0) < 1
 
   local assets = asset_set(cfg.assets)
 
@@ -412,7 +427,10 @@ function bk_evaluate()
       -- asset filter: the evidence corpus is BTC; others stay silent.
     elseif tracker.latched[m.condition_id] == slot then
       -- One attempt per condition per round; the attempt already happened.
-    elseif can_enter then
+    elseif can_enter and (tracker.opened[slot] or 0) < 1 then
+      -- The opening cap is re-read HERE, per market: the first intent of this
+      -- loop increments tracker.opened and every later market sees the cap
+      -- closed (one opening per round SLOT, not one per condition).
       -- Both books must be FRESH with real asks — a stale side is an
       -- outage, not a signal.
       local bu = bk.book(m.up_token)
@@ -446,7 +464,14 @@ function bk_evaluate()
             -- The round-open reference must exist AND belong to the book
             -- being priced (fail-closed: a mid-round start leaves the leg
             -- unqualified, never guessed).
-            if st and st.open_ref ~= nil and st.last_ts == book.ts_ms then
+            if st and st.open_ref ~= nil and st.last_ts == book.ts_ms
+              -- gate 0 — reference QUALIFICATION: the reference sample must
+              -- sit inside the round's opening window. elapsed at the
+              -- reference = elapsed now minus its age; past the window the
+              -- reference is a mid-round price, not the round open — the leg
+              -- stays unqualified for this whole round (fail-closed).
+              and elapsed - (round.now_ms - st.open_ts) / 1000
+                <= OPEN_REF_QUALIFY_SEC then
               -- gate 1 — establishment: |mid - open_ref| >= move
               local moved = dec_abs(dec_sub(mid, st.open_ref))
               local established = dec_cmp(moved, cfg.min_established_move) >= 0
