@@ -78,7 +78,12 @@ export function extractEdges(treeText, memberNames) {
   const external = new Map((memberNames.map((m) => [m, new Set()])));
   // Stack of {depth, name}; reset at every depth-0 root.
   const stack = [];
-  for (const raw of treeText.split('\n')) {
+  for (const rawLine of treeText.split('\n')) {
+    // Strip ANSI color codes: CI runs with CARGO_TERM_COLOR=always, which
+    // force-colorizes `cargo tree` even through a pipe — codes land on the
+    // package names, member matching fails, and the freeze set silently
+    // comes out empty (the second CI red, after the marker one).
+    const raw = rawLine.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
     if (!raw.trim()) continue;
     const lead = raw.match(/^[|`\s\\-]*/)[0].length;
     const depth = Math.floor(lead / 4);
@@ -269,6 +274,19 @@ function selfTest() {
       !p7.some((p) => p.includes('[build-dependencies]') || p.includes('[dev-dependencies]')),
   );
 
+  // 8. THE SECOND CI-CAUGHT REGRESSION: CARGO_TERM_COLOR=always makes cargo
+  //    tree emit ANSI codes on package names even through a pipe — the tree
+  //    must parse to the IDENTICAL freeze set as the clean text.
+  const ansi = (s) => `\x1b[0m\x1b[1m${s}\x1b[0m`;
+  const colored = extractEdges(
+    treeA
+      .split('\n')
+      .map((l) => l.replace(/([a-z-]+)( v\d+\.\d+\.\d+)?$/, (m, n) => ansi(m)))
+      .join('\n'),
+    members,
+  );
+  expect('ANSI-colored tree parses identically', judge(baseText, colored).length === 0);
+
   const failed = checks.filter((c) => !c.ok);
   for (const c of checks) console.log(`${c.ok ? 'ok  ' : 'RED '} self-test: ${c.name}`);
   if (failed.length) {
@@ -287,6 +305,19 @@ if (process.argv.includes('--self-test')) {
 
 const members = workspaceMembers();
 const freeze = extractEdges(cargoTreeText(), members);
+
+// Fail-closed honest diagnostic: a real workspace ALWAYS has internal edges.
+// An empty extraction means the tree text defeated the parser (environment,
+// formatting, a cargo change) — say so instead of red-ing with a confusing
+// "everything removed" diff.
+if (freeze.internal.size === 0 && freezeLines(freeze).length === 0) {
+  console.error(
+    'contract-tree-check: extraction produced an EMPTY graph — ' +
+      'cargo tree output defeated the parser (color codes? format change?). ' +
+      'Run `cargo tree --workspace --edges normal,build,dev --target all --charset ascii` and inspect.',
+  );
+  process.exit(1);
+}
 
 if (process.argv.includes('--rebaseline')) {
   writeFileSync(BASELINE, renderBaseline(freeze));
