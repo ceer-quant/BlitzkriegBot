@@ -6,6 +6,7 @@
 # means the CRATE GRAPH changed: re-baseline inside the PR that moved the edge
 # and disclose it in the PR body.
 [internal]
+blitzkrieg-build-info > blitzkrieg-build-support
 blitzkrieg-core > blitzkrieg-build-info
 blitzkrieg-core > blitzkrieg-data-model
 blitzkrieg-core > blitzkrieg-kalshi
@@ -15,6 +16,8 @@ blitzkrieg-core > blitzkrieg-onchain-pull
 blitzkrieg-core > blitzkrieg-polysimulator
 blitzkrieg-core > blitzkrieg-predictfun
 blitzkrieg-core > blitzkrieg-strategy-api
+blitzkrieg-core > blitzkrieg-ui-kit
+blitzkrieg-core > parity-logic
 blitzkrieg-core > polymarket-extension
 blitzkrieg-core > strategy-logic
 blitzkrieg-data-model > blitzkrieg-market-api
@@ -29,10 +32,11 @@ blitzkrieg-ui-panel > blitzkrieg-ui-kit
 polymarket-extension > blitzkrieg-market-api
 strategy-logic > blitzkrieg-market-api
 [external]
-blitzkrieg-core :: [dev-dependencies]
 blitzkrieg-core :: anyhow
 blitzkrieg-core :: arc-swap
 blitzkrieg-core :: async-trait
+blitzkrieg-core :: criterion
+blitzkrieg-core :: dhat
 blitzkrieg-core :: futures-util
 blitzkrieg-core :: libc
 blitzkrieg-core :: libloading
@@ -48,6 +52,7 @@ blitzkrieg-core :: toml
 blitzkrieg-core :: tracing
 blitzkrieg-core :: tracing-subscriber
 blitzkrieg-data-model :: rust_decimal
+blitzkrieg-data-model :: rust_decimal_macros
 blitzkrieg-data-model :: serde
 blitzkrieg-data-model :: serde_json
 blitzkrieg-data-model :: tracing
@@ -60,6 +65,7 @@ blitzkrieg-kalshi :: rand
 blitzkrieg-kalshi :: reqwest
 blitzkrieg-kalshi :: rsa
 blitzkrieg-kalshi :: rust_decimal
+blitzkrieg-kalshi :: rust_decimal_macros
 blitzkrieg-kalshi :: serde
 blitzkrieg-kalshi :: serde_json
 blitzkrieg-kalshi :: sha2
@@ -78,6 +84,7 @@ blitzkrieg-market-api :: serde_json
 blitzkrieg-onchain-pull :: futures-util
 blitzkrieg-onchain-pull :: reqwest
 blitzkrieg-onchain-pull :: rust_decimal
+blitzkrieg-onchain-pull :: rust_decimal_macros
 blitzkrieg-onchain-pull :: serde_json
 blitzkrieg-onchain-pull :: sha2
 blitzkrieg-onchain-pull :: tokio

@@ -62,6 +62,15 @@ export function pkgName(body) {
  * Indent unit is 4 (ascii glyphs `|-- ` / `|   ` / ``-- `); the per-root stack
  * resolves each line's parent; a trailing `(*)` (subtree elided — already
  * printed once) still contributes its edge, it just has no children to walk.
+ *
+ * Section markers (`[dependencies]` / `[dev-dependencies]` /
+ * `[build-dependencies]` / `[target.'cfg(...)'.dependencies]`) are SKIPPED,
+ * never pushed on the stack: cargo prints them with INCONSISTENT indentation
+ * (sometimes at depth 0 directly under the root, sometimes nested at the
+ * parent's depth) — the CI run that caught this red'd 130 phantom changes
+ * because a depth-0 marker reset the stack and orphaned every child edge of
+ * the root. Skipping them leaves each following child attached to its real
+ * parent package.
  */
 export function extractEdges(treeText, memberNames) {
   const members = new Set(memberNames);
@@ -74,6 +83,7 @@ export function extractEdges(treeText, memberNames) {
     const lead = raw.match(/^[|`\s\\-]*/)[0].length;
     const depth = Math.floor(lead / 4);
     const body = raw.slice(lead).replace(/\s+\(\*\)\s*$/, '');
+    if (body.startsWith('[') && body.endsWith(']')) continue; // section marker
     const name = pkgName(body);
     while (stack.length && stack[stack.length - 1].depth >= depth) stack.pop();
     const parent = stack.length ? stack[stack.length - 1].name : null;
@@ -235,6 +245,29 @@ function selfTest() {
   // 6. versions bumping must NOT red (the lockfile-noise guarantee).
   const bumped = extractEdges(treeA.replaceAll('v1.0.0', 'v9.9.9'), members);
   expect('version bumps stay green', judge(baseText, bumped).length === 0);
+
+  // 7. THE CI-CAUGHT REGRESSION: a section marker between a root and its
+  //    children (cargo prints [build-dependencies] at depth 0 when the root
+  //    has no normal deps, [dev-dependencies] nested elsewhere) must NOT
+  //    reset the stack — children stay attached to the real parent.
+  const marked = extractEdges(
+    [
+      'a-crate v1.0.0 (path)',
+      '[build-dependencies]',
+      '`-- b-crate v1.0.0 (path)',
+      '    [dev-dependencies]',
+      '    `-- serde v1.0.0',
+      'ext v1.0.0 (path)',
+      '    `-- libc v1.0.0',
+    ].join('\n'),
+    members,
+  );
+  const p7 = judge(baseText, marked);
+  expect(
+    'section markers never corrupt parenting',
+    marked.internal.has('a-crate > b-crate') &&
+      !p7.some((p) => p.includes('[build-dependencies]') || p.includes('[dev-dependencies]')),
+  );
 
   const failed = checks.filter((c) => !c.ok);
   for (const c of checks) console.log(`${c.ok ? 'ok  ' : 'RED '} self-test: ${c.name}`);
