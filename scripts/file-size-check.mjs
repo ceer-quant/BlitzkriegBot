@@ -16,6 +16,11 @@
  *   3. an ALLOW entry whose file is now ≤ LIMIT is red — prune the
  *      allowlist, the ratchet only tightens. An entry never grows: shrinking
  *      is the only direction out of it.
+ *   4. an ALLOW entry whose file now exceeds its atAuthoring count is red
+ *      (#818) — the marker pins the line count the file carried when it was
+ *      allowlisted, so only shrinking passes through it. Without this rule
+ *      an allowlisted file could swell past its authoring count —
+ *      unboundedly — and the gate would still report green.
  *
  * Lines are counted with `wc -l` semantics: newline bytes, nothing else.
  *
@@ -121,6 +126,16 @@ export function audit(root, allow = ALLOW) {
           lines,
           detail: `now ${lines} lines (was ${entry.atAuthoring} at authoring) — prune the allowlist — the ratchet only tightens`,
         });
+      } else if (lines > entry.atAuthoring) {
+        // #818: an entry never grows. atAuthoring is the size the file had
+        // when the debt was accepted; anything above it is new debt the
+        // allowlist never signed for, allowlisted or not.
+        violations.push({
+          kind: 'growth',
+          path: f.rel,
+          lines,
+          detail: `now ${lines} lines > atAuthoring ${entry.atAuthoring} — an allowlist entry never grows: shrink the file back to its authoring count or split it — the ratchet only tightens`,
+        });
       }
     } else if (lines > LIMIT) {
       violations.push({
@@ -157,18 +172,25 @@ function selfTest() {
       writeFileSync(p, '\n'.repeat(newlines));
     };
     // A 3-line file, an exactly-at-limit file (1500 passes — the rule is
-    // "over 1500"), a 1501-line offender, one allowlisted file still over
-    // the limit (its debt marker is honoured), one allowlisted file shrunk
-    // to ≤ limit (prune rule), one allowlisted file deleted (gone rule);
-    // plus a target/ tree the scan must skip.
+    // "over 1500"), a 1501-line offender, then the #818 allowlist matrix —
+    // one file exactly at its authoring count (passes, == is not growth),
+    // one shrunk below its authoring count but still over the limit
+    // (passes, shrinking is the only direction out), one grown past its
+    // authoring count (growth rule — an entry never grows) — plus one
+    // allowlisted file shrunk to ≤ limit (prune rule), one allowlisted file
+    // deleted (gone rule), and a target/ tree the scan must skip.
     write('core/a.rs', 3);
     write('tools/exact.rs', LIMIT);
     write('user_layer/over.rs', LIMIT + 1);
-    write('core/still_over.rs', LIMIT + 5);
+    write('core/at_authoring.rs', LIMIT + 5);
+    write('core/shrunk_still_over.rs', LIMIT + 2);
+    write('core/grown.rs', LIMIT + 50);
     write('extensions/shrunk.rs', 2);
     write('core/target/junk.rs', LIMIT + 7);
     const fixtureAllow = [
-      { path: 'core/still_over.rs', atAuthoring: LIMIT + 5 },
+      { path: 'core/at_authoring.rs', atAuthoring: LIMIT + 5 },
+      { path: 'core/shrunk_still_over.rs', atAuthoring: LIMIT + 100 },
+      { path: 'core/grown.rs', atAuthoring: LIMIT + 10 },
       { path: 'extensions/shrunk.rs', atAuthoring: 900 },
       { path: 'core/vanished.rs', atAuthoring: 1600 },
     ];
@@ -176,15 +198,20 @@ function selfTest() {
     const over = violations.filter((v) => v.kind === 'over-limit');
     const prune = violations.filter((v) => v.kind === 'prune');
     const gone = violations.filter((v) => v.kind === 'gone');
+    const growth = violations.filter((v) => v.kind === 'growth');
 
     check('at-limit file (1500 lines exactly) passes', !over.some((v) => v.path === 'tools/exact.rs') && !prune.some((v) => v.path === 'tools/exact.rs'));
     check('small file passes', !over.some((v) => v.path === 'core/a.rs'));
     check('1501-line unallowlisted file reds (over-limit)', over.length === 1 && over[0].path === 'user_layer/over.rs', over.map((v) => v.path).join(','));
-    check('allowlisted file still over limit passes (debt marker honoured)', !over.some((v) => v.path === 'core/still_over.rs') && !prune.some((v) => v.path === 'core/still_over.rs'));
+    // #818 matrix: == atAuthoring passes, LIMIT < lines < atAuthoring passes
+    // (shrink allowed), lines > atAuthoring reds (entry never grows).
+    check('allowlisted file at exactly atAuthoring passes (debt marker honoured, == is not growth)', !over.some((v) => v.path === 'core/at_authoring.rs') && !growth.some((v) => v.path === 'core/at_authoring.rs') && !prune.some((v) => v.path === 'core/at_authoring.rs'));
+    check('allowlisted file shrunk below atAuthoring but still over limit passes (shrink is allowed)', !growth.some((v) => v.path === 'core/shrunk_still_over.rs') && !prune.some((v) => v.path === 'core/shrunk_still_over.rs') && !over.some((v) => v.path === 'core/shrunk_still_over.rs'));
+    check('allowlisted file grown past atAuthoring reds (growth rule — entry never grows)', growth.length === 1 && growth[0].path === 'core/grown.rs', growth.map((v) => v.path).join(','));
     check('allowlisted file shrunk to ≤ limit reds (prune rule)', prune.length === 1 && prune[0].path === 'extensions/shrunk.rs');
     check('allowlisted file gone reds (drop the entry)', gone.length === 1 && gone[0].path === 'core/vanished.rs');
     check('target/ tree is skipped', !over.some((v) => v.path.includes('target/')));
-    check('scan counted the five in-scope fixtures', scanned === 5, `scanned=${scanned}`);
+    check('scan counted the seven in-scope fixtures', scanned === 7, `scanned=${scanned}`);
 
     const failed = checks.filter((c) => !c.ok).length;
     if (failed > 0) {
