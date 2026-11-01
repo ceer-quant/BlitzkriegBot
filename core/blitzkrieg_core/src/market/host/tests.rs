@@ -459,12 +459,12 @@ fn the_token_venue_lookup_reads_the_round_list() {
 /// signature change here is a deliberate act, not a drive-by.
 #[test]
 fn compat_judge_keeps_its_single_plugin_signature() {
-    let p = crate::market::compat::PluginModes::for_plugin(&BarePlugin);
+    let p = crate::compat::PluginModes::for_plugin(&BarePlugin);
     let modes = vec![blitzkrieg_strategy_api::StrategyMode {
         market_type: MarketType::Prediction,
         structure: None,
     }];
-    assert!(crate::market::compat::check_compatibility("s", &modes, &p).is_ok());
+    assert!(crate::compat::check_compatibility("s", &modes, &p).is_ok());
 }
 
 // ── 盘口批次原子化 ─────────────────────────────────────────────────────

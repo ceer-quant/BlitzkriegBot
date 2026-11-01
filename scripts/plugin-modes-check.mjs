@@ -75,7 +75,7 @@ const CAPS_BIT = {
 
 /**
  * One (strategy mode, plugin mode) pair under §7.5 (1)-(2), the JS mirror of
- * `core/blitzkrieg_core/src/market/compat.rs::pair_compatible`. A plugin that
+ * `core/blitzkrieg_core/src/compat.rs::pair_compatible`. A plugin that
  * cannot name the structure is NOT a match for a concrete-structure strategy —
  * the directionality rule, restated here because every teeth case below is
  * about a core that got it backwards.

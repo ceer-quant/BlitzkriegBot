@@ -145,7 +145,7 @@ pub async fn run(
     core.set_plugin_modes(
         actives
             .iter()
-            .map(|p| crate::market::compat::PluginModes::for_plugin(p.as_ref()))
+            .map(|p| crate::compat::PluginModes::for_plugin(p.as_ref()))
             .collect(),
     );
 

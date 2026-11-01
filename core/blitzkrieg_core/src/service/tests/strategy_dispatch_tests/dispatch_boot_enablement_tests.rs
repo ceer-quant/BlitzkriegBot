@@ -1113,7 +1113,7 @@ fn strategy_enablement_persists_to_the_state_file() {
 /// removes the name: that is a decision, not a market mismatch.
 #[test]
 fn a_handshake_refused_strategy_stays_in_the_state_file() {
-    use crate::market::compat::PluginModes;
+    use crate::compat::PluginModes;
     use blitzkrieg_market_api::{MarketStructure, MarketType};
 
     let dir =
@@ -1188,8 +1188,8 @@ fn a_handshake_refused_strategy_stays_in_the_state_file() {
 
 // ── E27 multi-plugin handshake: ANY active plugin can serve ─────────────
 
-fn prediction_plugin_modes(name: &str) -> crate::market::compat::PluginModes {
-    crate::market::compat::PluginModes {
+fn prediction_plugin_modes(name: &str) -> crate::compat::PluginModes {
+    crate::compat::PluginModes {
         name: name.into(),
         modes: vec![blitzkrieg_market_api::MarketMode {
             market_type: blitzkrieg_market_api::MarketType::Prediction,
@@ -1199,8 +1199,8 @@ fn prediction_plugin_modes(name: &str) -> crate::market::compat::PluginModes {
     }
 }
 
-fn spot_plugin_modes(name: &str) -> crate::market::compat::PluginModes {
-    crate::market::compat::PluginModes {
+fn spot_plugin_modes(name: &str) -> crate::compat::PluginModes {
+    crate::compat::PluginModes {
         name: name.into(),
         modes: vec![blitzkrieg_market_api::MarketMode {
             market_type: blitzkrieg_market_api::MarketType::Spot,

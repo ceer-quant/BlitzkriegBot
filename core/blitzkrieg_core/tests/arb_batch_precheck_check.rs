@@ -620,14 +620,14 @@ fn credentials_not_ready_refuses_the_whole_batch_then_both_legs_pass() {
     )]
     .into_iter()
     .collect();
-    let missing = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &declared);
+    let missing = blitzkrieg_core::service::venue_credentials_missing(KALSHI, &declared);
     assert_eq!(
         missing,
         vec!["KALSHI_API_KEY_ID", "KALSHI_RSA_PRIVATE_KEY"],
         "the diagnosis helper names exactly the unresolved vars, in declared order"
     );
     set_env("KALSHI_API_KEY_ID", "test-key");
-    let missing_one = blitzkrieg_core::market::venue_credentials_missing(KALSHI, &declared);
+    let missing_one = blitzkrieg_core::service::venue_credentials_missing(KALSHI, &declared);
     assert_eq!(
         missing_one,
         vec!["KALSHI_RSA_PRIVATE_KEY"],

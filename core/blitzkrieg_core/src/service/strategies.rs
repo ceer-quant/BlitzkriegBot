@@ -346,7 +346,7 @@ impl Core {
     /// plugin's own mismatch so the diagnostic stays complete. Single-plugin
     /// books render exactly the historical message (no per-plugin prefix).
     pub(super) fn modes_refusal(
-        plugins: &[crate::market::compat::PluginModes],
+        plugins: &[crate::compat::PluginModes],
         name: &str,
         modes: &[blitzkrieg_strategy_api::StrategyMode],
     ) -> Option<String> {
@@ -358,7 +358,7 @@ impl Core {
         }
         let refusals: Vec<String> = plugins
             .iter()
-            .filter_map(|p| crate::market::compat::check_compatibility(name, modes, p).err())
+            .filter_map(|p| crate::compat::check_compatibility(name, modes, p).err())
             .collect();
         if refusals.len() < plugins.len() {
             // At least one plugin passed (its refusal is absent): ANY one
@@ -390,7 +390,7 @@ impl Core {
     /// BEFORE any strategy is loaded or enabled, so all three §8.2 handshake
     /// sites judge against the same view). Empty leaves the handshake inert
     /// (backtester, tests).
-    pub fn set_plugin_modes(&mut self, modes: Vec<crate::market::compat::PluginModes>) {
+    pub fn set_plugin_modes(&mut self, modes: Vec<crate::compat::PluginModes>) {
         self.plugin_modes = modes;
     }
 

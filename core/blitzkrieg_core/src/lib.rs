@@ -30,6 +30,10 @@ pub mod backtest_jobs;
 /// #361: the blueprint JSON → three-stage compile → Lua strategy surface.
 pub mod blueprint;
 pub mod cli;
+/// Strategy ↔ plugin compatibility handshake (DEV_V0_3 §7.5/§8.2) — hoisted
+/// from `market/` to the crate top (#824 cycle 2): a pure leaf that never
+/// needed the market seam, consumed by service-side handshake sites.
+pub mod compat;
 pub mod config;
 pub mod data_lock;
 pub mod data_source;
