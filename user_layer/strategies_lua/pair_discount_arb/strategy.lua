@@ -8,19 +8,35 @@
 -- the profit is locked at entry, the exit is not a decision but a collection.
 --
 -- How the pieces fit:
---   * ENTRY — one candidate per leg per condition, priced AT its own ask
---     (the manifest declares `entry_maker`: the kernel submits these legs as
---     post-only maker quotes at the quoted price — join the ask, never cross
---     — and they NEVER escalate to taker; an unfilled leg simply rests to the
---     round's own end-of-life and the kernel's round-expiry sweep closes it.
---     v1.2 moved the strategy here: at the current fee schedule a
---     taker-filled pair pays ~3.5% round-trip on a ~2.5% discount — the edge
---     dies in fees; maker legs pay no taker fee. A/B vs the old doctrine =
---     remove the manifest declaration and reload the package).
+--   * ENTRY — one candidate per leg per condition, priced where a post-only
+--     buy can actually REST: strictly UNDER the leg's own ask (`entry_quote_mode`,
+--     default 1 = ask − 1 tick; 2 = mid floored to the grid; 3 = the bid;
+--     0 = v1.2's at-ask, which the kernel REFUSES at POST — #464 — and which
+--     is kept only as the replay baseline). The manifest declares
+--     `entry_maker`: the kernel submits these legs as post-only maker quotes
+--     at the quoted price — join the book, never cross — and they NEVER
+--     escalate to taker; an unfilled leg simply rests to the round's own
+--     end-of-life and the kernel's round-expiry sweep closes it. v1.2 moved
+--     the strategy to the maker side of the book: at the current fee schedule
+--     a taker-filled pair pays ~3.5% round-trip on a ~2.5% discount — the
+--     edge dies in fees; maker legs pay no taker fee. v1.3 moved the quote
+--     INTO the fill path: v1.2 quoted AT the ask, and a post-only buy whose
+--     limit reaches the live ask is refused on POST (10/15 replay: 4 orders,
+--     4 `venue.WouldCross`, 0 rests) — the one price a maker buy can never
+--     rest at. The @almach corpus (the real profitable pair collector, 8
+--     pair legs booked against the archive book): maker prints land 1–3
+--     ticks BELOW the then-ask (resting bids the falling ask descended
+--     into), taker prints AT the ask, never above. A/B vs any doctrine:
+--     set the tunables (maker_mode equivalents = `entry_quote_mode`),
+--     reload the package).
 --     `shares` are DECLARED so both legs match in share count — a pair
 --     merges per share-pair, and a naked leg has no collateral claim. Shares
 --     size to the smaller leg's visible ask depth (floored to the 0.01 grid);
---     the kernel still caps at its own `max_shares`.
+--     the kernel still caps at its own `max_shares`. The DISCOUNT TEST runs
+--     on the asks — a maker fill always prints at or below its quote, so
+--     realized pair cost only improves on the tested one. A leg with no
+--     restable quote (locked book, quote below the 0.01 grid or below
+--     `min_leg_price`) skips the attempt: fail closed, no naked quote.
 --   * ENTRY WINDOW — `entry_window` (fraction of the round, 0.5 default)
 --     confines NEW pair attempts to the round's FIRST half: `time_left_sec`
 --     must be at or past `(1 − entry_window) × round_sec` still to run.
@@ -62,11 +78,12 @@
 --     kernel releases a token's repeat-suppression once its entry order
 --     ends (filled, cancelled or rejected), so an ARMED condition reads
 --     `bk.holdings()` every cycle: a leg holding fewer shares than its
---     counterpart is topped up AT ITS CURRENT ASK with the exact shortfall
---     (the declared-size discipline, re-priced to the book that must fill
---     it; the earlier attempt's price is history). The top-up pays for
---     itself whenever the pair still merges under `max_pair_cost` — the
---     SAME discount test as the entry, applied to the incremental cost.
+--     counterpart is topped up with the exact shortfall, quoted by the SAME
+--     fill-path policy (strictly under its current ask — an at-ask top-up
+--     is refused at POST like any other; the earlier attempt's price is
+--     history). The top-up pays for itself whenever the pair still merges
+--     under `max_top_up_cost` — the incremental-cost test runs on the ASK
+--     (the ceiling) while the fill prints at the quote (cheaper).
 --   * Both books must be FRESH with a real ask on each leg. A stale or
 --     bid-less leg is not a discount, it is an outage.
 
@@ -275,7 +292,83 @@ local function read_config()
     -- carries only `time_left_sec`, so progress needs the declared total
     -- (900 = the 15m wheel; a 5m family sets 300 via --round-sec).
     round_sec = int_param(p, "round_sec", 900),
+    -- The fill-path policy (v1.3): WHERE the maker quote rests. The kernel
+    -- refuses a post-only BUY whose limit reaches the live ask at POST time
+    -- (#464, `venue.WouldCross`) — v1.2's at-ask quote is the ONE price a
+    -- post-only buy can never rest at, so every leg died at submission
+    -- (10/15 replay: 4 orders, 4 WouldCross, 0 rests, 0 fills). The @almach
+    -- corpus (8 pair legs booked against the archive book,
+    -- scripts/pair-fill-almach-fill-path.mjs): 4 maker prints 1–3 ticks
+    -- BELOW the then-ask (resting bids the falling ask descended into) and
+    -- 4 taker prints AT the ask, 0 above it. A restable quote is anything
+    -- strictly under the ask; the mode picks how deep:
+    --   0 = at the ask (v1.2 baseline; the kernel refuses the POST — kept
+    --       only as the replay baseline arm, never as a default)
+    --   1 = ask − `entry_reprice_ticks` (default: the most aggressive
+    --       RESTABLE quote — the waterfall has to step only one tick onto us)
+    --   2 = mid floored to the 0.01 grid (half a spread deep)
+    --   3 = at the bid (the almach path: deepest; fills only in a real
+    --       waterfall, and fills cheapest when it does)
+    -- Any quote the guards reject (>= the live ask — a locked book; below
+    -- the 0.01 grid; below `min_leg_price`) skips the leg: no restable
+    -- quote, no attempt — fail closed. The DISCOUNT TEST stays on the asks:
+    -- a maker fill always prints at or below its quote, so the realized
+    -- pair cost can only improve on the tested one. The same policy prices
+    -- gap-fill top-ups — an at-ask top-up is refused exactly like an at-ask
+    -- entry (the doctrine is package-level: every entry of this package is
+    -- a pure maker quote-pull).
+    entry_quote_mode = int_param(p, "entry_quote_mode", 1),
+    entry_reprice_ticks = int_param(p, "entry_reprice_ticks", 1),
   }
+end
+
+-- ── the maker quote (the fill path) ─────────────────────────────────────────
+
+local TICK = { m = 1, s = 2 }      -- the venue's 0.01 price grid
+local GRID_FLOOR = { m = 1, s = 2 } -- no buy may quote below 0.01
+
+--- The restable maker quote for ONE leg's book, or `nil` when no quote the
+--- kernel would accept exists (a locked book leaves nothing under the ask;
+--- a floor-clamped quote that reaches the ask is a refusal, not a quote;
+--- a bid-less leg prices nothing in modes 2–3). `ask` is a non-nil decimal
+--- — the caller guards; `bid` may be nil. Exact integer arithmetic
+--- throughout; modes 1–3 floor onto the 0.01 grid (the venue's tick) so a
+--- live POST never dies on an off-grid limit.
+local function maker_quote(bid, ask, cfg)
+  -- Mode 0 is the v1.2 baseline VERBATIM (quote at the ask; the kernel's
+  -- post-only gate refuses the POST — #464): no guards, so the replay
+  -- baseline reproduces v1.2's exact emit-then-refuse behaviour.
+  if cfg.entry_quote_mode == 0 then return ask end
+  local q
+  if cfg.entry_quote_mode == 2 then
+    -- (bid + ask) / 2 then floor to the grid — dec_floor2 is the same
+    -- floor-to-scale-2 the share grid uses, and a 0.01 price grid IS scale 2.
+    -- Both price off the bid: a bid-less leg is an outage (fail closed).
+    if bid == nil then return nil end
+    q = dec_floor2(dec_mul(dec_add(bid, ask), { m = 5, s = 1 }))
+  elseif cfg.entry_quote_mode == 3 then
+    if bid == nil then return nil end
+    q = dec_floor2(bid)
+  else
+    q = dec_sub(ask, dec_mul(TICK, { m = math.max(cfg.entry_reprice_ticks, 1), s = 0 }))
+    q = dec_floor2(q)
+    -- never quote below the grid floor
+    if dec_cmp(q, GRID_FLOOR) < 0 then q = GRID_FLOOR end
+  end
+  -- The post-only gate (#464): at or above the live ask the POST is refused.
+  -- The package's own price floor keeps the quote inside min_leg_price.
+  if dec_cmp(q, ask) >= 0 then return nil end
+  if dec_cmp(q, cfg.min_leg_price) < 0 then return nil end
+  return q
+end
+
+--- The reason-string label for a quote mode (discipline: every entry's
+--- reason names its fill path, so a replay log reads the policy).
+local function quote_label(cfg)
+  if cfg.entry_quote_mode == 0 then return "post-only@ask" end
+  if cfg.entry_quote_mode == 2 then return "post-only@mid" end
+  if cfg.entry_quote_mode == 3 then return "post-only@bid" end
+  return string.format("post-only@ask-%dt", math.max(cfg.entry_reprice_ticks, 1))
 end
 
 -- ── the fee curve (bk.fees() — the kernel's ONE schedule) ───────────────────
@@ -374,8 +467,10 @@ function bk_evaluate()
     if armed[m.condition_id] == slot then
       exits[#exits + 1] = { token = m.up_token, reason = "merge" }
       exits[#exits + 1] = { token = m.down_token, reason = "merge" }
-      -- GAP FILL: top up a partially-filled leg to its counterpart, at the
-      -- CURRENT ask. A top-up share merges against an ALREADY-HELD share of
+      -- GAP FILL: top up a partially-filled leg to its counterpart, quoted
+      -- by the SAME fill-path policy as a fresh pair (strictly under its
+      -- current ask — an at-ask top-up is refused at POST like any other).
+      -- A top-up share merges against an ALREADY-HELD share of
       -- the other leg (sunk cost), so its economics are ask + fee vs $1.00 —
       -- cheaper than a fresh pair, and the ceiling is one minus a floor
       -- margin, NOT `max_pair_cost` (the pair test prices two fresh legs).
@@ -401,21 +496,30 @@ function bk_evaluate()
                 local f = fee_per_share(a, rate, exponent)
                 if f then
                   -- Incremental all-in per share: ask + fee, redeeming $1
-                  -- against a sunk-cost counterpart share.
+                  -- against a sunk-cost counterpart share. The TEST stays on
+                  -- the ask (the cost ceiling); the quote below can only fill
+                  -- cheaper — and an at-ask quote would be refused at POST
+                  -- like any other (#464), so the top-up rests under the ask
+                  -- under the SAME fill-path policy as a fresh pair.
                   local total = dec_add(a, f)
                   if dec_cmp(total, cfg.max_top_up_cost) < 0 then
-                    entries[#entries + 1] = {
-                      token = leg.side == "up" and m.up_token or m.down_token,
-                      price = dec_fmt(a),
-                      shares = dec_fmt(dec_floor2(gap)),
-                      reason = string.format(
-                        "gap-fill %s leg: %.2f held vs %.2f counterpart, top up at %s (cost %s vs $1)",
-                        leg.side,
-                        leg.held.m / POW10[leg.held.s],
-                        leg.other.m / POW10[leg.other.s],
-                        dec_fmt(a), dec_fmt(total)
-                      ),
-                    }
+                    local leg_bid = dec_parse(leg.book.best_bid)
+                    local quote = maker_quote(leg_bid, a, cfg)
+                    if quote then
+                      entries[#entries + 1] = {
+                        token = leg.side == "up" and m.up_token or m.down_token,
+                        price = dec_fmt(quote),
+                        shares = dec_fmt(dec_floor2(gap)),
+                        reason = string.format(
+                          "gap-fill %s leg: %.2f held vs %.2f counterpart, top up %s at %s (cost %s vs $1)",
+                          leg.side,
+                          leg.held.m / POW10[leg.held.s],
+                          leg.other.m / POW10[leg.other.s],
+                          quote_label(cfg),
+                          dec_fmt(quote), dec_fmt(total)
+                        ),
+                      }
+                    end
                   end
                 end
               end
@@ -436,7 +540,9 @@ function bk_evaluate()
           local fd = fee_per_share(ad, rate, exponent)
           if fu and fd then
             -- All-in cost per pair: both asks + both entry fees. The merge
-            -- redeems $1.00, so the locked edge is 1 − total.
+            -- redeems $1.00, so the locked edge is 1 − total. The TEST stays
+            -- on the asks (the worst case); the quotes below can only fill
+            -- cheaper.
             local total = dec_add(dec_add(au, ad), dec_add(fu, fd))
             if dec_cmp(total, cfg.max_pair_cost) < 0 then
               local du = dec_parse(bu.ask_depth)
@@ -444,36 +550,48 @@ function bk_evaluate()
               if du and dd and du.m > 0 and dd.m > 0 then
                 local shares = dec_floor2(dec_cmp(du, dd) < 0 and du or dd)
                 if dec_cmp(shares, cfg.min_pair_shares) >= 0 then
-                  local edge_pct = ((1 - total.m / POW10[total.s]) * 100)
-                  local template = "pair %s (%s+%s+fee) vs $1, edge %.2f%%, maker post-only, %ds left"
-                  entries[#entries + 1] = {
-                    token = m.up_token,
-                    price = dec_fmt(au),
-                    shares = dec_fmt(shares),
-                    reason = string.format(
-                      template,
-                      dec_fmt(total),
-                      dec_fmt(au), dec_fmt(ad),
-                      edge_pct,
-                      round.time_left_sec
-                    ),
-                  }
-                  entries[#entries + 1] = {
-                    token = m.down_token,
-                    price = dec_fmt(ad),
-                    shares = dec_fmt(shares),
-                    reason = string.format(
-                      template,
-                      dec_fmt(total),
-                      dec_fmt(au), dec_fmt(ad),
-                      edge_pct,
-                      round.time_left_sec
-                    ),
-                  }
-                  -- One attempt per condition per round: the declared share
-                  -- count carries the size, a rejected attempt is not retried
-                  -- into the same book.
-                  armed[m.condition_id] = slot
+                  -- v1.3 fill path: quote each leg where a post-only buy can
+                  -- actually REST (strictly under its ask — #464 refuses the
+                  -- at-ask POST). A leg with no restable quote skips the
+                  -- whole attempt: a pair leg is worthless naked.
+                  local bu_bid = dec_parse(bu.best_bid)
+                  local bd_bid = dec_parse(bd.best_bid)
+                  local qu = maker_quote(bu_bid, au, cfg)
+                  local qd = maker_quote(bd_bid, ad, cfg)
+                  if qu and qd then
+                    local edge_pct = ((1 - total.m / POW10[total.s]) * 100)
+                    local template = "pair %s (%s+%s+fee) vs $1, edge %.2f%%, maker %s, %ds left"
+                    entries[#entries + 1] = {
+                      token = m.up_token,
+                      price = dec_fmt(qu),
+                      shares = dec_fmt(shares),
+                      reason = string.format(
+                        template,
+                        dec_fmt(total),
+                        dec_fmt(au), dec_fmt(ad),
+                        edge_pct,
+                        quote_label(cfg),
+                        round.time_left_sec
+                      ),
+                    }
+                    entries[#entries + 1] = {
+                      token = m.down_token,
+                      price = dec_fmt(qd),
+                      shares = dec_fmt(shares),
+                      reason = string.format(
+                        template,
+                        dec_fmt(total),
+                        dec_fmt(au), dec_fmt(ad),
+                        edge_pct,
+                        quote_label(cfg),
+                        round.time_left_sec
+                      ),
+                    }
+                    -- One attempt per condition per round: the declared share
+                    -- count carries the size, a rejected attempt is not retried
+                    -- into the same book.
+                    armed[m.condition_id] = slot
+                  end
                 end
               end
             end
