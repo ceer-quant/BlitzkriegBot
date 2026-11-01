@@ -122,7 +122,7 @@ impl Core {
             engine.set_account_equity(id, equity);
             engine.set_account_trading(id, a.trading_enabled);
             engine.set_account_venue(id, &a.venue);
-            engine.set_account_frozen(id, self.account_freezes.contains_key(id));
+            engine.set_account_frozen(id, self.freeze_book.account_freezes.contains_key(id));
         }
         engine.set_positions_view(held_view);
         // 视图落引擎的 per-cycle 快照（evaluate 的 ctx 构造从这取）。
@@ -765,7 +765,7 @@ impl Core {
                     e.set_account_equity(id, equity);
                     e.set_account_trading(id, a.trading_enabled);
                     e.set_account_venue(id, &a.venue);
-                    e.set_account_frozen(id, self.account_freezes.contains_key(id));
+                    e.set_account_frozen(id, self.freeze_book.account_freezes.contains_key(id));
                 }
                 e.set_positions_view(held_view);
                 e.replay_candidates(now_ms)

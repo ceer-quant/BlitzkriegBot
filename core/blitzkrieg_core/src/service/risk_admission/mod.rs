@@ -27,3 +27,8 @@ use super::{EXIT_REPORT_BEAT_MS, marketable_exit_price};
 mod admission;
 mod exits;
 mod freeze;
+
+// #834 cycle 1: the freeze/circuit-breaker state book lives beside its only
+// manager; `service.rs` re-exports it for the struct field and the
+// integration tree's handle.
+pub(crate) use freeze::FreezeBook;

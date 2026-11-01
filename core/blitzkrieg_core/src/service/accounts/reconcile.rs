@@ -109,6 +109,7 @@ impl Core {
         now_ms: i64,
     ) {
         let streak = self
+            .freeze_book
             .consecutive_sweep_failures_by_venue
             .entry(venue.to_string())
             .or_default();
@@ -159,8 +160,11 @@ impl Core {
     /// Legacy global form kept for callers with no venue attribution. The
     /// in-kernel dry sweep and any pre-plugin path land here.
     pub fn on_reconcile_failed(&mut self, err: crate::model::CoreError, now_ms: i64) {
-        self.consecutive_sweep_failures = self.consecutive_sweep_failures.saturating_add(1);
-        let streak = self.consecutive_sweep_failures;
+        self.freeze_book.consecutive_sweep_failures = self
+            .freeze_book
+            .consecutive_sweep_failures
+            .saturating_add(1);
+        let streak = self.freeze_book.consecutive_sweep_failures;
         let message = format!("reconciliation sweep failed ({streak}): {}", err.message);
         // #184: the safety net reporting on itself is an ops-critical line, and it
         // belongs at error level from the FIRST failure — not only when the third
@@ -334,15 +338,21 @@ impl Core {
         // with it (the snapshot does not carry the reporting venue; one
         // successful sweep anywhere is evidence the transport fabric is
         // alive, and a fresh failure just rebuilds its own streak).
-        self.consecutive_sweep_failures = 0;
-        self.consecutive_sweep_failures_by_venue.clear();
+        self.freeze_book.consecutive_sweep_failures = 0;
+        self.freeze_book.consecutive_sweep_failures_by_venue.clear();
         // 冻结自愈：a successful sweep proves the transport fabric alive, but
         // the snapshot names no venue — so every AUTO-frozen account gets the
         // same evidence, debounced by FREEZE_AUTO_LIFT_MIN_MS (a fresh freeze
         // rides out the flash outage that caused it before the lift fires).
         // Manual freezes are invisible to this loop by construction.
-        for account in self.auto_frozen.keys().cloned().collect::<Vec<_>>() {
-            if let Some(t) = self.auto_frozen.get(account.as_str())
+        for account in self
+            .freeze_book
+            .auto_frozen
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(t) = self.freeze_book.auto_frozen.get(account.as_str())
                 && snap.now_ms - t >= FREEZE_AUTO_LIFT_MIN_MS
             {
                 self.auto_lift_if_venue_healthy(

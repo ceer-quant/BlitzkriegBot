@@ -121,7 +121,9 @@ impl Core {
                     "venue cash realigned into its bound account (no resting commitment)"
                 );
             }
-            self.venue_free_by_venue.insert(venue.to_string(), (ts, b));
+            self.freeze_book
+                .venue_free_by_venue
+                .insert(venue.to_string(), (ts, b));
         }
         if let Ok(ledger) = self.accounts.get_mut(&target) {
             // issue 749: this is VENUE truth, not a local funding number —
