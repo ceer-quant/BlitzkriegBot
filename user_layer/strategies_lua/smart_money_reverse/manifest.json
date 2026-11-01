@@ -1,0 +1,114 @@
+{
+  "name": "smart_money_reverse",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "bf8b6f8b424776805e3f40761a2ff5052690c87c68d5521d92352c29550dd485",
+  "author": "BlitzkriegBot",
+  "description": "Smart-money-reverse for 15-minute binary rounds: one leg crashes >= 20% inside 60s -> wait out the knife (8s no new low AND bid side thickened to 1.5x the crash period's thinnest depth, floored at 500) -> rest a post-only maker bid at the touch on the CRASHED leg only; while holding, a mid more than 3% under the stabilization-time mid emits one kernel-priced thesis_reversed exit (trailing_exit: true keeps the kernel's own trailing ON). Optional fade-FOMO (default off; the 6meteor whale trace 0.24->0.98 went 9/9 chasing) rests a 0.10 bid on the opposite leg of a ramp. No on-chain whale feed exists in bk.*: the crash/ramp footprint IS the proxy trigger. Both scenarios ship OFF (crash_enabled/fomo_enabled): the 57-day corpus sweep measured the stabilize-then-bid shape at negative ROI (post-crash books do not retest) and fading whales at 89.4% settle WR loses — enabling is an operator decision. Signal-only: the kernel adjudicates, sizes, funds-gates and posts every intent post_only.",
+  "trailing_exit": true,
+  "tunables": {
+    "crash_window_sec": {
+      "type": "int",
+      "default": "60",
+      "min": "10",
+      "max": "300"
+    },
+    "crash_drop_pct": {
+      "type": "decimal",
+      "default": "20",
+      "min": "5",
+      "max": "90"
+    },
+    "settle_quiet_sec": {
+      "type": "int",
+      "default": "8",
+      "min": "1",
+      "max": "60"
+    },
+    "stabilize_depth_factor": {
+      "type": "decimal",
+      "default": "1.5",
+      "min": "1",
+      "max": "10"
+    },
+    "min_bid_depth": {
+      "type": "decimal",
+      "default": "500",
+      "min": "0",
+      "max": "5000"
+    },
+    "entry_offset": {
+      "type": "decimal",
+      "default": "0.00",
+      "min": "0",
+      "max": "0.10"
+    },
+    "thesis_break_pct": {
+      "type": "decimal",
+      "default": "3",
+      "min": "0.5",
+      "max": "25"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "180",
+      "min": "0",
+      "max": "300"
+    },
+    "spot_max_move_pct": {
+      "type": "decimal",
+      "default": "0.5",
+      "min": "0.1",
+      "max": "5"
+    },
+    "spot_window_sec": {
+      "type": "int",
+      "default": "10",
+      "min": "5",
+      "max": "120"
+    },
+    "spot_missing": {
+      "type": "string",
+      "default": "block"
+    },
+    "crash_enabled": {
+      "type": "string",
+      "default": "off"
+    },
+    "fomo_enabled": {
+      "type": "string",
+      "default": "off"
+    },
+    "fomo_min_price": {
+      "type": "decimal",
+      "default": "0.85",
+      "min": "0.50",
+      "max": "0.99"
+    },
+    "fomo_ramp_pct": {
+      "type": "decimal",
+      "default": "15",
+      "min": "1",
+      "max": "99"
+    },
+    "fomo_ramp_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "5",
+      "max": "300"
+    },
+    "fomo_fade_price": {
+      "type": "decimal",
+      "default": "0.10",
+      "min": "0.01",
+      "max": "0.50"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}
