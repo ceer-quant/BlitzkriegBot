@@ -1,23 +1,29 @@
 //! pair_discount_arb × `entry_maker` — the REAL maker-pairing package through
-//! the kernel's full entry pipeline, proving the three teeth of the v1.2
-//! doctrine at the OME level:
+//! the kernel's full entry pipeline, pinning the doctrine's teeth at the OME
+//! level under the v1.3 quote policy:
 //!
 //!   1. DECLARATION → ROUTING — the manifest's `entry_maker` makes the host
 //!      build BOTH pair legs as `FillPolicy::Maker` submitted on the OME's
-//!      never-escalate clock (`maker_timeout_ms = -1`): post-only at each
-//!      leg's OWN ask, the join-not-chase price.
-//!   2. NEVER ESCALATES — dry's honest #464 mirror: a post-only quote priced
-//!      at the standing ask WOULD cross at submission, so the venue refuses
-//!      the POST (`WouldCross`). A Maker leg's refusal is final: no
+//!      never-escalate clock (`maker_timeout_ms = -1`). v1.3 quotes strictly
+//!      UNDER the leg's own ask (`entry_quote_mode` 1 = ask − 1 tick), so a
+//!      post-only BUY can actually REST — v1.2's at-ask quote was the ONE
+//!      price a post-only buy can never rest at (#464 `WouldCross`), which
+//!      is why it filled 0/N.
+//!   2. THE #464 HONEST MIRROR (declared mode-0 baseline) — with
+//!      `entry_quote_mode = 0` (v1.2's at-ask quote, kept as a replay arm)
+//!      the POST is refused (`WouldCross`) and nothing chases: no
 //!      `{id}:escalated` taker is ever placed, no escalation deadline is
-//!      armed (`next_escalation_ms` stays `i64::MAX`), the cash reservation
-//!      is released, and the pair never opens. The leg "rests" only in a
-//!      book that lets it; the round's own expiry sweep cleans the rest.
-//!   3. DEFAULT UNCHANGED — the SAME books through the same package WITHOUT
-//!      the declaration keep today's `MakerThenTaker` routing: the refused
-//!      POST chases at the book's real price through the WouldCross reaction
-//!      (`escalation_guard` + `place_escalated`) and the pair opens as two
-//!      taker fills — byte-identically to the pre-v1.2 economics the
+//!      armed, the cash reservation is released, and the pair never opens.
+//!      A Maker leg's refusal is final; the round's own expiry sweep cleans
+//!      the rest.
+//!   3. NEVER ESCALATES — a Maker leg never arms the sweep
+//!      (`next_escalation_ms` stays `i64::MAX`), on either quote arm.
+//!   4. DEFAULT UNCHANGED — the SAME books through the same package WITHOUT
+//!      the declaration keep today's `MakerThenTaker` routing: the
+//!      under-ask POST now RESTS (no WouldCross, no immediate chase), the
+//!      configured 5 s clock fires, the sweep cancels the resting maker and
+//!      the chase crosses at the book's real price — the pair opens as two
+//!      taker fills, byte-identically to the pre-v1.2 economics the
 //!      cross_venue twins already pin.
 //!
 //! Fixture shape follows `strategy_dispatch_tests::core_with_cross_venue_arb`:
@@ -45,7 +51,8 @@ fn package_dir() -> std::path::PathBuf {
 }
 
 /// The one-condition round the package prices: 0.48 + 0.45 + fees ≈ 0.945 <
-/// 0.995 (`max_pair_cost`) → the package fires both legs, each at its OWN ask.
+/// 0.995 (`max_pair_cost`) → the package fires both legs, each quoted by the
+/// v1.3 policy off its OWN ask.
 fn pair_market() -> Vec<CryptoMarket> {
     vec![CryptoMarket {
         asset: "BTC".into(),
@@ -70,7 +77,9 @@ fn pair_market() -> Vec<CryptoMarket> {
 /// overrides the manifest's declaration: `None` hosts it as shipped (the
 /// premise asserts the manifest declares it), `Some(false)` hosts the same
 /// package as a pre-v1.2 deployment saw it (the A/B contrast arm).
-fn core_with_pair(entry_maker: Option<bool>) -> Core {
+/// `overrides` patches the tunables bag before the adapter is built — the
+/// `entry_quote_mode` replay arms (mode 0 = the v1.2 at-ask baseline).
+fn core_with_pair_overrides(entry_maker: Option<bool>, overrides: &[(&str, &str)]) -> Core {
     let mut c = Core::new(CoreConfig {
         risk: RiskConfig {
             max_order_notional: dec!(10_000),
@@ -111,7 +120,11 @@ fn core_with_pair(entry_maker: Option<bool>) -> Core {
     // The kernel's ONE fee schedule, the same stamp the production loader
     // applies (`bk.fees()` nil would refuse everything).
     let sched = crate::exit_policy::fee_schedule();
-    let adapter = LuaEngineAdapter::new(loaded.strategy, loaded.tunables)
+    let mut tunables = loaded.tunables;
+    for (name, value) in overrides {
+        tunables.insert((*name).to_string(), (*value).to_string());
+    }
+    let adapter = LuaEngineAdapter::new(loaded.strategy, tunables)
         .declare(loaded.holds_to_settlement, loaded.gate_exemptions)
         .declare_atomic_batch(loaded.atomic_batch)
         .declare_trailing_exit(loaded.trailing_exit)
@@ -129,6 +142,10 @@ fn core_with_pair(entry_maker: Option<bool>) -> Core {
     assert!(eng.set_strategy_enabled("pair_discount_arb", true));
     c.enable_engine(eng);
     c
+}
+
+fn core_with_pair(entry_maker: Option<bool>) -> Core {
+    core_with_pair_overrides(entry_maker, &[])
 }
 
 /// The round + both leg books: ask 0.48 / 0.45 with depth 600 each (equal
@@ -156,11 +173,13 @@ fn feed_pair_books(c: &mut Core, now: i64) {
     book(DOWN, dec!(0.45), dec!(600));
 }
 
-/// Teeth 1 + 2: the declared package's legs reach the OME as post-only Maker
-/// orders on the never-escalate clock; the crossing POST is refused (#464)
-/// and NOTHING chases — no escalated taker, no armed deadline, no position.
+/// Teeth 1 + 3: the declared package's legs reach the OME as post-only Maker
+/// orders on the never-escalate clock, quoted strictly UNDER the leg's own
+/// ask (v1.3 `entry_quote_mode` 1) — so they REST, which is the fill path
+/// v1.2 never had, and no deadline is ever armed, no chase ever exists, no
+/// position opens while the book stands still.
 #[test]
-fn entry_maker_legs_go_post_only_on_the_never_escalate_clock_and_never_chase() {
+fn declared_legs_quote_under_the_ask_and_rest_on_the_never_escalate_clock() {
     let mut c = core_with_pair(None);
     feed_pair_books(&mut c, NOW + 1_000);
     assert_eq!(c.engine_evaluate(NOW + 2_000), 2, "both legs place");
@@ -188,6 +207,79 @@ fn entry_maker_legs_go_post_only_on_the_never_escalate_clock_and_never_chase() {
         );
         assert!(
             !o.internal_key.ends_with(":escalated"),
+            "no taker continuation exists for a maker leg"
+        );
+        assert_eq!(
+            o.status,
+            OrderStatus::Live,
+            "v1.3: a post-only quote strictly UNDER the standing ask rests — \
+             the rest IS the fill path v1.2 never had: {o:?}"
+        );
+    }
+    let up = orders.iter().find(|o| o.token_id == UP).unwrap();
+    let down = orders.iter().find(|o| o.token_id == DOWN).unwrap();
+    assert_eq!(
+        up.price,
+        dec!(0.47),
+        "each leg prices one tick UNDER its OWN ask (join under, the 0.01 grid)"
+    );
+    assert_eq!(down.price, dec!(0.44), "join under, never chase");
+
+    // And the OME agrees: no live order carries a deadline at all.
+    assert_eq!(
+        c.ome().next_escalation_ms(),
+        i64::MAX,
+        "the never-escalate clock never arms the sweep"
+    );
+    assert!(
+        c.positions().open_positions().is_empty(),
+        "a resting pair opens nothing until the book crosses it"
+    );
+
+    // Drive the clock far past any MakerThenTaker window (5 s default): a
+    // chasing deployment would have crossed by now. The maker posture keeps
+    // holding: no sweep fires, no order appears, the round's own expiry is
+    // the only end these legs know.
+    let later = NOW + 30_000;
+    c.tick(later).expect("the tick sweeps nothing");
+    c.engine_evaluate(later);
+    assert_eq!(
+        c.list_orders().len(),
+        2,
+        "still exactly the two resting legs"
+    );
+    assert_eq!(
+        c.ome().next_escalation_ms(),
+        i64::MAX,
+        "still nothing armed"
+    );
+    assert!(c.positions().open_positions().is_empty());
+}
+
+/// Tooth 2: the declared mode-0 baseline (v1.2's at-ask quote, kept as a
+/// replay arm) still hits the #464 honest mirror — the POST is refused,
+/// the refusal is final for a Maker leg, and nothing hidden chases.
+#[test]
+fn the_at_ask_baseline_still_refuses_the_post_and_never_chases() {
+    let mut c = core_with_pair_overrides(None, &[("entry_quote_mode", "0")]);
+    feed_pair_books(&mut c, NOW + 1_000);
+    assert_eq!(c.engine_evaluate(NOW + 2_000), 2, "both legs place");
+
+    let orders = c.list_orders();
+    assert_eq!(orders.len(), 2, "exactly the two declared legs, no chase");
+    for o in &orders {
+        assert_eq!(
+            o.mode,
+            FillPolicy::Maker,
+            "the declared package's leg is post-only Maker, got {:?}",
+            o.mode
+        );
+        assert_eq!(
+            o.maker_timeout_ms, -1,
+            "the never-escalate clock the doctrine submits with"
+        );
+        assert!(
+            !o.internal_key.ends_with(":escalated"),
             "no taker continuation exists for a refused maker leg"
         );
         assert_eq!(
@@ -203,47 +295,29 @@ fn entry_maker_legs_go_post_only_on_the_never_escalate_clock_and_never_chase() {
     assert_eq!(
         up.price,
         dec!(0.48),
-        "each leg prices at its OWN ask (join)"
+        "the v1.2 baseline prices AT its own ask — the unpostable price"
     );
-    assert_eq!(down.price, dec!(0.45), "join, not chase");
+    assert_eq!(down.price, dec!(0.45), "join, not chase (the v1.2 form)");
 
-    // And the OME agrees: no live order carries a deadline at all.
     assert_eq!(
         c.ome().next_escalation_ms(),
         i64::MAX,
-        "the never-escalate clock never arms the sweep"
+        "the never-escalate clock never arms the sweep, even on the refused arm"
     );
     assert!(
         c.positions().open_positions().is_empty(),
         "a refused pair opens nothing — the taker-pair economics are gone"
     );
-
-    // Drive the clock far past any MakerThenTaker window (5 s default): a
-    // chasing deployment would have crossed by now. The maker posture keeps
-    // holding: no sweep fires, no order appears, the round's own expiry is
-    // the only end these legs know.
-    let later = NOW + 30_000;
-    c.tick(later).expect("the tick sweeps nothing");
-    c.engine_evaluate(later);
-    assert_eq!(
-        c.list_orders().len(),
-        2,
-        "still exactly the two refused legs"
-    );
-    assert_eq!(
-        c.ome().next_escalation_ms(),
-        i64::MAX,
-        "still nothing armed"
-    );
-    assert!(c.positions().open_positions().is_empty());
 }
 
-/// Tooth 3: the SAME books through the same package WITHOUT the declaration
-/// keep the `MakerThenTaker` entry — the refused POST chases at the book's
-/// real price and the pair opens as two taker fills (the pre-v1.2 routing
-/// the replay baseline reproduces), on the configured 5 s window.
+/// Tooth 4: the SAME books through the same package WITHOUT the declaration
+/// keep the `MakerThenTaker` entry — the under-ask POST now RESTS (no
+/// WouldCross, no immediate chase), the configured 5 s clock fires, the
+/// sweep cancels the resting maker and the chase crosses at the book's real
+/// price: the pair opens as two taker fills, byte-identically to the
+/// pre-v1.2 economics the replay baseline reproduces.
 #[test]
-fn without_the_declaration_the_maker_then_taker_chase_is_unchanged() {
+fn without_the_declaration_the_maker_then_taker_rests_then_chases_after_its_window() {
     let mut c = core_with_pair(Some(false));
     feed_pair_books(&mut c, NOW + 1_000);
     assert_eq!(c.engine_evaluate(NOW + 2_000), 2, "both legs place");
@@ -258,17 +332,56 @@ fn without_the_declaration_the_maker_then_taker_chase_is_unchanged() {
         .filter(|o| o.internal_key.ends_with(":escalated"))
         .collect();
     assert_eq!(legs.len(), 2, "the two declared legs");
-    assert_eq!(chases.len(), 2, "each refused POST escalates a taker");
+    assert_eq!(
+        chases.len(),
+        0,
+        "the under-ask POST does not cross at submission — no immediate chase"
+    );
     for o in &legs {
         assert_eq!(o.mode, FillPolicy::MakerThenTaker, "the legacy routing");
         assert_eq!(
             o.maker_timeout_ms, 5000,
             "the configured entry_maker_timeout_ms, byte-identically"
         );
-        assert_eq!(o.status, OrderStatus::Rejected, "#464 refuses the POST");
+        assert_eq!(
+            o.status,
+            OrderStatus::Live,
+            "v1.3: the under-ask POST rests instead of being refused"
+        );
+    }
+    assert_ne!(
+        c.ome().next_escalation_ms(),
+        i64::MAX,
+        "MakerThenTaker arms the 5 s clock the maker posture never does"
+    );
+
+    // Drive past the maker window (submitted at NOW+2_000, due NOW+7_000):
+    // the sweep cancels the resting makers and chases at the book's price.
+    // No engine_evaluate after the tick — the tick is sweeps only, the same
+    // maintenance pass the host's loop runs beside its evaluate cycle.
+    c.tick(NOW + 8_000)
+        .expect("the tick runs the escalation sweep");
+
+    let orders = c.list_orders();
+    let legs: Vec<_> = orders
+        .iter()
+        .filter(|o| !o.internal_key.ends_with(":escalated"))
+        .collect();
+    let chases: Vec<_> = orders
+        .iter()
+        .filter(|o| o.internal_key.ends_with(":escalated"))
+        .collect();
+    assert_eq!(legs.len(), 2, "the two maker legs, escalated away");
+    assert_eq!(chases.len(), 2, "each expired maker escalates a taker");
+    for o in &legs {
+        assert_eq!(
+            o.status,
+            OrderStatus::Cancelled,
+            "the sweep cancels the resting maker to make room for the chase"
+        );
     }
     for o in &chases {
-        assert_eq!(o.mode, FillPolicy::Taker, "the WouldCross reaction chases");
+        assert_eq!(o.mode, FillPolicy::Taker, "the clock's chase is a taker");
         assert_eq!(o.status, OrderStatus::Filled, "the chase crosses and fills");
     }
     assert_eq!(

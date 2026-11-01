@@ -3,8 +3,10 @@
 //! adapter, exactly the surface the kernel runs.
 //!
 //! The spec's acceptance rows, mapped:
-//!   positive  — ask_UP + ask_DOWN + entry fees < 0.995 → ONE suggestion per
-//!               leg at its own ask, EQUAL declared share counts (a pair
+//!   positive  — ask_UP + ask_DOWN + entry fees < max_pair_cost → ONE
+//!               suggestion per leg at the v1.3 fill-path quote (each one tick
+//!               UNDER its own ask — the RESTABLE price; an at-ask post-only
+//!               POST is refused, #464), EQUAL declared share counts (a pair
 //!               merges per share-pair); the armed condition then emits
 //!               `reason = "merge"` collection intents on later evaluations;
 //!   negative  — pair sum above the cost cap (the spec's "> 1.005 never
@@ -148,8 +150,13 @@ fn pair_fresh(
 
 // ── positive ────────────────────────────────────────────────────────────────
 
-/// 0.48 + 0.45 + fees (0.00778752 + 0.00765703) = 0.94544455 < 0.995 → BOTH
-/// legs suggested, each at its own ask, EQUAL declared share counts.
+/// 0.48 + 0.45 + fees (0.00778752 + 0.00765703) = 0.94544455 < max_pair_cost
+/// (default 0.985) → BOTH legs suggested at the v1.3 fill-path quote (mode 1,
+/// the default: each one tick UNDER its OWN ask — the RESTABLE price; the
+/// at-ask quote is the ONE price a post-only BUY can never rest at and the
+/// kernel refuses its POST, #464), EQUAL declared share counts. The DISCOUNT
+/// TEST stays on the asks: the reason still names the ask-based all-in cost,
+/// and a maker fill only ever prints at or below its quote.
 #[test]
 fn a_discounted_pair_suggests_both_legs_at_their_asks() {
     let mut a = adapter();
@@ -166,8 +173,13 @@ fn a_discounted_pair_suggests_both_legs_at_their_asks() {
     let down = got.iter().find(|s| s.token_id == DOWN).unwrap();
     assert_eq!(up.direction, SignalDirection::Up);
     assert_eq!(down.direction, SignalDirection::Down);
-    assert_eq!(up.price, dec!(0.48), "each leg prices at its OWN ask");
-    assert_eq!(down.price, dec!(0.45));
+    assert_eq!(
+        up.price,
+        dec!(0.47),
+        "each leg quotes one tick UNDER its OWN ask (v1.3 mode 1: the restable \
+         price — at-ask is refused #464)"
+    );
+    assert_eq!(down.price, dec!(0.44));
     assert_eq!(
         up.shares, down.shares,
         "the legs must match in share count — a pair merges per share-pair"
@@ -176,7 +188,46 @@ fn a_discounted_pair_suggests_both_legs_at_their_asks() {
     assert!(up.condition_id == down.condition_id && up.condition_id == COND);
     assert!(
         up.reason.contains("pair 0.9454"),
-        "reason should name the all-in cost: {}",
+        "the discount test stays on the asks — the reason names the all-in \
+         cost: {}",
+        up.reason
+    );
+    assert!(
+        up.reason.contains("post-only@ask-1t"),
+        "the reason names the v1.3 fill path: {}",
+        up.reason
+    );
+}
+
+/// The declared mode-0 arm (v1.2's at-ask baseline, kept as the replay
+/// control) still emits AT the asks — the ONE price a post-only BUY can never
+/// rest at, which the kernel refuses at POST (#464 `WouldCross`, pinned at
+/// the OME level in
+/// `pair_entry_maker_tests::the_at_ask_baseline_still_refuses_the_post_and_never_chases`).
+/// Locked here so the under-ask default can never silently drift back onto
+/// the unpostable price.
+#[test]
+fn the_mode_0_baseline_quotes_at_the_ask_the_kernel_refuses() {
+    let mut a = adapter_with_params("entry_quote_mode", "0");
+    let fresh = pair_fresh(
+        Some((dec!(0.48), dec!(600))),
+        Some((dec!(0.45), dec!(600))),
+        NOW,
+    );
+    let markets = vec![market()];
+    let got = candidates_of(&mut a, &markets, 600, NOW, &fresh);
+    assert_eq!(got.len(), 2, "the v1.2 arm still emits both legs");
+    let up = got.iter().find(|s| s.token_id == UP).unwrap();
+    let down = got.iter().find(|s| s.token_id == DOWN).unwrap();
+    assert_eq!(
+        up.price,
+        dec!(0.48),
+        "mode 0 quotes AT its own ask — the unpostable price"
+    );
+    assert_eq!(down.price, dec!(0.45), "join, not chase (the v1.2 form)");
+    assert!(
+        up.reason.contains("post-only@ask,"),
+        "mode 0's fill-path label is the plain at-ask form: {}",
         up.reason
     );
 }
@@ -434,11 +485,14 @@ fn entry_window_zero_restores_the_whole_round() {
 
 // ── gap-fill ────────────────────────────────────────────────────────────────
 
-/// A partially-filled leg is topped up to its counterpart at the CURRENT ask:
-/// arms a pair, then re-evaluates with a holdings slice showing the UP leg
-/// fully held (3.0) and the DOWN leg missing — the gap-fill branch must emit
-/// ONE top-up entry on the DOWN leg at its own ask (ask + fee < $1), tagged
-/// with the shortfall reason. The collection merge intents still fire.
+/// A partially-filled leg is topped up to its counterpart by the SAME v1.3
+/// fill path: arms a pair, then re-evaluates with a holdings slice showing the
+/// UP leg fully held (3.0) and the DOWN leg missing — the gap-fill branch must
+/// emit ONE top-up entry on the DOWN leg one tick UNDER the CURRENT ask (the
+/// restable quote; an at-ask top-up is refused at POST exactly like an at-ask
+/// entry, #464), tagged with the shortfall reason. The incremental TEST stays
+/// on the ask (ask + fee < max_top_up_cost); the collection merge intents
+/// still fire.
 #[test]
 fn a_partially_filled_leg_is_topped_up_to_its_counterpart() {
     let mut a = adapter();
@@ -468,7 +522,12 @@ fn a_partially_filled_leg_is_topped_up_to_its_counterpart() {
     assert_eq!(got2.len(), 1, "one top-up for the short leg, got {got2:?}");
     let sig = &got2[0];
     assert_eq!(sig.token_id, DOWN, "the SHORT leg is topped up");
-    assert_eq!(sig.price, dec!(0.45), "top-up prices the CURRENT ask");
+    assert_eq!(
+        sig.price,
+        dec!(0.44),
+        "the top-up quotes the CURRENT ask − 1t (v1.3 mode 1: the restable \
+         price — an at-ask top-up POST is refused #464)"
+    );
     assert_eq!(
         sig.shares,
         Some(dec!(3.00)),
