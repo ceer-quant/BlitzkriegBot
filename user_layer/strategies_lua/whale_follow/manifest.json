@@ -1,0 +1,74 @@
+{
+  "name": "whale_follow",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "4be6b63f63cb55d0860061f05b270b444240bd782c07f398c00c07e6d2f6921d",
+  "author": "BlitzkriegBot",
+  "description": "Whale-follow for 5-minute binary rounds, market-side only: when a round is past its open (elapsed inside [entry_elapsed_min_sec, entry_elapsed_max_sec], default 90-240s of 300) and ONE leg's own mid has ESTABLISHED a direction (at/above min_entry_price 0.55, moved >= min_established_move 0.05 off the round-open reference, sitting AT its round running high) and reached that level as a PLATEAU, not a spike (|move over drift_window_sec 60s| <= max_drift_60s 0.10), lift that leg's ask once (band [0.55, 0.88]) and HOLD TO SETTLEMENT (holds_to_settlement; exits and breaks are always empty). The plateau-vs-spike wall is the evidence-pinned discriminator between mid-round continuation and top-ticking: on an unbiased 450-round BTC 5m tape corpus (real taker prints, gamma settlement truth) the EST shape runs WR 88.8% / EV +0.074 per share legacy (+0.068 official 0.07*p(1-p)), n=161, both chronological halves positive, while the same action entering mid-spike (|60s drift| >= 0.15) collapses to EV +0.012 legacy / +0.003 official (n=444) — the naive chase this package refuses is exactly lua_momentum's 7.5%-WR up leg. Whale anchors: 6meteor 9/9 BTC/ETH 5m main legs (tracker vs REDEEM truth, offsets 41-175s, VWAP 0.48-0.83, BUY-only), 5 independent wallets 8/8 the same day, and 267 distinct BUY-only whales (>= $300/round) on the tape whose offset-120-240s entries win 76.4% vs 63.9% early. Ceiling disclosed: there is NO on-chain whale feed in bk.* — the established level IS the proxy trigger; the round-open reference is the leg's own first fresh mid (a mid-round start leaves the leg unqualified, fail-closed); the drift gate needs a full 60s ring (fail-closed); the corpus is BTC 5m (assets tunable, round_sec rescales the window; other horizons untested). One attempt per condition and one opening per round; the manifest waives ONLY the kernel timing floor (timing_min_time_left_sec 60, the window's own edge) and keeps the momentum veto at full strength. Fail-closed on a missing fee schedule. Signal-only: the kernel adjudicates, sizes, funds-gates and posts every intent.",
+  "holds_to_settlement": true,
+  "gate_exemptions": {
+    "timing": true,
+    "timing_min_time_left_sec": 60
+  },
+  "tunables": {
+    "round_sec": {
+      "type": "int",
+      "default": "300",
+      "min": "60",
+      "max": "1800"
+    },
+    "assets": {
+      "type": "string",
+      "default": "BTC"
+    },
+    "entry_elapsed_min_sec": {
+      "type": "int",
+      "default": "90",
+      "min": "0",
+      "max": "1500"
+    },
+    "entry_elapsed_max_sec": {
+      "type": "int",
+      "default": "240",
+      "min": "10",
+      "max": "1799"
+    },
+    "min_entry_price": {
+      "type": "decimal",
+      "default": "0.55",
+      "min": "0.50",
+      "max": "0.80"
+    },
+    "max_entry_price": {
+      "type": "decimal",
+      "default": "0.88",
+      "min": "0.60",
+      "max": "0.95"
+    },
+    "min_established_move": {
+      "type": "decimal",
+      "default": "0.05",
+      "min": "0.01",
+      "max": "0.30"
+    },
+    "max_drift_60s": {
+      "type": "decimal",
+      "default": "0.10",
+      "min": "0.02",
+      "max": "0.40"
+    },
+    "drift_window_sec": {
+      "type": "int",
+      "default": "60",
+      "min": "10",
+      "max": "180"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}
