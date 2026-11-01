@@ -531,6 +531,20 @@ jobs:
         run: |
           node scripts/file-size-check.mjs --self-test
           node scripts/file-size-check.mjs
+      # #840 PR0: the workspace dependency-graph freeze. PR1..PR3 migrate
+      # types/readers/ABI between crates; the proof a migration moved TYPES
+      # and not DEPENDENCIES is this gate. It pins every workspace-internal
+      # edge and every member's DIRECT external dep names (versions stripped
+      # — a Cargo.lock bump must stay green). The three contract crates'
+      # "zero tokio/reqwest" rule and the four-extension zero-reverse-dep rule
+      # are both enforced here as ordinary graph lines. --self-test proves the
+      # teeth on in-memory fixtures first (§A.4), then the real verdict diffs
+      # `cargo tree --workspace --edges normal,build,dev --target all`
+      # (platform-independent) against scripts/contract-tree-baseline.txt.
+      - name: Contract dependency-graph freeze (#840)
+        run: |
+          node scripts/contract-tree-check.mjs --self-test
+          node scripts/contract-tree-check.mjs
       # #825: test-support must never ride back into the default build. The
       # blunt test mutators (positions_mut / accounts_mut / config_mut /
       # risk_config_mut / ledger_mut) and the `strategies::test_support`
