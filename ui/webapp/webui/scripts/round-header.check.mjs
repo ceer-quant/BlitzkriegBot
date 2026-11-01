@@ -93,9 +93,14 @@ const NUMERIC_CLASS = /(?:^|\s)(?:stat-num|num)(?:\s|$)/
  * it would animate the prose around the number and twitch on every state change.
  * Timestamps and addresses are identifiers, not readings. `duration()` is
  * deliberately absent: a countdown does tick and must roll.
+ *
+ * `confirmedPreview`（Overview 趋势确认行）同理：它是 token id 前缀的文本
+ * 列表（`abcdef12…, 9f3e01aa… (+2)`）——组成变化不是数值跳动，滚动动画
+ * 无意义；旁边的计数 `<RollingNumber :value="confirmedTokens.length"> 币`
+ * 已按数字滚动。
  */
 const TEXT_MARKERS =
-  /^(?:dateTime|shortAddr|identity|stateLabel|marketTypeLabel|backtestLabel)\s*\(|\.(?:ageLabel|asset|direction|name|strategy|source|exitReason|label|description|kind)\b/
+  /^(?:dateTime|shortAddr|identity|stateLabel|marketTypeLabel|backtestLabel)\s*\(|^confirmedPreview\b|\.(?:ageLabel|asset|direction|name|strategy|source|exitReason|label|description|kind)\b/
 
 /**
  * Raw `{{ … }}` interpolations sitting directly inside a numeric slot.

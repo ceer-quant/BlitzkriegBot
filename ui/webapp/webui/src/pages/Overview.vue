@@ -346,10 +346,12 @@ const engineCounterLabel = computed(() => `引擎计数 · ${engineCounterScope.
  * `extensions/polymarket/src/feed.rs`) calls `on_book` / `on_spot` and never
  * `on_top_of_book` — so the counter is structurally 0, and a tile that always
  * reads 0 invites the question it cannot answer. It stays in the snapshot for
- * plugins that do emit it.
+ * plugins that do emit it. `spots` IS live for the same reason (on_spot), and
+ * the TUI's feed line has carried it from the start — shown here too.
  */
 const counters = computed(() => [
   { label: '订单簿', value: compact(engine.value.books), tone: 'default' as const },
+  { label: '现货价', value: compact(engine.value.spots), tone: 'default' as const },
   { label: '轮次', value: num(engine.value.rounds), tone: 'default' as const },
   { label: '评估', value: compact(engine.value.evaluations), tone: 'default' as const },
   { label: '信号', value: compact(engine.value.signals), tone: 'gold' as const },
@@ -362,6 +364,23 @@ const counters = computed(() => [
     tone: (engine.value.placeRejected ?? 0) > 0 ? ('down' as const) : ('default' as const),
   },
 ])
+
+/**
+ * 趋势确认 token（TUI Markets 卡 `trend confirmed:` 行的同源数据 —— 引擎
+ * `confirmed_tokens()`，wire 上由快照 stats.confirmed 携带，排序在内核侧
+ * `engine_stats_at` 做过）。原始 id 是几十位的十进制长串，全量展示不可读，
+ * TUI 也只打前缀 —— 这里沿用同一形态：前 8 字符 + 省略号，至多 6 个，
+ * 溢出以 +N 收尾，完整列表进 title 悬停可见。老内核/无引擎不带该键 →
+ * 空数组 → 整块不渲染（缺省诚实，不冒充「零确认」）。
+ */
+const confirmedTokens = computed(() => snap.value?.stats?.confirmed ?? [])
+const confirmedPreview = computed(() => {
+  const take = confirmedTokens.value.slice(0, 6).map((t) => `${t.slice(0, 8)}…`)
+  const more = confirmedTokens.value.length > 6
+    ? ` (+${confirmedTokens.value.length - 6})`
+    : ''
+  return `${take.join(', ')}${more}`
+})
 
 // 浮动合计读的是上面已按账户过滤后的持仓集合（数字与当前持仓表同口径）。
 // 口径必须是美元（issue 744）：内核 `unrealizedPct` 是百分数
@@ -627,6 +646,18 @@ const needsStrategyHint = computed(() => {
                 'text-down': c.tone === 'down',
               }"
             ><RollingNumber :value="c.value" /></div>
+          </div>
+        </div>
+        <div
+          v-if="confirmedTokens.length"
+          class="mt-4 border-t border-line pt-3"
+        >
+          <div class="flex items-center justify-between text-[11.5px]">
+            <span class="text-faint-fg">趋势确认</span>
+            <span class="text-[10.5px] text-faint-fg num"><RollingNumber :value="confirmedTokens.length" /> 币</span>
+          </div>
+          <div class="mt-1 truncate text-[10.5px] text-faint-fg num" :title="confirmedTokens.join(', ')">
+            {{ confirmedPreview }}
           </div>
         </div>
         <div

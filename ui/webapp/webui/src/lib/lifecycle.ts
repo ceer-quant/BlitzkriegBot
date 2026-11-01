@@ -1,5 +1,9 @@
 /**
- * What the 启动 / 停止 controls can actually do.
+ * What the 启动 / 停止 controls can actually do. 重启 rides the same gates:
+ * it is a stop+start compound (`dispatcher cmd_restart`), so `usable`
+ * （canStop || canStart）gates it — offline it IS a start; on an adopted
+ * core its stop half answers not_owned and the button stays honest by
+ * disabling.
  *
  * Two independent things decide it, and conflating them is what produced a pair
  * of buttons that looked live and answered `lifecycle control disabled; start

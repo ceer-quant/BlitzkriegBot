@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
- * 设置 · 网关与网络 —— Gateway 指令台（网关身份 + status/start/stop，沿用
- * lifecycle 的能力闸）与网络诊断（内核拨测出网路径，读法在 lib/net-check.ts）。
+ * 设置 · 网关与网络 —— Gateway 指令台（网关身份 + status/start/restart/stop，
+ * 沿用 lifecycle 的能力闸）与网络诊断（内核拨测出网路径，读法在 lib/net-check.ts）。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  RefreshCw, ShieldCheck, TerminalSquare, Play, Square, Info, Server, Network,
+  RefreshCw, ShieldCheck, TerminalSquare, Play, RotateCw, Square, Info, Server, Network,
 } from 'lucide-vue-next'
 import { api, type CommandDoc, type NetCheckDoc } from '@/api/client'
 import { readNetCheck } from '@/lib/net-check'
@@ -31,7 +31,7 @@ const exit = computed(() => exitNotice(gateway.value, engineUp.value))
 
 const busy = ref(false)
 const cmdMsg = ref<string | null>(null)
-async function send(cmd: 'start' | 'stop' | 'status'): Promise<void> {
+async function send(cmd: 'start' | 'stop' | 'status' | 'restart'): Promise<void> {
   busy.value = true
   cmdMsg.value = null
   try {
@@ -43,6 +43,29 @@ async function send(cmd: 'start' | 'stop' | 'status'): Promise<void> {
   } finally {
     busy.value = false
     setTimeout(() => { cmdMsg.value = null }, 6000)
+  }
+}
+
+/**
+ * 重启 = 停止 + 拉起（dispatcher `cmd_restart`：stop → 等 socket 静默 →
+ * start），是「让下一会话设置生效」的正道。能力闸沿用 control.usable
+ * （canStop || canStart）：stop+start 复合动词，两端有一头能用它就能用
+ * —— 内核离线时它就是启动（回执 "core started (was not running)"），
+ * 接管（adopted）内核时 stop 端 not_owned，按钮如实禁用，不假装能重启
+ * 别人的进程。破坏性虽低于强平，但仍会断内核片刻 —— 走同一款确认词门。
+ */
+const restartTitle = computed(() => {
+  if (!control.value.enabled) {
+    return control.value.blockedReason ?? '当前网关未开启进程控制'
+  }
+  if (engineUp.value && !gateway.value?.managed) {
+    return '内核由其他进程启动，本网关不会停止它 —— 重启不适用；如需在此重启，请改由网关启动内核'
+  }
+  return '重启内核：先停止再拉起，下一会话设置即时生效'
+})
+function askRestart(): void {
+  if (window.confirm('重启内核：先停止本网关启动的内核再拉起（下一会话设置即时生效）。确认重启？')) {
+    void send('restart')
   }
 }
 
@@ -176,6 +199,15 @@ const netBadge = computed(() => {
           @click="send('start')"
         >
           <Play class="size-3.5" />启动内核
+        </Button>
+        <Button
+          variant="default"
+          size="sm"
+          :disabled="busy || !control.usable"
+          :title="restartTitle"
+          @click="askRestart"
+        >
+          <RotateCw class="size-3.5" />重启内核
         </Button>
         <Button
           variant="danger"
