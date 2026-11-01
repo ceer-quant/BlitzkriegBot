@@ -4,14 +4,14 @@
  *
  * The campaign rule it enforces: no `.rs` file in the trading-repo scope
  * (core/, tools/, user_layer/, extensions/ — and, since the #819-#821 ui
- * split wave, `ui/` too) may exceed 1500 lines. A file that big is where review
- * coverage dies and where the split campaigns (#699 family, #780's
- * service-test split) come to rot back together; this gate is the arm that
- * keeps them split.
+ * split wave, `ui/` too) and no `.vue`/`.ts` file in `ui/webapp/webui/src/`
+ * may exceed 1500 lines. A file that big is where review coverage dies and
+ * where the split campaigns (#699 family, #780's service-test split) come to
+ * rot back together; this gate is the arm that keeps them split.
  *
  * Ratchet semantics — the allowlist is debt, not licence, and it only
  * tightens:
- *   1. a scanned `.rs` file over LIMIT that is not in ALLOW is red;
+ *   1. a scanned file over LIMIT that is not in ALLOW is red;
  *   2. an ALLOW entry whose file no longer exists is red — drop the entry;
  *   3. an ALLOW entry whose file is now ≤ LIMIT is red — prune the
  *      allowlist, the ratchet only tightens. An entry never grows: shrinking
@@ -55,10 +55,12 @@ const LIMIT = 1500;
 // audit_fix_tests.rs 2191→299 with every child ≤1461 — and the largest
 // in-scope file is now lua_loader.rs at 1495. The ui split wave (#819-#821)
 // brought `ui/` into scope the same day its last oversized file fell (the
-// largest ui file is web/auth_tests.rs at 1302), so the allowlist stays
-// empty across the whole tree. An entry here is a debt
-// marker — the file may shrink or die, never grow into a bigger exception,
-// and once it is ≤ LIMIT the entry must be pruned (rule 3 above).
+// largest ui file is web/auth_tests.rs at 1302), and webui (.vue/.ts under
+// ui/webapp/webui/src/) joined with its largest file (HftPage.vue at 1325)
+// safely below the 1500 limit, so the allowlist stays empty across the whole
+// tree. An entry here is a debt marker — the file may shrink or die, never
+// grow into a bigger exception, and once it is ≤ LIMIT the entry must be
+// pruned (rule 3 above).
 const ALLOW = [];
 
 const checks = [];
@@ -76,9 +78,12 @@ function lineCount(p) {
   return n;
 }
 
-/** Every in-scope `.rs` file under `root`, repo-relative (`/`-separated),
- * recursively, skipping machine-generated directories. A scope that does
- * not exist in this checkout is fine. */
+/** Every in-scope file under `root`:
+ *   - all `.rs` files across SCOPES (core, tools, user_layer, extensions, ui)
+ *   - all `.vue` and `.ts` files under `ui/webapp/webui/src`
+ * repo-relative (`/`-separated), recursively, skipping machine-generated
+ * directories (target, dist, node_modules). A scope that does not exist in
+ * this checkout is fine. */
 function scopeFiles(root) {
   const files = [];
   for (const dir of SCOPES) {
@@ -94,8 +99,13 @@ function scopeFiles(root) {
         if (e.isDirectory()) {
           if (SKIP_DIRS.includes(e.name)) continue;
           walk(p);
-        } else if (e.isFile() && e.name.endsWith('.rs')) {
-          files.push({ path: p, rel: p.slice(root.length + 1).split('\\').join('/') });
+        } else if (e.isFile()) {
+          const rel = p.slice(root.length + 1).split('\\').join('/');
+          const isRs = e.name.endsWith('.rs');
+          const isWebUi = (e.name.endsWith('.vue') || e.name.endsWith('.ts')) && rel.startsWith('ui/webapp/webui/src/');
+          if (isRs || isWebUi) {
+            files.push({ path: p, rel });
+          }
         }
       }
     };
@@ -187,12 +197,26 @@ function selfTest() {
     write('core/grown.rs', LIMIT + 50);
     write('extensions/shrunk.rs', 2);
     write('core/target/junk.rs', LIMIT + 7);
+
+    // .vue and .ts fixtures under ui/webapp/webui/src/ (covering over-limit and allowlist paths)
+    // plus an over-limit file outside src/ that should be skipped.
+    write('ui/webapp/webui/src/over.vue', LIMIT + 1);
+    write('ui/webapp/webui/src/over.ts', LIMIT + 1);
+    write('ui/webapp/webui/src/at_authoring.vue', LIMIT + 10);
+    write('ui/webapp/webui/src/shrunk_still_over.ts', LIMIT + 5);
+    write('ui/webapp/webui/src/grown.ts', LIMIT + 25);
+    write('ui/webapp/webui/src/small.vue', 10);
+    write('ui/webapp/webui/outside.ts', LIMIT + 100);
+
     const fixtureAllow = [
       { path: 'core/at_authoring.rs', atAuthoring: LIMIT + 5 },
       { path: 'core/shrunk_still_over.rs', atAuthoring: LIMIT + 100 },
       { path: 'core/grown.rs', atAuthoring: LIMIT + 10 },
       { path: 'extensions/shrunk.rs', atAuthoring: 900 },
       { path: 'core/vanished.rs', atAuthoring: 1600 },
+      { path: 'ui/webapp/webui/src/at_authoring.vue', atAuthoring: LIMIT + 10 },
+      { path: 'ui/webapp/webui/src/shrunk_still_over.ts', atAuthoring: LIMIT + 20 },
+      { path: 'ui/webapp/webui/src/grown.ts', atAuthoring: LIMIT + 15 },
     ];
     const { scanned, violations } = audit(sandbox, fixtureAllow);
     const over = violations.filter((v) => v.kind === 'over-limit');
@@ -202,16 +226,23 @@ function selfTest() {
 
     check('at-limit file (1500 lines exactly) passes', !over.some((v) => v.path === 'tools/exact.rs') && !prune.some((v) => v.path === 'tools/exact.rs'));
     check('small file passes', !over.some((v) => v.path === 'core/a.rs'));
-    check('1501-line unallowlisted file reds (over-limit)', over.length === 1 && over[0].path === 'user_layer/over.rs', over.map((v) => v.path).join(','));
+    check('small webui .vue file passes', !over.some((v) => v.path === 'ui/webapp/webui/src/small.vue'));
+    check('1501-line unallowlisted .rs file reds (over-limit)', over.some((v) => v.path === 'user_layer/over.rs'));
+    check('1501-line unallowlisted webui .vue file reds (over-limit)', over.some((v) => v.path === 'ui/webapp/webui/src/over.vue'));
+    check('1501-line unallowlisted webui .ts file reds (over-limit)', over.some((v) => v.path === 'ui/webapp/webui/src/over.ts'));
+    check('unallowlisted file outside webui src/ is skipped even if over limit', !over.some((v) => v.path === 'ui/webapp/webui/outside.ts'));
     // #818 matrix: == atAuthoring passes, LIMIT < lines < atAuthoring passes
     // (shrink allowed), lines > atAuthoring reds (entry never grows).
     check('allowlisted file at exactly atAuthoring passes (debt marker honoured, == is not growth)', !over.some((v) => v.path === 'core/at_authoring.rs') && !growth.some((v) => v.path === 'core/at_authoring.rs') && !prune.some((v) => v.path === 'core/at_authoring.rs'));
+    check('allowlisted webui .vue file at exactly atAuthoring passes (debt marker honoured, == is not growth)', !over.some((v) => v.path === 'ui/webapp/webui/src/at_authoring.vue') && !growth.some((v) => v.path === 'ui/webapp/webui/src/at_authoring.vue') && !prune.some((v) => v.path === 'ui/webapp/webui/src/at_authoring.vue'));
     check('allowlisted file shrunk below atAuthoring but still over limit passes (shrink is allowed)', !growth.some((v) => v.path === 'core/shrunk_still_over.rs') && !prune.some((v) => v.path === 'core/shrunk_still_over.rs') && !over.some((v) => v.path === 'core/shrunk_still_over.rs'));
-    check('allowlisted file grown past atAuthoring reds (growth rule — entry never grows)', growth.length === 1 && growth[0].path === 'core/grown.rs', growth.map((v) => v.path).join(','));
+    check('allowlisted webui .ts file shrunk below atAuthoring but still over limit passes (shrink is allowed)', !growth.some((v) => v.path === 'ui/webapp/webui/src/shrunk_still_over.ts') && !prune.some((v) => v.path === 'ui/webapp/webui/src/shrunk_still_over.ts') && !over.some((v) => v.path === 'ui/webapp/webui/src/shrunk_still_over.ts'));
+    check('allowlisted file grown past atAuthoring reds (growth rule — entry never grows)', growth.some((v) => v.path === 'core/grown.rs'));
+    check('allowlisted webui .ts file grown past atAuthoring reds (growth rule — entry never grows)', growth.some((v) => v.path === 'ui/webapp/webui/src/grown.ts'));
     check('allowlisted file shrunk to ≤ limit reds (prune rule)', prune.length === 1 && prune[0].path === 'extensions/shrunk.rs');
     check('allowlisted file gone reds (drop the entry)', gone.length === 1 && gone[0].path === 'core/vanished.rs');
     check('target/ tree is skipped', !over.some((v) => v.path.includes('target/')));
-    check('scan counted the seven in-scope fixtures', scanned === 7, `scanned=${scanned}`);
+    check('scan counted the thirteen in-scope fixtures', scanned === 13, `scanned=${scanned}`);
 
     const failed = checks.filter((c) => !c.ok).length;
     if (failed > 0) {
@@ -234,10 +265,10 @@ function main() {
     console.error(`    ${v.path}: ${v.detail}`);
   }
   if (violations.length > 0) {
-    console.error(`\nfile-size-check: ${violations.length} RED — no .rs file over ${LIMIT} lines (ratchet: shrink or split; the allowlist only tightens)`);
+    console.error(`\nfile-size-check: ${violations.length} RED — no in-scope file over ${LIMIT} lines (ratchet: shrink or split; the allowlist only tightens)`);
     process.exit(1);
   }
-  console.error(`\nfile-size-check: all green — ${scanned} .rs file(s) scanned across ${SCOPES.join(', ')}, limit ${LIMIT}, ALLOW ${ALLOW.length} entr${ALLOW.length === 1 ? 'y' : 'ies'}`);
+  console.error(`\nfile-size-check: all green — ${scanned} in-scope file(s) scanned across ${SCOPES.join(', ')} (.rs) and ui/webapp/webui/src (.vue/.ts), limit ${LIMIT}, ALLOW ${ALLOW.length} entr${ALLOW.length === 1 ? 'y' : 'ies'}`);
 }
 
 main();
