@@ -762,3 +762,270 @@ fn fires_with_long_fractional_depth() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].price, dec!(0.26));
 }
+
+// ── regression: spot_ok across the five acceptance domains (issue #847) ────
+//
+// ff311c8 replaced the float move ratio `diff.m / (POW10[diff.s] * oldest.m)
+// * 100` — which reads POW10[oldest.s]x too small whenever the OLDEST close
+// carries a scale (a -5% waterfall on a scale-2 close read -0.05%, so the
+// veto never fired) and whose denominator product itself wrapped i64 at the
+// top of the declared domain — with the exact rational cross-multiplication
+// `|diff| * 100 >= thr * oldest`, threshold included. These rows pin the
+// fixed verdicts on the REAL package (loader + sandbox + adapter): every row
+// isolates the spot gate (dominance latched, fast wick armed, deep neutral
+// book, inside the time window, no account view), so the only thing that can
+// flip the verdict is spot_ok.
+//
+// Rows marked [old-red] fail on ff311c8^ by construction: the old float form
+// reads the move POW10[oldest.s]x small there. The window geometry is shared
+// and self-checking: a slip that drops the oldest bar turns any two_step
+// pair into a flat diff (diff.m == 0 → pass), which fails every veto row
+// loudly.
+
+/// Spot-window geometry shared by every row below: ten sec1 bars opening at
+/// `SPOT_OPEN`, evaluated at `SPOT_NOW`. Bar 0 closes 499ms INSIDE the
+/// window cutoff (`SPOT_NOW - spot_window_sec·1s`), bar 9 closes 501ms
+/// before now, so the gate's window pair is EXACTLY closes[0] → closes[9]
+/// and each row can state the move the gate sees.
+const SPOT_OPEN: i64 = NOW + 12_500;
+const SPOT_NOW: i64 = NOW + 23_000;
+
+/// Exact decimal from a string literal: unlike the `dec!` macro (numeric
+/// literals only), this keeps EXPLICIT trailing scales ("950.00" stays
+/// scale 2, "9.5000" stays scale 4) — the (mantissa, scale) pairs are the
+/// point of the scale rows below.
+fn d(s: &str) -> Decimal {
+    Decimal::from_str_exact(s).expect("valid decimal literal")
+}
+
+/// Ten closes whose window pair is exactly (`first` → `rest`): `first` at
+/// the oldest in-window bar, `rest` for the other nine.
+fn window_pair(first: Decimal, rest: Decimal) -> Vec<Decimal> {
+    let mut v = vec![first];
+    v.resize(10, rest);
+    v
+}
+
+/// Arm `token` (22s hold-dominance at 0.56, then a fast wick to 0.28) with
+/// `closes` as the spot window, and evaluate at SPOT_NOW with every non-spot
+/// gate satisfied. The suggestions ARE the spot gate's verdict: one row =
+/// pass (resting bid at 0.26), empty = veto.
+fn spot_verdict(
+    adapter: &mut LuaEngineAdapter,
+    token: &str,
+    closes: &[Decimal],
+) -> Vec<blitzkrieg_core::signal::TradeSignal> {
+    feed_dominance(adapter, token, NOW, 22, dec!(0.56));
+    feed_spot(adapter, SPOT_OPEN, closes);
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    adapter.on_book(token, &wick, SPOT_NOW);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == token).then(|| wick_for_fresh.clone());
+    candidates_of(adapter, &markets, 600, SPOT_NOW, &fresh)
+}
+
+/// Lua callback errors the adapter recorded (0 = no crash mid-evaluation;
+/// the adapter swallows evaluation errors into diagnostics).
+fn lua_errors(adapter: &mut LuaEngineAdapter) -> i64 {
+    let markets = vec![market()];
+    let fresh = |_t: &str| None;
+    let ctx = StrategyCtx::new(&markets, NOW / 900_000, 600, SPOT_NOW, &fresh);
+    let diag = adapter.diagnostics(&ctx);
+    diag.first()
+        .and_then(|d| d.get("errors"))
+        .and_then(|e| e.as_i64())
+        .unwrap_or(-1)
+}
+
+// ── domain 1: forward AND reverse move, each vetoing only its own side ──────
+
+/// [old-red] A -1% waterfall on scale-2 closes vetoes the UP buy, and a +1%
+/// pump on scale-2 closes vetoes the DOWN buy. The old float form read both
+/// moves as ±0.01% (POW10[2] too small) and bought through either one.
+#[test]
+fn spot_waterfall_vetoes_up_and_pump_vetoes_down() {
+    let mut a = adapter();
+    // Window pair 100.00 → 99.00: move = -1% ≤ -thr → waterfall → UP veto.
+    let closes = window_pair(d("100.00"), d("99.00"));
+    assert!(
+        spot_verdict(&mut a, UP, &closes).is_empty(),
+        "a waterfall must veto the UP buy"
+    );
+
+    let mut b = adapter();
+    // Window pair 100.00 → 101.00: move = +1% ≥ +thr → pump → DOWN veto.
+    let closes = window_pair(d("100.00"), d("101.00"));
+    assert!(
+        spot_verdict(&mut b, DOWN, &closes).is_empty(),
+        "a pump must veto the DOWN buy"
+    );
+}
+
+/// Direction symmetry: the SAME adverse move does not veto the OPPOSITE
+/// side — a waterfall is confirmation for the DOWN buy, a pump for the UP
+/// buy (normal spot data present → pass, the other half of the
+/// spot_missing domain).
+#[test]
+fn spot_vetoes_are_direction_symmetric() {
+    let mut a = adapter();
+    let closes = window_pair(d("100.00"), d("99.00"));
+    assert_eq!(
+        spot_verdict(&mut a, DOWN, &closes).len(),
+        1,
+        "the same waterfall must NOT veto the DOWN buy"
+    );
+
+    let mut b = adapter();
+    let closes = window_pair(d("100.00"), d("101.00"));
+    assert_eq!(
+        spot_verdict(&mut b, UP, &closes).len(),
+        1,
+        "the same pump must NOT veto the UP buy"
+    );
+}
+
+// ── domain 2: threshold EQUALITY boundary (the contract is >=, not >) ───────
+
+/// [old-red] A move of EXACTLY thr must veto (|diff|·100 == thr·oldest).
+/// Scale-2 closes also make the old float form read -0.05% here.
+#[test]
+fn spot_move_exactly_at_threshold_vetoes() {
+    let mut a = adapter();
+    // 100.00 → 99.50 is EXACTLY -0.5% = spot_max_move_pct (manifest default).
+    let closes = window_pair(d("100.00"), d("99.50"));
+    assert!(
+        spot_verdict(&mut a, UP, &closes).is_empty(),
+        "move == thr sits inside the veto (threshold included)"
+    );
+}
+
+/// The mirror edge: just UNDER the threshold passes. Proves the equality
+/// veto above is the boundary, not an over-broad gate.
+#[test]
+fn spot_move_just_under_threshold_passes() {
+    let mut a = adapter();
+    // 100.00 → 99.51 = -0.49% < 0.5%: |diff|·100 < thr·oldest, exactly.
+    let closes = window_pair(d("100.00"), d("99.51"));
+    let got = spot_verdict(&mut a, UP, &closes);
+    assert_eq!(got.len(), 1, "-0.49% is calm: {got:?}");
+    assert_eq!(got[0].price, dec!(0.26));
+}
+
+// ── domain 3: the SAME move in three (mantissa, scale) spellings ────────────
+
+/// [old-red] THE scale-bug lesion: one -5% move written as 95000/90250 at
+/// s=0, 950.00→902.50 at s=2 and 9.5000→9.0250 at s=4 — identical mantissa
+/// pairs, POW10-shifted scales — must produce the byte-identical verdict
+/// (VETO) at every scale. The old form read s=2 as -0.05% and s=4 as
+/// -0.0005% and bought every knife at scale ≥ 1.
+#[test]
+fn spot_same_move_across_scales_is_bit_identical_veto() {
+    for (oldest, newest) in [
+        (dec!(95000), dec!(90250)), // s=0
+        (d("950.00"), d("902.50")), // s=2, same mantissas
+        (d("9.5000"), d("9.0250")), // s=4, same mantissas
+    ] {
+        let mut a = adapter();
+        let closes = window_pair(oldest, newest);
+        assert!(
+            spot_verdict(&mut a, UP, &closes).is_empty(),
+            "-5% spelled at scale {oldest} must veto the UP buy"
+        );
+    }
+}
+
+/// The pass direction must not drift either: the same calm +0.0105% move in
+/// the same three spellings lets the entry through at the IDENTICAL price —
+/// equivalent fractions stay equivalent across scales.
+#[test]
+fn spot_calm_move_across_scales_is_bit_identical_pass() {
+    for (oldest, newest) in [
+        (dec!(95000), dec!(95010)), // s=0
+        (d("950.00"), d("950.10")), // s=2, same mantissas
+        (d("9.5000"), d("9.5010")), // s=4, same mantissas
+    ] {
+        let mut a = adapter();
+        let closes = window_pair(oldest, newest);
+        let got = spot_verdict(&mut a, UP, &closes);
+        assert_eq!(got.len(), 1, "calm {oldest} → {newest} must pass: {got:?}");
+        assert_eq!(got[0].price, dec!(0.26), "the row must be byte-identical");
+    }
+}
+
+// ── domain 4: spot_missing both ways (fail-closed default, disclosed knob) ──
+
+/// NO spot bars at all: the default `spot_missing=block` refuses (cannot
+/// confirm the underlying is calm → no knife), the disclosed
+/// `spot_missing=pass` diagnostic knob arms the identical book-only shape.
+/// With normal data present → pass is pinned by the symmetry rows above.
+#[test]
+fn spot_missing_block_refuses_and_pass_knob_arms() {
+    let mut blocked = adapter();
+    assert!(
+        spot_verdict(&mut blocked, UP, &[]).is_empty(),
+        "no spot data + default block must refuse"
+    );
+
+    let mut passing = adapter_with_params("spot_missing", "pass");
+    let got = spot_verdict(&mut passing, UP, &[]);
+    assert_eq!(got.len(), 1, "the pass knob arms the same shape: {got:?}");
+    assert_eq!(got[0].price, dec!(0.26));
+}
+
+// ── domain 5: overflow upper bound — 1e5 prices at 10 decimals ──────────────
+
+/// [old-red] The top of the declared domain at its most violent legal move:
+/// 99999.9999999999 → 0.0000000001 (scale 10). The new products stay far
+/// inside i64 (|diff|·100 ≈ 1e17, the aligned comparison ≈ 1e18 < 2^63) and
+/// the verdict is a veto; the old form's denominator POW10[10]·oldest ≈ 1e25
+/// wrapped i64 before the comparison. No Lua error may be swallowed either
+/// way (a crashed evaluation must not masquerade as a pass).
+#[test]
+fn spot_max_magnitude_waterfall_vetoes_without_overflow() {
+    let mut a = adapter();
+    let closes = window_pair(d("99999.9999999999"), d("0.0000000001"));
+    assert!(
+        spot_verdict(&mut a, UP, &closes).is_empty(),
+        "a ~-100% waterfall at max magnitude must veto the UP buy"
+    );
+    assert_eq!(
+        lua_errors(&mut a),
+        0,
+        "no Lua callback error may be swallowed"
+    );
+}
+
+/// The pump mirror at the same magnitude vetoes the DOWN buy, also without
+/// overflow and without a swallowed error.
+#[test]
+fn spot_max_magnitude_pump_vetoes_down_without_overflow() {
+    let mut a = adapter();
+    let closes = window_pair(d("0.0000000001"), d("99999.9999999999"));
+    assert!(
+        spot_verdict(&mut a, DOWN, &closes).is_empty(),
+        "an extreme pump on a near-zero oldest close must veto the DOWN buy"
+    );
+    assert_eq!(
+        lua_errors(&mut a),
+        0,
+        "no Lua callback error may be swallowed"
+    );
+}
+
+/// No MISjudgement at the top of the domain: a 1e-10-wide move on max
+/// scale-10 closes is calm — the gate must still pass it and bid 0.26 (max
+/// magnitude must not scare the veto).
+#[test]
+fn spot_max_scale_tiny_move_still_passes() {
+    let mut a = adapter();
+    let closes = window_pair(d("99999.9999999999"), d("99999.9999999998"));
+    let got = spot_verdict(&mut a, UP, &closes);
+    assert_eq!(got.len(), 1, "a 1e-10 move must not veto: {got:?}");
+    assert_eq!(got[0].price, dec!(0.26));
+    assert_eq!(
+        lua_errors(&mut a),
+        0,
+        "no Lua callback error may be swallowed"
+    );
+}
