@@ -426,12 +426,22 @@ end
 --- waterfall (move <= -spot_max_move_pct over the window) vetoes an UP buy,
 --- a pump vetoes a DOWN buy. Data missing or window not covered → the
 --- `spot_missing` policy (default "block": no confirmation, no knife).
+---
+--- The move comparison is EXACT rational math (issue #847; the smart_money_reverse
+--- spelling): the old float form divided the scaled diff mantissa by
+--- POW10[diff.s] * oldest.m, which is only scale-true when the oldest close
+--- carries scale 0 — a close at scale s > 0 reads POW10[s]x too small (a 5%
+--- waterfall on a scale-2 close read -0.05%, so this veto could never fire).
+--- Here: move <= -thr  ⟺  |diff| * 100 >= thr * oldest (diff < 0), same for
+--- the pump branch. Mantissa domain: closes ≤ 1e5 with ≤ 10 decimals keep
+--- every product far inside i64.
 local function spot_ok(cfg, asset, dir_up, now_ms)
   local arr = spot_bars[asset]
-  local move, enough = 0, false
+  local enough = false
+  local diff, oldest
   if arr and #arr >= 2 then
     local cutoff = now_ms - cfg.spot_window_sec * 1000
-    local oldest_ts, oldest, newest
+    local oldest_ts, newest
     for i = 1, #arr do
       if arr[i].ts >= cutoff then
         if not oldest then
@@ -444,16 +454,22 @@ local function spot_ok(cfg, asset, dir_up, now_ms)
     -- window coverage within 1s (sec1 bars close at most ~1s behind now)
     if oldest and newest and oldest.m > 0 and (now_ms - oldest_ts) >= (cfg.spot_window_sec - 1) * 1000 then
       enough = true
-      local diff = dec_sub(newest, oldest)
-      move = (diff.m / (POW10[diff.s] * oldest.m)) * 100
+      diff = dec_sub(newest, oldest)
     end
   end
   if not enough then return cfg.spot_missing == "pass" end
-  local thr = tonumber(dec_fmt(cfg.spot_max_move_pct))
+  if diff.m == 0 then return true end
+  local abs_diff = diff.m < 0 and { m = -diff.m, s = diff.s } or diff
+  local lhs = dec_mul(abs_diff, DEC_100)
+  local rhs = dec_mul(cfg.spot_max_move_pct, oldest)
   if dir_up then
-    return not (move <= -thr)
+    -- a waterfall (move <= -thr) vetoes the UP buy
+    if diff.m < 0 then return dec_cmp(lhs, rhs) < 0 end
+    return true
   end
-  return not (move >= thr)
+  -- a pump (move >= +thr) vetoes the DOWN buy
+  if diff.m > 0 then return dec_cmp(lhs, rhs) < 0 end
+  return true
 end
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────

@@ -1,5 +1,11 @@
 # mad_dog — the panic-wick catcher
 
+> **FROZEN pending issue #847 positioning verdict** — the spot waterfall veto
+> is fixed (exact-rational), but the structural flaws stand: the
+> extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill /
+> 0.65%) and the post-breakdown edge is zero (0/1,928 settlements). Do not
+> enable without repositioning.
+
 A 15-minute-round strategy that buys panic, not direction: after one side has
 held the round (`mid >= 0.55`, by a 20s hold or a 60s rolling mean), a FAST
 wick below `0.35` (>= 15% drop inside 3s) arms a resting **maker** bid
