@@ -142,6 +142,50 @@ jobs:
       - name: Version guard — one source of truth
         run: node scripts/version-guard.mjs --manifest-only
 
+  default-feature-tests:
+    # #840 PR0 (codex review): the Test step above always enables
+    # blitzkrieg-core/test-support, so a default-feature breakage in an
+    # integration test is invisible to this CI — WorkBuddy proved exactly that
+    # with tests/contract_freeze_dry_fixture.rs at 83cb5aed. This job runs the
+    # exact command that failed there — the plain workspace test with NO
+    # features, what `cargo test` does on a fresh clone — so the default
+    # configuration is proven green on every PR, independently of the feature
+    # matrix. Test targets that drive the gated test-support seam declare it
+    # with `#![cfg(feature = "test-support")]` and are compiled out here.
+    name: default-feature-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Test (default features — the fresh-clone command)
+        run: cargo test --workspace --locked
+      # WorkBuddy retest (6558660155) IMPORTANT: the step above proves the
+      # default build COMPILES; this step proves the eight test-support
+      # targets were compiled out BY DECLARATION, not lost — each target
+      # must still exist and run exactly zero tests here. A deleted file
+      # fails with "no test target named"; a lost `#![cfg(...)]` line fails
+      # with the E0599 the blocker report captured; a target that starts
+      # running tests under default features means the declaration is wrong.
+      # Tooth-verified locally: commenting the cfg line of
+      # contract_freeze_dry_fixture.rs turns this step red (E0599, exit 101).
+      - name: Gated targets compiled out by declaration (8 targets, 0 tests each)
+        run: |
+          for t in contract_freeze_dry_fixture cross_venue_replay_check \
+                   pair_book_check account_decouple_check \
+                   arb_batch_precheck_check accounting_truth \
+                   cross_arb_reverse_check dhat_profile; do
+            out=$(cargo test -p blitzkrieg-core --locked --test "$t" 2>&1) \
+              || { echo "target $t failed to build under default features:"; \
+                   echo "$out"; exit 1; }
+            echo "$out" | grep -q "running 0 tests" \
+              || { echo "target $t is NOT compiled out of the default build:"; \
+                   echo "$out"; exit 1; }
+            echo "declared + compiled out: $t (0 tests)"
+          done
+
   panel-check:
     name: panel-check
     runs-on: ubuntu-latest
@@ -531,6 +575,20 @@ jobs:
         run: |
           node scripts/file-size-check.mjs --self-test
           node scripts/file-size-check.mjs
+      # #840 PR0: the workspace dependency-graph freeze. PR1..PR3 migrate
+      # types/readers/ABI between crates; the proof a migration moved TYPES
+      # and not DEPENDENCIES is this gate. It pins every workspace-internal
+      # edge and every member's DIRECT external dep names (versions stripped
+      # — a Cargo.lock bump must stay green). The three contract crates'
+      # "zero tokio/reqwest" rule and the four-extension zero-reverse-dep rule
+      # are both enforced here as ordinary graph lines. --self-test proves the
+      # teeth on in-memory fixtures first (§A.4), then the real verdict diffs
+      # `cargo tree --workspace --edges normal,build,dev --target all`
+      # (platform-independent) against scripts/contract-tree-baseline.txt.
+      - name: Contract dependency-graph freeze (#840)
+        run: |
+          node scripts/contract-tree-check.mjs --self-test
+          node scripts/contract-tree-check.mjs
       # #825: test-support must never ride back into the default build. The
       # blunt test mutators (positions_mut / accounts_mut / config_mut /
       # risk_config_mut / ledger_mut) and the `strategies::test_support`

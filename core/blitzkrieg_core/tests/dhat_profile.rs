@@ -1,3 +1,10 @@
+// #840 PR0: imports the test-support-gated `strategies::test_support` adapter
+// (`#[cfg(any(test, feature = "test-support"))]` — #825: never in the default
+// set). An integration test compiles the library WITHOUT `cfg(test)`, so this
+// target builds only with the feature enabled (the CI test matrix declares
+// that dependency here, explicitly). Compiled out of the default-feature
+// build; the dedicated default-feature CI job (#840) proves that build green.
+#![cfg(feature = "test-support")]
 //! E14 allocation accounting (dhat) — the hot-path load the production
 //! traffic walks every tick, measured in allocation bytes/blocks rather than
 //! process RSS.
