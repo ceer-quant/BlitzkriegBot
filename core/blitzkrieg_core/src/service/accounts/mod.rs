@@ -560,7 +560,8 @@ impl Core {
 
     /// Existence check only (#780 boundary hygiene): the IPC `account.freeze`
     /// path must refuse an UNKNOWN account before the verdict write, and the
-    /// blunt mutator ([`Self::accounts_mut`]) is test-support-only now —
+    /// blunt mutator ([`Self::accounts_mut`]) is test-only now (#825: cfg
+    /// test or the opt-in `test-support` feature, never default) —
     /// production validates through this narrow read of the same
     /// `AccountLedgers::require` gate.
     pub fn require_account(&self, id: &crate::account::AccountId) -> CoreResult<()> {

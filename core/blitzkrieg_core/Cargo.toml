@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # default ships all built-in market extensions (Polymarket, Kalshi,
 # predict.fun, PolySimulator) so a plain build can reach every venue;
 # `--market-plugin` still picks exactly one operative venue at runtime.
-default = ["polymarket", "kalshi", "predictfun", "polysimulator", "strategy-loading", "account-precision", "test-support"]
+default = ["polymarket", "kalshi", "predictfun", "polysimulator", "strategy-loading", "account-precision"]
 # Link the official Polymarket market extension as the operative market.
 polymarket = ["dep:polymarket-extension"]
 # 0.3.3 stage 2 (#424): Kalshi + predict.fun market extensions, opt-in features
@@ -42,7 +42,11 @@ strategy-loading = ["dep:libloading"]
 # account-precision`, one of the plan's gates). On by default so a plain
 # `cargo test` exercises it too — the gate cannot silently stop running.
 account-precision = []
-# Exposes test_support adapters to integration tests.
+# Exposes test_support adapters and the blunt test mutators (positions_mut/
+# accounts_mut/config_mut/risk_config_mut/ledger_mut) to integration tests.
+# NOT in default (#825): the shipped library never carries the test seams —
+# a plain build cannot reach them — and test targets opt in explicitly
+# (CI test/clippy runs pass `--features blitzkrieg-core/test-support`).
 test-support = []
 
 [dependencies]

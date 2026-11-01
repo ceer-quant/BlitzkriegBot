@@ -230,12 +230,15 @@ docs/ · dev-docs/      公开文档 · 内部文档（不入库）
 ### 本地验收门禁（提交前必须全绿）
 
 ```bash
-cargo build --release --workspace --locked && cargo test --workspace --locked
+cargo build --release --workspace --locked && cargo test --workspace --locked --features blitzkrieg-core/test-support
 node scripts/cycle-check.mjs          # 订单链端到端：挂单 → 成交 → 持仓 → 重估
 node scripts/core-parity.mjs          # 核心 dry/live 双核对拍
 bash scripts/secret-scan.sh           # 零依赖密钥扫描
 cd ui/webapp/webui && npm run check:all   # 面板前端检查
 ```
+
+（`--features blitzkrieg-core/test-support`：集成测试要驱动内核的测试钝
+mutator，#825 起该 feature 不再在 default 里——release 构建照旧走 default 面。）
 
 ### 分支与版本
 

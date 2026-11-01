@@ -26,33 +26,33 @@ impl Core {
         &self.positions
     }
 
-    /// Mutable access to the position manager — TEST SEAM ONLY (feature
-    /// `test-support`; #780 boundary hygiene, the same gate
+    /// Mutable access to the position manager — TEST SEAM ONLY (test cfg or
+    /// feature `test-support`; #780/#825 boundary hygiene, the same gate
     /// [`Self::ledger_mut`] carries). The #364 IPC tests seed closed rows to
     /// replay. Not for moving money: every cash path routes through the
     /// ledgers, not this book — and no production caller may reach the book
     /// bluntly.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn positions_mut(&mut self) -> &mut PositionManager {
         &mut self.positions
     }
 
-    /// Mutable handle on the account book — TEST SEAM ONLY (feature
-    /// `test-support`; #780 boundary hygiene, the same gate
+    /// Mutable handle on the account book — TEST SEAM ONLY (test cfg or
+    /// feature `test-support`; #780/#825 boundary hygiene, the same gate
     /// [`Self::ledger_mut`] carries). The #364 IPC tests prime a ledger
     /// before replaying history. The LIVE money paths never come through
     /// here: they route by the order's own `account_id` at each site (§9.3).
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn accounts_mut(&mut self) -> &mut crate::account::AccountLedgers {
         &mut self.accounts
     }
 
-    /// Mutable access to config — TEST SEAM ONLY (feature `test-support`;
-    /// #780 boundary hygiene). Production writers go through narrow mutators
-    /// (e.g. [`Self::set_tick_schedule_ms`]) or the runtime-config paths, so
-    /// a naked config write can no longer bypass their validation from
-    /// outside `service`.
-    #[cfg(feature = "test-support")]
+    /// Mutable access to config — TEST SEAM ONLY (test cfg or feature
+    /// `test-support`; #780/#825 boundary hygiene). Production writers go
+    /// through narrow mutators (e.g. [`Self::set_tick_schedule_ms`]) or the
+    /// runtime-config paths, so a naked config write can no longer bypass
+    /// their validation from outside `service`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn config_mut(&mut self) -> &mut CoreConfig {
         &mut self.config
     }
