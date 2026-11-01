@@ -356,7 +356,7 @@ fn audit_skips_the_venue_leg_for_a_simulated_venue() {
     );
     // 注入声明快照（生产装配同一入口）：polysimulator 的模式声明带
     // SIMULATED 位。
-    let paper = crate::market::compat::PluginModes {
+    let paper = crate::compat::PluginModes {
         name: "polysimulator".into(),
         modes: vec![blitzkrieg_market_api::MarketMode {
             market_type: blitzkrieg_market_api::MarketType::Prediction,
@@ -410,7 +410,7 @@ fn audit_skips_the_venue_leg_for_a_simulated_venue() {
 
     // 防御半边：同书同数，只把声明换成非 SIMULATED（真盘）——该腿回到
     // 检查列表并照旧报 cross-source drift（首轮不熔断，既有语义不变）。
-    let real = crate::market::compat::PluginModes {
+    let real = crate::compat::PluginModes {
         name: "polysimulator".into(),
         modes: vec![blitzkrieg_market_api::MarketMode {
             market_type: blitzkrieg_market_api::MarketType::Prediction,

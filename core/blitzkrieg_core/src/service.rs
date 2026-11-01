@@ -29,6 +29,9 @@ mod views;
 pub use config::*;
 pub(crate) use helpers::*;
 pub use views::*;
+// #824 cycle 2: the venue-credential predicates moved into engine_cycle (their
+// only consumer); surfaced here so the integration tree keeps a public handle.
+pub use engine_cycle::{venue_credentials_missing, venue_credentials_ready};
 
 pub struct Core {
     config: CoreConfig,
@@ -92,7 +95,7 @@ pub struct Core {
     /// strategy cannot serve must not block the venues it can. Empty
     /// (backtester, tests) leaves the handshake inert: nothing to be
     /// incompatible with.
-    plugin_modes: Vec<crate::market::compat::PluginModes>,
+    plugin_modes: Vec<crate::compat::PluginModes>,
     /// Per-plugin subscription controls (P4 → multi-plugin data plane). The
     /// key is the market-plugin name; with one active plugin this map holds a
     /// single entry and behaves exactly as the old `feed: Option<...>` slot.
