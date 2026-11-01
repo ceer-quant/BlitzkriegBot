@@ -13,10 +13,11 @@
 //!   6. time since last apply >= `cooldown_secs` (>=10 min)
 
 use super::config::ShadowEvolutionConfig;
-use super::knobs::{MutableParams, StrategyParams};
+use super::knobs::MutableParams;
 use super::signal::{EvolutionReason, EvolveSignal};
 use super::variants::{Metrics, VariantSet};
 use rust_decimal::Decimal;
+use strategy_logic::params::StrategyParams;
 
 /// Outcome of one evaluation pass for ONE strategy.
 pub struct Selection {
@@ -134,13 +135,13 @@ fn params_for(strategy: &str, params: StrategyParams) -> MutableParams {
 mod tests {
     use super::*;
     use crate::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
-    use crate::shadow_evolution::knobs::KnobSpec;
     use crate::shadow_evolution::variants::build_variants;
     use crate::signal::TradeSignal;
     use crate::strategies::shadow_twin::{ShadowFactory, tick_ctx};
     use crate::strategies::{EngineStrategy, StrategyCtx};
     use crate::test_fixtures::{evo_book, evo_market};
     use rust_decimal_macros::dec;
+    use strategy_logic::params::KnobSpec;
 
     /// A synthetic strategy whose ONE knob decides whether it enters: it buys
     /// whenever the mid is at or under `cap`. Nothing else — no trend, no exit

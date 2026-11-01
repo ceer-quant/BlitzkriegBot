@@ -155,7 +155,7 @@ impl Core {
     /// pushed via `on_config` (the observable form of "evolution off").
     pub fn set_engine_hot_params(
         &mut self,
-        registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+        registry: Option<std::sync::Arc<crate::registry::ParamRegistry>>,
     ) {
         if let Some(engine) = self.engine.as_mut() {
             engine.set_hot_params(registry);
@@ -359,14 +359,14 @@ mod replay_seam_tests {
     fn hot_params_seam_without_an_engine_never_materializes_an_overlay() {
         let mut c = Core::new(CoreConfig::default());
         c.set_engine_hot_params(Some(std::sync::Arc::new(
-            crate::shadow_evolution::ParamRegistry::new(),
+            crate::registry::ParamRegistry::new(),
         )));
         assert!(!c.has_hot_params(), "no engine — no ghost overlay");
         c.enable_engine(crate::engine::Engine::new(
             crate::engine::EngineConfig::default(),
         ));
         c.set_engine_hot_params(Some(std::sync::Arc::new(
-            crate::shadow_evolution::ParamRegistry::new(),
+            crate::registry::ParamRegistry::new(),
         )));
         assert!(c.has_hot_params(), "the seam drives the same cell");
         c.set_engine_hot_params(None);

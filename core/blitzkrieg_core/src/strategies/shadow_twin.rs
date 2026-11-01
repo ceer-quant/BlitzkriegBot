@@ -19,10 +19,10 @@ use crate::exit_policy::{
     ExitConfig, ExitState, ExitTickInput, decide_exit, taker_fee_pct, update_exit_state,
 };
 use crate::model::{CryptoMarket, OrderbookSnapshot};
-use crate::shadow_evolution::{KnobSpec, StrategyParams};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet, VecDeque};
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 /// One strategy's shadow contract: what it declares evolvable, and how to build
 /// an independent twin with a parameter set applied.

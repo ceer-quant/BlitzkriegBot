@@ -705,7 +705,7 @@ pub struct LoadedForeign {
     /// The knobs this library declared evolvable (E2-c / #28). Empty = **not
     /// evolvable** (no symbol, or nothing declared), which is an explicit
     /// declaration and is reported as such at registration.
-    pub evolvable_knobs: Vec<crate::shadow_evolution::KnobSpec>,
+    pub evolvable_knobs: Vec<strategy_logic::params::KnobSpec>,
     /// Hold-to-settlement declaration: the strategy's positions are meant to be
     /// redeemed at expiry, not sold on the exit ladder. Default (no symbol) =
     /// false; reported at registration so the operator sees it.

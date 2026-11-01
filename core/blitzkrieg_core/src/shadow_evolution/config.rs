@@ -7,8 +7,8 @@
 //!     are not part of the swapped object at all (structural, not a check).
 //!
 //! A strategy's own evolvable surface — which knobs, and within which domain —
-//! is declared by the strategy itself ([`super::knobs::KnobSpec`], produced by
-//! `EngineStrategy::evolvable_knobs` in-tree and by the optional
+//! is declared by the strategy itself ([`strategy_logic::params::KnobSpec`],
+//! produced by `EngineStrategy::evolvable_knobs` in-tree and by the optional
 //! `bk_strategy_evolvable_knobs` symbol across the C ABI). The kernel never
 //! invents a knob for a strategy.
 
@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-pub use super::knobs::{KnobDeclaration, KnobSpec, MutableParams, StrategyParams};
+pub use super::knobs::MutableParams;
 
 /// Parameters that are PHYSICAL LAW and must never evolve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -22,8 +22,8 @@
 //!     variant generation cannot smuggle a weaker risk posture.
 
 use super::config::ImmutableConfig;
-use super::knobs::{KnobSpec, StrategyParams};
 use rust_decimal::Decimal;
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GuardError {

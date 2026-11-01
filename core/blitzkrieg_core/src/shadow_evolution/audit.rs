@@ -224,9 +224,9 @@ impl AuditLog {
 #[cfg(test)]
 mod tests {
     use super::super::config::ShadowEvolutionConfig;
-    use super::super::knobs::StrategyParams;
     use super::*;
     use rust_decimal_macros::dec;
+    use strategy_logic::params::StrategyParams;
 
     fn params(v: rust_decimal::Decimal) -> MutableParams {
         let mut p = StrategyParams::new();

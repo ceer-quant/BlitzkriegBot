@@ -11,14 +11,13 @@
 //! and swept by an offset, so successive re-anchors visit every knob on both
 //! sides instead of re-testing the same one forever.
 
-use super::config::KnobSpec;
-use super::knobs::StrategyParams;
 use crate::exit_policy::ExitConfig;
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::strategies::EngineStrategy;
 use crate::strategies::shadow_twin::{ShadowFactory, ShadowTickCtx, TwinReplay};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 /// Performance metrics over an evaluation window.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -396,7 +395,6 @@ pub fn build_deep_variants(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shadow_evolution::knobs::KnobSpec;
     use crate::signal::{SpreadArbConfig, TrendConfig};
     use crate::strategies::shadow_twin::tick_ctx;
     use crate::strategies::test_support::TestSpreadArbFactory;

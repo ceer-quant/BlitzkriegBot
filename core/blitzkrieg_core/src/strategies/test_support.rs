@@ -18,12 +18,13 @@
 use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx};
 use crate::model::OrderbookSnapshot;
-use crate::shadow_evolution::{KnobSpec, ParamRegistry, StrategyParams};
+use crate::registry::ParamRegistry;
 use crate::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use arc_swap::ArcSwap;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::sync::Arc;
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 // ── spread_arb (the trend-confirmed dip buyer) ──────────────────────────────
 

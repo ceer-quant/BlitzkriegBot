@@ -153,7 +153,7 @@ pub(crate) async fn handle_se(
                         .get("params")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
-                    match serde_json::from_value::<crate::shadow_evolution::StrategyParams>(bag) {
+                    match serde_json::from_value::<strategy_logic::params::StrategyParams>(bag) {
                         Err(e) => Err((Failure::INVALID_PARAMS, format!("params: {e}"), None)),
                         Ok(typed) => {
                             let mut bag = crate::shadow_evolution::MutableParams::new();

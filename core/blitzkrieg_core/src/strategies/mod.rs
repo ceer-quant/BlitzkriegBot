@@ -474,7 +474,7 @@ pub trait EngineStrategy: Send + Sync {
     /// feature existed (acceptance: "evolution off ⇒ unchanged"). Default: ignore.
     fn set_hot_params(
         &mut self,
-        _registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+        _registry: Option<std::sync::Arc<crate::registry::ParamRegistry>>,
     ) {
     }
 
@@ -484,7 +484,7 @@ pub trait EngineStrategy: Send + Sync {
     ///
     /// A strategy that returns knobs also needs [`EngineStrategy::shadow_factory`],
     /// otherwise the declaration is inert (nothing can be replayed).
-    fn evolvable_knobs(&self) -> Vec<crate::shadow_evolution::KnobSpec> {
+    fn evolvable_knobs(&self) -> Vec<strategy_logic::params::KnobSpec> {
         Vec::new()
     }
 
