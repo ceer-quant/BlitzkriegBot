@@ -529,7 +529,7 @@ impl Core {
     ) -> Result<crate::schema::StrategyParamsSetUpdate, crate::model::CoreError> {
         use crate::model::{CoreError, CoreErrorCode};
         use crate::schema::StrategyParamChange;
-        use crate::shadow_evolution::knobs::StrategyParams as KnobBag;
+        use strategy_logic::params::StrategyParams as KnobBag;
 
         let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
         // The declaration lives on the live instance (E2-c); a strategy that

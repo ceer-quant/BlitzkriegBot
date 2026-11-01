@@ -18,12 +18,12 @@
 //! auto-evolve switch, and are always re-guarded at decision time: a proposal is
 //! an observation, never a bypass.
 
-use super::knobs::StrategyParams;
 use super::signal::EvolutionReason;
 use super::variants::Metrics;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use strategy_logic::params::StrategyParams;
 
 /// Who decided a proposal's fate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

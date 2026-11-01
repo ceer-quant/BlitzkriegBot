@@ -72,19 +72,18 @@ pub mod evaluator;
 pub mod guard;
 pub mod knobs;
 pub mod proposal;
-pub mod registry;
 pub mod signal;
 pub mod variants;
 
 pub use config::{
-    EvolutionStatus, ImmutableConfig, KnobDeclaration, KnobSpec, MutableParams,
-    ShadowEvolutionConfig, StrategyParams, VariantView, exit_caliber,
+    EvolutionStatus, ImmutableConfig, MutableParams, ShadowEvolutionConfig, VariantView,
+    exit_caliber,
 };
 pub use proposal::{DecidedBy, EvolutionProposal, ProposalState, TradeMetrics};
-pub use registry::ParamRegistry;
 pub use signal::{EvolutionReason, EvolveSignal};
 
 use crate::model::{CryptoMarket, OrderbookSnapshot};
+use crate::registry::ParamRegistry;
 use crate::strategies::EngineStrategy;
 use crate::strategies::shadow_twin::ShadowTickCtx;
 use audit::AuditLog;
@@ -92,6 +91,7 @@ use blitzkrieg_market_api::net::now_ms;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use strategy_logic::params::{KnobSpec, StrategyParams};
 use variants::{VariantSet, build_deep_variants, build_variants};
 
 /// Result of one evaluation/action, mapped to events by the caller.

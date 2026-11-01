@@ -85,6 +85,7 @@ pub mod position_db;
 pub mod probe;
 pub mod reconcile;
 pub mod regime_eval;
+pub mod registry;
 pub mod risk;
 pub mod risk_context;
 /// #824 cycle-1: the runtime-config persistence helpers (market plugin /

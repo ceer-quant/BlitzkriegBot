@@ -7,9 +7,10 @@ use super::*;
 use crate::engine::{DataEvent, Engine, EngineConfig};
 use crate::model::CryptoMarket;
 use crate::risk::RiskConfig;
-use crate::shadow_evolution::{MutableParams, StrategyParams};
+use crate::shadow_evolution::MutableParams;
 use crate::test_fixtures::round_market;
 use rust_decimal_macros::dec;
+use strategy_logic::params::StrategyParams;
 
 /// Mirrors the production engine knobs closely enough to trade the feed below
 /// (same shape as the engine.rs unit tests).

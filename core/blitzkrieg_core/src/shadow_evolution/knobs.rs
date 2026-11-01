@@ -27,10 +27,9 @@
 //! "no in-tree caller" is not evidence of death for them (see that crate's
 //! `lib.rs` content rules).
 
-pub use strategy_logic::params::{KnobDeclaration, KnobSpec, StrategyParams};
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use strategy_logic::params::StrategyParams;
 
 /// The aggregate swappable object: **per-strategy named parameter sets**.
 ///

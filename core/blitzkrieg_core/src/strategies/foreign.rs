@@ -14,7 +14,7 @@
 //!
 //! E2-c (#28): the adapter is now per-strategy in the evolution chain too.
 //!  - hot parameters are pushed from THIS strategy's own cell in the kernel's
-//!    [`ParamRegistry`](crate::shadow_evolution::ParamRegistry) — a name→value bag
+//!    [`ParamRegistry`](crate::registry::ParamRegistry) — a name→value bag
 //!    of the knobs the library itself declared, not spread_arb's four fields;
 //!  - `evolvable_knobs` reads the OPTIONAL `bk_strategy_evolvable_knobs` symbol,
 //!    so a library self-certifies which knobs may evolve and over what domain;
@@ -31,7 +31,7 @@
 use super::shadow_twin::ShadowFactory;
 use super::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use crate::model::OrderbookSnapshot;
-use crate::shadow_evolution::{KnobDeclaration, KnobSpec, ParamRegistry, StrategyParams};
+use crate::registry::ParamRegistry;
 use crate::signal::TradeSignal;
 use arc_swap::ArcSwap;
 use blitzkrieg_strategy_api::{
@@ -43,6 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::str::FromStr;
 use std::sync::Arc;
+use strategy_logic::params::{KnobDeclaration, KnobSpec, StrategyParams};
 
 /// A dlopen'ed strategy library plus the symbols the kernel resolves once, at
 /// load time. Shared (`Arc`) by every instance the library produces, including

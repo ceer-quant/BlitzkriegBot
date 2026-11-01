@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::risk::RiskConfig;
-use crate::shadow_evolution::EvolutionStatus;
-use crate::shadow_evolution::{MutableParams, StrategyParams};
+use crate::shadow_evolution::{EvolutionStatus, MutableParams};
 use rust_decimal_macros::dec;
+use strategy_logic::params::StrategyParams;
 
 /// A private evolution audit dir for one test, returned as the tuning block
 /// that points the manager at it.

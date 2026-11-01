@@ -668,7 +668,8 @@ impl EventBacktester {
         // (the registry forwards to what is already wired), through the same
         // cell a Shadow Evolution proposal writes.
         if !cfg.hot_params.is_empty() {
-            use crate::shadow_evolution::{ParamRegistry, StrategyParams};
+            use crate::registry::ParamRegistry;
+            use strategy_logic::params::StrategyParams;
             let mut by_strategy: std::collections::BTreeMap<&str, StrategyParams> =
                 std::collections::BTreeMap::new();
             for (strategy, knob, value) in &cfg.hot_params {

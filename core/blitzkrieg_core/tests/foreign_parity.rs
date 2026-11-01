@@ -18,8 +18,8 @@
 
 use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::model::{CryptoMarket, OrderRequest, OrderbookSnapshot, SignalDirection};
+use blitzkrieg_core::registry::ParamRegistry;
 use blitzkrieg_core::scanner::ScannerConfig;
-use blitzkrieg_core::shadow_evolution::{ParamRegistry, StrategyParams};
 use blitzkrieg_core::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx, StrategyExitIntent};
 use blitzkrieg_core::strategy_engine::loader::load_foreign;
@@ -30,6 +30,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use strategy_logic::params::StrategyParams;
 
 fn dylib_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

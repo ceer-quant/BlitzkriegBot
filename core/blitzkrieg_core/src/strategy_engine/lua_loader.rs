@@ -43,10 +43,10 @@ use blitzkrieg_strategy_api::{
 };
 
 use crate::model::{OrderbookSnapshot, SignalDirection};
-use crate::shadow_evolution::knobs::{KnobSpec, StrategyParams};
 use crate::signal::{TradePairDecl, TradeSignal};
 use crate::strategies::shadow_twin::ShadowFactory;
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 /// The one supported manifest API version (§6.4).
 const MANIFEST_API: &str = "1.0";
@@ -971,7 +971,7 @@ impl EngineStrategy for LuaEngineAdapter {
         self.inner.diagnostics()
     }
 
-    fn set_hot_params(&mut self, registry: Option<Arc<crate::shadow_evolution::ParamRegistry>>) {
+    fn set_hot_params(&mut self, registry: Option<Arc<crate::registry::ParamRegistry>>) {
         // Resolve only OUR cell (the foreign.rs pattern): no declared knobs →
         // no cell → the manifest defaults keep answering `bk.params()`.
         self.params_cell = registry.as_ref().and_then(|r| r.handle_for(self.name()));

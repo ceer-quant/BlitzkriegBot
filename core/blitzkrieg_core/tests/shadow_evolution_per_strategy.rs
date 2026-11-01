@@ -17,17 +17,17 @@
 use blitzkrieg_core::engine::{DataEvent, Engine, EngineConfig};
 use blitzkrieg_core::exit_policy::ExitConfig;
 use blitzkrieg_core::model::{CryptoMarket, OrderbookSnapshot, SignalDirection};
+use blitzkrieg_core::registry::ParamRegistry;
 use blitzkrieg_core::scanner::ScannerConfig;
 use blitzkrieg_core::service::{Core, CoreConfig, ShadowEvolutionTuning};
-use blitzkrieg_core::shadow_evolution::{
-    EvolutionOutcome, KnobSpec, MutableParams, ParamRegistry, StrategyParams,
-};
+use blitzkrieg_core::shadow_evolution::{EvolutionOutcome, MutableParams};
 use blitzkrieg_core::signal::{SpreadArbConfig, TradeSignal, TrendConfig};
 use blitzkrieg_core::strategies::shadow_twin::ShadowFactory;
 use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
+use strategy_logic::params::{KnobSpec, StrategyParams};
 
 const T0: i64 = 1_700_000_000_000;
 const ROUND_MS: i64 = 900_000;

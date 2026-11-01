@@ -10,10 +10,10 @@
 //! Isolation is structural: two strategies cannot observe or overwrite each
 //! other's parameters because they do not share a cell.
 
-use super::knobs::StrategyParams;
 use arc_swap::ArcSwap;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
+use strategy_logic::params::StrategyParams;
 
 pub struct ParamRegistry {
     /// Created/looked up behind an `RwLock` (wire-time only). Reads on the hot
@@ -85,8 +85,8 @@ impl ParamRegistry {
     }
 
     /// Snapshot of every strategy's parameters (observability/tests).
-    pub fn snapshot(&self) -> super::knobs::MutableParams {
-        let mut out = super::knobs::MutableParams::new();
+    pub fn snapshot(&self) -> crate::shadow_evolution::knobs::MutableParams {
+        let mut out = crate::shadow_evolution::knobs::MutableParams::new();
         for name in self.names() {
             if let Some(cell) = self.handle_for(&name) {
                 out.set_strategy(&name, (**cell.load()).clone());
@@ -98,10 +98,10 @@ impl ParamRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::super::knobs::KnobSpec;
     use super::*;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use strategy_logic::params::KnobSpec;
 
     fn knobs(v: Decimal) -> StrategyParams {
         StrategyParams::from_knobs(&[KnobSpec::new("k", v, dec!(0), dec!(10))])

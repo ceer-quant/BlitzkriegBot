@@ -836,7 +836,7 @@ impl Engine {
     /// to the pre-feature behaviour rather than merely inert by convention.
     pub fn set_hot_params(
         &mut self,
-        registry: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+        registry: Option<std::sync::Arc<crate::registry::ParamRegistry>>,
     ) {
         self.hot_params = registry.clone();
         for s in &mut self.strategies {

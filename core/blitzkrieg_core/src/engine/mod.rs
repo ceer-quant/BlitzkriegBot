@@ -386,7 +386,7 @@ pub struct Engine {
     /// and reads that cell lock-free on the hot path, so an evolution takes effect
     /// on the next tick with no restart — and one strategy's parameters can never
     /// be read by another.
-    hot_params: Option<std::sync::Arc<crate::shadow_evolution::ParamRegistry>>,
+    hot_params: Option<std::sync::Arc<crate::registry::ParamRegistry>>,
     /// Registered strategies (PR-B: starts EMPTY — the kernel ships none). Every
     /// strategy arrives through `register_user_strategy`, whether it was built
     /// in-tree in a test or dlopened from a cdylib.
