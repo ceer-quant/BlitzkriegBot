@@ -103,8 +103,9 @@ impl Core {
             // both end here — the global readout AND the account's own
             // streak (its venue proved itself; a sibling venue's streak is
             // none of its business).
-            self.consecutive_venue_rejects = 0;
-            self.consecutive_venue_rejects_by_account
+            self.freeze_book.consecutive_venue_rejects = 0;
+            self.freeze_book
+                .consecutive_venue_rejects_by_account
                 .remove(o.account_id.as_str());
             // 冻结自愈：the venue just accepted an order from this account —
             // the strongest proof of life there is. An AUTO freeze rides
@@ -348,12 +349,14 @@ impl Core {
                 );
             }
         } else {
-            self.consecutive_venue_rejects = self.consecutive_venue_rejects.saturating_add(1);
+            self.freeze_book.consecutive_venue_rejects =
+                self.freeze_book.consecutive_venue_rejects.saturating_add(1);
         }
         let account_streak = if benign_close {
             0
         } else {
             let streak = self
+                .freeze_book
                 .consecutive_venue_rejects_by_account
                 .entry(account_id.to_string())
                 .or_default();

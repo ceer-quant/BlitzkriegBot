@@ -1080,8 +1080,8 @@ impl Core {
         }
         // 冻结簿随账户走：旧实现留着悬空冻结项（同名 id 重建即继承上一世
         // 的 kill switch），自愈时间戳同理一并摘除。
-        self.account_freezes.remove(id.as_str());
-        self.auto_frozen.remove(id.as_str());
+        self.freeze_book.account_freezes.remove(id.as_str());
+        self.freeze_book.auto_frozen.remove(id.as_str());
         self.accounts.repair_active_after_removal(id);
         // 显示账户配置化: the removal must not orphan the display pointer —
         // the file was rewritten WITHOUT the row above, and the same render

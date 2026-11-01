@@ -92,6 +92,7 @@ impl Core {
         // this book's balance).
         let active_venue = self.accounts.active_venue().to_string();
         let venue_free = self
+            .freeze_book
             .venue_free_by_venue
             .get(&active_venue)
             .map(|(t, b)| (*t, *b));

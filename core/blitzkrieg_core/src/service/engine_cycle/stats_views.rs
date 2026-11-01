@@ -482,7 +482,7 @@ impl Core {
             // reachable from a market plugin, so this is the only way an outside
             // observer (panel, gate) can see the kernel's own threshold.
             "reconcile": {
-                "consecutiveSweepFailures": self.consecutive_sweep_failures,
+                "consecutiveSweepFailures": self.freeze_book.consecutive_sweep_failures,
                 "freezeThreshold": SWEEP_FAILURE_FREEZE,
             },
             "selfCheck": match &self.last_self_check {
@@ -508,7 +508,7 @@ impl Core {
             // nothing is frozen — a client distinguishes "global freeze"
             // (tradingFrozen.active) from "these accounts only" without
             // parsing reasons.
-            "accountFreezes": self.account_freezes,
+            "accountFreezes": self.freeze_book.account_freezes,
             // In-kernel accounting audit (issue #189): the latest verdict, so the
             // panel shows what the kernel itself concluded about the books.
             "accountingAudit": self.accounting_audit_view(),

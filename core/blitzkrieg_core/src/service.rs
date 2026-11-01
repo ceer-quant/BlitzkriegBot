@@ -32,6 +32,9 @@ pub use views::*;
 // #824 cycle 2: the venue-credential predicates moved into engine_cycle (their
 // only consumer); surfaced here so the integration tree keeps a public handle.
 pub use engine_cycle::{venue_credentials_missing, venue_credentials_ready};
+// #834 cycle 1: the freeze/circuit-breaker state book moved next to its only
+// manager; surfaced for the struct field and the integration tree's handle.
+pub(crate) use risk_admission::FreezeBook;
 
 pub struct Core {
     config: CoreConfig,
@@ -190,37 +193,12 @@ pub struct Core {
     /// sibling executor swallowing another venue's id would strand the cancel
     /// forever.
     pending_venue_cancels: Vec<(String, String)>,
-    /// Consecutive LIVE venue rejections (a successful placement resets).
-    /// Reaching the threshold trips the freeze (kill switch).
-    consecutive_venue_rejects: u32,
-    /// Consecutive LIVE venue rejections PER ACCOUNT. The freeze decision
-    /// reads this map — one venue's outage freezes only the accounts bound
-    /// to it, not the whole process. Reset alongside the global counter.
-    consecutive_venue_rejects_by_account: HashMap<String, u32>,
-    /// The account-scoped kill book: account id → freeze reason. A frozen
-    /// account refuses NEW orders at the submission gate and drops entry
-    /// candidates in the engine (mirrored via `set_account_frozen`), while
-    /// its exits keep flowing — the same 「拒开仓、放平仓」 contract the
-    /// trading switch has, raised automatically instead of by hand. The
-    /// GLOBAL kill switch (`risk.kill`, `is_killed`) is unchanged and
-    /// still outranks everything.
-    account_freezes: HashMap<String, String>,
-    /// 冻结自愈（2026-10-28 真线事故）：AUTO-frozen accounts and WHEN —
-    /// account id → freeze timestamp (ms). Only the three automatic freeze
-    /// routes (rejection streak, failed self-check, failed sweep streak)
-    /// register here, so `auto_lift_if_venue_healthy` can tell "the kernel
-    /// froze this on circumstantial evidence" from an operator's deliberate
-    /// `account.freeze` — the latter must never self-lift. Same `&mut self`
-    /// discipline as `account_freezes`: no lock, atomic by construction.
-    auto_frozen: HashMap<String, i64>,
-    /// Consecutive failed reconciliation sweeps (a successful sweep resets).
-    /// Reaching the threshold freezes trading — a blind safety net is the
-    /// failure mode that lets ghosts and orphans accumulate (E31-b).
-    consecutive_sweep_failures: u32,
-    /// Per-venue streak of the same (venue-scoped freeze, 2026-10-25): each
-    /// plugin's sweep reports under its own name, so one venue's failures no
-    /// longer ride the global counter nor freeze its siblings' accounts.
-    consecutive_sweep_failures_by_venue: HashMap<String, u32>,
+    /// 冻结/熔断状态簿（#834，Core 上帝结构第一环）：account-scoped kill
+    /// book（account id → reason）、#685 冻结自愈簿、venue 拒单连击（全局
+    /// +按账户）、venue 维 sweep 连败（全局+按场地）、venue 自由现金簿。
+    /// 原 7 个裸字段收拢为一，字段语义逐字保留，唯一管理者是
+    /// [`FreezeBook`]（risk_admission/freeze.rs）。
+    freeze_book: FreezeBook,
     /// Last error of any kind recorded this session (venue refusal, failed
     /// self-check or reconcile sweep, kill switch, kernel-side order refusal),
     /// surfaced to the panel as `engine.stats.lastError`. Session-scoped: a
@@ -250,11 +228,6 @@ pub struct Core {
     /// resolves its own markets and simulates the redemption; in live mode the
     /// venue plugin answers and redeems.
     settlement: SettlementBook,
-    /// Last free-cash figure each venue reported, as venue → `(at_ms, free)` —
-    /// the audit's venue leg reads ONLY the report of the venue the audited
-    /// (active) account is bound to; a sibling venue's cash is a different
-    /// book's truth.
-    venue_free_by_venue: std::collections::HashMap<String, (i64, Decimal)>,
     /// The event archive's recording state as THIS core last saw it (issue
     /// #669): `true` = recording (and the boot assumption — an archive that
     /// opened stopped — still arms the edge below, because `stop()` may also

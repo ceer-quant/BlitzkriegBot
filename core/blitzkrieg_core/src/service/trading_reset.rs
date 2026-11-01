@@ -938,12 +938,9 @@ impl Core {
         self.escalation_skips.clear();
         self.pending_venue_cancels.clear();
         self.books.clear();
-        self.consecutive_venue_rejects = 0;
-        self.consecutive_venue_rejects_by_account
-            .remove(account_id.as_str());
-        self.account_freezes.remove(account_id.as_str());
-        self.auto_frozen.remove(account_id.as_str());
-        self.consecutive_sweep_failures = 0;
+        // #834 cycle 1: the freeze/circuit-breaker five-liner collapsed into
+        // the state book that owns it.
+        self.freeze_book.reset_for_account(account_id.as_str());
         self.last_error = None;
         // #537: the strategy page's PnL counters are the OTHER survivor —
         // trade_db and the cash ledger reset, but these per-(strategy,account)
