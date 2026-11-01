@@ -1,3 +1,10 @@
+// #840 PR0: drives the test-support-gated seam (`Core::accounts_mut`,
+// `#[cfg(any(test, feature = "test-support"))]` — #825: never in the default
+// set). An integration test compiles the library WITHOUT `cfg(test)`, so this
+// target builds only with the feature enabled (the CI test matrix declares
+// that dependency here, explicitly). Compiled out of the default-feature
+// build; the dedicated default-feature CI job (#840) proves that build green.
+#![cfg(feature = "test-support")]
 //! PR0 (#840) — the deterministic dry fixture: the behavior golden for the
 //! contract-freeze waves.
 //!

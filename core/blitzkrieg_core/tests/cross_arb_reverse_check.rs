@@ -1,3 +1,10 @@
+// #840 PR0: drives the test-support-gated seam (`Core::positions_mut`,
+// `#[cfg(any(test, feature = "test-support"))]` — #825: never in the default
+// set). An integration test compiles the library WITHOUT `cfg(test)`, so this
+// target builds only with the feature enabled (the CI test matrix declares
+// that dependency here, explicitly). Compiled out of the default-feature
+// build; the dedicated default-feature CI job (#840) proves that build green.
+#![cfg(feature = "test-support")]
 //! cross_venue_arb 反向验收（spec：「反向五条——必须红/必须有牙」）。
 //!
 //! 每条测试都是一颗牙：内核或包在对应纪律上打洞时，这里必须先红。

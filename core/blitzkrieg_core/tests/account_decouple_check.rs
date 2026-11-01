@@ -1,3 +1,10 @@
+// #840 PR0: drives the test-support-gated seam (`Core::accounts_mut`,
+// `#[cfg(any(test, feature = "test-support"))]` — #825: never in the default
+// set). An integration test compiles the library WITHOUT `cfg(test)`, so this
+// target builds only with the feature enabled (the CI test matrix declares
+// that dependency here, explicitly). Compiled out of the default-feature
+// build; the dedicated default-feature CI job (#840) proves that build green.
+#![cfg(feature = "test-support")]
 //! 多账户解耦验收（spec：正向三条 + 反向三条，每条一颗牙，先红后绿）。
 //!
 //! 六颗牙的判定对象与运行状态（红基线于 029028f 记录，收口时必须全绿）：
