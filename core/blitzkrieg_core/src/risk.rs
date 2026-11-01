@@ -59,7 +59,7 @@ pub struct RiskConfig {
     /// E26 (§4.3): an explicit `[[risk.ladder]]` opts in and takes over the
     /// Gate 4 projection. Empty = the shipped projection stays in charge,
     /// which is every existing deployment's behavior.
-    pub explicit_ladder: Vec<crate::arbitration::LadderStep>,
+    pub explicit_ladder: Vec<crate::risk::physics::LadderStep>,
 }
 
 impl Default for RiskConfig {
