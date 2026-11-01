@@ -541,7 +541,13 @@ pub fn render_json_full(
                 "books": st.books, "tops": st.tops, "spots": st.spots,
                 "rounds": st.rounds, "evaluations": st.evaluations,
                 "signals": st.signals, "placeRejected": st.place_rejected,
-                "orderCounts": st.confirmed.len(),
+                // The token list itself (sorted upstream in `engine_stats_at`),
+                // not just the count: the TUI's Markets card shows a
+                // `trend confirmed:` preview the web panel had no access to —
+                // the wire only carried `orderCounts`. The panel renders the
+                // same 8-char-prefix form; raw 77-digit ids never leave the
+                // kernel untruncated on screen.
+                "confirmed": st.confirmed,
                 "venueRejected": st.venue_rejected,
                 "lastError": last_error,
                 "lastVenueError": last_venue_error,

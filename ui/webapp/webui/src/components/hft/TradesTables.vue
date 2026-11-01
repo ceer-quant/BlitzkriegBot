@@ -97,6 +97,13 @@ function exitReasonTone(reason?: string): 'up' | 'down' | 'default' | 'gold' {
 /** 历史页签的终态死单合成行（orderStatus 在场 = 来源「订单」）：状态徽标
  * 语气沿用挂单页签的 orderStatusTone，轮次照挂单页签的 #slot 形。 */
 const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefined
+
+/** 订单号截断，TUI 挂单表首列 Id 同款（ui/ui_kit_panel/src/ui/mod.rs
+ * short_id）：前 16 字符 + 省略号。完整 id 悬停可见 —— 强平审计（写
+ * force_close 单）要对得上号，不能只给截断值。 */
+function shortId(id: string): string {
+  return id.length > 16 ? `${id.slice(0, 16)}…` : id
+}
 </script>
 
 <template>
@@ -164,9 +171,10 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
        进入历史订单」），不再在这里堆尸体充「当前挂单」。 -->
   <div v-else-if="tab === 'orders'">
     <div v-if="openOrderRows.length" class="overflow-x-auto">
-      <table class="w-full min-w-[900px] text-[13px]">
+      <table class="w-full min-w-[1000px] text-[13px]">
         <thead>
           <tr class="text-left">
+            <th class="label-micro px-2 pb-2">订单号</th>
             <th class="label-micro px-2 pb-2">资产</th>
             <th class="label-micro px-2 pb-2">方向</th>
             <th class="label-micro px-2 pb-2">侧</th>
@@ -186,6 +194,9 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
             :key="o.orderId"
             class="border-t border-line transition-colors hover:bg-panel-2"
           >
+            <td class="px-2 py-2.5 text-[11.5px] num text-faint-fg" :title="o.orderId">
+              {{ shortId(o.orderId) }}
+            </td>
             <td class="px-2 py-2.5 font-semibold">{{ o.asset }}</td>
             <td class="px-2 py-2.5">
               <Badge :variant="o.direction === 'up' ? 'up' : 'down'">{{ o.direction.toUpperCase() }}</Badge>
