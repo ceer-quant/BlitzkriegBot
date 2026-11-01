@@ -1062,7 +1062,7 @@ async fn main() -> anyhow::Result<()> {
                 config.round_duration_source = "runtime";
             }
         } else if let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
-            blitzkrieg_core::ipc::runtime_config::load_round_duration_from(
+            blitzkrieg_core::runtime_config::load_round_duration_from(
                 std::path::Path::new(p),
                 &config.allowed_round_secs,
             )
@@ -1104,7 +1104,7 @@ async fn main() -> anyhow::Result<()> {
         config.runtime_config_path.as_deref(),
         config.env_file_path.as_deref(),
     ) {
-        match blitzkrieg_core::ipc::runtime_config::migrate_credentials_cell_to_env(
+        match blitzkrieg_core::runtime_config::migrate_credentials_cell_to_env(
             std::path::Path::new(config_path),
             std::path::Path::new(env_path),
         ) {

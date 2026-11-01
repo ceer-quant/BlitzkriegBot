@@ -16,8 +16,8 @@
 //! being judged by the new value — lives in `ipc::server`'s tests, next to the
 //! dispatch it polices.
 
-use blitzkrieg_core::ipc::schema::SetRiskLimitsParams;
 use blitzkrieg_core::risk::RiskConfig;
+use blitzkrieg_core::schema::SetRiskLimitsParams;
 use blitzkrieg_core::service::{Core, CoreConfig};
 use rust_decimal_macros::dec;
 

@@ -990,7 +990,7 @@ impl Core {
         // who, what, at which price, on which market. `append_manual_op` (the
         // reset path's writer) fails loudly — surfaced as a refusal-shaped
         // error, though the close itself has landed by then; the warn names it.
-        if let Err(e) = crate::ipc::runtime_config::append_manual_op(
+        if let Err(e) = crate::runtime_config::append_manual_op(
             std::path::Path::new(audit_path),
             &serde_json::json!({
                 "op": "positions.force_close",

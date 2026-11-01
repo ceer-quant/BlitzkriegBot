@@ -5,9 +5,9 @@
 //! `round_duration.set`, the intent-decision audit and the daily-loss trip
 //! with its suppressed-stop reports.
 
-use crate::ipc::schema::Event;
 use crate::model::*;
 use crate::position::EquityBasis;
+use crate::schema::Event;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 
@@ -37,12 +37,12 @@ impl Core {
     /// cannot tell two different stories.
     pub fn apply_risk_limits(
         &mut self,
-        patch: &crate::ipc::schema::SetRiskLimitsParams,
+        patch: &crate::schema::SetRiskLimitsParams,
         actor: &str,
         now_ms: i64,
-    ) -> CoreResult<crate::ipc::schema::RiskLimitUpdate> {
-        use crate::ipc::schema::{RISK_LIMIT_UPDATE_NOTE, RiskLimitChange, RiskLimitUpdate};
+    ) -> CoreResult<crate::schema::RiskLimitUpdate> {
         use crate::risk::HOT_RELOADABLE;
+        use crate::schema::{RISK_LIMIT_UPDATE_NOTE, RiskLimitChange, RiskLimitUpdate};
 
         if patch.is_empty() {
             return Err(CoreError::new(
@@ -192,13 +192,11 @@ impl Core {
     /// 「热≠永久」同一句真话。
     pub fn apply_systemic_limits(
         &mut self,
-        patch: &crate::ipc::schema::SetSystemicLimitsParams,
+        patch: &crate::schema::SetSystemicLimitsParams,
         actor: &str,
         now_ms: i64,
-    ) -> CoreResult<crate::ipc::schema::SystemicLimitUpdate> {
-        use crate::ipc::schema::{
-            SYSTEMIC_LIMIT_UPDATE_NOTE, SystemicLimitChange, SystemicLimitUpdate,
-        };
+    ) -> CoreResult<crate::schema::SystemicLimitUpdate> {
+        use crate::schema::{SYSTEMIC_LIMIT_UPDATE_NOTE, SystemicLimitChange, SystemicLimitUpdate};
 
         if patch.is_empty() {
             return Err(CoreError::new(
@@ -408,11 +406,11 @@ impl Core {
     /// `risk.setSystemic` 的「热≠永久」同一句真话。
     pub fn apply_exit_set(
         &mut self,
-        patch: &crate::ipc::schema::SetExitParams,
+        patch: &crate::schema::SetExitParams,
         actor: &str,
         now_ms: i64,
-    ) -> CoreResult<crate::ipc::schema::ExitSetUpdate> {
-        use crate::ipc::schema::{EXIT_SET_UPDATE_NOTE, ExitSetChange, ExitSetUpdate};
+    ) -> CoreResult<crate::schema::ExitSetUpdate> {
+        use crate::schema::{EXIT_SET_UPDATE_NOTE, ExitSetChange, ExitSetUpdate};
 
         if patch.is_empty() {
             return Err(CoreError::new(
@@ -585,11 +583,11 @@ impl Core {
     /// 回报 —— 测试不往调用者恰好在的 checkout 里落文件。
     pub fn apply_round_duration_set(
         &mut self,
-        patch: &crate::ipc::schema::SetRoundDurationParams,
+        patch: &crate::schema::SetRoundDurationParams,
         actor: &str,
         now_ms: i64,
-    ) -> CoreResult<crate::ipc::schema::RoundDurationUpdate> {
-        use crate::ipc::schema::{ROUND_DURATION_SET_NOTE, RoundDurationUpdate};
+    ) -> CoreResult<crate::schema::RoundDurationUpdate> {
+        use crate::schema::{ROUND_DURATION_SET_NOTE, RoundDurationUpdate};
 
         if patch.reset && patch.duration_sec.is_some() {
             return Err(CoreError::new(
@@ -623,7 +621,7 @@ impl Core {
                 .env_file_path
                 .as_deref()
                 .map(std::path::Path::new);
-            crate::ipc::runtime_config::persist_round_duration_to_with_env(
+            crate::runtime_config::persist_round_duration_to_with_env(
                 std::path::Path::new(path),
                 value,
                 actor,
@@ -710,12 +708,12 @@ impl Core {
     /// 路径重写 enabled 集 —— 这是行为语义的一部分，不是泄漏）。
     pub fn reset_trading(
         &mut self,
-        params: &crate::ipc::schema::ResetTradingParams,
+        params: &crate::schema::ResetTradingParams,
         actor: &str,
         now_ms: i64,
-    ) -> CoreResult<crate::ipc::schema::ResetTradingResult> {
-        use crate::ipc::runtime_config::append_manual_op;
-        use crate::ipc::schema::{RESET_TRADING_LIVE_REFUSAL, ResetPreSummary, ResetTradingResult};
+    ) -> CoreResult<crate::schema::ResetTradingResult> {
+        use crate::runtime_config::append_manual_op;
+        use crate::schema::{RESET_TRADING_LIVE_REFUSAL, ResetPreSummary, ResetTradingResult};
 
         if self.config.mode == Mode::Live {
             return Err(CoreError::new(

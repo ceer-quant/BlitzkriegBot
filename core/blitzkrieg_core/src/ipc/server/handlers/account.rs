@@ -3,7 +3,7 @@ use super::super::{
     enable_venue_at_runtime, typed,
 };
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `account` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //

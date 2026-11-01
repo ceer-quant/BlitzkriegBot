@@ -1,6 +1,6 @@
 //! Shared UI data model — ONE-TO-ONE with the core's IPC messages.
 //!
-//! These are deliberately a *mirror* of `core/blitzkrieg_core/src/ipc/schema.rs` and
+//! These are deliberately a *mirror* of `core/blitzkrieg_core/src/schema/` and
 //! `model.rs`, not a re-export: the UI Kit must not link the core's trading
 //! crate, so it stays a replaceable presentation layer. Every field name matches
 //! the wire (camelCase) so deserialisation is direct.
@@ -97,7 +97,7 @@ pub struct PositionView {
     #[serde(default)]
     pub venue: String,
     /// E28 (§9.2): the account the position settles into. The kernel's
-    /// `ipc::schema::PositionView` writes it on every row; a core older than
+    /// `schema::PositionView` writes it on every row; a core older than
     /// E28 omits it and the empty string keeps the row visible (the panel
     /// filters only on a non-empty accountId).
     #[serde(default)]

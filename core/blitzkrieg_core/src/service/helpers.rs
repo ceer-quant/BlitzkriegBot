@@ -5,7 +5,7 @@
 //! child test files reach with `pub use helpers::*;`.
 
 use super::Core;
-use crate::ipc::schema::Event;
+use crate::schema::Event;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;

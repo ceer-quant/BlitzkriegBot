@@ -491,7 +491,7 @@ impl Core {
     /// Surface a fill that landed on an order which had already ended (or that
     /// reports more size than the order could hold). Returns the alert text.
     ///
-    /// `ipc/schema.rs` is outside this change's territory, so this rides the
+    /// `schema/mod.rs` is outside this change's territory, so this rides the
     /// existing `RiskAlert` event rather than adding a dedicated variant; the
     /// message is a greppable `late_fill …` line so an operator, the audit log
     /// and the panel all show the same fact without a new wire type.

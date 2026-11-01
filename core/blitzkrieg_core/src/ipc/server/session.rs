@@ -87,9 +87,7 @@ pub async fn run(
         let cell = config
             .runtime_config_path
             .as_deref()
-            .and_then(|p| {
-                crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
-            })
+            .and_then(|p| crate::runtime_config::load_market_plugin_from(std::path::Path::new(p)))
             .filter(|cell| {
                 let names = crate::market::parse_plugin_list(&cell.plugin);
                 !names.is_empty() && names.iter().all(|n| registry.get(n).is_some())
@@ -109,7 +107,7 @@ pub async fn run(
                 .runtime_config_path
                 .as_deref()
                 .and_then(|p| {
-                    crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p))
+                    crate::runtime_config::load_market_plugin_from(std::path::Path::new(p))
                 })
                 .map(|c| c.plugin)
                 .filter(|v| !crate::market::parse_plugin_list(v).is_empty())

@@ -40,11 +40,11 @@ use std::path::{Path, PathBuf};
 use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
 use blitzkrieg_core::account::config::{load_account_ledgers, load_account_ledgers_single_source};
 use blitzkrieg_core::engine::DataEvent;
-use blitzkrieg_core::ipc::schema::Event;
 use blitzkrieg_core::model::{
     AccountId, CoreError, CoreErrorCode, CryptoMarket, FillPolicy, Mode, OrderRequest, OrderStatus,
     Side, default_account_id,
 };
+use blitzkrieg_core::schema::Event;
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_lua_runtime::FeeScheduleView;

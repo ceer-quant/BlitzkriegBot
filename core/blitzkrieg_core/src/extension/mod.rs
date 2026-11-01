@@ -18,7 +18,7 @@
 
 pub mod builtins;
 
-use crate::ipc::schema::Event;
+use crate::schema::Event;
 use std::collections::HashMap;
 
 /// Where extension directories live, relative to the core's working directory

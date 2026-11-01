@@ -105,7 +105,7 @@ pub fn boot_enablement(
     core: &crate::service::Core,
     registry: &registry::MarketPluginRegistry,
     flag: Option<&str>,
-    cell: Option<&crate::ipc::runtime_config::MarketPluginCell>,
+    cell: Option<&crate::runtime_config::MarketPluginCell>,
 ) -> (Option<String>, PluginEnableSource) {
     // Layer 1: an explicit flag outranks everything, verbatim (a flag is also
     // how the replay corpus pins its plugin — never touched here).
@@ -137,7 +137,7 @@ pub fn boot_enablement(
                     .env_file_path
                     .as_deref()
                     .map(std::path::Path::new);
-                match crate::ipc::runtime_config::persist_market_plugin_to_with_env(
+                match crate::runtime_config::persist_market_plugin_to_with_env(
                     std::path::Path::new(path),
                     None,
                     "system:venue-derive-migration",
@@ -317,8 +317,8 @@ pub(crate) fn net_check_plugin(
 pub fn plugin_readout(
     registry: &registry::MarketPluginRegistry,
     core: &crate::service::Core,
-) -> crate::ipc::schema::MarketPluginReadout {
-    use crate::ipc::schema::{MarketPluginOption, MarketPluginReadout};
+) -> crate::schema::MarketPluginReadout {
+    use crate::schema::{MarketPluginOption, MarketPluginReadout};
     let list = registry.list();
     let active = registry
         .active()
@@ -340,7 +340,7 @@ pub fn plugin_readout(
         .config()
         .runtime_config_path
         .as_deref()
-        .and_then(|p| crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(p)))
+        .and_then(|p| crate::runtime_config::load_market_plugin_from(std::path::Path::new(p)))
         .filter(|c| {
             parse_plugin_list(&c.plugin)
                 .iter()
@@ -383,12 +383,12 @@ pub fn plugin_readout(
 pub(crate) async fn apply_plugin_set(
     registry: &registry::MarketPluginRegistry,
     core: &tokio::sync::Mutex<crate::service::Core>,
-    patch: &crate::ipc::schema::SetMarketPluginParams,
+    patch: &crate::schema::SetMarketPluginParams,
     actor: &str,
     now_ms: i64,
-) -> Result<crate::ipc::schema::MarketPluginUpdate, crate::model::CoreError> {
-    use crate::ipc::schema::{MARKET_PLUGIN_SET_NOTE, MarketPluginUpdate};
+) -> Result<crate::schema::MarketPluginUpdate, crate::model::CoreError> {
     use crate::model::{CoreError, CoreErrorCode};
+    use crate::schema::{MARKET_PLUGIN_SET_NOTE, MarketPluginUpdate};
 
     // 绑定即启用（fail-closed guard）：当 THIS session 的启用集合由账户
     // venue 绑定派生时，持久格是死格 —— boot 的派生层 outrank 它，写入一个
@@ -541,7 +541,7 @@ async fn persist_cell(
         )
     })?;
     let env_path = env_path.as_deref().map(std::path::Path::new);
-    crate::ipc::runtime_config::persist_market_plugin_to_with_env(
+    crate::runtime_config::persist_market_plugin_to_with_env(
         std::path::Path::new(&path),
         plugin,
         actor,
@@ -567,8 +567,8 @@ async fn persist_cell(
 /// core-side match). Values never leave the process; names and presence only.
 pub fn credentials_status(
     registry: &registry::MarketPluginRegistry,
-) -> crate::ipc::schema::CredentialsStatus {
-    use crate::ipc::schema::{CredentialsStatus, PluginCredentialRow};
+) -> crate::schema::CredentialsStatus {
+    use crate::schema::{CredentialsStatus, PluginCredentialRow};
     let rows = registry
         .names()
         .iter()
@@ -638,12 +638,12 @@ pub fn venue_credentials_missing(
 pub async fn apply_credentials_set(
     registry: &registry::MarketPluginRegistry,
     core: &tokio::sync::Mutex<crate::service::Core>,
-    patch: &crate::ipc::schema::SetCredentialsParams,
+    patch: &crate::schema::SetCredentialsParams,
     actor: &str,
     now_ms: i64,
-) -> Result<crate::ipc::schema::CredentialsUpdate, crate::model::CoreError> {
-    use crate::ipc::schema::{CREDENTIALS_SET_NOTE, CredentialsUpdate};
+) -> Result<crate::schema::CredentialsUpdate, crate::model::CoreError> {
     use crate::model::{CoreError, CoreErrorCode};
+    use crate::schema::{CREDENTIALS_SET_NOTE, CredentialsUpdate};
 
     let plugin = patch.plugin.trim();
     let plugin_obj = match registry.get(plugin) {
@@ -733,8 +733,8 @@ pub async fn apply_credentials_set(
 #[cfg(test)]
 mod set_tests {
     use super::*;
-    use crate::ipc::schema::SetMarketPluginParams;
     use crate::model::CoreErrorCode;
+    use crate::schema::SetMarketPluginParams;
 
     /// A tiny registered plugin — the registry is compiled in, so a test that
     /// wants a controllable switchable set registers its own two names.
@@ -833,10 +833,9 @@ mod set_tests {
         // Single-value spelling is EXACTLY the historical shape — the reply
         // carries the value verbatim (no commas, no reordering).
         assert_eq!(update.next_session_plugin, "alpha");
-        let cell = crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(
-            &cell_in(&dir),
-        ))
-        .expect("the cell must hold the write");
+        let cell =
+            crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell_in(&dir)))
+                .expect("the cell must hold the write");
         assert_eq!(cell.plugin, "alpha");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -860,10 +859,9 @@ mod set_tests {
         // The cell carries the whole comma string; the READ path
         // (parse_plugin_list, what the boot actually runs) re-derives both
         // names from it in order.
-        let cell = crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(
-            &cell_in(&dir),
-        ))
-        .expect("the cell must hold the write");
+        let cell =
+            crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell_in(&dir)))
+                .expect("the cell must hold the write");
         assert_eq!(parse_plugin_list(&cell.plugin), vec!["alpha", "beta"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -894,7 +892,7 @@ mod set_tests {
         let cell = cell_in(&dir);
         // Pre-seed a good cell: a refused write must leave it untouched
         // (plan-first — the validation happens before anything touches disk).
-        crate::ipc::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to_with_env(
             std::path::Path::new(&cell),
             Some("alpha"),
             "seed",
@@ -925,9 +923,8 @@ mod set_tests {
             err.message
         );
         // And the cell is exactly as it was — nothing was half-written.
-        let after =
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
-                .expect("the seeded cell survived");
+        let after = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
+            .expect("the seeded cell survived");
         assert_eq!(after.plugin, "alpha");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -974,8 +971,7 @@ mod set_tests {
         // session's own boot resolution, not a cell value.
         assert_eq!(update.next_session_plugin, "alpha");
         assert!(
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
-                .is_none(),
+            crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell)).is_none(),
             "the cell holds nothing after a reset"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1009,8 +1005,8 @@ mod derive_tests {
     //! 绑定翻转启用来源时清旧格 + INFO）、market.plugin.set 在派生生效
     //! 期间的 fail-closed 拒绝、readout 的 source 披露。
     use super::*;
-    use crate::ipc::schema::SetMarketPluginParams;
     use crate::model::CoreErrorCode;
+    use crate::schema::SetMarketPluginParams;
     use crate::service::{Core, CoreConfig};
 
     /// A tiny registered plugin — same trick as `set_tests`: the registry is
@@ -1043,7 +1039,7 @@ mod derive_tests {
     /// Venues are STUB PLUGIN names so the set the derivation returns can be
     /// resolved against a registry this test also controls.
     fn core_with_bindings(bindings: &[(&str, &str)], runtime_config_path: Option<String>) -> Core {
-        let now = crate::ipc::schema::ACCOUNT_VENUE_SET_NOTE.len() as i64; // any constant now
+        let now = crate::schema::ACCOUNT_VENUE_SET_NOTE.len() as i64; // any constant now
         let accounts: Vec<crate::account::Account> = bindings
             .iter()
             .map(|(id, venue)| crate::account::Account {
@@ -1108,7 +1104,7 @@ mod derive_tests {
         );
         assert_eq!(source, PluginEnableSource::Flag);
         // Even a persisted cell cannot outrank the flag.
-        let cell = crate::ipc::runtime_config::MarketPluginCell {
+        let cell = crate::runtime_config::MarketPluginCell {
             plugin: "beta".to_string(),
         };
         let (resolved, source) = boot_enablement(&core, &reg, Some("alpha"), Some(&cell));
@@ -1126,7 +1122,7 @@ mod derive_tests {
         let cell = cell_in(&dir);
         // 旧持久格：上一次 UI 写的 alpha —— 现在账户绑定了 beta/gamma，派生
         // 集合非空，旧格必须退休。
-        crate::ipc::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to_with_env(
             std::path::Path::new(&cell),
             Some("alpha"),
             "uid:old",
@@ -1134,8 +1130,7 @@ mod derive_tests {
             None,
         )
         .expect("seed the old cell");
-        let loaded =
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
+        let loaded = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
         assert!(loaded.is_some(), "the old cell is on disk");
         let reg = registry_with(&["alpha", "beta", "gamma"]);
         let core = core_with_bindings(
@@ -1156,8 +1151,7 @@ mod derive_tests {
         );
         // 迁移：旧格已清 —— 下次会话不会再从旧格解析。
         assert!(
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
-                .is_none(),
+            crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell)).is_none(),
             "the retired cell is gone from disk"
         );
 
@@ -1189,7 +1183,7 @@ mod derive_tests {
     fn no_bindings_falls_back_to_cell_then_first_registered() {
         let reg = registry_with(&["alpha", "beta"]);
         // 旧格在场：回落旧格。
-        let cell = crate::ipc::runtime_config::MarketPluginCell {
+        let cell = crate::runtime_config::MarketPluginCell {
             plugin: "alpha,beta".to_string(),
         };
         let core = core_with_bindings(&[("a", "")], None);
@@ -1245,8 +1239,7 @@ mod derive_tests {
         assert!(err.message.contains("账户绑定派生"), "{}", err.message);
         // 什么都不落盘。
         assert!(
-            crate::ipc::runtime_config::load_market_plugin_from(std::path::Path::new(&cell))
-                .is_none(),
+            crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell)).is_none(),
             "nothing was written under the guard"
         );
 
@@ -1285,7 +1278,7 @@ mod derive_tests {
         // 时 cell 是 None，直接落 fallback；persisted 层用带路径的核验证。
         let dir = scratch("readout");
         let path = cell_in(&dir);
-        crate::ipc::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to_with_env(
             std::path::Path::new(&path),
             Some("alpha"),
             "uid:old",

@@ -1,6 +1,6 @@
 use super::super::{DataPlaneRuntime, PeerAuth, SOCKET_MODE, typed};
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `misc` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //

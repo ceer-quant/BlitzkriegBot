@@ -878,12 +878,12 @@ impl Core {
 
     /// Open positions enriched for the UI (unrealised PnL uses the current price
     /// we track; the book tick updates it on every check).
-    pub fn position_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::PositionView> {
+    pub fn position_views(&self, now_ms: i64) -> Vec<crate::schema::PositionView> {
         use crate::exit_policy::pnl_pct;
         self.positions
             .open_positions()
             .iter()
-            .map(|p| crate::ipc::schema::PositionView {
+            .map(|p| crate::schema::PositionView {
                 id: p.id.clone(),
                 asset: p.asset.clone(),
                 direction: p.direction.as_str().to_string(),

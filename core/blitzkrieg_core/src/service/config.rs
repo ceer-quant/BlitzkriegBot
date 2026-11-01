@@ -1127,7 +1127,7 @@ pub(super) fn schedule_reproduces_pin(schedule: crate::exit_policy::FeeSchedule)
 /// Read-only quote of the fee schedule (#182). `price` defaults to the widest
 /// point of the schedule (0.5) so a caller that only wants the model metadata
 /// does not have to invent a price.
-pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
+pub fn fee_quote(price: Option<Decimal>) -> crate::schema::FeeQuoteResult {
     fee_quote_at(crate::exit_policy::fee_schedule(), price)
 }
 
@@ -1137,11 +1137,11 @@ pub fn fee_quote(price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
 pub(super) fn fee_quote_at(
     schedule: crate::exit_policy::FeeSchedule,
     price: Option<Decimal>,
-) -> crate::ipc::schema::FeeQuoteResult {
+) -> crate::schema::FeeQuoteResult {
     let price = price.unwrap_or_else(|| dec!(0.5));
     let charged = charged_per_share(schedule, price);
     let model_matches = schedule_reproduces_pin(schedule);
-    crate::ipc::schema::FeeQuoteResult {
+    crate::schema::FeeQuoteResult {
         model: schedule.name.to_string(),
         rate: schedule.rate,
         exponent: schedule.exponent,
@@ -1160,11 +1160,11 @@ pub(super) fn fee_quote_at(
 /// snapshot that a write could make a lie. A core with no runtime config path
 /// (backtests, in-process tests) reports `persisted: false` — there is no cell
 /// to read, and the effective value is the truth for the next session too.
-pub fn round_duration_readout(core: &Core) -> crate::ipc::schema::RoundDurationResult {
-    use crate::ipc::schema::{RoundDurationOption, RoundDurationResult};
+pub fn round_duration_readout(core: &Core) -> crate::schema::RoundDurationResult {
+    use crate::schema::{RoundDurationOption, RoundDurationResult};
     let effective = core.config().round_duration_sec;
     let cell = core.config().runtime_config_path.as_deref().and_then(|p| {
-        crate::ipc::runtime_config::load_round_duration_from(
+        crate::runtime_config::load_round_duration_from(
             std::path::Path::new(p),
             &core.config().allowed_round_secs,
         )

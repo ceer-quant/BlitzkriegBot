@@ -7,7 +7,7 @@
  * drive a temporary core over the UDS JSON-RPC channel. This module replaces
  * the compiled TS client for those gates with ~150 lines of stdlib code.
  *
- * Contract (single source of truth: blitzkrieg-core/src/ipc/schema.rs):
+ * Contract (single source of truth: blitzkrieg-core/src/schema/):
  *   framing  — one JSON object per '\n' over a Unix domain socket
  *   requests — {jsonrpc:"2.0",id,method,params}
  *   events   — {jsonrpc:"2.0",method:"core.event",params:{kind,...}}

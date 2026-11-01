@@ -7,10 +7,10 @@
 //! the error/daily-budget emitters, and `tick` with the escalation and exit
 //! sweeps.
 
-use crate::ipc::schema::Event;
 use crate::model::*;
 use crate::ome::{FillDelta, SubmitParams};
 use crate::risk::RiskConfig;
+use crate::schema::Event;
 use crate::sim::Book;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};

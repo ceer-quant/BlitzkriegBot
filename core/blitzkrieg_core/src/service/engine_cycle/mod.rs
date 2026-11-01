@@ -14,8 +14,8 @@
 //! `service`, so the struct fields remain private to it.
 
 use crate::engine::BatchBook;
-use crate::ipc::schema::Event;
 use crate::model::*;
+use crate::schema::Event;
 use crate::shadow_evolution::EvolutionOutcome;
 use crate::sim::{Book, rests_on_book};
 use blitzkrieg_market_api::net::now_ms;

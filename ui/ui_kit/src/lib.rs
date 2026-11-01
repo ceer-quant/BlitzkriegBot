@@ -6,7 +6,7 @@
 //!   trading logic, no risk rules, no order decisions. All of that lives in
 //!   `blitzkrieg-core`.
 //! * It speaks to the core exclusively over the UDS JSON-RPC contract
-//!   (`core/blitzkrieg_core/src/ipc/schema.rs`). It never links the core's trading
+//!   (`core/blitzkrieg_core/src/schema/`). It never links the core's trading
 //!   types, so the whole kit is replaceable without touching the kernel.
 //! * One shared `core` (types + IPC client + event bus) fan-outs to three
 //!   adapters: `web` (browser), `app` (future Tauri/egui) + the ratatui panel

@@ -4,7 +4,7 @@
  *
  * The contract it guards: `docs/rust-core/INTERFACES.md` §2 claims to be the
  * single source of truth for the UDS JSON-RPC surface, and
- * `core/blitzkrieg_core/src/ipc/schema.rs` IS the compiled one. When the two
+ * `core/blitzkrieg_core/src/schema/` IS the compiled one. When the two
  * drift apart the documentation quietly stops being a contract (the 2026-10-26
  * audit D-2: 79 constants, 36 documented — including money-sensitive verbs
  * like `risk.setExit` living outside the ledger). A new `pub const *_METHOD`
@@ -45,7 +45,7 @@ import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SCHEMA = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'ipc', 'schema');
+const SCHEMA = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'schema');
 const DOC = join(ROOT, 'docs', 'rust-core', 'INTERFACES.md');
 
 // #780 split the schema into a module directory. Read every part and search the

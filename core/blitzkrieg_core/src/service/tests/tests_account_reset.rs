@@ -589,7 +589,7 @@ fn account_scoped_reset_leaves_other_accounts_untouched() {
 
     let r = c
         .reset_trading(
-            &crate::ipc::schema::ResetTradingParams {
+            &crate::schema::ResetTradingParams {
                 confirm: "RESET".into(),
                 reason: Some("unit".into()),
                 account_id: Some("paper".into()),
@@ -695,7 +695,7 @@ fn account_scoped_reset_refuses_an_unknown_account() {
     c.set_balance(Decimal::from(1_000));
     let err = c
         .reset_trading(
-            &crate::ipc::schema::ResetTradingParams {
+            &crate::schema::ResetTradingParams {
                 confirm: "RESET".into(),
                 reason: Some("unit".into()),
                 account_id: Some("ghost".into()),
@@ -721,7 +721,7 @@ fn account_scoped_reset_keeps_the_three_gates() {
     c.set_balance(Decimal::from(1_000));
     let err = c
         .reset_trading(
-            &crate::ipc::schema::ResetTradingParams {
+            &crate::schema::ResetTradingParams {
                 confirm: "reset".into(),
                 reason: Some("unit".into()),
                 account_id: Some("paper".into()),
@@ -737,7 +737,7 @@ fn account_scoped_reset_keeps_the_three_gates() {
     let mut live = live_core(dec!(10));
     let err = live
         .reset_trading(
-            &crate::ipc::schema::ResetTradingParams {
+            &crate::schema::ResetTradingParams {
                 confirm: "RESET".into(),
                 reason: Some("unit".into()),
                 account_id: Some("paper".into()),
@@ -863,7 +863,7 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
     }
 
     c.reset_trading(
-        &crate::ipc::schema::ResetTradingParams {
+        &crate::schema::ResetTradingParams {
             confirm: "RESET".into(),
             reason: Some("unit".into()),
             account_id: Some("default".into()),

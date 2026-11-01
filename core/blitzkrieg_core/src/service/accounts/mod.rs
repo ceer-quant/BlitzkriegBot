@@ -14,9 +14,9 @@
 //! the core money truth and account views; the struct fields stay private to
 //! `service` and descendants either way.
 
-use crate::ipc::schema::Event;
 use crate::ledger::Ledger;
 use crate::model::*;
+use crate::schema::Event;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 
@@ -62,7 +62,7 @@ impl Core {
     /// being a bare function because the day the schedule becomes a per-core
     /// setting (the `--taker-fee-legacy` switch in flight) the lookup belongs
     /// here, and only here.
-    pub fn fee_quote(&self, price: Option<Decimal>) -> crate::ipc::schema::FeeQuoteResult {
+    pub fn fee_quote(&self, price: Option<Decimal>) -> crate::schema::FeeQuoteResult {
         fee_quote(price)
     }
 
@@ -232,7 +232,7 @@ impl Core {
     /// correction row is bookkeeping; the venue having moved money the kernel
     /// cannot attribute is a RISK FACT, and it must be loud.
     ///
-    /// Same shape as [`Self::emit_late_fill`] (ipc/schema.rs is not this
+    /// Same shape as [`Self::emit_late_fill`] (schema/mod.rs is not this
     /// change's territory): the existing `RiskAlert` event carries a greppable
     /// `unattributed_cash_move …` line, the same fact lands in the audit JSONL,
     /// and `tracing` + stderr say it too.
@@ -565,7 +565,7 @@ impl Core {
         self.accounts.require(id)
     }
 
-    /// E28 `account.list` (§12.1): one [`crate::ipc::schema::AccountView`]
+    /// E28 `account.list` (§12.1): one [`crate::schema::AccountView`]
     /// per configured account, sorted by id (`AccountLedgers::account_list`
     /// order). Every money field is the account's OWN book — this view is
     /// how cross-account isolation is READ; `dayRealizedUsd` sums the
@@ -585,7 +585,7 @@ impl Core {
     /// (issue 749): a plugin can sign with its own env while the account
     /// declares nothing, so the credential fact both over- and under-reported.
     /// The live balance is the venue's word, so the venue's word is the gate.
-    pub fn account_views(&self, now_ms: i64) -> Vec<crate::ipc::schema::AccountView> {
+    pub fn account_views(&self, now_ms: i64) -> Vec<crate::schema::AccountView> {
         let live = self.config.mode == Mode::Live;
         let today = crate::position::utc_day_index(now_ms);
         self.accounts
@@ -634,7 +634,7 @@ impl Core {
                 } else {
                     (ledger.balance(), ledger.available())
                 };
-                crate::ipc::schema::AccountView {
+                crate::schema::AccountView {
                     id: id.as_str().to_string(),
                     name: a.name.clone(),
                     market_type: a.market_type,

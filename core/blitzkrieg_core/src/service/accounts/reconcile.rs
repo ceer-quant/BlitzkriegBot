@@ -1,7 +1,7 @@
 //! Venue self-check and reconcile bookkeeping (#780).
 
-use crate::ipc::schema::Event;
 use crate::model::*;
+use crate::schema::Event;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 

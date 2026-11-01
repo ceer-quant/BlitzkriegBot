@@ -32,7 +32,7 @@ impl Core {
         reason: &str,
         now_ms: i64,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::ACCOUNT_VENUE_SET_NOTE;
+        use crate::schema::ACCOUNT_VENUE_SET_NOTE;
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
@@ -94,7 +94,7 @@ impl Core {
         reason: &str,
         _now_ms: i64,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::ACCOUNT_ROUNDS_SET_NOTE;
+        use crate::schema::ACCOUNT_ROUNDS_SET_NOTE;
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
@@ -463,7 +463,7 @@ impl Core {
         reason: &str,
         now_ms: i64,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::ACCOUNT_TRADING_SET_NOTE;
+        use crate::schema::ACCOUNT_TRADING_SET_NOTE;
         self.accounts.require(id)?;
         let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
@@ -526,7 +526,7 @@ impl Core {
         actor: &str,
         reason: &str,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::DISPLAY_ACCOUNT_SET_NOTE;
+        use crate::schema::DISPLAY_ACCOUNT_SET_NOTE;
         self.accounts.require(id)?;
         let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
@@ -590,7 +590,7 @@ impl Core {
         reason: &str,
         now_ms: i64,
     ) -> CoreResult<Vec<String>> {
-        use crate::ipc::schema::ACCOUNT_STRATEGIES_SET_NOTE;
+        use crate::schema::ACCOUNT_STRATEGIES_SET_NOTE;
         self.accounts.require(id)?;
         // Dedupe + order-stable: an assignment that names a strategy twice
         // is a caller bug, but the honest handling is collapse, not refusal.
@@ -867,7 +867,7 @@ impl Core {
         audit: (&str, &str),
         now_ms: i64,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::ACCOUNT_CREATE_NOTE;
+        use crate::schema::ACCOUNT_CREATE_NOTE;
         let (actor, reason) = audit;
         // Reserved name first — BEFORE the empty-id check, so the refusal
         // names the contract, not the spelling (`"default"` trimmed and
@@ -990,7 +990,7 @@ impl Core {
         actor: &str,
         reason: &str,
     ) -> CoreResult<()> {
-        use crate::ipc::schema::ACCOUNT_REMOVE_NOTE;
+        use crate::schema::ACCOUNT_REMOVE_NOTE;
         // The LAST account stays: an empty book fails the next boot's parse,
         // so retiring it would be a delete-the-deployment footgun. Every id
         // is otherwise fair game — `default` included (the zero-config

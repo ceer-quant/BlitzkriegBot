@@ -42,8 +42,8 @@ pub(crate) fn order(mode: FillPolicy, price: Decimal, size: Decimal, key: &str) 
 
 // ── #458: system.reset_trading —— 三道门 + 重置闭环（直接单测） ─────────
 
-pub(crate) fn reset_params(confirm: &str) -> crate::ipc::schema::ResetTradingParams {
-    crate::ipc::schema::ResetTradingParams {
+pub(crate) fn reset_params(confirm: &str) -> crate::schema::ResetTradingParams {
+    crate::schema::ResetTradingParams {
         confirm: confirm.to_string(),
         reason: Some("unit".to_string()),
         account_id: None,

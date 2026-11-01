@@ -129,7 +129,7 @@ fn params_set_moves_one_knob_and_keeps_the_others() {
 fn params_set_refuses_bad_patches_without_moving_anything() {
     let mut c = core_with_strategies();
     let before = c.strategy_params_readout("spread_arb");
-    let snapshot = |r: &crate::ipc::schema::StrategyParamsReadout| {
+    let snapshot = |r: &crate::schema::StrategyParamsReadout| {
         r.tunables
             .iter()
             .map(|t| (t.name.clone(), t.value.clone()))

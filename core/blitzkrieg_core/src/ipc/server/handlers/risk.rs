@@ -1,6 +1,6 @@
 use super::super::{PeerAuth, core_err};
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `risk` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -19,7 +19,7 @@ pub(crate) async fn handle_risk(
         method::RISK_LIMITS => {
             let c = core.lock().await;
             Ok(
-                serde_json::to_value(crate::ipc::schema::RiskLimitsResult::snapshot(
+                serde_json::to_value(crate::schema::RiskLimitsResult::snapshot(
                     &c.risk_config().systemic,
                     &c.config().positions.exit,
                 ))

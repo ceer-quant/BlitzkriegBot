@@ -436,7 +436,7 @@ fn arb_config_set_wire_shape_parses_and_refuses_nulls() {
         r#"{"jsonrpc":"2.0","id":1,"method":"arb.config.set","params":{"version":2,"legAVenue":"polymarket","legAAccount":"default","legBVenue":"kalshi","legBAccount":"arb-b","pairs":["BTC"]}}"#,
     )
     .expect("json");
-    let params: blitzkrieg_core::ipc::schema::ArbConfigSetParams =
+    let params: blitzkrieg_core::schema::ArbConfigSetParams =
         serde_json::from_value(req["params"].clone()).expect("the wire shape parses (camelCase)");
     assert_eq!(params.version, 2, "the wrong version arrives as 2");
     assert_eq!(params.leg_a_venue, "polymarket");
@@ -451,7 +451,7 @@ fn arb_config_set_wire_shape_parses_and_refuses_nulls() {
         r#"{"jsonrpc":"2.0","id":2,"method":"arb.config.set","params":{"version":1,"legAVenue":"polymarket","legAAccount":"default","legBVenue":null,"legBAccount":"arb-b","pairs":["BTC"]}}"#,
     )
     .expect("json");
-    let parsed: Result<blitzkrieg_core::ipc::schema::ArbConfigSetParams, _> =
+    let parsed: Result<blitzkrieg_core::schema::ArbConfigSetParams, _> =
         serde_json::from_value(req["params"].clone());
     assert!(
         parsed.is_err(),
