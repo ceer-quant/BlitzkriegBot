@@ -94,10 +94,15 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # --all-targets compiles the integration tests; #825 took test-support
+      # out of blitzkrieg-core's default set, so the feature is named here.
+      - run: cargo clippy --workspace --all-targets --locked --features blitzkrieg-core/test-support -- -D warnings
       - run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - run: cargo build --release --workspace --locked
-      - run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
+      # --features blitzkrieg-core/test-support (#825): the test targets that
+      # drive the blunt test mutators opt in explicitly; the release build
+      # above stays default and proves the shipped surface carries none.
+      - run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked --features blitzkrieg-core/test-support
       - uses: actions/setup-node@v6
         with:
           node-version: 22

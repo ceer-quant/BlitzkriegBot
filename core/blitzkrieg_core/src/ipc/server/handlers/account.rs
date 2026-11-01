@@ -608,9 +608,9 @@ pub(crate) async fn handle_account(
                     let id = AccountId::from(p.account_id.as_str());
                     let mut c = core.lock().await;
                     // #780 boundary hygiene: existence-only check through the
-                    // narrow read (the blunt `accounts_mut` is test-support
-                    // only now); the freeze/resume writes below are Core
-                    // methods, not book surgery.
+                    // narrow read (the blunt `accounts_mut` is test-only
+                    // now — #825, never default); the freeze/resume writes
+                    // below are Core methods, not book surgery.
                     c.require_account(&id)?;
                     if p.frozen {
                         c.freeze_account_manual(

@@ -7,8 +7,10 @@
 //! (exit checks + escalation) with an open position.
 //!
 //! The hosted strategy is the same test adapter the unit tests use
-//! (`strategies::test_support`, enabled by default features), so bench numbers
-//! reflect real strategy work, not an empty engine.
+//! (`strategies::test_support`, via the opt-in `test-support` feature — #825
+//! took it out of default, so bench/test runs pass
+//! `--features test-support`), so bench numbers reflect real strategy work,
+//! not an empty engine.
 //!
 //! Run: cargo bench -p blitzkrieg-core --bench hot_path
 

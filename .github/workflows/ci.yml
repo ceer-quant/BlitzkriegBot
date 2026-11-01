@@ -84,14 +84,19 @@ jobs:
         run: node scripts/binary-size-check.mjs --verbose
       # BK_REQUIRE_DYLIB=1 turns the dylib-driven tests from skip into hard
       # failure if the artifacts above are missing or fail negotiation.
+      # --features blitzkrieg-core/test-support (#825): the feature left the
+      # default set, so the integration tests that drive the blunt test
+      # mutators / the test_support adapter opt in here — while the release
+      # builds above and below stay default and prove the shipped surface
+      # carries none of it.
       - name: Test
-        run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked
+        run: BK_REQUIRE_DYLIB=1 cargo test --workspace --locked --features blitzkrieg-core/test-support
       # The dhat allocation profile (E14 §8) is written under target/ — scratch,
       # not a tracked baseline (#206) — so its NUMBERS only reach a reader
       # through stdout, which a passing `cargo test` swallows. This step is the
       # log transport, and it reuses the artifacts the Test step just built.
       - name: dhat allocation summary (E14, log-only)
-        run: cargo test -p blitzkrieg-core --locked --test dhat_profile -- --nocapture
+        run: cargo test -p blitzkrieg-core --locked --features test-support --test dhat_profile -- --nocapture
       # #760's acceptance: the .env migration must produce keys the REAL policy
       # loader reads back, not keys that merely look right. The script builds a
       # scratch deployment, runs scripts/migrate-config-to-env.sh, and then asks
@@ -127,7 +132,10 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        # --all-targets compiles the integration tests and benches; #825 took
+        # test-support out of blitzkrieg-core's default set, so the feature is
+        # named here the same way the Test step names it.
+        run: cargo clippy --workspace --all-targets --locked --features blitzkrieg-core/test-support -- -D warnings
       # One source of truth for the version (VERSIONING.md §8.6): manifest-only
       # is pure-text and millisecond-fast, so it fits the PR gate; the full check
       # (incl. the binary's self-description) belongs to the release pipeline.
@@ -523,6 +531,22 @@ jobs:
         run: |
           node scripts/file-size-check.mjs --self-test
           node scripts/file-size-check.mjs
+      # #825: test-support must never ride back into the default build. The
+      # blunt test mutators (positions_mut / accounts_mut / config_mut /
+      # risk_config_mut / ledger_mut) and the `strategies::test_support`
+      # adapter module are gated `cfg(any(test, feature = "test-support"))`
+      # and the feature is NOT in blitzkrieg-core's default set — the release
+      # builds in this file are the compile-level proof that the shipped
+      # surface carries none of it. This gate pins the text that makes that
+      # true: the default list stays clean, the opt-in feature stays declared
+      # (integration tests still need it), and every mutator keeps the dual
+      # cfg. --self-test proves it reds on a dirty default, a feature-only
+      # cfg, and a missing opt-in (§A.4 order: prove it can go red, then the
+      # real verdict).
+      - name: Test-support default gate (#825)
+        run: |
+          node scripts/test-support-default-check.mjs --self-test
+          node scripts/test-support-default-check.mjs
       # #644: the contract-ledger gate. `docs/rust-core/INTERFACES.md` §2 claims
       # to be the single source of truth for the IPC surface; schema.rs IS the
       # compiled one. When they drift the documentation quietly stops being a

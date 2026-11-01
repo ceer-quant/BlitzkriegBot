@@ -1,10 +1,14 @@
 //! The in-kernel accounting audit and its journal (#780).
 
-use crate::ledger::Ledger;
 use crate::model::*;
 use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
 use crate::schema::Event;
 use rust_decimal::Decimal;
+
+// Only the test seam below names the ledger type directly; keep the import
+// on the same gate so the default build carries neither (#825).
+#[cfg(any(test, feature = "test-support"))]
+use crate::ledger::Ledger;
 
 use crate::service::{AUDIT_HEARTBEAT_MS, f64_to_decimal};
 
@@ -282,10 +286,10 @@ impl Core {
 
     /// Mutable ledger access, for tests that must put the books into the exact
     /// state a bug leaves behind (a stranded reservation, cash that moved with no
-    /// trade) and assert the audit NOTICES it. Gated behind the `test-support`
-    /// feature the crate enables for its own test targets, so no production build
-    /// can reach it.
-    #[cfg(feature = "test-support")]
+    /// trade) and assert the audit NOTICES it. Gated behind cfg(test) or the
+    /// opt-in `test-support` feature (#825: never in default), so no production
+    /// build can reach it.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ledger_mut(&mut self) -> &mut Ledger {
         // E28: tests poking the books target the ACTIVE account's ledger —
         // the same default a 0.2 deployment has exactly one of.
