@@ -28,10 +28,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use blitzkrieg_core::engine::DataEvent;
-use blitzkrieg_core::ipc::schema::Event;
 use blitzkrieg_core::model::{CryptoMarket, Mode, OrderRequest, Side, default_account_id};
 use blitzkrieg_core::position::OpenParams;
 use blitzkrieg_core::risk::RiskConfig;
+use blitzkrieg_core::schema::Event;
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_lua_runtime::FeeScheduleView;

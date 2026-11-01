@@ -391,7 +391,7 @@ fn exit_set_reaches_the_exit_sweep_of_already_open_positions() {
 
     // THE WRITE: tighten the stop to 1% through the verb's service path.
     c.apply_exit_set(
-        &crate::ipc::schema::SetExitParams {
+        &crate::schema::SetExitParams {
             stop_loss_pct: Some(dec!(1)),
             ..Default::default()
         },

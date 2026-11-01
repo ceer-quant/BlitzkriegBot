@@ -52,9 +52,9 @@ fn core_over(mode: Mode, accounts: Vec<crate::account::Account>, active: &str) -
 }
 
 fn view_of<'a>(
-    views: &'a [crate::ipc::schema::AccountView],
+    views: &'a [crate::schema::AccountView],
     id: &str,
-) -> &'a crate::ipc::schema::AccountView {
+) -> &'a crate::schema::AccountView {
     views
         .iter()
         .find(|v| v.id == id)

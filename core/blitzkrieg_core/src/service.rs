@@ -2,11 +2,11 @@
 //! implements every typed command. Synchronous except for the event sink, so it
 //! is fully unit-testable; the async UDS layer and live venue sit on top.
 
-use crate::ipc::schema::Event;
 use crate::model::*;
 use crate::ome::Ome;
 use crate::position::{OpenPosition, PositionManager};
 use crate::risk::{LossBreakers, RiskGate};
+use crate::schema::Event;
 use crate::settlement::SettlementBook;
 use crate::shadow_evolution::{ShadowEvolution, ShadowEvolutionConfig};
 use crate::sim::Book;

@@ -1,9 +1,9 @@
 //! The in-kernel accounting audit and its journal (#780).
 
-use crate::ipc::schema::Event;
 use crate::ledger::Ledger;
 use crate::model::*;
 use crate::reconcile::{AuditInput, AuditReport, CashIdentity};
+use crate::schema::Event;
 use rust_decimal::Decimal;
 
 use crate::service::{AUDIT_HEARTBEAT_MS, f64_to_decimal};

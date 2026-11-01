@@ -340,7 +340,7 @@ impl TradeDb {
     /// 语义与 [`Self::retract`] 同族（rewrite_atomic 重写 + 从存留行重建
     /// summary），只是过滤器从「一行」换成「一个账户」：pre-E28 行
     /// （无 accountId）经 serde default 归入 default 账户，重置 default
-    /// 时一并撤走，与 [`crate::ipc::schema::AccountView`] 的读数口径一致。
+    /// 时一并撤走，与 [`crate::schema::AccountView`] 的读数口径一致。
     /// 返回撤走的行数（自检/回执用）。
     pub fn retract_account(&mut self, account: &str, now_ms: i64) -> usize {
         let Ok(text) = std::fs::read_to_string(&self.jsonl_path) else {

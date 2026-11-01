@@ -1,5 +1,5 @@
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `unified` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -17,29 +17,28 @@ pub(crate) async fn handle_unified(
         method::UNIFIED_LIST => {
             let c = core.lock().await;
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 "events": c.unified_list(),
             }))
         }
         method::UNIFIED_CANDIDATES => {
             let c = core.lock().await;
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 "candidates": c.unified_candidates(),
             }))
         }
         method::UNIFIED_CONFIRM => {
-            let params: crate::ipc::schema::UnifiedConfirmParams =
-                match serde_json::from_value(params) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Err((
-                            Failure::PARSE_ERROR,
-                            format!("invalid unified.confirm params: {e}"),
-                            None,
-                        ));
-                    }
-                };
+            let params: crate::schema::UnifiedConfirmParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err((
+                        Failure::PARSE_ERROR,
+                        format!("invalid unified.confirm params: {e}"),
+                        None,
+                    ));
+                }
+            };
             let title = params.title.trim().to_string();
             let actor = params
                 .actor
@@ -64,7 +63,7 @@ pub(crate) async fn handle_unified(
                 let mut c = core.lock().await;
                 match c.unified_confirm(&title, &actor, params.listings, now_ms()) {
                     Ok(event) => Ok(serde_json::json!({
-                        "version": crate::ipc::schema::PROTOCOL_VERSION,
+                        "version": crate::schema::PROTOCOL_VERSION,
                         "event": {
                             "id": event.id,
                             "title": event.title,
@@ -77,17 +76,16 @@ pub(crate) async fn handle_unified(
             }
         }
         method::UNIFIED_REVOKE => {
-            let params: crate::ipc::schema::UnifiedRevokeParams =
-                match serde_json::from_value(params) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Err((
-                            Failure::PARSE_ERROR,
-                            format!("invalid unified.revoke params: {e}"),
-                            None,
-                        ));
-                    }
-                };
+            let params: crate::schema::UnifiedRevokeParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err((
+                        Failure::PARSE_ERROR,
+                        format!("invalid unified.revoke params: {e}"),
+                        None,
+                    ));
+                }
+            };
             let event_id = params.event_id.trim().to_string();
             let actor = params
                 .actor
@@ -106,7 +104,7 @@ pub(crate) async fn handle_unified(
                 let mut c = core.lock().await;
                 match c.unified_revoke(&event_id, &actor, now_ms()) {
                     Ok(()) => Ok(serde_json::json!({
-                        "version": crate::ipc::schema::PROTOCOL_VERSION,
+                        "version": crate::schema::PROTOCOL_VERSION,
                         "revoked": event_id,
                     })),
                     Err(e) => Err((Failure::APPLICATION, e, None)),

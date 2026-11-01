@@ -23,7 +23,7 @@
 
 use crate::data_source::{DataSource, SourceStats, TimedEvent};
 use crate::engine::DataEvent;
-use crate::ipc::schema::Event;
+use crate::schema::Event;
 use crate::service::{Core, CoreConfig};
 use crate::sim::FillModel;
 use rust_decimal::Decimal;

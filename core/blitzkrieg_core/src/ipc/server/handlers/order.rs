@@ -1,6 +1,6 @@
 use super::super::{SessionState, core_err, effective_default_account, typed};
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `order` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //

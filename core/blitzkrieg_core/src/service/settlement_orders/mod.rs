@@ -5,10 +5,10 @@
 //! close-credential unwind journal, market resolution → redemption/merge
 //! plumbing, the expiry sweeps and the dry settlement ladder.
 
-use crate::ipc::schema::Event;
 use crate::model::*;
 use crate::ome::{FillDelta, FillOutcome, LateFill, SubmitParams};
 use crate::position::OpenParams;
+use crate::schema::Event;
 use crate::settlement::{
     EXPIRY_FALLBACK_AFTER_MS, SETTLEMENT_EXIT_REASON, UNVERIFIED_EXPIRY_EXIT_REASON, booking_for,
     settlement_key,

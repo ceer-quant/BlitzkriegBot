@@ -496,10 +496,10 @@ impl Core {
     pub fn execution_policy_section_view(
         &self,
         account_id: &str,
-    ) -> Option<crate::ipc::schema::ExecutionPolicySectionView> {
+    ) -> Option<crate::schema::ExecutionPolicySectionView> {
         let policy = self.execution_policy.as_ref()?;
         let s = policy.section_for(account_id);
-        Some(crate::ipc::schema::ExecutionPolicySectionView {
+        Some(crate::schema::ExecutionPolicySectionView {
             budget_ratio: Some(s.budget_ratio.to_string()),
             min_budget_usd: Some(s.min_budget_usd.to_string()),
             max_budget_usd: Some(s.max_budget_usd.to_string()),
@@ -576,7 +576,7 @@ impl Core {
         &self,
         account_id: &str,
         limit: usize,
-    ) -> crate::ipc::schema::ExecutionPolicyPreviewResult {
+    ) -> crate::schema::ExecutionPolicyPreviewResult {
         use crate::execution_policy::PolicyOutput;
         let now = now_ms();
         // Closed trades of THIS account, oldest first, capped at `limit` —
@@ -645,7 +645,7 @@ impl Core {
                 }
             };
             let symbol = facts.symbol.clone();
-            rows.push(crate::ipc::schema::ExecutionPolicyPreviewRow {
+            rows.push(crate::schema::ExecutionPolicyPreviewRow {
                 ts_ms: c.exited_at_ms,
                 symbol,
                 balance,
@@ -667,7 +667,7 @@ impl Core {
             // the money-string convention every other field keeps.
             Some((sum / n).to_string())
         };
-        crate::ipc::schema::ExecutionPolicyPreviewResult {
+        crate::schema::ExecutionPolicyPreviewResult {
             considered,
             skipped,
             avg_budget_usd,

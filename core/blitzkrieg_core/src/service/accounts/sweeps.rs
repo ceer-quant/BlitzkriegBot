@@ -1,7 +1,7 @@
 //! Expiry, pair-orphan and force-close sweeps (#780).
 
-use crate::ipc::schema::Event;
 use crate::model::*;
+use crate::schema::Event;
 use rust_decimal::Decimal;
 
 use super::Core;

@@ -1,6 +1,6 @@
 use super::super::{PeerAuth, client_err, core_err};
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `strategy` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -61,7 +61,7 @@ pub(crate) async fn handle_strategy(
                 })
                 .collect();
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 "strategies": strategies,
             }))
         }

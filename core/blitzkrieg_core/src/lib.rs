@@ -83,7 +83,16 @@ pub mod reconcile;
 pub mod regime_eval;
 pub mod risk;
 pub mod risk_context;
+/// #824 cycle-1: the runtime-config persistence helpers (market plugin /
+/// round duration / credentials cells) hoisted to the crate top level — they
+/// are DTO/persistence helpers the service layer shares, not IPC-transport
+/// state.
+pub mod runtime_config;
 pub mod scanner;
+/// #824 cycle-1: the single serde contract between the Rust core and Node,
+/// hoisted to the crate top level so the service layer stops reaching through
+/// the `ipc` transport module for it.
+pub mod schema;
 pub mod service;
 pub mod settlement;
 pub mod shadow;

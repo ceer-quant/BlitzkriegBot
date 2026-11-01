@@ -8,8 +8,8 @@
 use crate::account::AccountId;
 #[cfg(test)]
 use crate::account::AccountStatus;
-use crate::ipc::schema::*;
 use crate::model::{CoreError, CoreErrorCode, Mode};
+use crate::schema::*;
 use crate::service::{Core, CoreConfig};
 use blitzkrieg_market_api::net::now_ms;
 use serde_json::Value;

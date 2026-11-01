@@ -1,5 +1,5 @@
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `se` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -72,7 +72,7 @@ pub(crate) async fn handle_se(
                 .min()
                 .unwrap_or(-1);
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 // Aggregate keys kept unchanged so an existing Node consumer keeps
                 // working; `strategies` carries the per-strategy detail.
                 "status": status,
@@ -116,7 +116,7 @@ pub(crate) async fn handle_se(
                 .await
                 .shadow_evolution_history(strategy.as_deref(), limit);
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 "strategy": strategy,
                 "history": records,
             }))
@@ -173,7 +173,7 @@ pub(crate) async fn handle_se(
             let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
             let proposals = core.lock().await.shadow_evolution_proposals(limit);
             Ok(serde_json::json!({
-                "version": crate::ipc::schema::PROTOCOL_VERSION,
+                "version": crate::schema::PROTOCOL_VERSION,
                 "proposals": proposals,
             }))
         }

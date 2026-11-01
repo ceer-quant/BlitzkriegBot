@@ -43,7 +43,7 @@ const ORDER_LOG = join(WORK, 'orders.jsonl');
 const SOCK = join(WORK, 'core.sock');
 
 // Method name and payload come from the Rust schema
-// (`ipc/schema.rs` method::ORDER_PLACE = "orders.place"; params are a flattened
+// (`schema/mod.rs` method::ORDER_PLACE = "orders.place"; params are a flattened
 // `OrderRequest`). Written out rather than generated because a silently-wrong
 // payload would make every "order accepted" claim below vacuous — the core would
 // reject on shape and this gate would call that a crash-recovery failure.

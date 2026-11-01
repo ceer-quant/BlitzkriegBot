@@ -4,10 +4,10 @@
 //! the shadow-evolution lifecycle, the unified cross-venue mapping ledger's
 //! IPC verbs, the extension registry listing and the trade-summary reports.
 
-use crate::ipc::schema::Event;
 use crate::model::*;
 use crate::ome::Ome;
 use crate::position::PositionManager;
+use crate::schema::Event;
 use crate::shadow_evolution::{EvolutionOutcome, EvolutionStatus, MutableParams, ShadowEvolution};
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
@@ -187,7 +187,7 @@ impl Core {
         reason: &str,
         now_ms: i64,
     ) -> CoreResult<(Vec<String>, Vec<String>)> {
-        use crate::ipc::schema::ACCOUNT_STRATEGIES_SET_NOTE;
+        use crate::schema::ACCOUNT_STRATEGIES_SET_NOTE;
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
@@ -449,8 +449,8 @@ impl Core {
     /// in force. The schema source is the strategy's OWN knob declaration
     /// (manifest tunables for Lua packages) — the kernel invents no domain,
     /// and a strategy that declared nothing reports an empty list.
-    pub fn strategy_params_readout(&self, name: &str) -> crate::ipc::schema::StrategyParamsReadout {
-        use crate::ipc::schema::{StrategyParamsReadout, TunableView};
+    pub fn strategy_params_readout(&self, name: &str) -> crate::schema::StrategyParamsReadout {
+        use crate::schema::{StrategyParamsReadout, TunableView};
         let specs: Vec<_> = self
             .engine
             .as_ref()
@@ -526,9 +526,9 @@ impl Core {
         actor: &str,
         reason: Option<String>,
         now_ms: i64,
-    ) -> Result<crate::ipc::schema::StrategyParamsSetUpdate, crate::model::CoreError> {
-        use crate::ipc::schema::StrategyParamChange;
+    ) -> Result<crate::schema::StrategyParamsSetUpdate, crate::model::CoreError> {
         use crate::model::{CoreError, CoreErrorCode};
+        use crate::schema::StrategyParamChange;
         use crate::shadow_evolution::knobs::StrategyParams as KnobBag;
 
         let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
@@ -671,14 +671,14 @@ impl Core {
             "operator tunables edit",
         );
 
-        Ok(crate::ipc::schema::StrategyParamsSetUpdate {
+        Ok(crate::schema::StrategyParamsSetUpdate {
             name: name.to_string(),
             applied: changes,
             at_ms: now_ms,
             actor: actor.to_string(),
             reason,
             persisted: false,
-            note: crate::ipc::schema::STRATEGY_PARAMS_SET_NOTE,
+            note: crate::schema::STRATEGY_PARAMS_SET_NOTE,
         })
     }
 

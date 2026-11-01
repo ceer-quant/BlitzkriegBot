@@ -529,7 +529,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     }
     // The cell content, read back through the SAME loader a restart
     // would use — the write and the boot read agree by construction.
-    let cell = crate::ipc::runtime_config::load_round_duration_from(
+    let cell = crate::runtime_config::load_round_duration_from(
         std::path::Path::new(&cell_str),
         crate::account::config::TEST_ALLOWED_ROUNDS,
     )
@@ -566,7 +566,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         "an off-whitelist value is refused by name: {bad}"
     );
     assert_eq!(
-        crate::ipc::runtime_config::load_round_duration_from(
+        crate::runtime_config::load_round_duration_from(
             std::path::Path::new(&cell_str),
             crate::account::config::TEST_ALLOWED_ROUNDS,
         )
@@ -610,7 +610,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         "after a reset the next session re-resolves to the effective value: {reset}"
     );
     assert_eq!(
-        crate::ipc::runtime_config::load_round_duration_from(
+        crate::runtime_config::load_round_duration_from(
             std::path::Path::new(&cell_str),
             crate::account::config::TEST_ALLOWED_ROUNDS,
         ),

@@ -1,5 +1,5 @@
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `arb` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -15,17 +15,16 @@ pub(crate) async fn handle_arb(
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
     match method {
         method::ARB_CONFIG_SET => {
-            let params: crate::ipc::schema::ArbConfigSetParams =
-                match serde_json::from_value(params) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Err((
-                            Failure::PARSE_ERROR,
-                            format!("invalid arb.config.set params: {e}"),
-                            None,
-                        ));
-                    }
-                };
+            let params: crate::schema::ArbConfigSetParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err((
+                        Failure::PARSE_ERROR,
+                        format!("invalid arb.config.set params: {e}"),
+                        None,
+                    ));
+                }
+            };
             if params.version != 1 {
                 Err((
                     Failure::APPLICATION,
@@ -53,7 +52,7 @@ pub(crate) async fn handle_arb(
                 let mut c = core.lock().await;
                 match c.arb_config_set_persisting(&cfg, &actor, "arb.config.set", now_ms()) {
                     Ok(()) => Ok(serde_json::json!({
-                        "version": crate::ipc::schema::PROTOCOL_VERSION,
+                        "version": crate::schema::PROTOCOL_VERSION,
                         "configured": true,
                     })),
                     Err(e) => Err((Failure::APPLICATION, e.to_string(), None)),
@@ -64,7 +63,7 @@ pub(crate) async fn handle_arb(
             let c = core.lock().await;
             let payload = match c.arb_leg_config() {
                 Some(cfg) => serde_json::json!({
-                    "version": crate::ipc::schema::PROTOCOL_VERSION,
+                    "version": crate::schema::PROTOCOL_VERSION,
                     "configured": true,
                     "legAVenue": cfg.leg_a_venue,
                     "legAAccount": cfg.leg_a_account,
@@ -73,7 +72,7 @@ pub(crate) async fn handle_arb(
                     "pairs": cfg.pairs,
                 }),
                 None => serde_json::json!({
-                    "version": crate::ipc::schema::PROTOCOL_VERSION,
+                    "version": crate::schema::PROTOCOL_VERSION,
                     "configured": false,
                     "legAVenue": null,
                     "legAAccount": null,

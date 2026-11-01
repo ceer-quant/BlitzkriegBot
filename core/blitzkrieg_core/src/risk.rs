@@ -98,7 +98,7 @@ impl Default for RiskConfig {
 /// The per-entry budget (`sizeUsd` / `sizePct`) is deliberately outside: it is a
 /// target, not a bound, and it decides how much to commit rather than how much
 /// is allowed. Everything not listed here is refused — see
-/// [`hot_reload_refusal`] and [`crate::ipc::schema::SetRiskLimitsParams`].
+/// [`hot_reload_refusal`] and [`crate::schema::SetRiskLimitsParams`].
 pub const HOT_RELOADABLE: &[&str] = &[
     "maxOrderNotional",
     "maxOrderNotionalPct",

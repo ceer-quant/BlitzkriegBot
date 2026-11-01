@@ -1,6 +1,5 @@
 //! Shared fixtures for the risk-gate acceptance tests.
 
-pub use blitzkrieg_core::ipc::schema::Event;
 pub use blitzkrieg_core::model::{
     CoreErrorCode, ExitReason, FillPolicy, Mode, OrderRequest, OrderRole, OrderStatus,
     OrderbookSnapshot, Side, SignalDirection,
@@ -10,6 +9,7 @@ pub use blitzkrieg_core::position::{
     StopSuppressionCause, utc_day_index,
 };
 pub use blitzkrieg_core::risk::RiskConfig;
+pub use blitzkrieg_core::schema::Event;
 pub use blitzkrieg_core::service::{Core, CoreConfig};
 pub use rust_decimal::Decimal;
 pub use rust_decimal_macros::dec;

@@ -16,12 +16,12 @@
 //!    drift is alerted, persisted and blocks NEW entries within one interval
 //!    (30s default), while exits stay possible; healing resumes entries.
 
-use blitzkrieg_core::ipc::schema::Event;
 use blitzkrieg_core::model::{
     CoreErrorCode, Fill, FillPolicy, FillStatus, Mode, OrderRequest, OrderStatus, Side,
 };
 use blitzkrieg_core::ome::APPLIED_CAP;
 use blitzkrieg_core::risk::RiskConfig;
+use blitzkrieg_core::schema::Event;
 use blitzkrieg_core::service::{Core, CoreConfig};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

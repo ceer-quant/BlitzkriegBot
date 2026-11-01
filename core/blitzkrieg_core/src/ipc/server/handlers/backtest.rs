@@ -1,6 +1,6 @@
 use super::super::typed;
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `backtest` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //

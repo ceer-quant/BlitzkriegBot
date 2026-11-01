@@ -42,7 +42,7 @@ const NET_CHECK_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The IPC method names this client speaks, one place instead of bare string
 /// literals scattered through the wrappers. Mirrors the wire constants in the
-/// core's `ipc::schema::method` — the UI Kit deliberately does not link the
+/// core's `schema::method` — the UI Kit deliberately does not link the
 /// core crate (design contract), so the match is textual and exercised by the
 /// snapshot path on every panel poll.
 pub(crate) mod method {
@@ -92,7 +92,7 @@ pub(crate) mod method {
     pub const ACCOUNT_SWITCH: &str = "account.switch";
     /// 显示账户配置化: point the snapshot's displayAccount/displayVenue at
     /// another account (a pure presentation pointer; persisted). Must mirror
-    /// the core's `ipc::schema::method::DISPLAY_ACCOUNT_SET`.
+    /// the core's `schema::method::DISPLAY_ACCOUNT_SET`.
     ///
     // TODO(主会话/webui): the client-side surface ends HERE by design —
     // this round ships the KERNEL + gateway transport only. The panel's

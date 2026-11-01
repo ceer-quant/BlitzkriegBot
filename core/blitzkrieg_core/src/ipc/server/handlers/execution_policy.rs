@@ -1,5 +1,5 @@
 use super::prelude::*;
-use crate::ipc::schema::*;
+use crate::schema::*;
 
 // The `execution_policy` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
 //
@@ -83,9 +83,9 @@ pub(crate) async fn handle_execution_policy(
                                 .unwrap_or(true)
                         })
                         .collect();
-                    let views: Vec<crate::ipc::schema::ExecutionPolicyAuditView> = records
+                    let views: Vec<crate::schema::ExecutionPolicyAuditView> = records
                         .iter()
-                        .map(|r| crate::ipc::schema::ExecutionPolicyAuditView {
+                        .map(|r| crate::schema::ExecutionPolicyAuditView {
                             ts_ms: r.ts_ms,
                             actor: r.actor.clone(),
                             action: r.action.clone(),
