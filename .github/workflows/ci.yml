@@ -162,6 +162,29 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Test (default features — the fresh-clone command)
         run: cargo test --workspace --locked
+      # WorkBuddy retest (6558660155) IMPORTANT: the step above proves the
+      # default build COMPILES; this step proves the eight test-support
+      # targets were compiled out BY DECLARATION, not lost — each target
+      # must still exist and run exactly zero tests here. A deleted file
+      # fails with "no test target named"; a lost `#![cfg(...)]` line fails
+      # with the E0599 the blocker report captured; a target that starts
+      # running tests under default features means the declaration is wrong.
+      # Tooth-verified locally: commenting the cfg line of
+      # contract_freeze_dry_fixture.rs turns this step red (E0599, exit 101).
+      - name: Gated targets compiled out by declaration (8 targets, 0 tests each)
+        run: |
+          for t in contract_freeze_dry_fixture cross_venue_replay_check \
+                   pair_book_check account_decouple_check \
+                   arb_batch_precheck_check accounting_truth \
+                   cross_arb_reverse_check dhat_profile; do
+            out=$(cargo test -p blitzkrieg-core --locked --test "$t" 2>&1) \
+              || { echo "target $t failed to build under default features:"; \
+                   echo "$out"; exit 1; }
+            echo "$out" | grep -q "running 0 tests" \
+              || { echo "target $t is NOT compiled out of the default build:"; \
+                   echo "$out"; exit 1; }
+            echo "declared + compiled out: $t (0 tests)"
+          done
 
   panel-check:
     name: panel-check
