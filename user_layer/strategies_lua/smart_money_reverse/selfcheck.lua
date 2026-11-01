@@ -107,7 +107,7 @@ local function reset()
   state.now = T0
   state.slot = 1
   state.time_left = 900
-  state.params = { spot_missing = "pass" } -- book-only rows; the spot block
+  state.params = { spot_missing = "pass", crash_enabled = "on" } -- book-only rows; the spot block
   -- default has its own dedicated rows below
   state.books = {}
   state.holdings = {}
@@ -263,7 +263,7 @@ end
 -- BTC down 4% over the window vetoes buying the UP leg.
 do
   reset()
-  state.params = {}
+  state.params = { crash_enabled = "on" }
   local closes = {}
   for i = 0, 10 do closes[#closes + 1] = string.format("%.3f", 0.500 - i * 0.002) end
   feed("up-1", 0.50, 900, 0)
@@ -278,7 +278,7 @@ end
 -- calm spot bars let the same shape through.
 do
   reset()
-  state.params = {}
+  state.params = { crash_enabled = "on" }
   local closes = {}
   for i = 0, 10 do closes[#closes + 1] = string.format("%.3f", 0.500 + i * 0.0001) end
   feed("up-1", 0.50, 900, 0)
@@ -291,7 +291,7 @@ end
 -- spot_missing default "block" with NO data: refuse (fail closed).
 do
   reset()
-  state.params = {}
+  state.params = { crash_enabled = "on" }
   arm_crash()
   ok(#evaluate().entries == 0,
     "no spot data and spot_missing=block: no bid (cannot confirm calm)")
@@ -349,7 +349,7 @@ end
 -- on: the ramp fades the OPPOSITE leg at the fixed 0.10 price.
 do
   reset()
-  state.params = { spot_missing = "pass", fomo_enabled = "on" }
+  state.params = { spot_missing = "pass", fomo_enabled = "on", crash_enabled = "on" }
   feed("up-1", 0.60, 900, 0)
   feed("up-1", 0.90, 900, 25000) -- +50% inside 30s, mid ≥ 0.85
   feed("down-1", 0.10, 900, 26000)
@@ -371,7 +371,7 @@ end
 -- a crashed leg wins over a fade bid on the same token: scenario A owns it.
 do
   reset()
-  state.params = { spot_missing = "pass", fomo_enabled = "on" }
+  state.params = { spot_missing = "pass", fomo_enabled = "on", crash_enabled = "on" }
   feed("up-1", 0.60, 900, 0)
   feed("up-1", 0.90, 900, 25000)
   feed("down-1", 0.40, 900, 26000) -- baseline for the down book
@@ -409,13 +409,22 @@ do
   reset()
   state.params = {
     crash_window_sec = "abc", crash_drop_pct = "xyz", settle_quiet_sec = "",
-    spot_missing = "pass",
+    spot_missing = "pass", crash_enabled = "on",
   }
   feed("up-1", 0.50, 900, 0)
   feed("up-1", 0.36, 400, 5000)
   feed("up-1", 0.36, 700, 14000)
   ok(#evaluate().entries == 1,
     "corrupt params fall back to defaults: the same shape still fires")
+end
+
+-- crash_enabled defaults to off: the identical arm shape fires nothing.
+do
+  reset()
+  state.params = { spot_missing = "pass" } -- crash_enabled absent → default off
+  arm_crash()
+  ok(#evaluate().entries == 0,
+    "crash_enabled defaults to off: no arming, no bid")
 end
 
 -- ── verdict ─────────────────────────────────────────────────────────────────

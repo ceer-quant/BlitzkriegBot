@@ -238,7 +238,12 @@ local DEC_001 = { m = 1, s = 2 }
 local function read_config()
   local p = bk.params()
   return {
-    -- scenario A: crash arm + stabilization + entry
+    -- scenario A: crash arm + stabilization + entry. The master switch
+    -- ships OFF: the 57-day corpus sweep (bk-session/smr-round/
+    -- whale-trigger-spec.md) measured this exact shape at ROI −46% to −65%
+    -- on filled resting bids — the stabilization gate selects precisely the
+    -- rounds that stay down.
+    crash_enabled = p.crash_enabled == "on",
     crash_window_sec = int_param(p, "crash_window_sec", 60),
     crash_drop_pct = dec_param(p, "crash_drop_pct", { m = 20, s = 0 }),
     settle_quiet_sec = int_param(p, "settle_quiet_sec", 8),
@@ -349,6 +354,7 @@ end
 --- observed bid_depth ratchets into min_depth — it is the depth baseline
 --- the stabilization gate must beat.
 local function crash_check(cfg, st, now_ms, mid, depth, tok)
+  if not cfg.crash_enabled then return end
   if st.crash then
     if dec_cmp(mid, st.crash.low) < 0 then
       if st.confirmed then

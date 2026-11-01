@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "d35f5a3b97d92d429dcdd8895d7715d400103ad701991c9b8166c0ebdab10e5e",
+  "sha256": "bf8b6f8b424776805e3f40761a2ff5052690c87c68d5521d92352c29550dd485",
   "author": "BlitzkriegBot",
-  "description": "Smart-money-reverse for 15-minute binary rounds: one leg crashes >= 20% inside 60s -> wait out the knife (8s no new low AND bid side thickened to 1.5x the crash period's thinnest depth, floored at 500) -> rest a post-only maker bid at the touch on the CRASHED leg only; while holding, a mid more than 3% under the stabilization-time mid emits one kernel-priced thesis_reversed exit (trailing_exit: true keeps the kernel's own trailing ON). Optional fade-FOMO (default off; the 6meteor whale trace 0.24->0.98 went 9/9 chasing) rests a 0.10 bid on the opposite leg of a ramp. No on-chain whale feed exists in bk.*: the crash/ramp footprint IS the proxy trigger. Signal-only: the kernel adjudicates, sizes, funds-gates and posts every intent post_only.",
+  "description": "Smart-money-reverse for 15-minute binary rounds: one leg crashes >= 20% inside 60s -> wait out the knife (8s no new low AND bid side thickened to 1.5x the crash period's thinnest depth, floored at 500) -> rest a post-only maker bid at the touch on the CRASHED leg only; while holding, a mid more than 3% under the stabilization-time mid emits one kernel-priced thesis_reversed exit (trailing_exit: true keeps the kernel's own trailing ON). Optional fade-FOMO (default off; the 6meteor whale trace 0.24->0.98 went 9/9 chasing) rests a 0.10 bid on the opposite leg of a ramp. No on-chain whale feed exists in bk.*: the crash/ramp footprint IS the proxy trigger. Both scenarios ship OFF (crash_enabled/fomo_enabled): the 57-day corpus sweep measured the stabilize-then-bid shape at negative ROI (post-crash books do not retest) and fading whales at 89.4% settle WR loses — enabling is an operator decision. Signal-only: the kernel adjudicates, sizes, funds-gates and posts every intent post_only.",
   "trailing_exit": true,
   "tunables": {
     "crash_window_sec": {
@@ -71,6 +71,10 @@
     "spot_missing": {
       "type": "string",
       "default": "block"
+    },
+    "crash_enabled": {
+      "type": "string",
+      "default": "off"
     },
     "fomo_enabled": {
       "type": "string",
