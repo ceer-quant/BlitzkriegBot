@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "943ed8fee5f0503c6d305ed02e431e667b90f7ceff444d73468d16d0827bc8f2",
+  "sha256": "fab1aaad4966e4f5319ec7f8d200d1006889bb3dba803cf341f6ddffa8339d4c",
   "author": "BlitzkriegBot",
-  "description": "Official Lua example (E30/issue 336) — v2-corpus census (RETEST-2026-10-10) measured the taker shape at net -$17,575.78 over 20,038 closed trades. After issue 742 (pure-maker entries) the live line's UNMANAGED window (2026-10-24→26) went net +$12.65, all-positive; this package now declares hold-to-settlement — its exits are expiry redemption, not stop ladders.",
+  "description": "Official Lua example (E30/issue 336), narrowed to its one live-positive leg. The unmanaged live window (2026-10-24→26) split the legs: buying the DOWN leg while its own price crashed filled 44 trades at WR 56.8% net +$22.79 (the 0.20-0.35 entry band filled at WR 75%), while chasing the UP leg filled 40 trades at WR 7.5% net -$40.37 (the 17 fills at 0.40+ all lost) — the up leg is deleted and cannot be re-armed by any tunable. Entries are pure maker (issue 742's entry_maker declaration): each entry rests post-only at the falling DOWN leg's best_bid under the never-escalate clock, so the crash itself crosses the resting bid — a fill pays no taker fee (which had eaten 17.8% of the down leg's gross profit), and an unfilled bid is a missed chance, not a loss. Exit doctrine unchanged: holds_to_settlement collection, exits owned by the kernel.",
   "trailing_exit": false,
   "holds_to_settlement": true,
+  "entry_maker": true,
   "tunables": {
     "threshold": {
       "type": "decimal",
