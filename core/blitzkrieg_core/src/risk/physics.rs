@@ -21,13 +21,43 @@
 //!    position (`close_ratio = 1.0`) — the same "close it all at once"
 //!    semantics the kernel has always had.
 
-use crate::arbitration::{LadderStep, PhysicsBinding};
 use crate::exit_policy::{ExitConfig, effective_stop_pct};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+/// Survival binding (Gate 4's product). This RECORDS the exit discipline the
+/// kernel will enforce; it adds no trigger path — firing stays with the
+/// existing exit_policy / position machinery.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicsBinding {
+    /// Hard-stop price, from the existing `effective_stop_pct` at entry time.
+    pub stop_price: rust_decimal::Decimal,
+    /// Forced exit seconds before the round ends (`ExitConfig::force_exit_sec`).
+    pub force_exit_sec: i64,
+    /// Ladder snapshot. With no ladder configured this is the existing exit
+    /// policy's PROJECTION (§4.3): one step, `close_ratio = 1.0` — the same
+    /// "close it all at once" semantics the shipped kernel has.
+    pub ladder: Vec<LadderStep>,
+}
+
+// `Deserialize` exists only so `PositionConfig` (a serde type since the #464
+// net-mark switch) can hold the runtime `exit_ladder` hand-off; the config
+// file's rows remain the single parse surface (main.rs copies them in).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LadderStep {
+    /// Trigger threshold (positive = profit %, negative = loss %).
+    pub at_pct: rust_decimal::Decimal,
+    /// Fraction to close, in [0, 1].
+    pub close_ratio: rust_decimal::Decimal,
+    /// Where the stop moves after this step (`None` = unchanged).
+    pub move_stop_to: Option<rust_decimal::Decimal>,
+}
 
 /// The explicit-ladder config shape (§4.3, opt-in). Identical in meaning to
 /// [`LadderStep`]; kept as a distinct name so the config layer can talk about
-/// file fields without importing arbitration types.
+/// file fields in its own vocabulary.
 pub type LadderSpec = LadderStep;
 
 /// Reject an explicit ladder that cannot be executed as written. Called from
@@ -172,9 +202,9 @@ mod tests {
             },
         ];
         let b = apply_physics(dec!(0.5), 240, &c, &steps);
-        // Field-by-field: `LadderStep` derives no `PartialEq` (E25's
-        // arbitration territory owns that type), so the comparison spells
-        // out the fields it binds instead of asking the type to change.
+        // Field-by-field: `LadderStep` derives no `PartialEq`, so the
+        // comparison spells out the fields it binds instead of asking the
+        // type to change.
         assert_eq!(b.ladder.len(), steps.len());
         for (got, want) in b.ladder.iter().zip(steps.iter()) {
             assert_eq!(got.at_pct, want.at_pct);

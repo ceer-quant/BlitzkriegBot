@@ -20,7 +20,7 @@ mod pipeline;
 pub use audit::{AuditSink, DecisionPush, IntentAuditRecord};
 pub use pipeline::{IntentCtx, Outcome, StrategyIntent, process_intent};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Which gate produced a trace. The audit carries this enum, never an index —
 /// an index is not a stable identity.
@@ -71,35 +71,7 @@ pub enum Modification {
     },
 }
 
-/// Survival binding (Gate 4's product). This RECORDS the exit discipline the
-/// kernel will enforce; it adds no trigger path — firing stays with the
-/// existing exit_policy / position machinery.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhysicsBinding {
-    /// Hard-stop price, from the existing `effective_stop_pct` at entry time.
-    pub stop_price: rust_decimal::Decimal,
-    /// Forced exit seconds before the round ends (`ExitConfig::force_exit_sec`).
-    pub force_exit_sec: i64,
-    /// Ladder snapshot. With no ladder configured this is the existing exit
-    /// policy's PROJECTION (§4.3): one step, `close_ratio = 1.0` — the same
-    /// "close it all at once" semantics the shipped kernel has.
-    pub ladder: Vec<LadderStep>,
-}
-
-// `Deserialize` exists only so `PositionConfig` (a serde type since the #464
-// net-mark switch) can hold the runtime `exit_ladder` hand-off; the config
-// file's rows remain the single parse surface (main.rs copies them in).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LadderStep {
-    /// Trigger threshold (positive = profit %, negative = loss %).
-    pub at_pct: rust_decimal::Decimal,
-    /// Fraction to close, in [0, 1].
-    pub close_ratio: rust_decimal::Decimal,
-    /// Where the stop moves after this step (`None` = unchanged).
-    pub move_stop_to: Option<rust_decimal::Decimal>,
-}
+pub use crate::risk::physics::{LadderStep, PhysicsBinding};
 
 /// The verdict. `Approved`/`Modified` hand the SAME request to the existing
 /// `Core::place()` path; `Rejected` means the intent never reaches OME.
