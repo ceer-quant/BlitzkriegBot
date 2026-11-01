@@ -105,12 +105,19 @@ for (const pkg of packages) {
     }
   }
 
-  // Re-signed OR verified: the manifest must match the entry ON DISK.
-  if (APPLY) continue;
+  // Re-signed OR verified: the manifest must match the entry ON DISK. In
+  // --apply mode a byte-identical block under a stale sha (an entry edit
+  // outside the block) still gets the re-sign — this is the only fixer.
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const actual = createHash('sha256').update(readFileSync(entryPath)).digest('hex');
   if (manifest.sha256 !== actual) {
-    stamp(`${pkg}: manifest sha256 is stale for the entry on disk (loader would refuse it)`);
+    if (APPLY) {
+      manifest.sha256 = actual;
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+      console.log(`${pkg}: re-signed ${actual.slice(0, 12)}`);
+    } else {
+      stamp(`${pkg}: manifest sha256 is stale for the entry on disk (loader would refuse it)`);
+    }
   }
 }
 
