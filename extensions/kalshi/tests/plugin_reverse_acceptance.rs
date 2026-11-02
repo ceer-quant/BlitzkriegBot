@@ -767,6 +767,20 @@ async fn reverse_d_discovery_refeeds_when_the_round_batch_grows() {
 /// host push (no duplicate RoundMarkets every 3s for a settled round).
 #[tokio::test]
 async fn reverse_d2_discovery_does_not_refeed_an_unchanged_batch() {
+    // The loop keys its dedupe on the wall-clock round slot. If the second
+    // poll (3s later) crossed a 900s boundary, re-feeding the same batch is
+    // correct by design and this test would red for a timing reason only
+    // (issue 896). Start just after a boundary so the ~9s window stays in
+    // one slot.
+    let into_slot = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        % 900;
+    if into_slot > 880 {
+        tokio::time::sleep(Duration::from_secs(901 - into_slot)).await;
+    }
+
     // Two identical polls; the batch does not change between them.
     let body = discovery_events_body("KXBTC15M-251020", "BTC", "0.43");
     let base = scripted_server(vec![Some(http_ok(&body)), Some(http_ok(&body))]);
