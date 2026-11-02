@@ -269,8 +269,9 @@ impl OrderResponse {
 /// Ack of `DELETE /v1/order` (live shape 2026-10-25: a batch envelope —
 /// `{"canceled":["1404785"],"not_canceled":{"1404525":"Order not found …"}}`.
 /// A single cancel succeeds when its id lands in `canceled`; `not_canceled`
-/// carries per-id reasons for the ones the venue refused or had already
-/// settled).
+/// carries per-id reasons for the ones the venue had already settled or
+/// otherwise refuses — the seam treats those as idempotent success, since
+/// the order is not resting either way (see `rest::cancel_order`)).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CancelAck {
     #[serde(default)]
@@ -281,8 +282,8 @@ pub struct CancelAck {
 
 impl CancelAck {
     /// The cancelled id when OUR id is inside `canceled`; `None` otherwise —
-    /// the caller turns the remaining case into an UnknownOrder-style error
-    /// with the venue's own reason.
+    /// the caller then falls back to `rejection` (idempotent success) or, for
+    /// an id named in neither set, an ORDER_NOT_FOUND error.
     pub fn cancelled_id(&self, order_id: &str) -> Option<&str> {
         self.canceled
             .iter()
@@ -290,7 +291,9 @@ impl CancelAck {
             .map(|id| id.as_str())
     }
 
-    /// The venue's per-id reason when our id landed in `not_canceled`.
+    /// The venue's per-id reason when our id landed in `not_canceled` — a
+    /// refusal meaning the order is already terminal (or otherwise not
+    /// resting), not a failed cancel.
     pub fn rejection(&self, order_id: &str) -> Option<&str> {
         self.not_canceled.get(order_id).map(|s| s.as_str())
     }

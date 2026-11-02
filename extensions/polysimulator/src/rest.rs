@@ -215,9 +215,15 @@ impl PolySimRest {
             .await
     }
 
-    /// Cancel one order by venue id. The ack is a batch envelope — an id
-    /// absent from `canceled` (with its reason in `not_canceled`) is a failed
-    /// cancel, surfaced as UnknownOrder with the venue's own text.
+    /// Cancel one order by venue id. The ack is a batch envelope. An id in
+    /// `canceled` is a plain success. An id in `not_canceled` was refused
+    /// because it is already gone — cancelled or filled ("Order not found or
+    /// already cancelled/filled"), typically a fill landing in the ~0.5s
+    /// window before our DELETE — which IS the goal state: the order no
+    /// longer rests, so the cancel is idempotent-success like the sibling
+    /// venues (kalshi/predictfun promise it, polymarket ignores the ack).
+    /// Only an id named in neither set (malformed ack) errors as
+    /// ORDER_NOT_FOUND; a genuine HTTP 404 keeps its own mapping.
     pub async fn cancel_order(&self, order_id: &str) -> Result<String, PolySimError> {
         self.require_key()?;
         let body = CancelOneBody {
@@ -232,16 +238,20 @@ impl PolySimRest {
             )
             .await?;
         if ack.cancelled_id(order_id).is_some() {
-            Ok(order_id.to_string())
-        } else {
-            let reason = ack.rejection(order_id).unwrap_or("not in the canceled set");
-            Err(PolySimError::Api {
-                code: "ORDER_NOT_FOUND".into(),
-                message: format!("cancel refused for {order_id}: {reason}"),
-                status: 200,
-                retry_after_ms: None,
-            })
+            return Ok(order_id.to_string());
         }
+        if let Some(reason) = ack.rejection(order_id) {
+            eprintln!(
+                "polysimulator-extension: cancel of {order_id} already terminal at the venue: {reason}"
+            );
+            return Ok(order_id.to_string());
+        }
+        Err(PolySimError::Api {
+            code: "ORDER_NOT_FOUND".into(),
+            message: format!("cancel refused for {order_id}: not in the canceled set"),
+            status: 200,
+            retry_after_ms: None,
+        })
     }
 
     /// Open (PENDING) orders, native envelope. Empty when nothing rests.
