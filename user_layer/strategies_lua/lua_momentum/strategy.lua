@@ -41,6 +41,14 @@
 -- `allow_both_sides` is 1, an entry is refused while the opposite token of
 -- the same condition is already held.
 --
+-- Re-entry is the other leak. Banking a winner and then buying the same
+-- condition again in that round is how a giveback turns into a second
+-- loss. `max_entries_per_round` (default 1) counts position attempts per
+-- (round slot, condition): the first resting bid may be re-quoted every
+-- evaluate until it fills or the round ends, but once that attempt has
+-- exited, a new entry needs another slot. `reentry_cooldown_sec` (default
+-- 0) additionally waits after the exit before a later slot may be used.
+--
 -- Wire rules worth copying into your own strategy:
 --   * prices/sizes cross as exact decimal STRINGS ("0.55"), never floats;
 --   * price entries ONLY off books with `fresh == true` (the host's
@@ -216,6 +224,12 @@ end
 local last_mid = {}       -- token -> last mid seen (string)
 local confirmed = {}      -- token -> true while the DOWN-leg premise holds
 local peak_proceeds = {}  -- token -> best (bid − taker fee) seen while held
+-- (round slot, condition) -> { count, open, last_exit_ms }. `open` means a
+-- resting attempt is still being quoted; `count` is how many attempts this
+-- round has started. Wiped when the round slot changes.
+local attempts = {}
+local attempts_slot = nil
+local prev_held = {}      -- condition_id -> true on the previous evaluate
 
 -- The tunable from manifest.json (`tunables.threshold.default`), overridable
 -- by hot parameters (host config / shadow evolution) via `bk.params()`.
@@ -345,6 +359,88 @@ local function held_index()
     return map
 end
 
+local function attempt_key(slot, condition)
+    return tostring(slot) .. "\0" .. (condition or "")
+end
+
+local function roll_round(slot)
+    if attempts_slot ~= slot then
+        attempts = {}
+        prev_held = {}
+        attempts_slot = slot
+    end
+end
+
+local function attempt_of(slot, condition)
+    local key = attempt_key(slot, condition)
+    local st = attempts[key]
+    if st == nil then
+        st = { count = 0, open = false, last_exit_ms = nil }
+        attempts[key] = st
+    end
+    return st
+end
+
+--- Close the current attempt. Count stays, so a later entry is a new
+--- attempt and has to fit under `max_entries_per_round`. Called when an
+--- exit is emitted and again on the held→flat transition (the cooldown
+--- clock starts at the later of the two — when a re-entry could exist).
+local function note_exit(slot, condition, now_ms)
+    if condition == nil then
+        return
+    end
+    local st = attempt_of(slot, condition)
+    st.open = false
+    if st.count < 1 then
+        st.count = 1
+    end
+    st.last_exit_ms = now_ms
+end
+
+local function condition_of(token)
+    for _, market in ipairs(bk.markets()) do
+        if market.down_token == token or market.up_token == token then
+            return market.condition_id
+        end
+    end
+    return nil
+end
+
+--- A new position attempt is allowed. Re-quoting an attempt that is still
+--- `open` (the unfilled maker bid) does not consume another slot.
+local function may_open_entry(slot, condition, token, held, now_ms)
+    if held[token] ~= nil then
+        return false
+    end
+    local max_n = int_param(bk.params(), "max_entries_per_round", 1)
+    if max_n < 0 then
+        max_n = 1
+    end
+    local cool = int_param(bk.params(), "reentry_cooldown_sec", 0)
+    if cool < 0 then
+        cool = 0
+    end
+    local st = attempt_of(slot, condition)
+    if st.open then
+        return true
+    end
+    if st.count >= max_n then
+        return false
+    end
+    if cool > 0 and st.last_exit_ms ~= nil and now_ms - st.last_exit_ms < cool * 1000 then
+        return false
+    end
+    return true
+end
+
+local function begin_attempt(slot, condition)
+    local st = attempt_of(slot, condition)
+    if not st.open then
+        st.count = st.count + 1
+        st.open = true
+    end
+end
+
 local function forget_unheld(held)
     for tok in pairs(peak_proceeds) do
         if held[tok] == nil then
@@ -432,7 +528,11 @@ end
 function bk_on_round(round)
     -- Per-token momentum state stays: a premise may carry across rounds for
     -- the same token id. Peak proceeds are position state and are dropped
-    -- when the holding disappears (`forget_unheld`), not on the rollover.
+    -- when the holding disappears (`forget_unheld`). The entry budget does
+    -- not carry: a new slot is a new round.
+    if round ~= nil and round.slot ~= nil then
+        roll_round(round.slot)
+    end
 end
 
 -- REQUIRED. Return the intent tables; the kernel adjudicates everything.
@@ -453,10 +553,38 @@ function bk_evaluate()
         return out -- between rounds: nothing to trade
     end
 
+    roll_round(round.slot)
     local held = held_index()
     forget_unheld(held)
+
+    -- Held→flat on the DOWN leg is an exit even when this evaluate did not
+    -- emit one (the sell filled on a previous cycle, or the kernel settled
+    -- the leg). An opposite-leg holding is the both-sides guard's problem,
+    -- not an entry this budget already spent.
+    local held_down = {}
+    for _, market in ipairs(bk.markets()) do
+        if market.condition_id ~= nil and held[market.down_token] ~= nil then
+            held_down[market.condition_id] = true
+            local st = attempt_of(round.slot, market.condition_id)
+            if st.count < 1 then
+                st.count = 1
+            end
+            st.open = false
+        end
+    end
+    local now_ms = bk.now_ms()
+    for cond, _ in pairs(prev_held) do
+        if not held_down[cond] then
+            note_exit(round.slot, cond, now_ms)
+        end
+    end
+    prev_held = held_down
+
     for _, row in pairs(held) do
         consider_exit(out, row, round)
+    end
+    for i = 1, #out.exits do
+        note_exit(round.slot, condition_of(out.exits[i].token), now_ms)
     end
 
     -- Entries stay outside the force-exit window. Exits above do not: a
@@ -481,10 +609,13 @@ function bk_evaluate()
             -- not collecting a pair, so the second side is refused unless
             -- the operator sets allow_both_sides = 1.
             local opposite_held = market.up_token ~= nil and held[market.up_token] ~= nil
-            if allow_both or not opposite_held then
+            if (allow_both or not opposite_held)
+                and may_open_entry(round.slot, market.condition_id, token, held, bk.now_ms())
+            then
                 local book = bk.book(token)
                 -- §6.6: price ONLY off a fresh, two-sided book.
                 if book ~= nil and book.fresh == true and book.best_bid ~= nil then
+                    begin_attempt(round.slot, market.condition_id)
                     out.entries[#out.entries + 1] = {
                         token = token,
                         price = book.best_bid,

@@ -522,6 +522,91 @@ do
     "allow_both_sides = 1 is the only way the opposite leg is offered")
 end
 
+-- ═══ RE-ENTRY ═══════════════════════════════════════════════════════════════
+-- Default max_entries_per_round is 1. The unfilled bid may be re-quoted;
+-- once the attempt has exited, that condition is done for the round.
+
+do
+  reset()
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  ok(#evaluate().entries == 1, "the first quote of the round is the one entry")
+  ok(#evaluate().entries == 1, "re-quoting the unfilled bid does not spend a second entry")
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "take_profit" and #r.entries == 0,
+    "the filled attempt exits and is not re-bought in the same cycle")
+  state.holdings = {}
+  r = evaluate()
+  ok(#r.entries == 0 and #r.exits == 0,
+    "after the exit, default max_entries_per_round 1 blocks a new entry, got "
+      .. #r.entries .. " entries")
+end
+
+-- a later round slot is a new budget.
+do
+  reset()
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  evaluate()
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  evaluate()
+  state.holdings = {}
+  ok(#evaluate().entries == 0, "still blocked in the same slot")
+  state.slot = 2
+  local r = evaluate()
+  ok(#r.entries == 1 and r.entries[1].token == "down-1",
+    "a new round slot may enter again")
+end
+
+-- max_entries_per_round 0 quotes nothing. 2 allows one re-entry.
+do
+  reset()
+  state.params = { max_entries_per_round = "0" }
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  ok(#evaluate().entries == 0, "max_entries_per_round 0 quotes nothing")
+end
+
+do
+  reset()
+  state.params = { max_entries_per_round = "2" }
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  evaluate()
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  evaluate()
+  state.holdings = {}
+  local r = evaluate()
+  ok(#r.entries == 1, "max_entries_per_round 2 allows one re-entry after the exit, got "
+    .. #r.entries)
+end
+
+-- reentry_cooldown_sec waits even when a slot remains. Exactly the cooldown
+-- is enough; one millisecond early is not.
+do
+  reset()
+  state.params = { max_entries_per_round = "2", reentry_cooldown_sec = "60" }
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  evaluate()
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  evaluate()
+  state.holdings = {}
+  local blocked = evaluate()
+  ok(#blocked.entries == 0, "60s cooldown blocks the spare entry slot")
+  state.now = state.now + 59999
+  ok(#evaluate().entries == 0, "one millisecond early is still inside the cooldown")
+  state.now = state.now + 1
+  local r = evaluate()
+  ok(#r.entries == 1, "at the cooldown boundary the second entry is offered, got "
+    .. #r.entries)
+end
+
 -- ── verdict ─────────────────────────────────────────────────────────────────
 if #failures > 0 then
   real_io.stderr:write(string.format("selfcheck FAILED: %d/%d rows\n", #failures, checks))

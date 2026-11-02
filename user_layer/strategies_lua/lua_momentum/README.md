@@ -97,7 +97,7 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 | `bk.params()` | tunables (manifest defaults, hot-param overridable) |
 | `bk.holdings()` | open positions the exit rules and the both-sides guard read |
 | `bk.fees()` | the kernel's taker schedule; a zero/nil schedule falls back to `exit_fee_rate` |
-| `bk.now_ms()` | available but not needed (the host timestamps everything) |
+| `bk.now_ms()` | the re-entry cooldown clock |
 
 ## Tunables
 
@@ -110,6 +110,8 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 | `trail_giveback_pct` | `15` | `0` | `500` | once armed, sell when net PnL has fallen this many percentage points from the peak. `0` disables |
 | `exit_time_left_sec` | `0` | `0` | `900` | sell whatever is held once this many seconds remain, even at a loss. `0` disables (hold to settlement) |
 | `allow_both_sides` | `0` | `0` | `1` | `1` permits an entry while the opposite token of the same condition is held. Default refuses it |
+| `max_entries_per_round` | `1` | `0` | `20` | position attempts per condition in one round. The unfilled bid may be re-quoted; after an exit, a new entry needs another slot. `1` means no re-entry. `0` quotes nothing |
+| `reentry_cooldown_sec` | `0` | `0` | `900` | after an exit, wait this long before a remaining slot may be used. `0` waits nothing |
 | `exit_fee_rate` | `0.07` | `0` | `1` | realistic taker fee per share, `rate * p * (1-p)`, used when `bk.fees()` is nil or zero |
 
 Set `take_profit_pct`, `take_profit_price`, `trail_arm_pct`, `trail_giveback_pct` and `exit_time_left_sec` to `0` to restore the previous hold-to-settlement behaviour.
@@ -120,7 +122,7 @@ The package lives in the default scan root, so a normal kernel boot finds it:
 
 ```sh
 cargo run -p blitzkrieg-core -- --engine --readonly
-# receipt: lua_momentum@0.2.0 (lua) registered into the engine dispatch (disabled)
+# receipt: lua_momentum@0.2.1 (lua) registered into the engine dispatch (disabled)
 ```
 
 Then enable it like any other strategy (`strategy.enable` over IPC, the UI
