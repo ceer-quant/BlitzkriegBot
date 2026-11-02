@@ -1,7 +1,10 @@
 version: 2
 updates:
   - package-ecosystem: "npm"
-    directory: "/"
+    # The only npm project is the webUI app (no root package.json — a "/"
+    # directory makes the Dependabot updater abort every weekly run with
+    # "package.json not found" and log a red job).
+    directory: "/ui/webapp/webui"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
