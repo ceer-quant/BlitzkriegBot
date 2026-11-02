@@ -1,0 +1,30 @@
+# 72-hour dry profile (issues #864, #865, #866, #868).
+#
+# Point the kernel at this file with BK_CONFIG (see production-72h.env) or
+# `--config user_layer/configs/production-72h.toml`. The numbers match
+# `default.toml` on purpose: a normal repo-root boot and this profile enforce
+# the same loss bounds and the same orderbook budget. A test locks that.
+#
+# This file does not set DRY_RUN and does not enable a strategy. Strategy
+# names that may be passed to `--enable-strategy` live in
+# `production-72h.allowlist`, which is empty until
+# `docs/reports/cost-adjusted-edge-72h.md` records a GO. Start with
+# `--no-strategy-state` so a leftover `data/strategy-state.json` cannot turn
+# a losing package back on.
+#
+# `--no-config` is the factory escape hatch (limits off, staleness 8000 ms).
+# Do not use it for a 72-hour run.
+
+[engine]
+max_orderbook_stale_ms = 3500
+
+[risk]
+max_single_loss_usd = "0.50"
+max_daily_drawdown_usd = "5"
+max_position_size = "5"
+max_consecutive_losses = "4"
+cooldown_minutes = "30"
+max_total_position = "6"
+max_total_exposure_usd = "20"
+max_correlation_usd = "12"
+global_kill_switch_loss_usd = "8"

@@ -23,10 +23,11 @@
 #       core/blitzkrieg_core/src/ipc/runtime_config.rs)
 #   user_layer/configs/execution_policy.toml
 #
-# NOTE: user_layer/configs/default.toml is RETIRED (2026-10-28) — it carries no
-# active configuration keys (engine keys moved to BK_* env in #588; exit/risk
-# knobs stay at their compiled defaults unless uncommented in a copy). It is
-# documentation only and is NOT migrated by this script; nothing to move.
+# NOTE: user_layer/configs/default.toml is not operator state and is NOT
+# migrated by this script. Engine factory keys (assets / round_sec /
+# min_round_age_sec / min_time_left_sec) stay absent (#588, issue 499).
+# `[risk]` and `engine.max_orderbook_stale_ms` are active shipped defaults
+# (#864, #866) — they are not copied into .env by this script.
 #     → POLICY_BUDGET_RATIO / POLICY_MIN_BUDGET_USD / POLICY_MAX_BUDGET_USD /
 #       POLICY_MIN_EQUITY_USD / POLICY_MAX_POSITIONS_PER_ASSET, global and
 #       per-account in the kernel's EXACT grammar `POLICY_<TAIL>_<ID>` (the

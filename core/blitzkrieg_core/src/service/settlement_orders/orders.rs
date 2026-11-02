@@ -107,10 +107,11 @@ impl Core {
             self.freeze_book
                 .consecutive_venue_rejects_by_account
                 .remove(o.account_id.as_str());
-            // 冻结自愈：the venue just accepted an order from this account —
-            // the strongest proof of life there is. An AUTO freeze rides
-            // circumstantial evidence (a rejection streak, a failed probe);
-            // positive evidence outranks it. Manual freezes never lift here.
+            // 冻结自愈：the venue just accepted an order from this account.
+            // The streak clear above is immediate. The freeze itself lifts
+            // only after FREEZE_AUTO_LIFT_MIN_MS (#867) — an in-flight close
+            // ack is not evidence the outage is over. Manual freezes never
+            // lift here.
             self.auto_lift_if_venue_healthy(o.account_id.as_str(), "venue accepted order", now_ms);
             self.place_cooldowns.remove(&o.internal_key);
             // A `maker_then_taker` order rests as GTC; the escalation clock

@@ -485,6 +485,14 @@ jobs:
       # run. It needs no archive and no core: pure self-test.
       - name: Capacity book-extractor self-test (#192)
         run: node scripts/archive-book-extract.mjs --self-test
+      # #865 / #868: fee+slippage scan of the frozen windows, and the 72h
+      # dry-run preflight. Neither starts a kernel and neither sets DRY_RUN.
+      - name: 72h cost-adjusted edge and dry-run preflight (#865 #868)
+        run: |
+          node scripts/cost-adjusted-edge.mjs --self-test
+          node scripts/cost-adjusted-edge.mjs --check
+          node scripts/soak-72h-check.mjs --self-test
+          node scripts/soak-72h-check.mjs --preflight
       # RETIRED with the shipped strategies (they drove the deleted cdylibs, so
       # there is nothing left for them to drive): the E2 strategy-scoped gates
       # (strategy-limit / strategy-gate / strategy-evolution), the E4 leg gates
