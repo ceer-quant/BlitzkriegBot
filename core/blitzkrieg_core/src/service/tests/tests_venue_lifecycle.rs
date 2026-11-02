@@ -251,6 +251,79 @@ fn sweep_marked_terminal_orders_are_persisted() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// PolySimulator shape that wiped the Oct 24–28 lua_momentum run (#632/#636):
+/// the order is gone from the venue's OPEN list because it already filled,
+/// and the only evidence is a trade row. The sweep must record that fill in
+/// orders.jsonl. Force-closing it (or leaving the log at LIVE) is how the
+/// run ended with no local order history.
+#[test]
+fn a_fill_absent_from_the_open_list_is_persisted_as_filled() {
+    let dir = std::env::temp_dir().join(format!("bk-recon-filled-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("orders.jsonl");
+    let mut c = Core::new(CoreConfig {
+        order_log_path: Some(log.to_string_lossy().into_owned()),
+        risk: RiskConfig {
+            max_order_notional: dec!(3),
+            ..Default::default()
+        },
+        dry_seed_balance: Decimal::from(10_000),
+        ..Default::default()
+    });
+    let (id, _) = c
+        .place(
+            order(FillPolicy::Maker, dec!(0.40), dec!(5), "k-filled"),
+            0,
+            1,
+        )
+        .unwrap();
+    c.bind_venue(&id, "1410921".to_string(), 2).expect("bind");
+    let snap = crate::reconcile::VenueSnapshot {
+        open_order_ids: vec![],
+        trades: vec![crate::reconcile::VenueTrade {
+            venue_order_id: "1410921".into(),
+            trade_id: "fill:1410921".into(),
+            token_id: "tok".into(),
+            side: Side::Buy,
+            size: dec!(5),
+            price: dec!(0.365),
+            ts_ms: 1_761_500_000_000,
+            tx_hash: None,
+            maker: Some(false),
+        }],
+        now_ms: 3,
+    };
+    let report = c.reconcile(snap).unwrap();
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|a| matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. })),
+        "the trade must book, not be dropped as an unknown fill"
+    );
+    assert!(
+        !report.actions.iter().any(|a| matches!(
+            a,
+            crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
+        )),
+        "a filled order must not be force-closed as a ghost"
+    );
+    let rows: Vec<crate::model::TrackedOrder> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let last = rows
+        .iter()
+        .rev()
+        .find(|o| o.order_id == id)
+        .expect("the fill must reach orders.jsonl in this pass");
+    assert_eq!(last.status, OrderStatus::Filled);
+    assert_eq!(last.filled_size, dec!(5));
+    assert_eq!(last.avg_fill_price, Some(dec!(0.365)));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn risk_and_ledger_reject_oversize_and_kill() {
     let mut c = dry_core(dec!(10));
