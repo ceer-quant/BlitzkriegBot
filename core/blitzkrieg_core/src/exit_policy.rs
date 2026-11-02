@@ -1094,8 +1094,9 @@ pub fn update_exit_state_interval_2x<B: BookScalarView + ?Sized>(
 /// on), and `last_run_ms` is the previous call's own instant, used ONLY to
 /// undo the per-tick counter ratchets the skipped maintenance ticks would
 /// have walked through. Issue #390: the replay maintenance pass runs on the
-/// 50 ms tick grid, and the fast path proves a quiet-tick re-run reproduces
-/// the previous marks exactly — the cheap output-preserving generalisation is
+/// 1 ms tick grid by default, and the fast path proves a quiet-tick re-run
+/// reproduces the previous marks exactly — the cheap output-preserving
+/// generalisation is
 /// to run the pass on its deadlines and compensate the one stateful counter
 /// the interval invalidates. `last_run_ms >= now_ms` (never ran, or the
 /// same-tick legacy spelling) leaves the ladder byte-identical to
@@ -1229,10 +1230,10 @@ pub struct ExitTickInput<'a> {
 const BREAKEVEN_LOCK_TRIGGER_PCT: i64 = 3;
 
 /// Issue #390: the replay maintenance grid the interval-compensated ladder
-/// backfills over. The replay driver steps `tick_ms` (50 ms in every shipped
-/// config and test), so the count of skipped boundaries inside a gap of G ms
-/// is (G-1)/tick_ms; the caller passes its own grid for non-default steps.
-pub const REPLAY_TICK_BOUNDARY_MS: i64 = 50;
+/// backfills over. The replay grid defaults to 1 ms, so the count of skipped
+/// boundaries inside a gap of G ms is (G-1)/tick_ms; the caller still passes
+/// its own grid for non-default steps.
+pub const REPLAY_TICK_BOUNDARY_MS: i64 = 1;
 
 /// Pure exit decision; mutates nothing. Mandatory exits return use_maker=false.
 ///

@@ -384,9 +384,10 @@ fn a_stray_positional_argument_is_refused() {
 /// #441: a WELL-SPELLED flag with a value the kernel cannot parse must refuse
 /// the boot, exactly as #228 refuses an unknown argument. The old arms read
 /// `.and_then(parse.ok()).unwrap_or(default)`, so `--tick-ms banana` started a
-/// core on the compiled 50 ms and `--mode LIVE` started a DRY core — the boot
-/// the operator asked for was never the boot they got. Each case names the
-/// flag family whose silent fallback was the hazard.
+/// core on the compiled default (now 10 ms live / 0 ms replay) and `--mode
+/// LIVE` started a DRY core — the boot the operator asked for was never the
+/// boot they got. Each case names the flag family whose silent fallback was
+/// the hazard.
 #[test]
 fn a_value_the_kernel_cannot_parse_exits_2_without_booting() {
     for (flag, raw, why) in [

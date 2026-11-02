@@ -44,14 +44,15 @@ pub trait Backtester {
 
 /// How to run a replay. Manual `Debug` because `progress` is a closure (its
 /// `Clone` is the `Arc`'s — the callback is shared, not duplicated).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BacktestConfig {
     /// Base core config (strategy knobs: assets, sizing, gates, exit policy,
     /// per-strategy limits). The replay forces the safe subset — see
     /// [`EventBacktester::new`].
     pub core: CoreConfig,
-    /// Virtual-clock step between maintenance cycles. 50 ms matches the live
-    /// server loop, so signals/exits are evaluated at the same cadence.
+    /// 回放虚拟时钟步长，0 表示事件驱动下界（1ms），延迟档因此是网格的真实倍数
+    /// 而不是和网格重合；live 的间隔由 `--tick-ms` 独立控制（默认 10ms）；
+    /// 需要粗网格时显式传参。
     pub tick_ms: i64,
     /// After the last event, keep the clock running this long (ms) so pending
     /// maker escalations and exits fire. 0 = stop at the last event.
@@ -83,18 +84,6 @@ impl std::fmt::Debug for BacktestConfig {
             .field("hot_params", &self.hot_params)
             .field("progress", &self.progress.as_ref().map(|_| "<fn>"))
             .finish()
-    }
-}
-
-impl Default for BacktestConfig {
-    fn default() -> Self {
-        Self {
-            core: CoreConfig::default(),
-            tick_ms: 50,
-            tail_ms: 0,
-            hot_params: Vec::new(),
-            progress: None,
-        }
     }
 }
 
@@ -147,9 +136,23 @@ pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillMod
     })
 }
 
-/// The sweep verdict, from the per-rung net PnLs: all positive → insensitive
-/// to latency; positive at 0 ms but negative at the top rung → latency-bound
-/// edge; negative at 0 ms → the strategy has no edge at all, eliminate it.
+/// The two rungs the sweep verdict reads: 0 ms and the top (real-latency)
+/// rung. Every middle rung — the 50 ms step included — stays in the report
+/// for reference and never decides pass/fail: on the shipped 1 ms replay grid
+/// a 50 ms rung is fifty grid steps, and judging "latency insensitivity" on it
+/// re-introduces the one-step cliff the old 50 ms grid produced.
+pub fn verdict_basis_nets(nets: &[Decimal]) -> Vec<Decimal> {
+    match (nets.first(), nets.last()) {
+        (Some(first), Some(last)) if nets.len() > 1 => vec![*first, *last],
+        _ => nets.to_vec(),
+    }
+}
+
+/// The sweep verdict, from the per-rung net PnLs: first rung and top rung both
+/// positive → insensitive to latency; first rung positive but top rung negative
+/// → latency-bound edge; first rung negative → the strategy has no edge at
+/// all, eliminate it. Callers pass [`verdict_basis_nets`], so the middle rungs
+/// never decide the verdict.
 pub fn latency_verdict(nets: &[Decimal]) -> &'static str {
     let Some(first) = nets.first() else {
         return "no rungs ran";
@@ -158,11 +161,11 @@ pub fn latency_verdict(nets: &[Decimal]) -> &'static str {
         return "no rungs ran";
     };
     if nets.iter().all(|n| *n > Decimal::ZERO) {
-        "all rungs positive → 延迟不敏感（稳）"
+        "首尾档均为正 → 延迟不敏感（稳）"
     } else if *first > Decimal::ZERO && *last < Decimal::ZERO {
-        "positive at 0ms, negative at the top rung → 延迟敏感型"
+        "first rung positive, top rung negative → 延迟敏感型"
     } else if *first <= Decimal::ZERO {
-        "negative at 0ms → 策略本身无正期望，淘汰"
+        "first rung negative → 策略本身无正期望，淘汰"
     } else {
         "mixed → 见表"
     }

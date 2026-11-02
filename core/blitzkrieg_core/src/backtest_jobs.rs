@@ -25,6 +25,7 @@
 
 use crate::backtest::{
     BacktestConfig, Backtester, EventBacktester, latency_verdict, mode_rung_model, mode_rungs,
+    verdict_basis_nets,
 };
 use crate::data_source::open_replay_all;
 use crate::service::CoreConfig;
@@ -377,7 +378,7 @@ impl BacktestJobs {
                  floor is 1 tick"
             ));
         }
-        let tick_ms = p.tick_ms.unwrap_or(50).max(1);
+        let tick_ms = p.tick_ms.unwrap_or(0).max(1);
         let base_tail = p.tail_ms.unwrap_or(0).max(0);
         let rungs = mode_rungs(&mode, verify)?;
         // The dataset root confines which files a backtest may open: the WebUI
@@ -466,11 +467,16 @@ impl BacktestJobs {
                 }
                 let nets: Vec<Decimal> =
                     reports.iter().map(|(_, r)| r.trades.net_pnl_usd).collect();
-                let verdict = latency_verdict(&nets);
+                let verdict = latency_verdict(&verdict_basis_nets(&nets));
+                let basis_ms = json!([
+                    reports.first().map(|(r, _)| *r).unwrap_or(0),
+                    reports.last().map(|(r, _)| *r).unwrap_or(0),
+                ]);
                 Ok(json!({
                     "mode": mode,
                     "archive": archive,
                     "verdict": verdict,
+                    "verdictBasisMs": basis_ms,
                     "ladder": rows,
                     // Rung 0 = the no-latency baseline the ladder is read against.
                     "report": serde_json::to_value(&reports[0].1).unwrap_or(Value::Null),

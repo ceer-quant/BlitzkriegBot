@@ -1,7 +1,7 @@
 //! E14 hot-path benches (criterion) — the per-tick trading loop.
 //!
 //! These measure the exact chain production traffic walks every `tick_ms`
-//! (default 50ms): market data in (`engine_on_data` → books mirror + resting
+//! (default 10ms): market data in (`engine_on_data` → books mirror + resting
 //! maker + strategy books), evaluation out (`engine_evaluate` → fresh-book
 //! snapshots → candidate dispatch → gates), and the periodic `tick()` sweep
 //! (exit checks + escalation) with an open position.
@@ -55,7 +55,7 @@ fn book(mid: Decimal, depth: usize) -> (BookSide, BookSide) {
 
 /// A Core with the spread_arb test strategy registered and ENABLED, a live
 /// round for the four bench tokens, and fresh books — the steady state the
-/// 50ms production tick loop lives in.
+/// 10ms production tick loop lives in.
 fn bench_core() -> Core {
     let cfg = CoreConfig {
         risk: RiskConfig {
@@ -211,7 +211,7 @@ fn bench_book_apply(c: &mut Criterion) {
     g.finish();
 }
 
-/// The evaluate half of the 50ms tick loop: fresh-book closure, strategy
+/// The evaluate half of the 10ms tick loop: fresh-book closure, strategy
 /// candidate dispatch, kernel gates.
 fn bench_evaluate(c: &mut Criterion) {
     let mut g = c.benchmark_group("hot_path.evaluate");

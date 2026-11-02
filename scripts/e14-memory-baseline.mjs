@@ -8,7 +8,8 @@
  *   - 40 tokens, one full L2 snapshot of 20 levels per side per iteration
  *     (`engine.book` — the same choke point the Rust-native feed drives),
  *     rotated across the token set at the loop's ~20 Hz cadence,
- *   - the IPC maintenance loop ticking at the production cadence (50 ms).
+ *   - the IPC maintenance loop ticking at 50 ms — the gate is pinned at this
+ *     cadence so its archived baseline stays comparable.
  *
  * Peak and final RSS are sampled from `ps` every ~250 ms and archived as JSON,
  * so a later E14 run is directly comparable (acceptance: "内存从基线到目标").

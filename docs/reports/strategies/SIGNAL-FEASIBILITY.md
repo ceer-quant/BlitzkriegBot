@@ -96,7 +96,7 @@ engine.rs `on_data`（531+）的分发决定了每个 Lua 回调的货源：
   默认 **8,000ms**，engine.rs:35；CLI 上限 30s）。top 节拍 30–60s+ ⇒ 语料里大量 evaluate 时刻
   `bk.book(tok).fresh == false`，需要 fresh book 的门槛在事件间隙里是关着的。
 - **回放节拍**：tick_ms 默认 50（backtest.rs:93），事件批后必有 evaluate——评估机会不缺，
-  缺的是评估时的数据新鲜度。
+  缺的是评估时的数据新鲜度。（历史口径；当前默认已改为 live 10ms / 回测 0ms）
 
 ---
 

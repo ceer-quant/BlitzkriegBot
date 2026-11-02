@@ -133,7 +133,7 @@ pub const FLAGS: &[FlagSpec] = &[
         "the core is in WRITE mode by default, so an order it decides to place is \
          placed for real once the mode is live",
     ),
-    flag("--tick-ms", "<n>", "Engine tick period in ms (default 50)."),
+    flag("--tick-ms", "<n>", "Engine tick period in ms (default 10)."),
     flag(
         "--seed-balance",
         "<usd>",
@@ -638,7 +638,7 @@ pub const FLAGS: &[FlagSpec] = &[
     flag(
         "--backtest-tick-ms",
         "<n>",
-        "Virtual-clock step between maintenance cycles in a replay (default 50).",
+        "Virtual-clock step between maintenance cycles in a replay (default 0 = event-driven 1 ms floor).",
     ),
     flag(
         "--backtest-tail-ms",

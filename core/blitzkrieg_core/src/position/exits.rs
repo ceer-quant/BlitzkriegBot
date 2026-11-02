@@ -67,7 +67,7 @@ impl PositionManager {
     /// same `current_price` (only the tick-count ratchet state stands
     /// still — unobservable, the fast path never consults the holder
     /// ladder). The Decimal-heavy pass over hundreds of idle positions
-    /// stops running on every 50 ms maintenance tick.
+    /// stops running on every 10 ms maintenance tick.
     pub fn valuate_dirty_tokens(
         &mut self,
         books: &dyn Fn(&str) -> Option<BookView>,

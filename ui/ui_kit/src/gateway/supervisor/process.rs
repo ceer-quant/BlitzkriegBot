@@ -152,7 +152,7 @@ impl SupervisorConfig {
             socket_path,
             mode: if dry { "dry".into() } else { "live".into() },
             seed_balance: "1000".into(),
-            tick_ms: 50,
+            tick_ms: 10,
             max_order_notional: notional,
             assets,
             round_sec: std::env::var("HFT_ROUND_SEC")

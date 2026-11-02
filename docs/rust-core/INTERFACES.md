@@ -223,7 +223,7 @@
 | `backtest.onchain.list` | `{}` | `{ outDir, datasets: [{dataset, eventsPath, manifest}] }` —— 数据集根全量清单（CLI pull 同布局同根），最旧在前；半写 manifest 跳过 |
 | `backtest.run` | `{ archive, mode?, verifyLatencyMs?, slippageTicks?, tickMs?, tailMs?, strategies? }` —— `archive` 必须是 pull 产出的数据集（内核数据集目录下）；`mode` ∈ `mine`（缺省）\|`verify`\|`sweep`（#351 阶梯）；`slippageTicks` 低于 1 拒绝（诚实摩擦下限）；`strategies` 只收**名字**（未知名是作业失败信息，永不 shell） | `{ jobId }` —— 回放用活内核 config 的**快照**驱动独立 replay 实例（交易侧继续跑，无 #199 ledger-dir 争用） |
 | `backtest.status` | `{ id }` | `JobView`（`{jobId, kind, state, phase, detail, progress, startedAtMs, finishedAtMs?, error?}`）+ 完成时附 `result` —— `state` ∈ `running`/`done`/`failed`；pull 的 `phase` ∈ trades/markets/prices/convert/done，回放恒 `replay` |
-| `backtest.result` | `{ id }` | 完整结果文档（pull：`{asset, trades, events, cacheHit, tradesPath, eventsPath, manifestPath}`；回测：含 `archive` 的报告 JSON）；未完成作业报错并提示轮询 status |
+| `backtest.result` | `{ id }` | 完整结果文档（pull：`{asset, trades, events, cacheHit, tradesPath, eventsPath, manifestPath}`；回测：含 `archive` 的报告 JSON）；未完成作业报错并提示轮询 status。sweep verdict 只读首尾档（sweep 下即 0ms 与最高延迟档），50ms 档仅展示 |
 | `backtest.export` | `{ id }` | `{ fileName: "<stem>.report.json", content: <pretty JSON 字符串> }` —— 命名报告文档，浏览器负责保存（WebUI 本身不碰文件系统） |
 
 ### 2.13 蓝图编辑器面 #362/#393（blueprint，2026-10-26 补册）

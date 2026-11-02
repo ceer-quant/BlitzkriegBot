@@ -74,7 +74,7 @@ export class CoreClient {
     this.mode = opts.mode ?? 'dry';
     this.seedBalance = opts.seedBalance ?? 10000;
     this.maxOrderNotional = opts.maxOrderNotional ?? 100;
-    this.tickMs = opts.tickMs ?? 50;
+    this.tickMs = opts.tickMs ?? 10;
     this.autoRestart = opts.autoRestart ?? true;
     this.extraArgs = opts.extraArgs ?? [];
     this.cwd = opts.cwd;

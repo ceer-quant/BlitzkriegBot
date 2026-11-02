@@ -409,8 +409,8 @@ pub struct CoreConfig {
     /// Issue #390 (replay nofast): the maintenance grid the replay drives the
     /// core on (ms). The deadline-scheduled exit ladder backfills its counter
     /// ratchets over this step, so the core must know the schedule the caller
-    /// runs. Default 50 ms — the live server's interval, the backtester's
-    /// default and every shipped replay's step. Only read when
+    /// runs. Default 1 ms — follows the replay default; live never reads this
+    /// field. Only read when
     /// `backtest_fast` is false and an engine drives positions (the nofast
     /// replay shape); every other path ignores it.
     pub tick_schedule_ms: i64,
@@ -1034,7 +1034,7 @@ impl Default for CoreConfig {
             backtest_fast: false,
             // Issue #390: the maintenance grid the exit ladder's deadline
             // schedule backfills over (the replay driver's tick step).
-            tick_schedule_ms: 50,
+            tick_schedule_ms: 1,
             // Issue #390: replay maintenance scheduling off by default — the
             // live kernel stays every-tick on every path.
             replay_scheduling: false,
