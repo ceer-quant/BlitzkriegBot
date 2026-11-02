@@ -7,17 +7,18 @@ once, and hold to settlement.
 ## Mechanism
 
 When a round is past its open (elapsed inside `[entry_elapsed_min_sec,
-entry_elapsed_max_sec]`, default 90-240s of a 300s round) and ONE leg's own
-mid has:
+entry_elapsed_max_sec]`, default 90-240s of a 300s round) and the round's
+FAIR price — the symmetric consensus of BOTH legs, `fair = (up_mid + (1 −
+down_mid)) / 2` over trailing 10s means, never one leg's own mid — has:
 
 1. **Established** — priced at/above `min_entry_price` (0.55) AND moved at
    least `min_established_move` (0.05) off the round-open reference (the
-   leg's own first fresh mid sampled inside the round's opening window —
-   first 2s; a mid-round start leaves the leg unqualified for that round);
+   first fair sample inside the round's opening window — first 2s; a
+   mid-round start leaves the round unqualified);
 2. **Plateaued** — reached that level with a `|move over
    `drift_window_sec`|` (default 60s) of at most `max_drift_60s` (0.10) —
    NOT mid-spike;
-3. **At the running high** — the current mid is the leg's round running
+3. **At the running high** — the current fair is the round's running
    extreme (承接在极值上，不在回撤中接);
 
 …lift that leg's ask once (band `[min_entry_price, max_entry_price]`,
@@ -76,10 +77,16 @@ shape at −$17.6k over 20,038 trades. The anti-chase gate is the wall.
   for the footprint: an established mid-round level is the proxy trigger.
   The strategy cannot see who accumulated and cannot distinguish a whale
   from any other repricing — it prices only what the whole market sees.
-- **The round-open reference is the leg's own first fresh mid sampled inside
-  the round's opening window (first 2s).** A strategy (re)start mid-round
-  never holds a trusted reference and the leg stays unqualified for that
-  whole round — fail-closed, never guessed.
+- **The round-open reference is the first FAIR sample inside the round's
+  opening window (first 2s).** A strategy (re)start mid-round never holds a
+  trusted reference and the round stays unqualified — fail-closed, never
+  guessed.
+- **Zero-fill rounds are counted, not silent.** Every priced market settles
+  into exactly one bucket at round rollover — `no_signal` (fair never
+  established), `gate_blocked` (shape held, a gate refused), `budget_spent`
+  (the round's one opening was already used) — and the counts ride the next
+  entry's `reason`. An operator can tell a quiet market from a blocked or
+  exhausted one without a diagnostics channel.
 - **The drift gate needs a full drift window of ring coverage** (ring =
   drift window + 30s at 250ms buckets). Sparse feeds inside the window
   refuse (fail-closed).
@@ -107,9 +114,9 @@ the edge, not fee arbitrage.
 | `assets` | `BTC` | comma-separated allowlist; empty = all (corpus tested BTC only) |
 | `entry_elapsed_min_sec` | `90` | window floor (whale offsets 41-175s, almach R1 ≥ 90s) |
 | `entry_elapsed_max_sec` | `240` | window ceiling (last 60s left to the harvester) |
-| `min_entry_price` | `0.55` | established-side floor on mid and ask |
+| `min_entry_price` | `0.55` | established-side floor on the fair (and on the ask paid) |
 | `max_entry_price` | `0.88` | band ceiling (≥0.90 is the thin-payoff zone) |
-| `min_established_move` | `0.05` | minimum mid move off the round-open reference |
+| `min_established_move` | `0.05` | minimum fair move off the round-open reference |
 | `max_drift_60s` | `0.10` | THE anti-chase wall: max \|60s move\| into the entry |
 | `drift_window_sec` | `60` | the plateau measurement window |
 
@@ -135,6 +142,10 @@ seal rows on a stub `bk` surface (pure Lua 5.4, no dependencies):
 lua user_layer/strategies_lua/whale_follow/selfcheck.lua
 ```
 
-Exit 0 = all 37 rows hold — including the two audit-repro negatives: two
-conditions qualifying in one round leave exactly ONE opening, and a mid-round
-start (first sample at elapsed 60s) leaves the round shut.
+Exit 0 = all 50 rows hold — including the fair-symmetry counterexamples
+(both legs rising together leaves the fair unmoved; a leg at its own new
+high while the fair pulls back is not at the round high), the two
+audit-repro negatives (two conditions in one round leave exactly ONE
+opening; a mid-round start leaves the round shut), and the three bucket
+rows (a quiet round counts as `no_signal`, a refused one as `gate_blocked`,
+a second qualifying condition as `budget_spent`).

@@ -2,12 +2,29 @@
 -- settlement (§6.5 contract).
 --
 -- One sentence: when a binary round is PAST its open (elapsed inside the
--- entry window) and ONE leg's own mid has established a direction — priced
--- at/above min_entry_price, moved at least min_established_move off the
--- round-open reference, sitting AT its round running high, and reached that
--- level as a PLATEAU (|move over the last drift_window_sec| <=
--- max_drift_60s, NOT a spike) — lift that leg's ask once and hold: the
--- manifest declares holds_to_settlement and no exit is ever emitted.
+-- entry window) and the round's FAIR price — the symmetric consensus of both
+-- legs, `fair = (up_mid + (1 - down_mid)) / 2` over trailing 10s means — has
+-- established a direction (moved at least min_established_move off the
+-- round-open fair), sitting AT its round running high, and reached that level
+-- as a PLATEAU (|move over the last drift_window_sec| <= max_drift_60s, NOT a
+-- spike) — lift the favored leg's ask once and hold: the manifest declares
+-- holds_to_settlement and no exit is ever emitted.
+--
+-- Why FAIR and not the leg's own mid (the 2026-11-01 attribution replay):
+--   The README's EST signal is built on the FAIR path (10s buckets of both
+--   legs' BUY prints: 0.5*mean(Up) + 0.5*(1 - mean(Down))); v1 of this file
+--   used each leg's OWN last mid and took the higher one as the established
+--   leg. Re-judging the kernel's 71 fills on the same 450-round tape by the
+--   README rule splits them cleanly: 33 fills ARE README-EST (net +$37.08,
+--   EV +0.112/share, WR 87.9%) and 38 are NOT (net -$37.09, EV -0.098/share,
+--   WR 68.4%). The binding gate is G4 (at round high): 39 pass / 38 fail, and
+--   the 38 failures carry -$28.50 of the -$0.01 total. A per-leg reference
+--   mistakes "each leg at its own new high" for establishment exactly when
+--   the legs diverge (up rises AND down rises: the books are inconsistent,
+--   fair does not move) — the symmetric fair path refuses that shape by
+--   construction, which is why the README number is reproducible only on it.
+--   Gate funnel on the README path over 450 rounds: 169 rounds pass all five
+--   gates, 281 are blocked (G4 193, G3 54, G1+G3 5, G5 4, G2 3, rest mixed).
 --
 -- Why this shape (the evidence, 2026-11-01):
 --   * The discriminating experiment ran on an UNBIASED 450-round BTC 5m tape
@@ -266,52 +283,111 @@ local function asset_set(csv)
   return (next(set) ~= nil) and set or nil
 end
 
--- ── per-token state (250ms bucket ring) ─────────────────────────────────────
--- tokens[tok] = {
---   samples   = { {ts, p=mid}, ... } oldest first (ring: drift window + 5s)
---   open_ref  = dec|nil  (round-open proxy: the first fresh mid, trusted
---                         only when sampled inside the opening window)
---   open_ts   = ms|nil   (when open_ref was sampled — its qualification)
---   runmax    = dec|nil  (round running high of mid)
---   runmin    = dec|nil  (round running low of mid)
---   at_high   = bool     (latest sample sits at the running high)
---   at_low    = bool     (latest sample sits at the running low)
---   last_ts   = ms of the latest sample
+-- ── the 250ms rings: per-leg mids, per-condition FAIR ───────────────────────
+-- tokens[tok] = { samples = { {ts, p=mid}, ... }, last_ts }   oldest first
+--   The per-leg ring feeds the trailing 10s mean of ONE leg (the fair input).
+--
+-- fairs[condition_id] = {
+--   samples  = { {ts, p=fair}, ... }   fair = (up_mid + (1 - down_mid)) / 2
+--   open_ref = dec|nil  (first fair of the round — the round-open reference,
+--                        trusted only when sampled inside the opening window)
+--   open_ts  = ms|nil   (when open_ref was sampled — its qualification)
+--   runmax   = dec|nil  (round running high of FAIR, not of a leg)
+--   at_high  = bool     (the latest fair sits at that running high)
+--   last_ts  = ms of the latest fair sample
 -- }
+-- verdicts[condition_id] = {fired, denied, budget}  this round's bucket flags
+-- buckets = {no_signal, gate_blocked, budget_spent, fired}  per-round counts
 -- latched[condition_id] = slot   (one attempt per condition per round)
 -- opened[slot] = count           (one opening per round)
 
 local BUCKET_MS = 250
--- The ring must retain the drift window AND enough slack that the "mid at
--- window's edge" sample survives sparse feeds: a print 75s old (60s gate +
+-- The ring must retain the drift window AND enough slack that the sample at
+-- the window's edge survives sparse feeds: a print 75s old (60s gate +
 -- snapshot gap) is a legal drift reference; a ring of drift+30s keeps every
 -- reference the gate can use and stays bounded (360 buckets).
 local RING_PAD_SEC = 30
 
 -- The round-open reference is TRUSTED only when it was sampled inside the
 -- round's opening window (first 2s): later than that it is a mid-round price,
--- and an establishment measured from it is a guess, not evidence — the leg
--- stays unqualified for the whole round (fail-closed). 2s absorbs the
--- kernel's 1s time_left quantization plus the first book tick after the open.
+-- and an establishment measured from it is a guess, not evidence — the
+-- condition stays unqualified for the whole round (fail-closed). 2s absorbs
+-- the kernel's 1s time_left quantization plus the first book tick after the
+-- open.
 local OPEN_REF_QUALIFY_SEC = 2
 
-local tracker = { slot = nil, tokens = {}, latched = {}, opened = {} }
+-- The fair path is the mean of each leg's mids over the LAST 10s (the
+-- README's bucket width), summed on a 1e-6 integer grid: no float ever
+-- enters the signal (lua-decimal-check's rule), and ten 1e-6 samples stay
+-- far inside i64 (a raw micro-mantissa sum of 18-digit parses would not).
+local FAIR_WINDOW_SEC = 10
+local FAIR_SCALE = 6
+local MICRO_ONE = 1000000
+
+local tracker = {
+  slot = nil,
+  tokens = {},   -- [tok]            -> leg ring
+  fairs = {},    -- [condition_id]   -> fair ring + round extremes
+  verdicts = {}, -- [condition_id]   -> this round's bucket flags
+  buckets = { no_signal = 0, gate_blocked = 0, budget_spent = 0, fired = 0 },
+  latched = {},
+  opened = {},
+}
 
 local function token_state(tok)
   local st = tracker.tokens[tok]
   if not st then
-    st = { samples = {}, open_ref = nil, open_ts = nil,
-           runmax = nil, runmin = nil,
-           at_high = false, at_low = false, last_ts = 0 }
+    st = { samples = {}, last_ts = 0 }
     tracker.tokens[tok] = st
   end
   return st
 end
 
+local function fair_state(cid)
+  local st = tracker.fairs[cid]
+  if not st then
+    st = { samples = {}, open_ref = nil, open_ts = nil,
+           runmax = nil, at_high = false, last_ts = 0 }
+    tracker.fairs[cid] = st
+  end
+  return st
+end
+
+local function verdict(cid)
+  local v = tracker.verdicts[cid]
+  if not v then
+    v = { fired = false, denied = false, budget = false }
+    tracker.verdicts[cid] = v
+  end
+  return v
+end
+
+--- Close the book on the departing round: every condition the strategy saw
+--- lands in exactly ONE bucket. Priority: an opening that happened beats a
+--- refusal; a budget refusal (the round's one opening was already spent)
+--- beats a qualification refusal. A condition nobody could qualify is
+--- `no_signal` — the honest reading, not a failure.
+local function settle_round()
+  for _, v in pairs(tracker.verdicts) do
+    if v.fired then
+      tracker.buckets.fired = tracker.buckets.fired + 1
+    elseif v.budget then
+      tracker.buckets.budget_spent = tracker.buckets.budget_spent + 1
+    elseif v.denied then
+      tracker.buckets.gate_blocked = tracker.buckets.gate_blocked + 1
+    else
+      tracker.buckets.no_signal = tracker.buckets.no_signal + 1
+    end
+  end
+end
+
 local function tracker_reset_if_new_round(slot)
   if slot ~= tracker.slot then
+    settle_round()   -- counts land in tracker.buckets (they survive the reset)
     tracker.slot = slot
     tracker.tokens = {}
+    tracker.fairs = {}
+    tracker.verdicts = {}
     tracker.latched = {}
     tracker.opened = {}
   end
@@ -321,23 +397,7 @@ local function ring_sec(cfg)
   return cfg.drift_window_sec + RING_PAD_SEC
 end
 
-local function push_sample(st, ts, mid, cfg)
-  local bucket = ts // BUCKET_MS
-  local n = #st.samples
-  if n > 0 and st.samples[n].ts // BUCKET_MS == bucket then
-    st.samples[n] = { ts = ts, p = mid }
-  else
-    st.samples[n + 1] = { ts = ts, p = mid }
-  end
-  st.last_ts = ts
-  -- The running-extreme flags are computed BEFORE the scalar ratchets move:
-  -- a sample that SETS a new high is the at-the-high sample.
-  st.at_high = (st.runmax == nil) or dec_cmp(mid, st.runmax) >= 0
-  st.at_low = (st.runmin == nil) or dec_cmp(mid, st.runmin) <= 0
-  if st.runmax == nil or dec_cmp(mid, st.runmax) > 0 then st.runmax = mid end
-  if st.runmin == nil or dec_cmp(mid, st.runmin) < 0 then st.runmin = mid end
-  if st.open_ref == nil then st.open_ref = mid; st.open_ts = ts end
-  -- trim the ring
+local function trim_ring(st, ts, cfg)
   local cutoff = ts - ring_sec(cfg) * 1000
   local kept, m = {}, 0
   for i = 1, #st.samples do
@@ -347,6 +407,66 @@ local function push_sample(st, ts, mid, cfg)
     end
   end
   st.samples = kept
+end
+
+--- Append/overwrite the current 250ms bucket on ONE leg's mid ring.
+local function push_mid(st, ts, mid, cfg)
+  local bucket = ts // BUCKET_MS
+  local n = #st.samples
+  if n > 0 and st.samples[n].ts // BUCKET_MS == bucket then
+    st.samples[n] = { ts = ts, p = mid }
+  else
+    st.samples[n + 1] = { ts = ts, p = mid }
+  end
+  st.last_ts = ts
+  trim_ring(st, ts, cfg)
+end
+
+--- Append/overwrite the current 250ms bucket on the FAIR ring and ratchet the
+--- round extremes. at_high is computed BEFORE runmax moves: the sample that
+--- SETS a new high IS the at-the-high sample (ties stay inclusive, the
+--- README's `f >= runmax` spelling).
+local function push_fair(st, ts, fair, cfg)
+  local bucket = ts // BUCKET_MS
+  local n = #st.samples
+  if n > 0 and st.samples[n].ts // BUCKET_MS == bucket then
+    st.samples[n] = { ts = ts, p = fair }
+  else
+    st.samples[n + 1] = { ts = ts, p = fair }
+  end
+  st.last_ts = ts
+  st.at_high = (st.runmax == nil) or dec_cmp(fair, st.runmax) >= 0
+  if st.runmax == nil or dec_cmp(fair, st.runmax) > 0 then st.runmax = fair end
+  if st.open_ref == nil then st.open_ref = fair; st.open_ts = ts end
+  trim_ring(st, ts, cfg)
+end
+
+--- Trailing mean of ONE leg's mids over the last FAIR_WINDOW_SEC, on the
+--- 1e-6 integer grid. nil when the window holds no sample — the caller reads
+--- that as "no priced view" (fail-closed).
+local function mean_micro(st, now_ms)
+  local cutoff = now_ms - FAIR_WINDOW_SEC * 1000
+  local sum, n = 0, 0
+  for i = 1, #st.samples do
+    local s = st.samples[i]
+    if s.ts >= cutoff and s.ts <= now_ms then
+      sum = sum + dec_rescale(s.p, FAIR_SCALE)
+      n = n + 1
+    end
+  end
+  if n == 0 then return nil end
+  return sum // n
+end
+
+--- fair = (up_mean + (1 - down_mean)) / 2 — the README's symmetric price.
+--- Both legs quote the SAME event from opposite sides, so their consensus is
+--- Up's mean averaged with the Down leg's complement. One leg alone has no
+--- fair (fail-closed). Integer micro units throughout: no float.
+local function fair_now(up_st, down_st, now_ms)
+  local mu = mean_micro(up_st, now_ms)
+  local md = mean_micro(down_st, now_ms)
+  if mu == nil or md == nil then return nil end
+  return { m = (mu + (MICRO_ONE - md)) // 2, s = FAIR_SCALE }
 end
 
 --- The mid at/before (now - drift_window_sec), or nil when the ring does not
@@ -372,12 +492,32 @@ end
 
 -- ── entry points (§6.5) ─────────────────────────────────────────────────────
 
+--- (Re)price the FAIR of every market whose legs are currently quoted, at
+--- `ts`: each leg's mids averaged over the trailing 10s, then combined
+--- symmetrically. Called on every book tick (so the fair path is built at
+--- tick granularity and the round-open reference lands inside the first 2s)
+--- and again at each evaluation instant.
+local function observe_fair(ts, cfg)
+  for _, m in ipairs(bk.markets()) do
+    local bu = bk.book(m.up_token)
+    local bd = bk.book(m.down_token)
+    if bu ~= nil and bd ~= nil then
+      local mu = dec_parse(bu.mid)
+      local md = dec_parse(bd.mid)
+      if mu ~= nil and md ~= nil and mu.m > 0 and md.m > 0 then
+        local f = fair_now(token_state(m.up_token), token_state(m.down_token), ts)
+        if f ~= nil then push_fair(fair_state(m.condition_id), ts, f, cfg) end
+      end
+    end
+  end
+end
+
 function bk_on_book(book)
   local cfg = read_config()
   local mid = dec_parse(book.mid)
   if not mid or mid.m <= 0 then return end
-  local st = token_state(book.symbol)
-  push_sample(st, book.ts_ms, mid, cfg)
+  push_mid(token_state(book.symbol), book.ts_ms, mid, cfg)
+  observe_fair(book.ts_ms, cfg)
 end
 
 function bk_on_round(round)
@@ -413,97 +553,103 @@ function bk_evaluate()
   local elapsed = cfg.round_sec - round.time_left_sec
   local in_window = elapsed >= cfg.entry_elapsed_min_sec
     and elapsed <= cfg.entry_elapsed_max_sec
-  -- in_window / schedule_ok are loop-invariant. The per-round opening cap is
-  -- NOT cached here: it is re-judged PER MARKET inside the loop (bk.markets()
-  -- order is the kernel's, not a best-first ranking), so an intent emitted
-  -- earlier in this same evaluation closes the budget for every later market
-  -- — two qualifying conditions in one round may not each fire.
-  local can_enter = in_window and schedule_ok
-
+  -- in_window is loop-invariant. The per-round opening cap is NOT cached
+  -- here: it is re-judged PER MARKET inside the loop (bk.markets() order is
+  -- the kernel's, not a best-first ranking), so an intent emitted earlier in
+  -- this same evaluation closes the budget for every later market — two
+  -- qualifying conditions in one round may not each fire.
   local assets = asset_set(cfg.assets)
+  -- The Down side's level floor is the mirror of the Up floor: fair <= 1 - min.
+  local one_minus_floor = dec_sub({ m = 1, s = 0 }, cfg.min_entry_price)
 
   for _, m in ipairs(bk.markets()) do
     if assets and not assets[m.asset or ""] then
       -- asset filter: the evidence corpus is BTC; others stay silent.
     elseif tracker.latched[m.condition_id] == slot then
       -- One attempt per condition per round; the attempt already happened.
-    elseif can_enter and (tracker.opened[slot] or 0) < 1 then
-      -- The opening cap is re-read HERE, per market: the first intent of this
-      -- loop increments tracker.opened and every later market sees the cap
-      -- closed (one opening per round SLOT, not one per condition).
-      -- Both books must be FRESH with real asks — a stale side is an
-      -- outage, not a signal.
+    elseif in_window then
+      -- Both books must be FRESH with real asks — a stale side is an outage,
+      -- not a signal, and the fair is never priced off one leg.
       local bu = bk.book(m.up_token)
       local bd = bk.book(m.down_token)
-      if bu and bu.fresh == true and bd and bd.fresh == true then
-        local mu = dec_parse(bu.mid)
-        local md = dec_parse(bd.mid)
-        local au = dec_parse(bu.best_ask)
-        local ad = dec_parse(bd.best_ask)
-        if mu ~= nil and md ~= nil and mu.m > 0 and md.m > 0
-          and au ~= nil and ad ~= nil and au.m > 0 and ad.m > 0 then
-          -- The ESTABLISHED leg: its OWN mid prices the direction (>= floor).
-          -- A leg under the floor is not established; if both legs clear it
-          -- (an inconsistent book), the higher mid is the more established.
-          local tok, book, mid, ask
-          local du = dec_cmp(mu, cfg.min_entry_price)
-          local dd = dec_cmp(md, cfg.min_entry_price)
-          if du >= 0 and dd >= 0 then
-            if dec_cmp(mu, md) >= 0 then
-              tok, book, mid, ask = m.up_token, bu, mu, au
-            else
-              tok, book, mid, ask = m.down_token, bd, md, ad
-            end
-          elseif du >= 0 then
-            tok, book, mid, ask = m.up_token, bu, mu, au
-          elseif dd >= 0 then
-            tok, book, mid, ask = m.down_token, bd, md, ad
+      local mu = bu and dec_parse(bu.mid) or nil
+      local md = bd and dec_parse(bd.mid) or nil
+      if bu and bu.fresh == true and bd and bd.fresh == true
+        and mu ~= nil and md ~= nil and mu.m > 0 and md.m > 0 then
+        -- Advance the FAIR path to this evaluation instant (book ticks push
+        -- it too; the 250ms bucket dedupes).
+        local f = fair_now(token_state(m.up_token), token_state(m.down_token),
+                           round.now_ms)
+        if f ~= nil then
+          local fs = fair_state(m.condition_id)
+          push_fair(fs, round.now_ms, f, cfg)
+          -- Every priced market gets a verdict this round, even one whose
+          -- shape never forms: a quiet round must settle as no_signal rather
+          -- than vanish from the buckets (issue #854).
+          local v = verdict(m.condition_id)
+
+          -- The side FAIR favors (README: Up at/above the floor, Down at or
+          -- below 1 - floor) — never a leg's own mid — and the price actually
+          -- paid: THAT leg's ask.
+          local tok, ask
+          if dec_cmp(f, cfg.min_entry_price) >= 0 then
+            tok, ask = m.up_token, dec_parse(bu.best_ask)
+          elseif dec_cmp(f, one_minus_floor) <= 0 then
+            tok, ask = m.down_token, dec_parse(bd.best_ask)
           end
-          if tok ~= nil then
-            local st = tracker.tokens[tok]
-            -- The round-open reference must exist AND belong to the book
-            -- being priced (fail-closed: a mid-round start leaves the leg
-            -- unqualified, never guessed).
-            if st and st.open_ref ~= nil and st.last_ts == book.ts_ms
-              -- gate 0 — reference QUALIFICATION: the reference sample must
-              -- sit inside the round's opening window. elapsed at the
-              -- reference = elapsed now minus its age; past the window the
-              -- reference is a mid-round price, not the round open — the leg
-              -- stays unqualified for this whole round (fail-closed).
-              and elapsed - (round.now_ms - st.open_ts) / 1000
-                <= OPEN_REF_QUALIFY_SEC then
-              -- gate 1 — establishment: |mid - open_ref| >= move
-              local moved = dec_abs(dec_sub(mid, st.open_ref))
-              local established = dec_cmp(moved, cfg.min_established_move) >= 0
-              -- gate 2 — the anti-chase wall: the level was reached as a
-              -- PLATEAU, not a spike (|mid - mid@window_ago| <= cap). No
-              -- window coverage -> no measurement -> no entry.
-              local drift_ok = false
-              local drift_txt = "none"
-              local past = mid_before(st, book.ts_ms, cfg.drift_window_sec)
-              if past ~= nil then
-                local drift = dec_abs(dec_sub(mid, past))
-                drift_txt = dec_fmt(drift)
-                drift_ok = dec_cmp(drift, cfg.max_drift_60s) <= 0
-              end
-              -- gate 3 — at the round running high (承接在极值上)
-              local at_extreme = st.at_high
-              -- gate 4 — the entry band on the price actually paid
-              local in_band = dec_cmp(ask, cfg.min_entry_price) >= 0
-                and dec_cmp(ask, cfg.max_entry_price) <= 0
-              if established and drift_ok and at_extreme and in_band then
-                entries[#entries + 1] = {
-                  token = tok,
-                  price = dec_fmt(ask),
-                  reason = string.format(
-                    "whale_follow: leg established at %s (open ref %s, drift %s over %ds, at round high), ask %s, %ds left",
-                    dec_fmt(mid), dec_fmt(st.open_ref), drift_txt,
-                    cfg.drift_window_sec, dec_fmt(ask), round.time_left_sec
-                  ),
-                }
-                tracker.latched[m.condition_id] = slot
-                tracker.opened[slot] = (tracker.opened[slot] or 0) + 1
-              end
+          -- gate 4 — the entry band on the price actually paid (this is also
+          -- the "a real ask exists" test: an empty side has no ask).
+          local in_band = tok ~= nil and ask ~= nil and ask.m > 0
+            and dec_cmp(ask, cfg.min_entry_price) >= 0
+            and dec_cmp(ask, cfg.max_entry_price) <= 0
+          -- gate 3 — at the FAIR running high (承接在极值上, not on a leg's)
+          local at_extreme = fs.at_high
+          -- gate 2 — the anti-chase wall: the level was reached as a
+          -- PLATEAU, not a spike (|fair - fair@window_ago| <= cap). No
+          -- window coverage -> no measurement -> no entry.
+          local drift_ok, drift_txt = false, "none"
+          local past = mid_before(fs, round.now_ms, cfg.drift_window_sec)
+          if past ~= nil then
+            local drift = dec_abs(dec_sub(f, past))
+            drift_txt = dec_fmt(drift)
+            drift_ok = dec_cmp(drift, cfg.max_drift_60s) <= 0
+          end
+          -- The signal SHAPE: everything measurable without the reference.
+          if at_extreme and drift_ok and in_band then
+            -- gate 0 — reference QUALIFICATION: the reference fair must sit
+            -- inside the round's opening window. Past it the reference is a
+            -- mid-round price, not the round open — the condition stays
+            -- unqualified for this whole round (fail-closed).
+            local ref_ok = fs.open_ts ~= nil
+              and elapsed - (round.now_ms - fs.open_ts) / 1000
+                <= OPEN_REF_QUALIFY_SEC
+            -- gate 1 — establishment: |fair - fair_open| >= move
+            local established = fs.open_ref ~= nil
+              and dec_cmp(dec_abs(dec_sub(f, fs.open_ref)),
+                          cfg.min_established_move) >= 0
+            if not ref_ok or not schedule_ok then
+              v.denied = true    -- 资格门挡: the shape held, a gate refused it
+            elseif not established then
+              -- the move off the open is too small: no signal, not a refusal
+            elseif (tracker.opened[slot] or 0) >= 1 then
+              v.budget = true    -- 预算耗尽: this round's one opening is spent
+            else
+              entries[#entries + 1] = {
+                token = tok,
+                price = dec_fmt(ask),
+                reason = string.format(
+                  "whale_follow: fair %s established (open ref %s, drift %s over %ds, at fair high), ask %s, %ds left | buckets no_signal=%d gate_blocked=%d budget_spent=%d",
+                  dec_fmt(dec_round2(f)),
+                  fs.open_ref ~= nil and dec_fmt(dec_round2(fs.open_ref)) or "none",
+                  drift_txt, cfg.drift_window_sec, dec_fmt(ask),
+                  round.time_left_sec,
+                  tracker.buckets.no_signal, tracker.buckets.gate_blocked,
+                  tracker.buckets.budget_spent
+                ),
+              }
+              v.fired = true
+              tracker.latched[m.condition_id] = slot
+              tracker.opened[slot] = (tracker.opened[slot] or 0) + 1
             end
           end
         end
