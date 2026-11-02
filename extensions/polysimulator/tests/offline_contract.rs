@@ -157,20 +157,37 @@ async fn cancel_order_parses_the_batch_envelope() {
 }
 
 #[tokio::test]
-async fn cancel_order_refusal_maps_to_the_venue_reason() {
+async fn cancel_of_an_already_gone_order_is_idempotent_success() {
+    // Live shape: the venue answers not_canceled when the order was already
+    // cancelled or filled before our DELETE landed (fill/cancel race) — the
+    // order no longer rests, so the cancel's goal is achieved and the seam
+    // returns Ok like the sibling venues' idempotent cancels.
     let url = mock_server(vec![http_ok(
         r#"{"canceled":[],"not_canceled":{"6391":"Order not found or already cancelled/filled"}}"#,
     )]);
     let client = client_with_key(&url);
+    let id = client
+        .cancel_order("6391")
+        .await
+        .expect("already gone = ok");
+    assert_eq!(id, "6391");
+}
+
+#[tokio::test]
+async fn cancel_id_absent_from_both_sets_still_errors() {
+    // An id the ack names in neither set is a malformed answer — keep the
+    // ORDER_NOT_FOUND error so real anomalies stay visible.
+    let url = mock_server(vec![http_ok(r#"{"canceled":[],"not_canceled":{}}"#)]);
+    let client = client_with_key(&url);
     let err = client
         .cancel_order("6391")
         .await
-        .expect_err("id absent from canceled set");
+        .expect_err("id absent from both sets");
     match err {
         PolySimError::Api { code, message, .. } => {
             assert_eq!(code, "ORDER_NOT_FOUND");
             assert!(
-                message.contains("6391") && message.contains("not found"),
+                message.contains("6391") && message.contains("not in the canceled set"),
                 "{message}"
             );
         }
