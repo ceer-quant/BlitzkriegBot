@@ -1,0 +1,9 @@
+# Strategies a 100 USDC live run may enable, one name per line.
+# Blank lines and '#' comments are ignored.
+#
+# A name may be added only after the soak gate records GO for that package
+# (docs/soak-72h.md: PF >= 1.1, max drawdown <= $5, at least 30 closes) AND
+# docs/reports/cost-adjusted-edge-72h.md lists it under allow.
+#
+# 2026-11-02: no package has passed. The list is empty on purpose.
+# Do not add pair_discount_arb or single_leg_pair on the 0.4.1 PF.

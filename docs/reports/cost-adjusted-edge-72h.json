@@ -1,0 +1,108 @@
+{
+  "generatedOn": "2026-11-02",
+  "issue": 865,
+  "staleMs": 3500,
+  "rounds": 80,
+  "discountUnder985": 0,
+  "perWindow": [
+    {
+      "name": "trend-20260919T1000Z",
+      "rounds": 20
+    },
+    {
+      "name": "range-20260919T1600Z",
+      "rounds": 20
+    },
+    {
+      "name": "trend-20260920T2100Z",
+      "rounds": 20
+    },
+    {
+      "name": "range-20260920T2300Z",
+      "rounds": 20
+    }
+  ],
+  "scenarios": {
+    "taker_official_slip1": {
+      "n": 75,
+      "wins": 0,
+      "losses": 75,
+      "netUsd": "-4.22766",
+      "grossProfitUsd": "0",
+      "grossLossUsd": "4.22766",
+      "profitFactor": "0",
+      "maxDrawdownUsd": "4.22766",
+      "optimistic": false,
+      "passesGate": false
+    },
+    "taker_legacy_slip1": {
+      "n": 75,
+      "wins": 0,
+      "losses": 75,
+      "netUsd": "-3.070599",
+      "grossProfitUsd": "0",
+      "grossLossUsd": "3.070599",
+      "profitFactor": "0",
+      "maxDrawdownUsd": "3.070599",
+      "optimistic": false,
+      "passesGate": false
+    },
+    "maker_at_ask": {
+      "n": 80,
+      "wins": 0,
+      "losses": 80,
+      "netUsd": "-0.99",
+      "grossProfitUsd": "0",
+      "grossLossUsd": "0.99",
+      "profitFactor": "0",
+      "maxDrawdownUsd": "0.99",
+      "optimistic": true,
+      "passesGate": false
+    },
+    "maker_quote_minus_1": {
+      "n": 80,
+      "wins": 61,
+      "losses": 0,
+      "netUsd": "0.61",
+      "grossProfitUsd": "0.61",
+      "grossLossUsd": "0",
+      "profitFactor": "inf",
+      "maxDrawdownUsd": "0",
+      "optimistic": true,
+      "passesGate": false
+    }
+  },
+  "decisions": {
+    "pair_discount_arb": {
+      "version": "1.3.0",
+      "decision": "NO-GO",
+      "reason": "v1.3.0 是 entry_maker，报价在 ask 之下。这些窗口没有成交打印，测不到 maker 成交率，也测不到裸腿归零。taker_official_slip1 是一条当前版本根本不走的路径的成本上限。docs/strategy-review-0.4.1.md 的 PF 早于 v1.3。策略自己的折扣测试看的是 ask 之和（再加费）是否低于 0.985；本语料的命中轮数见文末，中位书上并不开火。"
+    },
+    "single_leg_pair": {
+      "version": "1.1.0",
+      "decision": "NO-GO",
+      "reason": "方向性单腿要有结算或 resolution 才能打分。这些窗口既没有 resolution，也没有 spot。0.4.1 的 PF 不是 1.1.0 在这份语料上的重跑。"
+    },
+    "lua_momentum": {
+      "version": "0.1.0",
+      "decision": "NO-GO",
+      "reason": "0.4.1 重测约 -$17.6k，PF 0.433。不重新启用。"
+    },
+    "spread_arb": {
+      "version": "1.0.0",
+      "decision": "NO-GO",
+      "reason": "0.4.1 重测约 -$475，胜率约 10%。不重新启用。"
+    },
+    "mad_dog": {
+      "version": "1.0.0",
+      "decision": "NO-GO",
+      "reason": "带 spot 的样本是负的。这份语料没有 spot。不重新启用。"
+    },
+    "market_maker": {
+      "version": "1.1.0",
+      "decision": "NO-GO",
+      "reason": "没有扣费后为正的样本。不重新启用。"
+    }
+  },
+  "allow": []
+}

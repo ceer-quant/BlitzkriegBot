@@ -1096,7 +1096,9 @@ pub(crate) fn parse_args(
     let stale = pick(
         max_orderbook_stale_ms,
         env.num::<i64>("BK_MAX_ORDERBOOK_STALE_MS"),
-        None,
+        // #866: the config file is a real layer. `--no-config` leaves this
+        // None, so the compiled 8000 ms stays the factory.
+        file.max_orderbook_stale_ms,
         blitzkrieg_core::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
     );
     // Invalid values fail the boot loudly instead of falling back: a silently

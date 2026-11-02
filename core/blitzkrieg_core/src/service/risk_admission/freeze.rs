@@ -137,10 +137,21 @@ impl Core {
     /// only on positive evidence the venue recovered (`trigger` names it).
     /// A manual freeze is never touched — `auto_frozen` is the ledger that
     /// separates kernel circumstantial freezes from operator verdicts.
+    ///
+    /// Every caller — a reconcile sweep and a venue ack — waits out
+    /// `FREEZE_AUTO_LIFT_MIN_MS` (#867). An in-flight close can still be
+    /// acked while the account is frozen (closes are admitted); that ack
+    /// clears the rejection streak in the caller, but it must not reopen
+    /// entries during the outage that froze the account. `saturating_sub`
+    /// treats a clock step backwards as "not yet", so a 72-hour run does
+    /// not wrap into an instant lift.
     pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
         let Some(frozen_at) = self.freeze_book.auto_frozen.get(account).copied() else {
             return;
         };
+        if now_ms.saturating_sub(frozen_at) < crate::service::FREEZE_AUTO_LIFT_MIN_MS {
+            return;
+        }
         self.resume_account(account);
         self.freeze_book.auto_frozen.remove(account);
         let minutes = (now_ms - frozen_at).max(0) / 60_000;
