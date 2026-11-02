@@ -28,6 +28,9 @@ mod admission;
 mod exits;
 mod freeze;
 
+#[cfg(test)]
+pub(crate) use exits::strategy_signal_sell_bid;
+
 // #834 cycle 1: the freeze/circuit-breaker state book lives beside its only
 // manager; `service.rs` re-exports it for the struct field and the
 // integration tree's handle.

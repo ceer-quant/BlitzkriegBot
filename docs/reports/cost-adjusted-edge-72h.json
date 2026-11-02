@@ -84,7 +84,7 @@
       "reason": "方向性单腿要有结算或 resolution 才能打分。这些窗口既没有 resolution，也没有 spot。0.4.1 的 PF 不是 1.1.0 在这份语料上的重跑。"
     },
     "lua_momentum": {
-      "version": "0.1.0",
+      "version": "0.2.1",
       "decision": "NO-GO",
       "reason": "0.4.1 重测约 -$17.6k，PF 0.433。不重新启用。"
     },
