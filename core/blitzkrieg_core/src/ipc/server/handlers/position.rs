@@ -1,4 +1,4 @@
-use super::super::{PeerAuth, core_err, typed};
+use super::super::{PeerAuth, typed};
 use super::prelude::*;
 use crate::schema::*;
 
@@ -21,19 +21,22 @@ pub(crate) async fn handle_position(
             Ok(serde_json::json!({ "positions": views }))
         }
         method::POSITION_EXIT => {
-            let p: PositionExitParams = serde_json::from_value(params.clone())
-                .unwrap_or(PositionExitParams { position_id: None });
-            match core
-                .lock()
-                .await
-                .flatten(p.position_id.as_deref(), now_ms())
-            {
-                Ok(n) => {
-                    Ok(serde_json::to_value(PositionExitResult { closed: n })
-                        .unwrap_or(Value::Null))
+            typed(params, |p: PositionExitParams| {
+                let core = core.clone();
+                async move {
+                    // `"all"` is the documented explicit spelling for the
+                    // whole book; an omitted `positionId` keeps its historical
+                    // meaning. A param set that does not deserialize is a
+                    // client error — it must never decay into "flatten all"
+                    // (issue 894).
+                    let target = p.position_id.as_deref().filter(|id| *id != "all");
+                    let closed = core.lock().await.flatten(target, now_ms())?;
+                    Ok::<_, CoreError>(
+                        serde_json::to_value(PositionExitResult { closed }).unwrap_or(Value::Null),
+                    )
                 }
-                Err(e) => Err(core_err(e)),
-            }
+            })
+            .await
         }
         method::POSITION_FORCE_CLOSE => {
             typed(params, |p: PositionForceCloseParams| {
