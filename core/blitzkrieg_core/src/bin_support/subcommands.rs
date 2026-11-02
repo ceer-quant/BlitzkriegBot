@@ -149,7 +149,8 @@ fn backtest_once(
     );
     eprintln!("blitzkrieg-core: {}", bt.describe());
     eprintln!(
-        "blitzkrieg-core: replay is always dry (tick {tick_ms} ms, tail {tail_ms} ms, seed ${})",
+        "blitzkrieg-core: replay is always dry (tick {} ms, tail {tail_ms} ms, seed ${})",
+        tick_ms.max(1),
         core_cfg.dry_seed_balance
     );
     match bt.run() {
@@ -280,8 +281,12 @@ pub(crate) fn run_mode_backtest(
     }
     println!();
     let nets: Vec<Decimal> = rows.iter().map(|(_, r)| r.trades.net_pnl_usd).collect();
-    let verdict = blitzkrieg_core::backtest::latency_verdict(&nets);
-    println!("verdict: {verdict}");
+    let verdict = blitzkrieg_core::backtest::latency_verdict(
+        &blitzkrieg_core::backtest::verdict_basis_nets(&nets),
+    );
+    let first = rows.first().map(|(r, _)| *r).unwrap_or(0);
+    let last = rows.last().map(|(r, _)| *r).unwrap_or(0);
+    println!("verdict (basis {first}/{last} ms): {verdict}");
 }
 
 /// Offline walk-forward over a shadow JSONL file, using the SAME exit policy the

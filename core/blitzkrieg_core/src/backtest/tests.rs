@@ -565,7 +565,7 @@ fn dense_stream_keeps_live_evaluation_cadence() {
 
     let r = bt(base_core(None), Box::new(VecSource::new(evs)), 0);
 
-    // 2 000 ms of stream at the live 50 ms cadence = 40 maintenance cycles,
+    // 2 000 ms of stream at this fixture's 50 ms replay cadence = 40 maintenance cycles,
     // regardless of the 2 002 events that arrived in between.
     assert_eq!(r.feed["evaluations"], 40, "\n{}", r.render());
     assert_eq!(
@@ -797,4 +797,14 @@ fn a_negative_entry_timeout_never_escalates_in_a_replay() {
     assert_eq!(r.fills, 0, "no taker leg ever fires");
     assert_eq!(r.trades.closed, 0);
     assert_eq!(r.open_positions, 0);
+}
+
+#[test]
+fn the_verdict_basis_keeps_only_zero_and_the_top_rung() {
+    let nets = vec![dec!(10), dec!(-5), dec!(1)];
+    assert_eq!(verdict_basis_nets(&nets), vec![dec!(10), dec!(1)]);
+    assert_eq!(
+        latency_verdict(&verdict_basis_nets(&nets)),
+        "首尾档均为正 → 延迟不敏感（稳）"
+    );
 }

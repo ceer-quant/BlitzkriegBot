@@ -55,7 +55,7 @@ FLAGS (for blitzkrieg / blitzkrieg run / core):
   --mode <dry|live>     Trading mode (default: dry)
   --readonly            Disable order egress structurally (local settlement only)
   --assets <list>       Comma-separated asset list (default: BTC,ETH,SOL,XRP)
-  --tick-ms <N>         Engine tick interval in ms (default: 50)
+  --tick-ms <N>         Engine tick interval in ms (default: 10)
   --seed-balance <N>    Initial seed balance (default: 1000)
   --max-order-notional <N> Maximum notional per order
   --round-sec <N>       Round duration in seconds (default 900; beats HFT_ROUND_SEC)

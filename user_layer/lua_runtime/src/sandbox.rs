@@ -462,8 +462,10 @@ mod tests {
 
     /// P3 (§16.5): per-callback latency under the sandbox quotas is MEASURED
     /// via `--nocapture`, and the realistic-callback p99 carries the only NEW
-    /// perf threshold 0.3 adds: **≤ 5 ms** (10× headroom against the 50 ms
-    /// engine tick). Two shapes are timed in the steady state:
+    /// perf threshold 0.3 adds: **≤ 5 ms** — 2× headroom against the live 10 ms
+    /// engine tick; the 50 ms is the test's absolute cap, not a tick multiple;
+    /// whether to lower the instruction budget is a separate decision. Two
+    /// shapes are timed in the steady state:
     /// a real-work evaluate (table building + arithmetic — what a legitimate
     /// strategy does every round), and the WORST legal callback — a tight
     /// loop that burns just under the full 1e6-instruction budget before the
@@ -522,8 +524,8 @@ mod tests {
 
         // The worst LEGAL callback: ~95k loop iterations ≈ just under the
         // 1e6-instruction budget. It must RETURN (not poison) and cost less
-        // than one engine tick even in a debug build — that bound is what
-        // keeps a budget-burning strategy from stalling the 50 ms loop.
+        // than the test's 50 ms absolute cap even in a debug build — that bound
+        // keeps a budget-burning strategy from stalling the live 10 ms loop.
         let burn = sandbox();
         burn.load(
             "function bk_burn() local i = 0 while i < 95000 do i = i + 1 end return i end",
@@ -549,8 +551,8 @@ mod tests {
         );
         assert!(
             burn_us[burn_us.len() - 1] <= 50_000,
-            "a budget-bounded callback must cost less than one 50ms engine tick, \
-             got max {}us",
+            "a budget-bounded callback must cost less than the test's 50ms absolute cap \
+             (not a tick multiple), got max {}us",
             burn_us[burn_us.len() - 1]
         );
     }

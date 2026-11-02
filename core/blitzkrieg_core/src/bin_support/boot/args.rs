@@ -22,7 +22,7 @@ pub(crate) fn parse_args(
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
     let mut readonly = false;
-    let mut tick_ms = 50u64;
+    let mut tick_ms = 10u64;
     let mut seed_balance = Decimal::from(10_000);
     let mut max_order_notional = Decimal::from(100);
     let mut max_open_notional = Decimal::ZERO;
@@ -113,7 +113,7 @@ pub(crate) fn parse_args(
     let mut entry_maker_timeout_ms: i64 = 5000;
     let mut backtest: Option<String> = None;
     let mut backtest_report: Option<String> = None;
-    let mut backtest_tick_ms: i64 = 50;
+    let mut backtest_tick_ms: i64 = 0;
     let mut backtest_tail_ms: i64 = 0;
     let mut backtest_knobs: Vec<(String, String, Decimal)> = Vec::new();
     // #351: the replay mode — `mine` (zero latency, friction as configured),

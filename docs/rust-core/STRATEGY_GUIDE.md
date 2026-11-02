@@ -631,8 +631,9 @@ target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   剩余量按 `PartiallyFilled` 继续挂着、可撤可等。第四个旋钮 `--maker-depth-share-bps`（0–10000，
   默认 10000 = 恒等）再按订单 id 的确定性哈希把上限缩到该深度的一个比例，用来复现「排队只吃到一部分」。
   同一输入必然得到同一成交量（无 RNG、无时钟、无线程调度参与）。
-- **评估节拍**：回放的 `tick + engine_evaluate` 跑在自己的 `--backtest-tick-ms` 定时表上（默认 50 ms，
-  与 live 的 `ipc::server` interval 同频），**与事件密度无关**——出场（TP/SL/追踪/强平）因此与 live 同等灵敏。
+- **评估节拍**：live 10ms / 回放 0ms（1ms 下界）：回放的 `tick + engine_evaluate` 跑在自己的
+  `--backtest-tick-ms` 定时表上，**与事件密度无关**——出场（TP/SL/追踪/强平）因此不粗于 live
+  （回放默认 1ms 下界，live 默认 10ms）。
   真实 feed 是亚毫秒级突发：若把维护周期挂到"到下一事件的间隙"上，13 分钟只会跑 803 个周期（应 15 610），
   回测出场会比 live 迟钝。该缺陷已修复（`MIGRATION_LOG §35`），并有回归测试钉住两种密度下的周期数。
 - 一致性验收：`node scripts/backtest-check.mjs` 已随被删策略退役（它回放的就是那些 cdylib）。

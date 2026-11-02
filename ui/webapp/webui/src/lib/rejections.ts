@@ -21,10 +21,10 @@
  * `place()` that can be doing the refusing.
  *
  * One further trap, worth knowing before reading a bare count: `ordersRejected` is
- * counted per `place()` attempt, and the tick loop re-evaluates ~20x/second. A
+ * counted per `place()` attempt, and the tick loop re-evaluates ~100x/second. A
  * refused candidate is not recorded as pending, so it is re-proposed next tick and
  * refused again — one signal stuck behind a persistent refusal (an open position in
- * the same asset, a full position book, a tripped breaker) accrues roughly 20
+ * the same asset, a full position book, a tripped breaker) accrues roughly 100
  * counts per second for as long as the condition holds. The count is therefore a
  * refusal *rate over time*, not a number of distinct signals.
  */
@@ -121,5 +121,5 @@ export const REFUSAL_NOTE =
   '两类拒绝互不包含，不能相加。①「下单被拒」发生在下单函数内部：风控门、熔断器、持仓上限、已持有同标的、各类冷却、资金预留、重复单——它们只计入这一项。'
   + '②「时机 / 动量 / 限额」发生在信号变成订单之前，被它们挡下的信号从未进入下单函数，因此是各自独立的计数。'
   + '所以拒单数既不等于、也不包含那三项之和。'
-  + '另外拒单是按每 50ms 的评估周期累计的：被拒的候选不会记为挂单中，下一周期会再次尝试并再次被拒，'
-  + '因此一个持续被拒的信号每秒约累加 20 次——这个数字是拒绝率随时间的累积，不是不同信号的笔数。'
+  + '另外拒单是按每 10ms 的评估周期累计的：被拒的候选不会记为挂单中，下一周期会再次尝试并再次被拒，'
+  + '因此一个持续被拒的信号每秒约累加 100 次——这个数字是拒绝率随时间的累积，不是不同信号的笔数。'

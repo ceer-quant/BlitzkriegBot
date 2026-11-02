@@ -5,7 +5,7 @@
 //! the environment inside the process (never supplied by Node).
 //!
 //! Usage:
-//!   blitzkrieg-core --socket <path> [--mode dry|live] [--tick-ms 50]
+//!   blitzkrieg-core --socket <path> [--mode dry|live] [--tick-ms 10]
 //!                   [--readonly]
 //!                   [--seed-balance 10000] [--max-order-notional 100]
 //!                   [--min-shares 10] [--max-shares 10]
@@ -85,7 +85,7 @@
 //!
 //! Backtest (offline; forces dry mode, starts no feeds and writes no logs):
 //!   blitzkrieg-core --backtest <archive.jsonl> [--backtest-report <path>]
-//!                   [--backtest-tick-ms 50] [--backtest-tail-ms 0] [model flags]
+//!                   [--backtest-tick-ms 0] [--backtest-tail-ms 0] [model flags]
 //!                   [--backtest-knob <strategy>:<knob>=<value>]...
 //!                   [--fee-model <legacy_quadratic|official>] [strategy knobs:
 //!                    --trend-confirm-sec --spread-arb-entry-factor

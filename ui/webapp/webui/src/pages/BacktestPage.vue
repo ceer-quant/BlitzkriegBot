@@ -599,7 +599,7 @@ onMounted(() => {
           v-if="lastResult && lastResult.ladder.length > 1"
           tone="info"
           :title="lastResult.verdict"
-          hint="阶梯每一档都是完整重放：延迟越高利润越薄是正常物理，关键是哪一档转负。"
+          hint="阶梯每一档都是完整重放：延迟越高利润越薄是正常物理，关键是哪一档转负；判定只读首尾档（sweep 下即 0ms 与最高延迟档），50ms 档仅供参考。"
         />
 
         <div v-if="lastResult && lastResult.ladder.length" class="mt-3 overflow-x-auto">

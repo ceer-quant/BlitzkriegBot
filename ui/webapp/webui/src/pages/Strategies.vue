@@ -753,9 +753,9 @@ onMounted(() => {
                           evaluation cycle, and a refused candidate is retried each cycle.
                         -->
                         <p v-if="profile(r).causes.length" class="mt-2.5 text-[11px] leading-snug text-faint-fg">
-                          计数口径：被拒的候选不会记为「挂单中」，引擎每个评估周期（约 50ms，即每秒约 20 次）会重新提出同一信号并再次被拒，
+                          计数口径：被拒的候选不会记为「挂单中」，引擎每个评估周期（约 10ms，即每秒约 100 次）会重新提出同一信号并再次被拒，
                           因此上述数字是<span class="text-muted-fg">拒绝次数随时间的累积</span>，不是不同信号的笔数。
-                          一个持续被挡的信号（例如同标的有持仓、持仓已满、熔断未解除）每小时可累积约 7 万次。
+                          一个持续被挡的信号（例如同标的有持仓、持仓已满、熔断未解除）每小时可累积约 36 万次。
                         </p>
                       </div>
                       <!-- tunables 编辑卡（issue 481 G3）：策略自己声明的域，

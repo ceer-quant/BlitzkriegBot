@@ -271,7 +271,7 @@ fn snapshot_the_default_boot_is_pinned() {
 socket=blitzkrieg-core (suffix)\n\
 mode=Dry\n\
 readonly=false\n\
-tick_ms=50\n\
+tick_ms=10\n\
 seed_balance=10000\n\
 max_order_notional=100\n\
 max_open_notional=0\n\
@@ -361,7 +361,7 @@ ntp_interval_secs=300\n\
 ntp_echo[0]=environment probes: NTP clock-offset probe ON — every 300 s against pool.ntp.org (default/default); |offset| >= 50 ms warns, >= 100 ms flags probe.ntp.skewRed\n\
 backtest=None\n\
 backtest_report=None\n\
-backtest_tick_ms=50\n\
+backtest_tick_ms=0\n\
 backtest_tail_ms=0\n\
 backtest_mode=\"\"\n\
 verify_latency_ms=286\n\

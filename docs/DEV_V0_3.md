@@ -1803,7 +1803,7 @@ node scripts/cycle-check.mjs
 |:---|:---|:---|
 | P1 | 经济结论不变 | `exit-economics-check` 在有/无审计两种情形下均通过**既有** `BASELINE`；**不重录 BASELINE** |
 | P2 | 裁决开销 | `process_intent` 的 p50/p99 实测写入 `docs/perf/V0_3.md`；判据是「P1 通过」而非人为阈值 |
-| P3 | Lua 回调 | 1e6 指令预算下的 p99 单次回调耗时记录；**新增阈值：≤ 5ms**（相对 50ms tick 留 10x 余量）。超出 → 下调指令预算并把实测写入文档 |
+| P3 | Lua 回调 | 1e6 指令预算下的 p99 单次回调耗时记录；**新增阈值：≤ 5ms**（相对 50ms tick 留 10x 余量）。超出 → 下调指令预算并把实测写入文档（2026-11-02：live tick 默认改为 10ms，余量由 10× 变 2×；5ms 上限本次不动，另议） |
 | P4 | K 线聚合 | 10k 成交的聚合吞吐与内存上界（`symbols × intervals × sizeof(Kline)`）记录；不设新阈值 |
 | P5 | 二进制体积 | `binary-size-check.mjs --verbose` 绿（既有 50MB 目标），并记录 mlua vendored 带来的增量 |
 | P6 | 常驻内存 | 既有 `e14-memory-baseline.mjs` 门禁绿（阈值不动）；记录 K 线 + 账户账本带来的增量 |
