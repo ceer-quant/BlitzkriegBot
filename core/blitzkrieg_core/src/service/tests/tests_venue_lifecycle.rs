@@ -271,7 +271,11 @@ fn a_fill_absent_from_the_open_list_is_persisted_as_filled() {
         ..Default::default()
     });
     let (id, _) = c
-        .place(order(FillPolicy::Maker, dec!(0.40), dec!(5), "k-filled"), 0, 1)
+        .place(
+            order(FillPolicy::Maker, dec!(0.40), dec!(5), "k-filled"),
+            0,
+            1,
+        )
         .unwrap();
     c.bind_venue(&id, "1410921".to_string(), 2).expect("bind");
     let snap = crate::reconcile::VenueSnapshot {
@@ -298,13 +302,10 @@ fn a_fill_absent_from_the_open_list_is_persisted_as_filled() {
         "the trade must book, not be dropped as an unknown fill"
     );
     assert!(
-        !report
-            .actions
-            .iter()
-            .any(|a| matches!(
-                a,
-                crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
-            )),
+        !report.actions.iter().any(|a| matches!(
+            a,
+            crate::reconcile::ReconcileAction::MarkedForceClosed { .. }
+        )),
         "a filled order must not be force-closed as a ghost"
     );
     let rows: Vec<crate::model::TrackedOrder> = std::fs::read_to_string(&log)
