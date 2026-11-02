@@ -30,6 +30,14 @@
  *   node scripts/cost-adjusted-edge.mjs --self-test
  *   node scripts/cost-adjusted-edge.mjs --write
  *   node scripts/cost-adjusted-edge.mjs --check
+ *   node scripts/cost-adjusted-edge.mjs --dig [--top N]
+ *
+ * --dig (issue 889, 挖掘档): prints the candidate pool as JSON. Each pricing
+ * mode is one arm; the pool is sorted by EV (net per round) descending and
+ * carries per-arm n / EV / PF / CI. This is mining semantics: a pool to dig
+ * through, with NO GO/NO-GO verdicts — verdicts stay with the adoption gate
+ * (--check) alone, per the 2026-11-02 ruling (挖掘宽、采用严). The pool reads
+ * the same frozen corpus; `top` defaults to all arms.
  */
 import { readFileSync, writeFileSync, rmSync, createReadStream } from 'fs';
 import { createInterface } from 'readline';
@@ -46,11 +54,19 @@ const TICK = 10_000n; // 0.01
 const MAX_PX = 990_000n; // 0.99
 const MIN_PX = 10_000n; // 0.01
 const ONE = MICRO;
+const DIG_Z = 1.959963984540054; // two-sided 95% normal / Wilson deviate
 
-const args = new Set(process.argv.slice(2));
-const selfTest = args.has('--self-test');
-const write = args.has('--write');
-const check = args.has('--check') || (!selfTest && !write);
+const argv = process.argv.slice(2);
+const selfTest = argv.includes('--self-test');
+const write = argv.includes('--write');
+const dig = argv.includes('--dig');
+const topIdx = argv.indexOf('--top');
+const topArg = topIdx === -1 ? Infinity : Number(argv[topIdx + 1]);
+if (topIdx !== -1 && (!Number.isInteger(topArg) || topArg < 1)) {
+  console.error('cost-adjusted-edge: --top needs a positive integer');
+  process.exit(1);
+}
+const check = !selfTest && !write && !dig;
 
 function parseMicro(raw) {
   const s = String(raw).trim();
@@ -194,6 +210,57 @@ function scenarioPasses(summary, mode) {
   if (pfNumber(summary.profitFactor) < 1.1) return false;
   if (Number(summary.maxDrawdownUsd) > 5) return false;
   return true;
+}
+
+/**
+ * One mining arm (issue 889): n / EV / PF / CI for one pricing mode. EV is
+ * the integer-rounded mean per-round pnl; the CI is the conservative
+ * normal-approx lower bound EV − z·s/√n (sample sd, n<2 → null) alongside the
+ * win-rate Wilson lower bound. Money stays in the report's micro-USD string
+ * convention; ranks sort on the exact integer mean.
+ */
+function digArm(mode, pnls) {
+  const s = summarize(pnls);
+  const n = pnls.length;
+  let sum = 0n;
+  for (const p of pnls) sum += p;
+  const evMicro = divRound(sum, BigInt(n));
+  let evLb = null;
+  if (n >= 2) {
+    const mean = Number(sum) / n;
+    let s2 = 0;
+    for (const p of pnls) s2 += (Number(p) - mean) ** 2;
+    evLb = mean - (DIG_Z * Math.sqrt(s2 / (n - 1))) / Math.sqrt(n);
+  }
+  const wr = s.wins / n;
+  const denom = 1 + (DIG_Z * DIG_Z) / n;
+  const centre = wr + (DIG_Z * DIG_Z) / (2 * n);
+  const rad = DIG_Z * Math.sqrt((wr * (1 - wr)) / n + (DIG_Z * DIG_Z) / (4 * n * n));
+  const wrWilsonLb = Math.max(0, (centre - rad) / denom);
+  return {
+    mode,
+    n,
+    evMicro,
+    evUsd: formatMicro(evMicro),
+    evLowerUsd: evLb === null ? null : formatMicro(BigInt(Math.round(evLb))),
+    wrWilsonLb,
+    profitFactor: s.profitFactor,
+  };
+}
+
+/** The --dig pool: every mode as an arm, EV-descending, top-N. No verdicts. */
+function digPool(rounds, top) {
+  const pool = [];
+  for (const mode of MODES) {
+    const pnls = [];
+    for (const r of rounds) {
+      const p = pnlOf(r.up, r.down, mode);
+      if (p !== null) pnls.push(p);
+    }
+    if (pnls.length) pool.push(digArm(mode, pnls));
+  }
+  pool.sort((a, b) => (b.evMicro > a.evMicro ? 1 : b.evMicro < a.evMicro ? -1 : a.mode.localeCompare(b.mode)));
+  return pool.slice(0, top).map(({ evMicro, ...rest }) => rest);
 }
 
 function readManifest(name) {
@@ -357,7 +424,7 @@ async function scanWindow(name) {
   return rounds;
 }
 
-async function buildReport() {
+async function collectRounds() {
   const perWindow = [];
   const rounds = [];
   for (const w of WINDOWS) {
@@ -366,6 +433,11 @@ async function buildReport() {
     for (const r of found) rounds.push({ window: w.name, ...r });
   }
   rounds.sort((a, b) => a.at - b.at || (a.key < b.key ? -1 : 1));
+  return { perWindow, rounds };
+}
+
+async function buildReport() {
+  const { perWindow, rounds } = await collectRounds();
   const scenarios = {};
   for (const mode of MODES) {
     const pnls = [];
@@ -407,6 +479,13 @@ function assertEq(name, got, want) {
   }
 }
 
+function atMost(name, got, eps) {
+  if (!(got <= eps)) {
+    console.error(`SELF-TEST FAIL ${name}: off by ${got} (±${eps})`);
+    process.exit(1);
+  }
+}
+
 function runSelfTest() {
   assertEq('official 0.40', officialFee(400_000n), 16_800n);
   assertEq('legacy 0.40', legacyFee(400_000n), 7_200n);
@@ -439,13 +518,51 @@ function runSelfTest() {
     console.error('SELF-TEST FAIL: current packages must stay NO-GO without fill evidence');
     process.exit(1);
   }
+  // --dig (issue 889): arms carry n / EV / CI and rank by exact EV; no verdicts.
+  const mixed = digArm('mixed', [2_000_000n, -1_000_000n]);
+  assertEq('dig n', mixed.n, 2);
+  assertEq('dig ev', mixed.evUsd, '0.5');
+  assertEq('dig pf', mixed.profitFactor, '2');
+  // mean 0.5, sd 1.5e6 micro, se 1.5e6/sqrt(2): lb = 0.5 - 2.939945... = -2.439946
+  assertEq('dig ev lower bound', mixed.evLowerUsd, '-2.439946');
+  atMost('dig wilson lower bound', Math.abs(mixed.wrWilsonLb - 0.0945327), 1e-4);
+  const clean = digArm('clean', [1_000_000n, 1_000_000n, 1_000_000n]);
+  assertEq('dig all-win ev', clean.evUsd, '1');
+  assertEq('dig all-win ev lb', clean.evLowerUsd, '1');
+  assertEq('dig all-win pf', clean.profitFactor, 'inf');
+  atMost('dig all-win wilson lb', Math.abs(clean.wrWilsonLb - 0.438531), 1e-4);
+  assertEq('dig n=1 has no ev lb', digArm('single', [500_000n]).evLowerUsd, null);
+  const pool = digPool([{ up: 400_000n, down: 400_000n }], 10);
+  assertEq(
+    'dig pool ranks by ev, best first',
+    pool.map((a) => a.mode).join(','),
+    'maker_quote_minus_1,maker_at_ask,taker_legacy_slip1,taker_official_slip1',
+  );
+  assertEq('dig pool drops the sort key', 'evMicro' in pool[0], false);
+  assertEq('dig pool top', digPool([{ up: 400_000n, down: 400_000n }], 2).length, 2);
   console.log('cost-adjusted-edge self-test: PASS');
 }
 
 async function main() {
   if (selfTest) {
     runSelfTest();
-    if (!check && !write) return;
+    if (!check && !write && !dig) return;
+  }
+  if (dig) {
+    const { rounds } = await collectRounds();
+    const pool = digPool(rounds, topArg);
+    console.log(
+      JSON.stringify(
+        {
+          semantics: 'mining',
+          note: '挖掘档候选池：按 EV 降序，无 GO/NO-GO 判决（判决只属于 --check 的采用语义）',
+          pool,
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+    return;
   }
   const report = await buildReport();
   const body = stable(report);
