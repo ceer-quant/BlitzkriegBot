@@ -20,7 +20,6 @@
 | `spread_arb` | 1.0.0 | NO-GO |
 | `mad_dog` | 1.0.0 | NO-GO |
 | `market_maker` | 1.1.0 | NO-GO |
-| `maker_pair` | 1.0.0 | NO-GO |
 
 ## 每个二元轮的合并盈亏（1 手，合并拿回 $1）
 
@@ -32,7 +31,6 @@
 | `taker_legacy_slip1` | 75 | 0 / 75 | -3.070599 | 0 | 3.070599 | 否 |
 | `maker_at_ask` | 80 | 0 / 80 | -0.99 | 0 | 0.99 | 否 |
 | `maker_quote_minus_1` | 80 | 61 / 0 | 0.61 | inf | 0 | 否 |
-| `maker_pair_gated` | 0 | 0 / 0 | 0 | na | 0 | 否 |
 
 `passesGate` 只表示该模型自己达到了 PF ≥ 1.1、回撤 ≤ $5、样本 ≥ 30，且模型不是乐观成交。它不会把策略放进启用集。maker 两行被标成乐观，门禁直接否决。
 

@@ -1256,7 +1256,6 @@ mod tests {
     mod ghost_cash_move_tests;
     mod ghost_fill_tests;
     mod journal_cursor_tests;
-    mod maker_pair_tests;
     mod maker_rebate_tests;
     mod order_state_machine_462_tests;
     mod pair_entry_maker_tests;
