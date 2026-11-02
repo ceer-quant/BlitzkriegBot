@@ -253,13 +253,84 @@ fn replay(events: Vec<TimedEvent>) -> blitzkrieg_core::backtest::BacktestReport 
 /// The determinism half: two independent replays of the same corpus must
 /// agree BYTE-FOR-BYTE on the serialized report (#351's contract), which also
 /// makes the pinned constants in the next test meaningful.
+///
+/// Exception — `feed.probe.fd` is HOST telemetry sampled at stats-eval time
+/// (`/proc/self/fd` entry count on Linux, null on macOS), not a replay
+/// product: two runs on the same machine legitimately disagree (a concurrent
+/// test opening/closing a fd moves it). It is excluded from the byte
+/// assertion and pinned separately below; everything else stays byte-strong.
 #[test]
 fn two_runs_produce_byte_identical_reports() {
-    let a = replay(corpus());
-    let b = replay(corpus());
+    let mut a = replay(corpus());
+    let mut b = replay(corpus());
+
+    // Weak assertions on the excluded block FIRST, while it is still there:
+    // present, structurally sane, and host-stable. soft/hard come from
+    // getrlimit and are fixed for the process, so the two runs must agree on
+    // them; `open` may jitter on Linux and is null on macOS — only its type
+    // is pinned, never its value.
+    let fd_of = |r: &blitzkrieg_core::backtest::BacktestReport| {
+        r.feed
+            .get("probe")
+            .and_then(|p| p.get("fd"))
+            .and_then(|f| f.as_object())
+            .cloned()
+            .expect("report must carry feed.probe.fd host telemetry")
+    };
+    let fd_a = fd_of(&a);
+    let fd_b = fd_of(&b);
+    assert_eq!(
+        fd_a.get("soft"),
+        fd_b.get("soft"),
+        "rlimit soft is process-stable — must match across runs"
+    );
+    assert_eq!(
+        fd_a.get("hard"),
+        fd_b.get("hard"),
+        "rlimit hard is process-stable — must match across runs"
+    );
+    for fd in [&fd_a, &fd_b] {
+        match fd.get("open") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Number(n)) => assert!(
+                n.as_u64().is_some_and(|v| v < 1_000_000),
+                "fd.open must be a plausible fd count, got {n}"
+            ),
+            other => panic!("fd.open must be null or a number, got {other:?}"),
+        }
+        assert!(
+            matches!(fd.get("critical"), Some(serde_json::Value::Bool(_))),
+            "fd.critical must be a bool"
+        );
+    }
+
+    // Tooth: inject DIFFERENT host-jitter values into fd BEFORE the
+    // exclusion. If the exclusion ever stops covering feed.probe.fd
+    // (re-embedded at another path, or the strip drifts into a no-op), the
+    // injected difference survives into the byte comparison and this goes red
+    // on every platform — no Linux host jitter required.
+    a.feed["probe"]["fd"] = serde_json::json!({
+        "soft": 1u64, "hard": 2u64, "open": 999u64, "usagePct": 99.9, "critical": true
+    });
+    b.feed["probe"]["fd"] = serde_json::json!({
+        "soft": 3u64, "hard": 4u64, "open": 998u64, "usagePct": 1.0, "critical": false
+    });
+
+    let strip_fd = |r: &mut blitzkrieg_core::backtest::BacktestReport| {
+        r.feed
+            .get_mut("probe")
+            .and_then(|p| p.as_object_mut())
+            .expect("report feed must carry a probe object")
+            .remove("fd");
+    };
+    strip_fd(&mut a);
+    strip_fd(&mut b);
     let ja = serde_json::to_string(&a).expect("report serializes");
     let jb = serde_json::to_string(&b).expect("report serializes");
-    assert_eq!(ja, jb, "same corpus ⇒ byte-identical report JSON");
+    assert_eq!(
+        ja, jb,
+        "same corpus ⇒ byte-identical report JSON (fd excluded)"
+    );
 }
 
 /// The freeze half: the fixture's outcome is pinned. `trades_sha256` is the
