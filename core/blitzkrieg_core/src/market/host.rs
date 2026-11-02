@@ -106,11 +106,13 @@ pub fn market_from_api(d: &api::MarketDescriptor) -> m::CryptoMarket {
         down_price: d.down_price,
         expires_at_ms: d.expires_at_ms,
         round_slot: d.round_slot,
-        // Live markets ride the configured grid (the scanner slots off
-        // `round_duration_sec`), and the API descriptor declares no duration —
-        // `0` keeps the #354 cadence gate silent on the live path, where the
-        // grid IS the assumption.
-        round_duration_sec: 0,
+        // The descriptor carries the duration discovery built the slug from.
+        // `0` (a producer that does not know) still means undeclared, so the
+        // #354 gate stays silent and the configured grid applies — the same
+        // live behaviour as before the field existed. A non-zero value is
+        // what a later replay needs in order to refuse the wrong grid
+        // instead of ageing a 5m round on a 900s clock.
+        round_duration_sec: d.round_duration_sec,
         // #377 (治 #2): a live market has no archive verdict — the venue
         // answers settlement queries itself.
         archive_verdict: false,

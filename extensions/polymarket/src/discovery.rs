@@ -116,6 +116,10 @@ pub fn spawn(
                         .unwrap_or_else(|| rust_decimal::Decimal::new(5, 1)),
                     expires_at_ms: end_ms,
                     round_slot: end_ms / 1000 / round_sec,
+                    // The slug was built from this duration. The archive has
+                    // to carry it or a replay cannot tell a 5m capture from a
+                    // 15m one (both used to land as roundDurationSec 0).
+                    round_duration_sec: round_sec,
                     // #427: this plugin's own identity, declared as data.
                     venue: "polymarket".to_string(),
                     neg_risk: m.neg_risk.unwrap_or(true),

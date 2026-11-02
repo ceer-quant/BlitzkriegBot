@@ -191,6 +191,7 @@ impl blitzkrieg_market_api::MarketDiscovery for VenueLiveDiscovery {
                 down_price: dec!(0.45),
                 expires_at_ms: now_ms() + 900_000,
                 round_slot: now_ms() / 1000 / 900,
+                round_duration_sec: 900,
                 // The batch carries the OWNING plugin's venue tag (the
                 // host resolves whose upstream a batch is from it). Every
                 // existing mount test names its plugin `venuelive`, so

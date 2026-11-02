@@ -328,6 +328,59 @@ impl blitzkrieg_market_api::SubscriptionControl for FeedHandle {
 
 // ── Polymarket orderbook via REST polling ───────────────────────────────────
 
+/// How long to wait before dialing Binance again.
+///
+/// A transport blip retries in 5s. HTTP 451 is the venue refusing the source
+/// IP ("restricted location"); retrying every 5s for the life of the process
+/// only fills the capture log and never obtains a trade. A minute is still a
+/// retry, not a give-up.
+fn binance_reconnect_pause(err: &str) -> Duration {
+    if err.contains("451") {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+/// A combined Binance `@trade` stream of the liquid pairs this feed subscribes
+/// (BTC/ETH/SOL/XRP) prints many times a second. Silence longer than this is a
+/// transport gap, not a quiet market, so the feed logs it. It is an observation
+/// only — it does not change the book stamp, the staleness budget, or any
+/// order. 3500ms is about three default book polls: the same hole the
+/// data-quality report counts as a missed snapshot.
+const WS_SILENCE_LOG_MS: u128 = 3_500;
+
+/// Median and max of `local_now_ms - venue_ms`.
+///
+/// The archive stamps a book with the local clock (see the poll loop), so a
+/// later reader cannot recover how far behind the venue's own `timestamp` the
+/// snapshot was when it arrived. This summary is what the poll log line
+/// records. Empty input is `None`. The median is the upper median
+/// (`lags[len/2]` after sorting).
+fn venue_lag_summary(now_ms: i64, venue_ms: &[i64]) -> Option<(i64, i64)> {
+    if venue_ms.is_empty() {
+        return None;
+    }
+    let mut lags: Vec<i64> = venue_ms.iter().map(|ts| now_ms - *ts).collect();
+    lags.sort_unstable();
+    let med = lags[lags.len() / 2];
+    let max = *lags.last()?;
+    Some((med, max))
+}
+
+/// One successful poll, in a stable `key=value` shape the run log can be
+/// grepped for. `lat_ms` is local request time. `venue_lag_*` is
+/// local-clock minus the venue book timestamp (clock skew and path delay
+/// together; the NTP probe separates the skew).
+fn poll_ok_line(lat_ms: u128, now_ms: i64, venue_ms: &[i64], tokens: usize) -> String {
+    match venue_lag_summary(now_ms, venue_ms) {
+        Some((med, max)) => format!(
+            "poly poll ok lat_ms={lat_ms} venue_lag_ms={med} venue_lag_max_ms={max} tokens={tokens}"
+        ),
+        None => format!("poly poll ok lat_ms={lat_ms} tokens={tokens}"),
+    }
+}
+
 /// Poll `POST /books` for the current token set.
 ///
 /// Replaces the venue's WebSocket market channel; see [`DEFAULT_POLL_MS`] for
@@ -354,7 +407,12 @@ async fn poly_rest_loop(
     use polymarket_client_sdk_v2::clob::{Client, Config};
     use polymarket_client_sdk_v2::types::U256;
 
-    let client = match Client::new(&host, Config::default()) {
+    // A fresh client is a fresh connection pool. Kept as a closure so a
+    // timed-out poll can drop a wedged keep-alive: after a stall, the same
+    // pool kept timing out at 5s while a brand-new connection to POST /books
+    // answered in ~200ms. Rebuilding is what lets the next poll through.
+    let open_client = |host: &str| Client::new(host, Config::default());
+    let mut client = match open_client(&host) {
         Ok(c) => c,
         Err(e) => {
             let _ = ev_tx
@@ -387,6 +445,7 @@ async fn poly_rest_loop(
             .map(|id| OrderBookSummaryRequest::builder().token_id(*id).build())
             .collect();
 
+        let started = std::time::Instant::now();
         match tokio::time::timeout(
             Duration::from_millis(REQUEST_TIMEOUT_MS),
             client.order_books(&requests),
@@ -394,6 +453,7 @@ async fn poly_rest_loop(
         .await
         {
             Ok(Ok(books)) => {
+                let lat_ms = started.elapsed().as_millis();
                 interval_ms = base_ms; // recovered: back to the configured cadence
                 // 盘口批次原子化：先收集整批，再一次 send —— 批内共享一个
                 // 本地时钟时间戳，pump 侧一次 `on_books` 整批进核。逐 token
@@ -403,6 +463,7 @@ async fn poly_rest_loop(
                 // 的批内时间漂移。
                 let now = now_ms();
                 let mut batch: Vec<BatchBook> = Vec::with_capacity(books.len());
+                let mut venue_ms: Vec<i64> = Vec::with_capacity(books.len());
                 for book in books {
                     let bids: Vec<(Decimal, Decimal)> =
                         book.bids.iter().map(|l| (l.price, l.size)).collect();
@@ -415,8 +476,15 @@ async fn poly_rest_loop(
                     // aligned with ours. Staleness is already bounded by the poll
                     // cadence: if a poll fails or hangs, no event is emitted and the
                     // book correctly ages out on its own.
+                    //
+                    // The venue stamp is NOT dropped on the floor: it rides the
+                    // poll log line (`venue_lag_ms`) so a capture can tell a slow
+                    // path from a quiet book. It stays out of the archive line,
+                    // which replays byte-for-byte on the local clock alone.
+                    venue_ms.push(book.timestamp.timestamp_millis());
                     batch.push((book.asset_id.to_string(), bids, asks));
                 }
+                let n = batch.len();
                 if !batch.is_empty()
                     && ev_tx
                         .send(FeedEvent::Books {
@@ -428,22 +496,57 @@ async fn poly_rest_loop(
                 {
                     return; // host is gone
                 }
+                if n > 0
+                    && ev_tx
+                        .send(FeedEvent::Info(poll_ok_line(lat_ms, now, &venue_ms, n)))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
             }
             Ok(Err(e)) => {
+                let lat_ms = started.elapsed().as_millis();
+                let limited = is_rate_limited(&e);
                 let _ = ev_tx
-                    .send(FeedEvent::Info(format!("poly rest poll: {e}")))
+                    .send(FeedEvent::Info(format!(
+                        "poly rest poll lat_ms={lat_ms}: {e}"
+                    )))
                     .await;
-                if is_rate_limited(&e) {
+                if limited {
                     interval_ms = interval_ms.saturating_mul(2).min(MAX_POLL_MS);
+                } else {
+                    // Not a 429: the socket, not the venue's limiter, failed.
+                    // Drop it. A 429 keeps the client — the pool is fine, the
+                    // cadence is what has to slow down.
+                    match open_client(&host) {
+                        Ok(c) => client = c,
+                        Err(err) => {
+                            let _ = ev_tx
+                                .send(FeedEvent::Info(format!("poly rest client: {err}")))
+                                .await;
+                            return;
+                        }
+                    }
                 }
             }
             Err(_) => {
+                let lat_ms = started.elapsed().as_millis();
                 let _ = ev_tx
                     .send(FeedEvent::Info(format!(
-                        "poly rest poll timed out after {REQUEST_TIMEOUT_MS}ms ({} tokens)",
+                        "poly rest poll timed out after {REQUEST_TIMEOUT_MS}ms lat_ms={lat_ms} ({} tokens); rebuilding client",
                         ids.len()
                     )))
                     .await;
+                match open_client(&host) {
+                    Ok(c) => client = c,
+                    Err(err) => {
+                        let _ = ev_tx
+                            .send(FeedEvent::Info(format!("poly rest client: {err}")))
+                            .await;
+                        return;
+                    }
+                }
             }
         }
 
@@ -471,9 +574,18 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
         .collect();
     let url = format!("wss://stream.binance.com:9443/ws/{}", streams.join("/"));
 
+    // Clock of the last trade frame. A reconnect's first trade measures the
+    // hole the socket was down for; a live socket that simply stops printing
+    // measures a stall. Either one longer than [`WS_SILENCE_LOG_MS`] is logged.
+    let mut last_rx = std::time::Instant::now();
+    let mut saw_trade = false;
+    // Both arms assign this before the sleep. A successful dial waits 5s
+    // before the next reconnect; a refused dial uses [`binance_reconnect_pause`].
+    let mut pause;
     loop {
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
+                pause = Duration::from_secs(5);
                 let _ = ev_tx
                     .send(FeedEvent::Info("binance spot connected".into()))
                     .await;
@@ -482,6 +594,16 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
                     match next {
                         Ok(Message::Text(txt)) => {
                             if let Some((symbol, price)) = parse_binance_trade(&txt) {
+                                let silence_ms = last_rx.elapsed().as_millis();
+                                if saw_trade && silence_ms >= WS_SILENCE_LOG_MS {
+                                    let _ = ev_tx
+                                        .send(FeedEvent::Info(format!(
+                                            "binance ws gap silence_ms={silence_ms} why=trade"
+                                        )))
+                                        .await;
+                                }
+                                saw_trade = true;
+                                last_rx = std::time::Instant::now();
                                 let asset = symbol
                                     .trim_end_matches("USDT")
                                     .trim_end_matches("USD")
@@ -496,11 +618,29 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
                             }
                         }
                         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                        Ok(Message::Close(_)) => break,
+                        Ok(Message::Close(_)) => {
+                            let silence_ms = last_rx.elapsed().as_millis();
+                            if saw_trade && silence_ms >= WS_SILENCE_LOG_MS {
+                                let _ = ev_tx
+                                    .send(FeedEvent::Info(format!(
+                                        "binance ws gap silence_ms={silence_ms} why=close"
+                                    )))
+                                    .await;
+                            }
+                            break;
+                        }
                         Err(e) => {
+                            let silence_ms = last_rx.elapsed().as_millis();
                             let _ = ev_tx
                                 .send(FeedEvent::Info(format!("binance ws error: {e}")))
                                 .await;
+                            if saw_trade && silence_ms >= WS_SILENCE_LOG_MS {
+                                let _ = ev_tx
+                                    .send(FeedEvent::Info(format!(
+                                        "binance ws gap silence_ms={silence_ms} why=error"
+                                    )))
+                                    .await;
+                            }
                             break;
                         }
                         _ => {}
@@ -508,12 +648,14 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
                 }
             }
             Err(e) => {
+                let msg = e.to_string();
+                pause = binance_reconnect_pause(&msg);
                 let _ = ev_tx
-                    .send(FeedEvent::Info(format!("binance connect: {e}")))
+                    .send(FeedEvent::Info(format!("binance connect: {msg}")))
                     .await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(pause).await;
     }
 }
 
@@ -807,6 +949,53 @@ mod tests {
         assert_eq!(asks, &vec![(dec("0.50"), dec("5"))]);
         assert!(seen.contains_key(&b), "no book for the second token");
         assert!(batch_ts > 0, "the batch carries a real timestamp");
+
+        // The latency line follows the book batch. It must not be the first
+        // event — the test above pins that — and it must name the request
+        // time and the venue-stamp lag the archive itself does not keep.
+        let info = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+            .await
+            .expect("no poll log within 2s")
+            .expect("feed closed");
+        let FeedEvent::Info(line) = info else {
+            panic!("expected the poll log after the batch, got {info:?}");
+        };
+        assert!(
+            line.starts_with("poly poll ok "),
+            "poll log must be the stable key=value line, got {line}"
+        );
+        assert!(line.contains("lat_ms="), "{line}");
+        assert!(line.contains("tokens=2"), "{line}");
+        assert!(
+            line.contains("venue_lag_ms="),
+            "venue timestamp must survive as a lag, got {line}"
+        );
+    }
+
+    #[test]
+    fn a_geo_block_waits_longer_than_a_transport_blip() {
+        assert_eq!(
+            binance_reconnect_pause("HTTP error: 451 Unavailable For Legal Reasons"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            binance_reconnect_pause("Connection refused"),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn venue_lag_summary_is_upper_median_and_max() {
+        assert_eq!(venue_lag_summary(1_000, &[]), None);
+        // lags: 900, 800, 100 → sorted 100, 800, 900; upper median index 1.
+        assert_eq!(venue_lag_summary(1_000, &[100, 200, 900]), Some((800, 900)));
+        // A local clock behind the venue is a negative lag, not clamped to 0.
+        assert_eq!(venue_lag_summary(1_000, &[1_050]), Some((-50, -50)));
+        let line = poll_ok_line(42, 1_000, &[900], 1);
+        assert_eq!(
+            line,
+            "poly poll ok lat_ms=42 venue_lag_ms=100 venue_lag_max_ms=100 tokens=1"
+        );
     }
 
     /// A round rollover must switch the polled set over, and must not keep asking

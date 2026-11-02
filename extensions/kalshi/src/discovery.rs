@@ -340,6 +340,7 @@ fn discovery_loop(
                             down_price: Decimal::ONE - mid,
                             expires_at_ms: close_ms,
                             round_slot: close_ms / 1000 / round_sec,
+                            round_duration_sec: round_sec,
                             // #427: this plugin's own identity, declared as data.
                             venue: "kalshi".to_string(),
                             neg_risk: false,

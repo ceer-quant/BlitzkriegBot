@@ -342,7 +342,7 @@ fn spot_update_golden() {
 
 #[test]
 fn market_descriptor_golden() {
-    let md = MarketDescriptor {
+    let mut md = MarketDescriptor {
         asset: "BTC".into(),
         condition_id: "cond-1".into(),
         question_id: "q-1".into(),
@@ -352,6 +352,7 @@ fn market_descriptor_golden() {
         down_price: d("0.45"),
         expires_at_ms: TS,
         round_slot: 7,
+        round_duration_sec: 0,
         venue: "polymarket".into(),
         neg_risk: false,
         question: "BTC up or down?".into(),
@@ -365,6 +366,10 @@ fn market_descriptor_golden() {
             r#""negRisk":false,"question":"BTC up or down?"}"#
         ),
     );
+    // A known family is on the wire. Zero stays omitted (the assertion above).
+    md.round_duration_sec = 300;
+    let v = serde_json::to_value(&md).unwrap();
+    assert_eq!(v["roundDurationSec"], 300);
 }
 
 // ── reconciliation / self-check / network family ────────────────────────────
