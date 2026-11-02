@@ -360,16 +360,19 @@ pub async fn spawn_from_env(
     // Sweep transport: our own client with a browser-shaped UA. The SDK's
     // dedicated client is kept for trading; only the read-only /data/* sweep
     // goes through this one so the two paths stay independent.
-    let sweep_http = reqwest::Client::builder()
-        .user_agent(SWEEP_UA)
-        .default_headers({
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert(ACCEPT, "application/json".parse().unwrap());
-            h.insert(ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
-            h
-        })
-        .build()
-        .map_err(|e| anyhow::anyhow!("sweep http client: {e}"))?;
+    let sweep_http = crate::proxy::apply_reqwest(
+        reqwest::Client::builder()
+            .user_agent(SWEEP_UA)
+            .default_headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(ACCEPT, "application/json".parse().unwrap());
+                h.insert(ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+                h
+            }),
+    )
+    .map_err(|e| anyhow::anyhow!("sweep http client: {e}"))?
+    .build()
+    .map_err(|e| anyhow::anyhow!("sweep http client: {e}"))?;
     let signer_checksum = signer_address.to_checksum(None);
 
     tokio::spawn(async move {

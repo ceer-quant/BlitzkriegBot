@@ -328,7 +328,8 @@ NetCheckReport = {
   ok,          // 所有已探测路径都通过；unsupported/rejected 不算通过
   tsMs,        // 报告生成时刻（毫秒时间戳）
   hintCode,    // 结论分类（按优先级取唯一值）：
-               // unsupported / ok / tls_blocked / dns_failed / proxy_env / fake_ip / partial
+               // unsupported / ok / tls_blocked / dns_failed / proxy_unreachable /
+               // proxy_env / fake_ip / partial
   hint,        // 该分类的中文/英文一句话解释，可直接展示
   proxyEnv[],  // 进程环境里出现的代理变量名（只有名字，绝无取值）
   items[] = {
@@ -336,7 +337,7 @@ NetCheckReport = {
     target,    // 被探测的 URL（已脱敏，不含凭证）
     ok,
     status,    // ok / dns_failed / tcp_refused / timeout / tls_cert / tls_error /
-               // http_error / transport_error / unsupported / rejected
+               // http_error / transport_error / proxy_unreachable / unsupported / rejected
     addrs[],   // 解析出的地址（DNS 阶段的结果）
     fakeIp,    // 命中伪造 IP（GFW 式 DNS 污染）为 true
     ms,        // 该路径耗时

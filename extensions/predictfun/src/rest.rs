@@ -237,6 +237,24 @@ impl std::fmt::Debug for PredictRest {
     }
 }
 
+fn apply_process_proxy(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::ClientBuilder, PredictError> {
+    match blitzkrieg_market_api::net::client_proxy().map_err(PredictError::Transport)? {
+        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
+        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
+        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
+            let proxy = reqwest::Proxy::all(&url).map_err(|e| {
+                PredictError::Transport(format!(
+                    "proxy URL rejected: {}",
+                    blitzkrieg_market_api::net::error_chain(&e)
+                ))
+            })?;
+            Ok(builder.proxy(proxy))
+        }
+    }
+}
+
 impl PredictRest {
     /// Build a client. Without [`Credentials`] the client can only hit
     /// public endpoints (markets, order books) — portfolio calls fail with
@@ -251,6 +269,8 @@ impl PredictRest {
         // unconditionally; production keeps the default.
         if config.no_proxy {
             builder = builder.no_proxy();
+        } else {
+            builder = apply_process_proxy(builder)?;
         }
         let http = builder
             .build()

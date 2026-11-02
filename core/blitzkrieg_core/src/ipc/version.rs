@@ -388,17 +388,19 @@ async fn fetch_release_assets_impl(
 ) -> Result<(Vec<u8>, String), String> {
     let asset = asset_name(version, target);
     let base = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}");
-    let client = reqwest::Client::builder()
-        // A download is bigger than a check but still bounded: two minutes is
-        // generous for a release archive and stops a stalled socket from
-        // holding the staging state in Downloading forever.
-        .timeout(std::time::Duration::from_secs(120))
-        .user_agent(format!(
-            "BlitzkriegBot/{}",
-            blitzkrieg_build_info::BUILD_INFO.version
-        ))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
+    let client = apply_bk_proxy(
+        reqwest::Client::builder()
+            // A download is bigger than a check but still bounded: two minutes is
+            // generous for a release archive and stops a stalled socket from
+            // holding the staging state in Downloading forever.
+            .timeout(std::time::Duration::from_secs(120))
+            .user_agent(format!(
+                "BlitzkriegBot/{}",
+                blitzkrieg_build_info::BUILD_INFO.version
+            )),
+    )?
+    .build()
+    .map_err(|e| format!("http client: {e}"))?;
     let mut req = client
         .get(&base)
         .header("Accept", "application/vnd.github+json");
@@ -758,6 +760,22 @@ fn parse_latest_release(body: &str) -> Result<(String, String), String> {
     Ok((tag.to_string(), url))
 }
 
+fn apply_bk_proxy(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
+    match blitzkrieg_market_api::net::client_proxy()? {
+        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
+        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
+        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
+            let proxy = reqwest::Proxy::all(url).map_err(|e| {
+                format!(
+                    "proxy URL rejected: {}",
+                    blitzkrieg_market_api::net::error_chain(&e)
+                )
+            })?;
+            Ok(builder.proxy(proxy))
+        }
+    }
+}
+
 /// The real fetch, routed by token presence. Kept as one `pub` entry point so
 /// the dispatch branch stays one line.
 pub async fn fetch_latest(token: Option<String>) -> Result<String, String> {
@@ -774,19 +792,21 @@ async fn fetch_latest_impl(token: Option<&str>) -> Result<String, String> {
     // The stamp lives in blitzkrieg-build-info's compilation unit; from here it
     // is read through BUILD_INFO, not env!() (the core crate has no stamps of
     // its own any more — §3.2: exactly one crate injects).
-    let client = reqwest::Client::builder()
-        // 30s, not 10s: the check traverses whatever proxy path the operator's
-        // network rides, and a same-stack probe measured 5.7s of pure baseline
-        // latency — 10s turned routine jitter into "update checking is broken"
-        // with no reason visible anywhere. Still short enough that a failed
-        // check never holds anything up.
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(format!(
-            "BlitzkriegBot/{}",
-            blitzkrieg_build_info::BUILD_INFO.version
-        ))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
+    let client = apply_bk_proxy(
+        reqwest::Client::builder()
+            // 30s, not 10s: the check traverses whatever proxy path the operator's
+            // network rides, and a same-stack probe measured 5.7s of pure baseline
+            // latency — 10s turned routine jitter into "update checking is broken"
+            // with no reason visible anywhere. Still short enough that a failed
+            // check never holds anything up.
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(format!(
+                "BlitzkriegBot/{}",
+                blitzkrieg_build_info::BUILD_INFO.version
+            )),
+    )?
+    .build()
+    .map_err(|e| format!("http client: {e}"))?;
     let mut req = client
         .get(RELEASES_LATEST)
         .header("Accept", "application/vnd.github+json");

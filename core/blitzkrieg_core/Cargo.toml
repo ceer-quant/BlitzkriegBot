@@ -56,7 +56,7 @@ blitzkrieg-build-info = { path = "../build_info" }
 # Update check (VERSIONING.md §7.3): both are already in the dependency tree
 # (reqwest via the market extension, semver transitively) — direct use adds no
 # new tree, only a named edge (P26). rustls-only, no default features.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
 # #355: bounded-concurrency metadata/price fetching (FuturesUnordered +
 # Semaphore polling) — 28k conditions would take 10+ hours serially.
 # Already in the dependency tree (reqwest/tokio peers); this names the edge.

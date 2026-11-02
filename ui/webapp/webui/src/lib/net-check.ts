@@ -33,6 +33,7 @@ export function netStatusLabel(status: string): string {
     case 'timeout': return '超时'
     case 'http_error': return 'HTTP 错误'
     case 'transport_error': return '传输错误'
+    case 'proxy_unreachable': return '代理已配置但连不上'
     case 'rejected': return '被策略拒绝（未拨号）'
     case 'unsupported': return '无探针（本构建未实现）'
     default: return status
@@ -45,6 +46,7 @@ export function netHintTitle(code: string | undefined): string {
     case 'ok': return '每条路径都通'
     case 'tls_blocked': return 'TLS 在请求前被拦'
     case 'dns_failed': return '域名解析失败'
+    case 'proxy_unreachable': return '代理已配置但连不上'
     case 'proxy_env': return '本进程配了代理'
     case 'fake_ip': return '解析器返回了 fake-IP'
     case 'partial': return '部分路径失败'

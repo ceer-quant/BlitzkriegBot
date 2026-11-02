@@ -14,6 +14,7 @@ pub mod gamma;
 pub mod live;
 pub mod net_check;
 pub mod plugin;
+mod proxy;
 pub mod redeem;
 pub mod venue;
 
