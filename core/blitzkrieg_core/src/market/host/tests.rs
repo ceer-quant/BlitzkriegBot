@@ -589,6 +589,7 @@ fn reuse_batch(source: &str, up: &str, down: &str) -> Vec<blitzkrieg_market_api:
         down_price: dec!(0.45),
         expires_at_ms: (slot + 1) * 900 * 1000,
         round_slot: slot,
+        round_duration_sec: 900,
         venue: source.to_string(),
         neg_risk: false,
         question: "reuse batch".to_string(),
@@ -754,4 +755,31 @@ async fn consumer_rows_read_the_reused_stream_and_stay_venue_distinct() {
         assert_eq!(m.venue, venue, "each read resolves to the venue's own row");
     }
     assert_eq!(c.venue_of_token("flow-up"), "");
+}
+
+/// Discovery's duration has to survive onto the archived market. A `0` here
+/// is what made a 5m capture and a 15m capture look the same to replay.
+#[test]
+fn market_from_api_keeps_the_round_duration() {
+    let d = blitzkrieg_market_api::MarketDescriptor {
+        asset: "BTC".into(),
+        condition_id: "c".into(),
+        question_id: "q".into(),
+        up_token_id: "up".into(),
+        down_token_id: "down".into(),
+        up_price: dec!(0.55),
+        down_price: dec!(0.45),
+        expires_at_ms: 1_000,
+        round_slot: 3,
+        round_duration_sec: 300,
+        venue: "polymarket".into(),
+        neg_risk: false,
+        question: "q".into(),
+    };
+    assert_eq!(market_from_api(&d).round_duration_sec, 300);
+    let undeclared = blitzkrieg_market_api::MarketDescriptor {
+        round_duration_sec: 0,
+        ..d
+    };
+    assert_eq!(market_from_api(&undeclared).round_duration_sec, 0);
 }

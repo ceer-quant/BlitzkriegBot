@@ -287,6 +287,10 @@ impl OrderIntent {
     }
 }
 
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
 // ── Market descriptor ────────────────────────────────────────────────────────
 
 /// A binary UP/DOWN market for one asset in the current round.
@@ -308,6 +312,17 @@ pub struct MarketDescriptor {
     pub down_price: Decimal,
     pub expires_at_ms: i64,
     pub round_slot: i64,
+    /// The round's own length in seconds (slug `5m` → 300, `15m` → 900).
+    ///
+    /// Discovery builds the slug from this number, then used to drop it: the
+    /// archived market came out `roundDurationSec: 0`, and a replay treats 0
+    /// as "undeclared" and silently substitutes `--round-sec`. A 5m capture
+    /// replayed on the default 900s grid then ages every round three times
+    /// too slowly. `0` remains "undeclared" and is omitted on the wire so a
+    /// descriptor that does not know its family still round-trips the
+    /// historical JSON.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub round_duration_sec: i64,
     /// #427: the listing venue, as pure DATA (`CryptoMarket.venue`'s wire
     /// counterpart). The plugin fills it from its own identity — no consumer
     /// may branch on the value. Empty = the plugin predates the field (the
