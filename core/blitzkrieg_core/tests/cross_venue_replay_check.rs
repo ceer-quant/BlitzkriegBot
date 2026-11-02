@@ -271,6 +271,7 @@ fn replay_with_config(
             tail_ms: 10_000,
             hot_params: Vec::new(),
             progress: None,
+            mode: String::new(),
         },
         Box::new(VecSource::new(events)),
     );

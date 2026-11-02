@@ -115,6 +115,7 @@ fn bt_result(
             tail_ms,
             hot_params: Vec::new(),
             progress: None,
+            mode: String::new(),
         },
         src,
     );
@@ -140,6 +141,54 @@ fn bt_result(
 
 fn bt(core: CoreConfig, src: Box<dyn DataSource>, tail_ms: i64) -> BacktestReport {
     bt_result(core, src, tail_ms).expect("replay runs")
+}
+
+// ── #879 · the report names its coordinate system ──────────────────────
+
+/// A mode run's text report OPENS with the coordinate-system line (slippage
+/// overlay + fee tier), so two numbers are never compared across different
+/// frictions. mine reads 「坐标系：mine(0 tick, <fee> 费)」; verify/sweep
+/// print their own tier. The JSON wire is untouched (`serde(skip)`), and the
+/// historic no-`--backtest-mode` path predates the annotation: unchanged.
+#[test]
+fn mode_reports_open_with_the_coordinate_system_line() {
+    let run = |mode: &str| {
+        EventBacktester::new(
+            BacktestConfig {
+                core: CoreConfig::default(),
+                tick_ms: 50,
+                tail_ms: 0,
+                hot_params: Vec::new(),
+                progress: None,
+                mode: mode.to_string(),
+            },
+            Box::new(VecSource::new(Vec::new())),
+        )
+        .run()
+        .expect("an empty replay still reports")
+    };
+    let mine = run("mine");
+    // The fee name is read off the report itself (order-independent across
+    // the process's fee-schedule global): "legacy 费" in the ruling's words
+    // is `legacy_quadratic` on the shipped default.
+    assert!(
+        mine.render().starts_with(&format!(
+            "坐标系：mine(0 tick, {} 费)",
+            mine.fee_schedule.name
+        )),
+        "#879 acceptance line, verbatim tier:\n{}",
+        mine.render()
+    );
+    let verify = run("verify");
+    assert!(
+        verify.render().starts_with("坐标系：verify("),
+        "verify prints its own tier:\n{}",
+        verify.render()
+    );
+    assert!(
+        !run("").render().contains("坐标系"),
+        "the historic single-run path stays byte-identical"
+    );
 }
 
 // ── #354 (5.4) · the replay grid is fail-closed against the corpus ─────
@@ -449,6 +498,7 @@ fn a_shallow_book_reports_a_partial_fill() {
             tail_ms: 0,
             hot_params: Vec::new(),
             progress: None,
+            mode: String::new(),
         },
         Box::new(VecSource::new(vec![
             TimedEvent {

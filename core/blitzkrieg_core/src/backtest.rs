@@ -66,6 +66,10 @@ pub struct BacktestConfig {
     /// strategy does not declare is simply not applied by it (the declaration is
     /// the strategy's own), exactly as a proposal would be.
     pub hot_params: Vec<(String, String, Decimal)>,
+    /// The `--backtest-mode` that requested this replay (`mine`/`verify`/
+    /// `sweep`), reported in the text render's coordinate-system line (#879).
+    /// Empty = the historic single-run path, which prints no such line.
+    pub mode: String,
     /// Progress callback: `(delivered_events, virtual_clock_ms)`, invoked at
     /// most once per wall second. The single producer — the replay loop — has
     /// two consumers: the CLI prints it to stderr, the #353 IPC job registry
@@ -82,6 +86,7 @@ impl std::fmt::Debug for BacktestConfig {
             .field("tick_ms", &self.tick_ms)
             .field("tail_ms", &self.tail_ms)
             .field("hot_params", &self.hot_params)
+            .field("mode", &self.mode)
             .field("progress", &self.progress.as_ref().map(|_| "<fn>"))
             .finish()
     }
@@ -90,9 +95,11 @@ impl std::fmt::Debug for BacktestConfig {
 // ── #351 mode ladder (in the lib so the #353 IPC job registry composes the
 //    SAME contract the CLI does — one definition, two consumers) ────────────
 
-/// The mode's latency rungs. Latency is the ONLY dial a mode moves: slippage
-/// and the fee schedule stay as configured, so the rungs are comparable and
-/// any expectation change is attributable to latency alone.
+/// The mode's latency rungs. The rungs move ONLY latency — slippage and the
+/// fee schedule stay as configured across rungs, so the rungs are comparable
+/// and any expectation change is attributable to latency alone. (The one
+/// per-MODE friction dial, #879: `mine` pins taker slippage to 0 — see
+/// [`mode_rung_model`].)
 pub fn mode_rungs(mode: &str, verify_latency_ms: i64) -> Result<Vec<i64>, String> {
     match mode {
         "sweep" => Ok(vec![0, 50, 100, 200, 300]),
@@ -104,15 +111,18 @@ pub fn mode_rungs(mode: &str, verify_latency_ms: i64) -> Result<Vec<i64>, String
     }
 }
 
-/// The fill model for one mode rung: `mine` zeroes the latency dials keeping
-/// the configured friction, `verify`/`sweep` stamp the rung onto every
-/// latency. Zero taker slippage is refused (fail-closed) for every mode —
-/// the honest-friction floor is `--slippage-ticks 1`.
+/// The fill model for one mode rung. `mine` zeroes the latency dials and —
+/// #879 用户裁决（2026-11-02）— pins taker slippage to 0: a 1-tick overlay on
+/// a price that already walked the spread (`walk_marketable`'s VWAP) bills
+/// the spread twice, so the mining tier stops paying it. `verify`/`sweep`
+/// keep the configured friction as the 1-tick control arm, and there the
+/// fail-closed floor still refuses a zero taker slippage the OPERATOR asked
+/// for — the honest-friction floor is `--slippage-ticks 1`.
 pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillModel, String> {
-    if base.taker_slippage_ticks == 0 {
+    if mode != "mine" && base.taker_slippage_ticks == 0 {
         return Err(format!(
             "backtest-mode {mode} refuses zero taker slippage: the honest-friction floor is \
-             --slippage-ticks 1 (mine 模式禁止把滑点设为 0)"
+             --slippage-ticks 1 (verify/sweep 模式禁止把滑点设为 0)"
         ));
     }
     Ok(match mode {
@@ -120,6 +130,9 @@ pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillMod
             taker_latency_ms: 0,
             taker_rtt_ms: 0,
             maker_latency_ms: 0,
+            // #879: pinned by the tier itself — the operator's --slippage-ticks
+            // no longer reaches the mine rung (it stays the verify/sweep dial).
+            taker_slippage_ticks: 0,
             ..base
         },
         "verify" | "sweep" => FillModel {
@@ -376,6 +389,11 @@ pub struct BacktestReport {
     pub end_at_ms: i64,
     pub virtual_ms: i64,
     pub fill_model: FillModel,
+    /// The requesting `--backtest-mode` (#879). Text-render only: the JSON
+    /// wire stays byte-identical (the coordinate is already derivable from
+    /// `fillModel.takerSlippageTicks` + the fee schedule's name).
+    #[serde(skip)]
+    pub mode: String,
     /// The taker-fee schedule this replay charged (#203). See [`FeeScheduleReport`].
     pub fee_schedule: FeeScheduleReport,
     /// #388: wallet-level venue cash credited from the stream (MAKER_REBATE /
@@ -426,6 +444,18 @@ impl BacktestReport {
     /// Human-readable rendering for the CLI.
     pub fn render(&self) -> String {
         let mut s = String::new();
+        // #879: a report names the coordinate system it was mined/verified in
+        // (slippage overlay + fee tier), so two numbers are never compared
+        // across different frictions. The fee prints the schedule's own name —
+        // `legacy_quadratic` on the default, the shipped coordinate the ruling
+        // calls "legacy 费"; `official` when the operator ran --fee-model
+        // official. Empty mode = the historic single-run path, unchanged.
+        if !self.mode.is_empty() {
+            s.push_str(&format!(
+                "坐标系：{}({} tick, {} 费)\n",
+                self.mode, self.fill_model.taker_slippage_ticks, self.fee_schedule.name
+            ));
+        }
         s.push_str(&format!("backtest: {}\n", self.source));
         s.push_str(&format!(
             "  window           : {} → {} ({} ms virtual)\n",
@@ -584,6 +614,9 @@ pub struct EventBacktester {
     rx: mpsc::UnboundedReceiver<Event>,
     tick_ms: i64,
     tail_ms: i64,
+    /// The requesting `--backtest-mode` (empty on the historic single-run
+    /// path) — flows into the report's coordinate-system line (#879).
+    mode: String,
     /// Orders by their last observed status.
     order_status: HashMap<String, String>,
     /// Orders by the last observed `(size, filled_size)` (#183).
@@ -696,6 +729,7 @@ impl EventBacktester {
             rx,
             tick_ms,
             tail_ms: cfg.tail_ms.max(0),
+            mode: std::mem::take(&mut cfg.mode),
             order_status: HashMap::new(),
             order_sizes: HashMap::new(),
             fills: 0,
@@ -1208,6 +1242,7 @@ impl Backtester for EventBacktester {
             end_at_ms,
             virtual_ms: clock - start_at_ms,
             fill_model: self.core.config().fill_model,
+            mode: self.mode.clone(),
             fee_schedule: crate::exit_policy::fee_schedule().into(),
             // #388: the cash rows the core credited — read straight off the
             // stats the credit path wrote, so the report and the ledger can

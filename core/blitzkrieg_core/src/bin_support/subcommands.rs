@@ -115,6 +115,7 @@ fn backtest_once(
     tail_ms: i64,
     knobs: &[(String, String, Decimal)],
     report_path: Option<&str>,
+    mode: &str,
 ) -> blitzkrieg_core::backtest::BacktestReport {
     use blitzkrieg_core::backtest::{BacktestConfig, Backtester, EventBacktester};
     use blitzkrieg_core::data_source::open_replay_all;
@@ -144,6 +145,7 @@ fn backtest_once(
             tail_ms,
             hot_params: knobs.to_vec(),
             progress: None,
+            mode: mode.to_string(),
         },
         Box::new(src),
     );
@@ -199,14 +201,15 @@ pub(crate) fn run_backtest(
     tail_ms: i64,
     knobs: Vec<(String, String, Decimal)>,
 ) {
-    let _ = backtest_once(archive, cfg, tick_ms, tail_ms, &knobs, report_path);
+    let _ = backtest_once(archive, cfg, tick_ms, tail_ms, &knobs, report_path, "");
 }
 
-/// #351: the mode runner — `mine` (zero latency, friction as configured),
-/// `verify` (one real-latency run), `sweep` (the latency ladder with the
-/// verdict table). Latency is the ONLY dial the mode moves: slippage and the
-/// fee schedule stay as configured, so the rungs are comparable and any
-/// expectation change is attributable to latency alone.
+/// #351: the mode runner — `mine` (zero latency; #879: slippage pinned to 0,
+/// the double-billed spread overlay dropped), `verify` (one real-latency run
+/// on the configured 1-tick friction, the control arm), `sweep` (the latency
+/// ladder with the verdict table). Within a rung latency is the only dial the
+/// runner moves — the fee schedule stays as configured, so the rungs are
+/// comparable and any expectation change is attributable to latency alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_mode_backtest(
     archive: &str,
@@ -249,7 +252,15 @@ pub(crate) fn run_mode_backtest(
             }
         });
         eprintln!("=== backtest-mode {mode} @ latency {rung} ms ===");
-        let report = backtest_once(archive, cfg.clone(), tick_ms, tail, &knobs, rp.as_deref());
+        let report = backtest_once(
+            archive,
+            cfg.clone(),
+            tick_ms,
+            tail,
+            &knobs,
+            rp.as_deref(),
+            mode,
+        );
         rows.push((rung, report));
     }
     // The ladder table.
