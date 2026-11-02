@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional launchd agent for the 72 hour dry soak.
+  Rendered by scripts/run-72h-dry.sh with the install-launchd flag.
+  Restarts the dry soak only. Does not start live trading.
+  Placeholders: __REPO_ROOT__ __LOG_DIR__
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.blitzkrieg.soak72h</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_ROOT__/scripts/run-72h-dry.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DRY_RUN</key>
+    <string>true</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/soak72h.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/soak72h.log</string>
+</dict>
+</plist>
