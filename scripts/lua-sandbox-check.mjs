@@ -52,7 +52,7 @@ import { createChecks } from './lib/gate-harness.mjs';
 import { waitForSocket, sleep, pollUntil } from './lib/wait.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
-import { existsSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync, mkdirSync, copyFileSync, cpSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync, mkdirSync, copyFileSync, cpSync } from 'fs';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 
@@ -62,6 +62,10 @@ const EXAMPLES = join(ROOT, 'user_layer', 'examples');
 const DYLIB_EXT = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so';
 const OFFICIAL_DIR = join(ROOT, 'user_layer', 'strategies_lua', 'lua_momentum');
 const OFFICIAL_NAME = 'lua_momentum';
+// The live scan receipt names whatever version the package manifest ships.
+// Hostile fixtures below stay at 0.1.0; only the copied official package
+// follows this file.
+const OFFICIAL_VERSION = JSON.parse(readFileSync(join(OFFICIAL_DIR, 'manifest.json'), 'utf8')).version;
 const REFERENCE_NAME = 'momentum_alpha';
 
 // The §6.3 vocabulary, exactly as the issue pins it. Teeth E and the §6.3
@@ -391,7 +395,11 @@ async function main() {
         const m = line.match(/auto-load (ok|FAILED): (.*)$/);
         const receipt = m ? m[2] : '';
         const problems = m && m[1] === 'ok'
-          ? judgeLoadReceipt(receipt, { name, version: '0.1.0', lua: true })
+          ? judgeLoadReceipt(receipt, {
+              name,
+              version: name === OFFICIAL_NAME ? OFFICIAL_VERSION : '0.1.0',
+              lua: true,
+            })
           : [`auto-load did not succeed for ${name}: ${line.slice(0, 160)}`];
         check(`§6.4 scan registered "${name}" (lua marker, disabled, signed)`, problems.length === 0, problems.join(' | '));
       }
