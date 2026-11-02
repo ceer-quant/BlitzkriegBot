@@ -82,6 +82,15 @@ pub struct TradeRecord {
     /// field existed reads as undeclared (serde default — no migration).
     #[serde(default)]
     pub venue: String,
+    /// #872: loss on a maker close, in USD. Absent on every other strategy so
+    /// older logs and their exact JSON stay unchanged. `soak-72h-check` reads
+    /// `netPnlUsd` and ignores this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adverse_selection_usd: Option<String>,
+    /// #872: maker fills divided by post-only quotes for this strategy, as a
+    /// decimal string. Absent unless the close is a `postonly_pair` maker fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker_fill_rate: Option<String>,
 }
 
 impl TradeRecord {
@@ -125,6 +134,8 @@ impl TradeRecord {
             high_pnl_pct: c.high_pnl_pct,
             low_pnl_pct: c.low_pnl_pct,
             venue: c.venue.clone(),
+            adverse_selection_usd: None,
+            maker_fill_rate: None,
         }
     }
 }
@@ -608,5 +619,26 @@ mod tests {
             "the live db must not write beside the dry ledger"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn postonly_metrics_are_optional_on_the_trade_log() {
+        let plain = serde_json::to_value(TradeRecord::from_closed(&closed())).unwrap();
+        assert!(plain.get("adverseSelectionUsd").is_none());
+        assert!(plain.get("makerFillRate").is_none());
+        assert!(plain.get("netPnlUsd").is_some());
+        let mut rec = TradeRecord::from_closed(&closed());
+        rec.strategy = "postonly_pair".into();
+        rec.adverse_selection_usd = Some("0.47".into());
+        rec.maker_fill_rate = Some("0.5".into());
+        let line = serde_json::to_string(&rec).unwrap();
+        let back: TradeRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.adverse_selection_usd.as_deref(), Some("0.47"));
+        assert_eq!(back.maker_fill_rate.as_deref(), Some("0.5"));
+        assert_eq!(back.net_pnl_usd, rec.net_pnl_usd);
+        let legacy = serde_json::to_string(&TradeRecord::from_closed(&closed())).unwrap();
+        let loaded: TradeRecord = serde_json::from_str(&legacy).unwrap();
+        assert!(loaded.adverse_selection_usd.is_none());
+        assert!(loaded.maker_fill_rate.is_none());
     }
 }

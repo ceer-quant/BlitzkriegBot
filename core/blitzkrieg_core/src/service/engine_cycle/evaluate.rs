@@ -668,10 +668,14 @@ impl Core {
             };
             match self.place(req, maker_timeout, now_ms) {
                 Ok((_id, _)) => {
-                    self.strategy_accounting
+                    let acc = self
+                        .strategy_accounting
                         .entry(strategy_acc_key(&name, placed_account.as_str()))
-                        .or_default()
-                        .placed += 1;
+                        .or_default();
+                    acc.placed += 1;
+                    if name == "postonly_pair" && maker_timeout < 0 {
+                        acc.maker_quotes += 1;
+                    }
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }
@@ -1085,10 +1089,14 @@ impl Core {
             };
             match self.place(req, maker_timeout, now_ms) {
                 Ok((_id, _)) => {
-                    self.strategy_accounting
+                    let acc = self
+                        .strategy_accounting
                         .entry(strategy_acc_key(&name, placed_account.as_str()))
-                        .or_default()
-                        .placed += 1;
+                        .or_default();
+                    acc.placed += 1;
+                    if name == "postonly_pair" && maker_timeout < 0 {
+                        acc.maker_quotes += 1;
+                    }
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }

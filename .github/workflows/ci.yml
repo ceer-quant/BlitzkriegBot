@@ -561,6 +561,8 @@ jobs:
           node scripts/lua-sandbox-check.mjs
           node scripts/no-venue-branch-check.mjs
           node scripts/lua-decimal-check.mjs
+          node scripts/postonly-pair-replay.mjs --self-test
+          node scripts/postonly-pair-replay.mjs --check
       # #780: the file-size ratchet — no `.rs` file over 1500 lines in the
       # trading-repo scope (core/, tools/, user_layer/, extensions/; `ui/` is a
       # different owner and out of scope). The split campaigns (#699 family,

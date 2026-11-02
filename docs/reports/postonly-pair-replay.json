@@ -1,0 +1,15 @@
+{
+  "generatedOn": "2026-11-02",
+  "issue": 872,
+  "summary": {
+    "attempts": 80,
+    "scored": 69,
+    "paired": 6,
+    "unpaired": 63,
+    "netUsd": "-3.89",
+    "profitFactor": "0.037129",
+    "adverseSelectionUsd": "4.04",
+    "fillRate": "0.574514",
+    "decision": "NO-GO"
+  }
+}

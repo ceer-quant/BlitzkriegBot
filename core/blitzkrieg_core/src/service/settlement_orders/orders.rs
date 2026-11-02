@@ -966,6 +966,12 @@ impl Core {
                 // never fired) accrues onto the same flows.
                 self.positions
                     .apply_entry_fill(&id, d.delta, px, fee_usd, d.role);
+                if d.strategy == "postonly_pair" && d.role.is_maker() && d.delta > Decimal::ZERO {
+                    self.strategy_accounting
+                        .entry(strategy_acc_key(&d.strategy, d.account_id.as_str()))
+                        .or_default()
+                        .maker_fills += 1;
+                }
                 if maker_rebate_usd != Decimal::ZERO {
                     self.positions.accrue_maker_rebate(&id, maker_rebate_usd);
                 }
