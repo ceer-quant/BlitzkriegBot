@@ -5,8 +5,9 @@
 -- the README promises:
 --   positive — an up leg that established (0.50 -> 0.62), plateaued into the
 --              entry window and sits at its round high fires exactly ONE
---              ask-priced entry on THAT leg; the mirrored down leg does the
---              same on its own token;
+--              ask-priced entry on THAT leg; the mirrored DOWN shape (a fair
+--              FALL to the floor, at its round running LOW) buys the down leg
+--              the same way;
 --   negative — a spike into the level (drift 0.25 > 0.10) refuses (the
 --              anti-chase wall), early/late elapsed refuse, an ask above the
 --              band refuses, an un-established level refuses, a pull-back
@@ -188,23 +189,47 @@ do
   ok(e ~= nil and r.exits == nil or #r.exits == 0, "no exits — holding is the thesis")
 end
 
--- the DOWN side fires the same way when FAIR (not a leg's own mid) sits at or
--- below 1 - min_entry_price while rising to a new fair high. Books: up 0.40 /
--- down 0.60 -> fair 0.40; up 0.44 / down 0.56 -> fair 0.44; up 0.45 / down
--- 0.55 -> fair 0.45 (the floor), established by 0.05, plateaued, at high.
+-- the DOWN side fires the MIRRORED shape: FAIR (not a leg's own mid) FALLS
+-- to or below 1 - min_entry_price and sits at its round running LOW — a down
+-- establishment is a fall, so the extreme gate must be at_low, never the
+-- Up branch's at_high. Books mirrored: up 0.50 / down 0.50 -> fair 0.50; up
+-- 0.46 / down 0.54 -> fair 0.46; up 0.44 / down 0.56 -> fair 0.44 (past the
+-- floor), established by 0.06, plateaued (60s drift 0.02), AT THE FAIR LOW.
+do
+  reset()
+  feed_legs(0.50, 0.50, 0)
+  feed_legs(0.46, 0.54, 45000)
+  feed_legs(0.44, 0.56, 120000)
+  state.time_left = 180
+  local r = evaluate()
+  ok(#r.entries == 1,
+    "fair falling to/below the down floor fires exactly one entry, got "
+      .. #r.entries)
+  ok(r.entries[1] ~= nil and r.entries[1].token == "down-1",
+    "the down entry buys the down leg at ITS own ask")
+  ok(r.entries[1] ~= nil and r.entries[1].price == "0.57",
+    "the down entry lifts the down ask (0.57), got "
+    .. tostring(r.entries[1] and r.entries[1].price))
+  ok(r.entries[1] ~= nil
+      and r.entries[1].reason:find("at fair low", 1, true) ~= nil,
+    "the down entry names the fair-low extreme (the mirrored gate 3)")
+end
+
+-- THE old-bug counterexample (PR #856 review 6569861191): fair RISES to the
+-- down floor (0.40 -> 0.44 -> 0.45). That path sits at a fair HIGH, not a
+-- low — a rising fair is an UP shape that merely dipped under the floor's
+-- mirror, so the Down gate must refuse it. The pre-fix code shared
+-- `at_extreme = fs.at_high` between both branches and fired exactly here;
+-- the fix turns this artificial path into a wall.
 do
   reset()
   feed_legs(0.40, 0.60, 0)
   feed_legs(0.44, 0.56, 45000)
   feed_legs(0.45, 0.55, 120000)
   state.time_left = 180
-  local r = evaluate()
-  ok(#r.entries == 1, "fair at/below the down floor fires exactly one entry")
-  ok(r.entries[1] ~= nil and r.entries[1].token == "down-1",
-    "the entry buys the down leg at ITS own ask")
-  ok(r.entries[1] ~= nil and r.entries[1].price == "0.56",
-    "the down entry lifts the down ask (0.56), got "
-    .. tostring(r.entries[1] and r.entries[1].price))
+  ok(#evaluate().entries == 0,
+    "fair rising to the down floor sits at a fair HIGH, not low: "
+      .. "the pre-fix Down path refuses")
 end
 
 -- ═══ NEGATIVE — every gate is a real wall ═══════════════════════════════════

@@ -5,10 +5,12 @@
 -- entry window) and the round's FAIR price — the symmetric consensus of both
 -- legs, `fair = (up_mid + (1 - down_mid)) / 2` over trailing 10s means — has
 -- established a direction (moved at least min_established_move off the
--- round-open fair), sitting AT its round running high, and reached that level
--- as a PLATEAU (|move over the last drift_window_sec| <= max_drift_60s, NOT a
--- spike) — lift the favored leg's ask once and hold: the manifest declares
--- holds_to_settlement and no exit is ever emitted.
+-- round-open fair), sitting AT its round running EXTREME on the favored side
+-- (Up enters with fair at its running high, Down with fair at its running
+-- low — the mirror gate; a Down shape IS a fall to the floor), and reached
+-- that level as a PLATEAU (|move over the last drift_window_sec| <=
+-- max_drift_60s, NOT a spike) — lift the favored leg's ask once and hold: the
+-- manifest declares holds_to_settlement and no exit is ever emitted.
 --
 -- Why FAIR and not the leg's own mid (the 2026-11-01 attribution replay):
 --   The README's EST signal is built on the FAIR path (10s buckets of both
@@ -293,7 +295,9 @@ end
 --                        trusted only when sampled inside the opening window)
 --   open_ts  = ms|nil   (when open_ref was sampled — its qualification)
 --   runmax   = dec|nil  (round running high of FAIR, not of a leg)
+--   runmin   = dec|nil  (round running low of FAIR — the Down side's extreme)
 --   at_high  = bool     (the latest fair sits at that running high)
+--   at_low   = bool     (the latest fair sits at that running low)
 --   last_ts  = ms of the latest fair sample
 -- }
 -- verdicts[condition_id] = {fired, denied, budget}  this round's bucket flags
@@ -347,7 +351,8 @@ local function fair_state(cid)
   local st = tracker.fairs[cid]
   if not st then
     st = { samples = {}, open_ref = nil, open_ts = nil,
-           runmax = nil, at_high = false, last_ts = 0 }
+           runmax = nil, runmin = nil,
+           at_high = false, at_low = false, last_ts = 0 }
     tracker.fairs[cid] = st
   end
   return st
@@ -423,9 +428,9 @@ local function push_mid(st, ts, mid, cfg)
 end
 
 --- Append/overwrite the current 250ms bucket on the FAIR ring and ratchet the
---- round extremes. at_high is computed BEFORE runmax moves: the sample that
---- SETS a new high IS the at-the-high sample (ties stay inclusive, the
---- README's `f >= runmax` spelling).
+--- round extremes. at_high/at_low are computed BEFORE the ratchets move: the
+--- sample that SETS a new extreme IS the at-that-extreme sample (ties stay
+--- inclusive: the README's `f >= runmax` spelling, mirrored `f <= runmin`).
 local function push_fair(st, ts, fair, cfg)
   local bucket = ts // BUCKET_MS
   local n = #st.samples
@@ -436,7 +441,9 @@ local function push_fair(st, ts, fair, cfg)
   end
   st.last_ts = ts
   st.at_high = (st.runmax == nil) or dec_cmp(fair, st.runmax) >= 0
+  st.at_low = (st.runmin == nil) or dec_cmp(fair, st.runmin) <= 0
   if st.runmax == nil or dec_cmp(fair, st.runmax) > 0 then st.runmax = fair end
+  if st.runmin == nil or dec_cmp(fair, st.runmin) < 0 then st.runmin = fair end
   if st.open_ref == nil then st.open_ref = fair; st.open_ts = ts end
   trim_ring(st, ts, cfg)
 end
@@ -590,20 +597,25 @@ function bk_evaluate()
 
           -- The side FAIR favors (README: Up at/above the floor, Down at or
           -- below 1 - floor) — never a leg's own mid — and the price actually
-          -- paid: THAT leg's ask.
-          local tok, ask
+          -- paid: THAT leg's ask. The extreme gate is side-symmetric with the
+          -- shape: an Up entry continues a fair RISE (承接在 fair 高点), a
+          -- Down entry continues a fair FALL (承接在 fair 低点) — a down-ward
+          -- established fair sits at its running LOW, never its high.
+          local tok, ask, at_extreme, extreme_txt
           if dec_cmp(f, cfg.min_entry_price) >= 0 then
-            tok, ask = m.up_token, dec_parse(bu.best_ask)
+            tok, ask, at_extreme, extreme_txt =
+              m.up_token, dec_parse(bu.best_ask), fs.at_high, "at fair high"
           elseif dec_cmp(f, one_minus_floor) <= 0 then
-            tok, ask = m.down_token, dec_parse(bd.best_ask)
+            tok, ask, at_extreme, extreme_txt =
+              m.down_token, dec_parse(bd.best_ask), fs.at_low, "at fair low"
           end
           -- gate 4 — the entry band on the price actually paid (this is also
           -- the "a real ask exists" test: an empty side has no ask).
           local in_band = tok ~= nil and ask ~= nil and ask.m > 0
             and dec_cmp(ask, cfg.min_entry_price) >= 0
             and dec_cmp(ask, cfg.max_entry_price) <= 0
-          -- gate 3 — at the FAIR running high (承接在极值上, not on a leg's)
-          local at_extreme = fs.at_high
+          -- gate 3 — at the FAIR running extreme OF THE FAVORED SIDE (承接在
+          -- 极值上, not on a leg's): high for Up, low for Down.
           -- gate 2 — the anti-chase wall: the level was reached as a
           -- PLATEAU, not a spike (|fair - fair@window_ago| <= cap). No
           -- window coverage -> no measurement -> no entry.
@@ -638,10 +650,10 @@ function bk_evaluate()
                 token = tok,
                 price = dec_fmt(ask),
                 reason = string.format(
-                  "whale_follow: fair %s established (open ref %s, drift %s over %ds, at fair high), ask %s, %ds left | buckets no_signal=%d gate_blocked=%d budget_spent=%d",
+                  "whale_follow: fair %s established (open ref %s, drift %s over %ds, %s), ask %s, %ds left | buckets no_signal=%d gate_blocked=%d budget_spent=%d",
                   dec_fmt(dec_round2(f)),
                   fs.open_ref ~= nil and dec_fmt(dec_round2(fs.open_ref)) or "none",
-                  drift_txt, cfg.drift_window_sec, dec_fmt(ask),
+                  drift_txt, cfg.drift_window_sec, extreme_txt, dec_fmt(ask),
                   round.time_left_sec,
                   tracker.buckets.no_signal, tracker.buckets.gate_blocked,
                   tracker.buckets.budget_spent
