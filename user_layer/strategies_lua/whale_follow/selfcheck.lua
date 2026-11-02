@@ -137,6 +137,19 @@ local function feed_up(up_mid, t_ms)
   S.bk_on_book(bu)
 end
 
+--- Feed BOTH legs with INDEPENDENT mids: a real round's two books are two
+--- quotes on the same event and can diverge (which is the whole point of the
+--- fair symmetric price).
+local function feed_legs(up_mid, down_mid, t_ms)
+  if t_ms then state.now = T0 + t_ms end
+  local bu = book_row("up-1", up_mid)
+  local bd = book_row("down-1", down_mid)
+  state.books["up-1"] = bu
+  state.books["down-1"] = bd
+  S.bk_on_book(bu)
+  S.bk_on_book(bd)
+end
+
 --- Feed BOTH markets of a two-market state.markets the mirrored pair shape
 --- (up_mid_a for the first market's up leg, up_mid_b for the second's).
 local function feed_both_markets(up_mid_a, up_mid_b, t_ms)
@@ -175,19 +188,22 @@ do
   ok(e ~= nil and r.exits == nil or #r.exits == 0, "no exits — holding is the thesis")
 end
 
--- the mirrored down leg is the same shape on its own token.
+-- the DOWN side fires the same way when FAIR (not a leg's own mid) sits at or
+-- below 1 - min_entry_price while rising to a new fair high. Books: up 0.40 /
+-- down 0.60 -> fair 0.40; up 0.44 / down 0.56 -> fair 0.44; up 0.45 / down
+-- 0.55 -> fair 0.45 (the floor), established by 0.05, plateaued, at high.
 do
   reset()
-  feed_pair(0.50, 0)
-  feed_pair(0.44, 45000)
-  feed_pair(0.38, 120000) -- up falls, DOWN leg's own mid rises to 0.62
+  feed_legs(0.40, 0.60, 0)
+  feed_legs(0.44, 0.56, 45000)
+  feed_legs(0.45, 0.55, 120000)
   state.time_left = 180
   local r = evaluate()
-  ok(#r.entries == 1, "the down leg establishing fires exactly one entry")
+  ok(#r.entries == 1, "fair at/below the down floor fires exactly one entry")
   ok(r.entries[1] ~= nil and r.entries[1].token == "down-1",
     "the entry buys the down leg at ITS own ask")
-  ok(r.entries[1] ~= nil and r.entries[1].price == "0.63",
-    "the down entry also lifts the ask (0.63), got "
+  ok(r.entries[1] ~= nil and r.entries[1].price == "0.56",
+    "the down entry lifts the down ask (0.56), got "
     .. tostring(r.entries[1] and r.entries[1].price))
 end
 
@@ -306,6 +322,49 @@ do
   ok(#evaluate().entries == 0, "round_sec=300 default: a 15m round never fires")
 end
 
+-- ═══ FAIR SYMMETRY — the round's price is BOTH legs, never one ══════════════
+
+-- THE core counterexample: up rises AND down rises (an inconsistent book —
+-- both sides bidding up). The Up leg climbs 0.50 -> 0.62 -> 0.72, its own new
+-- high with a legal 0.10 plateau, and a per-leg rule would fire HERE. But
+-- fair = (up + (1 - down)) / 2 stays at exactly 0.50 all the way: the round's
+-- consensus did not move, so nothing is established and nothing is at a high.
+do
+  reset()
+  feed_legs(0.50, 0.50, 0)
+  feed_legs(0.62, 0.62, 45000)  -- up 0.50 -> 0.62, down 0.50 -> 0.62
+  feed_legs(0.72, 0.72, 120000) -- up at its own round high; fair still 0.50
+  state.time_left = 180
+  ok(#evaluate().entries == 0,
+    "both legs rising together: fair never moved, no establishment, no entry")
+end
+
+-- at-high is a FAIR property: up makes a new high (0.66 -> 0.72) while the
+-- Down leg gives up more than it gained, so fair pulls back 0.63 -> 0.58 —
+-- off its round high. A per-leg rule fires on the leg's new high; the fair
+-- rule refuses (承接在极值上 means the ROUND's extreme, not a leg's).
+do
+  reset()
+  feed_legs(0.50, 0.50, 0)      -- fair 0.50 (open reference)
+  feed_legs(0.66, 0.40, 45000)  -- fair 0.63 (running high)
+  feed_legs(0.72, 0.56, 120000) -- up's own new high, fair 0.58 < 0.63
+  state.time_left = 180
+  ok(#evaluate().entries == 0,
+    "a leg's new high while fair pulled back is not at the round high")
+end
+
+-- the fair mean is a TRAILING 10s window over both legs: a leg that has not
+-- ticked for 120s leaves fair unpriced, and an unpriced round never enters
+-- (fail-closed — one side alone is not a consensus).
+do
+  reset()
+  feed_legs(0.50, 0.50, 0)   -- both rings carry a sample at t=0
+  feed_up(0.62, 120000)      -- only up refreshes; down's last mid is 120s old
+  state.time_left = 180
+  ok(#evaluate().entries == 0,
+    "a leg older than the 10s fair window leaves fair unpriced (fail-closed)")
+end
+
 -- ═══ AUDIT REPRO — the two blockers, pinned as negative rows ════════════════
 
 -- Blocker 1 (P1): TWO conditions qualify in the SAME evaluation — each market
@@ -422,6 +481,96 @@ do
   state.time_left = 180
   ok(#evaluate().entries == 1,
     "corrupt params fall back to defaults: the same shape still fires")
+end
+
+-- ═══ OBSERVABILITY — every round lands in exactly one bucket ════════════════
+
+-- A zero-fill round must never be indistinguishable from a dead strategy: the
+-- three ways a round can end without an entry are counted separately and
+-- published on the next entry's reason, so an operator reading trades sees
+-- WHY nothing fired (issue #854).
+
+-- no_signal: the fair never established — nothing to refuse, the market was
+-- simply quiet. A quiet round 1 must show up as no_signal, not as a refusal.
+do
+  reset()
+  feed_pair(0.50, 0)
+  feed_pair(0.53, 60000)   -- +0.03 < 0.05 established floor
+  state.time_left = 180
+  ok(#evaluate().entries == 0, "a quiet round fires nothing")
+  S.bk_on_round({ slot = 2 })
+  state.slot = 2
+  state.now = T0 + 1000000
+  feed_pair(0.50, 1000000)
+  feed_pair(0.56, 1045000)
+  feed_pair(0.62, 1120000)
+  state.time_left = 180
+  local r = evaluate()
+  ok(#r.entries == 1, "the next round fires, carrying the settled buckets")
+  ok(r.entries[1] ~= nil
+      and r.entries[1].reason:find("no_signal=1", 1, true) ~= nil,
+    "the quiet round is counted as no_signal, not as a refusal: "
+      .. tostring(r.entries[1] and r.entries[1].reason))
+  ok(r.entries[1] ~= nil
+      and r.entries[1].reason:find("gate_blocked=0", 1, true) ~= nil,
+    "a quiet round is not mislabelled gate_blocked")
+end
+
+-- gate_blocked: the fair DID establish inside the window but a gate refused
+-- it (here: the round was joined mid-flight, so no trusted open reference).
+do
+  reset()
+  state.now = T0 + 60000
+  feed_pair(0.50, 60000)
+  feed_pair(0.56, 105000)
+  feed_pair(0.62, 180000)
+  state.time_left = 120
+  ok(#evaluate().entries == 0, "the mid-round start fires nothing")
+  S.bk_on_round({ slot = 2 })
+  state.slot = 2
+  state.now = T0 + 1000000
+  feed_pair(0.50, 1000000)
+  feed_pair(0.56, 1045000)
+  feed_pair(0.62, 1120000)
+  state.time_left = 180
+  local r = evaluate()
+  ok(#r.entries == 1, "the next round fires, carrying the settled buckets")
+  ok(r.entries[1] ~= nil
+      and r.entries[1].reason:find("gate_blocked=1", 1, true) ~= nil,
+    "a refused round is counted as gate_blocked: "
+      .. tostring(r.entries[1] and r.entries[1].reason))
+end
+
+-- budget_spent: the shape and every gate held, but this round's one opening
+-- was already spent on another condition — a budget refusal, not a signal
+-- refusal and not a quiet round.
+do
+  reset()
+  state.markets = {
+    { asset = "BTC", condition_id = "cA", up_token = "up-a",
+      down_token = "down-a", expires_at_ms = 0, slot = 1, neg_risk = false },
+    { asset = "BTC", condition_id = "cB", up_token = "up-b",
+      down_token = "down-b", expires_at_ms = 0, slot = 1, neg_risk = false },
+  }
+  feed_both_markets(0.50, 0.50, 0)
+  feed_both_markets(0.56, 0.56, 45000)
+  feed_both_markets(0.62, 0.62, 120000)
+  state.time_left = 180
+  ok(#evaluate().entries == 1, "one of the two qualifying markets fires")
+  state.markets = nil
+  S.bk_on_round({ slot = 2 })
+  state.slot = 2
+  state.now = T0 + 1000000
+  feed_pair(0.50, 1000000)
+  feed_pair(0.56, 1045000)
+  feed_pair(0.62, 1120000)
+  state.time_left = 180
+  local r = evaluate()
+  ok(#r.entries == 1, "the next round fires, carrying the settled buckets")
+  ok(r.entries[1] ~= nil
+      and r.entries[1].reason:find("budget_spent=1", 1, true) ~= nil,
+    "the second qualifying condition is counted as budget_spent: "
+      .. tostring(r.entries[1] and r.entries[1].reason))
 end
 
 -- ── verdict ─────────────────────────────────────────────────────────────────
