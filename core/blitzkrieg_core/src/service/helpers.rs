@@ -111,10 +111,12 @@ pub(super) const FREEZE_ON_REJECTS: u32 = 5;
 /// Consecutive failed reconciliation sweeps that freeze trading (E31-b): a
 /// blind sweep is the failure mode that lets ghosts and orphans accumulate.
 pub(super) const SWEEP_FAILURE_FREEZE: u32 = 3;
-/// 冻结自愈防抖：an AUTO-frozen account is only lifted by a reconcile sweep
-/// after THIS long, so the flash outage that caused the freeze has to stay
+/// 冻结自愈防抖：an AUTO-frozen account is lifted only after THIS long, on
+/// every path (`auto_lift_if_venue_healthy`, #867) — a successful reconcile
+/// sweep or a venue ack. The flash outage that caused the freeze has to stay
 /// quiet for ten minutes before the kernel trusts it again (真线 2026-10-28:
-/// 断网恢复后 sweep 曾长期无处落地，冻结白挂数小时).
+/// 断网恢复后 sweep 曾长期无处落地，冻结白挂数小时). Closes keep flowing
+/// during the window; new entries do not.
 pub(super) const FREEZE_AUTO_LIFT_MIN_MS: i64 = 600_000;
 /// A benign close-intent rejection (Insufficient position) backoff-retried
 /// THIS many times in a row (≈15–20 min under the exponential curve) before

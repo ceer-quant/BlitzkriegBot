@@ -1,0 +1,35 @@
+# Opt-in live profile for a 100 USDC bankroll (issue #870).
+#
+# This file is not the default. A normal boot still reads default.toml, and
+# `.env.example` keeps DRY_RUN=true. Point the kernel here only after
+# `scripts/live-100u-preflight.mjs` has passed, via production-live-100u.env
+# or `--config user_layer/configs/production-live-100u.toml`.
+#
+# The loss bounds and the orderbook budget match production-72h.toml and
+# default.toml. A test locks that. They are sized for 100 USDC:
+#   global halt $8, daily loss $5, one entry's stop-loss $0.50,
+#   total open exposure $20, same-asset $12.
+# The per-order notional cap is not a toml key. production-live-100u.env
+# sets it to $2 absolute (`BK_LIVE_MAX_ORDER_NOTIONAL`) and 2% of equity
+# (`BK_MAX_ORDER_NOTIONAL_PCT`; 2% of 100 USDC = $2), with the entry
+# budget at 1% (`BK_SIZE_PCT`). The running process must pass those
+# through `--max-order-notional` / `--min-shares` / `--max-shares`; this
+# tree does not ship a launcher.
+#
+# No strategy is enabled here. production-live-100u.allowlist stays empty
+# until a package passes the soak gate (PF >= 1.1 after costs, max
+# drawdown <= $5, at least 30 closes). Start with --no-strategy-state.
+
+[engine]
+max_orderbook_stale_ms = 3500
+
+[risk]
+max_single_loss_usd = "0.50"
+max_daily_drawdown_usd = "5"
+max_position_size = "5"
+max_consecutive_losses = "4"
+cooldown_minutes = "30"
+max_total_position = "6"
+max_total_exposure_usd = "20"
+max_correlation_usd = "12"
+global_kill_switch_loss_usd = "8"

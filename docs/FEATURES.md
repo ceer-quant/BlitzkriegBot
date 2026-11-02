@@ -58,7 +58,7 @@ BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场
 | **崩溃恢复：订单**（孤儿订单防护） | ✅ 已验证（离线） | `scripts/order-recovery-check.mjs`；启动孤儿清算（`startup sweep cancelled N orphan order(s)`） |
 | **崩溃恢复：持仓**（失管防护） | ✅ 已验证（离线） | `position_db.rs` + `restore_positions()`；`scripts/position-recovery-check.mjs` |
 | **内核接管（adopt）**：重复客户端不重启风暴 | ✅ 已验证（离线） | `scripts/core-adopt-check.mjs`；socket 改名后可发现并领养旧名 |
-| **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `backtest.rs` 单元测试。**端到端那条已退役**：`scripts/backtest-check.mjs`（21/21，live vs 回放**逐位相等**，净盈亏 5.12208717）回放的就是被删的 cdylib，现在没有替代品——要恢复它，先让树里重新有一个可回放的策略库 |
+| **事件驱动回测器（`--backtest`）** | ✅ 已验证（离线） | `backtest.rs` 单元测试。**逐位相等的端到端门禁仍退役**：旧 `scripts/backtest-check.mjs` 回放的是已删除的 cdylib。替代物是费用+滑点扫描 `scripts/cost-adjusted-edge.mjs`（#865），它不声称逐位回放，当前结论是 NO-GO，见 [`reports/cost-adjusted-edge-72h.md`](reports/cost-adjusted-edge-72h.md) |
 | **行情归档（默认开启）**：分段轮转 256MB、无会话上限、<5GB 停录、单写者锁 | ✅ 已模拟实况验证（dry） | 真实 feed 13 分钟 / 1,025,963 事件 / 145.7 MB 重放一致 |
 | **UDS + JSON-RPC 2.0 IPC** | ✅ 已模拟实况验证（dry） | 45 个方法名（见 §1.1）；Node 侧 zod 镜像校验 |
 | **C ABI v2 策略接口** | ✅ 已验证（离线） | CI 真构建并驱动两个真实 cdylib；`foreign_parity.rs` 逐信号对拍 |

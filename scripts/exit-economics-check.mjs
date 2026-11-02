@@ -214,24 +214,39 @@ function judge(baseline, actual) {
   return problems;
 }
 
+/**
+ * Replay argv.
+ *
+ * `--no-config` is pinned. The #272 baseline was recorded at factory posture
+ * (risk limits off, commit 9ad51ea). A normal start may arm `default.toml`
+ * (#864); those limits are real for that start and are covered by the config
+ * and soak checks. This gate measures strategy economics, so it must not
+ * inherit the armed file. Dropping the flag makes the recorded windows
+ * incomparable. Do not widen TOLERANCE to hide that.
+ */
+function replayArgs({ corpus, report, extraFlags = [] }) {
+  return [
+    '--mode', 'dry',
+    '--engine',
+    '--no-discovery',
+    '--no-strategy-state',
+    '--no-config',
+    ...strategyArgs,
+    '--no-trade-log', '--no-order-log', '--no-position-log', '--no-event-archive',
+    '--round-sec', '900', '--min-round-age', '0', '--min-time-left', '0',
+    '--seed-balance', '1000', '--max-order-notional', '12',
+    '--backtest', corpus,
+    '--backtest-report', report,
+    '--backtest-tick-ms', '50', '--backtest-tail-ms', '0',
+    ...extraFlags,
+  ];
+}
+
 /** One replay: materialize the window, drive the release core, read the report. */
 function runArm({ corpus, windowName, dir, extraFlags = [] }) {
   return new Promise((resolve) => {
     const report = join(dir, `${windowName}-${STRATEGY}.json`);
-    const args = [
-      '--mode', 'dry',
-      '--engine',
-      '--no-discovery',
-      '--no-strategy-state',
-      ...strategyArgs,
-      '--no-trade-log', '--no-order-log', '--no-position-log', '--no-event-archive',
-      '--round-sec', '900', '--min-round-age', '0', '--min-time-left', '0',
-      '--seed-balance', '1000', '--max-order-notional', '12',
-      '--backtest', corpus,
-      '--backtest-report', report,
-      '--backtest-tick-ms', '50', '--backtest-tail-ms', '0',
-      ...extraFlags,
-    ];
+    const args = replayArgs({ corpus, report, extraFlags });
     const child = spawn(BIN, args, { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     child.stderr.on('data', (d) => (err += d));
@@ -291,11 +306,26 @@ function selfTest() {
       console.log(`  ok   ${c.name}`);
     }
   }
+  const pinned = replayArgs({
+    corpus: 'corpus.jsonl',
+    report: 'report.json',
+    extraFlags: ['--exit-stop-loss-pct', '1'],
+  });
+  const noConfigAt = pinned.indexOf('--no-config');
+  const armAt = pinned.indexOf('--exit-stop-loss-pct');
+  const pinOk = noConfigAt >= 0 && armAt > noConfigAt && !pinned.includes('--config');
+  if (!pinOk) {
+    failed += 1;
+    console.error('  FAIL replay stays on --no-config, ahead of any arm flag');
+  } else {
+    console.log('  ok   replay is pinned to --no-config (factory posture, #272 baseline)');
+  }
+  const total = cases.length + 1;
   if (failed > 0) {
-    console.error(`\nexit-economics self-test: ${failed} of ${cases.length} fixtures failed`);
+    console.error(`\nexit-economics self-test: ${failed} of ${total} fixtures failed`);
     process.exit(1);
   }
-  console.log(`\nexit-economics self-test: ${cases.length} fixtures passed`);
+  console.log(`\nexit-economics self-test: ${total} fixtures passed`);
 }
 
 /**
