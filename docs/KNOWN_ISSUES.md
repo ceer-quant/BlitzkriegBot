@@ -6,7 +6,7 @@
 
 `FEATURES.md` 里 Polymarket 的真实下单/撤单记录，不等于成交捕获和结算链已经验收。dry-run、离线单测、以及 `docs/reports/cost-adjusted-edge-72h.md` 的费用扫描，都不能当成实盘盈亏。
 
-默认 `DRY_RUN=true`（`.env.example` 与 `user_layer/configs/production-72h.env`）。把 `DRY_RUN` 设成 `false` 是所有者的决定，不在默认配置里。
+默认 `DRY_RUN=true`（`.env.example` 与 `user_layer/configs/production-72h.env`）。100 USDC 的实盘文件是另选的 `production-live-100u.env`（issue #870）：下单前必须先过只读预检（余额、授权、链上成交和持仓）。预检通过也不等于策略可以启用，允许名单仍然是空的。
 
 ## 2. 当前策略没有扣费后的样本外 GO
 

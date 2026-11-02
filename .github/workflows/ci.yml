@@ -493,6 +493,8 @@ jobs:
           node scripts/cost-adjusted-edge.mjs --check
           node scripts/soak-72h-check.mjs --self-test
           node scripts/soak-72h-check.mjs --preflight
+          node scripts/live-100u-preflight.mjs --self-test
+          node scripts/live-100u-preflight.mjs --config
       # RETIRED with the shipped strategies (they drove the deleted cdylibs, so
       # there is nothing left for them to drive): the E2 strategy-scoped gates
       # (strategy-limit / strategy-gate / strategy-evolution), the E4 leg gates

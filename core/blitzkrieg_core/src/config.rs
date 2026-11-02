@@ -1010,29 +1010,37 @@ mod tests {
         assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
     }
 
-    /// #864: the 72-hour profile and the shipped default enforce the same
-    /// loss bounds and the same freshness budget. Drift between the two files
-    /// would mean "the profile" and "a normal boot" are different products.
+    /// #864 / #870: the 72-hour profile, the 100 USDC live profile, and the
+    /// shipped default enforce the same loss bounds and the same freshness
+    /// budget. Drift between the files would mean a "profile" and a normal
+    /// boot are different products.
     #[test]
     fn production_72h_matches_the_shipped_risk_and_staleness() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
         let shipped = FileConfig::load(Some(&root.join("default.toml")));
         let profile = FileConfig::load(Some(&root.join("production-72h.toml")));
+        let live = FileConfig::load(Some(&root.join("production-live-100u.toml")));
         assert!(profile.warnings.is_empty(), "{:?}", profile.warnings);
+        assert!(live.warnings.is_empty(), "{:?}", live.warnings);
         assert!(
             profile.unknown_keys.is_empty(),
             "{:?}",
             profile.unknown_keys
         );
+        assert!(live.unknown_keys.is_empty(), "{:?}", live.unknown_keys);
         assert_eq!(shipped.risk, profile.risk);
+        assert_eq!(shipped.risk, live.risk);
         assert_eq!(
             shipped.max_orderbook_stale_ms,
             profile.max_orderbook_stale_ms
         );
+        assert_eq!(shipped.max_orderbook_stale_ms, live.max_orderbook_stale_ms);
         assert_eq!(profile.max_orderbook_stale_ms, Some(3500));
-        // The profile must not smuggle an engine factory key back in.
+        // Neither profile may smuggle an engine factory key back in.
         assert_eq!(profile.round_sec, None);
         assert_eq!(profile.assets, None);
+        assert_eq!(live.round_sec, None);
+        assert_eq!(live.assets, None);
     }
 
     #[test]
