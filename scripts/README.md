@@ -379,6 +379,13 @@ checkup route (`soak-health.sh`) still carries it as a `backup=` sub-status.
 - `secret-scan.sh` — zero-dependency secret scan (`--all` includes untracked
   docs; `--history` scans full git history). Reports locations, never values.
 
+## Corpus
+
+- `corpus/` — replay-corpus settlement schema tools (#890): the generator
+  (`build_realbook.py`, writes token ids), the gate/repair
+  (`fix_resolutions.py --check|--apply`), and the self-test. See
+  `corpus/README.md`; the corpus JSONL itself never lives in the repo.
+
 ## Conventions
 
 - Gate scripts print `RESULT: PASS|FAIL` and exit `0`/`1`.
