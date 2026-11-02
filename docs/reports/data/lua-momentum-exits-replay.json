@@ -1,0 +1,470 @@
+{
+  "owner_example": {
+    "entry": "0.28",
+    "shares": 10,
+    "at_0.42": {
+      "bid": "0.42",
+      "fee_per_share": "0.017052",
+      "net_pct": "43.91",
+      "gross_pct": "50.00",
+      "realistic_pnl": "1.2295",
+      "polysim_pnl": "1.4000"
+    },
+    "at_0.26": {
+      "bid": "0.26",
+      "fee_per_share": "0.013468",
+      "net_pct": "-11.95",
+      "gross_pct": "-7.14",
+      "realistic_pnl": "-0.3347",
+      "polysim_pnl": "-0.2000"
+    },
+    "with_exits_realistic_pnl": "1.2295",
+    "without_exits_if_settles_0": "-2.80",
+    "giveback_from_peak_to_0.26_realistic": "1.5642"
+  },
+  "tapes": {
+    "range-20260919T1600Z.jsonl.gz": {
+      "with_exits": {
+        "missed_bids": 4,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 35,
+          "wins": 19,
+          "losses": 16,
+          "flat": 0,
+          "net": "-45.373930",
+          "gross_win": "28.212770",
+          "gross_loss": "-73.586700",
+          "pf": "0.3833949613177381238729281242",
+          "max_dd": "60.505980",
+          "giveback_sum": "87.86308000000000000000000000",
+          "giveback_n": 35,
+          "armed_n": 23,
+          "armed_giveback_sum": "17.27314000000000000000000000",
+          "unresolved": 13,
+          "reasons": {
+            "take_profit": 8,
+            "trailing_stop": 14,
+            "unresolved_mark": 13
+          }
+        },
+        "polysim_fee0": {
+          "n": 35,
+          "wins": 20,
+          "losses": 15,
+          "flat": 0,
+          "net": "-42.210",
+          "gross_win": "30.790",
+          "gross_loss": "-73.00",
+          "pf": "0.4217808219178082191780821918",
+          "max_dd": "58.300",
+          "giveback_sum": "85.54083000000000000000000000",
+          "giveback_n": 35,
+          "armed_n": 23,
+          "armed_giveback_sum": "14.95089000000000000000000000",
+          "unresolved": 13,
+          "reasons": {
+            "take_profit": 8,
+            "trailing_stop": 14,
+            "unresolved_mark": 13
+          }
+        }
+      },
+      "without_exits": {
+        "missed_bids": 3,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 17,
+          "wins": 4,
+          "losses": 13,
+          "flat": 0,
+          "net": "-44.510",
+          "gross_win": "17.390",
+          "gross_loss": "-61.90",
+          "pf": "0.2809369951534733441033925687",
+          "max_dd": "48.000",
+          "giveback_sum": "87.55371000000000000000000000",
+          "giveback_n": 17,
+          "armed_n": 11,
+          "armed_giveback_sum": "55.26976000000000000000000000",
+          "unresolved": 17,
+          "reasons": {
+            "unresolved_mark": 17
+          }
+        },
+        "polysim_fee0": {
+          "n": 17,
+          "wins": 4,
+          "losses": 13,
+          "flat": 0,
+          "net": "-44.510",
+          "gross_win": "17.390",
+          "gross_loss": "-61.90",
+          "pf": "0.2809369951534733441033925687",
+          "max_dd": "48.000",
+          "giveback_sum": "87.55371000000000000000000000",
+          "giveback_n": 17,
+          "armed_n": 11,
+          "armed_giveback_sum": "55.26976000000000000000000000",
+          "unresolved": 17,
+          "reasons": {
+            "unresolved_mark": 17
+          }
+        }
+      },
+      "both_sides_if_up_leg_restored": {
+        "conditions_filled": 20,
+        "conditions_both_sides": 17
+      }
+    },
+    "range-20260920T2300Z.jsonl.gz": {
+      "with_exits": {
+        "missed_bids": 2,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 27,
+          "wins": 14,
+          "losses": 13,
+          "flat": 0,
+          "net": "-52.905960",
+          "gross_win": "21.794040",
+          "gross_loss": "-74.70",
+          "pf": "0.2917542168674698795180722892",
+          "max_dd": "54.995960",
+          "giveback_sum": "83.77535000000000000000000000",
+          "giveback_n": 27,
+          "armed_n": 14,
+          "armed_giveback_sum": "6.895790000000000000000000000",
+          "unresolved": 15,
+          "reasons": {
+            "take_profit": 5,
+            "trailing_stop": 7,
+            "unresolved_mark": 15
+          }
+        },
+        "polysim_fee0": {
+          "n": 27,
+          "wins": 14,
+          "losses": 13,
+          "flat": 0,
+          "net": "-51.210",
+          "gross_win": "23.490",
+          "gross_loss": "-74.70",
+          "pf": "0.3144578313253012048192771084",
+          "max_dd": "53.30",
+          "giveback_sum": "82.70449000000000000000000000",
+          "giveback_n": 27,
+          "armed_n": 14,
+          "armed_giveback_sum": "5.824930000000000000000000000",
+          "unresolved": 15,
+          "reasons": {
+            "take_profit": 5,
+            "trailing_stop": 7,
+            "unresolved_mark": 15
+          }
+        }
+      },
+      "without_exits": {
+        "missed_bids": 2,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 18,
+          "wins": 5,
+          "losses": 13,
+          "flat": 0,
+          "net": "-45.020",
+          "gross_win": "24.780",
+          "gross_loss": "-69.80",
+          "pf": "0.3550143266475644699140401146",
+          "max_dd": "54.60",
+          "giveback_sum": "78.70546000000000000000000000",
+          "giveback_n": 18,
+          "armed_n": 9,
+          "armed_giveback_sum": "26.70759000000000000000000000",
+          "unresolved": 18,
+          "reasons": {
+            "unresolved_mark": 18
+          }
+        },
+        "polysim_fee0": {
+          "n": 18,
+          "wins": 5,
+          "losses": 13,
+          "flat": 0,
+          "net": "-45.020",
+          "gross_win": "24.780",
+          "gross_loss": "-69.80",
+          "pf": "0.3550143266475644699140401146",
+          "max_dd": "54.60",
+          "giveback_sum": "78.70546000000000000000000000",
+          "giveback_n": 18,
+          "armed_n": 9,
+          "armed_giveback_sum": "26.70759000000000000000000000",
+          "unresolved": 18,
+          "reasons": {
+            "unresolved_mark": 18
+          }
+        }
+      },
+      "both_sides_if_up_leg_restored": {
+        "conditions_filled": 20,
+        "conditions_both_sides": 17
+      }
+    },
+    "trend-20260919T1000Z.jsonl.gz": {
+      "with_exits": {
+        "missed_bids": 1,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 40,
+          "wins": 29,
+          "losses": 11,
+          "flat": 0,
+          "net": "-4.543710",
+          "gross_win": "44.331220",
+          "gross_loss": "-48.874930",
+          "pf": "0.9070339333478329278425565008",
+          "max_dd": "30.075610",
+          "giveback_sum": "63.38046000000000000000000000",
+          "giveback_n": 40,
+          "armed_n": 29,
+          "armed_giveback_sum": "16.90005000000000000000000000",
+          "unresolved": 15,
+          "reasons": {
+            "take_profit": 10,
+            "trailing_stop": 15,
+            "unresolved_mark": 15
+          }
+        },
+        "polysim_fee0": {
+          "n": 40,
+          "wins": 29,
+          "losses": 11,
+          "flat": 0,
+          "net": "-1.110",
+          "gross_win": "47.590",
+          "gross_loss": "-48.70",
+          "pf": "0.9772073921971252566735112936",
+          "max_dd": "28.80",
+          "giveback_sum": "60.97526000000000000000000000",
+          "giveback_n": 40,
+          "armed_n": 29,
+          "armed_giveback_sum": "14.49485000000000000000000000",
+          "unresolved": 15,
+          "reasons": {
+            "take_profit": 10,
+            "trailing_stop": 15,
+            "unresolved_mark": 15
+          }
+        }
+      },
+      "without_exits": {
+        "missed_bids": 0,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 20,
+          "wins": 10,
+          "losses": 10,
+          "flat": 0,
+          "net": "1.580",
+          "gross_win": "46.380",
+          "gross_loss": "-44.80",
+          "pf": "1.035267857142857142857142857",
+          "max_dd": "32.30",
+          "giveback_sum": "51.34170000000000000000000000",
+          "giveback_n": 20,
+          "armed_n": 13,
+          "armed_giveback_sum": "23.42267000000000000000000000",
+          "unresolved": 20,
+          "reasons": {
+            "unresolved_mark": 20
+          }
+        },
+        "polysim_fee0": {
+          "n": 20,
+          "wins": 10,
+          "losses": 10,
+          "flat": 0,
+          "net": "1.580",
+          "gross_win": "46.380",
+          "gross_loss": "-44.80",
+          "pf": "1.035267857142857142857142857",
+          "max_dd": "32.30",
+          "giveback_sum": "51.34170000000000000000000000",
+          "giveback_n": 20,
+          "armed_n": 13,
+          "armed_giveback_sum": "23.42267000000000000000000000",
+          "unresolved": 20,
+          "reasons": {
+            "unresolved_mark": 20
+          }
+        }
+      },
+      "both_sides_if_up_leg_restored": {
+        "conditions_filled": 20,
+        "conditions_both_sides": 19
+      }
+    },
+    "trend-20260920T2100Z.jsonl.gz": {
+      "with_exits": {
+        "missed_bids": 4,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 34,
+          "wins": 25,
+          "losses": 9,
+          "flat": 0,
+          "net": "8.796950",
+          "gross_win": "46.760120",
+          "gross_loss": "-37.963170",
+          "pf": "1.231723272845760772875394758",
+          "max_dd": "24.082030",
+          "giveback_sum": "44.41294000000000000000000000",
+          "giveback_n": 34,
+          "armed_n": 24,
+          "armed_giveback_sum": "6.340980000000000000000000000",
+          "unresolved": 14,
+          "reasons": {
+            "take_profit": 14,
+            "trailing_stop": 6,
+            "unresolved_mark": 14
+          }
+        },
+        "polysim_fee0": {
+          "n": 34,
+          "wins": 25,
+          "losses": 9,
+          "flat": 0,
+          "net": "11.360",
+          "gross_win": "49.160",
+          "gross_loss": "-37.80",
+          "pf": "1.300529100529100529100529101",
+          "max_dd": "23.100",
+          "giveback_sum": "43.53493000000000000000000000",
+          "giveback_n": 34,
+          "armed_n": 24,
+          "armed_giveback_sum": "5.462970000000000000000000000",
+          "unresolved": 14,
+          "reasons": {
+            "take_profit": 14,
+            "trailing_stop": 6,
+            "unresolved_mark": 14
+          }
+        }
+      },
+      "without_exits": {
+        "missed_bids": 1,
+        "both_blocked": 0,
+        "realistic": {
+          "n": 19,
+          "wins": 11,
+          "losses": 8,
+          "flat": 0,
+          "net": "20.250",
+          "gross_win": "54.750",
+          "gross_loss": "-34.50",
+          "pf": "1.586956521739130434782608696",
+          "max_dd": "18.300",
+          "giveback_sum": "40.05978000000000000000000000",
+          "giveback_n": 19,
+          "armed_n": 14,
+          "armed_giveback_sum": "17.42057000000000000000000000",
+          "unresolved": 19,
+          "reasons": {
+            "unresolved_mark": 19
+          }
+        },
+        "polysim_fee0": {
+          "n": 19,
+          "wins": 11,
+          "losses": 8,
+          "flat": 0,
+          "net": "20.250",
+          "gross_win": "54.750",
+          "gross_loss": "-34.50",
+          "pf": "1.586956521739130434782608696",
+          "max_dd": "18.300",
+          "giveback_sum": "40.05978000000000000000000000",
+          "giveback_n": 19,
+          "armed_n": 14,
+          "armed_giveback_sum": "17.42057000000000000000000000",
+          "unresolved": 19,
+          "reasons": {
+            "unresolved_mark": 19
+          }
+        }
+      },
+      "both_sides_if_up_leg_restored": {
+        "conditions_filled": 20,
+        "conditions_both_sides": 17
+      }
+    }
+  },
+  "stitched": {
+    "with_exits": {
+      "realistic": {
+        "n": 136,
+        "net": "-94.026650",
+        "gross_win": "141.098150",
+        "gross_loss": "-235.124800",
+        "pf": "0.6000989687178893932073520105",
+        "max_dd": "142.961920",
+        "armed_n": 90,
+        "armed_giveback_sum": "47.40996000000000000000000000",
+        "unresolved": 57,
+        "reasons": {
+          "take_profit": 37,
+          "trailing_stop": 42,
+          "unresolved_mark": 57
+        }
+      },
+      "polysim_fee0": {
+        "n": 136,
+        "net": "-83.170",
+        "gross_win": "151.030",
+        "gross_loss": "-234.20",
+        "pf": "0.6448761742100768573868488471",
+        "max_dd": "137.610",
+        "armed_n": 90,
+        "armed_giveback_sum": "40.73364000000000000000000000",
+        "unresolved": 57,
+        "reasons": {
+          "take_profit": 37,
+          "trailing_stop": 42,
+          "unresolved_mark": 57
+        }
+      }
+    },
+    "without_exits": {
+      "realistic": {
+        "n": 74,
+        "net": "-67.700",
+        "gross_win": "143.300",
+        "gross_loss": "-211.00",
+        "pf": "0.6791469194312796208530805687",
+        "max_dd": "125.320",
+        "armed_n": 47,
+        "armed_giveback_sum": "122.8205900000000000000000000",
+        "unresolved": 74,
+        "reasons": {
+          "unresolved_mark": 74
+        }
+      },
+      "polysim_fee0": {
+        "n": 74,
+        "net": "-67.700",
+        "gross_win": "143.300",
+        "gross_loss": "-211.00",
+        "pf": "0.6791469194312796208530805687",
+        "max_dd": "125.320",
+        "armed_n": 47,
+        "armed_giveback_sum": "122.8205900000000000000000000",
+        "unresolved": 74,
+        "reasons": {
+          "unresolved_mark": 74
+        }
+      }
+    }
+  },
+  "note": "Decision-faithful replay of lua_momentum on the four checked-in 1h windows (docs/reports/data/mean-reversion-gate). Not a kernel backtest: those tapes have book+round events and no resolution, so a hold is marked at the last two-sided mid only when that mid is >=0.90 (pays 1) or <=0.10 (pays 0); every other hold is an unresolved last-bid mark, not a settlement. Maker entry: the first confirming best bid rests until a later ask crosses it. Exits re-arm the entry rule, so the with-exits arm trades more than once per token. Giveback is peak fee-net unrealized USD minus realized USD, floored at 0; armed_giveback counts only positions whose peak net PnL reached +20%. realistic subtracts 0.07*p*(1-p) on sells; polysim_fee0 does not. A redemption itself is not a taker fill. max_dd is the stitched equity curve."
+}

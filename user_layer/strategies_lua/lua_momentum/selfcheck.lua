@@ -11,9 +11,13 @@
 --   premise    — sub-threshold moves never confirm, a rebound clears a
 --               confirmed premise, corrupt params fall back to the default;
 --   gates      — a stale book refuses to price, the force-exit window and
---               the between-rounds gap emit nothing;
---   seal       — exits and breaks are always empty (the exit layer is the
---               kernel's).
+--               the between-rounds gap emit no entries;
+--   seal       — flat (nothing held) the exit list stays empty;
+--   exits      — a held winner is sold off the fresh BEST BID after the
+--               taker fee, never the mid: take-profit, a price target, a
+--               trailing giveback, an optional time exit; zeroing the knobs
+--               restores hold-to-settlement; the opposite leg is refused
+--               unless allow_both_sides is 1.
 --
 -- Run: lua selfcheck.lua   (exit 0 = all rows hold)
 
@@ -46,6 +50,8 @@ local state = {
   now = T0, slot = 1, time_left = 900,
   params = {}, round_open = true,
   books = {},
+  holdings = {},
+  fees = nil,
 }
 
 local bk = {}
@@ -66,6 +72,8 @@ bk.markets = function()
 end
 bk.book = function(sym) return state.books[sym] end
 bk.params = function() return state.params end
+bk.holdings = function() return state.holdings end
+bk.fees = function() return state.fees end
 
 -- the strategy is PERSISTENT across evaluations within a row (last_mid and
 -- confirmed must survive); a row starts from reset(). strategy.lua defines
@@ -91,6 +99,8 @@ local function reset()
   state.params = {}
   state.round_open = true
   state.books = {}
+  state.holdings = {}
+  state.fees = nil
 end
 
 local function book_row(sym, mid_num, fresh)
@@ -252,7 +262,8 @@ end
 
 -- ═══ SEAL ═══════════════════════════════════════════════════════════════════
 
--- exits and breaks are always empty — the exit layer is the kernel's.
+-- Nothing held: exits and breaks stay empty. The exit rules only speak
+-- about a position the host has pushed through bk.holdings().
 do
   local shapes = {
     { "down-1", 0.50, 0 }, { "down-1", 0.45, 1000 }, { "down-1", 0.40, 2000 },
@@ -262,12 +273,253 @@ do
     feed(s[1], s[2], s[3])
     local r = evaluate()
     ok(#r.exits == 0 and #r.breaks == 0,
-      "shape " .. i .. ": no exits, no breaks (the kernel owns survival)")
+      "shape " .. i .. ": flat book emits no exits and no breaks")
     for j = 1, #r.entries do
       ok(r.entries[j].shares == nil, "shape " .. i .. ": entries carry no shares")
       ok(r.entries[j].price ~= nil, "shape " .. i .. ": entries carry a price")
     end
   end
+end
+
+-- ═══ EXITS — the owner's giveback, priced on the bid ════════════════════════
+-- UP 10 @ 0.28 ran to a 0.42 bid (+50% gross) with ~7m41s left, then gave
+-- it back. Defaults bank it. PolySim's fee schedule is nil here: the
+-- decision still haircuts by 0.07*p*(1-p).
+
+local function hold(token, entry)
+  state.holdings = {
+    {
+      token_id = token, entry_price = entry, shares = "10",
+      direction = "down", condition_id = "c1", round_slot = 1,
+    },
+  }
+end
+
+local function quote(token, bid, ask, fresh)
+  state.books[token] = {
+    symbol = token,
+    best_bid = bid, best_ask = ask,
+    mid = nil, -- a mid must not be required, and must not be the sell
+    obi = "0", spread = "0.01",
+    bid_depth = "900", ask_depth = "900",
+    ts_ms = state.now, fresh = fresh ~= false,
+  }
+end
+
+local function exit_reasons(r)
+  local s = {}
+  for i = 1, #r.exits do s[i] = r.exits[i].reason end
+  return table.concat(s, ",")
+end
+
+-- the peak itself: bid 0.42, entry 0.28, fee 0.07*0.42*0.58 = 0.017052,
+-- net +43.9% >= the default 40% → one take_profit, and no new entry is
+-- required for the exit to exist.
+do
+  reset()
+  state.time_left = 461 -- 7m41s
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "take_profit" and r.exits[1].token == "down-1",
+    "a +50% gross bid is a take_profit after the 0.07 fee, got " .. exit_reasons(r))
+end
+
+-- zeroing the exit knobs restores hold-to-settlement: the same peak, then
+-- the giveback to 0.26, emits nothing.
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", take_profit_price = "0",
+    trail_arm_pct = "0", trail_giveback_pct = "0",
+    exit_time_left_sec = "0",
+  }
+  state.time_left = 461
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  ok(#evaluate().exits == 0, "exits disabled: the 0.42 peak is held")
+  quote("down-1", "0.26", "0.27")
+  ok(#evaluate().exits == 0, "exits disabled: the giveback to 0.26 is held to settlement")
+end
+
+-- trailing only: arm after +20% net, sell on a 15 percentage-point giveback.
+-- 0.42 arms and does not sell (no giveback yet); 0.26 gives back ~56pp.
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", take_profit_price = "0",
+    trail_arm_pct = "20", trail_giveback_pct = "15",
+  }
+  state.time_left = 461
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  ok(#evaluate().exits == 0, "the arming tick is not itself a giveback")
+  quote("down-1", "0.26", "0.27")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "trailing_stop",
+    "a 15pp giveback from the 0.42 peak sells, got " .. exit_reasons(r))
+end
+
+-- the mid is not the sell. mid would be 0.42 (+50%); the bid is 0.30 and
+-- the fee-net gain is ~2%, under both the 40% target and the 20% arm.
+do
+  reset()
+  state.time_left = 461
+  hold("down-1", "0.28")
+  quote("down-1", "0.30", "0.54")
+  state.books["down-1"].mid = "0.42"
+  ok(#evaluate().exits == 0, "a 0.42 mid with a 0.30 bid is not a take-profit")
+end
+
+-- no bid, or a stale book: no exit, even when the last mid looks rich.
+do
+  reset()
+  state.time_left = 461
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  state.books["down-1"].best_bid = nil
+  ok(#evaluate().exits == 0, "no best bid: no exit")
+end
+do
+  reset()
+  state.time_left = 461
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43", false)
+  ok(#evaluate().exits == 0, "a stale book does not price an exit")
+end
+
+-- absolute price target, still net of the fee. 0.42 clears 0.40 and the
+-- fee. 0.29 clears a 0.29 target on the bid but the fee turns it into a loss.
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    take_profit_price = "0.40",
+  }
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "take_profit_price",
+    "bid at the price target sells, got " .. exit_reasons(r))
+end
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    take_profit_price = "0.29",
+  }
+  hold("down-1", "0.28")
+  quote("down-1", "0.29", "0.30")
+  ok(#evaluate().exits == 0, "a target the taker fee turns into a loss is not taken")
+end
+
+-- a fatter schedule than 0.07 wins. 0.50*0.42*0.58 leaves ~+6.5% net,
+-- under the 40% target the official curve would have cleared.
+do
+  reset()
+  state.fees = { name = "fat", rate = "0.50", exponent = 1 }
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  ok(#evaluate().exits == 0, "a larger live fee schedule blocks a fee-thin take-profit")
+end
+
+-- exit_fee_rate 0.90 on a nil PolySim schedule does the same.
+do
+  reset()
+  state.params = { exit_fee_rate = "0.90" }
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  ok(#evaluate().exits == 0, "exit_fee_rate 0.90 haircuts the 0.42 bid below the target")
+end
+
+-- optional time exit fires inside its window even at a loss, and stays
+-- quiet when the knob is 0. It still needs a bid.
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    exit_time_left_sec = "120",
+  }
+  state.time_left = 100
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "time_exit",
+    "inside exit_time_left_sec a loser is sold, got " .. exit_reasons(r))
+  ok(#r.entries == 0, "the time-exit window is also inside the entry gate")
+end
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    exit_time_left_sec = "0",
+  }
+  state.time_left = 100
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  ok(#evaluate().exits == 0, "exit_time_left_sec 0 does not sell a loser early")
+end
+
+-- a winner inside the 60s entry blackout is STILL sold. The same crash
+-- would have entered a minute earlier; here the entry stays shut.
+do
+  reset()
+  state.time_left = 55
+  hold("down-1", "0.28")
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.42, 1000) -- bid lands at 0.41; net of the fee still clears 40%
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "take_profit",
+    "the entry blackout does not swallow a take-profit, got " .. exit_reasons(r))
+  ok(#r.entries == 0, "the entry blackout still refuses a new bid")
+end
+
+-- a held winner that is ALSO still confirmed is sold and not re-bought
+-- in the same cycle.
+do
+  reset()
+  state.time_left = 400
+  hold("down-1", "0.28")
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.42, 1000)
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "take_profit",
+    "a held winner still exits, got " .. exit_reasons(r))
+  ok(#r.entries == 0, "the token being sold is not re-bought in the same cycle")
+end
+
+-- ═══ BOTH SIDES ═════════════════════════════════════════════════════════════
+-- holds_to_settlement would let the kernel admit the UP leg. The strategy
+-- must not offer it unless allow_both_sides is explicitly 1.
+
+do
+  reset()
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  state.holdings = {
+    {
+      token_id = "up-1", entry_price = "0.28", shares = "10",
+      direction = "up", condition_id = "c1", round_slot = 1,
+    },
+  }
+  local r = evaluate()
+  ok(#r.entries == 0, "holding the UP leg blocks the DOWN entry (allow_both_sides defaults off)")
+end
+
+do
+  reset()
+  state.params = { allow_both_sides = "1" }
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  state.holdings = {
+    {
+      token_id = "up-1", entry_price = "0.28", shares = "10",
+      direction = "up", condition_id = "c1", round_slot = 1,
+    },
+  }
+  local r = evaluate()
+  ok(#r.entries == 1 and r.entries[1].token == "down-1",
+    "allow_both_sides = 1 is the only way the opposite leg is offered")
 end
 
 -- ── verdict ─────────────────────────────────────────────────────────────────

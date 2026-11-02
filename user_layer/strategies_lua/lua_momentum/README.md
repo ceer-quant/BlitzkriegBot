@@ -1,4 +1,4 @@
-# lua_momentum — the official Lua example strategy (E30 / #336), down-leg only
+# lua_momentum — the official Lua example strategy (E30 / #336), down-leg only, configurable exits
 
 > **⚠️ EXAMPLE / SINGLE-EDGE PACKAGE.** The v2-corpus census after the #419
 > locked-top fix (90h replay, official fees + 1 tick slippage, 10-share lot)
@@ -25,9 +25,18 @@ by the kernel (entry gates, sizing, risk, signing, submission).
   prices ONE LIMIT entry at that token's live best bid, but ONLY when:
   * the round exists and `time_left_sec > 60` (outside the force-exit
     window), and
-  * the book is `fresh == true` (the host's freshness gate) with a bid side.
+  * the book is `fresh == true` (the host's freshness gate) with a bid side, and
+  * the opposite (UP) token of the same condition is not already held,
+    unless `allow_both_sides` is `1`.
+* The same call emits **exits** for positions `bk.holdings()` reports. A
+  sell is judged on the fresh **best bid** after a taker fee, never the
+  mid. PolySim's schedule is 0; the decision still haircuts by
+  `exit_fee_rate * p * (1-p)` (default `0.07`) so a fee-eaten gain is not
+  called a profit. A positive `bk.fees()` schedule is used when it is
+  larger, because that is what the kernel will actually charge.
 
 Everything else (risk, sizing, quotas, submission) belongs to the kernel.
+A position that hits none of the exit rules still holds to settlement.
 
 ## The direction gate — live evidence (2026-10-24→26, 86 fills, 0 maker)
 
@@ -70,10 +79,13 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 * the up-token entry arm (`want = "up"`) — the WR 7.5% leg;
 * the per-token `direction` state and the momentum-flip branch — dead once
   the gate landed (a premise that stops falling is simply not a trade);
-* no `exits`/`breaks` logic was added: the exit layer is the kernel's
-  (`holds_to_settlement` collection; the kernel's own exit config owns
-  survival — the live window's 19 `trailing_stop` exits netted +$15.72, 15
-  of them on the down leg, and all 3 `take_profit` exits were down-leg).
+* no kernel-ladder opt-in was added (`trailing_exit` stays false). On a
+  locally-settled run (PolySim, dry) the policy ladder **skips** a
+  hold-to-settlement strategy, and the ladder's own profit rule is a +100%
+  backstop — a +50% mark that round-trips to a loss never reached it. The
+  exits below are strategy signals, which the kernel honours even for a
+  holder. The live window's 19 `trailing_stop` exits netted +$15.72 (15 of
+  them on the down leg).
 
 ## The read-only surface it uses
 
@@ -82,7 +94,9 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 | `bk.round()` | round timing; skip entries inside the force-exit window |
 | `bk.markets()` | the round's UP/DOWN token pairs (only `down_token` is read) |
 | `bk.book(token)` | best bid to rest at, plus the `fresh` verdict |
-| `bk.params()` | the `threshold` tunable (manifest default, hot-param overridable) |
+| `bk.params()` | tunables (manifest defaults, hot-param overridable) |
+| `bk.holdings()` | open positions the exit rules and the both-sides guard read |
+| `bk.fees()` | the kernel's taker schedule; a zero/nil schedule falls back to `exit_fee_rate` |
 | `bk.now_ms()` | available but not needed (the host timestamps everything) |
 
 ## Tunables
@@ -90,6 +104,15 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 | name | default | min | max | meaning |
 |:---|:---|:---|:---|:---|
 | `threshold` | `0.04` | `0.005` | `1` | single-tick mid drop (%) that confirms the DOWN leg |
+| `take_profit_pct` | `40` | `0` | `500` | sell when net PnL on the best bid, after the taker fee, reaches this many percent. `0` disables |
+| `take_profit_price` | `0` | `0` | `0.99` | sell when the best bid reaches this price AND the fee-net proceeds still beat the entry. `0` disables |
+| `trail_arm_pct` | `20` | `0` | `500` | arm the trailing stop once peak net PnL reaches this. `0` disables the trail |
+| `trail_giveback_pct` | `15` | `0` | `500` | once armed, sell when net PnL has fallen this many percentage points from the peak. `0` disables |
+| `exit_time_left_sec` | `0` | `0` | `900` | sell whatever is held once this many seconds remain, even at a loss. `0` disables (hold to settlement) |
+| `allow_both_sides` | `0` | `0` | `1` | `1` permits an entry while the opposite token of the same condition is held. Default refuses it |
+| `exit_fee_rate` | `0.07` | `0` | `1` | realistic taker fee per share, `rate * p * (1-p)`, used when `bk.fees()` is nil or zero |
+
+Set `take_profit_pct`, `take_profit_price`, `trail_arm_pct`, `trail_giveback_pct` and `exit_time_left_sec` to `0` to restore the previous hold-to-settlement behaviour.
 
 ## Running it
 
@@ -97,7 +120,7 @@ The package lives in the default scan root, so a normal kernel boot finds it:
 
 ```sh
 cargo run -p blitzkrieg-core -- --engine --readonly
-# receipt: lua_momentum@0.1.0 (lua) registered into the engine dispatch (disabled)
+# receipt: lua_momentum@0.2.0 (lua) registered into the engine dispatch (disabled)
 ```
 
 Then enable it like any other strategy (`strategy.enable` over IPC, the UI
@@ -106,8 +129,7 @@ somewhere else: `--lua-strategy-dir <path>` (or `BK_LUA_STRATEGY_DIR`;
 `--no-lua-strategy-dir` disables the scan).
 
 Self-check (drives the real `strategy.lua` over a stub `bk` surface and
-asserts the direction gate: the up leg never bids, the falling DOWN leg
-bids at its best bid):
+asserts the direction gate, the bid-not-mid exits, and the both-sides guard):
 
 ```sh
 lua user_layer/strategies_lua/lua_momentum/selfcheck.lua

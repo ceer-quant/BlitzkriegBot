@@ -45,11 +45,11 @@ const END = '-- END common/decimal.lua';
 const APPLY = process.argv.includes('--apply');
 const source = readFileSync(SOURCE, 'utf8');
 
-// Packages that carry NO decimal block at all — currently none reference
-// POW10/dec_* (the no-stop-loss scanner and this gate both verify). A new
-// package that starts using exact decimals must either embed the block or be
-// listed here with a written reason.
-const EMBED_EXEMPT = new Set(['lua_momentum']);
+// Packages that carry NO decimal block at all. A new package that starts
+// using exact decimals must either embed the block or be listed here with a
+// written reason. lua_momentum embedded the block when its exits started
+// pricing the taker fee on the bid (2026-11-02); it is no longer exempt.
+const EMBED_EXEMPT = new Set();
 
 // common/ itself is a SOURCE dir, not a package: no manifest.json, and the
 // loader's discover_lua_packages only registers dirs carrying manifest.json.

@@ -1,5 +1,29 @@
 use super::*;
 
+/// The limit a strategy-signal SELL may be priced from: the book's best bid,
+/// and only while that book is still inside the exit path's pricing window.
+///
+/// A mid, a remembered mark, and a dark bid side are not buyers. The old
+/// strategy-exit path priced off `current_price`, which falls through to the
+/// mid (and then to the last mark) whenever the bid is missing — the same
+/// phantom the F6 ladder already refuses. Callers treat `None` as "do not
+/// place". An unstamped book (`received_ms <= 0`) has no age to judge and
+/// counts as fresh, matching [`crate::exit_policy::book_is_fresh`].
+pub(crate) fn strategy_signal_sell_bid(
+    book: Option<&Book>,
+    now_ms: i64,
+    max_book_age_sec: i64,
+) -> Option<Decimal> {
+    let book = book?;
+    if book.received_ms > 0 {
+        let age = now_ms.saturating_sub(book.received_ms);
+        if age > max_book_age_sec.saturating_mul(1_000) {
+            return None;
+        }
+    }
+    book.best_bid().filter(|b| *b > Decimal::ZERO)
+}
+
 impl Core {
     pub fn cancel(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
         let order = self
@@ -1093,10 +1117,21 @@ impl Core {
             if !has_job.insert(pos.id.clone()) {
                 continue; // an automated/policy exit already closes it this cycle
             }
-            let price = if pos.current_price > Decimal::ZERO {
-                pos.current_price
-            } else {
-                Decimal::new(1, 2)
+            // Best bid only. A missing or stale bid must not fall through to
+            // the mid or to `current_price` (a display mark). The strategy
+            // already judged the exit off this same bid; selling a different
+            // number would book a profit nobody was offering.
+            let Some(price) = strategy_signal_sell_bid(
+                self.books.get(&pos.token_id),
+                now_ms,
+                self.config.positions.exit.max_book_age_sec,
+            ) else {
+                tracing::info!(
+                    token = %pos.token_id,
+                    strategy = %pos.strategy,
+                    "strategy exit withheld: no fresh best bid (will not sell the mid)"
+                );
+                continue;
             };
             let tag: String = intent
                 .reason

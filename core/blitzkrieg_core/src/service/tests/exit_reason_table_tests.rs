@@ -323,3 +323,111 @@ fn engine_stats_reports_the_orderbook_freshness_budget() {
     assert_eq!(off["maxStaleMs"], serde_json::json!(0));
     assert_eq!(off["checkEnabled"], serde_json::json!(false));
 }
+
+/// Strategy-signal sells price off the fresh best bid. The mid of a 0.42/0.60
+/// book is 0.51; a limit up there finds no bid and the FOK dies. A bid-priced
+/// sell (slipped two ticks to 0.40) lifts the 0.42 bid.
+#[test]
+fn a_strategy_exit_sells_the_best_bid_not_the_mid() {
+    let book = crate::sim::Book {
+        bids: vec![(dec!(0.42), dec!(500))],
+        asks: vec![(dec!(0.60), dec!(500))],
+        received_ms: 2_000,
+    };
+    let bid = super::risk_admission::strategy_signal_sell_bid(Some(&book), 2_000, 60);
+    assert_eq!(bid, Some(dec!(0.42)));
+    // The mid is the number this function must not return.
+    assert_ne!(bid, book.mid());
+
+    let mut c = core();
+    open_position(&mut c, "tok", 1_000);
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.60), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+        });
+    c.tick(2_000).unwrap();
+
+    assert!(
+        c.positions().open_positions().is_empty(),
+        "the bid was marketable; the position must close"
+    );
+    let closed = &c.positions().closed_positions()[0];
+    assert_eq!(closed.exit_reason, ExitReason::StrategySignal);
+    assert_eq!(
+        closed.exit_price,
+        dec!(0.42),
+        "filled at the resting bid, not the 0.51 mid"
+    );
+}
+
+/// No bid, or a bid older than the pricing window: the exit is withheld.
+/// Selling `current_price` (the entry mark, 0.40) into either book would be
+/// a trade nobody is bidding right now.
+#[test]
+fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
+    let dark = crate::sim::Book {
+        bids: vec![],
+        asks: vec![(dec!(0.60), dec!(500))],
+        received_ms: 2_000,
+    };
+    assert_eq!(
+        super::risk_admission::strategy_signal_sell_bid(Some(&dark), 2_000, 60),
+        None,
+        "an ask-only book has no buyer"
+    );
+    let stale = crate::sim::Book {
+        bids: vec![(dec!(0.42), dec!(500))],
+        asks: vec![(dec!(0.60), dec!(500))],
+        received_ms: 1_000,
+    };
+    assert_eq!(
+        super::risk_admission::strategy_signal_sell_bid(Some(&stale), 71_000, 60),
+        None,
+        "a 70s-old bid is not a quote"
+    );
+
+    let mut c = core();
+    open_position(&mut c, "tok", 1_000);
+    // Ask only, stamped fresh. The entry mark (0.40) is still on the position.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.60), dec!(500))], 2_000);
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+        });
+    c.tick(2_000).unwrap();
+    assert_eq!(c.positions().open_positions().len(), 1);
+    assert!(
+        c.ome.live_orders().is_empty(),
+        "no sell is rested off a mark"
+    );
+
+    // A real bid, but received a minute ago. Same refusal.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.60), dec!(500))],
+        1_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+        });
+    c.tick(71_000).unwrap();
+    assert_eq!(
+        c.positions().open_positions().len(),
+        1,
+        "a stale bid does not close the position"
+    );
+}
