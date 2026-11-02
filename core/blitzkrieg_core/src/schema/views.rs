@@ -350,9 +350,10 @@ pub struct PositionView {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PositionExitParams {
-    /// "all" flattens every open position; otherwise a specific position id.
+    /// "all" (or an omitted field) flattens every open position; otherwise a
+    /// specific position id.
     #[serde(default)]
     pub position_id: Option<String>,
 }

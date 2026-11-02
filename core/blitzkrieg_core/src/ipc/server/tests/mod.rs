@@ -809,6 +809,7 @@ mod tests_account_verbs;
 mod tests_backtest;
 mod tests_blueprint;
 mod tests_execution_policy;
+mod tests_exit_params;
 mod tests_feed_reuse;
 mod tests_hot_reload;
 mod tests_read_envelopes;
