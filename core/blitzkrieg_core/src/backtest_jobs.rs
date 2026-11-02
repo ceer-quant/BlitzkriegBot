@@ -452,6 +452,7 @@ impl BacktestJobs {
                             tail_ms: tail,
                             hot_params: Vec::new(),
                             progress: Some(progress),
+                            mode: mode.clone(),
                         },
                         Box::new(src),
                     );

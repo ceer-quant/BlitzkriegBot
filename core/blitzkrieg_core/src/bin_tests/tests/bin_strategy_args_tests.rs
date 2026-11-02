@@ -2,30 +2,40 @@ use super::*;
 
 // ── #351 反向验收 · the honest-friction floor is enforced ───────────────
 
-/// The spec's floor: "mine 模式拒绝 slippage=0（fail-closed）". A sweep
-/// that asked for a frictionless run must be refused at the knob, not run
-/// and quietly print fantasy PnL.
+/// #879 用户裁决（2026-11-02）：`mine` 档自身钉 0 tick——1 tick 叠加在已穿越
+/// VWAP 上是双重计费（`walk_marketable` 的 VWAP 已含点差成本），挖掘档不再
+/// 付第二次。因此旧断言「mine 拒绝 0 滑点」反转为「mine 强制 0 滑点」；
+/// fail-closed 守卫保留给 verify/sweep 的**用户配置**——操作员在那里请求
+/// 无摩擦回放仍然在旋钮处被拒，而不是静默打出幻想 PnL。
 #[test]
-fn mine_mode_refuses_zero_slippage() {
+fn mine_mode_pins_zero_slippage_verify_sweep_refuse_it() {
     let base = blitzkrieg_core::sim::FillModel {
         taker_slippage_ticks: 0,
         ..Default::default()
     };
-    let err = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+    let mine = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0)
+        .expect("#879: mine pins 0 itself; the floor refusal is verify/sweep's");
+    assert_eq!(
+        mine.taker_slippage_ticks, 0,
+        "#879: 1 tick 叠加在已穿越 VWAP 上是双重计费，mine 钉 0"
+    );
+    // The floor is mode-scoped now, but still fail-closed where the friction
+    // is operator-configured: verify and sweep refuse a frictionless run.
+    assert!(blitzkrieg_core::backtest::mode_rung_model("verify", base, 0).is_err());
+    assert!(blitzkrieg_core::backtest::mode_rung_model("sweep", base, 0).is_err());
+    let err = blitzkrieg_core::backtest::mode_rung_model("verify", base, 0)
         .expect_err("zero slippage must die");
     assert!(
         err.contains("refuses zero taker slippage"),
         "the refusal must name the floor: {err}"
     );
-    // The floor is mode-independent: verify and sweep run on the same
-    // honest-friction contract.
-    assert!(blitzkrieg_core::backtest::mode_rung_model("verify", base, 0).is_err());
-    assert!(blitzkrieg_core::backtest::mode_rung_model("sweep", base, 0).is_err());
 }
 
-/// The other side of the knob contract: mine zeroes the latency dials
-/// (0 decision→venue distance, real slippage/fees kept from `base`), while
-/// verify/sweep stamp the rung onto every latency.
+/// The other side of the knob contract: mine zeroes the latency dials (0
+/// decision→venue distance) and, since #879, also the slippage overlay —
+/// the operator's `--slippage-ticks` no longer reaches the mine rung —
+/// while verify/sweep stamp the rung onto every latency keeping the
+/// configured friction (the 1-tick control arm, pinned by this test).
 #[test]
 fn mode_rung_model_wires_the_latency_dials_per_mode() {
     let base = blitzkrieg_core::sim::FillModel {
@@ -35,21 +45,35 @@ fn mode_rung_model_wires_the_latency_dials_per_mode() {
         maker_latency_ms: 13,
         ..Default::default()
     };
-    let mine =
-        blitzkrieg_core::backtest::mode_rung_model("mine", base, 0).expect("mine above the floor");
+    let mine = blitzkrieg_core::backtest::mode_rung_model("mine", base, 0).expect("mine runs");
     assert_eq!(mine.taker_latency_ms, 0);
     assert_eq!(mine.taker_rtt_ms, 0);
     assert_eq!(mine.maker_latency_ms, 0);
     assert_eq!(
-        mine.taker_slippage_ticks, 1,
-        "mine keeps the real friction; latency is the only dial it turns"
+        mine.taker_slippage_ticks, 0,
+        "#879 用户裁决（2026-11-02）：mine 默认 0 tick 叠加，双层计费不再"
+    );
+    // Even a deliberately larger operator dial cannot re-inflate the mine
+    // rung: the tier, not the flag, decides the mining coordinate.
+    let fat = blitzkrieg_core::sim::FillModel {
+        taker_slippage_ticks: 5,
+        ..base
+    };
+    assert_eq!(
+        blitzkrieg_core::backtest::mode_rung_model("mine", fat, 0)
+            .expect("mine runs")
+            .taker_slippage_ticks,
+        0
     );
     let verify = blitzkrieg_core::backtest::mode_rung_model("verify", base, 286)
         .expect("verify above the floor");
     assert_eq!(verify.taker_latency_ms, 286);
     assert_eq!(verify.taker_rtt_ms, 286);
     assert_eq!(verify.maker_latency_ms, 286);
-    assert_eq!(verify.taker_slippage_ticks, 1);
+    assert_eq!(
+        verify.taker_slippage_ticks, 1,
+        "#879 回归钉：verify 保留 1 tick 对照，摩擦配置零变化"
+    );
 }
 
 #[test]

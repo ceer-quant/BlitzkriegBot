@@ -208,6 +208,7 @@ fn replay(events: Vec<TimedEvent>) -> blitzkrieg_core::backtest::BacktestReport 
             tail_ms: 10_000,
             hot_params: Vec::new(),
             progress: None,
+            mode: String::new(),
         },
         Box::new(VecSource::new(events)),
     );
