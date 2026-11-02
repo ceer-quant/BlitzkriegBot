@@ -216,6 +216,9 @@ pub struct FileConfig {
     pub round_sec: Option<i64>,
     pub min_round_age_sec: Option<i64>,
     pub min_time_left_sec: Option<i64>,
+    /// `#866`: how old a book may be before entries stop. `None` = the
+    /// compiled 8000 ms. `Some(0)` is the explicit "check off" spelling.
+    pub max_orderbook_stale_ms: Option<i64>,
     // ── [exit] ──────────────────────────────────────────────────────────────
     pub exit: ExitFile,
     // ── [risk] (E26 §4) ─────────────────────────────────────────────────────
@@ -325,6 +328,12 @@ impl FileConfig {
                     }
                     ("engine", "min_time_left_sec") => {
                         got(&mut self.min_time_left_sec, int(v), &full, w)
+                    }
+                    // #866: the freshness budget's TOML face. CLI and
+                    // BK_MAX_ORDERBOOK_STALE_MS still outrank it. Absent =
+                    // compiled 8000 ms. 0 is legal and means the check is off.
+                    ("engine", "max_orderbook_stale_ms") => {
+                        got(&mut self.max_orderbook_stale_ms, int(v), &full, w)
                     }
                     // E17/#264: the engine-level exit ladder. Percentages, so the
                     // quoted form is accepted exactly like the shadow section's
@@ -923,13 +932,13 @@ mod tests {
         // The repo's own config must not contain a single unknown key: this test
         // is what keeps the file and the parser from drifting apart.
         //
-        // env single-source (2026-10-23 ruling): the factory [engine] keys moved
-        // to the compiled defaults + .env (BK_*). The shipped file now pins ZERO
-        // explicit values — which is load-bearing, not cosmetic: an explicit
-        // round_sec here would suppress the round-duration UI card's persisted
-        // cell (issue 499). The compiled defaults these keys fall through to are
-        // asserted below at EXACTLY the values the file used to carry, so the
-        // migration is a no-op for every operator.
+        // env single-source (2026-10-23 ruling): the factory [engine] keys
+        // (assets / round_sec / min_round_age / min_time_left) stay absent.
+        // An explicit round_sec here would suppress the round-duration UI
+        // card (issue 499). `[risk]` and `engine.max_orderbook_stale_ms` are
+        // the exception (#864, #866): a normal boot must enforce them. The
+        // compiled defaults the absent engine keys fall through to are
+        // asserted by the bin tests.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
         let cfg = FileConfig::load(Some(&root.join("default.toml")));
         assert!(cfg.path.is_some(), "default.toml must exist");
@@ -954,6 +963,28 @@ mod tests {
             cfg.min_time_left_sec, None,
             "min_time_left_sec must come from the compiled default / BK_MIN_TIME_LEFT_SEC"
         );
+        // #864 / #866: the shipped file arms the loss bounds and the freshness
+        // budget. `--no-config` is what keeps the factory (tested separately).
+        assert_eq!(cfg.max_orderbook_stale_ms, Some(3500));
+        assert_eq!(cfg.risk.max_single_loss_usd, Some(dec!(0.50)));
+        assert_eq!(cfg.risk.max_daily_drawdown_usd, Some(dec!(5)));
+        assert_eq!(cfg.risk.max_position_size, Some(dec!(5)));
+        assert_eq!(cfg.risk.max_consecutive_losses, Some(dec!(4)));
+        assert_eq!(cfg.risk.cooldown_minutes, Some(dec!(30)));
+        assert_eq!(cfg.risk.max_total_position, Some(dec!(6)));
+        assert_eq!(cfg.risk.max_total_exposure_usd, Some(dec!(20)));
+        assert_eq!(cfg.risk.max_correlation_usd, Some(dec!(12)));
+        assert_eq!(cfg.risk.global_kill_switch_loss_usd, Some(dec!(8)));
+        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
+        assert!(
+            sys.any_armed(),
+            "a normal boot must enforce systemic limits"
+        );
+        assert!(sys.account.max_single_loss_usd.is_enabled());
+        assert_eq!(
+            sys.account.max_daily_drawdown_usd.source(),
+            crate::risk::limits::LimitSource::Toml
+        );
         // Loaded from the sibling file, not invented.
         let s = &cfg.shadow;
         // #269 reverses #249's choice: the shipped file leaves the evaluator OFF.
@@ -977,6 +1008,39 @@ mod tests {
         assert_eq!(s.max_gradient, Some(dec!(0.05)));
         assert_eq!(s.variant_count, Some(3));
         assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
+    }
+
+    /// #864 / #870: the 72-hour profile, the 100 USDC live profile, and the
+    /// shipped default enforce the same loss bounds and the same freshness
+    /// budget. Drift between the files would mean a "profile" and a normal
+    /// boot are different products.
+    #[test]
+    fn production_72h_matches_the_shipped_risk_and_staleness() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
+        let shipped = FileConfig::load(Some(&root.join("default.toml")));
+        let profile = FileConfig::load(Some(&root.join("production-72h.toml")));
+        let live = FileConfig::load(Some(&root.join("production-live-100u.toml")));
+        assert!(profile.warnings.is_empty(), "{:?}", profile.warnings);
+        assert!(live.warnings.is_empty(), "{:?}", live.warnings);
+        assert!(
+            profile.unknown_keys.is_empty(),
+            "{:?}",
+            profile.unknown_keys
+        );
+        assert!(live.unknown_keys.is_empty(), "{:?}", live.unknown_keys);
+        assert_eq!(shipped.risk, profile.risk);
+        assert_eq!(shipped.risk, live.risk);
+        assert_eq!(
+            shipped.max_orderbook_stale_ms,
+            profile.max_orderbook_stale_ms
+        );
+        assert_eq!(shipped.max_orderbook_stale_ms, live.max_orderbook_stale_ms);
+        assert_eq!(profile.max_orderbook_stale_ms, Some(3500));
+        // Neither profile may smuggle an engine factory key back in.
+        assert_eq!(profile.round_sec, None);
+        assert_eq!(profile.assets, None);
+        assert_eq!(live.round_sec, None);
+        assert_eq!(live.assets, None);
     }
 
     #[test]

@@ -158,14 +158,39 @@ fn auto_frozen_account_lifted_when_venue_accepts() {
         .unwrap_or_else(|e| panic!("a close flows through the freeze: {e}"));
     c.confirm_live(&id, 2_100).unwrap();
     assert!(
+        c.account_freeze_reason("poly-acct").is_some(),
+        // Static message: same CodeQL cleartext-logging family as above.
+        "an ack inside the debounce must not lift the auto freeze"
+    );
+    // The streak clear is immediate; entries stay refused until the window.
+    let mut early = open_req("still-frozen");
+    early.account_id = crate::account::AccountId::from("poly-acct");
+    assert!(
+        c.place_pending(early, 2_200).is_err(),
+        "new entries stay refused inside the debounce"
+    );
+    let frozen_at = c
+        .freeze_book
+        .auto_frozen
+        .get("poly-acct")
+        .copied()
+        .expect("auto stamp survives the early ack");
+    let mut later = close_req("flatten:manual:tok-later");
+    later.account_id = crate::account::AccountId::from("poly-acct");
+    let lift_at = frozen_at + FREEZE_AUTO_LIFT_MIN_MS;
+    let (id2, _) = c
+        .place_pending(later, lift_at)
+        .unwrap_or_else(|e| panic!("a close still flows: {e}"));
+    c.confirm_live(&id2, lift_at).unwrap();
+    assert!(
         c.account_freeze_reason("poly-acct").is_none(),
         // Static message: same CodeQL cleartext-logging family as above.
-        "venue acceptance must lift the auto freeze"
+        "venue acceptance past the debounce must lift the auto freeze"
     );
     // A NEW order now passes the gate again — full trading capability back.
     let mut entry = open_req("fresh-entry");
     entry.account_id = crate::account::AccountId::from("poly-acct");
-    c.place_pending(entry, 2_200)
+    c.place_pending(entry, lift_at + 100)
         .unwrap_or_else(|e| panic!("the lifted account trades again: {e}"));
 }
 
@@ -264,6 +289,21 @@ fn reconcile_lift_respects_debounce() {
     );
 }
 
+/// A freeze that has been quiet for 72 hours still lifts. The debounce is a
+/// minimum wait, not a window that expires or overflows on a long run.
+#[test]
+fn auto_lift_still_works_seventy_two_hours_later() {
+    let mut c = core();
+    let t0 = 1_700_000_000_000;
+    c.freeze_account_auto("default", "venue rejecting".into(), t0);
+    let later = t0 + 72 * 60 * 60 * 1000;
+    c.auto_lift_if_venue_healthy("default", "venue accepted order", later);
+    assert!(
+        c.account_freeze_reason("default").is_none(),
+        "a 72h-old auto freeze must still lift once the venue is healthy"
+    );
+}
+
 /// After an auto-lift, a fresh failure re-freezes with the NEW trigger's
 /// reason — the heal must not leave a stale cause in the panel's freeze book.
 #[test]
@@ -271,7 +311,20 @@ fn re_freeze_after_auto_lift_carries_new_reason() {
     let mut c = core();
     c.freeze_account_auto("default", "cause A: sweep failed".into(), 1_000);
     assert!(c.account_freeze_reason("default").is_some());
-    c.auto_lift_if_venue_healthy("default", "venue accepted order", 2_000);
+    c.auto_lift_if_venue_healthy(
+        "default",
+        "venue accepted order",
+        1_000 + FREEZE_AUTO_LIFT_MIN_MS - 1,
+    );
+    assert!(
+        c.account_freeze_reason("default").is_some(),
+        "one millisecond short of the window must not lift"
+    );
+    c.auto_lift_if_venue_healthy(
+        "default",
+        "venue accepted order",
+        1_000 + FREEZE_AUTO_LIFT_MIN_MS,
+    );
     assert!(c.account_freeze_reason("default").is_none());
 
     c.freeze_account_auto("default", "cause B: self-check failed".into(), 3_000);

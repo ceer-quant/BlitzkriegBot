@@ -882,6 +882,19 @@ fn the_orderbook_staleness_budget_is_configurable_from_cli_and_env() {
         "{:?}",
         a.config_report
     );
+    // #866: toml sits under env. An absent key stays at the compiled 8000 ms.
+    let file = file_with("[engine]\nmax_orderbook_stale_ms = 3500\n");
+    let a = parse_args(&file, &[], &EnvVars::default());
+    assert_eq!(a.max_orderbook_stale_ms, 3_500);
+    assert!(
+        a.config_report
+            .iter()
+            .any(|l| l == "engine.max_orderbook_stale_ms=3500 (toml)"),
+        "{:?}",
+        a.config_report
+    );
+    let a = parse_args(&file, &[], &env);
+    assert_eq!(a.max_orderbook_stale_ms, 15_000, "env outranks toml");
     // CLI outranks env, like every other setting in the chain.
     let a = parse_args(
         &blitzkrieg_core::config::FileConfig::default(),
