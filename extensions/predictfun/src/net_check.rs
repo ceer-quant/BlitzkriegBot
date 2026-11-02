@@ -22,7 +22,7 @@
 use crate::rest::PRODUCTION_BASE_URL;
 use blitzkrieg_market_api::{
     NetCheckItem, NetCheckReport,
-    net::{finish, is_fake_ip, now_ms, proxy_env_names},
+    net::{annotate, error_chain, finish_with, is_fake_ip, now_ms, proxy_view},
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -165,7 +165,8 @@ pub async fn probe() -> NetCheckReport {
             })
         })
         .collect();
-    finish(
+    let (items, obs, names) = attach_proxy(items).await;
+    finish_with(
         NetCheckReport {
             ok: false,
             ts_ms: now_ms(),
@@ -174,8 +175,75 @@ pub async fn probe() -> NetCheckReport {
             proxy_env: Vec::new(),
             items,
         },
-        proxy_env_names(),
+        names,
+        &obs,
     )
+}
+
+async fn attach_proxy(
+    mut items: Vec<NetCheckItem>,
+) -> (
+    Vec<NetCheckItem>,
+    blitzkrieg_market_api::net::ProxyObservation,
+    Vec<String>,
+) {
+    let view = match proxy_view() {
+        Ok(v) => v,
+        Err(e) => {
+            items.insert(
+                0,
+                NetCheckItem {
+                    name: "proxy".into(),
+                    target: "BK_PROXY".into(),
+                    ok: false,
+                    status: "rejected".into(),
+                    addrs: Vec::new(),
+                    fake_ip: false,
+                    ms: 0,
+                    detail: e,
+                },
+            );
+            return (
+                items,
+                blitzkrieg_market_api::net::ProxyObservation::legacy(),
+                Vec::new(),
+            );
+        }
+    };
+    let dial = match view.configured.as_ref().or(view.active.as_ref()) {
+        Some(ep) => Some(dial_proxy(ep).await),
+        None => None,
+    };
+    let names = view.names.clone();
+    let (obs, row) = annotate(&view, dial);
+    if let Some(row) = row {
+        items.insert(0, row);
+    }
+    (items, obs, names)
+}
+
+async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i64, String> {
+    let start = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(ep.dial_addr())).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Ok(start.elapsed().as_millis() as i64)
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("no answer within 1s".to_string()),
+    }
+}
+
+fn apply_bk_proxy(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
+    match blitzkrieg_market_api::net::client_proxy()? {
+        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
+        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
+        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
+            let proxy = reqwest::Proxy::all(url)
+                .map_err(|e| format!("proxy URL rejected: {}", error_chain(&e)))?;
+            Ok(builder.proxy(proxy))
+        }
+    }
 }
 
 /// The URL as a report may print it: userinfo removed.
@@ -361,7 +429,9 @@ async fn probe_one(t: &Target) -> NetCheckItem {
 
     // ── 3. TLS + one request ────────────────────────────────────────────────
     let req_start = Instant::now();
-    let client = match reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build() {
+    let client = match apply_bk_proxy(reqwest::Client::builder().timeout(REQUEST_TIMEOUT))
+        .and_then(|b| b.build().map_err(|e| error_chain(&e)))
+    {
         Ok(c) => c,
         Err(e) => {
             return item(
@@ -400,8 +470,9 @@ async fn probe_one(t: &Target) -> NetCheckItem {
             )
         }
         Err(e) => {
+            let chain = error_chain(&e);
             let timed_out = e.is_timeout();
-            let status = classify_transport(&e.to_string(), timed_out);
+            let status = classify_transport(&chain, timed_out);
             item(
                 name,
                 host,
@@ -410,7 +481,7 @@ async fn probe_one(t: &Target) -> NetCheckItem {
                 shown,
                 fake_ip,
                 ms,
-                format!("tls/http failed after {ms}ms: {e}"),
+                format!("tls/http failed after {ms}ms: {chain}"),
             )
         }
     }

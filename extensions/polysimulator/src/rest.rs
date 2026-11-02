@@ -105,6 +105,24 @@ impl std::fmt::Debug for PolySimRest {
     }
 }
 
+fn apply_process_proxy(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::ClientBuilder, PolySimError> {
+    match blitzkrieg_market_api::net::client_proxy().map_err(PolySimError::Transport)? {
+        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
+        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
+        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
+            let proxy = reqwest::Proxy::all(&url).map_err(|e| {
+                PolySimError::Transport(format!(
+                    "proxy URL rejected: {}",
+                    blitzkrieg_market_api::net::error_chain(&e)
+                ))
+            })?;
+            Ok(builder.proxy(proxy))
+        }
+    }
+}
+
 impl PolySimRest {
     /// Build a client. Without [`Credentials`] the client can only hit
     /// public endpoints; most account endpoints need the key.
@@ -125,6 +143,8 @@ impl PolySimRest {
         // unconditionally; production keeps the default.
         if config.no_proxy {
             builder = builder.no_proxy();
+        } else {
+            builder = apply_process_proxy(builder)?;
         }
         let http = builder
             .build()

@@ -472,7 +472,7 @@ async fn binance_spot_loop(assets: Vec<String>, ev_tx: mpsc::Sender<FeedEvent>) 
     let url = format!("wss://stream.binance.com:9443/ws/{}", streams.join("/"));
 
     loop {
-        match tokio_tungstenite::connect_async(&url).await {
+        match crate::proxy::connect(&url).await {
             Ok((ws, _)) => {
                 let _ = ev_tx
                     .send(FeedEvent::Info("binance spot connected".into()))

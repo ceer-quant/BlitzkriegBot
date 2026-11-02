@@ -29,7 +29,7 @@ export interface NetCheckReport {
   /** 全部通过才为真；空报告与 `unsupported` 都不算通过。 */
   ok: boolean
   tsMs?: number
-  /** `ok` | `tls_blocked` | `dns_failed` | `proxy_env` | `fake_ip` | `partial` | `unsupported`。 */
+  /** `ok` | `tls_blocked` | `dns_failed` | `proxy_unreachable` | `proxy_env` | `fake_ip` | `partial` | `unsupported`。 */
   hintCode?: string
   /** 内核给出的一句话判读。 */
   hint?: string

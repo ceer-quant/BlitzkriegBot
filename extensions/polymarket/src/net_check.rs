@@ -32,7 +32,7 @@ use crate::venue::{
 };
 use blitzkrieg_market_api::{
     NetCheckItem, NetCheckReport,
-    net::{finish, is_fake_ip, now_ms, proxy_env_names},
+    net::{annotate, error_chain, finish_with, is_fake_ip, now_ms, proxy_view},
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -123,7 +123,8 @@ pub async fn probe() -> NetCheckReport {
             })
         })
         .collect();
-    finish(
+    let (items, obs, names) = attach_proxy(items).await;
+    finish_with(
         NetCheckReport {
             ok: false,
             ts_ms: now_ms(),
@@ -132,8 +133,63 @@ pub async fn probe() -> NetCheckReport {
             proxy_env: Vec::new(),
             items,
         },
-        proxy_env_names(),
+        names,
+        &obs,
     )
+}
+
+async fn attach_proxy(
+    mut items: Vec<NetCheckItem>,
+) -> (
+    Vec<NetCheckItem>,
+    blitzkrieg_market_api::net::ProxyObservation,
+    Vec<String>,
+) {
+    let view = match proxy_view() {
+        Ok(v) => v,
+        Err(e) => {
+            items.insert(
+                0,
+                NetCheckItem {
+                    name: "proxy".to_string(),
+                    target: "BK_PROXY".to_string(),
+                    ok: false,
+                    status: "rejected".to_string(),
+                    addrs: Vec::new(),
+                    fake_ip: false,
+                    ms: 0,
+                    detail: e,
+                },
+            );
+            return (
+                items,
+                blitzkrieg_market_api::net::ProxyObservation::legacy(),
+                Vec::new(),
+            );
+        }
+    };
+    let dial = match view.configured.as_ref().or(view.active.as_ref()) {
+        Some(ep) => Some(dial_proxy(ep).await),
+        None => None,
+    };
+    let names = view.names.clone();
+    let (obs, row) = annotate(&view, dial);
+    if let Some(row) = row {
+        items.insert(0, row);
+    }
+    (items, obs, names)
+}
+
+async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i64, String> {
+    let start = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(ep.dial_addr())).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Ok(start.elapsed().as_millis() as i64)
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("no answer within 1s".to_string()),
+    }
 }
 
 /// Row order, so the placeholder above can name the path it stands for.
@@ -417,11 +473,14 @@ fn trail_addrs(addrs: &[SocketAddr]) -> String {
 /// failing. A 5xx is the edge or the origin reporting it cannot serve, which is
 /// worth failing on.
 async fn http_probe(url: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .user_agent(PROBE_UA)
-        .build()
-        .map_err(|e| format!("client build: {e}"))?;
+    let client = crate::proxy::apply_reqwest(
+        reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(PROBE_UA),
+    )
+    .map_err(|e| format!("client build: {e}"))?
+    .build()
+    .map_err(|e| format!("client build: {}", error_chain(&e)))?;
     let resp = client
         .get(url)
         .send()
@@ -440,7 +499,7 @@ async fn http_probe(url: &str) -> Result<String, String> {
 /// and the venue's edge all worked — the same stack the feed and the fill stream
 /// use. The socket is dropped immediately and nothing is sent.
 async fn ws_probe(url: &str) -> Result<String, String> {
-    match tokio::time::timeout(REQUEST_TIMEOUT, tokio_tungstenite::connect_async(url)).await {
+    match tokio::time::timeout(REQUEST_TIMEOUT, crate::proxy::connect(url)).await {
         Ok(Ok((stream, resp))) => {
             let code = resp.status().as_u16();
             drop(stream);
@@ -454,14 +513,15 @@ async fn ws_probe(url: &str) -> Result<String, String> {
     }
 }
 
-/// reqwest flattens its error chain into one message; keep it, and keep the
-/// timeout flag distinct — a timeout and a broken handshake are different
-/// diagnoses.
+/// reqwest's Display is only "error sending request for url (…)". The OS error
+/// (connection refused, unsupported socks scheme) lives on `source()`. Walk it.
+/// A timeout and a broken handshake stay distinct diagnoses.
 fn transport_message(e: &reqwest::Error) -> String {
+    let chain = error_chain(e);
     if e.is_timeout() {
-        format!("timed out: {e}")
+        format!("timed out: {chain}")
     } else {
-        e.to_string()
+        chain
     }
 }
 
@@ -739,5 +799,51 @@ mod tests {
     fn the_shipped_defaults_are_accepted_by_their_validators() {
         assert!(validate_venue_host(DEFAULT_CLOB_URL).is_ok());
         assert!(validate_ws_host(DEFAULT_WS_URL).is_ok());
+    }
+
+    /// The owner's failure: a closed local proxy makes reqwest return in about
+    /// 0ms, and Display does not mention the refusal. The source chain does.
+    /// SOCKS URLs must build — that is the `socks` feature.
+    #[tokio::test]
+    async fn a_dead_proxy_hides_connection_refused_on_display_only() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        for scheme in ["http", "socks5", "socks5h"] {
+            let proxy = format!("{scheme}://127.0.0.1:{port}");
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .proxy(reqwest::Proxy::all(&proxy).expect("socks feature accepts the scheme"))
+                .build()
+                .unwrap();
+            let err = client
+                .get("https://1.1.1.1/")
+                .send()
+                .await
+                .expect_err("nothing is listening on the proxy port");
+            let top = err.to_string();
+            assert!(
+                top.contains("error sending request"),
+                "{scheme} display: {top}"
+            );
+            assert!(
+                !top.to_ascii_lowercase().contains("refused"),
+                "{scheme} display should not be the only place the refusal lives: {top}"
+            );
+            let chain = blitzkrieg_market_api::net::error_chain(&err);
+            let lower = chain.to_ascii_lowercase();
+            // HTTP proxies surface the OS refusal. SOCKS wraps it one layer
+            // deeper than `source()` exposes ("failed to create underlying
+            // connection") — still a connect failure, not a missing feature.
+            let explains_connect = lower.contains("refused")
+                || lower.contains("underlying connection")
+                || lower.contains("socks");
+            assert!(explains_connect, "{scheme} source chain: {chain}");
+            assert!(
+                !lower.contains("socks feature") && !lower.contains("unknown proxy scheme"),
+                "{scheme} must be a supported scheme: {chain}"
+            );
+            assert!(!chain.contains("user:"), "{chain}");
+        }
     }
 }

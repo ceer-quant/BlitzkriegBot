@@ -607,8 +607,9 @@ pub struct NetCheckItemView {
     pub target: String,
     pub ok: bool,
     /// `ok` | `dns_failed` | `tcp_refused` | `tcp_timeout` | `tls_cert` |
-    /// `tls_error` | `timeout` | `http_error` | `transport_error` | `rejected` |
-    /// `unsupported`. Rendered through `core::net_check::status_label`, which
+    /// `tls_error` | `timeout` | `http_error` | `transport_error` |
+    /// `proxy_unreachable` | `rejected` | `unsupported`. Rendered through
+    /// `core::net_check::status_label`, which
     /// echoes an unknown value instead of hiding it.
     pub status: String,
     #[serde(default)]
@@ -632,8 +633,8 @@ pub struct NetCheckReportView {
     pub ok: bool,
     #[serde(default)]
     pub ts_ms: i64,
-    /// `ok` | `tls_blocked` | `dns_failed` | `proxy_env` | `fake_ip` |
-    /// `partial` | `unsupported` — see `core::net_check::hint_label`.
+    /// `ok` | `tls_blocked` | `dns_failed` | `proxy_unreachable` | `proxy_env` |
+    /// `fake_ip` | `partial` | `unsupported` — see `core::net_check::hint_label`.
     #[serde(default)]
     pub hint_code: String,
     /// The reading in one sentence, composed by the core.

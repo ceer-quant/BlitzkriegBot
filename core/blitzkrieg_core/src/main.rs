@@ -307,6 +307,20 @@ async fn main() -> anyhow::Result<()> {
     // is why it sits here and not beside the other one-shot runners: those are
     // reached after `CoreConfig` is built, and `CoreConfig` consumes the very
     // field (`market_plugin`) this needs.
+    // Before any reqwest client, including the venue SDK's: `BK_PROXY=none`
+    // drops HTTP(S)_PROXY / ALL_PROXY so REST dials direct the way WebSocket
+    // already does. An explicit URL is installed into those variables and is
+    // never printed.
+    if let Err(e) = blitzkrieg_market_api::net::install_process_proxy_policy() {
+        eprintln!("blitzkrieg-core: {e}");
+        std::process::exit(2);
+    }
+    if let Ok(view) = blitzkrieg_market_api::net::proxy_view()
+        && let Some(line) = blitzkrieg_market_api::net::boot_line(&view)
+    {
+        eprintln!("blitzkrieg-core: {line}");
+    }
+
     if args.net_check {
         std::process::exit(run_net_check(args.market_plugin.as_deref()).await);
     }

@@ -9,7 +9,9 @@
 //! failure the same way instead of each inventing a reading of the same numbers.
 
 use crate::types::{NetCheckItem, NetCheckReport};
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Proxy variables that route a process's outbound traffic through something it
@@ -55,7 +57,9 @@ fn is_fake_ipv4(v4: &Ipv4Addr) -> bool {
     let o = v4.octets();
     // 198.18.0.0/15 — RFC 2544's benchmarking block, which Clash, Surge, Stash
     // and their relatives reuse for fake-IP answers.
-    o[0] == 198 && (o[1] == 18 || o[1] == 19)
+    // 28.0.0.0/8 — the alternate range Clash/mihomo document as `fake-ip-range`
+    // (the block the owner's resolver returned after Clash was stopped).
+    o[0] == 28 || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
 }
 
 /// Names of the proxy variables visible to THIS process, in the order of
@@ -66,6 +70,653 @@ pub fn proxy_env_names() -> Vec<String> {
         .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
         .map(|name| (*name).to_string())
         .collect()
+}
+
+/// Variables whose values this process rewrites for `BK_PROXY=none|<url>`.
+/// `BK_PROXY` itself is never cleared: it is the operator's instruction.
+const PROXY_ASSIGN_VARS: [&str; 6] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+/// How this process dials. `BK_PROXY` selects it; unset is [`ProxyMode::Auto`].
+#[derive(Clone, PartialEq, Eq)]
+pub enum ProxyMode {
+    /// Honor `HTTPS_PROXY` / `ALL_PROXY` (and the lowercase names), same as reqwest.
+    Auto,
+    /// Ignore every proxy variable and dial direct.
+    Direct,
+    /// Use this URL for HTTP and HTTPS. May contain userinfo; never log it.
+    Explicit(String),
+}
+
+impl fmt::Debug for ProxyMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str("Auto"),
+            Self::Direct => f.write_str("Direct"),
+            Self::Explicit(_) => f.write_str("Explicit(<redacted>)"),
+        }
+    }
+}
+
+impl ProxyMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Direct => "none",
+            Self::Explicit(_) => "explicit",
+        }
+    }
+}
+
+/// `BK_PROXY=auto|none|off|direct|<url>`. An empty value is `auto`.
+///
+/// The error never echoes `raw`: a URL can carry a password.
+pub fn parse_proxy_mode(raw: Option<&str>) -> Result<ProxyMode, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(ProxyMode::Auto);
+    };
+    if raw.eq_ignore_ascii_case("auto") {
+        return Ok(ProxyMode::Auto);
+    }
+    if raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("direct")
+    {
+        return Ok(ProxyMode::Direct);
+    }
+    if parse_proxy_endpoint(raw).is_err() {
+        return Err(
+            "BK_PROXY must be auto, none, off, direct, or an http/https/socks5/socks5h URL \
+             (the value is not shown)"
+                .to_string(),
+        );
+    }
+    Ok(ProxyMode::Explicit(raw.to_string()))
+}
+
+/// A proxy endpoint safe to print: `scheme://host:port`, never userinfo.
+#[derive(Clone)]
+pub struct ProxyEndpoint {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    username: String,
+    password: String,
+}
+
+impl fmt::Debug for ProxyEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProxyEndpoint")
+            .field("display", &self.display())
+            .finish()
+    }
+}
+
+impl ProxyEndpoint {
+    /// `scheme://host:port` with IPv6 hosts bracketed. No userinfo.
+    pub fn display(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{}://{host}:{}", self.scheme, self.port)
+    }
+
+    /// Address `TcpStream::connect` accepts.
+    pub fn dial_addr(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    /// Username and password, when the URL had userinfo.
+    pub fn basic_userinfo(&self) -> Option<(&str, &str)> {
+        if self.username.is_empty() && self.password.is_empty() {
+            None
+        } else {
+            Some((self.username.as_str(), self.password.as_str()))
+        }
+    }
+}
+
+/// What a reqwest builder should do. `Explicit`'s URL may contain credentials.
+#[derive(Clone)]
+pub enum ClientProxy {
+    FromEnvironment,
+    Disable,
+    Explicit(String),
+}
+
+impl fmt::Debug for ClientProxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FromEnvironment => f.write_str("FromEnvironment"),
+            Self::Disable => f.write_str("Disable"),
+            Self::Explicit(_) => f.write_str("Explicit(<redacted>)"),
+        }
+    }
+}
+
+/// The proxy decision for one process, with secrets kept off [`Debug`].
+#[derive(Clone)]
+pub struct ProxyView {
+    pub policy: &'static str,
+    /// Variable NAMES that were set, plus `BK_PROXY` when the operator set it.
+    pub names: Vec<String>,
+    /// The proxy the environment (or `BK_PROXY=<url>`) named. Redacted.
+    pub configured: Option<ProxyEndpoint>,
+    /// The proxy REST and our WebSocket stack will actually dial.
+    pub active: Option<ProxyEndpoint>,
+    /// A proxy value was present and was not a supported URL.
+    pub invalid: bool,
+    explicit_url: Option<String>,
+}
+
+impl fmt::Debug for ProxyView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProxyView")
+            .field("policy", &self.policy)
+            .field("names", &self.names)
+            .field("configured", &self.configured.as_ref().map(|e| e.display()))
+            .field("active", &self.active.as_ref().map(|e| e.display()))
+            .field("invalid", &self.invalid)
+            .finish()
+    }
+}
+
+impl ProxyView {
+    pub fn client_proxy(&self) -> ClientProxy {
+        if self.invalid || self.policy == "none" || self.active.is_none() {
+            // `auto` with no proxy selected keeps reqwest's own env lookup,
+            // which is a no-op when nothing is set and matches NO_PROXY=*.
+            if self.policy == "auto" && !self.invalid && self.active.is_none() {
+                return ClientProxy::FromEnvironment;
+            }
+            return ClientProxy::Disable;
+        }
+        if let Some(url) = &self.explicit_url {
+            return ClientProxy::Explicit(url.clone());
+        }
+        ClientProxy::FromEnvironment
+    }
+}
+
+/// Resolve `mode` against an explicit environment list (tests pass this; the
+/// process path reads the real environment).
+pub fn resolve_proxy_with(mode: &ProxyMode, env: &[(&str, &str)]) -> Result<ProxyView, String> {
+    let mut names: Vec<String> = PROXY_ENV_VARS
+        .iter()
+        .filter(|name| env_value(env, name).is_some())
+        .map(|name| (*name).to_string())
+        .collect();
+    if env_value(env, "BK_PROXY").is_some() && !names.iter().any(|n| n == "BK_PROXY") {
+        names.push("BK_PROXY".to_string());
+    }
+    let bypass = no_proxy_star(env);
+    let (from_env, env_invalid) = https_proxy_from_env(env);
+    let (configured, invalid, explicit_url, active) = match mode {
+        ProxyMode::Explicit(url) => {
+            let ep = parse_proxy_endpoint(url).map_err(|_| {
+                "BK_PROXY must be auto, none, off, direct, or an http/https/socks5/socks5h URL \
+                 (the value is not shown)"
+                    .to_string()
+            })?;
+            (Some(ep.clone()), false, Some(url.clone()), Some(ep))
+        }
+        ProxyMode::Direct => (from_env, env_invalid, None, None),
+        ProxyMode::Auto => {
+            let active = if bypass { None } else { from_env.clone() };
+            (from_env, env_invalid, None, active)
+        }
+    };
+    Ok(ProxyView {
+        policy: mode.label(),
+        names,
+        configured,
+        active,
+        invalid,
+        explicit_url,
+    })
+}
+
+fn env_value<'a>(env: &'a [(&str, &str)], name: &str) -> Option<&'a str> {
+    env.iter().find_map(|(k, v)| {
+        if !k.eq_ignore_ascii_case(name) {
+            return None;
+        }
+        let t = v.trim();
+        if t.is_empty() { None } else { Some(t) }
+    })
+}
+
+fn first_env<'a>(env: &'a [(&str, &str)], keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| env_value(env, k))
+}
+
+fn no_proxy_star(env: &[(&str, &str)]) -> bool {
+    first_env(env, &["NO_PROXY", "no_proxy"]).is_some_and(|v| v.split(',').any(|p| p.trim() == "*"))
+}
+
+/// The proxy reqwest would use for an `https://` URL: `HTTPS_PROXY`, then
+/// `https_proxy`, then `ALL_PROXY`, then `all_proxy`. `HTTP_PROXY` alone does
+/// not intercept HTTPS. An unparseable value is skipped the way hyper-util
+/// skips it, and reported as `invalid` when nothing usable remains.
+fn https_proxy_from_env(env: &[(&str, &str)]) -> (Option<ProxyEndpoint>, bool) {
+    let https = first_env(env, &["HTTPS_PROXY", "https_proxy"]);
+    let all = first_env(env, &["ALL_PROXY", "all_proxy"]);
+    match parse_optional(https) {
+        Some(Ok(ep)) => (Some(ep), false),
+        Some(Err(_)) => match parse_optional(all) {
+            Some(Ok(ep)) => (Some(ep), false),
+            Some(Err(_)) => (None, true),
+            None => (None, true),
+        },
+        None => match parse_optional(all) {
+            Some(Ok(ep)) => (Some(ep), false),
+            Some(Err(_)) => (None, true),
+            None => (None, false),
+        },
+    }
+}
+
+fn parse_optional(raw: Option<&str>) -> Option<Result<ProxyEndpoint, &'static str>> {
+    raw.map(parse_proxy_endpoint)
+}
+
+pub fn parse_proxy_endpoint(raw: &str) -> Result<ProxyEndpoint, &'static str> {
+    let raw = raw.trim();
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return Err("proxy URL has no scheme");
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "socks5" | "socks5h") {
+        return Err("proxy scheme is not http, https, socks5, or socks5h");
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return Err("proxy URL has no host");
+    }
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, authority),
+    };
+    if hostport.is_empty() {
+        return Err("proxy URL has no host");
+    }
+    let (username, password) = match userinfo {
+        Some(u) => {
+            let (user, pass) = u.split_once(':').unwrap_or((u, ""));
+            (percent_decode(user), percent_decode(pass))
+        }
+        None => (String::new(), String::new()),
+    };
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => 1080,
+    };
+    let (host, port) = split_host_port(hostport, default_port)?;
+    if host.is_empty() {
+        return Err("proxy URL has no host");
+    }
+    Ok(ProxyEndpoint {
+        scheme,
+        host,
+        port,
+        username,
+        password,
+    })
+}
+
+fn split_host_port(hostport: &str, default_port: u16) -> Result<(String, u16), &'static str> {
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let Some((host, tail)) = rest.split_once(']') else {
+            return Err("proxy URL has a bad IPv6 host");
+        };
+        if host.is_empty() {
+            return Err("proxy URL has no host");
+        }
+        let port = if let Some(p) = tail.strip_prefix(':') {
+            if p.is_empty() {
+                return Err("proxy URL has an empty port");
+            }
+            p.parse().map_err(|_| "proxy URL has a bad port")?
+        } else if tail.is_empty() {
+            default_port
+        } else {
+            return Err("proxy URL has a bad IPv6 host");
+        };
+        return Ok((host.to_string(), port));
+    }
+    match hostport.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !host.contains(':') && !port.is_empty() => Ok((
+            host.to_string(),
+            port.parse().map_err(|_| "proxy URL has a bad port")?,
+        )),
+        Some(_) => Err("proxy URL has a bad host"),
+        None => Ok((hostport.to_string(), default_port)),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One line for the boot log. `None` when nothing about proxies is worth saying.
+/// Never contains a credential.
+pub fn boot_line(view: &ProxyView) -> Option<String> {
+    if view.policy == "auto"
+        && view.names.is_empty()
+        && !view.invalid
+        && view.configured.is_none()
+        && view.active.is_none()
+    {
+        return None;
+    }
+    let proxy = view
+        .active
+        .as_ref()
+        .or(view.configured.as_ref())
+        .map(|e| e.display())
+        .unwrap_or_else(|| "none".to_string());
+    let use_ = if view.invalid {
+        "rejected URL, dialing direct"
+    } else if view.active.is_some() {
+        "in use"
+    } else if view.policy == "none" {
+        "ignored, dialing direct"
+    } else {
+        "not used for https"
+    };
+    let names = if view.names.is_empty() {
+        "none".to_string()
+    } else {
+        view.names.join(", ")
+    };
+    Some(format!(
+        "BK_PROXY={policy}: proxy {proxy} ({use_}); variables: {names} (names only)",
+        policy = view.policy
+    ))
+}
+
+static PROXY_SNAPSHOT: OnceLock<ProxyView> = OnceLock::new();
+
+fn process_env() -> Vec<(String, String)> {
+    let mut keys: Vec<&str> = PROXY_ENV_VARS.to_vec();
+    keys.push("BK_PROXY");
+    keys.iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(|v| ((*name).to_string(), v))
+        })
+        .collect()
+}
+
+fn resolve_process() -> Result<ProxyView, String> {
+    let owned = process_env();
+    let pairs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let mode = parse_proxy_mode(env_value(&pairs, "BK_PROXY"))?;
+    resolve_proxy_with(&mode, &pairs)
+}
+
+/// Read the proxy decision. After [`install_process_proxy_policy`] this is the
+/// snapshot taken BEFORE env vars were rewritten, so a report can still name
+/// the dead proxy `BK_PROXY=none` cleared.
+pub fn proxy_view() -> Result<ProxyView, String> {
+    if let Some(view) = PROXY_SNAPSHOT.get() {
+        return Ok(view.clone());
+    }
+    resolve_process()
+}
+
+pub fn client_proxy() -> Result<ClientProxy, String> {
+    Ok(proxy_view()?.client_proxy())
+}
+
+/// Apply `BK_PROXY` to the process environment so clients we do not build
+/// (the venue SDK's reqwest) follow the same decision. Idempotent.
+///
+/// `none` removes `HTTP(S)_PROXY` / `ALL_PROXY`. An explicit URL is written
+/// into those variables and is never logged. `auto` leaves the environment
+/// alone.
+pub fn install_process_proxy_policy() -> Result<(), String> {
+    if PROXY_SNAPSHOT.get().is_some() {
+        return Ok(());
+    }
+    let view = resolve_process()?;
+    match view.policy {
+        "none" => {
+            for name in PROXY_ASSIGN_VARS {
+                // SAFETY: one call from process startup, before other threads
+                // read the proxy environment. The OnceLock above makes a
+                // second call return without mutating. Nothing here is logged.
+                unsafe { std::env::remove_var(name) };
+            }
+        }
+        "explicit" => {
+            let url = view
+                .explicit_url
+                .clone()
+                .ok_or_else(|| "BK_PROXY explicit URL missing".to_string())?;
+            for name in PROXY_ASSIGN_VARS {
+                // SAFETY: same single-threaded startup window as `remove_var`.
+                // `url` is the operator's BK_PROXY value and is not logged.
+                unsafe { std::env::set_var(name, &url) };
+            }
+        }
+        _ => {}
+    }
+    let _ = PROXY_SNAPSHOT.set(view);
+    Ok(())
+}
+
+/// `Display` plus each `source()`, with `user:password@` stripped from any URL.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(err);
+    let mut guard = 0;
+    while let Some(e) = cur {
+        if guard >= 8 {
+            break;
+        }
+        let text = redact_secrets(&e.to_string());
+        if parts.last() != Some(&text) {
+            parts.push(text);
+        }
+        cur = e.source();
+        guard += 1;
+    }
+    parts.join(": ")
+}
+
+/// Strip `scheme://userinfo@` down to `scheme://host` anywhere in `input`.
+pub fn redact_secrets(input: &str) -> String {
+    let mut rest = input;
+    let mut out = String::with_capacity(input.len());
+    while let Some(idx) = rest.find("://") {
+        out.push_str(&rest[..idx + 3]);
+        rest = &rest[idx + 3..];
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '/' | '?' | '#' | ')' | ']' | '"' | '\'' | ',' | ';' | '>'
+                    )
+            })
+            .unwrap_or(rest.len());
+        let authority = &rest[..end];
+        match authority.rsplit_once('@') {
+            Some((_, host)) => out.push_str(host),
+            None => out.push_str(authority),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Facts the report's hint is allowed to print. Built by [`annotate`].
+#[derive(Clone, Debug)]
+pub struct ProxyObservation {
+    /// `false` for the historical `finish` path (no proxy TCP probe).
+    pub probed: bool,
+    pub policy: &'static str,
+    pub display: String,
+    pub in_use: bool,
+    pub invalid: bool,
+    pub tcp_error: String,
+    pub tcp_ms: i64,
+}
+
+impl ProxyObservation {
+    pub fn legacy() -> Self {
+        Self {
+            probed: false,
+            policy: "auto",
+            display: String::new(),
+            in_use: false,
+            invalid: false,
+            tcp_error: String::new(),
+            tcp_ms: 0,
+        }
+    }
+}
+
+/// Status of a proxy that is configured and not accepting TCP.
+pub const PROXY_UNREACHABLE: &str = "proxy_unreachable";
+
+/// Turn a TCP probe of the configured proxy (`None` when there was nothing to
+/// dial) into the hint observation and, when there is something to say, a
+/// `proxy` row. The row's `target` is the redacted endpoint.
+pub fn annotate(
+    view: &ProxyView,
+    dial: Option<Result<i64, String>>,
+) -> (ProxyObservation, Option<NetCheckItem>) {
+    let (tcp_error, tcp_ms) = match dial {
+        Some(Ok(ms)) => (String::new(), ms),
+        Some(Err(e)) => (redact_secrets(&e), 0),
+        None => (String::new(), 0),
+    };
+    let display = if view.active.is_some() {
+        view.active
+            .as_ref()
+            .map(|e| e.display())
+            .unwrap_or_default()
+    } else {
+        view.configured
+            .as_ref()
+            .map(|e| e.display())
+            .unwrap_or_default()
+    };
+    let obs = ProxyObservation {
+        probed: true,
+        policy: view.policy,
+        display,
+        in_use: view.active.is_some() && !view.invalid,
+        invalid: view.invalid,
+        tcp_error,
+        tcp_ms,
+    };
+    let item = proxy_row(&obs, &view.names);
+    (obs, item)
+}
+
+fn proxy_row(obs: &ProxyObservation, names: &[String]) -> Option<NetCheckItem> {
+    if obs.display.is_empty() && !obs.invalid {
+        return None;
+    }
+    let vars = if names.is_empty() {
+        "the proxy variables".to_string()
+    } else {
+        names.join(", ")
+    };
+    let (ok, status, detail) = if obs.invalid {
+        (
+            true,
+            "ok",
+            "a proxy value is not an http, https, socks5, or socks5h URL; the value is not shown. REST is dialing direct".to_string(),
+        )
+    } else if obs.in_use && !obs.tcp_error.is_empty() {
+        (
+            false,
+            PROXY_UNREACHABLE,
+            format!(
+                "proxy configured but unreachable at {} ({}). reqwest dials it before any venue I/O, so REST fails in about 0ms with only \"error sending request\" — the refusal is on the error source chain. Set BK_PROXY=none, or unset {vars}",
+                obs.display, obs.tcp_error
+            ),
+        )
+    } else if obs.in_use {
+        (
+            true,
+            "ok",
+            format!("proxy reachable at {} (tcp {}ms)", obs.display, obs.tcp_ms),
+        )
+    } else if obs.policy == "none" {
+        let extra = if obs.tcp_error.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} is not listening ({}) and is not used",
+                obs.display, obs.tcp_error
+            )
+        };
+        (
+            true,
+            "ok",
+            format!("BK_PROXY=none dials direct and ignores {vars}{extra}"),
+        )
+    } else {
+        (
+            true,
+            "ok",
+            format!("proxy {} is not used for https", obs.display),
+        )
+    };
+    Some(NetCheckItem {
+        name: "proxy".to_string(),
+        target: if obs.display.is_empty() {
+            "proxy".to_string()
+        } else {
+            obs.display.clone()
+        },
+        ok,
+        status: status.to_string(),
+        addrs: Vec::new(),
+        fake_ip: false,
+        ms: obs.tcp_ms,
+        detail,
+    })
 }
 
 /// Wall-clock milliseconds since the epoch (0 when the clock is before it).
@@ -82,13 +733,30 @@ pub fn now_ms() -> i64 {
 /// The rules live here rather than in the extension so that a second venue gets
 /// the same reading for free, and so the mapping is unit-testable without a
 /// network.
-pub fn finish(mut report: NetCheckReport, proxy: Vec<String>) -> NetCheckReport {
+pub fn finish(report: NetCheckReport, proxy: Vec<String>) -> NetCheckReport {
+    finish_with(report, proxy, &ProxyObservation::legacy())
+}
+
+/// [`finish`] plus the proxy TCP probe. The `proxy` row is not a venue path:
+/// fake-IP and "N of M" counts ignore it, but a failing proxy row still fails
+/// the report.
+pub fn finish_with(
+    mut report: NetCheckReport,
+    proxy: Vec<String>,
+    obs: &ProxyObservation,
+) -> NetCheckReport {
+    let venue = venue_items(&report.items);
     report.ok = !report.items.is_empty() && report.items.iter().all(|i| i.ok);
-    let failing: Vec<&NetCheckItem> = report.items.iter().filter(|i| !i.ok).collect();
-    report.hint_code = hint_code(&report.items, &failing, &proxy).to_string();
-    report.hint = hint_text(&report.items, &failing, &proxy);
+    let failing_all: Vec<&NetCheckItem> = report.items.iter().filter(|i| !i.ok).collect();
+    let failing_venue: Vec<&NetCheckItem> = venue.iter().copied().filter(|i| !i.ok).collect();
+    report.hint_code = hint_code(&venue, &failing_all, &failing_venue, &proxy, obs).to_string();
+    report.hint = hint_text(&venue, &failing_all, &failing_venue, &proxy, obs);
     report.proxy_env = proxy;
     report
+}
+
+fn venue_items(items: &[NetCheckItem]) -> Vec<&NetCheckItem> {
+    items.iter().filter(|i| i.name != "proxy").collect()
 }
 
 /// The most specific explanation the report supports, in the order that decides
@@ -98,26 +766,44 @@ pub fn finish(mut report: NetCheckReport, proxy: Vec<String>) -> NetCheckReport 
 /// headline that hedges ("possibly TLS, possibly DNS, possibly a proxy") is the
 /// thing this report exists to replace. The supporting sentences all appear in
 /// [`hint_text`], so nothing the priority hides is lost.
-fn hint_code(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]) -> &'static str {
-    if items.is_empty() || items.iter().all(|i| i.status == UNSUPPORTED) {
+fn hint_code(
+    venue: &[&NetCheckItem],
+    failing_all: &[&NetCheckItem],
+    failing_venue: &[&NetCheckItem],
+    proxy: &[String],
+    obs: &ProxyObservation,
+) -> &'static str {
+    if venue.is_empty() || venue.iter().all(|i| i.status == UNSUPPORTED) {
         return UNSUPPORTED;
     }
-    if failing.is_empty() {
+    if failing_all.is_empty() {
         return "ok";
     }
-    if failing.iter().any(|i| is_tls_status(&i.status)) {
+    if (obs.probed && obs.in_use && !obs.tcp_error.is_empty())
+        || failing_all.iter().any(|i| i.status == PROXY_UNREACHABLE)
+    {
+        return PROXY_UNREACHABLE;
+    }
+    if failing_venue.iter().any(|i| is_tls_status(&i.status)) {
         return "tls_blocked";
     }
-    if failing.iter().all(|i| i.status == "dns_failed") {
+    if !failing_venue.is_empty() && failing_venue.iter().all(|i| i.status == "dns_failed") {
         return "dns_failed";
     }
-    if !proxy.is_empty() {
+    if proxy_is_headline(obs, proxy) {
         return "proxy_env";
     }
-    if items.iter().all(|i| i.fake_ip) {
+    if venue.iter().all(|i| i.fake_ip) {
         return "fake_ip";
     }
     "partial"
+}
+
+fn proxy_is_headline(obs: &ProxyObservation, proxy: &[String]) -> bool {
+    if !obs.probed {
+        return !proxy.is_empty();
+    }
+    obs.in_use && !obs.display.is_empty()
 }
 
 /// Status of a plugin that implements no probe at all.
@@ -129,22 +815,28 @@ pub fn is_tls_status(status: &str) -> bool {
 }
 
 /// The full reading: every applicable sentence, in the same order as the codes.
-fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]) -> String {
-    if items.is_empty() {
+fn hint_text(
+    venue: &[&NetCheckItem],
+    failing_all: &[&NetCheckItem],
+    failing_venue: &[&NetCheckItem],
+    proxy: &[String],
+    obs: &ProxyObservation,
+) -> String {
+    if venue.is_empty() {
         return "no probe was run".to_string();
     }
-    if items.iter().all(|i| i.status == UNSUPPORTED) {
+    if venue.iter().all(|i| i.status == UNSUPPORTED) {
         return "this build's market plugin implements no network probe".to_string();
     }
-    if failing.is_empty() {
-        let mut s = format!("all {} network paths answered", items.len());
+    if failing_all.is_empty() {
+        let mut s = format!("all {} network paths answered", venue.len());
         // A green report still carries its context. These are the sentences an
         // operator wants to have read BEFORE the failure a tunneled resolver
         // eventually causes, and this function's contract is that no supporting
         // sentence is lost to the headline — on a passing report the headline has
         // nothing to say at all, so it is the only branch where that would
         // actually hide them.
-        for note in [fake_ip_note(items), proxy_note(proxy)] {
+        for note in [fake_ip_note(venue), proxy_context(proxy, obs)] {
             if !note.is_empty() {
                 s.push_str("; ");
                 s.push_str(&note);
@@ -153,7 +845,10 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
         return s;
     }
     let mut notes: Vec<String> = Vec::new();
-    let tls: Vec<&str> = failing
+    if let Some(note) = unreachable_note(obs, proxy) {
+        notes.push(note);
+    }
+    let tls: Vec<&str> = failing_venue
         .iter()
         .filter(|i| is_tls_status(&i.status))
         .map(|i| i.target.as_str())
@@ -165,7 +860,7 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
             tls.join(", ")
         ));
     }
-    let dns: Vec<&str> = failing
+    let dns: Vec<&str> = failing_venue
         .iter()
         .filter(|i| i.status == "dns_failed")
         .map(|i| i.target.as_str())
@@ -176,14 +871,15 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
             dns.join(", ")
         ));
     }
-    let fake_ip = fake_ip_note(items);
+    let fake_ip = fake_ip_note(venue);
     if !fake_ip.is_empty() {
         notes.push(fake_ip);
     }
-    if !proxy.is_empty() {
-        notes.push(proxy_note(proxy));
+    let proxy_note = proxy_context(proxy, obs);
+    if !proxy_note.is_empty() && unreachable_note(obs, proxy).is_none() {
+        notes.push(proxy_note);
     }
-    let other: Vec<&str> = failing
+    let other: Vec<&str> = failing_venue
         .iter()
         .filter(|i| {
             !is_tls_status(&i.status) && i.status != "dns_failed" && i.status != UNSUPPORTED
@@ -199,7 +895,7 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
         notes.push(format!(
             "{} of {} paths did not answer: {}",
             other.len(),
-            items.len(),
+            venue.len(),
             other.join(", ")
         ));
     }
@@ -217,23 +913,32 @@ fn hint_text(items: &[NetCheckItem], failing: &[&NetCheckItem], proxy: &[String]
 /// behalf of a tunnel is still a report about that tunnel whether the paths came
 /// back green or not — that tunnel is what decides whether the next connection
 /// leaves the machine at all.
-fn fake_ip_note(items: &[NetCheckItem]) -> String {
-    if items.is_empty() || !items.iter().all(|i| i.fake_ip) {
+fn fake_ip_note(venue: &[&NetCheckItem]) -> String {
+    let fakes: Vec<&&NetCheckItem> = venue.iter().filter(|i| i.fake_ip).collect();
+    if fakes.is_empty() {
         return String::new();
     }
-    let addrs: Vec<String> = items
-        .iter()
-        .filter(|i| i.fake_ip)
-        .flat_map(|i| i.addrs.iter().cloned())
-        .collect();
+    let addrs: Vec<String> = fakes.iter().flat_map(|i| i.addrs.iter().cloned()).collect();
     if addrs.is_empty() {
         return String::new();
     }
+    let lead = if venue.iter().all(|i| i.fake_ip) {
+        format!(
+            "every address came from a proxy fake-IP range ({})",
+            addrs.join(", ")
+        )
+    } else {
+        let targets: Vec<&str> = fakes.iter().map(|i| i.target.as_str()).collect();
+        format!(
+            "DNS returned proxy fake-IP addresses ({}) for {}",
+            addrs.join(", "),
+            targets.join(", ")
+        )
+    };
     format!(
-        "every address came from a proxy fake-IP range ({}): the resolver answers \
-         on behalf of a tunnel, and reachability depends on whether that tunnel \
-         routes the connection",
-        addrs.join(", ")
+        "{lead}: 198.18.0.0/15, 28.0.0.0/8 and fc00::/7 are Clash/Surge markers, \
+         often a stale resolver cache after the tunnel stops. On macOS flush with \
+         `sudo dscacheutil -flushcache` and `sudo killall -HUP mDNSResponder`"
     )
 }
 
@@ -243,6 +948,69 @@ fn fake_ip_note(items: &[NetCheckItem]) -> String {
 /// notes with `"; "`, so a note that carried one of its own was printed as
 /// "…answered; ; proxy variables…" on every failing report from a box that had
 /// one set.
+fn unreachable_note(obs: &ProxyObservation, proxy: &[String]) -> Option<String> {
+    if !(obs.probed && obs.in_use && !obs.tcp_error.is_empty()) {
+        return None;
+    }
+    let vars = if proxy.is_empty() {
+        "HTTP_PROXY, HTTPS_PROXY, ALL_PROXY".to_string()
+    } else {
+        proxy.join(", ")
+    };
+    Some(format!(
+        "proxy configured but unreachable at {} ({}). reqwest dials that proxy before any \
+         venue I/O and its Display is only \"error sending request\"; the refusal is on the \
+         error source chain, which is why REST fails in about 0ms while a WebSocket that \
+         ignores those variables can still connect. Variables still set: {vars}. Set \
+         BK_PROXY=none, or unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy \
+         all_proxy, so REST dials direct",
+        obs.display, obs.tcp_error
+    ))
+}
+
+fn proxy_context(proxy: &[String], obs: &ProxyObservation) -> String {
+    if !obs.probed {
+        return proxy_note(proxy);
+    }
+    if obs.invalid {
+        return "a proxy value is not an http, https, socks5, or socks5h URL; the value is \
+                not shown. Set BK_PROXY=none to dial direct, or set BK_PROXY to a supported URL"
+            .to_string();
+    }
+    if obs.probed && obs.in_use && !obs.tcp_error.is_empty() {
+        // The unreachable sentence already names it.
+        return String::new();
+    }
+    if obs.in_use {
+        return format!(
+            "REST and WebSocket use {} (variables: {})",
+            obs.display,
+            if proxy.is_empty() {
+                "none".to_string()
+            } else {
+                proxy.join(", ")
+            }
+        );
+    }
+    if obs.policy == "none" && (!obs.display.is_empty() || !proxy.is_empty()) {
+        let vars = if proxy.is_empty() {
+            "the proxy variables".to_string()
+        } else {
+            proxy.join(", ")
+        };
+        let dead = if obs.tcp_error.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} is not listening ({}) and is not used",
+                obs.display, obs.tcp_error
+            )
+        };
+        return format!("BK_PROXY=none dials direct and ignores {vars}{dead}");
+    }
+    String::new()
+}
+
 fn proxy_note(proxy: &[String]) -> String {
     if proxy.is_empty() {
         return String::new();
@@ -487,6 +1255,162 @@ mod tests {
         let empty = report(Vec::new(), &[]);
         assert!(!empty.ok, "an empty report is not a passing one");
         assert_eq!(empty.hint_code, "unsupported");
+    }
+
+    #[test]
+    fn clash_28_slash_8_is_a_fake_ip_and_neighbouring_blocks_are_not() {
+        for addr in ["28.0.0.1", "28.0.2.41", "28.255.255.255", "fc00::22a"] {
+            let ip: IpAddr = addr.parse().expect("test literal parses");
+            assert!(is_fake_ip(&ip), "{addr}");
+        }
+        for addr in ["27.255.255.255", "29.0.0.1", "128.0.0.1"] {
+            let ip: IpAddr = addr.parse().expect("test literal parses");
+            assert!(!is_fake_ip(&ip), "{addr}");
+        }
+    }
+
+    #[test]
+    fn bk_proxy_modes_and_https_selection_never_keep_credentials() {
+        assert_eq!(parse_proxy_mode(None).unwrap().label(), "auto");
+        assert_eq!(parse_proxy_mode(Some(" Off ")).unwrap().label(), "none");
+        assert!(parse_proxy_mode(Some("ftp://127.0.0.1:1")).is_err());
+        let err = parse_proxy_mode(Some("http://user:pw@127.0.0.1:1")).unwrap();
+        let rendered = format!("{err:?}");
+        assert!(!rendered.contains("pw"), "{rendered}");
+
+        let view = resolve_proxy_with(
+            &ProxyMode::Auto,
+            &[
+                ("HTTPS_PROXY", "http://user:pw@127.0.0.1:7890"),
+                ("ALL_PROXY", "socks5://127.0.0.1:1"),
+                ("HTTP_PROXY", "http://127.0.0.1:9"),
+            ],
+        )
+        .unwrap();
+        let shown = view.active.as_ref().unwrap().display();
+        assert_eq!(shown, "http://127.0.0.1:7890");
+        assert!(!format!("{view:?}").contains("pw"), "{view:?}");
+        assert!(matches!(view.client_proxy(), ClientProxy::FromEnvironment));
+
+        let only_http =
+            resolve_proxy_with(&ProxyMode::Auto, &[("HTTP_PROXY", "http://127.0.0.1:9")]).unwrap();
+        assert!(
+            only_http.active.is_none(),
+            "HTTP_PROXY does not intercept https"
+        );
+
+        let star = resolve_proxy_with(
+            &ProxyMode::Auto,
+            &[("ALL_PROXY", "socks5://127.0.0.1:7890"), ("NO_PROXY", "*")],
+        )
+        .unwrap();
+        assert!(star.active.is_none(), "NO_PROXY=* bypasses the proxy");
+
+        let direct = resolve_proxy_with(
+            &ProxyMode::Direct,
+            &[("ALL_PROXY", "http://user:pw@127.0.0.1:7890")],
+        )
+        .unwrap();
+        assert!(direct.active.is_none());
+        assert_eq!(
+            direct.configured.as_ref().unwrap().display(),
+            "http://127.0.0.1:7890"
+        );
+        assert!(matches!(direct.client_proxy(), ClientProxy::Disable));
+        let line = boot_line(&direct).unwrap();
+        assert!(line.contains("BK_PROXY=none"), "{line}");
+        assert!(!line.contains("pw") && !line.contains("user:"), "{line}");
+    }
+
+    #[test]
+    fn a_dead_in_use_proxy_is_the_headline_and_fake_ips_stay_in_the_hint() {
+        let obs = ProxyObservation {
+            probed: true,
+            policy: "auto",
+            display: "http://127.0.0.1:7890".into(),
+            in_use: true,
+            invalid: false,
+            tcp_error: "Connection refused (os error 61)".into(),
+            tcp_ms: 0,
+        };
+        let r = finish_with(
+            NetCheckReport {
+                ok: false,
+                ts_ms: 0,
+                hint_code: String::new(),
+                hint: String::new(),
+                proxy_env: Vec::new(),
+                items: vec![item("venue-rest", false, "transport_error", &["28.0.2.41"])],
+            },
+            vec!["ALL_PROXY".into(), "HTTPS_PROXY".into()],
+            &obs,
+        );
+        assert_eq!(r.hint_code, "proxy_unreachable");
+        assert!(r.hint.contains("unreachable"), "{}", r.hint);
+        assert!(r.hint.contains("http://127.0.0.1:7890"), "{}", r.hint);
+        assert!(r.hint.contains("BK_PROXY=none"), "{}", r.hint);
+        assert!(r.hint.contains("28.0.2.41"), "{}", r.hint);
+        assert!(r.hint.contains("dscacheutil"), "{}", r.hint);
+        assert!(!r.hint.contains("pw"), "{}", r.hint);
+    }
+
+    #[test]
+    fn bk_proxy_none_does_not_blame_the_proxy_variable() {
+        let obs = ProxyObservation {
+            probed: true,
+            policy: "none",
+            display: "http://127.0.0.1:7890".into(),
+            in_use: false,
+            invalid: false,
+            tcp_error: "Connection refused (os error 61)".into(),
+            tcp_ms: 0,
+        };
+        let r = finish_with(
+            NetCheckReport {
+                ok: false,
+                ts_ms: 0,
+                hint_code: String::new(),
+                hint: String::new(),
+                proxy_env: Vec::new(),
+                items: vec![item("venue-rest", true, "ok", &["1.1.1.1"])],
+            },
+            vec!["ALL_PROXY".into()],
+            &obs,
+        );
+        assert!(r.ok);
+        assert_eq!(r.hint_code, "ok");
+        assert!(r.hint.contains("BK_PROXY=none"), "{}", r.hint);
+        assert!(r.hint.contains("not listening"), "{}", r.hint);
+    }
+
+    #[test]
+    fn error_chain_walks_sources_and_strips_userinfo() {
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("Connection refused (os error 61)")
+            }
+        }
+        impl std::error::Error for Leaf {}
+        static LEAF: Leaf = Leaf;
+        #[derive(Debug)]
+        struct Top;
+        impl std::fmt::Display for Top {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error sending request for url (https://user:pw@clob.example/)")
+            }
+        }
+        impl std::error::Error for Top {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&LEAF)
+            }
+        }
+        let chain = error_chain(&Top);
+        assert!(chain.contains("error sending request"), "{chain}");
+        assert!(chain.contains("Connection refused"), "{chain}");
+        assert!(!chain.contains("pw"), "{chain}");
+        assert!(chain.contains("clob.example"), "{chain}");
     }
 
     #[test]

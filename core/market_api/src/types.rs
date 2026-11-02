@@ -464,7 +464,7 @@ pub struct NetCheckItem {
     pub ok: bool,
     /// Machine verdict: `ok` | `dns_failed` | `tcp_refused` | `tcp_timeout` |
     /// `tls_cert` | `tls_error` | `timeout` | `http_error` | `transport_error` |
-    /// `rejected` | `unsupported`. `transport_error` is a transport failure the
+    /// `proxy_unreachable` | `rejected` | `unsupported`. `transport_error` is a transport failure the
     /// finer statuses do not name (including a probe that panicked, which is
     /// reported rather than dropped); `rejected` means the endpoint was refused
     /// BY POLICY before any dial (a loopback/private `*_URL` override), which is
@@ -499,8 +499,8 @@ pub struct NetCheckReport {
     pub ok: bool,
     pub ts_ms: i64,
     /// What the report as a whole says, as a key a UI translates: `ok` |
-    /// `tls_blocked` | `dns_failed` | `proxy_env` | `fake_ip` | `partial` |
-    /// `unsupported`.
+    /// `tls_blocked` | `dns_failed` | `proxy_unreachable` | `proxy_env` |
+    /// `fake_ip` | `partial` | `unsupported`.
     pub hint_code: String,
     /// The same reading in one sentence, with the supporting observations —
     /// built by `crate::net::finish`, never assembled by a UI.

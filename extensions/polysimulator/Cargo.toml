@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-uti
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "socks"] }
 thiserror = "2"
 url = "2"
 mime = "0.3"
