@@ -35,6 +35,9 @@ pub use engine_cycle::{venue_credentials_missing, venue_credentials_ready};
 // #834 cycle 1: the freeze/circuit-breaker state book moved next to its only
 // manager; surfaced for the struct field and the integration tree's handle.
 pub(crate) use risk_admission::FreezeBook;
+// #861: the runtime risk-state cell (path + parsed file) the Core struct
+// holds — same re-export shape as FreezeBook above.
+pub(crate) use risk_admission::RiskStateCell;
 
 pub struct Core {
     config: CoreConfig,
@@ -199,6 +202,14 @@ pub struct Core {
     /// 原 7 个裸字段收拢为一，字段语义逐字保留，唯一管理者是
     /// [`FreezeBook`]（risk_admission/freeze.rs）。
     freeze_book: FreezeBook,
+    /// #861: the runtime risk state's durable mirror (`Option<RiskStateCell>`
+    /// — path + parsed file). `None` (backtester, most tests) = the historic
+    /// session-scoped behaviour: no risk knob is written or restored, and no
+    /// restart default-freeze applies. `Some`: every kill/freeze/limit write
+    /// lands in `positions.risk-state.json`, and a boot WITH a state file
+    /// restores caps/freezes and default-freezes every account until an
+    /// operator resumes it (the fail-closed restart, risk_admission/persist.rs).
+    risk_state: Option<RiskStateCell>,
     /// Last error of any kind recorded this session (venue refusal, failed
     /// self-check or reconcile sweep, kill switch, kernel-side order refusal),
     /// surfaced to the panel as `engine.stats.lastError`. Session-scoped: a

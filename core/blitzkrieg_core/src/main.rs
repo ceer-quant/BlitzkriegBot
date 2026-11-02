@@ -152,8 +152,8 @@ mod bin_tests;
 
 use bin_support::boot::{
     ConfigChoice, EnvVars, config_choice, daily_loss_path_for, parse_args, parse_strategy_limits,
-    parse_virtual_limits, resolve_event_archive, resolved_policy_path, round_duration_source_from,
-    run_net_check,
+    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
+    round_duration_source_from, run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -454,6 +454,11 @@ async fn main() -> anyhow::Result<()> {
     // (the struct literal below consumes `position_log_path`).
     let daily_pnl_path = position_log_path.as_deref().map(daily_loss_path_for);
 
+    // #861: the runtime risk state's durable side file — the daily-loss
+    // file's family, beside the position log. Only a real process has it
+    // (the backtester/tests run without, session-scoped as before).
+    let risk_state_path = position_log_path.as_deref().map(risk_state_path_for);
+
     // #380: WHERE the execution-policy file lives, settled BEFORE the core is
     // constructed. An explicit --execution-policy wins; the shipped default is
     // resolved against the install root (exe ancestors) then the cwd (cwd
@@ -601,6 +606,11 @@ async fn main() -> anyhow::Result<()> {
         // ④ 统一映射账本（cwd-relative）。confirmed 的跨所映射跨重启存活；
         // 自动配对只提议、操作员 confirm 才写这里。回测/测试 None = 纯内存。
         unified_ledger_path: Some("data/runtime/unified-mapping.json".to_string()),
+        // #861: the runtime risk state's durable side file (hot entry caps,
+        // systemic bounds, kill switch, freeze book + the restart default
+        // freeze). cwd-relative, derived from the position log — always on
+        // for a real process; the backtester/tests carry None.
+        risk_state_path: risk_state_path.clone(),
         // #458: where manual destructive operations audit themselves. Always
         // on for a real process; the backtester/tests carry None and refuse.
         manual_ops_audit_path: Some("data/audit/manual-ops.jsonl".to_string()),

@@ -115,6 +115,14 @@ pub struct CoreConfig {
     /// ledger in memory — the backtester and most in-process tests never
     /// confirm a mapping, so there is nothing to persist.
     pub unified_ledger_path: Option<String>,
+    /// #861: where the RUNTIME risk state persists (hot entry caps from
+    /// `risk.setLimits`, the nine systemic bounds from `risk.setSystemic`,
+    /// the kill switch and the freeze book — `positions.risk-state.json`
+    /// beside the position log in production, the daily-loss file's family).
+    /// `None` (the backtester, most in-process tests) keeps every risk knob
+    /// session-scoped exactly as before: nothing is written, nothing is
+    /// restored, no restart default-freeze applies.
+    pub risk_state_path: Option<String>,
     /// When false the core never auto-submits exits on tick; positions are only
     /// closed by explicit fills/flatten. Used by order-layer tests and for a
     /// "positions managed externally" deployment. Default true.
@@ -946,6 +954,7 @@ impl Default for CoreConfig {
             accounts_config_path: None,
             manual_ops_audit_path: None,
             unified_ledger_path: None,
+            risk_state_path: None,
             auto_exits_enabled: true,
             intent_audit_enabled: true,
             engine_enabled: false,

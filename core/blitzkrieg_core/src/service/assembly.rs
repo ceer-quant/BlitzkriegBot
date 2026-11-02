@@ -36,7 +36,7 @@ impl Core {
     /// through [`Core::new`], which fails closed on a malformed file; this
     /// variant trusts the caller's book.
     pub fn with_account_book(
-        config: CoreConfig,
+        mut config: CoreConfig,
         mut accounts: crate::account::AccountLedgers,
     ) -> Self {
         // Whether the boot below replayed durable cash journals (the server's
@@ -298,7 +298,47 @@ impl Core {
         // above). Issue 751: the flips land in `.env`, not the retired
         // `shadow_evolution.toml`.
         let shadow_env_path = config.env_file_path.clone();
-        Self {
+        // #861: the runtime risk state (hot entry caps, systemic bounds, kill
+        // switch, freeze book). Loaded BEFORE the config moves into the struct
+        // so the restored caps land in the gate the boot builds. `None` (the
+        // backtester, most in-process tests) keeps every knob session-scoped:
+        // nothing is written, nothing is restored, no restart freeze applies.
+        // A file that exists but does not parse is fail-CLOSED — nothing is
+        // restored, and `risk_state_boot_freeze` still forces the restart
+        // default freeze (the loud error is the contract, persist.rs).
+        let risk_state_path = config.risk_state_path.clone().map(std::path::PathBuf::from);
+        let mut risk_state_boot_freeze = false;
+        let risk_state = risk_state_path.map(|path| {
+            use crate::service::risk_admission::{
+                RiskStateLoad, apply_restored_limits, load_risk_state_file,
+            };
+            match load_risk_state_file(&path) {
+                RiskStateLoad::Missing => RiskStateCell {
+                    path,
+                    file: Default::default(),
+                },
+                RiskStateLoad::Corrupt(reason) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        reason = %reason,
+                        "risk-state file UNREADABLE — NOT restoring any risk posture; \
+                         every account will boot FROZEN (fail-closed, issue #861). \
+                         Repair or delete the file, then resume trading explicitly."
+                    );
+                    risk_state_boot_freeze = true;
+                    RiskStateCell {
+                        path,
+                        file: Default::default(),
+                    }
+                }
+                RiskStateLoad::Ok(file) => {
+                    apply_restored_limits(&mut config, &file, &path);
+                    risk_state_boot_freeze = true;
+                    RiskStateCell { path, file }
+                }
+            }
+        });
+        let mut core = Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
             ome: Ome::new(),
@@ -441,7 +481,16 @@ impl Core {
             // RFC 568 阶段一：配对簿随进程启动为空账（不持久化 —— 事实事件
             // 重放经同一事件流重建，#559 3c 的口径见 pair 模块注释）。
             pair_book: crate::pair::PairBook::default(),
-        }
+            // #861: the boot-loaded risk state (None = no risk-state path —
+            // the backtester/most-test shape: session-scoped, as always).
+            risk_state,
+        };
+        // The kill switch, the freeze book and the restart default freeze land
+        // AFTER the struct exists (they run the freeze paths, which emit and
+        // touch the book). The entry caps were restored into `config` above,
+        // so the gate the boot builds already carries them.
+        core.restore_risk_state_at_boot(risk_state_boot_freeze);
+        core
     }
 
     /// #363: the boot-time policy load. Fail-closed on ANY malformed input;

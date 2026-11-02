@@ -893,6 +893,16 @@ pub(crate) fn daily_loss_path_for(position_log: &str) -> String {
         .into_owned()
 }
 
+/// #861: where the RUNTIME risk state persists — the daily-loss file's own
+/// family (`positions.risk-state.json` beside the position log): the two
+/// files describe the same book's risk posture and belong in the same place.
+pub(crate) fn risk_state_path_for(position_log: &str) -> String {
+    std::path::Path::new(position_log)
+        .with_extension("risk-state.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `--net-check`: probe every network path the ACTIVE market plugin uses and
 /// print one JSON `NetCheckReport` on stdout, returning the code the shell
 /// should see (0 = every probe passed, 1 = something failed).
