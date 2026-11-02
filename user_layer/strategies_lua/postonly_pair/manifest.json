@@ -1,0 +1,97 @@
+{
+  "name": "postonly_pair",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "df0b8393d9a8a63b4c286dd919de94fb9e0a57bc7ce987abba4e746d2e2c1ebd",
+  "author": "BlitzkriegBot",
+  "description": "Post-only two-sided pair for Polymarket crypto Up/Down (issue #872). Both legs are bids strictly under their asks, or neither is sent. Combined quote cost must be under max_pair_cost (maker fee is 0; the taker schedule shares*0.07*p*(1-p) is not charged, and the 20% maker rebate is not assumed). Requotes on a 10-20s cadence, refuses to grow unpaired inventory past max_unpaired_shares, and cancels resting bids near expiry. Settlement is the kernel's (Chainlink TWAP is the venue's rule; this package does not price it). Off unless an operator enables it. Signal-only.",
+  "holds_to_settlement": true,
+  "entry_maker": true,
+  "atomic_batch": true,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 20
+  },
+  "tunables": {
+    "max_pair_cost": {
+      "type": "decimal",
+      "default": "0.985",
+      "min": "0.90",
+      "max": "0.999"
+    },
+    "min_leg_price": {
+      "type": "decimal",
+      "default": "0.01",
+      "min": "0.01",
+      "max": "0.10"
+    },
+    "max_leg_price": {
+      "type": "decimal",
+      "default": "0.99",
+      "min": "0.50",
+      "max": "0.995"
+    },
+    "min_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "max_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "max_unpaired_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "0",
+      "max": "100"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "0",
+      "max": "300"
+    },
+    "cancel_before_sec": {
+      "type": "int",
+      "default": "20",
+      "min": "5",
+      "max": "120"
+    },
+    "requote_ms": {
+      "type": "int",
+      "default": "15000",
+      "min": "10000",
+      "max": "20000"
+    },
+    "entry_reprice_ticks": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "5"
+    },
+    "entry_window_pct": {
+      "type": "int",
+      "default": "50",
+      "min": "0",
+      "max": "100"
+    },
+    "round_sec": {
+      "type": "int",
+      "default": "900",
+      "min": "60",
+      "max": "86400"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}

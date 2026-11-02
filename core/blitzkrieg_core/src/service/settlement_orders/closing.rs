@@ -21,7 +21,24 @@ impl Core {
         // Persist first so the panel/analysis have the record even if a later
         // step fails (matches the Node behaviour of saving on close).
         if let Some(db) = self.trade_db.as_mut() {
-            let rec = crate::trade_db::TradeRecord::from_closed(closed);
+            let mut rec = crate::trade_db::TradeRecord::from_closed(closed);
+            // #872: post-only pair closes carry the two metrics the soak
+            // scorer does not require. Other strategies omit the keys.
+            if closed.strategy == "postonly_pair" && closed.was_maker_entry {
+                let adverse = if closed.net_pnl_usd < Decimal::ZERO {
+                    (-closed.net_pnl_usd).to_string()
+                } else {
+                    "0".to_string()
+                };
+                rec.adverse_selection_usd = Some(adverse);
+                let key = strategy_acc_key(&closed.strategy, closed.account_id.as_str());
+                if let Some(acc) = self.strategy_accounting.get(&key)
+                    && acc.maker_quotes > 0
+                {
+                    let rate = Decimal::from(acc.maker_fills) / Decimal::from(acc.maker_quotes);
+                    rec.maker_fill_rate = Some(rate.to_string());
+                }
+            }
             db.record(&rec, now_ms);
         }
         // Per-strategy accounting (P-1.1): session realized PnL + fee totals,

@@ -236,6 +236,10 @@ pub(super) struct StrategyAccounting {
     pub(super) losses: u64,
     pub(super) fees_usd: Decimal,
     pub(super) net_pnl_usd: Decimal,
+    /// Post-only quotes accepted by the venue path for `postonly_pair`.
+    pub(super) maker_quotes: u64,
+    /// Maker fills that opened or added to a `postonly_pair` position.
+    pub(super) maker_fills: u64,
 }
 
 /// The `strategy_accounting` map key for one (strategy, account) scope. The
