@@ -472,7 +472,7 @@ async function main() {
     for (const p of problems) console.error(`  - ${p}`);
     process.exit(1);
   }
-  console.log('live-100u: READONLY PREFLIGHT GO. A live process may be armed with scripts/live-100u.sh --arm-orders.');
+  console.log('live-100u: READONLY PREFLIGHT GO. Point the already-running process at production-live-100u.toml.');
   console.log('  This is not a strategy GO and not a profitability claim. Allowlist stays empty.');
 }
 

@@ -118,7 +118,22 @@ function leg(px, mode) {
     return { px: q, fee: 0n };
   }
   if (mode === 'maker_at_ask') return { px, fee: 0n };
+  if (mode === 'maker_pair_gated') {
+    const q = px - TICK;
+    if (q < MIN_PX) return null;
+    return { px: q, fee: 0n };
+  }
   throw new Error(`unknown mode ${mode}`);
+}
+
+/** maker_pair's own gate: both quotes rest, and their sum is under 0.985. A round that does not fire is not a trade. */
+function makerPairPnl(up, down) {
+  const qu = up - TICK;
+  const qd = down - TICK;
+  if (qu < MIN_PX || qd < MIN_PX) return null;
+  const cost = qu + qd;
+  if (cost >= 985_000n) return null;
+  return ONE - cost;
 }
 
 const MODES = [
@@ -126,9 +141,10 @@ const MODES = [
   'taker_legacy_slip1',
   'maker_at_ask',
   'maker_quote_minus_1',
+  'maker_pair_gated',
 ];
 
-const OPTIMISTIC = new Set(['maker_quote_minus_1', 'maker_at_ask']);
+const OPTIMISTIC = new Set(['maker_quote_minus_1', 'maker_at_ask', 'maker_pair_gated']);
 
 function pnlOf(up, down, mode) {
   const a = leg(up, mode);
@@ -235,6 +251,12 @@ function decisions(pairManifest, singleManifest) {
       version: readManifest('market_maker').version,
       decision: 'NO-GO',
       reason: '没有扣费后为正的样本。不重新启用。',
+    },
+    maker_pair: {
+      version: readManifest('maker_pair').version,
+      decision: 'NO-GO',
+      reason:
+        '报价之和低于 0.985 的轮次见 maker_pair_gated。那一行假设两条腿都在报价上成交，窗口没有成交打印，成交率未测。允许名单保持空白。',
     },
   };
 }
@@ -370,7 +392,7 @@ async function buildReport() {
   for (const mode of MODES) {
     const pnls = [];
     for (const r of rounds) {
-      const p = pnlOf(r.up, r.down, mode);
+      const p = mode === 'maker_pair_gated' ? makerPairPnl(r.up, r.down) : pnlOf(r.up, r.down, mode);
       if (p !== null) pnls.push(p);
     }
     const summary = summarize(pnls);

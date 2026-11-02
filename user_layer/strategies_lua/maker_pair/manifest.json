@@ -1,0 +1,79 @@
+{
+  "name": "maker_pair",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "2a9346039b12665053a3143b9e2eb0b169b23dee1bc10380ddd84a5fe01521bc",
+  "author": "BlitzkriegBot",
+  "description": "Maker-only two-sided pair for a small bankroll. Both legs are quoted strictly under their own asks (post-only, entry_maker, never at the ask) with EQUAL share counts, or neither leg is sent. The cost test is the two quotes themselves (maker fee 0); a missing or crossing quote cancels the whole attempt. atomic_batch plus pair={key,leg} makes the kernel drop the cycle if one leg is refused. There is no one-sided gap-fill: a partial fill is not chased. Collection is a merge, not a sell. Not enabled by any shipped allowlist — the frozen-window replay does not measure maker fill rate. Signal-only.",
+  "holds_to_settlement": true,
+  "entry_maker": true,
+  "atomic_batch": true,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 30
+  },
+  "tunables": {
+    "max_pair_cost": {
+      "type": "decimal",
+      "default": "0.985",
+      "min": "0.90",
+      "max": "0.999"
+    },
+    "min_leg_price": {
+      "type": "decimal",
+      "default": "0.01",
+      "min": "0.01",
+      "max": "0.10"
+    },
+    "max_leg_price": {
+      "type": "decimal",
+      "default": "0.99",
+      "min": "0.50",
+      "max": "0.995"
+    },
+    "min_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "max_pair_shares": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "0",
+      "max": "300"
+    },
+    "entry_window_pct": {
+      "type": "int",
+      "default": "50",
+      "min": "0",
+      "max": "100"
+    },
+    "round_sec": {
+      "type": "int",
+      "default": "900",
+      "min": "60",
+      "max": "86400"
+    },
+    "entry_reprice_ticks": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "10"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}

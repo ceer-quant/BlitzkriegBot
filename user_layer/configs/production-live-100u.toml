@@ -9,9 +9,12 @@
 # default.toml. A test locks that. They are sized for 100 USDC:
 #   global halt $8, daily loss $5, one entry's stop-loss $0.50,
 #   total open exposure $20, same-asset $12.
-# The per-order notional cap is not a toml key. The env and
-# `scripts/live-100u.sh` set it to $2 absolute and 2% of equity
-# (2% of 100 USDC = $2), with the entry budget at 1% ($1).
+# The per-order notional cap is not a toml key. production-live-100u.env
+# sets it to $2 absolute (`BK_LIVE_MAX_ORDER_NOTIONAL`) and 2% of equity
+# (`BK_MAX_ORDER_NOTIONAL_PCT`; 2% of 100 USDC = $2), with the entry
+# budget at 1% (`BK_SIZE_PCT`). The running process must pass those
+# through `--max-order-notional` / `--min-shares` / `--max-shares`; this
+# tree does not ship a launcher.
 #
 # No strategy is enabled here. production-live-100u.allowlist stays empty
 # until a package passes the soak gate (PF >= 1.1 after costs, max

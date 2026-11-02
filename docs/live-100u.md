@@ -30,6 +30,8 @@ node scripts/live-100u-preflight.mjs --config
 POLYMARKET_FUNDER_ADDRESS=0x... node scripts/live-100u-preflight.mjs
 ```
 
+预检不启动、也不停掉已经在跑的进程。
+
 通过条件：
 
 - USDC.e 余额在 90 到 110 之间（100 的 ±10%）
@@ -41,12 +43,4 @@ POLYMARKET_FUNDER_ADDRESS=0x... node scripts/live-100u-preflight.mjs
 
 任何一项失败，订单保持不允许。
 
-## 武装下单
-
-只有预检退出码是 0 之后：
-
-```bash
-bash scripts/live-100u.sh --arm-orders
-```
-
-子进程是 `--mode live --no-strategy-state`，不带 `--enable-strategy`。这仍然不是盈利许可。没有策略通过 soak 之前，这个进程没有策略单。
+通过之后，由已经在跑的进程改用这份配置（`BK_CONFIG` 指向 `production-live-100u.toml`，并带上 env 里的名义额和股数带）。不要另写启动脚本。允许名单仍然是空的，所以不会因此启用策略。预检通过只说明余额和持仓对得上。

@@ -70,6 +70,18 @@
       "maxDrawdownUsd": "0",
       "optimistic": true,
       "passesGate": false
+    },
+    "maker_pair_gated": {
+      "n": 0,
+      "wins": 0,
+      "losses": 0,
+      "netUsd": "0",
+      "grossProfitUsd": "0",
+      "grossLossUsd": "0",
+      "profitFactor": "na",
+      "maxDrawdownUsd": "0",
+      "optimistic": true,
+      "passesGate": false
     }
   },
   "decisions": {
@@ -102,6 +114,11 @@
       "version": "1.1.0",
       "decision": "NO-GO",
       "reason": "没有扣费后为正的样本。不重新启用。"
+    },
+    "maker_pair": {
+      "version": "1.0.0",
+      "decision": "NO-GO",
+      "reason": "报价之和低于 0.985 的轮次见 maker_pair_gated。那一行假设两条腿都在报价上成交，窗口没有成交打印，成交率未测。允许名单保持空白。"
     }
   },
   "allow": []

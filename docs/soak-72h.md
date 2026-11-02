@@ -5,7 +5,6 @@
 ```bash
 node scripts/soak-72h-check.mjs --self-test
 node scripts/soak-72h-check.mjs --preflight
-bash scripts/soak-72h.sh --print-argv
 ```
 
 通过预检表示：
@@ -17,15 +16,7 @@ bash scripts/soak-72h.sh --print-argv
 
 当前 `allow` 是空的。启动命令带 `--no-strategy-state`，不会把旧的 `data/strategy-state.json` 里的策略重新打开。
 
-## 开跑（仍然是 dry）
-
-只有在预检通过、并且你明确要占着一个前台进程时：
-
-```bash
-bash scripts/soak-72h.sh --start
-```
-
-这不会把 `DRY_RUN` 设成 `false`。真钱上线不走这个脚本。
+机器上已经在跑的进程不用另起启动脚本。预检只读配置和成交日志。
 
 ## 跑完再打分
 
