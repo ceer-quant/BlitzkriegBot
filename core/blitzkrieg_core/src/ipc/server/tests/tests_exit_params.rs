@@ -101,6 +101,60 @@ async fn exit_params_that_do_not_deserialize_never_flatten_the_book() {
     }
 }
 
+/// Issue 895 compatibility closure: a request body with NO `params` key at
+/// all. The envelope's `#[serde(default)] params` fills in `Value::Null`,
+/// which `typed::<PositionExitParams>` refuses — a CLIENT error (-32602).
+/// Pinned so "omitted params" can never silently decay into the historical
+/// flatten-all: a malformed client must move no positions.
+#[tokio::test]
+async fn an_omitted_params_key_is_a_client_error_not_a_flatten() {
+    let (core, registry, peer) = hot_reload_fixture().await;
+    open_position(&core, &registry, &peer, "tok", "BTC", "exit-no-key").await;
+    assert_eq!(open_positions(&core, &registry, &peer).await.len(), 1);
+
+    // Not `exit_with`: that helper always spells a params value; here the
+    // key itself is absent from the request body.
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":7,"method":"positions.exit"}"#.to_string(),
+    )
+    .await;
+    assert_eq!(
+        reply["error"]["code"],
+        serde_json::json!(-32602),
+        "an omitted params key must be INVALID_PARAMS: {reply}"
+    );
+    assert_eq!(
+        open_positions(&core, &registry, &peer).await.len(),
+        1,
+        "an omitted params key must not close anything"
+    );
+}
+
+/// The explicit `"params": null` spelling deserializes to the same
+/// `Value::Null` as the omitted key, so both spellings must land on the
+/// same -32602 — and neither falls back to flatten-all (#895).
+#[tokio::test]
+async fn an_explicit_null_params_is_a_client_error_not_a_flatten() {
+    let (core, registry, peer) = hot_reload_fixture().await;
+    open_position(&core, &registry, &peer, "tok", "BTC", "exit-null").await;
+    assert_eq!(open_positions(&core, &registry, &peer).await.len(), 1);
+
+    let reply = exit_with(&core, &registry, &peer, "null").await;
+    assert_eq!(
+        reply["error"]["code"],
+        serde_json::json!(-32602),
+        "params:null must be INVALID_PARAMS: {reply}"
+    );
+    assert_eq!(
+        open_positions(&core, &registry, &peer).await.len(),
+        1,
+        "params:null must not close anything"
+    );
+}
+
 /// The schema documents `"all"` as the explicit whole-book spelling. Before
 /// the fix it was compared against position ids literally and closed nothing.
 #[tokio::test]
