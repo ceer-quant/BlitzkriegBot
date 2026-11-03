@@ -11,8 +11,14 @@
 //! `orderID` success acks, the `{"canceled":[…],"not_canceled":{…}}` batch
 //! cancel envelope, integer order ids, the PM-shape trades envelope with
 //! both leg fields, and the structured error body `{error, message}`.
+//! #878 adds the sweep-pagination contract: the two account reads (FILLED
+//! orders, trades) echo the response's `next_cursor` back as the
+//! `next_cursor` query parameter until the list ends — with the same
+//! termination rules the venue's own recovery script
+//! (`scripts/polysim-history.mjs`) follows.
 
 use blitzkrieg_market_api::CoreErrorCode;
+use blitzkrieg_polysimulator::rest::SWEEP_MAX_PAGES;
 use blitzkrieg_polysimulator::types::PlaceOrderBody;
 use blitzkrieg_polysimulator::{
     Credentials, PolySimError, PolySimRest, RestConfig, into_core_error,
@@ -21,6 +27,7 @@ use rust_decimal::Decimal;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 /// Serve `count` canned HTTP responses on an ephemeral 127.0.0.1 port.
@@ -41,6 +48,36 @@ fn mock_server(responses: Vec<Vec<u8>>) -> String {
         // Remaining connections (reqwest pooling) are dropped with the test.
     });
     format!("http://{}", addr)
+}
+
+/// The sequenced [`mock_server`], plus per-request path recording — the
+/// #878 pagination tests must pin the cursor's WIRE parameter (the request
+/// that fetches page 2 must carry `next_cursor=…`), which the plain
+/// sequenced server never exposes.
+fn recording_mock_server(responses: Vec<Vec<u8>>) -> (String, Arc<StdMutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local addr");
+    let requests: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let rec = requests.clone();
+    std::thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 16384];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let path = String::from_utf8_lossy(&buf[..n])
+                .split(' ')
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            rec.lock().unwrap().push(path);
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://{}", addr), requests)
 }
 
 fn http_ok(body: &str) -> Vec<u8> {
@@ -219,6 +256,113 @@ async fn trades_parse_the_pm_envelope_with_both_leg_sides() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].taker_order_id.as_deref(), Some("77"));
     assert_eq!(rows[0].maker_orders.as_ref().unwrap(), &["41".to_string()]);
+}
+
+// ── sweep pagination (#878) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn filled_orders_follow_the_cursor_until_has_more_false() {
+    // #878: page 1 claims more and hands a cursor; page 2 ends the list.
+    // BOTH pages' rows must come back — before the fix the second page was
+    // silently unreachable and every FILLED order past row 100 never entered
+    // the sweeps. The cursor must echo back as the `next_cursor` query
+    // parameter, the exact convention the venue's own recovery script
+    // (`scripts/polysim-history.mjs`) uses.
+    let page1 = r#"{"orders":[{"order_id":41,"market_id":"0xcond-1","side":"BUY","status":"FILLED","fill_price":"0.365","quantity":"10","filled_at":"2026-10-25T19:06:39Z"}],"next_cursor":"cur-1","has_more":true}"#;
+    let page2 = r#"{"orders":[{"order_id":42,"market_id":"0xcond-2","side":"SELL","status":"FILLED","fill_price":"0.55","quantity":"3","filled_at":"2026-10-25T19:40:00Z"}],"next_cursor":null,"has_more":false}"#;
+    let (url, requests) = recording_mock_server(vec![http_ok(page1), http_ok(page2)]);
+    let orders = client_with_key(&url)
+        .filled_orders()
+        .await
+        .expect("both pages parse");
+    assert_eq!(orders.len(), 2, "rows from BOTH pages must be returned");
+    assert_eq!(orders[0].venue_id(), "41");
+    assert_eq!(orders[1].venue_id(), "42");
+    let paths = requests.lock().unwrap().clone();
+    assert_eq!(paths.len(), 2, "exactly two page requests");
+    assert_eq!(
+        paths[0], "/v1/orders?status=FILLED&limit=100",
+        "page 1 carries no cursor"
+    );
+    assert_eq!(
+        paths[1], "/v1/orders?status=FILLED&limit=100&next_cursor=cur-1",
+        "page 2 echoes the cursor back as next_cursor"
+    );
+}
+
+#[tokio::test]
+async fn trades_follow_the_cursor_until_the_cursor_runs_empty() {
+    // #878 on the trades read. Page 2 ends with an EMPTY cursor string and
+    // NO has_more at all — the empty cursor alone must end the walk (the
+    // ticket's "next_cursor 空" stop), matching the recovery script's
+    // cursor-only termination.
+    let page1 = r#"{"limit":100,"count":1,"next_cursor":"cur-1","has_more":true,"data":[{"id":"tx-1","market":"0xcond-1","asset_id":"71321","side":"BUY","price":"0.55","size":"10","taker_order_id":"77","status":"MATCHED"}]}"#;
+    let page2 = r#"{"limit":100,"count":1,"next_cursor":"","data":[{"id":"tx-2","market":"0xcond-1","asset_id":"71321","side":"SELL","price":"0.60","size":"4","taker_order_id":"77","status":"MATCHED"}]}"#;
+    let (url, requests) = recording_mock_server(vec![http_ok(page1), http_ok(page2)]);
+    let rows = client_with_key(&url)
+        .trades()
+        .await
+        .expect("both pages parse");
+    assert_eq!(rows.len(), 2, "rows from BOTH pages must be returned");
+    assert_eq!(rows[0].id, "tx-1");
+    assert_eq!(rows[1].id, "tx-2");
+    let paths = requests.lock().unwrap().clone();
+    assert_eq!(paths.len(), 2, "exactly two page requests");
+    assert_eq!(paths[0], "/v1/data/trades?limit=100");
+    assert_eq!(
+        paths[1], "/v1/data/trades?limit=100&next_cursor=cur-1",
+        "page 2 echoes the cursor back as next_cursor"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_that_stops_advancing_ends_the_walk_not_loops_forever() {
+    // A venue bug (or an attack) echoing the SAME cursor forever must not
+    // turn one sweep into an unbounded fetch: the walk ends after the page
+    // whose cursor repeats — with a logged warning ("stuck", not silent) —
+    // keeping the rows it already read, and never re-requests the echoed
+    // cursor.
+    let page1 = r#"{"data":[{"id":"tx-1","market":"0xcond-1","asset_id":"71321","side":"BUY","price":"0.55","size":"10","taker_order_id":"77","status":"MATCHED"}],"next_cursor":"cur-1","has_more":true}"#;
+    let page2 = r#"{"data":[{"id":"tx-2","market":"0xcond-1","asset_id":"71321","side":"SELL","price":"0.60","size":"4","taker_order_id":"77","status":"MATCHED"}],"next_cursor":"cur-1","has_more":true}"#;
+    let (url, requests) = recording_mock_server(vec![http_ok(page1), http_ok(page2)]);
+    let rows = client_with_key(&url).trades().await.expect("stops cleanly");
+    assert_eq!(rows.len(), 2, "both served pages are kept");
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "the repeated cursor must NOT be requested again"
+    );
+}
+
+#[tokio::test]
+async fn the_page_cap_truncates_a_never_ending_list_loudly() {
+    // `SWEEP_MAX_PAGES` pages that all claim has_more=true with a fresh
+    // cursor each: the walk stops AT the cap, keeps the rows it read, and
+    // stops REQUESTING (no request beyond the cap). The truncation is logged
+    // honestly (the warning is the walk's observable contract; a silent
+    // truncation would be exactly the #878 failure mode again).
+    let pages: Vec<Vec<u8>> = (0..SWEEP_MAX_PAGES)
+        .map(|i| {
+            http_ok(&format!(
+                r#"{{"data":[{{"id":"tx-{i}","market":"0xcond-1","asset_id":"71321","price":"0.5","size":"1","taker_order_id":"77","status":"MATCHED"}}],"next_cursor":"c{i}","has_more":true}}"#
+            ))
+        })
+        .collect();
+    let (url, requests) = recording_mock_server(pages);
+    let rows = client_with_key(&url)
+        .trades()
+        .await
+        .expect("the cap truncates cleanly, not with an error");
+    assert_eq!(
+        rows.len(),
+        SWEEP_MAX_PAGES as usize,
+        "the rows already read are kept"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        SWEEP_MAX_PAGES as usize,
+        "no request may go out beyond the page cap"
+    );
 }
 
 #[tokio::test]

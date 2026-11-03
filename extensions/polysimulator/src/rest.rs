@@ -41,6 +41,19 @@ const VENUE_RETRY_AFTER_DEFAULT_MS: u64 = 1_000;
 /// request path for longer than the limiter's own give-up budget.
 const VENUE_RETRY_AFTER_CAP_MS: u64 = 5_000;
 
+/// Page size of the two account sweeps (FILLED orders + trades) — unchanged
+/// from the pre-#878 single-page reads; pagination follows the cursor
+/// instead of enlarging the page.
+const SWEEP_PAGE_LIMIT: u32 = 100;
+/// Hard ceiling on pages ONE sweep read will follow (#878). 40 × 100 rows is
+/// the same budget the venue's own recovery script
+/// (`scripts/polysim-history.mjs`: `PAGE = 100`, `MAX_PAGES = 40`) allows.
+/// A venue that never clears `has_more` must not turn a 5s sweep into an
+/// unbounded fetch; the walk keeps the rows it already read and says on the
+/// log that it truncated — silent truncation is exactly the missed-fill
+/// failure mode this loop exists to fix.
+pub const SWEEP_MAX_PAGES: u32 = 40;
+
 #[derive(Debug, Clone)]
 pub struct RestConfig {
     pub base_url: String,
@@ -289,24 +302,28 @@ impl PolySimRest {
     /// verified live 2026-10-25/26), so the trades stream can never be matched
     /// to our orders. The FILLED orders list does: each row names its
     /// `order_id` + `fill_price` + `filled_at` + `quantity`.
+    ///
+    /// #878: the read follows the venue's `next_cursor` until the list ends
+    /// (bounded by [`SWEEP_MAX_PAGES`]). Before #878 only the FIRST page was
+    /// ever read — any FILLED order past row 100 stayed invisible to the
+    /// sweeps forever, silently dropping fills.
     pub async fn filled_orders(&self) -> Result<Vec<NativeOrder>, PolySimError> {
         self.require_key()?;
-        let body: PendingOrdersEnvelope = self
-            .get_json(Class::Read, "/v1/orders?status=FILLED&limit=100")
-            .await?;
-        Ok(body.orders.unwrap_or_default())
+        self.sweep_paged::<PendingOrdersEnvelope, _>("FILLED orders", filled_orders_path)
+            .await
     }
 
-    /// Recent executed trades, PM-shape envelope (the reconcile unit). The
-    /// `next_cursor` paging of the venue is not followed here: the sweep
-    /// dedupes by trade id, and one page is far more than a sweep cadence
-    /// produces.
+    /// Recent executed trades, PM-shape envelope (the reconcile unit).
+    ///
+    /// #878: the read follows the venue's `next_cursor` until the list ends
+    /// (bounded by [`SWEEP_MAX_PAGES`]). The sweep dedupes by trade id
+    /// (`seen_trades`), so re-reading pages across sweeps stays safe; what
+    /// #878 changes is that trades beyond the first page are seen AT ALL —
+    /// previously any trade past row 100 never entered the reconcile stream.
     pub async fn trades(&self) -> Result<Vec<crate::types::PmTradeRow>, PolySimError> {
         self.require_key()?;
-        let body: PmTradesEnvelope = self
-            .get_json(Class::Read, "/v1/data/trades?limit=100")
-            .await?;
-        Ok(body.data.unwrap_or_default())
+        self.sweep_paged::<PmTradesEnvelope, _>("trades", trades_path)
+            .await
     }
 
     /// Account balance (the ledger seed / free-balance truth).
@@ -341,6 +358,46 @@ impl PolySimRest {
     ) -> Result<T, PolySimError> {
         self.request_json(class, reqwest::Method::POST, path, Some(payload))
             .await
+    }
+
+    /// Follow the venue's `next_cursor` for one sweep read until the list
+    /// ends (#878). `path` builds the per-page request from the cursor to
+    /// echo back. The walk stops per [`sweep_next_cursor`], or at
+    /// [`SWEEP_MAX_PAGES`] with the venue still claiming more — in every
+    /// abnormal stop the truncation is logged with the endpoint named:
+    /// silently dropping pages is exactly the missed-fill failure mode
+    /// (#878) this loop exists to fix.
+    async fn sweep_paged<E, P>(&self, endpoint: &str, path: P) -> Result<Vec<E::Row>, PolySimError>
+    where
+        E: SweepPageEnvelope,
+        P: Fn(Option<&str>) -> String,
+    {
+        let mut rows = Vec::new();
+        let mut sent: Option<String> = None;
+        let mut pages: u32 = 0;
+        loop {
+            if pages >= SWEEP_MAX_PAGES {
+                eprintln!(
+                    "polysimulator-extension: {endpoint}: page cap {SWEEP_MAX_PAGES} hit and the venue still reports more — truncating this sweep read; rows beyond page {SWEEP_MAX_PAGES} stay unseen until the next sweep"
+                );
+                break;
+            }
+            let body: E = self.get_json(Class::Read, &path(sent.as_deref())).await?;
+            let (page_rows, next_cursor, has_more) = body.page_parts();
+            rows.extend(page_rows);
+            pages += 1;
+            match sweep_next_cursor(has_more, next_cursor, sent.as_deref()) {
+                SweepPage::Next(cursor) => sent = Some(cursor),
+                SweepPage::End => break,
+                SweepPage::Stuck(reason) => {
+                    eprintln!(
+                        "polysimulator-extension: {endpoint}: {reason} — pagination stops so the same page cannot be re-served forever"
+                    );
+                    break;
+                }
+            }
+        }
+        Ok(rows)
     }
 
     async fn request_json<T, P>(
@@ -495,6 +552,78 @@ fn classify_send_error(e: reqwest::Error, configured: Duration) -> PolySimError 
     PolySimError::Transport(e.to_string())
 }
 
+/// One cursor step of a paginated sweep read (#878). The venue's own
+/// recovery script (`scripts/polysim-history.mjs`) pins the wire convention
+/// this mirrors: the response's `next_cursor` is echoed back as the
+/// `next_cursor` query parameter of the next page, and a cursor that is
+/// absent, empty, or unchanged from the one just sent ends the walk. An
+/// explicit `has_more:false` ends it too; a missing `has_more` defers to the
+/// cursor (leaner envelopes keep working). Pure decision logic — the caller
+/// logs, so the warning can name the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SweepPage {
+    /// Fetch the next page, echoing this cursor back.
+    Next(String),
+    /// The list is exhausted: `has_more:false`, or no cursor offered while
+    /// `has_more` is absent/false.
+    End,
+    /// The venue claims more but cannot name a NEW page: it re-offered the
+    /// cursor just sent (an echo), or claimed `has_more:true` with no cursor
+    /// at all. Stop and log — following it would re-serve the same page
+    /// forever.
+    Stuck(&'static str),
+}
+
+pub(crate) fn sweep_next_cursor(
+    has_more: Option<bool>,
+    next_cursor: Option<String>,
+    sent_cursor: Option<&str>,
+) -> SweepPage {
+    if has_more == Some(false) {
+        return SweepPage::End;
+    }
+    match next_cursor.filter(|c| !c.trim().is_empty()) {
+        Some(c) if Some(c.as_str()) == sent_cursor => {
+            SweepPage::Stuck("next_cursor repeated the cursor just sent (no forward progress)")
+        }
+        Some(c) => SweepPage::Next(c),
+        None if has_more == Some(true) => {
+            SweepPage::Stuck("has_more=true but the response carries no next_cursor")
+        }
+        None => SweepPage::End,
+    }
+}
+
+/// One page of a paginated sweep read: the rows it carries plus the venue's
+/// pagination handle. Both account reads (#878) share this shape, so both
+/// share the [`PolySimRest::sweep_paged`] loop.
+trait SweepPageEnvelope: serde::de::DeserializeOwned {
+    type Row;
+    fn page_parts(self) -> (Vec<Self::Row>, Option<String>, Option<bool>);
+}
+
+impl SweepPageEnvelope for PendingOrdersEnvelope {
+    type Row = NativeOrder;
+    fn page_parts(self) -> (Vec<NativeOrder>, Option<String>, Option<bool>) {
+        (
+            self.orders.unwrap_or_default(),
+            self.next_cursor,
+            self.has_more,
+        )
+    }
+}
+
+impl SweepPageEnvelope for PmTradesEnvelope {
+    type Row = crate::types::PmTradeRow;
+    fn page_parts(self) -> (Vec<crate::types::PmTradeRow>, Option<String>, Option<bool>) {
+        (
+            self.data.unwrap_or_default(),
+            self.next_cursor,
+            self.has_more,
+        )
+    }
+}
+
 /// The `GET /v1/markets/updown` query string. `limit=None` pins the venue's
 /// page default (500) so the settlement sweep sees the same full list it
 /// always did; a `Some` cap narrows the page for callers that do not need
@@ -532,9 +661,96 @@ fn urlencode(input: &str) -> String {
     out
 }
 
+/// The FILLED sweep page of `GET /v1/orders`. The venue's cursor rides back
+/// as the `next_cursor` query parameter — the exact convention the venue's
+/// own recovery script (`scripts/polysim-history.mjs`) uses. `pub(crate)` so
+/// tests pin the wire shape their parameters produce (same discipline as
+/// [`updown_path`]).
+pub(crate) fn filled_orders_path(cursor: Option<&str>) -> String {
+    let mut path = format!("/v1/orders?status=FILLED&limit={SWEEP_PAGE_LIMIT}");
+    if let Some(c) = cursor {
+        path.push_str("&next_cursor=");
+        path.push_str(&urlencode(c));
+    }
+    path
+}
+
+/// The trades sweep page of `GET /v1/data/trades` (same cursor convention).
+pub(crate) fn trades_path(cursor: Option<&str>) -> String {
+    let mut path = format!("/v1/data/trades?limit={SWEEP_PAGE_LIMIT}");
+    if let Some(c) = cursor {
+        path.push_str("&next_cursor=");
+        path.push_str(&urlencode(c));
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sweep query paths: pre-#878 both were a single
+    /// `?…&limit=100` page; now the cursor rides back as `next_cursor` —
+    /// the venue's own recovery-script convention. URL-encoded.
+    #[test]
+    fn sweep_query_paths_echo_the_cursor_as_next_cursor() {
+        assert_eq!(
+            filled_orders_path(None),
+            "/v1/orders?status=FILLED&limit=100"
+        );
+        assert_eq!(
+            filled_orders_path(Some("cur/1:2")),
+            "/v1/orders?status=FILLED&limit=100&next_cursor=cur%2F1%3A2"
+        );
+        assert_eq!(trades_path(None), "/v1/data/trades?limit=100");
+        assert_eq!(
+            trades_path(Some("c1")),
+            "/v1/data/trades?limit=100&next_cursor=c1"
+        );
+    }
+
+    /// The cursor step rules (#878): fresh cursor continues; `has_more:false`
+    /// ends; an absent/empty cursor ends; a repeated cursor or a
+    /// `has_more:true` with no cursor is a Stuck stop (logged by the caller).
+    #[test]
+    fn sweep_cursor_steps_continue_only_on_a_fresh_cursor() {
+        // A fresh cursor continues — `has_more` true or absent (a leaner
+        // envelope that only names the cursor keeps paging).
+        assert_eq!(
+            sweep_next_cursor(Some(true), Some("c2".into()), Some("c1")),
+            SweepPage::Next("c2".into())
+        );
+        assert_eq!(
+            sweep_next_cursor(None, Some("c2".into()), None),
+            SweepPage::Next("c2".into())
+        );
+
+        // Explicit has_more=false ends, even if a cursor rides along.
+        assert_eq!(
+            sweep_next_cursor(Some(false), Some("c2".into()), Some("c1")),
+            SweepPage::End
+        );
+
+        // An absent or empty cursor without a has_more claim is a normal end.
+        assert_eq!(sweep_next_cursor(None, None, None), SweepPage::End);
+        assert_eq!(
+            sweep_next_cursor(None, Some("   ".into()), Some("c1")),
+            SweepPage::End
+        );
+
+        // A cursor that does not advance (the venue echoes the one just
+        // sent) is a Stuck stop, not a loop.
+        assert!(matches!(
+            sweep_next_cursor(Some(true), Some("c1".into()), Some("c1")),
+            SweepPage::Stuck(_)
+        ));
+
+        // has_more=true without any cursor cannot advance either.
+        assert!(matches!(
+            sweep_next_cursor(Some(true), None, Some("c1")),
+            SweepPage::Stuck(_)
+        ));
+    }
 
     /// The updown query path: the settlement sweep's full-list bottom line
     /// (venue-default 500) vs a narrowed request with explicit filters —

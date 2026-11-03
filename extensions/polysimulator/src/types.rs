@@ -191,16 +191,33 @@ pub struct PmTradeRow {
     pub trader_side: Option<String>,
 }
 
-/// Envelope of `GET /v1/data/trades` (PM-shape `{limit,count,next_cursor,data}`).
+/// Envelope of `GET /v1/data/trades` (PM-shape
+/// `{limit,count,next_cursor,has_more,data}`). `next_cursor`/`has_more` are
+/// the pagination handle the account sweeps follow (#878): the venue keeps a
+/// trailing cursor in the response and expects it echoed back as the
+/// `next_cursor` query parameter of the next page. Both fields are
+/// default-absent (and `nextCursor` aliased) so a reduced envelope never
+/// breaks parsing — the sweeps then stop after one page exactly as they did
+/// before #878, only now with the reason visible in the code.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PmTradesEnvelope {
     pub data: Option<Vec<PmTradeRow>>,
+    #[serde(default, alias = "nextCursor")]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: Option<bool>,
 }
 
-/// Open-order envelope of `GET /v1/orders` (native form).
+/// Envelope of `GET /v1/orders` (native form). Carries the same
+/// `next_cursor`/`has_more` pagination handle as the trades envelope — both
+/// the PENDING read and the FILLED sweep read answer this shape (#878).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PendingOrdersEnvelope {
     pub orders: Option<Vec<NativeOrder>>,
+    #[serde(default, alias = "nextCursor")]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: Option<bool>,
 }
 
 /// An open position from `GET /v1/account/positions` (required: id,
