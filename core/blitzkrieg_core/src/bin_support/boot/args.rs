@@ -115,7 +115,10 @@ pub(crate) fn parse_args(
     let mut backtest_report: Option<String> = None;
     let mut backtest_tick_ms: i64 = 0;
     let mut backtest_tail_ms: i64 = 0;
-    let mut backtest_knobs: Vec<(String, String, Decimal)> = Vec::new();
+    // #916: the value stays a STRING end to end — a manifest tunable may
+    // declare "type": "string", so numeric-or-not is decided against the
+    // strategy's own declaration at apply time (backtest.rs), not at parse.
+    let mut backtest_knobs: Vec<(String, String, String)> = Vec::new();
     // #351: the replay mode — `mine` (zero latency, friction as configured),
     // `verify` (one real-latency run), `sweep` (latency ladder). Empty = the
     // historic single-run behaviour, byte-identical CLI surface.
@@ -683,7 +686,9 @@ pub(crate) fn parse_args(
                     "want a whole number of milliseconds"
                 )
             }
-            // `<strategy>:<knob>=<value>`; repeatable. A replay-only counterfactual.
+            // `<strategy>:<knob>=<value>`; repeatable. A replay-only
+            // counterfactual. The value is taken verbatim (#916); its type is
+            // decided against the strategy's manifest declaration at apply time.
             "--backtest-knob" => {
                 let spec = next_value!(it, "--backtest-knob");
                 match parse_backtest_knob(&spec) {

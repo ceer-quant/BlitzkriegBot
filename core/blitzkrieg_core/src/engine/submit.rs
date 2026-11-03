@@ -865,6 +865,56 @@ impl Engine {
         self.hot_params.is_some()
     }
 
+    /// #916: string tunables for a replay (`--backtest-knob` values whose
+    /// manifest type is `"string"`). Applies to EVERY instance of
+    /// `strategy` (the default scope and any account scopes — the knob is a
+    /// strategy property, not an account one) and returns `true` when at
+    /// least one instance heard it; `false` = nothing hosted under that
+    /// name, the backtester refuses the counterfactual.
+    pub fn apply_string_params(&mut self, strategy: &str, overrides: &[(String, String)]) -> bool {
+        let mut applied = false;
+        for s in &mut self.strategies {
+            if s.strategy.name() == strategy {
+                s.strategy.set_string_params(overrides);
+                applied = true;
+            }
+        }
+        applied
+    }
+
+    /// #916: the union of string-typed tunables every instance of
+    /// `strategy` declares. `None` = no hosted instance under that name (the
+    /// replay refuses the counterfactual); `Some(set)` = dispatch basis for
+    /// the `--backtest-knob` type decision. Overriders of
+    /// `set_string_params` were stamped from the SAME loaded manifest, so
+    /// every instance of one strategy answers the same declaration.
+    pub fn string_tunable_names(&self, strategy: &str) -> Option<Vec<String>> {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == strategy)
+            .map(|s| s.strategy.string_tunable_names())
+    }
+
+    /// #916: the FULL knob declaration a hosted strategy answers `--backtest-knob`
+    /// with: `(string names, decimal names)` in one query — string tunables ride
+    /// the params bag, declared decimal/int evolvables parse as decimals, and a
+    /// name on NEITHER list refuses. `None` = nothing hosted under that name.
+    pub fn knob_declarations(&self, strategy: &str) -> Option<(Vec<String>, Vec<String>)> {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == strategy)
+            .map(|s| {
+                (
+                    s.strategy.string_tunable_names(),
+                    s.strategy
+                        .evolvable_knobs()
+                        .iter()
+                        .map(|k| k.name.clone())
+                        .collect(),
+                )
+            })
+    }
+
     /// Per-strategy config-in-force views as (name, JSON string) for every
     /// strategy that reports one (observability). An external library reports
     /// through its OPTIONAL `bk_strategy_config_view` symbol; strategies that

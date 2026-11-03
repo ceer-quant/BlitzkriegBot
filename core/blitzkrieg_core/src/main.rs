@@ -101,7 +101,12 @@
 //!   handed to the replayed strategy through the Shadow Evolution hot-param
 //!   registry — the same cell, the same `on_hot_params` push as a live
 //!   evolution — so a counterfactual arm differs from the shipped one by exactly
-//!   that value (see `scripts/mean-reversion-gate-evidence.mjs`).
+//!   that value (see `scripts/mean-reversion-gate-evidence.mjs`). #916: the
+//!   value's type is decided against the strategy manifest's OWN tunable
+//!   declaration — `decimal`/`int` still parse as exact decimals and ride the
+//!   unchanged registry path, a `string` tunable (e.g. mad_dog `spot_missing`)
+//!   rides the raw `bk.params()` bag verbatim, and an undeclared knob or a
+//!   wrong-shaped value is refused at startup, never silently ignored.
 //!   `--fee-model` is the fee-side counterpart (#203): the same corpus replayed
 //!   under a different taker-fee schedule, so "what would the published crypto
 //!   rate cost this strategy" is a measurement rather than an argument (see

@@ -171,6 +171,42 @@ impl Core {
         self.engine.as_ref().is_some_and(|e| e.has_hot_params())
     }
 
+    /// Replay seam (#916): apply string tunables overrides to the hosted
+    /// strategy named `strategy`. Returns `false` when no hosted strategy
+    /// carries that name — the caller (the backtester) refuses a
+    /// `--backtest-knob` with no application site instead of letting the
+    /// counterfactual silently no-op. A strategy that declares no string bag
+    /// accepts the call and ignores it (the trait default), so the
+    /// distinguishment between "not loaded" and "loaded, nothing to override"
+    /// lives with the backtester's per-strategy grouping, not here.
+    pub fn set_engine_string_params(
+        &mut self,
+        strategy: &str,
+        overrides: &[(String, String)],
+    ) -> bool {
+        let Some(engine) = self.engine.as_mut() else {
+            return false;
+        };
+        engine.apply_string_params(strategy, overrides)
+    }
+
+    /// Replay seam (#916): the string-typed tunable names `strategy`
+    /// declares — the `--backtest-knob` dispatch basis. `None` = nothing
+    /// hosted under that name.
+    pub fn engine_string_tunable_names(&self, strategy: &str) -> Option<Vec<String>> {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.string_tunable_names(strategy))
+    }
+
+    /// Replay seam (#916): the full knob declaration `(string, decimal)`
+    /// `strategy` answers `--backtest-knob` with. `None` = nothing hosted.
+    pub fn engine_knob_declarations(&self, strategy: &str) -> Option<(Vec<String>, Vec<String>)> {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.knob_declarations(strategy))
+    }
+
     /// Install the running data feed's subscription control (P4), keyed by the
     /// market-plugin name. Called by the market plugin when its `DataFeed`
     /// starts, so the core stays unaware of any concrete feed implementation.

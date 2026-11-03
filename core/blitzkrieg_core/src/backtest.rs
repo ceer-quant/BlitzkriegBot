@@ -62,10 +62,15 @@ pub struct BacktestConfig {
     /// Delivered through the SAME hot-param registry Shadow Evolution uses, so a
     /// counterfactual run differs from the shipped behaviour only in the value
     /// handed over — same declared knobs, same cell, same `on_hot_params` push on
-    /// the hot path. Empty (the default) replays the config in force. A knob the
-    /// strategy does not declare is simply not applied by it (the declaration is
-    /// the strategy's own), exactly as a proposal would be.
-    pub hot_params: Vec<(String, String, Decimal)>,
+    /// the hot path. Empty (the default) replays the config in force.
+    ///
+    /// #916: the value arrives as a STRING and its type is decided against the
+    /// strategy's OWN manifest declaration at apply time (`Backtester::new`):
+    /// `decimal`/`int` tunables are parsed here and ride the registry exactly as
+    /// before, `string` tunables ride the raw `bk.params()` bag, and anything
+    /// undeclared or shape-mismatched is a startup error — a silently ignored
+    /// counterfactual would make a comparison meaningless.
+    pub hot_params: Vec<(String, String, String)>,
     /// The `--backtest-mode` that requested this replay (`mine`/`verify`/
     /// `sweep`), reported in the text render's coordinate-system line (#879).
     /// Empty = the historic single-run path, which prints no such line.
@@ -662,6 +667,13 @@ pub struct EventBacktester {
     /// CLI stderr heartbeat). Stashed on the struct because `run` takes `&mut
     /// self` and the callback needs to outlive the config.
     cfg_progress: Option<std::sync::Arc<dyn Fn(u64, i64) + Send + Sync>>,
+    /// #916: counterfactual knobs held back from the constructor — the hosted
+    /// strategies register AFTER `EventBacktester::new` (the host calls
+    /// `host_strategy` between construction and `run`), and the dispatch
+    /// needs their loaded declarations (string tunables vs decimal) to exist.
+    /// Applied at the top of `run`, before the clock starts: a refusal there
+    /// is the ordinary startup `Err`, not a half-applied replay.
+    pending_hot_params: Vec<(String, String, String)>,
 }
 
 /// Trades shown by the report's Display summary. The serialized `trade_lines`
@@ -726,26 +738,12 @@ impl EventBacktester {
         // ratchets over the grid the replay actually drives — tell the core the
         // step it will be stepped with (the mutator owns the ≥1ms floor).
         core.set_tick_schedule_ms(cfg.tick_ms);
-        // Counterfactual knobs go in AFTER the engine registered its strategies
-        // (the registry forwards to what is already wired), through the same
-        // cell a Shadow Evolution proposal writes.
-        if !cfg.hot_params.is_empty() {
-            use crate::registry::ParamRegistry;
-            use strategy_logic::params::StrategyParams;
-            let mut by_strategy: std::collections::BTreeMap<&str, StrategyParams> =
-                std::collections::BTreeMap::new();
-            for (strategy, knob, value) in &cfg.hot_params {
-                by_strategy
-                    .entry(strategy.as_str())
-                    .or_default()
-                    .set(knob, *value);
-            }
-            let registry = std::sync::Arc::new(ParamRegistry::new());
-            for (strategy, params) in by_strategy {
-                registry.publish(strategy, params);
-            }
-            core.set_engine_hot_params(Some(registry));
-        }
+        // Counterfactual knobs are applied at the top of `run()` (#916): the
+        // dispatch needs each hosted strategy's loaded declaration (string
+        // tunables vs decimal), and the host registers its strategies BETWEEN
+        // construction and run — applying here would answer "no loaded
+        // strategy" for every override and refuse healthy counterfactuals.
+
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
         core.set_event_sink(tx);
         let tick_ms = cfg.tick_ms.max(1);
@@ -766,6 +764,7 @@ impl EventBacktester {
             checked_events: 0,
             install_error,
             cfg_progress: cfg.progress.take(),
+            pending_hot_params: std::mem::take(&mut cfg.hot_params),
         }
     }
 
@@ -857,6 +856,84 @@ impl EventBacktester {
     /// starts DISABLED, so enable it by name on the core's engine.
     pub fn host_strategy(&mut self, strategy: Box<dyn crate::strategies::EngineStrategy>) {
         let _ = self.core.host_replay_strategy(strategy, "replay-hosted");
+    }
+
+    /// #916: apply the `--backtest-knob` counterfactuals held back from the
+    /// constructor. Dismissal is a returned `Err` with every offending knob
+    /// named — the replay refuses rather than runs a comparison one arm of
+    /// which silently used the shipped value.
+    fn apply_hot_params(&mut self, pending: Vec<(String, String, String)>) -> Result<(), String> {
+        use crate::registry::ParamRegistry;
+        use strategy_logic::params::StrategyParams;
+
+        let mut string_bags: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        let mut decimals: std::collections::BTreeMap<String, StrategyParams> =
+            std::collections::BTreeMap::new();
+        let mut failures: Vec<String> = Vec::new();
+        for (strategy, knob, value) in &pending {
+            let (string_names, declared) = match self.core.engine_knob_declarations(strategy) {
+                Some(d) => d,
+                None => {
+                    failures.push(format!(
+                        "--backtest-knob {strategy}:{knob}={value:?}: no loaded strategy \
+                             carries this name (the kernel does not invent knob types; a \
+                             counterfactual that would be silently ignored must refuse)"
+                    ));
+                    continue;
+                }
+            };
+            if string_names.iter().any(|n| n == knob) {
+                string_bags
+                    .entry(strategy.clone())
+                    .or_default()
+                    .push((knob.clone(), value.clone()));
+            } else if declared.iter().any(|n| n == knob) {
+                match Decimal::from_str_exact(value.trim()) {
+                    Ok(parsed) => {
+                        decimals
+                            .entry(strategy.clone())
+                            .or_default()
+                            .set(knob, parsed);
+                    }
+                    Err(_) => failures.push(format!(
+                        "--backtest-knob {strategy}:{knob}={value:?} is not a decimal \
+                         and the strategy does not declare it a string tunable \
+                         (refused, #228/#441)"
+                    )),
+                }
+            } else {
+                failures.push(format!(
+                    "--backtest-knob {strategy}:{knob}: the strategy declares no such \
+                     tunable (refused — an undeclared override would ride the shipped \
+                     config, #228/#441)"
+                ));
+            }
+        }
+        if !failures.is_empty() {
+            let list = failures
+                .iter()
+                .map(|f| format!("  {f}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(format!("counterfactual knobs refused:\n{list}"));
+        }
+        for (strategy, overrides) in &string_bags {
+            if !self.core.set_engine_string_params(strategy, overrides) {
+                return Err(format!(
+                    "counterfactual knobs refused: {strategy}: the strategy went \
+                     missing between declaration and application"
+                ));
+            }
+        }
+        if !decimals.is_empty() {
+            let registry = std::sync::Arc::new(ParamRegistry::new());
+            for (strategy, params) in decimals {
+                registry.publish(&strategy, params);
+            }
+            self.core.set_engine_hot_params(Some(registry));
+        }
+        Ok(())
     }
 
     /// Advance the virtual clock one maintenance step: the live loop's
@@ -1171,6 +1248,19 @@ impl Backtester for EventBacktester {
         // would read as "the strategy produced no signals".
         if let Some(why) = &self.install_error {
             return Err(format!("strategy startup self-check: {why}"));
+        }
+        // #916: counterfactual knobs apply HERE — after the host's
+        // between-construction-and-run strategy registrations, before the
+        // clock starts. The value arrives verbatim and its type is decided
+        // against the strategy's manifest: a tunable declaring
+        // `"type": "string"` rides the strategy's own `bk.params()` bag (the
+        // word it is, no decimal pipe), everything else parses as a Decimal —
+        // and a non-numeric value on such a knob is a loudly refused
+        // counterfactual (P0 #228/#441: a silently ignored override would
+        // make the comparison meaningless).
+        let pending = std::mem::take(&mut self.pending_hot_params);
+        if !pending.is_empty() {
+            self.apply_hot_params(pending)?;
         }
         // The event clock starts at the first event's timestamp — the instant
         // the live core saw its first datum — and only ever moves forward.
