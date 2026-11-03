@@ -682,6 +682,20 @@ impl Ome {
             .unwrap_or(false)
     }
 
+    /// The LIVE order carrying this internal key, if any — the id-bearing twin
+    /// of the dedup guard (issue #848). A caller that must RETIRE the resting
+    /// order before re-submitting the same intent (the pair completion
+    /// gap-fill's replace) looks the id up here; the dedup's purpose — never
+    /// two live orders under one key — stays the judge, because the replace
+    /// path retires before it resubmits and every other path still refuses.
+    pub fn live_id_for(&self, internal_key: &str) -> Option<OrderId> {
+        self.by_internal
+            .get(internal_key)
+            .and_then(|id| self.orders.get(id))
+            .filter(|o| o.status.is_live())
+            .map(|o| o.order_id.clone())
+    }
+
     /// Register a newly submitted order as Pending.
     pub fn submit(&mut self, p: SubmitParams) -> CoreResult<()> {
         if self.has_pending(&p.request.internal_key) {

@@ -538,6 +538,23 @@ impl Engine {
         })
     }
 
+    /// The token's leg twin — the OTHER side's token of the same round
+    /// condition (issue #848). The pair completion gap-fill releases the
+    /// counterpart token's repeat-suppression when the held leg's sibling
+    /// direction is the one that filled; `None` = the token belongs to no
+    /// live market. RFC-661 M1: unique-candidate resolution — see
+    /// [`Self::market_for_token`].
+    pub fn counterpart_token_of(&self, token_id: &str) -> Option<String> {
+        let m = self.scanner.market_for_token(token_id)?;
+        if m.up_token_id == token_id {
+            Some(m.down_token_id.clone())
+        } else if m.down_token_id == token_id {
+            Some(m.up_token_id.clone())
+        } else {
+            None
+        }
+    }
+
     /// Force-finalize every pending near-miss (used on shutdown so records are
     /// not lost when the process stops before a window elapses).
     pub fn flush_near_misses(&mut self) -> Vec<crate::shadow::NearMissRecord> {

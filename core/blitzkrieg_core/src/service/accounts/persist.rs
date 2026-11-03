@@ -395,6 +395,59 @@ impl Core {
             .on_order_event(internal_key, filled_delta, dead);
     }
 
+    /// issue #848：每个提交周期把「配对未完成」的对手腿 token 的
+    /// repeat-suppression 放开。事实源是持仓（不是 PairBook —— 配对包
+    /// 未必向配对簿声明，如 pair_discount_arb 的 Lua 不发 `pair` 字段）：
+    /// hold-to-settlement 策略在某个 condition 上持有单侧腿，对手腿就是
+    /// 未补齐的那一侧 —— 它的补腿 gap-fill 重报是合法再入。引擎的每轮
+    /// 一单抑制（`pending_tokens`）本意是防重复挂单，不是封死裸腿的补齐
+    /// 重报；持仓不消失（配对未平）就每周期都放（幂等），gap-fill 循环
+    /// 的逐周期重报逐周期都能到 place 面（重试在 place 层按「替换」受理，
+    /// 见 `place_gated` 的补腿重试路径）。放开只作用于持有配对包的策略
+    /// （hold-to-settlement），配对已两腿齐持仓（两侧都有仓位）时不放
+    /// —— 已无补齐缺口。`release_pending_token_for_strategy` 的
+    /// hold-to-settlement 门是第二道闸。
+    pub(crate) fn release_pair_completion_counterparts(&mut self) {
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        // (账户, 策略, 对手 token)：账户优先取对手腿自己挂单的落账账户
+        // （抑制键就是按它插进去的），无挂单时退回持仓账户（A≠B 的
+        // 退化位；此时对手腿无抑制，release 本就是空操作）。
+        let mut releases: Vec<(String, String, String)> = Vec::new();
+        for p in self.positions.open_positions() {
+            if !engine.strategy_holds_to_settlement(&p.strategy) {
+                continue;
+            }
+            let Some(other) = engine.counterpart_token_of(&p.token_id) else {
+                continue;
+            };
+            // 配对已两腿齐（对手方向也有持仓）⇒ 无补齐缺口，不放。
+            if self.positions.open_positions().iter().any(|q| {
+                q.strategy == p.strategy && q.condition_id == p.condition_id && q.token_id == other
+            }) {
+                continue;
+            }
+            let account = self
+                .ome
+                .live_orders()
+                .iter()
+                .find(|o| o.token_id == other && o.strategy == p.strategy)
+                .map(|o| o.account_id.to_string())
+                .unwrap_or_else(|| p.account_id.to_string());
+            releases.push((account, p.strategy.clone(), other));
+        }
+        if releases.is_empty() {
+            return;
+        }
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        for (account, strategy, token) in releases {
+            engine.release_pending_token_for_strategy(&account, &strategy, &token);
+        }
+    }
+
     /// 轮次推进清退：换轮臂（engine_on_data 的 RoundMarkets 非 top-up）调用。
     pub(crate) fn pair_retire_before(&mut self, before: i64) {
         self.pair_book.retire_before(before);
