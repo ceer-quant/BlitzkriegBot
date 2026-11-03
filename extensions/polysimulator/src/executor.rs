@@ -38,13 +38,20 @@
 //!     (`TAKER_FEE_RATE` / `official_taker_fee_usd`). An order whose ack
 //!     said `live` (rested) books its sweep-confirmed fill as MAKER; only a
 //!     `matched` ack (we crossed) books taker.
-//!   * ledger seed (#877) — the figure the executor seeds and re-aligns the
-//!     kernel ledger with is the venue's account EQUITY (`total_value`:
-//!     available cash + open positions, the website's own account-equity
-//!     view), not bare cash — a cash-only seed left the replay equity
-//!     systematically short by the open-position value. A balance report
-//!     without a usable `total_value` degrades to the cash floor loudly
-//!     (see `ledger_equity`).
+//!   * ledger seed (#877 → #909 follow-up) — the figure the executor seeds
+//!     and re-aligns the kernel ledger with is the venue's reported CASH.
+//!     The #877 replay seeded the account EQUITY (`total_value` = cash +
+//!     open positions) so the replay equity would match the website's —
+//!     but the kernel channels it feeds (`seed_balance` → the ledger's
+//!     spendable `balance`; `venue_free_balance` → `fold_venue_free`)
+//!     are CASH books: an equity seed over-approved the reserve gate and
+//!     an equity re-alignment folded the position value back in as
+//!     phantom cash on every no-order sweep (independent post-merge
+//!     acceptance, PR #909). The equity stays read-only telemetry: the
+//!     ready/sweep log lines still name cash + positions = equity in the
+//!     website's own identity. A report without `total_value`, or with
+//!     one below cash (impossible while a long position holds value),
+//!     still refuses the field loudly (see `ledger_equity`).
 
 use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
@@ -188,10 +195,13 @@ enum LedgerEquity {
 }
 
 impl LedgerEquity {
-    /// The number that goes into the ledger.
+    /// The number that goes into the LEDGER — the spendable CASH
+    /// (post-#909-follow-up: the equity figure over-approved the reserve gate
+    /// and double-counted the open position through `fold_venue_free`; the
+    /// equity stays on the evidence line instead).
     fn figure(&self) -> Decimal {
         match self {
-            Self::VenueReported { equity, .. } => *equity,
+            Self::VenueReported { cash, .. } => *cash,
             Self::CashFloor { cash, .. } => *cash,
         }
     }
@@ -235,11 +245,35 @@ impl std::fmt::Display for LedgerEquity {
     }
 }
 
-/// Read the ledger figure off one balance report. `total_value` is trusted
-/// only while it satisfies the venue's own identity (equity ≥ available cash
-/// on a long-only venue); anything else degrades to the cash floor with the
-/// reason carried for the caller's log line — never a silent zero for the
-/// positions. Pure so the mapping is testable without a client.
+/// The ledger figure off one balance report, post-#909-follow-up. Reality
+/// discovered by the independent post-merge acceptance (PR #909 comment
+/// 6597853873): the kernel's cash channels this figure feeds are SPENDABLE
+/// cash — `seed_balance` seeds the ledger's `balance` the reserve gate
+/// (`available() = balance − reserved`) spends, and `venue_free_balance`
+/// folds into the same book through `fold_venue_free`, which also reconciles
+/// the venue's post-settlement cash balance (`orders.rs:
+/// settle_buy_fill` debits cash while the position book books the position
+/// at cost). Feeding the EQUITY there let the kernel over-approve up to the
+/// open-position value (+17.9% on #877's screenshot: approve $131.62 while
+/// only $111.62 is real cash) and double-counted the position every
+/// no-order sweep (equity moved as the price moved → `fold_venue_free` read
+/// it as cash that appeared → `report_venue_cash_move` flagged a phantom
+/// injection the recon's `ledger_realigned` exemption then absorbed,
+/// keeping `trade_ledger_identity` green — fail-open).
+///
+/// So the ledger now takes the CASH figure, and the website's equity stays
+/// what it always was to the kernel: read-only telemetry (the evidence line
+/// names cash + positions + equity on one line, exactly the website's
+/// identity). The #877 replay-equity view is a REPORT concern (the dry-run
+/// report prices open positions from the position book), not a ledger-cash
+/// truth — an equity-in-cash-channel seed was the bug, not the fix.
+///
+/// `total_value` is still parsed and audit-checked (equity < cash is
+/// IMPOSSIBLE while a long position holds value → the field is inconsistent
+/// → refuse, keep the loud floor log at boot/every sweep) — but its figure
+/// no longer enters the ledger.
+///
+/// Pure so the mapping is testable without a client.
 fn ledger_equity(b: &BalanceBody) -> LedgerEquity {
     match b.total_value {
         Some(equity) if equity >= b.balance => LedgerEquity::VenueReported {
@@ -381,7 +415,13 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     match client.balance().await {
         Ok(b) => {
             let equity = ledger_equity(&b);
-            eprintln!("polysimulator-extension: executor ready {equity}");
+            // `equity`'s Display IS the website's identity (cash + positions =
+            // equity); the ledger takes the CASH figure and the view stays
+            // telemetry in this one line (#909 follow-up).
+            eprintln!(
+                "polysimulator-extension: executor ready {equity} (ledger cash={})",
+                equity.figure()
+            );
             host.seed_balance("polysimulator", equity.figure()).await;
         }
         Err(e) => eprintln!("polysimulator-extension: live balance fetch failed: {e}"),
@@ -922,6 +962,9 @@ async fn sweep(
             if let Some(reason) = equity.degraded() {
                 eprintln!("polysimulator-extension: balance sync degraded to cash only: {reason}");
             }
+            // The ledger takes the CASH figure (#909 follow-up): the equity
+            // view over-approved the reserve gate and folded the open
+            // position back in as phantom cash on every no-order sweep.
             host.venue_free_balance("polysimulator", equity.figure())
                 .await;
         }
@@ -1290,14 +1333,18 @@ mod tests {
     }
 
     /// The #877 screenshot identity, in one balance body: cash 111.62 +
-    /// positions 20.00 = equity 131.62. The ledger figure is the venue's own
-    /// `total_value` — the open positions ARE merged — and the evidence line
-    /// spells the identity out (cash, positions component, unrealized,
-    /// equity).
+    /// positions 20.00 = equity 131.62. Post-#909-follow-up the LEDGER figure
+    /// is the spendable CASH (111.62 — the reserve gate must never see the
+    /// position value) while the website's equity identity rides the evidence
+    /// line read-only (cash, positions component, unrealized, equity).
     #[test]
-    fn ledger_seed_merges_open_positions_into_the_equity() {
+    fn ledger_seed_takes_cash_and_keeps_equity_on_the_evidence_line() {
         let eq = ledger_equity(&balance_body("111.62", Some("131.62"), Some("0.00")));
-        assert_eq!(eq.figure(), Decimal::from_str("131.62").unwrap());
+        assert_eq!(
+            eq.figure(),
+            Decimal::from_str("111.62").unwrap(),
+            "the ledger is a cash book (#909 acceptance: an equity figure over-approved the reserve gate by the position value)"
+        );
         assert_eq!(
             eq,
             LedgerEquity::VenueReported {
@@ -1323,15 +1370,15 @@ mod tests {
 
     /// `unrealized_pnl` never enters the arithmetic: it is quoted against
     /// entry cost (equity = cash + cost + unrealized, cost basis not on this
-    /// body) — adding it on top of `total_value` would double-count. It
-    /// rides the evidence line only.
+    /// body). It rides the evidence line only — and the ledger figure is the
+    /// cash either way.
     #[test]
     fn unrealized_pnl_never_enters_the_arithmetic() {
         let eq = ledger_equity(&balance_body("111.62", Some("131.62"), Some("5.00")));
         assert_eq!(
             eq.figure(),
-            Decimal::from_str("131.62").unwrap(),
-            "unrealized_pnl must not be added on top of total_value"
+            Decimal::from_str("111.62").unwrap(),
+            "the ledger takes the cash figure; unrealized_pnl must not be added on top"
         );
         assert!(
             eq.to_string().contains("unrealized=5.00"),
