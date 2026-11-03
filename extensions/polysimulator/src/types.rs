@@ -126,7 +126,18 @@ pub struct BalanceBody {
     pub balance: Decimal,
     pub currency: Option<String>,
     pub starting_balance: Option<Decimal>,
+    /// Unrealized PnL of the open positions, quoted against their ENTRY cost
+    /// — evidence only: equity cannot be reconstructed from it (equity =
+    /// cash + entry cost + unrealized, and the cost basis is not on this
+    /// body), so the executor logs it and never does arithmetic with it
+    /// (#877).
     pub unrealized_pnl: Option<Decimal>,
+    /// The venue's own account equity — available cash plus the market value
+    /// of open positions, exactly the 账户权益 the website displays (the #877
+    /// identity: cash 111.62 + positions 20.00 = equity 131.62). This is the
+    /// figure the executor seeds and re-aligns the kernel ledger with
+    /// (#877); absent on older website builds, in which case the executor
+    /// degrades to `balance` loudly — never a silent zero for the positions.
     pub total_value: Option<Decimal>,
 }
 
