@@ -1146,7 +1146,6 @@ impl Core {
             .ok();
             return;
         }
-        let depth = book.marketable_depth(order.side, order.price);
         // #862: the maker crossing rule is the fill model's, judged HERE and
         // nowhere else — `Touch` is the historic reach-the-limit fill,
         // `TradeThrough` waits for the market to go strictly through the
@@ -1158,6 +1157,21 @@ impl Core {
         if !crossed {
             return;
         }
+        // The size cap reads the same book through the same rule the fill
+        // decision used (#862 follow-up): a maker the TradeThrough rule fires
+        // on was pierced STRICTLY (best price strictly through the resting
+        // price), so the volume it can trade against is the depth at that
+        // strictly-pierced price — levels merely AT the resting price are a
+        // touch the rule refuses, and counting them let a fill take MORE than
+        // the pierced volume (the acceptance saw 50 shares fill against a
+        // strictly-pierced depth of 1). Touch keeps the at-or-through depth
+        // (`crosses` fills on the touch).
+        let depth = match self.config.fill_model.maker_fill_rule {
+            crate::sim::MakerFillRule::Touch => book.marketable_depth(order.side, order.price),
+            crate::sim::MakerFillRule::TradeThrough => {
+                book.strict_trade_through_depth(order.side, order.price)
+            }
+        };
         // Fill model (P-1.2), identity by default so this path is unchanged:
         //  - latency: the order cannot be hit before the venue could have it;
         //  - fill probability: a crossing does not guarantee a fill (queue

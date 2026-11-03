@@ -920,6 +920,21 @@ async fn main() -> anyhow::Result<()> {
         );
         std::process::exit(2);
     }
+    // #862 follow-up: a fill-model PRESET shapes the dry matcher's fill
+    // semantics (latency, strict trade-through) — a serving or dry-boot core
+    // must answer with its configured model, not a command-line one (the
+    // honest-execution contract is the replay's). The replay-only flag
+    // refuses exactly like --backtest-fast/--maker-rebate above. Only the
+    // PRESET gate belongs here: the plain latency/depth-share dials stay the
+    // long-standing file-settable settings, and identity (no flag) changes
+    // nothing.
+    if let Some(name) = &args.fill_model_preset {
+        eprintln!(
+            "blitzkrieg-core: --fill-model {name} only applies to a replay; pass --backtest <archive.jsonl> \
+             (the fill model a live boot answers is a configured truth, not a per-invocation choice)"
+        );
+        std::process::exit(2);
+    }
 
     // ───────────────────────── #199: the data-directory latch ────────────────
     // Everything above this line is read-only or in-memory, and every offline
