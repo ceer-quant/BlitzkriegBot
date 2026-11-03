@@ -9,9 +9,10 @@ use blitzkrieg_market_api::{MarketType, net::now_ms};
 use rust_decimal_macros::dec;
 use std::path::Path;
 
-// The temp root lives under /Volumes (the workspace's own disk) — never /tmp,
-// the same discipline the repo's gates follow. The guard removes it even when
-// an assertion panics.
+// The temp root must be CI-portable: `std::env::temp_dir()` like every other
+// core test (a hardcoded workspace volume exists only on the operator's Mac
+// and panics the ubuntu runner). The guard removes it even when an assertion
+// panics.
 struct TempRoot(std::path::PathBuf);
 
 impl TempRoot {
@@ -20,12 +21,8 @@ impl TempRoot {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let dir = std::path::PathBuf::from("/Volumes/Hard Disk/bk-tmp").join(format!(
-            "test-861-{}-{}-{}",
-            tag,
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("test-861-{}-{}-{}", tag, std::process::id(), nanos));
         std::fs::create_dir_all(&dir).expect("temp root creates");
         TempRoot(dir)
     }
