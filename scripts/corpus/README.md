@@ -38,6 +38,34 @@ turned nine replay configs positive — the bug was data, not conservatism.
   resolution rows are written with token ids from the start, and rounds without
   token ids are dropped (`no_tokens`), never emitted as unmatchable resolutions.
   (`build-realbook-multi.py` already wrote token ids and stays in bk-session.)
+- `relabel_official.py` — rebuild settlement labels from the OFFICIAL
+  Polymarket resolution (issue #859). The generator above (and the A2 lane's
+  `labels_15m/5m.jsonl`) derives winners from the Binance spot tape, but the
+  venue settles against the **Chainlink TWAP** stream (live 2026-08-07, per
+  every up/down market description); A2 measured 5.77% (15m) / 13.06% (5m)
+  label flips from that gap. Three modes:
+  - `--relabel labels.jsonl... --out relabeled.jsonl`: fetch the official
+    winner per conditionId (CLOB `/markets/<cid>` `tokens[].winner` — the
+    market_resolved state) and write each input row back UNCHANGED plus
+    additive `official_win`/`official_slug`/`official_seconds_delay`/`period`
+    fields; prints the diff report (official vs Binance-point `p_win` and vs
+    spot-TWAP proxy `t_win`, per settlement-rule period). History is never
+    rewritten.
+  - `--verify relabeled.jsonl --sample N`: the acceptance gate. Deterministic
+    sample, re-fetch each round independently (CLOB winner AND Gamma
+    `outcomePrices`, slug taken from the CLOB payload); `agreement` = stored
+    label == CLOB == Gamma. Exit 0 iff agreement >= 99.5%; below 99% prints
+    STOP — halt downstream evaluation (issue #859).
+  - `--apply-corpus corpus.jsonl`: rewrite `k=resolution` rows to the official
+    winner in token form (mapped through the round rows' up/downTokenId);
+    unfetchable rows stay byte-identical; exit 1 if any remain. Temp file +
+    atomic rename, idempotent.
+  Network discipline: https only, host allowlist
+  (`clob.polymarket.com`, `gamma-api.polymarket.com`, `data-api.polymarket.com`),
+  one URL constructor that re-validates before every dial. Known Gamma traps
+  are pinned in the docstring: `/markets?slug=` returns EMPTY for archived
+  rounds and `?condition_id=` is silently ignored. Self-test:
+  `python3 scripts/corpus/test_relabel_official.py` (offline, fake fetcher).
 - `test_fix_resolutions.py` — self-test, `python3` direct, stdlib only, embedded
   fixture with fake ids:
 
