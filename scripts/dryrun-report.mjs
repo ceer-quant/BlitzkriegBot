@@ -11,6 +11,15 @@
  *     profit factor, net PnL, fees — the "按策略独立账本" view;
  *   - per-UTC-day breakdown for the requested window;
  *   - portfolio totals;
+ *   - platform liquidity rewards (#910): the REWARD cash rows the venue paid
+ *     for RESTING orders — income the trade ledger can never see — folded
+ *     from `data/rewards/rewards.jsonl` (the #388 archive cashflow format the
+ *     `reward-pull.mjs` puller lands) into the account income view. Trade net
+ *     and reward income stay SEPARATE columns plus one combined total: mixing
+ *     reward cash into win rate / profit factor would corrupt the trading
+ *     metrics they have nothing to do with. Attributed by PAYMENT timestamp
+ *     (the ~00:15 UTC settlement instant) — REWARD rows carry no
+ *     condition_id, so there is nothing more honest to attribute to;
  *   - fill rate / partial-fill rate over the ORDER ledger
  *     (`data/orders/orders.jsonl`, issue #183): how many orders actually
  *     traded, how many were left partially filled, and what share of the
@@ -27,7 +36,7 @@
  *
  * Usage:
  *   node scripts/dryrun-report.mjs [--days 7] [--trades data/trades/trades.jsonl]
- *        [--orders data/orders/orders.jsonl]
+ *        [--orders data/orders/orders.jsonl] [--rewards data/rewards/rewards.jsonl]
  *        [--evolution-dir data/evolution] [--out <dir>] [--json]
  *
  * `--json` prints the same manifest the `--out` directory would receive, so a
@@ -37,6 +46,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { foldRewards, loadRewardRows } from './lib/reward-ledger.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -48,6 +58,7 @@ const flag = (name) => {
 
 const tradesPath = resolve(ROOT, flag('--trades') ?? 'data/trades/trades.jsonl');
 const ordersPath = resolve(ROOT, flag('--orders') ?? 'data/orders/orders.jsonl');
+const rewardsPath = resolve(ROOT, flag('--rewards') ?? 'data/rewards/rewards.jsonl');
 const evolutionDir = resolve(ROOT, flag('--evolution-dir') ?? 'data/evolution');
 const days = Number(flag('--days') ?? 7);
 const fromArg = flag('--from');
@@ -85,6 +96,9 @@ const num = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 const r3 = (n) => (n == null ? '—' : (Math.round(n * 1000) / 1000).toString());
+// Reward cash is paid to 4 decimals (0.3132 USDC — the #910 evidence window's
+// only payment); 3-dp rounding would print it as 0.313 and lie by 0.0032.
+const r4 = (n) => (n == null ? '—' : (Math.round(n * 10000) / 10000).toString());
 
 // ── load the ledger ─────────────────────────────────────────────────────────
 let malformed = 0, skippedNoTs = 0;
@@ -194,7 +208,35 @@ for (const t of inWindow) {
   perDay[d] = perDay[d] ?? [];
   perDay[d].push(t);
 }
-const daysOut = Object.keys(perDay).sort().map((d) => ({ date: d, ...aggregate(perDay[d]) }));
+
+// ── platform rewards (#910): REST-order income the trade ledger can't see ───
+// Rewards pay the wallet at SETTLEMENT (~00:15 UTC for the previous UTC day),
+// so the day fold below uses the payment timestamp — the same口径 the #910
+// evidence reconciliation used. Absent ledger → `null`: the metric is then
+// UNKNOWN, not zero (the orderFlow precedent).
+const rewardsLedger = loadRewardRows(rewardsPath);
+const rewards = rewardsLedger.present ? foldRewards(rewardsLedger.rows, fromMs, toMs) : null;
+const rewardsByDay = {};
+if (rewardsLedger.present) {
+  for (const r of rewardsLedger.rows) {
+    const d = day(r.atMs);
+    if (d < day(fromMs) || d > day(toMs)) continue;
+    const start = Date.parse(`${d}T00:00:00.000Z`);
+    rewardsByDay[d] = foldRewards(rewardsLedger.rows, start, start + 86_400_000 - 1).rewardsUsd;
+  }
+}
+
+const daysOut = Object.keys(perDay)
+  .sort()
+  .map((d) => ({ date: d, ...aggregate(perDay[d]), rewardsUsd: rewardsByDay[d] ?? null }));
+// A day that paid rewards but closed no trades still belongs in the trend —
+// dropping it would hide exactly the "paid but did the resting earn it?" day.
+if (rewardsLedger.present) {
+  for (const d of Object.keys(rewardsByDay).sort()) {
+    if (!daysOut.some((x) => x.date === d)) daysOut.push({ date: d, ...aggregate([]), rewardsUsd: rewardsByDay[d] });
+  }
+  daysOut.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
 
 // Breaker trips from the evolution audit files (audit records carry
 // `applied:false` with a reason; consecutive-loss trips carry the breaker
@@ -221,6 +263,22 @@ for (const f of evolutionFiles) {
 
 const portfolio = aggregate(inWindow);
 
+// The income view the trade ledger alone cannot state: trade net stays its
+// own column, reward cash its own, one combined total (#910). Mixing rewards
+// into `aggregate()` would leak REST-order income into win rate / payoff /
+// profit factor — trading metrics that must stay trades-only.
+const rewardsBlock = rewardsLedger.present
+  ? {
+      path: rewardsPath,
+      rows: rewardsLedger.rows.length,
+      malformedLines: rewardsLedger.malformed,
+      wrongKindLines: rewardsLedger.wrongKind,
+      windowRows: rewards.windowRows,
+      rewardsUsd: rewards.rewardsUsd,
+      netIncludingRewardsUsd: Number((portfolio.netPnlUsd + rewards.rewardsUsd).toFixed(4)),
+    }
+  : null;
+
 const manifest = {
   generatedAtMs: nowMs,
   window: { fromMs, toMs, fromUtc: utc(fromMs), toUtc: utc(toMs), daysRequested: days },
@@ -228,6 +286,12 @@ const manifest = {
   perStrategy,
   perDay: daysOut,
   portfolio,
+  // #910 platform rewards. `null` when the rewards ledger is not present: the
+  // metric is then unknown, which is not the same as "no rewards paid".
+  rewards: rewardsBlock,
+  rewardsNote: rewardsBlock
+    ? undefined
+    : `rewards ledger not found at ${rewardsPath}: platform reward income unknown (pass --rewards or run scripts/reward-pull.mjs)`,
   // #183 fill realism. `null` when the order log is not present: the metric is
   // then unknown, which is not the same as "everything filled".
   orderFlow: orderFlowStats,
@@ -265,15 +329,35 @@ for (const s of strategies) {
 md.push('');
 md.push('## Per-UTC-day trend');
 md.push('');
-md.push('| UTC day | closed | wins | losses | WR% | PF | net USD |');
-md.push('|---|---|---|---|---|---|---|');
+md.push('| UTC day | closed | wins | losses | WR% | PF | net USD | rewards USD |');
+md.push('|---|---|---|---|---|---|---|---|');
 for (const d of daysOut) {
-  md.push(`| ${d.date} | ${d.closed} | ${d.wins} | ${d.losses} | ${r3(d.winRatePct)} | ${r3(d.profitFactor)} | ${r3(d.netPnlUsd)} |`);
+  md.push(`| ${d.date} | ${d.closed} | ${d.wins} | ${d.losses} | ${r3(d.winRatePct)} | ${r3(d.profitFactor)} | ${r3(d.netPnlUsd)} | ${d.rewardsUsd == null ? '—' : r4(d.rewardsUsd)} |`);
 }
 md.push('');
 md.push('## Portfolio (组合)');
 md.push('');
 md.push(`closed ${portfolio.closed}, WR ${r3(portfolio.winRatePct)}%, payoff ${r3(portfolio.payoff)}, PF ${r3(portfolio.profitFactor)}, fees ${r3(portfolio.feesUsd)}, **net ${r3(portfolio.netPnlUsd)} USD**.`);
+md.push('');
+md.push('## Platform rewards (平台流动性激励, #910)');
+md.push('');
+if (rewardsBlock) {
+  md.push(
+    `${rewardsBlock.windowRows} payment(s) in window, **${r4(rewardsBlock.rewardsUsd)} USD** — attributed by payment timestamp (~00:15 UTC settlement of the previous UTC day).`,
+  );
+  md.push('');
+  md.push(
+    `account income view: trade net ${r3(portfolio.netPnlUsd)} + rewards ${r4(rewardsBlock.rewardsUsd)} = **${r4(rewardsBlock.netIncludingRewardsUsd)} USD**.`,
+  );
+  md.push('');
+  md.push(
+    `${rewardsBlock.path}: ${rewardsBlock.rows} rows (${rewardsBlock.malformedLines} malformed, ${rewardsBlock.wrongKindLines} non-reward skipped). REWARD rows carry no condition_id, so no per-market attribution exists; rewards pay RESTING orders, which is why they never appear in the trade ledger above.`,
+  );
+} else {
+  md.push(
+    `rewards ledger not found at \`${rewardsPath}\` — platform reward income unknown (run \`node scripts/reward-pull.mjs --wallet 0x…\`).`,
+  );
+}
 md.push('');
 md.push('## Fill rate / partial fills (#183)');
 md.push('');
