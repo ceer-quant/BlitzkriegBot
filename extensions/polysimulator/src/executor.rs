@@ -26,6 +26,18 @@
 //!     resting ids consumed). OUR fill books under whichever of the two names
 //!     our venue order id; the venue order id is an INTEGER everywhere,
 //!     stringified at this seam.
+//!   * fill realism (#876) — the venue answers a marketable order with
+//!     `status:"matched"` and lists it FILLED instantly: no queue, no
+//!     round-trip, and its trade rows report `fee_rate_bps: 0` (free
+//!     trading). The adapter does not fold that optimism into the ledger:
+//!     a just-placed order stays non-terminal (reported OPEN) for one sweep
+//!     cycle and its fill confirms at the NEXT sweep — the existing sweep
+//!     cadence models the queue the venue lacks, no new timer — and the fee
+//!     a fill carries follows the official crypto schedule through its
+//!     maker/taker role: taker `shares · 0.07 · p · (1−p)` USD, maker 0
+//!     (`TAKER_FEE_RATE` / `official_taker_fee_usd`). An order whose ack
+//!     said `live` (rested) books its sweep-confirmed fill as MAKER; only a
+//!     `matched` ack (we crossed) books taker.
 
 use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
@@ -51,6 +63,84 @@ const SWEEP_FAILURE_FREEZE: u32 = 3;
 /// A venue rejection streak that triggers a direct capability probe instead
 /// of letting the freeze rest on inference.
 const PLACE_FAILURE_PROBE: u32 = 3;
+
+/// The fill-confirmation window (#876): one sweep period. A placement whose
+/// fill the sweep observes INSIDE this window does not book yet — the order
+/// stays non-terminal (reported OPEN) and the fill confirms at the NEXT
+/// sweep. The venue matches marketable orders instantly (`status:"matched"`,
+/// FILLED within the same tick); booking that at the same tick's sweep would
+/// fold the venue's missing queue straight into the ledger. The existing
+/// sweep cadence models the delay; deliberately no new timer.
+const FILL_CONFIRM_MS: i64 = (EXECUTOR_TICK_MS * SWEEP_EVERY_TICKS) as i64;
+/// How long a placement record outlives its confirmation window. The record
+/// carries the fill's role (maker/taker read off the place ack), so it must
+/// be there whenever the venue's FILLED list surfaces the order — bounded,
+/// not forever: past this horizon an unknown-provenance fill books with
+/// `maker: None` and the core falls back to the order's own fill policy.
+const PLACEMENT_TTL_MS: i64 = 600_000;
+/// The official crypto taker fee rate — `fee = shares · 0.07 · p · (1−p)`
+/// USD, maker side 0 (Polymarket's published Crypto schedule; the same curve
+/// the kernel pins as `official`). THE fee source of this adapter, in one
+/// place: the venue's own trade rows report `fee_rate_bps: 0` (live
+/// 2026-10-26) and that wire field is parsed but NEVER booked (#876).
+/// `from_parts` because `Decimal::new` is not `const`: 7 at scale 2 = 0.07.
+const TAKER_FEE_RATE: Decimal = Decimal::from_parts(7, 0, 0, false, 2);
+
+/// One placement the executor submitted this process: the venue id plus the
+/// place ack's own fill verdict. The verdict decides the fee semantics of
+/// the fill the sweep later confirms — the official schedule's maker/taker
+/// split is decided at PLACE time on this venue, whose FILLED list carries
+/// no role at all.
+#[derive(Debug, Clone)]
+struct Placement {
+    /// `Some(true)` = the ack said `matched` (we crossed, taker);
+    /// `Some(false)` = the ack said `live` (rested, maker when hit);
+    /// `None` = the ack carried no readable status — the role stays with the
+    /// core's fill-policy fallback.
+    crossed: Option<bool>,
+    placed_ms: i64,
+}
+
+/// Whether `p` is still inside its fill-confirmation window at `now_ms`:
+/// less than one sweep period since the place ack. Inside the window the
+/// order reports OPEN and its fill (whichever channel carries it first)
+/// waits for the next sweep.
+fn in_confirm_window(p: &Placement, now_ms: i64) -> bool {
+    now_ms - p.placed_ms < FILL_CONFIRM_MS
+}
+
+/// The official crypto taker fee in USD: `shares · 0.07 · p · (1−p)`.
+/// A price outside `(0, 1)` (and a non-positive size) charges nothing — the
+/// same bounds the kernel's own schedule guards, so a fee can never come out
+/// negative (a rebate) on a mis-shaped row.
+fn official_taker_fee_usd(price: Decimal, shares: Decimal) -> Decimal {
+    if price <= Decimal::ZERO || price >= Decimal::ONE || shares <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    shares * TAKER_FEE_RATE * price * (Decimal::ONE - price)
+}
+
+/// The place ack's own fill verdict: `matched` = the venue crossed the order
+/// at place time (taker), `live` = it rested (maker when the sweep confirms
+/// its fill), anything else = the ack does not say (`None`).
+fn ack_crossed(status: Option<&str>) -> Option<bool> {
+    match status {
+        Some("matched") => Some(true),
+        Some("live") => Some(false),
+        _ => None,
+    }
+}
+
+/// The fill's maker flag from the placement's ack verdict — the official fee
+/// semantics of this adapter: an order that RESTED books its sweep-confirmed
+/// fill as maker (official maker fee = 0); only an order the ack reported
+/// `matched` (we crossed) books taker. `None` (no readable ack, or an order
+/// this process never placed — restart recovery) leaves the role to the
+/// core's fill-policy fallback, which is what `MarketFill::maker = None`
+/// means at the seam.
+fn fill_role(crossed: Option<bool>) -> Option<bool> {
+    crossed.map(|c| !c)
+}
 
 /// Build the credentialed client, or `None` when the environment carries no
 /// API key — the executor is then INERT (dry runs). Same contract as the
@@ -157,9 +247,13 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     // Trade rows already reported to the host (dedup by trade id so a sweep
     // overlap never double-books).
     let mut seen_trades: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Orders just placed, still absent from the venue's open-order list (the
-    // orphan sweep's grace window).
-    let mut recent_placements: Vec<(String, i64)> = Vec::new();
+    // Orders this process placed, keyed by venue id: the place ack's fill
+    // verdict (maker/taker at place time) + when. Serves the orphan sweep's
+    // grace window AND the #876 fill-confirmation window (a just-placed
+    // order stays non-terminal for one sweep cycle; its fill confirms at the
+    // next sweep, with the role the ack decided).
+    let mut placements: std::collections::HashMap<String, Placement> =
+        std::collections::HashMap::new();
     const ORPHAN_GRACE_MS: i64 = 30_000;
 
     // Seed the ledger from the venue so the reserve gate reflects real cash.
@@ -223,9 +317,15 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         if cancel_strikes == 0 {
             for order in host.take_pending_orders("polysimulator").await {
                 match place(&client, &order).await {
-                    Ok(venue_id) => {
+                    Ok((venue_id, crossed)) => {
                         place_failures = 0;
-                        recent_placements.push((venue_id.clone(), now_ms()));
+                        placements.insert(
+                            venue_id.clone(),
+                            Placement {
+                                crossed,
+                                placed_ms: now_ms(),
+                            },
+                        );
                         host.on_order_accepted(&order.core_order_id, &venue_id)
                             .await;
                     }
@@ -259,7 +359,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
             &host,
             &client,
             &mut seen_trades,
-            &mut recent_placements,
+            &mut placements,
             ORPHAN_GRACE_MS,
         )
         .await
@@ -342,7 +442,12 @@ fn place_body_for(side: &Side, price: Decimal, shares: Decimal, token_id: &str) 
 /// reconciled through the orders list, never by blind retry. Outcome,
 /// quantity and time-in-force do not exist as fields — the venue derives them
 /// from the token and the amounts.
-async fn place(client: &PolySimRest, order: &PendingOrder) -> CoreResult<String> {
+///
+/// Returns the venue id PLUS the ack's own fill verdict (`matched` → we
+/// crossed → taker; `live` → rested → maker; unreadable → unknown). The
+/// verdict is decided ONCE here: the venue's FILLED list carries no role, so
+/// this is what the sweep-confirmed fill later books from (#876).
+async fn place(client: &PolySimRest, order: &PendingOrder) -> CoreResult<(String, Option<bool>)> {
     if order.size < Decimal::ONE {
         return Err(CoreError::new(
             CoreErrorCode::InvalidParams,
@@ -355,7 +460,7 @@ async fn place(client: &PolySimRest, order: &PendingOrder) -> CoreResult<String>
         .place_order(&body)
         .await
         .map_err(|e| into_core_error(&e))?;
-    Ok(ack.venue_id())
+    Ok((ack.venue_id(), ack_crossed(ack.status.as_deref())))
 }
 
 /// Attribute one trade row to our order ids: a row is OURS when our venue id
@@ -390,6 +495,13 @@ fn row_token_id(row: &crate::types::PmTradeRow) -> Option<String> {
 
 /// Map one trade row onto the seam type. A row whose price or shape cannot be
 /// read is skipped by the caller with a log line — never forwarded as garbage.
+///
+/// The row's `fee_rate_bps` is parsed for wire fidelity and deliberately NOT
+/// read here: the live venue reports it as 0 on every row (free trading),
+/// which is exactly the optimism #876 corrects. The fee a fill carries is
+/// decided by the executor — the maker/taker role per the official crypto
+/// schedule (taker `shares · 0.07 · p · (1−p)`, maker 0) — and the kernel's
+/// charge path books from that role. See `official_taker_fee_usd`.
 fn to_venue_trade(
     row: &crate::types::PmTradeRow,
     venue_order_id: String,
@@ -473,11 +585,18 @@ fn resolution_for(query: &SettlementQuery, rows: &[UpDownRow]) -> Option<MarketR
 /// One reconciliation pass: open orders + new trades + orphan cleanup + free
 /// balance. Any transport failure aborts the pass so the failure counter sees
 /// a coherent "sweep did not complete", not a half-swept ledger.
+///
+/// #876 fill-confirmation semantics: a placement still inside its window
+/// ([`in_confirm_window`]) reports OPEN and its fill — whichever channel
+/// first carries it — waits for the NEXT sweep. The kernel's reconcile folds
+/// a snapshot's trades BEFORE its ghost pass, so a deferred fill with the
+/// order still reported open is exactly the safe order: the venue's instant
+/// `matched` never books at the same tick's sweep.
 async fn sweep(
     host: &Arc<dyn MarketHost>,
     client: &PolySimRest,
     seen_trades: &mut std::collections::HashSet<String>,
-    recent_placements: &mut Vec<(String, i64)>,
+    placements: &mut std::collections::HashMap<String, Placement>,
     orphan_grace_ms: i64,
 ) -> CoreResult<()> {
     let open = client
@@ -492,10 +611,14 @@ async fn sweep(
     let known: std::collections::HashSet<String> =
         host.known_venue_order_ids().await.into_iter().collect();
     let now = now_ms();
-    recent_placements.retain(|(_, at)| now - *at < orphan_grace_ms);
+    placements.retain(|_, p| now - p.placed_ms < PLACEMENT_TTL_MS);
     for o in &open {
         let vid = o.venue_id();
-        if known.contains(&vid) || recent_placements.iter().any(|(rid, _)| *rid == vid) {
+        if known.contains(&vid)
+            || placements
+                .get(&vid)
+                .is_some_and(|p| now - p.placed_ms < orphan_grace_ms)
+        {
             continue;
         }
         match client.cancel_order(&vid).await {
@@ -517,16 +640,26 @@ async fn sweep(
     // Trades → reconcile snapshot; the core matches them to its own orders
     // and books what it owns. OUR fills are attributed through both leg
     // sides (taker + maker); rows that are not ours and rows we cannot read
-    // are silent or logged, never forwarded as garbage.
+    // are silent or logged, never forwarded as garbage. A row attributed to
+    // an order still inside its confirmation window waits for the next sweep
+    // — and is deliberately NOT marked seen, so the same row books then.
     let mut matched = Vec::new();
     for row in &trades {
         if seen_trades.contains(&row.id) {
             continue;
         }
-        // Mark seen regardless: an unreadable row must not be re-parsed every
-        // sweep (it would spam the log forever).
-        seen_trades.insert(row.id.clone());
         if let Some((vid, maker)) = our_leg(row, &known) {
+            if placements
+                .get(&vid)
+                .is_some_and(|p| in_confirm_window(p, now))
+            {
+                eprintln!(
+                    "polysimulator-extension: trade row {} for {vid} deferred — inside the fill-confirmation window, books at the next sweep",
+                    row.id
+                );
+                continue;
+            }
+            seen_trades.insert(row.id.clone());
             match to_venue_trade(row, vid, maker) {
                 Some(trade) => matched.push(trade),
                 None => eprintln!(
@@ -534,6 +667,10 @@ async fn sweep(
                     row.id, row.market
                 ),
             }
+        } else {
+            // Mark seen regardless: an unreadable row must not be re-parsed
+            // every sweep (it would spam the log forever).
+            seen_trades.insert(row.id.clone());
         }
     }
 
@@ -545,6 +682,14 @@ async fn sweep(
     // id the core knows becomes a synthetic reconcile trade; dedup key
     // `fill:{order_id}` (a limit order fills once at `fill_price`, so the
     // order id alone identifies the fill event).
+    //
+    // #876: a FILLED row for an order inside its confirmation window waits
+    // for the next sweep (unmarked, so it books then), and the fill books
+    // with the role the PLACE ack decided — `live` → maker (official maker
+    // fee 0), `matched` → taker. The venue's FILLED list carries no role, so
+    // "everything taker" was exactly its missing-queue optimism. An order
+    // this process never placed (restart recovery) has no record: the role
+    // stays `None` and the core falls back to the order's own fill policy.
     if let Ok(filled) = client.filled_orders().await {
         for o in &filled {
             let vid = o.venue_id();
@@ -552,7 +697,20 @@ async fn sweep(
             if !known.contains(&vid) || seen_trades.contains(&key) {
                 continue;
             }
+            if placements
+                .get(&vid)
+                .is_some_and(|p| in_confirm_window(p, now))
+            {
+                eprintln!(
+                    "polysimulator-extension: FILLED order {vid} deferred — inside the fill-confirmation window, books at the next sweep"
+                );
+                continue;
+            }
             seen_trades.insert(key);
+            // The record is consumed with the row it decided: booked or
+            // skipped-as-unreadable either way, the order is terminal at the
+            // venue and must not keep reporting OPEN.
+            let crossed = placements.remove(&vid).and_then(|p| p.crossed);
             let (Some(price), Some(size)) = (o.fill_price, o.quantity) else {
                 eprintln!(
                     "polysimulator-extension: FILLED order {} lacks fill_price/quantity — skipped",
@@ -584,12 +742,46 @@ async fn sweep(
                 price,
                 ts_ms,
                 tx_hash: None,
-                maker: Some(false),
+                maker: fill_role(crossed),
             });
         }
     }
+
+    // The snapshot's open list: the venue's own PENDING rows PLUS every
+    // placement still inside its confirmation window (#876) — a just-placed
+    // order stays non-terminal (OPEN/resting) toward the core even when the
+    // venue has already matched it, until the next sweep confirms FILLED.
+    let mut open_ids: Vec<String> = open.iter().map(|o| o.venue_id()).collect();
+    for (vid, p) in placements.iter() {
+        if in_confirm_window(p, now) && !open_ids.iter().any(|listed| listed == vid) {
+            open_ids.push(vid.clone());
+        }
+    }
+
+    // Fee evidence (#876): the fee a fill carries under the official crypto
+    // schedule, on the record next to the fill row. The maker/taker role is
+    // the fee-bearing field the kernel's charge path books from (maker 0);
+    // the venue's own `fee_rate_bps: 0` is never used.
+    for trade in &matched {
+        let (role, fee) = match trade.maker {
+            Some(false) => ("taker", official_taker_fee_usd(trade.price, trade.size)),
+            Some(true) => ("maker", Decimal::ZERO),
+            None => ("unknown (core fill-policy fallback)", Decimal::ZERO),
+        };
+        eprintln!(
+            "polysimulator-extension: fill {} {} {}@{} role={role} official_taker_fee_usd={fee}",
+            trade.trade_id,
+            match trade.side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            },
+            trade.size,
+            trade.price
+        );
+    }
+
     let snapshot = ReconcileSnapshot {
-        open_order_ids: open.iter().map(|o| o.venue_id()).collect(),
+        open_order_ids: open_ids,
         trades: matched.clone(),
         now_ms: now_ms(),
     };
@@ -856,5 +1048,96 @@ mod tests {
             self.size = Some(Decimal::ZERO);
             self
         }
+    }
+
+    // ── #876: official fee schedule ─────────────────────────────────────
+
+    /// The taker fee is the OFFICIAL crypto formula `shares · 0.07 · p ·
+    /// (1−p)` — not the venue's `fee_rate_bps: 0`, not the legacy kernel
+    /// curve. Boundaries charge nothing (never a negative fee).
+    #[test]
+    fn official_taker_fee_is_the_published_crypto_formula() {
+        let dec = |s: &str| Decimal::from_str(s).unwrap();
+        // 10 shares @ 0.5 → 10 · 0.07 · 0.25 = 0.175 USD.
+        assert_eq!(
+            official_taker_fee_usd(dec("0.5"), Decimal::from(10)),
+            dec("0.175")
+        );
+        // 5 shares @ 0.435 → 5 · 0.07 · 0.435 · 0.565 = 0.08602125 USD.
+        assert_eq!(
+            official_taker_fee_usd(dec("0.435"), Decimal::from(5)),
+            dec("0.08602125")
+        );
+        // Boundaries: a price at 0 or 1 (and non-positive inputs) is not a
+        // tradeable probability — no fee, never a rebate.
+        assert_eq!(
+            official_taker_fee_usd(Decimal::ZERO, Decimal::from(10)),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            official_taker_fee_usd(Decimal::ONE, Decimal::from(10)),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            official_taker_fee_usd(dec("0.5"), Decimal::ZERO),
+            Decimal::ZERO
+        );
+    }
+
+    /// The maker side of the official schedule is ZERO: a fill whose role
+    /// books maker carries no fee. The role comes from the place ack —
+    /// `live` (rested) → maker, `matched` (crossed) → taker, unreadable →
+    /// None (the core's fill-policy fallback).
+    #[test]
+    fn maker_fee_is_zero_and_the_role_is_decided_by_the_place_ack() {
+        // Ack verdicts…
+        assert_eq!(ack_crossed(Some("matched")), Some(true), "crossed at place");
+        assert_eq!(ack_crossed(Some("live")), Some(false), "rested");
+        assert_eq!(ack_crossed(None), None, "unreadable ack stays unknown");
+        assert_eq!(
+            ack_crossed(Some("pending")),
+            None,
+            "an unknown status says nothing"
+        );
+
+        // …become fill roles.
+        assert_eq!(fill_role(Some(true)), Some(false), "matched → taker");
+        assert_eq!(fill_role(Some(false)), Some(true), "rested → maker (fee 0)");
+        assert_eq!(fill_role(None), None, "unknown stays unknown");
+        // A maker-role fill's fee under this schedule is exactly zero — the
+        // evidence line books Decimal::ZERO for it (the schedule's maker
+        // side), never the taker formula.
+        let maker_fee = match fill_role(Some(false)) {
+            Some(true) => Decimal::ZERO,
+            _ => official_taker_fee_usd(Decimal::from_str("0.5").unwrap(), Decimal::from(10)),
+        };
+        assert_eq!(maker_fee, Decimal::ZERO, "official maker fee is 0");
+    }
+
+    /// The confirmation window: inside one sweep period the fill waits
+    /// (order reports OPEN); at/after it the next sweep books. The window
+    /// is the sweep cadence — one sweep period, no new timer.
+    #[test]
+    fn fill_confirmation_window_is_one_sweep_period() {
+        assert_eq!(
+            FILL_CONFIRM_MS,
+            (EXECUTOR_TICK_MS * SWEEP_EVERY_TICKS) as i64
+        );
+        let placed = Placement {
+            crossed: Some(false),
+            placed_ms: 10_000,
+        };
+        assert!(
+            in_confirm_window(&placed, 10_000),
+            "same instant: in window"
+        );
+        assert!(
+            in_confirm_window(&placed, 10_000 + FILL_CONFIRM_MS - 1),
+            "just under one sweep period: still in window"
+        );
+        assert!(
+            !in_confirm_window(&placed, 10_000 + FILL_CONFIRM_MS),
+            "at one sweep period: the next sweep may confirm FILLED"
+        );
     }
 }

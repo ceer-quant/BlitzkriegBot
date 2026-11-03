@@ -177,6 +177,13 @@ pub struct PmTradeRow {
     pub outcome: Option<String>,
     pub price: Option<Decimal>,
     pub size: Option<Decimal>,
+    /// Parsed for wire fidelity, deliberately NEVER booked: the live venue
+    /// reports 0 on every row (free trading) — exactly the optimism #876
+    /// corrects. The fee a fill carries is decided by the executor (the
+    /// maker/taker role per the official crypto schedule: taker
+    /// `shares · 0.07 · p · (1−p)`, maker 0 — see
+    /// `executor::official_taker_fee_usd`), and the kernel's charge path
+    /// books from that role.
     pub fee_rate_bps: Option<i64>,
     pub maker_orders: Option<Vec<String>>,
     pub taker_order_id: Option<String>,
@@ -241,6 +248,11 @@ pub struct PositionRow {
 /// production) — so the seam accepts both. The DELETE ack is a DIFFERENT
 /// envelope (`{"canceled":[…],"not_canceled":{…}}`, see `CancelAck`); this
 /// struct only parses the POST side.
+///
+/// #876: a `matched` ack means the venue crossed the order instantly (no
+/// queue). The executor does NOT book that as a fill — the verdict rides
+/// into the placement record (taker role) and the fill itself confirms at
+/// the next sweep cycle, with the order reported OPEN until then.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderResponse {
     #[serde(rename = "orderID", deserialize_with = "deserialize_order_id")]

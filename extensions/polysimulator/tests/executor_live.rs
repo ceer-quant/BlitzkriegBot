@@ -32,7 +32,17 @@
 //! 5. **unknown token → rejection, never a guessed placement** — a token
 //!    the registry does not answer is refused with InvalidParams and no
 //!    POST is sent.
-//! 6. **capability declaration is the transport contract** (§7.2) — the
+//! 6. **FILLED-orders attribution (the live venue's only working channel)** —
+//!    a FILLED row whose id the core knows books with the venue's executed
+//!    price and fill time; an unknown id books nothing.
+//! 7. **fill realism (#876)** — a `matched` ack (the venue crossed the
+//!    order instantly) does NOT book at the same tick's sweep: the order
+//!    stays non-terminal (reported OPEN) for one sweep cycle and its fill
+//!    confirms at the NEXT sweep, as TAKER; an order whose ack said `live`
+//!    (rested) books its sweep-confirmed fill as MAKER (official maker fee
+//!    0). An order this process never placed (restart recovery) books with
+//!    `maker: None` — the core falls back to the order's own fill policy.
+//! 8. **capability declaration is the transport contract** (§7.2) — the
 //!    plugin declares exactly `SIMULATED` and nothing else: the parasitic
 //!    form carries no data feed of its own, so a `LEVEL2_SNAPSHOT` bit would
 //!    be a lie about the seam this plugin actually exercises.
@@ -852,6 +862,13 @@ async fn filled_order_rows_book_our_fills_when_trade_legs_cannot() {
     assert_eq!(f.size, Decimal::from_str("10.0000").unwrap());
     assert_eq!(f.trade_id.as_deref(), Some("fill:1410921"));
     assert_eq!(
+        f.maker, None,
+        "#876: this order was never placed by THIS process (restart recovery) — \
+         no placement record, so the role stays unknown and the core falls back \
+         to the order's own fill policy; claiming taker here was exactly the \
+         old every-fill-is-taker optimism"
+    );
+    assert_eq!(
         f.ts_ms, 1_792_955_199_000,
         "filled_at ISO parses to epoch millis (2026-10-25T19:06:39Z; sub-second dropped)"
     );
@@ -911,6 +928,143 @@ async fn a_filled_row_for_an_unknown_order_is_never_booked() {
             .iter()
             .all(|s| s.trades.is_empty()),
         "no synthetic trade may enter the reconcile snapshot for an unknown order"
+    );
+}
+
+// ── 7b. fill realism (#876): confirmation window + maker/taker roles ────
+
+/// One FILLED row for a marketable order the executor just placed, served
+/// from the start; the venue's PENDING list stays empty (the venue matches
+/// and fills instantly — that is the optimism under test).
+fn filled_row_json(order_id: u32, price: &str) -> String {
+    format!(
+        r#"{{"order_id":{order_id},"market_id":"0xcond-1","side":"BUY","outcome":"Up","order_type":"limit","limit_price":"{price}","quantity":"10","time_in_force":"GTC","status":"FILLED","fill_price":"{price}","filled_at":"2026-10-25T19:06:39Z"}}"#
+    )
+}
+
+#[tokio::test]
+async fn a_matched_ack_order_stays_resting_one_sweep_then_confirms_filled_as_taker() {
+    // #876: the venue answers a marketable order with `status:"matched"` and
+    // lists it FILLED instantly — no queue, no round-trip. The adapter must
+    // not fold that into the ledger at the same tick's sweep: the order
+    // stays non-terminal (reported OPEN) for one sweep cycle, and the fill
+    // confirms at the NEXT sweep — as a TAKER (we crossed), the only path
+    // that books taker. The order is placed ~1s in so the first sweep
+    // (~5s cadence) lands INSIDE the fill-confirmation window.
+    let (url, _recorded) = mock_server(Routes {
+        filled_orders_body: format!(r#"{{"orders":[{}]}}"#, filled_row_json(771, "0.55")),
+        ..routes_for(
+            r#"{"balance":"100"}"#,
+            r#"{"orders":[]}"#,
+            r#"{"data":[]}"#,
+            RESOLVE_BODY,
+            vec![r#"{"orderID":771,"status":"matched","makingAmount":"5500000","takingAmount":"10000000","tradeIDs":["1"],"errorMsg":""}"#.to_string()],
+            vec![],
+        )
+    });
+    let sink = ExecSink::default();
+    sink.known_ids.lock().await.push(String::from("771"));
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    sink.push_pending(pending_order("core-876t", "71321", "0.55", "10"))
+        .await;
+
+    wait_until(25_000, || {
+        sink.reconciles
+            .try_lock()
+            .map(|r| r.len() >= 2)
+            .unwrap_or(false)
+            && sink.fills.try_lock().map(|f| f.len() == 1).unwrap_or(false)
+    })
+    .await;
+    let snaps = sink.reconciles.lock().await;
+    assert!(snaps.len() >= 2, "two reconcile sweeps must have run");
+    assert!(
+        snaps[0].open_order_ids.contains(&String::from("771")),
+        "first sweep: the just-matched order still reports OPEN (non-terminal), got {:?}",
+        snaps[0].open_order_ids
+    );
+    assert!(
+        snaps[0].trades.is_empty(),
+        "first sweep: the fill must NOT confirm inside the confirmation window"
+    );
+    assert!(
+        !snaps[1].open_order_ids.contains(&String::from("771")),
+        "second sweep: the confirmed fill takes the order off the open list"
+    );
+    assert_eq!(
+        snaps[1].trades.len(),
+        1,
+        "second sweep: the fill confirms exactly once"
+    );
+    drop(snaps);
+    let fills = sink.fills.lock().await;
+    assert_eq!(fills.len(), 1, "exactly one fill, booked at the next sweep");
+    assert_eq!(fills[0].order_id, "771");
+    assert_eq!(
+        fills[0].maker,
+        Some(false),
+        "a matched-ack order crossed the book: taker (the kernel charges the \
+         taker schedule on it — the official-fee evidence line rides the sweep)"
+    );
+}
+
+#[tokio::test]
+async fn a_resting_order_confirmed_by_the_sweep_books_as_maker() {
+    // #876: an order whose ack said `live` RESTED. When the sweep confirms
+    // its fill (someone crossed our resting order), the fill books MAKER —
+    // the official schedule's maker fee is 0, and the old every-fill-is-
+    // taker shortcut made the kernel charge for fills that never crossed.
+    // Same confirmation window as the matched path: one sweep cycle.
+    let (url, _recorded) = mock_server(Routes {
+        filled_orders_body: format!(r#"{{"orders":[{}]}}"#, filled_row_json(772, "0.43")),
+        ..routes_for(
+            r#"{"balance":"100"}"#,
+            r#"{"orders":[]}"#,
+            r#"{"data":[]}"#,
+            RESOLVE_BODY,
+            vec![r#"{"orderID":772,"status":"live","makingAmount":"4300000","takingAmount":"10000000","tradeIDs":null,"errorMsg":""}"#.to_string()],
+            vec![],
+        )
+    });
+    let sink = ExecSink::default();
+    sink.known_ids.lock().await.push(String::from("772"));
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    sink.push_pending(pending_order("core-876m", "71321", "0.43", "10"))
+        .await;
+
+    wait_until(25_000, || {
+        sink.reconciles
+            .try_lock()
+            .map(|r| r.len() >= 2)
+            .unwrap_or(false)
+            && sink.fills.try_lock().map(|f| f.len() == 1).unwrap_or(false)
+    })
+    .await;
+    let snaps = sink.reconciles.lock().await;
+    assert!(
+        snaps[0].open_order_ids.contains(&String::from("772")),
+        "first sweep: the resting order reports OPEN"
+    );
+    assert!(
+        snaps[0].trades.is_empty(),
+        "first sweep: the fill waits for the next sweep cycle"
+    );
+    drop(snaps);
+    let fills = sink.fills.lock().await;
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].order_id, "772");
+    assert_eq!(
+        fills[0].maker,
+        Some(true),
+        "a rested order's sweep-confirmed fill is maker (official maker fee 0)"
     );
 }
 
