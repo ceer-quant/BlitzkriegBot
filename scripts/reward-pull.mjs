@@ -104,17 +104,16 @@ if (fromMs != null && toMs != null && fromMs > toMs) fail('--from is after --to'
 const target = makeTarget(DATA_API_BASE);
 if (!target.ok) fail(`base target refused: ${target.reason}`);
 
-// Transport: one GET per page, browser UA (the same Cloudflare stance the
-// venue's read-only transports encode), 30s budget; any non-2xx is a failure
-// whose message carries the status and the body head (v1's 410 retirement was
-// exactly how the migration announced itself — the body must survive into the
-// log).
+// Transport: one GET per page, the repo's honest research UA (the #901 corpus
+// puller's spelling, re-stamped for this issue), 30s budget; any non-2xx is a
+// failure whose message carries the status and the body head (v1's 410
+// retirement was exactly how the migration announced itself — the body must
+// survive into the log).
 const fetchPage = async (url) => {
   const resp = await fetch(url, {
     signal: AbortSignal.timeout(30_000),
     headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (BlitzkriegBot-research; issue-910)',
       Accept: 'application/json',
     },
   });
@@ -157,7 +156,7 @@ const existing = existsSync(outPath)
   : { present: false, rows: [], malformed: 0, wrongKind: 0 };
 if (existing.present && (existing.malformed > 0 || existing.wrongKind > 0)) {
   console.error(
-    `reward-pull: existing ledger carries ${existing.malformed} malformed + ${existing.wrongKind} non-reward lines — kept verbatim, only well-formed reward rows merge`,
+    `reward-pull: existing ledger carries ${existing.malformed} malformed + ${existing.wrongKind} non-reward lines — dropped and counted (clean-rewrite semantics), only well-formed reward rows merge`,
   );
 }
 const landed = collected.rows.filter(
