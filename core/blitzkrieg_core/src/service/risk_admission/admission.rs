@@ -507,6 +507,59 @@ impl Core {
             }
         }
 
+        // issue #848 — the pair completion gap-fill's REPLACE: a retry of a
+        // naked pair leg whose sibling FILLED collides with the leg's own
+        // still-resting order under the SAME internal key (the key is
+        // kernel-derived: `strategy:asset:direction:slot` — the strategy
+        // layer cannot rekey). The dedup guard's purpose — never two live
+        // orders under one key — is honoured by RETIRING the resting order
+        // through the standard cancel path (reservation release, pair-book
+        // death fact, venue cancel) before the retry submits, so the OME
+        // always holds at most one live order per key. Two shapes:
+        //  - the retry DIFFERS from the resting order (price/size — the
+        //    fresh-book requote): cancel, then fall through and place;
+        //  - the retry is byte-identical (a re-emit while the requote is
+        //    already standing): answer Ok with the standing order — the
+        //    intent IS on the book; a per-cycle refusal storm would be
+        //    noise, not protection.
+        // Everything else (no live order under the key, or a same-key
+        // resubmit without a filled sibling — a plain duplicate entry)
+        // keeps today's dedup refusal byte-identically. The predicate sits
+        // AFTER every refusal gate above, so a doomed retry never cancels
+        // the resting order it meant to replace.
+        if entry_gates
+            && req.side == Side::Buy
+            && let Some(resting_id) = self.ome.live_id_for(&req.internal_key)
+        {
+            let resting = self.ome.get(&resting_id);
+            let differs = resting
+                .map(|o| o.price != req.price || (o.size - o.filled_size) != req.size)
+                .unwrap_or(true);
+            if self.is_naked_leg_requote(&req) {
+                if differs {
+                    tracing::info!(
+                        strategy = %req.strategy,
+                        token = %req.token_id,
+                        resting = %resting_id,
+                        price = %req.price,
+                        size = %req.size,
+                        "pair completion gap-fill: retiring the resting leg order, \
+                         the requote replaces it (same internal key, one live order)"
+                    );
+                    self.cancel(&resting_id, now_ms)?;
+                } else {
+                    let (id, status) = resting
+                        .map(|o| (o.order_id.clone(), o.status))
+                        .expect("looked up above");
+                    return Ok(PlaceOutcome {
+                        order_id: id,
+                        status,
+                        rejection: None,
+                    });
+                }
+            }
+        }
+
         let id = self.new_order_id();
         let buy = req.side == Side::Buy;
         let req_account = req.account_id.clone();
@@ -559,6 +612,40 @@ impl Core {
             status,
             rejection,
         })
+    }
+
+    /// issue #848: is this BUY the naked-leg completion re-entry of a
+    /// hold-to-settlement pair — the strategy holds the OPPOSITE direction
+    /// of the SAME condition and does NOT yet hold this direction (the
+    /// request is the MISSING leg)? The open position is the ground truth
+    /// of "the first leg filled" (positions exist only for fills), not the
+    /// eventually-consistent pair book. Scope: strategy + condition — the
+    /// pair's legs may stamp DIFFERENT accounts (A≠B), so the sibling
+    /// position is deliberately not scoped to the request's own account
+    /// (the same looseness the can_open pair-completion exemption above
+    /// already carries). The missing-leg half is the direction bound: once
+    /// BOTH directions of the condition are held the pair is complete and
+    /// a same-direction request is stacking, never completion — the OME's
+    /// internal-key dedup keeps refusing those byte-identically, so the
+    /// replace path cannot be ridden into doubling a filled pair.
+    fn is_naked_leg_requote(&self, req: &OrderRequest) -> bool {
+        let direction = parse_direction(&req.direction);
+        let held = |dir: SignalDirection| {
+            self.positions.open_positions().iter().any(|p| {
+                p.strategy == req.strategy
+                    && p.condition_id == req.condition_id
+                    && p.direction == dir
+            })
+        };
+        let opposite_held = match direction {
+            SignalDirection::Up => held(SignalDirection::Down),
+            SignalDirection::Down => held(SignalDirection::Up),
+        };
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy))
+            && opposite_held
+            && !held(direction)
     }
 
     /// The price a taker leg must state to guarantee a full fill of `size` on

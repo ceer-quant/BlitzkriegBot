@@ -22,6 +22,12 @@ impl Core {
         if self.engine.is_none() {
             return 0;
         }
+        // issue #848: a naked pair leg's completion re-entry is re-signallable —
+        // the release must land BEFORE either submission path reads the gate
+        // (the quiet-tick replay below re-submits the standing candidates
+        // through the same engine gate), so the gap-fill cycle that follows
+        // the first leg's fill sees the token open.
+        self.release_pair_completion_counterparts();
         self.stats.evaluations += 1;
         // Replay fast path: a quiet tick skips the Lua call entirely. Between
         // engine inputs (book/top/spot/rollover — the dirty wake) the only

@@ -33,7 +33,7 @@
 
 use super::*;
 use crate::engine::{DataEvent, Engine};
-use crate::model::{CryptoMarket, FillPolicy, OrderStatus};
+use crate::model::{CryptoMarket, FillPolicy, OrderRequest, OrderStatus, Side};
 use crate::risk::RiskConfig;
 use crate::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use rust_decimal_macros::dec;
@@ -171,6 +171,21 @@ fn feed_pair_books(c: &mut Core, now: i64) {
     };
     book(UP, dec!(0.48), dec!(600));
     book(DOWN, dec!(0.45), dec!(600));
+}
+
+/// One leg's fresh book at `now` (the same shape `feed_pair_books` builds):
+/// a 0.01-wide spread with `depth` on each side, ask at `ask`. The ingest
+/// path settles resting makers itself, so a crossing feed fills on arrival.
+fn mirror_book(c: &mut Core, token: &str, ask: Decimal, now: i64) {
+    c.engine_on_data(
+        DataEvent::Book {
+            token_id: token.into(),
+            bids: vec![(ask - dec!(0.01), dec!(600))],
+            asks: vec![(ask, dec!(600))],
+            now_ms: now,
+        },
+        now,
+    );
 }
 
 /// Teeth 1 + 3: the declared package's legs reach the OME as post-only Maker
@@ -403,4 +418,209 @@ fn without_the_declaration_the_maker_then_taker_rests_then_chases_after_its_wind
         .expect("the down leg held");
     assert_eq!(up.entry_price, dec!(0.48));
     assert_eq!(down.entry_price, dec!(0.45));
+}
+
+// ── issue #848 · the naked-leg tail's gap-fill retry ────────────────────────
+
+/// The UP leg has filled; the DOWN leg's order still rests (NOT terminal) and
+/// the naked tail's book has moved, so the gap-fill loop's requote carries the
+/// SAME internal key (`strategy:asset:direction:slot` — kernel-derived, the
+/// strategy layer cannot rekey) at a fresh price. Today the retry is refused
+/// twice: the engine's per-round repeat suppression drops the re-signal, and
+/// the OME's internal-key dedup refuses the resubmit. The fix: the naked
+/// token (the side the strategy does NOT hold — the open position is the
+/// ground truth of the first leg's fill) is released for re-signalling
+/// every cycle, and the place path RETIRES the resting leg order through
+/// the standard cancel and lets the requote replace it — at most ONE live
+/// order under the key, the dedup's purpose intact, the leg still pure
+/// maker on the never-escalate clock (#742), still gated by the post-only
+/// mirror (#464).
+#[test]
+fn the_naked_legs_gap_fill_requote_replaces_the_resting_order() {
+    let mut c = core_with_pair(None);
+    feed_pair_books(&mut c, NOW + 1_000);
+    assert_eq!(c.engine_evaluate(NOW + 2_000), 2, "both legs place");
+
+    // The UP leg fills the honest maker way: the ask descends ONTO the
+    // resting 0.47 quote (the almach path), a later tick than the POST.
+    mirror_book(&mut c, UP, dec!(0.47), NOW + 3_000);
+    let orders = c.list_orders();
+    let up = orders.iter().find(|o| o.token_id == UP).unwrap();
+    let down = orders.iter().find(|o| o.token_id == DOWN).unwrap();
+    assert_eq!(up.status, OrderStatus::Filled, "the first leg filled");
+    assert_eq!(
+        down.status,
+        OrderStatus::Live,
+        "the counterpart leg still rests — the not-terminal state the dedup used to hide behind"
+    );
+    assert_eq!(down.price, dec!(0.44));
+    let held = c.positions().open_positions();
+    assert_eq!(held.len(), 1, "only the filled UP leg is held");
+    assert_eq!(held[0].token_id, UP);
+    assert_eq!(held[0].direction, crate::signal::SignalDirection::Up);
+
+    // The DOWN book ticks one level up: the fresh restable quote (0.45)
+    // differs from the resting 0.44 — the naked-tail requote shape. The
+    // gap-fill loop re-emits the shortfall leg every cycle; the released
+    // token lets it reach the place path this time.
+    mirror_book(&mut c, UP, dec!(0.47), NOW + 4_000);
+    mirror_book(&mut c, DOWN, dec!(0.46), NOW + 4_000);
+    let placed = c.engine_evaluate(NOW + 4_000);
+    assert_eq!(placed, 1, "the gap-fill requote places (was: refused)");
+
+    let orders = c.list_orders();
+    let mut down_orders: Vec<_> = orders.iter().filter(|o| o.token_id == DOWN).collect();
+    down_orders.sort_by_key(|o| o.submitted_at_ms);
+    assert_eq!(
+        down_orders.len(),
+        2,
+        "the requote replaced the resting order: old retired, new resting"
+    );
+    assert_eq!(down_orders[0].price, dec!(0.44));
+    assert_eq!(
+        down_orders[0].status,
+        OrderStatus::Cancelled,
+        "the resting order was retired through the standard cancel"
+    );
+    assert_eq!(down_orders[1].price, dec!(0.45), "the fresh-book quote");
+    assert_eq!(down_orders[1].status, OrderStatus::Live);
+    assert_eq!(
+        down_orders[0].internal_key, down_orders[1].internal_key,
+        "same internal key — the replace, not a rekey; fills keep addressing the leg"
+    );
+    assert_eq!(
+        down_orders[1].mode,
+        FillPolicy::Maker,
+        "#742: the requote stays a pure-maker leg — the exemption never upgrades"
+    );
+    assert_eq!(
+        down_orders[1].maker_timeout_ms, -1,
+        "the never-escalate clock the doctrine submits with"
+    );
+    assert_eq!(
+        c.ome().next_escalation_ms(),
+        i64::MAX,
+        "no escalation deadline anywhere — the requote is not a taker path"
+    );
+    // The dedup's purpose holds: exactly ONE live order under the key.
+    let live_downs = orders
+        .iter()
+        .filter(|o| o.token_id == DOWN && o.status.is_live())
+        .count();
+    assert_eq!(
+        live_downs, 1,
+        "never two live orders under one internal key"
+    );
+}
+
+/// The exemption's boundary (issue #848 test ②): a same-key resubmit with NO
+/// filled sibling — a plain duplicate entry, or a fresh-pair re-emit while
+/// both legs rest — is still refused by the OME's internal-key dedup
+/// byte-identically, and the resting order is untouched. The requote path
+/// must not leak into a global dedup bypass.
+#[test]
+fn a_same_key_resubmit_without_a_filled_sibling_still_refuses() {
+    let mut c = core_with_pair(None);
+    feed_pair_books(&mut c, NOW + 1_000);
+    assert_eq!(c.engine_evaluate(NOW + 2_000), 2, "both legs place");
+
+    let resting = c
+        .list_orders()
+        .into_iter()
+        .find(|o| o.token_id == UP)
+        .expect("the UP leg rests");
+    let dup = OrderRequest {
+        token_id: resting.token_id.clone(),
+        condition_id: resting.condition_id.clone(),
+        side: Side::Buy,
+        mode: resting.mode,
+        price: resting.price,
+        size: resting.size,
+        internal_key: resting.internal_key.clone(),
+        strategy: resting.strategy.clone(),
+        asset: resting.asset.clone(),
+        direction: resting.direction.clone(),
+        round_slot: resting.round_slot,
+        account_id: resting.account_id.clone(),
+    };
+    let err = c
+        .place(dup, -1, NOW + 3_000)
+        .expect_err("a duplicate key with no filled sibling still refuses");
+    assert!(
+        err.message.contains("duplicate internal key"),
+        "the dedup refusal, byte-identically: {err:?}"
+    );
+    let orders = c.list_orders();
+    assert_eq!(orders.len(), 2, "nothing was cancelled, nothing was placed");
+    assert!(orders.iter().all(|o| o.status == OrderStatus::Live));
+}
+
+/// And the requote predicate is direction-bound (issue #848 boundary):
+/// once BOTH legs have filled, the pair is complete — a same-direction
+/// duplicate on the filled leg's key is stacking, not completion. The
+/// fixture's per-asset cap is deliberately 4 (#363: both legs of a
+/// same-market pair are one asset), so the cap does not refuse and the
+/// FIRST duplicate legitimately rests — that is the existing gates'
+/// business, unchanged here. The boundary this pins: the SECOND identical
+/// duplicate still meets the OME's internal-key dedup — NOT the
+/// completion no-op, and the resting order is not retired. Without the
+/// predicate's missing-leg half, the opposite-direction sibling position
+/// alone would make the replace path answer the duplicate Ok and ride
+/// over a complete pair.
+#[test]
+fn a_same_direction_duplicate_after_the_fill_is_not_a_requote() {
+    let mut c = core_with_pair(None);
+    feed_pair_books(&mut c, NOW + 1_000);
+    assert_eq!(c.engine_evaluate(NOW + 2_000), 2);
+    mirror_book(&mut c, UP, dec!(0.47), NOW + 3_000);
+    mirror_book(&mut c, DOWN, dec!(0.44), NOW + 3_100);
+    assert_eq!(
+        c.positions().open_positions().len(),
+        2,
+        "both legs filled — the pair is complete"
+    );
+
+    let filled = c
+        .list_orders()
+        .into_iter()
+        .find(|o| o.token_id == UP)
+        .expect("the filled UP leg");
+    let dup = OrderRequest {
+        token_id: filled.token_id.clone(),
+        condition_id: filled.condition_id.clone(),
+        side: Side::Buy,
+        mode: filled.mode,
+        // Under the 0.47 ask: the post-only mirror lets it rest, so the
+        // boundary is probed against a LIVE same-key order, the state the
+        // replace path acts on.
+        price: dec!(0.46),
+        size: filled.size,
+        internal_key: filled.internal_key.clone(),
+        strategy: filled.strategy.clone(),
+        asset: filled.asset.clone(),
+        direction: filled.direction.clone(),
+        round_slot: filled.round_slot,
+        account_id: filled.account_id.clone(),
+    };
+    let (stack_id, status) = c
+        .place(dup.clone(), -1, NOW + 4_000)
+        .expect("the fixture's cap admits the stack — the existing gates' business");
+    assert_eq!(status, OrderStatus::Live, "the duplicate rests");
+
+    let err = c
+        .place(dup, -1, NOW + 4_100)
+        .expect_err("a same-direction duplicate on a COMPLETE pair is not a requote");
+    assert!(
+        err.message.contains("duplicate internal key"),
+        "the dedup refusal, byte-identically — not the completion no-op: {err:?}"
+    );
+    assert_eq!(
+        c.list_orders()
+            .iter()
+            .find(|o| o.order_id == stack_id)
+            .expect("the resting stack order")
+            .status,
+        OrderStatus::Live,
+        "the resting stack order was not retired"
+    );
 }
