@@ -154,6 +154,9 @@ pub(crate) fn parse_args(
     let mut taker_rtt_ms: i64 = 0;
     let mut fill_prob_bps: Option<u32> = None;
     let mut maker_depth_share_bps: Option<u32> = None;
+    // #862: the named fill model (`--fill-model`), validated at parse time;
+    // None = the per-dial flags stand alone.
+    let mut fill_model_preset: Option<String> = None;
     // #205: the orderbook freshness budget, tracked as Option so CLI > env >
     // default resolution can tell "the operator spoke" from "nobody did".
     let mut max_orderbook_stale_ms: Option<i64> = None;
@@ -734,6 +737,7 @@ pub(crate) fn parse_args(
                     &mut taker_rtt_ms,
                     &mut fill_prob_bps,
                     &mut maker_depth_share_bps,
+                    &mut fill_model_preset,
                     &mut dry_redeem_fail,
                     &mut dry_redeem_manual,
                 ) {
@@ -1434,6 +1438,7 @@ pub(crate) fn parse_args(
         taker_rtt_ms,
         fill_prob_bps,
         maker_depth_share_bps,
+        fill_model_preset,
         dry_redeem_fail,
         dry_redeem_manual,
         config_report: report,

@@ -570,3 +570,158 @@ fn an_absurd_fill_price_does_not_panic_the_avg_price_update() {
         "the overflowing derived average is skipped, not fabricated"
     );
 }
+
+// ── #862 · maker 仅 trade-through 成交 ─────────────────────────────────────
+//
+// The l2-delay model's maker rule: a resting order fills only when the market
+// has gone strictly THROUGH its price. A touch at the exact limit fills
+// nothing — the order may be anywhere in that price's queue, and a replay
+// that books a maker fill for being touched is systematically optimistic
+// against the shadow ledger it must reconcile with.
+
+/// A touch at the limit is not a fill under the rule: the order keeps resting,
+/// its size whole, its cash still reserved.
+#[test]
+fn trade_through_maker_is_not_filled_by_a_touch() {
+    let mut c = core_with(FillModel {
+        maker_fill_rule: crate::sim::MakerFillRule::TradeThrough,
+        ..FillModel::default()
+    });
+    let (id, _) = c
+        .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    // The ask comes down to EXACTLY the limit — a touch, not a trade-through.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.39), dec!(100))],
+        vec![(dec!(0.40), dec!(100))],
+        1_100,
+    );
+    let o = c.ome().get(&id).unwrap();
+    assert!(
+        o.status.is_live(),
+        "a touch fills nothing under the rule: {o:?}"
+    );
+    assert_eq!(o.filled_size, Decimal::ZERO);
+    assert!(c.positions().open_positions().is_empty());
+    assert_eq!(c.ledger().reserved(), dec!(4), "still committed");
+    // The Touch rule WOULD have filled this exact book — the rules differ on
+    // this book and on no other, which is what makes the rule a model choice.
+    let mut touch = core_with(FillModel::default());
+    let (tid, _) = touch
+        .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    touch.book_snapshot(
+        "tok",
+        vec![(dec!(0.39), dec!(100))],
+        vec![(dec!(0.40), dec!(100))],
+        1_100,
+    );
+    assert_eq!(
+        touch.ome().get(&tid).unwrap().status,
+        OrderStatus::Filled,
+        "the identity rule fills the same touch (deep-enough book)"
+    );
+}
+
+/// The market trading strictly through the resting price IS the fill: at the
+/// maker's own limit, zero fee, capped by the depth that reached it (#183).
+#[test]
+fn trade_through_maker_fills_when_the_market_pierces_the_price() {
+    let mut c = core_with(FillModel {
+        maker_fill_rule: crate::sim::MakerFillRule::TradeThrough,
+        ..FillModel::default()
+    });
+    let (id, _) = c
+        .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    // The ask goes strictly BELOW the resting bid: the quote was consumed.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.38), dec!(100))],
+        vec![(dec!(0.39), dec!(100))],
+        1_100,
+    );
+    let o = c.ome().get(&id).unwrap();
+    assert_eq!(o.status, OrderStatus::Filled);
+    let pos = &c.positions().open_positions()[0];
+    assert_eq!(
+        pos.entry_price,
+        dec!(0.40),
+        "a maker fills at its own resting limit, not at the piercing price"
+    );
+    assert_eq!(pos.flows.entry_fee_usd, Decimal::ZERO, "maker economics");
+    assert!(c.ledger().is_balanced());
+}
+
+/// The #464 submission gate is venue parity, not the fill rule: a post-only
+/// POST that would cross is still refused under trade-through — the venue
+/// refuses it whatever the replay believes about fills.
+#[test]
+fn trade_through_keeps_the_post_only_submission_refusal() {
+    let mut c = core_with(FillModel {
+        maker_fill_rule: crate::sim::MakerFillRule::TradeThrough,
+        ..FillModel::default()
+    });
+    // Ask at the limit at POST time: the venue's post-only check crosses.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 900);
+    let (_, status) = c
+        .place(buy(FillPolicy::Maker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    assert_eq!(status, OrderStatus::Rejected, "the POST is still refused");
+    assert!(c.positions().open_positions().is_empty());
+}
+
+/// The l2-delay preset end-to-end: a taker leg is in flight for 150 ms and
+/// matches the book as it stands THEN (a pulled quote is a kill, not a fill
+/// at the decision price), while a maker fills only on a real trade-through.
+#[test]
+fn l2_delay_preset_delays_the_taker_and_gates_the_maker() {
+    let mut c = core_with(crate::sim::fill_model_preset("l2-delay").unwrap());
+    // Taker: decision 1_000 → execute_at 1_150 → report_at 1_300.
+    c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(500))], 900);
+    let (taker, st) = c
+        .place(buy(FillPolicy::Taker, dec!(0.40), dec!(10)), 0, 1_000)
+        .unwrap();
+    assert_eq!(
+        st,
+        OrderStatus::Pending,
+        "the leg has not reached the venue"
+    );
+    c.tick(1_100).unwrap();
+    assert_eq!(
+        c.ome().get(&taker).unwrap().status,
+        OrderStatus::Pending,
+        "before execute_at the venue has not even matched it"
+    );
+    c.tick(1_150).unwrap();
+    assert_eq!(
+        c.ome().get(&taker).unwrap().status,
+        OrderStatus::Pending,
+        "matched at 150 ms, not yet reported"
+    );
+    c.tick(1_300).unwrap();
+    assert_eq!(c.ome().get(&taker).unwrap().status, OrderStatus::Filled);
+    assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.40));
+
+    // Maker (a second token: one open position per asset): rests below the
+    // then-standing ask (no #464 crossing at POST), and a touch at its limit
+    // does not fill it.
+    c.book_snapshot("tok2", vec![], vec![(dec!(0.43), dec!(100))], 1_350);
+    let mut mk = buy(FillPolicy::Maker, dec!(0.42), dec!(10));
+    mk.token_id = "tok2".into();
+    mk.condition_id = "cond2".into();
+    mk.asset = "ETH".into();
+    mk.internal_key = "k2".into();
+    let (maker, _) = c.place(mk, 0, 1_400).unwrap();
+    assert!(c.ome().get(&maker).unwrap().status.is_live(), "rested");
+    // Touch: the ask comes down to EXACTLY the limit.
+    c.book_snapshot("tok2", vec![], vec![(dec!(0.42), dec!(100))], 1_500);
+    assert!(
+        c.ome().get(&maker).unwrap().status.is_live(),
+        "touch ≠ fill under the preset's maker rule"
+    );
+    // The market trading through it does.
+    c.book_snapshot("tok2", vec![], vec![(dec!(0.41), dec!(100))], 1_600);
+    assert_eq!(c.ome().get(&maker).unwrap().status, OrderStatus::Filled);
+}

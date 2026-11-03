@@ -16,6 +16,7 @@ pub(super) fn parse_replay_and_noop_flags(
     taker_rtt_ms: &mut i64,
     fill_prob_bps: &mut Option<u32>,
     maker_depth_share_bps: &mut Option<u32>,
+    fill_model: &mut Option<String>,
     dry_redeem_fail: &mut u32,
     dry_redeem_manual: &mut bool,
 ) -> bool {
@@ -90,6 +91,26 @@ pub(super) fn parse_replay_and_noop_flags(
                 u32,
                 "want a depth share in bps of 10000"
             ))
+        }
+        // #862: a named fill model — the WHOLE model, applied over whatever
+        // the per-dial flags built (`identity` = the historic behaviour,
+        // `l2-delay` = 150 ms taker L2 walk + maker trade-through). The name
+        // is validated here so a typo refuses at the CLI, not at boot.
+        "--fill-model" => {
+            if let Some(raw) = it.next() {
+                if blitzkrieg_core::sim::fill_model_preset(&raw).is_some() {
+                    *fill_model = Some(raw);
+                } else {
+                    bad_value(
+                        "--fill-model",
+                        &raw,
+                        &format!(
+                            "unknown preset; known: {}",
+                            blitzkrieg_core::sim::FILL_MODEL_PRESET_NAMES.join(", ")
+                        ),
+                    );
+                }
+            }
         }
         // Dry-mode test hooks (#175 gate). Both are inert unless a mode that
         // simulates the redemption is running, so a live deployment can pass

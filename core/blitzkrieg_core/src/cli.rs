@@ -673,6 +673,16 @@ pub const FLAGS: &[FlagSpec] = &[
         "Fill model: taker venue→report RTT in ms (default 0).",
     ),
     flag(
+        "--fill-model",
+        "<identity|l2-delay>",
+        "#862: a named fill-model PRESET (a whole model, not one dial). \
+         `l2-delay` = 150 ms taker decision→venue + 150 ms report RTT, \
+         level-by-level FOK taker walk on the mirrored L2, and STRICT \
+         trade-through maker fills (a resting order fills only when the market \
+         pierces its price, never on a mere touch). Mutually exclusive with \
+         --backtest-mode (the ladder re-prices these dials).",
+    ),
+    flag(
         "--fee-model",
         "<legacy_quadratic|official>",
         "Replay-only: which taker-fee schedule the replay charges (asking for it \
