@@ -43,6 +43,7 @@ pub mod rest;
 pub mod signing;
 pub mod types;
 
+pub use discovery::discovery_tests_only_spawn;
 pub use error::{PredictError, into_core_error};
 pub use executor::spawn_if_configured;
 pub use feed::{feed_tests_only_prob_in_band, feed_tests_only_spawn};
