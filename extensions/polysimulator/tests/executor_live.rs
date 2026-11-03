@@ -1108,17 +1108,23 @@ fn the_plugin_declares_exactly_simulated() {
     );
 }
 
-// ── 9. the ledger figure is the venue's equity (#877) ───────────────────
+// ── 9. the ledger figure is the venue's CASH (#877 → #909 follow-up) ──────
 
 #[tokio::test]
-async fn the_ledger_seed_and_every_sweep_carry_the_venues_equity_not_bare_cash() {
+async fn the_ledger_seed_and_every_sweep_carry_the_venues_cash_not_equity() {
     // #877, the website identity as one balance body: available cash 111.62
-    // + open positions 20.00 = account equity 131.62. The ledger figure is
-    // the EQUITY on both the boot seed (seed_balance) and every sweep's
-    // re-align (venue_free_balance) — seeding bare cash left the replay
-    // equity systematically short by the open-position value (20 of the
-    // +31.6% points). `unrealized_pnl` rides the evidence line, never the
-    // arithmetic.
+    // + open positions 20.00 = account equity 131.62. BEHAVIOUR CHANGE
+    // (#909's independent post-merge acceptance): the ledger channels these
+    // pushes feed are spendable CASH books — seed_balance seeds the ledger's
+    // balance the reserve gate (available = balance − reserved) spends, and
+    // venue_free_balance folds into the same book on every sweep. The old
+    // equity seed over-approved the gate by the position value (+17.9%:
+    // approve 131.62 while 111.62 is real) and an equity re-alignment folded
+    // the position's market value back in as phantom cash on every no-order
+    // sweep (residual flagged it; the recon's ledger_realigned exemption
+    // absorbed it — fail-open). Now the ledger takes the CASH on BOTH paths;
+    // the equity equality view stays read-only telemetry in the ready/sweep
+    // log lines. (Renamed from ..._carry_the_venues_equity_not_bare_cash.)
     let (url, _recorded) = mock_server(routes_for(
         r#"{"balance":"111.62","currency":"USDC","starting_balance":"100.00","unrealized_pnl":"0.00","total_value":"131.62"}"#,
         r#"{"orders":[]}"#,
@@ -1133,8 +1139,8 @@ async fn the_ledger_seed_and_every_sweep_carry_the_venues_equity_not_bare_cash()
         client_for(&url),
     );
     // The boot seed lands immediately; the first re-align follows one sweep
-    // period later (~5s). Two pushes of the SAME equity figure prove BOTH
-    // paths merged the open positions.
+    // period later (~5s). Two pushes of the SAME cash figure prove BOTH
+    // paths took the cash, never the equity above it.
     wait_until(15_000, || {
         sink.balances
             .try_lock()
@@ -1143,20 +1149,21 @@ async fn the_ledger_seed_and_every_sweep_carry_the_venues_equity_not_bare_cash()
     })
     .await;
     let balances = sink.balances.lock().await;
+    let cash = Decimal::from_str("111.62").unwrap();
     let equity = Decimal::from_str("131.62").unwrap();
     assert_eq!(
         balances.first().copied(),
-        Some(equity),
-        "the boot seed must carry the venue equity (cash 111.62 + positions 20.00), got {:?}",
+        Some(cash),
+        "the boot seed must carry the venue CASH the reserve gate can actually spend (the equity figure over-approved by the position value), got {:?}",
         balances.first()
     );
     assert!(
-        balances.iter().all(|b| *b == equity),
-        "every sweep re-align must carry the same equity figure, got {balances:?}"
+        balances.iter().all(|b| *b == cash),
+        "every sweep re-align must carry the same cash figure, got {balances:?}"
     );
     assert!(
-        !balances.contains(&Decimal::from_str("111.62").unwrap()),
-        "bare cash must never reach the ledger while the venue reports equity"
+        !balances.contains(&equity),
+        "the equity figure must never reach the ledger while cash is authoritative (#909)"
     );
 }
 
