@@ -478,6 +478,26 @@ pub trait EngineStrategy: Send + Sync {
     ) {
     }
 
+    /// #916: replay-time string tunables — the `--backtest-knob` values whose
+    /// manifest declaration is `"type": "string"` (e.g. mad_dog's
+    /// `spot_missing`). These ride NO decimal registry cell by design: a
+    /// string tunable is read through the strategy's `bk.params()` bag, so the
+    /// override merges into that bag's manifest-default start. Callers apply
+    /// this only where the strategy actually loads (a `--backtest-knob` with
+    /// no application site is a startup refusal, never a silent skip — the
+    /// loud-counterfactual rule). Default: ignore.
+    fn set_string_params(&mut self, _overrides: &[(String, String)]) {}
+
+    /// #916: the knobs whose manifest declaration is `"type": "string"` —
+    /// `--backtest-knob` names the replay channel routes to the params bag
+    /// verbatim (not the Decimal registry). Empty by default: the counterfactual
+    /// channel treats every other knob as decimal and refuses non-numeric
+    /// values loudly, so a name missing here can never smuggle a word past the
+    /// arithmetic.Declaration is the strategy's own; the kernel never invents.
+    fn string_tunable_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The knobs this strategy declares evolvable, with their domains
     /// (E2-c / #28). Default = none, i.e. **not evolvable**; the host then
     /// builds no shadow variants for this strategy and reports it as such.

@@ -162,6 +162,17 @@ impl BTreeMapDefs {
             .map(|(k, v)| (k.clone(), v.default.clone()))
             .collect()
     }
+
+    /// #916: the tunables the manifest declares `"type": "string"` — values
+    /// that are words, not numbers, and read through `bk.params()` verbatim.
+    /// A name NOT on this list takes the decimal counterfactual channel.
+    pub fn string_names(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(_, v)| v.r#type == "string")
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
 }
 
 /// #393: the evolvable-knob declaration a Lua manifest carries — the Lua
@@ -212,6 +223,9 @@ struct PackageSource {
     code: Arc<str>,
     modes: Vec<StrategyMode>,
     specs: Vec<KnobSpec>,
+    /// #916: the manifest's `"type": "string"` tunables — knob names whose
+    /// counterfactual overrides ride the params bag verbatim.
+    string_names: Option<Vec<String>>,
     defaults: HashMap<String, String>,
 }
 
@@ -368,6 +382,7 @@ pub fn load_lua_package(dir: &Path) -> Result<LoadedLua, String> {
             code: Arc::from(code.as_str()),
             modes: declared_modes.clone(),
             specs: specs_from_tunables(&manifest.tunables),
+            string_names: Some(manifest.tunables.string_names()),
             defaults: manifest.tunables.defaults(),
         },
     );
@@ -436,6 +451,10 @@ pub struct LuaEngineAdapter {
     /// merges over (#393): the cell carries the EVOLVED knobs, tunables that
     /// declared no domain keep their manifest default.
     defaults: HashMap<String, String>,
+    /// #916: the tunables the manifest declares `"type": "string"` — the
+    /// counterfactual `--backtest-knob` names that ride this strategy's
+    /// params bag verbatim instead of the Decimal registry.
+    string_names: Vec<String>,
     /// #393: the evolvable knobs this package declared (manifest tunables
     /// with a coherent domain). Empty = not evolvable — the explicit
     /// declaration, never a kernel-side guess.
@@ -477,9 +496,13 @@ impl LuaEngineAdapter {
         if let Ok(mut st) = state.lock() {
             st.params = tunables.clone();
         }
-        let specs = source_vault_for(inner.name())
-            .map(|s| s.specs)
-            .unwrap_or_default();
+        let (specs, string_names) = {
+            let v = source_vault_for(inner.name());
+            match v {
+                Some(s) => (s.specs, s.string_names.unwrap_or_default()),
+                None => (Vec::new(), Vec::new()),
+            }
+        };
         Self {
             inner,
             account_id,
@@ -495,6 +518,7 @@ impl LuaEngineAdapter {
             entry_maker: false,
             params_cell: None,
             defaults: tunables,
+            string_names,
             specs,
             fee_cell: Arc::new(Mutex::new(None)),
             arb_leg_config: None,
@@ -529,6 +553,7 @@ impl LuaEngineAdapter {
             entry_maker: false,
             params_cell: None,
             defaults: tunables,
+            string_names: Vec::new(),
             specs: Vec::new(),
             fee_cell,
             arb_leg_config: None,
@@ -543,6 +568,14 @@ impl LuaEngineAdapter {
     pub fn declare(mut self, holds_to_settlement: bool, gate_exemptions: GateExemptions) -> Self {
         self.holds_to_settlement = holds_to_settlement;
         self.gate_exemptions = gate_exemptions;
+        self
+    }
+
+    /// #916: stamp the manifest's string-typed tunables (the loaded-package
+    /// path). These are the knob names a `--backtest-knob` override may
+    /// inject verbatim into `bk.params()`.
+    pub fn declare_string_tunables(mut self, string_names: Vec<String>) -> Self {
+        self.string_names = string_names;
         self
     }
 
@@ -975,6 +1008,24 @@ impl EngineStrategy for LuaEngineAdapter {
         // Resolve only OUR cell (the foreign.rs pattern): no declared knobs →
         // no cell → the manifest defaults keep answering `bk.params()`.
         self.params_cell = registry.as_ref().and_then(|r| r.handle_for(self.name()));
+    }
+
+    fn set_string_params(&mut self, overrides: &[(String, String)]) {
+        // #916: the bag's START is the manifest defaults (`self.defaults` —
+        // the static map the per-cycle rebuild copies from, lua_loader.rs
+        // merge site). Merging HERE means the override survives every cycle —
+        // the registry-cell merge only overwrites the decimal knobs it
+        // carries, never these keys. A string tunable the manifest DOES
+        // declare replaces its default; the caller (the backtester) already
+        // refuses unknown knob names upstream, so an undeclared name cannot
+        // reach this line through the replay path.
+        for (k, v) in overrides {
+            self.defaults.insert(k.clone(), v.clone());
+        }
+    }
+
+    fn string_tunable_names(&self) -> Vec<String> {
+        self.string_names.clone()
     }
 
     /// 跨所套利弹窗 v2: store the leg configuration. The STAMP source and the

@@ -250,7 +250,13 @@ pub(crate) struct Args {
     /// Counterfactual `--backtest-knob <strategy>:<knob>=<value>` overrides,
     /// handed to the replayed strategies through the Shadow Evolution hot-param
     /// path (so a replay can A/B a knob value on the SAME frozen corpus).
-    pub(crate) backtest_knobs: Vec<(String, String, Decimal)>,
+    ///
+    /// The value stays a STRING here (#916): a manifest tunable may declare
+    /// `"type": "string"` (mad_dog's `spot_missing` is one), and such a knob's
+    /// admissible value is a word, not a number. Whether a given override is
+    /// numeric is decided against the strategy's own declaration at apply time
+    /// (see `parse_backtest_knob`); the decimal path is unchanged byte for byte.
+    pub(crate) backtest_knobs: Vec<(String, String, String)>,
     /// #351: the replay mode — `mine` / `verify` / `sweep`. Empty = the
     /// historic single-run behaviour (no mode requested, one replay, one
     /// report — the shape every existing gate and script drives).
@@ -577,10 +583,14 @@ fn split_assets(s: &str) -> Vec<String> {
 /// Parse one `--backtest-knob <strategy>:<knob>=<value>` override.
 ///
 /// Shape is deliberate: exactly one `:` and one `=`, the strategy and knob names
-/// non-empty, and the value a decimal string (the wire rule for knob values
-/// everywhere else). A malformed spec is a startup error, never a silently
-/// ignored counterfactual that would make a comparison meaningless.
-fn parse_backtest_knob(spec: &str) -> Result<(String, String, Decimal), String> {
+/// non-empty. The VALUE is taken verbatim (#916) — a manifest tunable may
+/// declare `"type": "string"` (mad_dog's `spot_missing` is one, "block"/"pass"),
+/// so whether a value is numeric is a property of the strategy's OWN
+/// declaration, not of the flag. Parsing against that declaration happens at
+/// apply time (`backtest.rs`); here the flag only demands a well-formed
+/// `strategy:knob=word-or-number`. A malformed spec is a startup error, never a
+/// silently ignored counterfactual that would make a comparison meaningless.
+fn parse_backtest_knob(spec: &str) -> Result<(String, String, String), String> {
     let (strategy, rest) = spec
         .split_once(':')
         .ok_or_else(|| "want <strategy>:<knob>=<value>".to_string())?;
@@ -592,8 +602,7 @@ fn parse_backtest_knob(spec: &str) -> Result<(String, String, Decimal), String> 
     if strategy.is_empty() || knob.is_empty() {
         return Err("strategy and knob must not be empty".into());
     }
-    let value = Decimal::from_str(value.trim()).map_err(|e| format!("bad decimal value: {e}"))?;
-    Ok((strategy.to_string(), knob.to_string(), value))
+    Ok((strategy.to_string(), knob.to_string(), value.to_string()))
 }
 
 /// Parse one `--exit-*` percentage value.

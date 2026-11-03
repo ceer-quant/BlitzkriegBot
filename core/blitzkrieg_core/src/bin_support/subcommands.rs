@@ -3,7 +3,6 @@
 // Declared only from `main.rs`, so these stay private to the bin target.
 
 use blitzkrieg_core::service::CoreConfig;
-use rust_decimal::Decimal;
 
 /// Offline MarketRegime evaluation (E16 / #98): label the archive's windows
 /// with the offline rule and score the online state machine against those
@@ -113,7 +112,9 @@ fn backtest_once(
     cfg: CoreConfig,
     tick_ms: i64,
     tail_ms: i64,
-    knobs: &[(String, String, Decimal)],
+    // #916: values stay strings; numeric-vs-word is decided against the
+    // strategy's manifest declaration in `backtest.rs` at apply time.
+    knobs: &[(String, String, String)],
     report_path: Option<&str>,
     mode: &str,
 ) -> blitzkrieg_core::backtest::BacktestReport {
@@ -199,7 +200,7 @@ pub(crate) fn run_backtest(
     cfg: CoreConfig,
     tick_ms: i64,
     tail_ms: i64,
-    knobs: Vec<(String, String, Decimal)>,
+    knobs: Vec<(String, String, String)>,
 ) {
     let _ = backtest_once(archive, cfg, tick_ms, tail_ms, &knobs, report_path, "");
 }
@@ -217,7 +218,7 @@ pub(crate) fn run_mode_backtest(
     mut cfg: CoreConfig,
     tick_ms: i64,
     tail_ms: i64,
-    knobs: Vec<(String, String, Decimal)>,
+    knobs: Vec<(String, String, String)>,
     mode: &str,
     verify_latency_ms: i64,
 ) {

@@ -914,3 +914,189 @@ fn l2_delay_preset_replays_and_names_itself_in_the_report() {
         "the l2-delay coordinate must be readable from the report: {line}"
     );
 }
+
+// ── #916 · --backtest-knob dispatches on the strategy's OWN declaration ────
+
+/// A strategy that declares ONE string tunable and writes every override it
+/// heard somewhere host-visible. The point is the CHANNEL: a string tunable
+/// must never reach the Decimal registry and a word must never parse as one.
+struct StringKnobStrategy {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl StringKnobStrategy {
+    fn name() -> &'static str {
+        "string-knob-probe"
+    }
+}
+
+impl crate::strategies::EngineStrategy for StringKnobStrategy {
+    fn name(&self) -> &str {
+        Self::name()
+    }
+    fn on_book(&mut self, _t: &str, _s: &crate::model::OrderbookSnapshot, _now: i64) {}
+    fn on_round(&mut self, _slot: i64, _time_left_sec: i64, _now_ms: i64) {}
+    fn find_candidates(
+        &mut self,
+        _ctx: &crate::strategies::StrategyCtx<'_>,
+    ) -> Vec<crate::signal::TradeSignal> {
+        Vec::new()
+    }
+    fn set_string_params(&mut self, overrides: &[(String, String)]) {
+        self.seen
+            .lock()
+            .expect("lock")
+            .extend(overrides.iter().cloned());
+    }
+    fn string_tunable_names(&self) -> Vec<String> {
+        vec!["spot_missing".into()]
+    }
+    fn evolvable_knobs(&self) -> Vec<strategy_logic::params::KnobSpec> {
+        vec![strategy_logic::params::KnobSpec::new(
+            "gate_threshold",
+            rust_decimal_macros::dec!(0.5),
+            rust_decimal_macros::dec!(0.0),
+            rust_decimal_macros::dec!(1.0),
+        )]
+    }
+}
+
+/// `mad_dog:spot_missing=pass`: the word rides the params bag verbatim — the
+/// strategy SEES the string, the Decimal registry never does, and the replay
+/// runs to a report.
+#[test]
+fn string_tunable_rides_the_params_bag_verbatim() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut b = EventBacktester::new(
+        BacktestConfig {
+            core: base_core(None),
+            tick_ms: 50,
+            tail_ms: 0,
+            hot_params: vec![(
+                StringKnobStrategy::name().to_string(),
+                "spot_missing".to_string(),
+                "pass".to_string(),
+            )],
+            progress: None,
+            mode: String::new(),
+        },
+        Box::new(VecSource::new(scenario_events(NOW))),
+    );
+    b.host_strategy(Box::new(StringKnobStrategy {
+        seen: std::sync::Arc::clone(&seen),
+    }));
+    assert!(
+        b.core_mut()
+            .set_strategy_enabled(StringKnobStrategy::name(), true),
+        "the hosted adapter registers under its name"
+    );
+    b.run().expect("a string override is not a decimal refusal");
+    let heard = seen.lock().expect("lock").clone();
+    assert_eq!(
+        heard,
+        vec![("spot_missing".to_string(), "pass".to_string())],
+        "the string tunable reached the bag verbatim, not a decimal pipe"
+    );
+}
+
+/// A decimal knob handed a word is refused at startup with the flag, value and
+/// expected type named — the P0 rule a string channel must not erode (#228/
+/// #441): `spread_arb:take_profit_pct=abc` never silently becomes a string.
+#[test]
+fn decimal_knob_refuses_a_word_loudly() {
+    let mut b = EventBacktester::new(
+        BacktestConfig {
+            core: base_core(None),
+            tick_ms: 50,
+            tail_ms: 0,
+            hot_params: vec![(
+                StringKnobStrategy::name().to_string(),
+                "gate_threshold".to_string(),
+                "abc".to_string(),
+            )],
+            progress: None,
+            mode: String::new(),
+        },
+        Box::new(VecSource::new(scenario_events(NOW))),
+    );
+    b.host_strategy(Box::new(StringKnobStrategy {
+        seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    }));
+    assert!(
+        b.core_mut()
+            .set_strategy_enabled(StringKnobStrategy::name(), true),
+        "the hosted adapter registers under its name"
+    );
+    let err = b
+        .run()
+        .expect_err("a word on a decimal knob must be a startup refusal");
+    assert!(
+        err.contains("gate_threshold") && err.contains("not a decimal"),
+        "the refusal names the knob and the decimal expectation: {err}"
+    );
+}
+
+/// An undeclared knob name must not ride the string channel by default: a
+/// name the strategy never opened would otherwise enter the bag without any
+/// declaration behind it.
+#[test]
+fn undeclared_knob_name_refuses() {
+    let mut b = EventBacktester::new(
+        BacktestConfig {
+            core: base_core(None),
+            tick_ms: 50,
+            tail_ms: 0,
+            hot_params: vec![(
+                StringKnobStrategy::name().to_string(),
+                "no_such_knob".to_string(),
+                "1.5".to_string(),
+            )],
+            progress: None,
+            mode: String::new(),
+        },
+        Box::new(VecSource::new(scenario_events(NOW))),
+    );
+    b.host_strategy(Box::new(StringKnobStrategy {
+        seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    }));
+    assert!(
+        b.core_mut()
+            .set_strategy_enabled(StringKnobStrategy::name(), true),
+        "the hosted adapter registers under its name"
+    );
+    let err = b
+        .run()
+        .expect_err("an undeclared knob must be a startup refusal");
+    assert!(
+        err.contains("no_such_knob"),
+        "the refusal names the unknown knob: {err}"
+    );
+}
+
+/// A `--backtest-knob` naming a strategy nothing hosted carries refuses too —
+/// the counterfactual would otherwise be a silent no-op that reads as data.
+#[test]
+fn unknown_strategy_refuses() {
+    let mut b = EventBacktester::new(
+        BacktestConfig {
+            core: base_core(None),
+            tick_ms: 50,
+            tail_ms: 0,
+            hot_params: vec![(
+                "absent-strategy".to_string(),
+                "spot_missing".to_string(),
+                "pass".to_string(),
+            )],
+            progress: None,
+            mode: String::new(),
+        },
+        Box::new(VecSource::new(Vec::new())),
+    );
+    let err = b
+        .run()
+        .expect_err("an override with no application site must refuse");
+    assert!(
+        err.contains("absent-strategy"),
+        "the refusal names the unhosted strategy: {err}"
+    );
+}

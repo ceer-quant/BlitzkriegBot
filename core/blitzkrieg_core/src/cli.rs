@@ -648,7 +648,11 @@ pub const FLAGS: &[FlagSpec] = &[
     flag(
         "--backtest-knob",
         "<strategy:knob=value>",
-        "Repeatable: counterfactual knob override handed to the replayed strategy.",
+        "Repeatable: counterfactual knob override handed to the replayed \
+         strategy (#916). The value is parsed against the strategy manifest's \
+         own tunable type — decimal/int knobs read an exact decimal, string \
+         knobs read the word verbatim; an undeclared knob or a wrong-shaped \
+         value is a startup error, not a silent skip.",
     ),
     flag(
         "--backtest-mode",
