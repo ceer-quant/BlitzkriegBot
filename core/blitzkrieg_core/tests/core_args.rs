@@ -517,3 +517,53 @@ fn the_harness_can_observe_a_real_boot() {
          assertions meaningful"
     );
 }
+
+/// #908 acceptance defect ②: `--fill-model` is a replay-shaping flag, so a
+/// serve/dry boot must refuse it exactly like --backtest-fast/--maker-rebate —
+/// the fill model a live core answers with is a CONFIGURED truth, not a
+/// per-invocation choice.
+///
+/// Unlike the parse-time refusals above, this one cannot land before the
+/// read-only boot echoes (#202 sizing echo prints unconditionally at :243,
+/// before the offline modes return): a replay MUST pass --fill-model, so the
+/// check can only run on the serving path. The contract is therefore
+/// exit-2-without-serving — dead before serving, not silent before echoing.
+#[test]
+fn a_fill_model_preset_is_refused_outside_a_replay() {
+    for preset in ["l2-delay", "identity"] {
+        let dir = sandbox("fill-model");
+        let run = run_core(&dir, &["--fill-model", preset], Duration::from_secs(10));
+        assert!(
+            !run.killed,
+            "{preset}: the core was still running after the grace period — it BOOTED. stderr:\n{}",
+            run.stderr
+        );
+        assert_eq!(
+            run.code,
+            Some(2),
+            "{preset}: must exit 2. stderr:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(BOOT_MARKER),
+            "{preset}: the read-only echo did not print — \
+             the refusal is running somewhere it must not (offline modes pass). stderr:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("--fill-model"),
+            "{preset}: the flag is named. stderr:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("--backtest"),
+            "{preset}: the replay path is pointed at. stderr:\n{}",
+            run.stderr
+        );
+        let entries = sandbox_entries(&dir);
+        assert!(
+            entries.is_empty(),
+            "{preset}: a refused start writes NOTHING (no ledger, no lock, no socket): {entries:?}"
+        );
+    }
+}
