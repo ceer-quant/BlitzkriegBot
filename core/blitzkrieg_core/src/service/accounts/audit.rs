@@ -144,6 +144,14 @@ impl Core {
             venue_free: venue_free.map(|(_, b)| b),
             venue_free_at_ms: venue_free.map(|(t, _)| t),
             ledger_realigned,
+            // Issue #921: whether the correction above was ALREADY spent — the
+            // attribution mark the previous audit left on this venue's slot.
+            // `None` = fresh evidence (or nothing to explain).
+            realign_explained_at: self
+                .audit
+                .realign_explained
+                .get(active_venue.as_str())
+                .copied(),
             open_positions,
             seen_trades,
             has_trade_log,
@@ -156,8 +164,27 @@ impl Core {
     ///
     /// Called from `tick` on `audit_interval_sec`, and directly by tests.
     pub fn run_accounting_audit(&mut self, now_ms: i64) -> AuditReport {
+        let active_venue = self.accounts.active_venue().to_string();
         let input = self.build_audit_input(now_ms);
         let report = crate::reconcile::audit_accounting(&input, self.audit.anchor.as_ref());
+        // Issue #921: an audit that CLAIMS the venue's own correction as the
+        // residual's explanation marks it spent — the pure audit cannot mutate
+        // its input, so the caller carries the attribution into the per-venue
+        // slot. The NEXT audit then reads it as `realign_explained_at` and the
+        // same correction cannot excuse a second residual. A NEWER correction
+        // (written by `realign_venue_cash`) clears the slot first: fresh
+        // evidence, spendable once again.
+        if let Some(at_ms) = report.realign_claimed_at {
+            self.audit
+                .realign_explained
+                .insert(active_venue.clone(), at_ms);
+            tracing::info!(
+                venue = %active_venue,
+                correction_at_ms = at_ms,
+                "trade-leg residual attributed to the venue's own ledger correction — \
+                 one-shot excuse claimed; a lingering residual next audit comes back unexplained (issue #921)"
+            );
+        }
 
         // Anchor: taken at the first audit the STRUCTURAL checks pass, then never
         // moved while anything is failing — re-anchoring on a failure would hide
@@ -228,7 +255,18 @@ impl Core {
             });
         } else if !report.ok {
             // Failing but not (yet) halting: still loud, still persisted.
-            let message = format!("accounting audit drift: {}", report.note);
+            // Issue #921: a residual explained by the venue's own correction is
+            // named AS the venue's correction — a plain cross-source drift is
+            // not to be confused with it, and the excuse being claimed once is
+            // stated in the same breath.
+            let message = if report.realign_claimed_at.is_some() {
+                format!(
+                    "accounting audit drift (venue correction claimed as the residual, issue 921): {}",
+                    report.note
+                )
+            } else {
+                format!("accounting audit drift: {}", report.note)
+            };
             tracing::warn!(drift = %report.drift_usd, "{}", message);
             eprintln!("core: accounting audit drift — see the warn log line above");
             self.emit(Event::RiskAlert {

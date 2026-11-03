@@ -949,13 +949,15 @@ async fn sweep(
         host.on_fill(to_fill(&trade.venue_order_id, trade)).await;
     }
 
-    // Equity truth (#877): re-align the ledger's equity view every sweep —
-    // the same figure as the boot seed: the venue's own `total_value` (cash
-    // + open positions) when reported, the cash floor when not (the
-    // degradation is logged here on every sweep; the healthy path stays as
-    // silent as it always was). The kernel folds this through its
-    // reserved-aware venue-cash semantics (`fold_venue_free`): resting
-    // commitments still surface as drift warnings, never auto-corrected.
+    // (#918, #909 follow-up) The ledger takes the CASH figure collected below —
+    // NOT the equity view, and not the venue's `total_value`. The comment block
+    // that preceded it said "re-align the ledger's equity view … the venue's
+    // own total_value", which is the retired contract: folding open positions
+    // back into the cash book pumped phantom cash into the account on every
+    // no-order sweep. `ledger_equity` still reports the degradation to a cash
+    // floor when the venue does not state a cash figure. The kernel folds this
+    // through its reserved-aware venue-cash semantics (`fold_venue_free`):
+    // resting commitments still surface as drift warnings, never auto-corrected.
     match client.balance().await {
         Ok(b) => {
             let equity = ledger_equity(&b);

@@ -113,6 +113,12 @@ impl Core {
                 self.audit
                     .last_realign
                     .insert(venue.to_string(), (ts, b - previous));
+                // Issue #921: a NEWER correction overwrites the slot, so any
+                // spend mark from the audit goes with it — fresh evidence is
+                // spendable once again. Clearing here (not on read) keeps the
+                // one-shot semantics on the WITER side: an unchanged repeat
+                // report (`previous == b`) does NOT re-arm the slot.
+                self.audit.realign_explained.remove(venue);
                 tracing::info!(
                     account = %target.as_str(),
                     venue = %venue,

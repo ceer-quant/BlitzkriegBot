@@ -263,6 +263,14 @@ pub const AUDIT_TOL_USD: Decimal = Decimal::from_parts(1, 0, 0, false, 4);
 /// rounding. Everything compared WITHIN the core uses [`AUDIT_TOL_USD`].
 pub const AUDIT_VENUE_TOL_USD: Decimal = Decimal::from_parts(2, 0, 0, false, 2);
 
+/// How long a venue's own ledger correction stays eligible to explain a
+/// trade-leg residual (issue #921). The audit interval default is 30s and the
+/// plugin host re-reports on every sweep/reconnect, so a real correction is
+/// always re-applied long before this expires; what expires is a one-time
+/// snapshot kept forever by the `last_realign` slot, which is exactly the
+/// "standing green light" the one-shot attribution must not become.
+pub const REALIGN_EXPLAIN_TTL_MS: i64 = 120_000;
+
 /// The cash identity at one instant, for the anchor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CashIdentity {
@@ -332,7 +340,20 @@ pub struct AuditInput {
     /// nothing rests, the venue's free cash IS our cash), so a trade-leg residual
     /// that equals this delta is the venue's own correction rather than a local
     /// inconsistency — see the trade-leg check.
+    ///
+    /// Issue #921: the excuse is ONE-SHOT and FRESH. Once an audit attributes a
+    /// residual to this correction, the attribution is recorded in
+    /// `realign_explained_at` and the same correction never excuses a second
+    /// residual; a fresher correction (the venue reporting again overwrites the
+    /// slot) re-arms it. This is the consumption mark's OTHER half: the audit
+    /// run finds it here.
     pub ledger_realigned: Option<(i64, Decimal)>,
+    /// When an audit last attributed a trade-leg residual to the correction
+    /// above (audit-instant ms; None = this correction has not been spent yet,
+    /// also the shape for a venue that never realigned). Set by the audit run,
+    /// cleared when the venue overwrites the slot with a newer correction: a
+    /// NEW correction is fresh evidence, spendable once.
+    pub realign_explained_at: Option<i64>,
     pub open_positions: usize,
     pub seen_trades: u64,
     /// False when no trade log is configured (the backtester, most in-process
@@ -440,6 +461,12 @@ pub struct AuditReport {
     /// anchored identity is not defined until a clean audit takes the anchor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<CashIdentity>,
+    /// Issue #921: this audit attributed the trade-leg residual to the venue's
+    /// own ledger correction stamped at this instant. Serialized so the JSONL
+    /// shows the excuse being claimed exactly once; `None` = no attribution
+    /// was made (residual unexplained, or nothing matched).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realign_claimed_at: Option<i64>,
     pub open_positions: usize,
     pub open_buys: usize,
     pub seen_trades: u64,
@@ -481,9 +508,18 @@ impl AuditReport {
 }
 
 /// Compare the core's accounting views. Pure: no I/O, no clocks, no mutation.
+///
+/// Returns, alongside the report, the attribution mark for the caller to carry
+/// into the NEXT audit's input: the instant THIS audit attributed a trade-leg
+/// residual to the venue's own correction (issue #921). Pure code cannot set
+/// it back into `input` — the CALLER owns the bookkeeping (see
+/// `AuditInput.realign_explained_at`).
 pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> AuditReport {
     let id = &input.identity;
     let mut checks: Vec<AuditCheck> = Vec::new();
+    // The instant whose correction, if any, is claimed by this report — None
+    // until trade_leg settles (filled below out of the report assembly).
+    let mut realign_spent: Option<i64> = None;
 
     // 1) The ledger's own cash identity. Structural: both sides are the same
     //    struct, so a failure is a bug in the ledger, not a stale read.
@@ -561,12 +597,50 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
             )),
             Some(a) => {
                 let expected = id.expected_after(a);
-                let realign = input
+                // Issue #921: the venue's own correction explains a residual
+                // ONCE, within a freshness window. The slot is never cleared by
+                // its writer, so without the two brackets below any later
+                // residual that happens to equal the standing delta would keep
+                // borrowing it as an excuse — forever, and once per audit —
+                // and the cross-source "repeat to halt" would never strike.
+                // Two brackets:
+                //  - one-shot: the attribution mark (`realign_explained_at`,
+                //    set by the caller after a previous audit that used this
+                //    correction) declines a second use;
+                //  - fresh: a correction older than REALIGN_EXPLAIN_TTL_MS is
+                //    declined too (the venue reports every sweep, so the
+                //    standing truth is always reapplied in practice).
+                //
+                // A DECLINED matcher is still a failure and now STRUCTURAL:
+                // the residual is no longer believed to be the venue's number,
+                // so there is "no fetch race to forgive" and entries halt at
+                // once instead of on a repeat that explained-away would never
+                // let arrive. Either way the detail states the offered
+                // correction and the refusal reason — loud, not silent.
+                let matcher = input
                     .ledger_realigned
                     .filter(|(_, d)| (id.total() - expected - d).abs() <= AUDIT_TOL_USD);
+                let declined: Option<&str> = matcher.as_ref().and_then(|(at_ms, _)| {
+                    if input
+                        .realign_explained_at
+                        .map(|t| t >= *at_ms)
+                        .unwrap_or(false)
+                    {
+                        Some("already spent on an earlier residual (not overwritten since)")
+                    } else if input.now_ms - *at_ms > REALIGN_EXPLAIN_TTL_MS {
+                        Some("stale: older than the fresh window")
+                    } else {
+                        None
+                    }
+                });
+                let explained = matcher.is_some() && declined.is_none();
                 let mut c = AuditCheck::new(
                     "trade_ledger_identity",
-                    realign.is_none(),
+                    // Structural = NO acceptable explanation: the books are
+                    // local and same-source, halting at once is right. The
+                    // ONLY thing that downgrades to cross-source is an
+                    // accepted (one-shot, fresh) venue correction.
+                    !explained,
                     expected,
                     id.total(),
                     format!(
@@ -587,11 +661,23 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
                         id.receivable - a.receivable,
                     ),
                 );
-                if let Some((at_ms, d)) = realign {
-                    c.detail.push_str(&format!(
-                        "; residual is the venue's own ledger correction at {at_ms} (Δ{d}): \
-                         cash was set from the venue, the trade record has not caught up"
-                    ));
+                if let Some((at_ms, d)) = matcher {
+                    if explained {
+                        c.detail.push_str(&format!(
+                            "; residual is the venue's own ledger correction ({d:+} at {at_ms}): \
+                             cash was set from the venue, the trade record has not caught up — \
+                             ONE-SHOT excuse: it is claimed for this audit (issue #921), \
+                             the slot is marked spent and a lingering residual next audit \
+                             comes back unexplained"
+                        ));
+                        realign_spent = Some(at_ms);
+                    } else {
+                        c.detail.push_str(&format!(
+                            "; residual matches the venue's ledger correction (Δ{d:+} at {at_ms}) \
+                             but the excuse is REFUSED: {} — downgraded back to STRUCTURAL (issue #921)",
+                            declined.unwrap_or_default()
+                        ));
+                    }
                 }
                 if input.seen_trades == 0 {
                     // Nothing has been closed yet, so the trade record says nothing
@@ -681,6 +767,7 @@ pub fn audit_accounting(input: &AuditInput, anchor: Option<&CashIdentity>) -> Au
         halt_entries: structural_failure,
         checks,
         anchor: anchor.copied(),
+        realign_claimed_at: realign_spent,
         open_positions: input.open_positions,
         open_buys: input.open_buys,
         seen_trades: input.seen_trades,
@@ -1005,6 +1092,7 @@ mod tests {
             venue_free: None,
             venue_free_at_ms: None,
             ledger_realigned: None,
+            realign_explained_at: None,
             open_positions: 0,
             seen_trades: 0,
             has_trade_log: true,
@@ -1272,7 +1360,10 @@ mod tests {
         assert!(c(&r).structural);
 
         // The same 5 USD, but the host set the ledger from the venue by exactly
-        // that amount: the correcting party is external, so it is cross-source.
+        // that amount — fresh (now 1000, correction at 900): the correcting
+        // party is external, so it is cross-source, and the excuse is CLAIMED
+        // for this audit (issue #921): the report carries the attribution.
+        input.now_ms = 1000;
         input.ledger_realigned = Some((900, dec!(-5)));
         let r = audit_accounting(&input, Some(&anchor));
         assert!(
@@ -1283,12 +1374,88 @@ mod tests {
         assert!(!c(&r).structural);
         assert_eq!(c(&r).drift, dec!(-5));
         assert!(c(&r).detail.contains("venue's own ledger correction"));
+        assert_eq!(r.realign_claimed_at, Some(900));
 
         // A realignment of a DIFFERENT size does not explain it.
         input.ledger_realigned = Some((900, dec!(-3)));
         let r = audit_accounting(&input, Some(&anchor));
         assert!(r.structural_failure);
         assert!(c(&r).structural);
+        assert_eq!(r.realign_claimed_at, None);
+    }
+
+    /// Issue #921: the venue's own correction is a ONE-SHOT excuse. The first
+    /// audit that matches a residual to it claims the attribution (cross-source
+    /// downgrade, no instant halt); the NEXT audit still seeing the residual
+    /// gets the excuse REFUSED — the check comes back STRUCTURAL, entries halt
+    /// without waiting for a second cross-source strike that the standing
+    /// excuse would keep absorbing. A REFUSED excused-matcher is loud in the
+    /// detail text.
+    #[test]
+    fn a_venue_correction_explains_a_residual_exactly_once() {
+        let anchor = CashIdentity {
+            balance: dec!(100),
+            realized: dec!(0),
+            spent: Decimal::ZERO,
+            received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
+        };
+        let mut input = clean_input();
+        input.identity.balance = dec!(95);
+        input.now_ms = 1000;
+        input.ledger_realigned = Some((900, dec!(-5)));
+
+        // First audit: explained, cross-source, attribution carried out.
+        let r = audit_accounting(&input, Some(&anchor));
+        assert!(!r.structural_failure);
+        assert_eq!(r.realign_claimed_at, Some(900));
+
+        // Next audit (same books, same correction — nothing overwrote it): the
+        // excuse is spent. The residual is UNEXPLAINED → structural.
+        input.realign_explained_at = Some(1000);
+        let r = audit_accounting(&input, Some(&anchor));
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.name == "trade_ledger_identity")
+            .unwrap();
+        assert!(r.structural_failure, "{:?}", c.detail);
+        assert!(c.structural);
+        assert!(c.detail.contains("REFUSED"));
+        assert!(c.detail.contains("already spent"));
+        assert_eq!(r.realign_claimed_at, None);
+    }
+
+    /// Issue #921: a correction older than the fresh window cannot excuse a
+    /// residual either — the venue reports on every sweep, so a standing truth
+    /// is always re-stamped in practice; only the snapshot kept by the
+    /// `last_realign` slot grows stale, and that snapshot must not act as a
+    /// permanent green light.
+    #[test]
+    fn a_stale_correction_cannot_explain_a_residual() {
+        let anchor = CashIdentity {
+            balance: dec!(100),
+            realized: dec!(0),
+            spent: Decimal::ZERO,
+            received: Decimal::ZERO,
+            receivable: Decimal::ZERO,
+        };
+        let mut input = clean_input();
+        input.identity.balance = dec!(95);
+        // Correction older than the TTL.
+        input.now_ms = 900 + REALIGN_EXPLAIN_TTL_MS + 1;
+        input.ledger_realigned = Some((900, dec!(-5)));
+        let r = audit_accounting(&input, Some(&anchor));
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.name == "trade_ledger_identity")
+            .unwrap();
+        assert!(r.structural_failure);
+        assert!(c.structural);
+        assert!(c.detail.contains("REFUSED"));
+        assert!(c.detail.contains("stale"));
+        assert_eq!(r.realign_claimed_at, None);
     }
 
     /// A restarted core has no anchor: the first audit reports the structural
