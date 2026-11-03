@@ -45,7 +45,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
-use blitzkrieg_core::account::config::{load_account_ledgers, load_account_ledgers_single_source};
+use blitzkrieg_core::account::config::{
+    load_account_ledgers_from_env, load_account_ledgers_single_source,
+};
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::model::{
     AccountId, CoreError, CoreErrorCode, CryptoMarket, FillPolicy, Mode, OrderRequest, OrderStatus,
@@ -91,6 +93,17 @@ fn scratch_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/account-decouple-tests");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// env 语法直读的静态查找（config_tests 同款）：把 (键, 值) 对装成闭包，
+/// 免进程环境 cross-contamination。
+fn static_lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    move |key: &str| {
+        pairs
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.to_string())
+    }
 }
 
 /// 双账户 accounts.toml。`paper_strategies` 非空时 paper 表预带 strategies 键
@@ -1083,17 +1096,32 @@ fn account_removal_is_delete_all_but_the_last_account() {
     );
 }
 
-/// 工厂 `user_layer/configs/accounts.toml` 的形状牙：随仓库走的那份文件必须
-/// 永远保持「三账户 + venue 绑定 + 全文不带 strategies 键」。字段面（§9.5
-/// 扩展轮）把 strategies 加进解析器后，这个不变量没有任何东西替我们看着 ——
-/// 而文件里写死的启用集正是「面板策略开关每次重启被改回」（策略永远无法被
-/// 关闭）的根源。解析失败 / 形状漂移都从这里红。
+/// 工厂账户形状牙：随仓库走的是 `.env.example` 的 ACCOUNT_* 模板了（issue 751
+/// 单源迁移，工厂 `user_layer/configs/accounts.toml` 已退役删除，操作员批准
+/// 2026-11-03）。守护对象从 toml 文件转位到 env 语法：模板教操作员照抄的拼法
+/// 必须永远保持「三账户 + venue 绑定 + 不带 STRATEGIES 键」。字段面（§9.5 扩展
+/// 轮）把 strategies 加进解析器后，这个不变量没有任何东西替我们看着 —— 而
+/// 写死的启用集正是「面板策略开关每次重启被改回」（策略永远无法被关闭）的
+/// 根源。解析失败 / 形状漂移都从这里红。
 #[test]
-fn the_factory_accounts_file_binds_venues_and_never_pins_strategies() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs/accounts.toml");
-    let book =
-        load_account_ledgers(&path, NOW, TEST_ALLOWED_ROUNDS).expect("the factory file parses");
+fn the_factory_accounts_shape_binds_venues_and_never_pins_strategies() {
+    // `.env.example`（工厂模板）里记账的拼法逐键复刻——不是写死的集合，是
+    // 模板运行起来必须长成的形状：default/paper/kalshi 三账户。
+    let factory_env = static_lookup(&[
+        ("ACCOUNT_LIST", "default,paper,kalshi"),
+        // ACCOUNT_DEFAULT_*：
+        ("ACCOUNT_DEFAULT_NAME", "主账户"),
+        ("ACCOUNT_DEFAULT_VENUE", "polymarket"),
+        // 不给策略键、不给凭证键：0.2 语义（插件自己的 env 处理原样保留）。
+        ("ACCOUNT_PAPER_NAME", "纸面练习"),
+        ("ACCOUNT_PAPER_STATUS", "read_only"),
+        // ACCOUNT_PAPER_VENUE 保持空 = 未绑定（可交易任意所）。
+        ("ACCOUNT_KALSHI_NAME", "kalshi"),
+        ("ACCOUNT_KALSHI_VENUE", "kalshi"),
+    ]);
+    let book = load_account_ledgers_from_env(NOW, TEST_ALLOWED_ROUNDS, &factory_env)
+        .expect("the factory template parses")
+        .expect("the factory template yields a book");
 
     let rows = book.account_list();
     let mut ids: Vec<String> = rows.iter().map(|a| a.id.to_string()).collect();
@@ -1105,7 +1133,7 @@ fn the_factory_accounts_file_binds_venues_and_never_pins_strategies() {
             "kalshi".to_string(),
             "paper".to_string()
         ],
-        "the factory book ships exactly these three accounts"
+        "the factory template ships exactly these three accounts"
     );
 
     let default = rows
