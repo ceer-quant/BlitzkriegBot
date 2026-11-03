@@ -67,6 +67,33 @@ impl Book {
         }
     }
 
+    /// #862 follow-up: the size a `TradeThrough` fill may take — the depth
+    /// resting STRICTLY through `limit`. A level merely AT the limit is the
+    /// touch the rule refuses to fill on, so `marketable_depth` (which
+    /// retains levels at-or-through) overstates the tradeable volume for
+    /// this rule (the acceptance: 50 shares filled against a pierced depth
+    /// of 1 because limit-price levels got counted). Sum the same walk with
+    /// the strict predicate so the fill's size cap reads exactly the book
+    /// the fill decision pierced.
+    pub fn strict_trade_through_depth(&self, side: Side, limit: Decimal) -> Decimal {
+        match side {
+            // A BUY maker trades against asks BELOW its limit.
+            Side::Buy => self
+                .asks
+                .iter()
+                .filter(|(p, _)| *p < limit)
+                .map(|(_, s)| *s)
+                .sum(),
+            // A SELL maker trades against bids ABOVE its limit.
+            Side::Sell => self
+                .bids
+                .iter()
+                .filter(|(p, _)| *p > limit)
+                .map(|(_, s)| *s)
+                .sum(),
+        }
+    }
+
     /// The two questions [`Book::walk_marketable`] collapses into a single
     /// `None`, asked separately so a refusal can say WHICH one failed (#180):
     /// does any resting level cross `limit` at all, and how much size rests at
@@ -846,6 +873,56 @@ mod tests {
         let empty = Book::default();
         assert!(!empty.trades_through(&order(Side::Buy, dec!(0.40), FillPolicy::Maker)));
         assert!(!empty.trades_through(&order(Side::Sell, dec!(0.40), FillPolicy::Maker)));
+    }
+
+    #[test]
+    fn strict_trade_through_depth_excludes_the_touched_price() {
+        // #862 follow-up: a BUY maker resting at 0.40 with asks 0.39 (strictly
+        // through, 1 share) and 0.40 (the touch, 49 shares) — the volume the
+        // fill may take is the PIERCED depth (1), not the at-or-through 50
+        // the acceptance saw fill.
+        let book = Book {
+            bids: vec![(dec!(0.38), dec!(100))],
+            asks: vec![(dec!(0.40), dec!(49)), (dec!(0.39), dec!(1))],
+            ..Default::default()
+        };
+        assert_eq!(
+            book.marketable_depth(Side::Buy, dec!(0.40)),
+            dec!(50),
+            "the at-or-through reading is the old overstatement"
+        );
+        assert_eq!(
+            book.strict_trade_through_depth(Side::Buy, dec!(0.40)),
+            dec!(1)
+        );
+        // SELL symmetry: a maker resting at 0.42, bids 0.43 (strictly
+        // through, 5) and 0.42 (touch, 95) — pierced depth is 5.
+        let sell_book = Book {
+            bids: vec![(dec!(0.42), dec!(95)), (dec!(0.43), dec!(5))],
+            asks: vec![],
+            ..Default::default()
+        };
+        assert_eq!(
+            sell_book.strict_trade_through_depth(Side::Sell, dec!(0.42)),
+            dec!(5)
+        );
+        // A book that only carries the touch has NOTHING to fill against.
+        let touch_only = Book {
+            bids: vec![(dec!(0.38), dec!(100))],
+            asks: vec![(dec!(0.40), dec!(49))],
+            ..Default::default()
+        };
+        assert_eq!(
+            touch_only.strict_trade_through_depth(Side::Buy, dec!(0.40)),
+            dec!(0),
+            "a touch is not a fill under TradeThrough; its size is not tradeable"
+        );
+        // Rates above the limit never trade against it either way.
+        let empty = Book::default();
+        assert_eq!(
+            empty.strict_trade_through_depth(Side::Buy, dec!(0.40)),
+            dec!(0)
+        );
     }
 
     #[test]
