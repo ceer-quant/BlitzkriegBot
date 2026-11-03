@@ -1108,9 +1108,6 @@ impl Core {
         let Some(book) = self.books.get(&order.token_id) else {
             return;
         };
-        if !book.crosses(&order) {
-            return;
-        }
         // #464 (see above): the venue would have refused the resting order —
         // post-only may not cross. Only the SUBMISSION instant is gated, so a
         // maker that rested and is hit by a later tick keeps its fill path
@@ -1119,7 +1116,16 @@ impl Core {
         // WouldCross escalation branch is entry-only), so the honest mirror
         // of live is the exit runner's own reject→backoff→retry loop, not a
         // dry refusal that would strand the position with no closer at all.
-        if order.submitted_at_ms == now_ms && !is_close_intent(&order.internal_key) {
+        //
+        // This gate is venue parity and runs BEFORE the #862 fill rule: the
+        // venue refuses a POST that would cross whatever fill rule the replay
+        // runs — a trade-through model must not turn a refused POST into a
+        // silently resting order. The refusal condition is the venue's own
+        // crossing check (`Book::crosses`), not the fill rule below.
+        if order.submitted_at_ms == now_ms
+            && book.crosses(&order)
+            && !is_close_intent(&order.internal_key)
+        {
             let side_word = if order.side == Side::Buy {
                 "buy"
             } else {
@@ -1141,6 +1147,17 @@ impl Core {
             return;
         }
         let depth = book.marketable_depth(order.side, order.price);
+        // #862: the maker crossing rule is the fill model's, judged HERE and
+        // nowhere else — `Touch` is the historic reach-the-limit fill,
+        // `TradeThrough` waits for the market to go strictly through the
+        // resting price (a touch says nothing about queue position).
+        let crossed = match self.config.fill_model.maker_fill_rule {
+            crate::sim::MakerFillRule::Touch => book.crosses(&order),
+            crate::sim::MakerFillRule::TradeThrough => book.trades_through(&order),
+        };
+        if !crossed {
+            return;
+        }
         // Fill model (P-1.2), identity by default so this path is unchanged:
         //  - latency: the order cannot be hit before the venue could have it;
         //  - fill probability: a crossing does not guarantee a fill (queue

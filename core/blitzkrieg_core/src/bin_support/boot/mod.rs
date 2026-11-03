@@ -337,6 +337,11 @@ pub(crate) struct Args {
     /// Fill model: share of the crossing depth a resting maker takes, in bps of
     /// 10000 (queue position); None = untouched.
     pub(crate) maker_depth_share_bps: Option<u32>,
+    /// #862: the named fill model (`--fill-model identity|l2-delay`). The
+    /// preset is the WHOLE model — applied over whatever the per-dial flags
+    /// built — so a run either runs the named model or the dial-built one,
+    /// never a mix. None = the per-dial flags stand alone.
+    pub(crate) fill_model_preset: Option<String>,
     /// Dry-mode test hook: the first N simulated redemption attempts of each
     /// claim fail before one lands (0 = every attempt lands).
     pub(crate) dry_redeem_fail: u32,

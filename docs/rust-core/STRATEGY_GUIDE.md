@@ -631,6 +631,24 @@ target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   剩余量按 `PartiallyFilled` 继续挂着、可撤可等。第四个旋钮 `--maker-depth-share-bps`（0–10000，
   默认 10000 = 恒等）再按订单 id 的确定性哈希把上限缩到该深度的一个比例，用来复现「排队只吃到一部分」。
   同一输入必然得到同一成交量（无 RNG、无时钟、无线程调度参与）。
+- **#862 执行模型档位 `--fill-model <identity|l2-delay>`**：一档=**整套模型**（不是单旋钮；
+  与 `--backtest-mode` 互斥——mode 阶梯会重定这些延迟旋钮的价）。`l2-delay` =
+  taker 决策→venue 150 ms + venue→report 150 ms、成交判定在 `execute_at` 对**镜面 L2 逐档
+  FOK**（走当时盘口档位，不吃决策时刻的穿越价，#351 两段式语义）；maker **仅 trade-through
+  成交**——挂单价被市场穿过（Buy 需 best_ask < 挂价、Sell 需 best_bid > 挂价）才算成交，
+  不乐观 touch=fill；#464 post-only 提交拒单语义与档位无关（照旧无条件生效）。
+  报告 `fillModel` 块与渲染行自报档位（`maker rule trade-through, taker latency 150+150 ms`），
+  `tradeLines` 每笔携带 canonical regime 标签（复用 `strategy_logic::market_regime` 单一口径）。
+- **#862 影子盘逐笔对账**：`node scripts/replay-shadow-reconcile.mjs --replay <report.json>... \
+  --shadow data/trades/trades-live.jsonl [--from-ms N --to-ms N] --out <dir>`——仅
+  同 conditionId+direction 配对（跨 venue 的同 slot 是 venue basis，不是执行模型误差），
+  按 Up/Down/日(UTC)/regime 分桶输出均价差/平均绝对差/最大绝对差；判据 **平均 |回放入场−影子入场|
+  ≤1¢ = PASS，超差 = FAIL（回测不可用）**，脚本只算差值并如实输出分布（无任何"修正"）。
+  其输出永远携带 `synthetic-replay-not-real-evidence` 证据等级标注——**回放结果不得作为真实盘证据引用**。
+- **#862 语料家族切片**：双 venue 家族语料先切单家族再回放，才能与单 venue 影子账本逐笔配对：
+  `python3 scripts/corpus/filter_family.py --corpus <in.jsonl> --out <out.jsonl> --venue polymarket`
+  （k=books 批行按 entry 逐条过滤——一行快照混多个 token，原子丢弃会丢整条 L2 流），
+  随后 `relabel_official.py --apply-corpus`（官方结算标签，#859）+ `fix_resolutions.py --check` 门。
 - **评估节拍**：live 10ms / 回放 0ms（1ms 下界）：回放的 `tick + engine_evaluate` 跑在自己的
   `--backtest-tick-ms` 定时表上，**与事件密度无关**——出场（TP/SL/追踪/强平）因此不粗于 live
   （回放默认 1ms 下界，live 默认 10ms）。

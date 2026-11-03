@@ -666,13 +666,27 @@ async fn main() -> anyhow::Result<()> {
         // install-root logic lives above, once, where the boot log can name
         // the decision.
         execution_policy_path,
-        fill_model: blitzkrieg_core::sim::FillModel {
-            taker_slippage_ticks: args.slippage_ticks,
-            maker_latency_ms: args.latency_ms,
-            maker_fill_prob_bps: args.fill_prob_bps.unwrap_or(10_000),
-            maker_depth_share_bps: args.maker_depth_share_bps.unwrap_or(10_000),
-            taker_latency_ms: args.taker_latency_ms,
-            taker_rtt_ms: args.taker_rtt_ms,
+        fill_model: {
+            // #862: a named preset is the WHOLE fill model, applied over
+            // whatever the per-dial flags built — a run either runs the named
+            // model or the dial-built one, never a mix (the preset owning the
+            // latency/rule dials is the point: no half-l2-delay chimera). The
+            // name was validated at parse time, so the expect is unreachable.
+            let dial_built = blitzkrieg_core::sim::FillModel {
+                taker_slippage_ticks: args.slippage_ticks,
+                maker_latency_ms: args.latency_ms,
+                maker_fill_prob_bps: args.fill_prob_bps.unwrap_or(10_000),
+                maker_depth_share_bps: args.maker_depth_share_bps.unwrap_or(10_000),
+                taker_latency_ms: args.taker_latency_ms,
+                taker_rtt_ms: args.taker_rtt_ms,
+                ..Default::default()
+            };
+            match &args.fill_model_preset {
+                Some(name) => {
+                    blitzkrieg_core::sim::fill_model_preset(name).expect("validated at parse time")
+                }
+                None => dial_built,
+            }
         },
         event_archive_path,
         event_archive_max_mb,

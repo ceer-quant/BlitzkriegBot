@@ -125,6 +125,17 @@ pub fn mode_rung_model(mode: &str, base: FillModel, rung: i64) -> Result<FillMod
              --slippage-ticks 1 (verify/sweep 模式禁止把滑点设为 0)"
         ));
     }
+    // #862: the mode ladder re-prices the LATENCY dials, which is exactly what
+    // a named model owns. An l2-delay base rung through the ladder would be a
+    // chimera — the walk's 150 ms coordinate replaced by the rung's while the
+    // trade-through rule stayed — so the combination refuses instead.
+    if base.maker_fill_rule == crate::sim::MakerFillRule::TradeThrough {
+        return Err(
+            "--fill-model l2-delay defines its own latency/maker coordinate; --backtest-mode \
+             re-prices those dials and the two cannot be combined (l2-delay 与 mode ladder 互斥)"
+                .to_string(),
+        );
+    }
     Ok(match mode {
         "mine" => FillModel {
             taker_latency_ms: 0,
@@ -253,6 +264,13 @@ pub struct TradeLine {
     pub net_pnl_usd: Decimal,
     #[serde(with = "crate::decimal")]
     pub net_pnl_pct: Decimal,
+    /// #862: the token's MarketRegime state (`range`/`trendUp`/`trendDown`/
+    /// `volatile`, the strategy_logic reference definition fed the token's own
+    /// mid path) at the close — the one regime label a reconciliation bucket
+    /// may use, so a per-regime fill-price comparison cannot grow a second
+    /// definition. `"none"` when the token's book never produced a mid (no
+    /// regime samples reached the state machine).
+    pub regime: String,
 }
 
 /// Aggregate trade statistics over the realized equity curve.
@@ -469,10 +487,13 @@ impl BacktestReport {
             self.source_stats.spot_events
         ));
         s.push_str(&format!(
-            "  fill model       : slippage {} tick(s), maker latency {} ms, maker fill {} bps\n",
+            "  fill model       : slippage {} tick(s), maker latency {} ms, maker fill {} bps, maker rule {}, taker latency {}+{} ms\n",
             self.fill_model.taker_slippage_ticks,
             self.fill_model.maker_latency_ms,
-            self.fill_model.maker_fill_prob_bps
+            self.fill_model.maker_fill_prob_bps,
+            self.fill_model.maker_fill_rule.as_str(),
+            self.fill_model.taker_latency_ms,
+            self.fill_model.taker_rtt_ms
         ));
         s.push_str(&format!(
             "  entry escalate   : {} ms\n",
@@ -623,6 +644,11 @@ pub struct EventBacktester {
     order_sizes: HashMap<String, (Decimal, Decimal)>,
     fills: u64,
     trades: Vec<TradeLine>,
+    /// #862: one online MarketRegime state machine per token, fed the token's
+    /// own mid path as the replay delivers it — the strategy_logic reference
+    /// definition (300 s window, hysteresis), so a trade's regime label is the
+    /// canonical classifier's verdict, never a re-implementation.
+    regimes: HashMap<String, strategy_logic::market_regime::MarketRegime>,
     risk_alerts: Vec<String>,
     errors: Vec<String>,
     /// Re-check the invariants the equivalence gate relies on.
@@ -734,12 +760,80 @@ impl EventBacktester {
             order_sizes: HashMap::new(),
             fills: 0,
             trades: Vec::new(),
+            regimes: HashMap::new(),
             risk_alerts: Vec::new(),
             errors: Vec::new(),
             checked_events: 0,
             install_error,
             cfg_progress: cfg.progress.take(),
         }
+    }
+
+    /// #862: feed the regime state machine the mid of every book/top the
+    /// replay delivers. The mid is read exactly like [`crate::sim::Book::mid`]
+    /// (best bid/ask, ask must be positive) so the label and the matcher read
+    /// the same book the same way; books without two-sided quotes feed nothing.
+    fn observe_regime_mid(&mut self, ev: &DataEvent, at_ms: i64) {
+        use strategy_logic::market_regime::{MarketRegime, MarketRegimeConfig};
+        let mid_of = |bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)]| {
+            let best = |levels: &[(Decimal, Decimal)], max: bool| {
+                levels
+                    .iter()
+                    .map(|(p, _)| *p)
+                    .reduce(|a, b| if max { a.max(b) } else { a.min(b) })
+            };
+            match (best(bids, true), best(asks, false)) {
+                (Some(b), Some(a)) if a > Decimal::ZERO => Some((b + a) / Decimal::TWO),
+                _ => None,
+            }
+        };
+        let mut feed = |token: &str, mid: Option<Decimal>| {
+            if let Some(mid) = mid {
+                let machine = self
+                    .regimes
+                    .entry(token.to_string())
+                    .or_insert_with(|| MarketRegime::new(MarketRegimeConfig::default()));
+                machine.on_price(at_ms, mid);
+            }
+        };
+        match ev {
+            DataEvent::Book {
+                token_id,
+                bids,
+                asks,
+                ..
+            } => feed(token_id, mid_of(bids, asks)),
+            DataEvent::Books { books, .. } => {
+                for (token_id, bids, asks) in books {
+                    feed(token_id, mid_of(bids, asks));
+                }
+            }
+            DataEvent::TopOfBook {
+                token_id,
+                best_bid,
+                best_ask,
+                ..
+            } => {
+                if let (Some(b), Some(a)) = (best_bid, best_ask)
+                    && *a > Decimal::ZERO
+                {
+                    let mid = (*b + *a) / Decimal::TWO;
+                    feed(token_id, Some(mid));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// #862: the regime label stamped on a closed trade — the token's own
+    /// state machine's verdict at the close. `"none"` when the token never
+    /// produced a mid (no book reached the machine): a bucket that says
+    /// "none" is a coverage fact, never a made-up regime.
+    fn regime_of(&self, token: &str) -> String {
+        self.regimes
+            .get(token)
+            .map(|m| m.state().as_str().to_string())
+            .unwrap_or_else(|| "none".into())
     }
 
     /// Read-only access to the replayed core (tests, post-run inspection).
@@ -894,6 +988,7 @@ impl EventBacktester {
                     net_pnl_pct,
                     ..
                 } => {
+                    let regime = self.regime_of(&token_id);
                     self.trades.push(TradeLine {
                         id,
                         asset,
@@ -905,6 +1000,7 @@ impl EventBacktester {
                         entry_price,
                         net_pnl_usd,
                         net_pnl_pct,
+                        regime,
                     });
                 }
                 Event::OrderUpdate { order } => {
@@ -1158,6 +1254,7 @@ impl Backtester for EventBacktester {
             }
             // Late/out-of-order events still get the current clock (never a
             // backwards jump) — the source counts them separately.
+            self.observe_regime_mid(&te.event, at);
             self.core.engine_on_data(te.event, clock);
             self.checked_events += 1;
             delivered += 1;

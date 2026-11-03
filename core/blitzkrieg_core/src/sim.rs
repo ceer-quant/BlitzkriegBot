@@ -54,6 +54,19 @@ impl Book {
         }
     }
 
+    /// #862 trade-through: the opposite side has gone strictly THROUGH the
+    /// resting price — a buy maker fills only when the best ask is BELOW its
+    /// limit, a sell maker only when the best bid is ABOVE it. A touch at the
+    /// exact limit is not a fill under this rule (the order may be anywhere in
+    /// that price's queue); the market trading through it is the evidence the
+    /// quote was actually consumed.
+    pub fn trades_through(&self, order: &TrackedOrder) -> bool {
+        match order.side {
+            Side::Buy => self.best_ask().map(|a| a < order.price).unwrap_or(false),
+            Side::Sell => self.best_bid().map(|b| b > order.price).unwrap_or(false),
+        }
+    }
+
     /// The two questions [`Book::walk_marketable`] collapses into a single
     /// `None`, asked separately so a refusal can say WHICH one failed (#180):
     /// does any resting level cross `limit` at all, and how much size rests at
@@ -168,6 +181,34 @@ pub fn rests_on_book(mode: FillPolicy) -> bool {
     matches!(mode, FillPolicy::Maker | FillPolicy::MakerThenTaker)
 }
 
+/// #862: how a resting maker order's crossing is judged at fill time.
+///
+///  - `Touch` (the default) is the historic behaviour: the opposite side
+///    REACHING the limit (`Book::crosses`) counts as a fill — optimistic,
+///    because a touch says nothing about where this order sat in the queue.
+///  - `TradeThrough` (#862) fills only when the market has gone strictly
+///    THROUGH the resting price (`Book::trades_through`): a buy maker needs
+///    the best ask BELOW its limit, a sell maker the best bid ABOVE it. The
+///    hanging quote the market merely touched may well never trade — a replay
+///    that pays it for being touched books maker fills live would not have
+///    given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MakerFillRule {
+    #[default]
+    Touch,
+    TradeThrough,
+}
+
+impl MakerFillRule {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Touch => "touch",
+            Self::TradeThrough => "trade-through",
+        }
+    }
+}
+
 /// Tradable price grid on the binary markets (1 tick = 0.01).
 fn tick() -> Decimal {
     Decimal::new(1, 2)
@@ -238,6 +279,12 @@ pub struct FillModel {
     /// historic behaviour.
     #[serde(default)]
     pub taker_rtt_ms: i64,
+    /// #862: the rule a resting maker's crossing is judged by — [`MakerFillRule::Touch`]
+    /// (the historic reach-the-limit fill) or [`MakerFillRule::TradeThrough`]
+    /// (the market must go strictly through the resting price). The default
+    /// keeps every existing replay bit-for-bit.
+    #[serde(default)]
+    pub maker_fill_rule: MakerFillRule,
 }
 
 impl Default for FillModel {
@@ -249,7 +296,43 @@ impl Default for FillModel {
             maker_depth_share_bps: default_maker_depth_share_bps(),
             taker_latency_ms: 0,
             taker_rtt_ms: 0,
+            maker_fill_rule: MakerFillRule::default(),
         }
+    }
+}
+
+/// The `--fill-model` named presets the replay harness accepts (issue #862).
+///
+/// A preset is the WHOLE model, not a patch on the individual dials: the CLI
+/// applies it over whatever the per-dial flags built, so an operator cannot
+/// end up with a half-#862 chimera. `identity` is the historic behaviour and
+/// the default when the flag is absent.
+pub const FILL_MODEL_PRESET_NAMES: &[&str] = &["identity", "l2-delay"];
+
+/// The named fill model for `--fill-model <name>`; `None` = unknown name.
+pub fn fill_model_preset(name: &str) -> Option<FillModel> {
+    match name {
+        "identity" => Some(FillModel::default()),
+        "l2-delay" => Some(FillModel {
+            // The taker leg reaches the venue 150 ms late and matches against
+            // the mirrored L2 as it stands THEN — the level-by-level FOK walk
+            // (`Book::walk_marketable`), never the decision-time quote. A book
+            // that no longer crosses or cannot cover the size on arrival is a
+            // kill: the walk does not eat a price the market already passed
+            // through. The report books another 150 ms later (`taker_rtt_ms`),
+            // the same shape the #351 verify rung uses for its round trip.
+            taker_latency_ms: 150,
+            taker_rtt_ms: 150,
+            // No slippage overlay on top of the walk: the walk already crosses
+            // the spread (its VWAP is the walked levels' own prices), and a
+            // tick overlay would bill the spread twice — the #879 mine ruling,
+            // applied to the same economics.
+            taker_slippage_ticks: 0,
+            // A maker fills only when the market trades through its price.
+            maker_fill_rule: MakerFillRule::TradeThrough,
+            ..FillModel::default()
+        }),
+        _ => None,
     }
 }
 
@@ -265,6 +348,7 @@ impl FillModel {
             && self.maker_depth_share_bps >= 10_000
             && self.taker_latency_ms <= 0
             && self.taker_rtt_ms <= 0
+            && self.maker_fill_rule == MakerFillRule::Touch
     }
 
     /// Price a taker fill would actually get, given the side.
@@ -665,6 +749,7 @@ mod tests {
             maker_depth_share_bps: 10_000,
             taker_latency_ms: 0,
             taker_rtt_ms: 0,
+            maker_fill_rule: MakerFillRule::Touch,
         };
         assert_eq!(m.apply_slippage(Side::Buy, dec!(0.42)), dec!(0.44));
         assert_eq!(m.apply_slippage(Side::Sell, dec!(0.42)), dec!(0.40));
@@ -719,5 +804,94 @@ mod tests {
             (120..=280).contains(&wins),
             "expected ~50% wins, got {wins}/400"
         );
+    }
+
+    // ── #862 · maker trade-through ─────────────────────────────────────────
+
+    #[test]
+    fn trades_through_is_strict_on_both_sides() {
+        // A BUY maker resting at 0.40: an ask AT 0.40 is a touch (no fill
+        // under the rule); an ask BELOW 0.40 is the market trading through.
+        let book = Book {
+            bids: vec![(dec!(0.38), dec!(100))],
+            asks: vec![(dec!(0.40), dec!(100))],
+            ..Default::default()
+        };
+        assert!(!book.trades_through(&order(Side::Buy, dec!(0.40), FillPolicy::Maker)));
+        assert!(
+            book.crosses(&order(Side::Buy, dec!(0.40), FillPolicy::Maker)),
+            "the touch the trade-through rule refuses is exactly what Touch fills"
+        );
+        let pierced = Book {
+            bids: vec![(dec!(0.38), dec!(100))],
+            asks: vec![(dec!(0.39), dec!(100))],
+            ..Default::default()
+        };
+        assert!(pierced.trades_through(&order(Side::Buy, dec!(0.40), FillPolicy::Maker)));
+        // A SELL maker resting at 0.42: a bid AT 0.42 is a touch; ABOVE it
+        // is the trade-through.
+        let sell_book = Book {
+            bids: vec![(dec!(0.42), dec!(100))],
+            asks: vec![],
+            ..Default::default()
+        };
+        assert!(!sell_book.trades_through(&order(Side::Sell, dec!(0.42), FillPolicy::Maker)));
+        let sell_pierced = Book {
+            bids: vec![(dec!(0.43), dec!(100))],
+            asks: vec![],
+            ..Default::default()
+        };
+        assert!(sell_pierced.trades_through(&order(Side::Sell, dec!(0.42), FillPolicy::Maker)));
+        // An empty book never trades through anything.
+        let empty = Book::default();
+        assert!(!empty.trades_through(&order(Side::Buy, dec!(0.40), FillPolicy::Maker)));
+        assert!(!empty.trades_through(&order(Side::Sell, dec!(0.40), FillPolicy::Maker)));
+    }
+
+    #[test]
+    fn fill_model_presets_are_whole_models() {
+        // identity IS the default, bit-for-bit.
+        assert_eq!(fill_model_preset("identity"), Some(FillModel::default()));
+        assert!(fill_model_preset("identity").unwrap().is_identity());
+        // l2-delay: the #862 execution model — 150 ms taker travel both ways
+        // and the trade-through maker rule; everything else identity.
+        let m = fill_model_preset("l2-delay").expect("l2-delay is a known preset");
+        assert!(!m.is_identity());
+        assert_eq!(m.taker_latency_ms, 150);
+        assert_eq!(m.taker_rtt_ms, 150);
+        assert_eq!(
+            m.taker_slippage_ticks, 0,
+            "the walk already crosses the spread (#879)"
+        );
+        assert_eq!(m.maker_fill_rule, MakerFillRule::TradeThrough);
+        assert_eq!(m.maker_latency_ms, 0);
+        assert_eq!(m.maker_fill_prob_bps, 10_000);
+        // Unknown names refuse (the CLI turns them away at parse time).
+        assert_eq!(fill_model_preset("slippy"), None);
+        assert_eq!(fill_model_preset(""), None);
+    }
+
+    /// An old config/fixture that predates the field deserializes as Touch —
+    /// every archived run keeps its exact economics (serde default, not a
+    /// silent model change).
+    #[test]
+    fn maker_fill_rule_defaults_to_touch_when_absent() {
+        let json = r#"{
+            "takerSlippageTicks": 0,
+            "makerLatencyMs": 0,
+            "makerFillProbBps": 10000,
+            "makerDepthShareBps": 10000,
+            "takerLatencyMs": 0,
+            "takerRttMs": 0
+        }"#;
+        let m: FillModel = serde_json::from_str(json).expect("a pre-#862 model loads");
+        assert_eq!(m.maker_fill_rule, MakerFillRule::Touch);
+        assert!(m.is_identity());
+        // And the new field round-trips under its camelCase name.
+        let m2 = fill_model_preset("l2-delay").unwrap();
+        let back: FillModel = serde_json::to_value(m2)
+            .map(|v| serde_json::from_value(v).unwrap())
+            .unwrap();
+        assert_eq!(back.maker_fill_rule, MakerFillRule::TradeThrough);
     }
 }

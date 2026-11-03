@@ -858,3 +858,59 @@ fn the_verdict_basis_keeps_only_zero_and_the_top_rung() {
         "首尾档均为正 → 延迟不敏感（稳）"
     );
 }
+
+// ── #862 · 每笔成交带 MarketRegime 标签（单一口径：strategy_logic 参考实现）──
+
+/// Every closed trade carries the token's MarketRegime verdict, computed by
+/// the strategy_logic reference classifier fed the token's own mid path —
+/// never a second regime definition. The scenario's book is calm around the
+/// entry, so the traded token's label comes out of the known four-state set
+/// (a flat path reads `range`), and a token the replay never saw a book for
+/// would read `none` — a coverage fact, never a made-up regime.
+#[test]
+fn trade_lines_carry_the_canonical_regime_label() {
+    let r = bt(
+        base_core(None),
+        Box::new(VecSource::new(scenario_events(NOW))),
+        10_000,
+    );
+    assert!(
+        !r.trade_lines.is_empty(),
+        "fixture sanity: the scenario trades:\n{}",
+        r.render()
+    );
+    const KNOWN: [&str; 4] = ["range", "trendUp", "trendDown", "volatile"];
+    for line in &r.trade_lines {
+        assert!(
+            KNOWN.contains(&line.regime.as_str()),
+            "trade {} must carry a canonical regime label, got {:?}",
+            line.id,
+            line.regime
+        );
+        assert_ne!(
+            line.regime, "none",
+            "the scenario fed books for the traded token; `none` would mean the sampler missed them"
+        );
+    }
+}
+
+/// The l2-delay preset runs end-to-end through the replay harness and is
+/// visible in the report's model line — the coordinate a reconciliation
+/// reads before trusting any fill-price comparison.
+#[test]
+fn l2_delay_preset_replays_and_names_itself_in_the_report() {
+    let core = CoreConfig {
+        fill_model: crate::sim::fill_model_preset("l2-delay").unwrap(),
+        ..base_core(None)
+    };
+    let r = bt(core, Box::new(VecSource::new(scenario_events(NOW))), 10_000);
+    let rendered = r.render();
+    let line = rendered
+        .lines()
+        .find(|l| l.contains("fill model"))
+        .expect("the report names its fill model");
+    assert!(
+        line.contains("maker rule trade-through") && line.contains("taker latency 150+150 ms"),
+        "the l2-delay coordinate must be readable from the report: {line}"
+    );
+}
