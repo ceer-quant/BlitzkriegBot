@@ -1,0 +1,55 @@
+{
+  "name": "maker_pair",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "9040e9d831080c63135f039bf18cf52f58130c598914bfae3724d982344176be",
+  "author": "BlitzkriegBot",
+  "description": "Both-restable maker pair for binary rounds (issue #871): when the sum of the two RESTABLE post-only quotes is under max_pair_cost, buy BOTH legs with EQUAL declared share counts, each quote strictly UNDER its own ask (the kernel refuses an at-ask post-only POST, #464 — there is no at-ask mode). The cost test runs on the quotes (maker fee = 0; bk.fees() is never read — no schedule in force is not an error because no fee enters this package's cost model), strict <: at or above the cap the attempt is abandoned whole. ONE leg failing any guard (book missing, stale, phantom depth, no restable quote) abandons the WHOLE attempt without arming anything. One attempt per condition per round; an armed condition emits NOTHING on later evaluations — no top-up, no re-quote, no merge, no taker escalation: leg dead = leg dead, and the remainder rides to settlement (holds_to_settlement). The kernel's naked-leg requote exemption (#904/#848) only releases repeat-suppression for hold-to-settlement strategies that re-emit leg intents — this package never does, so it never flows. Default 1 share per leg: at mid prices a pair costs ≈ $1 and one order sits inside the 100 USDC config's $2 single-order notional. Kernel surfaces used, zero kernel changes: entry_maker (#742 — every entry post-only, never escalates), atomic_batch (#531 — the two legs are ONE economic ticket for an E-VA pot; NO pot ships, the allowlist stays empty until the replay + soak gates say GO), holds_to_settlement (the pair-completion entry exemption and the exit-ladder skip). trailing_exit is NOT declared — the three-state default (follow the kernel-wide value). Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "holds_to_settlement": true,
+  "entry_maker": true,
+  "atomic_batch": true,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 30
+  },
+  "tunables": {
+    "max_pair_cost": {
+      "type": "decimal",
+      "default": "0.985",
+      "min": "0.98",
+      "max": "0.999"
+    },
+    "shares_per_leg": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "30",
+      "min": "0",
+      "max": "300"
+    },
+    "entry_quote_mode": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "3"
+    },
+    "entry_reprice_ticks": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "10"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}
