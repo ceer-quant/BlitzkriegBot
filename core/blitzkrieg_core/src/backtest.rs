@@ -814,11 +814,11 @@ impl EventBacktester {
                 best_ask,
                 ..
             } => {
-                if let (Some(b), Some(a)) = (best_bid, best_ask) {
-                    if *a > Decimal::ZERO {
-                        let mid = (*b + *a) / Decimal::TWO;
-                        feed(token_id, Some(mid));
-                    }
+                if let (Some(b), Some(a)) = (best_bid, best_ask)
+                    && *a > Decimal::ZERO
+                {
+                    let mid = (*b + *a) / Decimal::TWO;
+                    feed(token_id, Some(mid));
                 }
             }
             _ => {}

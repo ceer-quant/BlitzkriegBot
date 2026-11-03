@@ -889,7 +889,7 @@ mod tests {
         assert!(m.is_identity());
         // And the new field round-trips under its camelCase name.
         let m2 = fill_model_preset("l2-delay").unwrap();
-        let back: FillModel = serde_json::to_value(&m2)
+        let back: FillModel = serde_json::to_value(m2)
             .map(|v| serde_json::from_value(v).unwrap())
             .unwrap();
         assert_eq!(back.maker_fill_rule, MakerFillRule::TradeThrough);
