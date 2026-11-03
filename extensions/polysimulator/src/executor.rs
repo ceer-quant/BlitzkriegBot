@@ -38,10 +38,17 @@
 //!     (`TAKER_FEE_RATE` / `official_taker_fee_usd`). An order whose ack
 //!     said `live` (rested) books its sweep-confirmed fill as MAKER; only a
 //!     `matched` ack (we crossed) books taker.
+//!   * ledger seed (#877) — the figure the executor seeds and re-aligns the
+//!     kernel ledger with is the venue's account EQUITY (`total_value`:
+//!     available cash + open positions, the website's own account-equity
+//!     view), not bare cash — a cash-only seed left the replay equity
+//!     systematically short by the open-position value. A balance report
+//!     without a usable `total_value` degrades to the cash floor loudly
+//!     (see `ledger_equity`).
 
 use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
-use crate::types::{PlaceOrderBody, UpDownRow};
+use crate::types::{BalanceBody, PlaceOrderBody, UpDownRow};
 use blitzkrieg_market_api::{
     CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillStatus, MarketFill, MarketHost,
     MarketResolution, PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport,
@@ -140,6 +147,115 @@ fn ack_crossed(status: Option<&str>) -> Option<bool> {
 /// means at the seam.
 fn fill_role(crossed: Option<bool>) -> Option<bool> {
     crossed.map(|c| !c)
+}
+
+/// The figure the ledger is seeded with at boot and re-aligned with on every
+/// sweep (#877): the venue's own account EQUITY — available cash plus the
+/// market value of open positions, exactly the account-equity view the
+/// website displays — when the balance report carries `total_value`, and the
+/// cash floor (loudly degraded) when it does not.
+///
+/// Why not `balance` alone: seeding the ledger with bare cash left the
+/// replay equity systematically short by the open-position value — the #877
+/// identity (cash $111.62 + positions $20.00 = equity $131.62; 20 of the
+/// +31.6% points were position valuation) never closed on the kernel side.
+/// Why `unrealized_pnl` never enters the arithmetic: it is quoted against
+/// the ENTRY cost (equity = cash + cost + unrealized) and the cost basis is
+/// not on the balance body — adding it to cash would double-count once the
+/// position closes. It rides the evidence line instead. Why not
+/// `GET /v1/account/positions`: [`crate::types::PositionRow`] carries only
+/// `avg_entry_price`, so a sum of its rows prices open positions at COST — a
+/// different scope than the website's market-value equity, for a second wire
+/// dependency; `total_value` IS the website's own number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerEquity {
+    /// The wire's `total_value`: the venue's own equity view (cash + open
+    /// positions). `unrealized` is the wire's `unrealized_pnl`, evidence
+    /// only.
+    VenueReported {
+        equity: Decimal,
+        cash: Decimal,
+        unrealized: Option<Decimal>,
+    },
+    /// No usable `total_value` (an older website build may omit the field,
+    /// or report one below cash — impossible while a long position holds
+    /// value, so such a field is refused): the ledger falls back to cash
+    /// only, and the caller SAYS SO — a silent cash-only read is exactly the
+    /// #877 blind spot this type exists to close. Fail-closed floor: cash
+    /// understates equity by at most the open-position value; it never
+    /// overstates the money the venue can actually spend.
+    CashFloor { cash: Decimal, reason: &'static str },
+}
+
+impl LedgerEquity {
+    /// The number that goes into the ledger.
+    fn figure(&self) -> Decimal {
+        match self {
+            Self::VenueReported { equity, .. } => *equity,
+            Self::CashFloor { cash, .. } => *cash,
+        }
+    }
+
+    /// The degradation reason when this figure is the cash floor — the
+    /// caller logs it, at the boot seed and on every sweep: a degraded read
+    /// must be visible, never silent.
+    fn degraded(&self) -> Option<&'static str> {
+        match self {
+            Self::VenueReported { .. } => None,
+            Self::CashFloor { reason, .. } => Some(reason),
+        }
+    }
+}
+
+impl std::fmt::Display for LedgerEquity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // The website's identity on one line: cash + positions = equity
+            // (the #877 screenshot: 111.62 + 20.00 = 131.62).
+            Self::VenueReported {
+                equity,
+                cash,
+                unrealized,
+            } => {
+                let positions = *equity - *cash;
+                let un = match unrealized {
+                    Some(u) => u.to_string(),
+                    None => String::from("n/a"),
+                };
+                write!(
+                    f,
+                    "cash={cash} positions={positions} unrealized={un} equity={equity}"
+                )
+            }
+            Self::CashFloor { cash, reason } => write!(
+                f,
+                "cash={cash} equity={cash} (DEGRADED: {reason} — open positions count 0 toward the ledger; issue #877)"
+            ),
+        }
+    }
+}
+
+/// Read the ledger figure off one balance report. `total_value` is trusted
+/// only while it satisfies the venue's own identity (equity ≥ available cash
+/// on a long-only venue); anything else degrades to the cash floor with the
+/// reason carried for the caller's log line — never a silent zero for the
+/// positions. Pure so the mapping is testable without a client.
+fn ledger_equity(b: &BalanceBody) -> LedgerEquity {
+    match b.total_value {
+        Some(equity) if equity >= b.balance => LedgerEquity::VenueReported {
+            equity,
+            cash: b.balance,
+            unrealized: b.unrealized_pnl,
+        },
+        Some(_) => LedgerEquity::CashFloor {
+            cash: b.balance,
+            reason: "total_value below available cash (impossible while a long position holds value) — field refused",
+        },
+        None => LedgerEquity::CashFloor {
+            cash: b.balance,
+            reason: "no total_value on the balance report (older website build?)",
+        },
+    }
 }
 
 /// Build the credentialed client, or `None` when the environment carries no
@@ -256,14 +372,17 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         std::collections::HashMap::new();
     const ORPHAN_GRACE_MS: i64 = 30_000;
 
-    // Seed the ledger from the venue so the reserve gate reflects real cash.
+    // Seed the ledger from the venue so the reserve gate reflects real
+    // money. #877: the seed is the venue's account EQUITY (cash + open
+    // positions — the website's own identity), not bare cash: a cash-only
+    // seed left the replay equity systematically short by the open-position
+    // value. A report without a usable `total_value` degrades LOUDLY to the
+    // cash floor — never a silent zero for the positions.
     match client.balance().await {
         Ok(b) => {
-            host.seed_balance("polysimulator", b.balance).await;
-            eprintln!(
-                "polysimulator-extension: executor ready balance={}",
-                b.balance
-            );
+            let equity = ledger_equity(&b);
+            eprintln!("polysimulator-extension: executor ready {equity}");
+            host.seed_balance("polysimulator", equity.figure()).await;
         }
         Err(e) => eprintln!("polysimulator-extension: live balance fetch failed: {e}"),
     }
@@ -790,9 +909,22 @@ async fn sweep(
         host.on_fill(to_fill(&trade.venue_order_id, trade)).await;
     }
 
-    // Cash truth: re-align the ledger's free view every sweep.
+    // Equity truth (#877): re-align the ledger's equity view every sweep —
+    // the same figure as the boot seed: the venue's own `total_value` (cash
+    // + open positions) when reported, the cash floor when not (the
+    // degradation is logged here on every sweep; the healthy path stays as
+    // silent as it always was). The kernel folds this through its
+    // reserved-aware venue-cash semantics (`fold_venue_free`): resting
+    // commitments still surface as drift warnings, never auto-corrected.
     match client.balance().await {
-        Ok(b) => host.venue_free_balance("polysimulator", b.balance).await,
+        Ok(b) => {
+            let equity = ledger_equity(&b);
+            if let Some(reason) = equity.degraded() {
+                eprintln!("polysimulator-extension: balance sync degraded to cash only: {reason}");
+            }
+            host.venue_free_balance("polysimulator", equity.figure())
+                .await;
+        }
         Err(e) => host.report_error(into_core_error(&e)).await,
     }
     Ok(())
@@ -1139,5 +1271,112 @@ mod tests {
             !in_confirm_window(&placed, 10_000 + FILL_CONFIRM_MS),
             "at one sweep period: the next sweep may confirm FILLED"
         );
+    }
+
+    // ── #877: the ledger seed is the venue's equity, not bare cash ──────
+
+    fn balance_body(
+        balance: &str,
+        total_value: Option<&str>,
+        unrealized: Option<&str>,
+    ) -> BalanceBody {
+        BalanceBody {
+            balance: Decimal::from_str(balance).unwrap(),
+            currency: Some("USDC".to_string()),
+            starting_balance: None,
+            unrealized_pnl: unrealized.map(|u| Decimal::from_str(u).unwrap()),
+            total_value: total_value.map(|t| Decimal::from_str(t).unwrap()),
+        }
+    }
+
+    /// The #877 screenshot identity, in one balance body: cash 111.62 +
+    /// positions 20.00 = equity 131.62. The ledger figure is the venue's own
+    /// `total_value` — the open positions ARE merged — and the evidence line
+    /// spells the identity out (cash, positions component, unrealized,
+    /// equity).
+    #[test]
+    fn ledger_seed_merges_open_positions_into_the_equity() {
+        let eq = ledger_equity(&balance_body("111.62", Some("131.62"), Some("0.00")));
+        assert_eq!(eq.figure(), Decimal::from_str("131.62").unwrap());
+        assert_eq!(
+            eq,
+            LedgerEquity::VenueReported {
+                equity: Decimal::from_str("131.62").unwrap(),
+                cash: Decimal::from_str("111.62").unwrap(),
+                unrealized: Some(Decimal::ZERO),
+            }
+        );
+        assert!(eq.degraded().is_none(), "a reported equity is not degraded");
+        let rendered = eq.to_string();
+        for needle in [
+            "cash=111.62",
+            "positions=20.00",
+            "unrealized=0.00",
+            "equity=131.62",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "{needle} missing from: {rendered}"
+            );
+        }
+    }
+
+    /// `unrealized_pnl` never enters the arithmetic: it is quoted against
+    /// entry cost (equity = cash + cost + unrealized, cost basis not on this
+    /// body) — adding it on top of `total_value` would double-count. It
+    /// rides the evidence line only.
+    #[test]
+    fn unrealized_pnl_never_enters_the_arithmetic() {
+        let eq = ledger_equity(&balance_body("111.62", Some("131.62"), Some("5.00")));
+        assert_eq!(
+            eq.figure(),
+            Decimal::from_str("131.62").unwrap(),
+            "unrealized_pnl must not be added on top of total_value"
+        );
+        assert!(
+            eq.to_string().contains("unrealized=5.00"),
+            "unrealized stays visible on the evidence line"
+        );
+    }
+
+    /// An older website build without `total_value`: the figure falls back
+    /// to the cash floor — and the degradation reason rides to the caller's
+    /// log line, never silently zeroing the positions (#877's blind spot).
+    #[test]
+    fn ledger_seed_degrades_to_the_cash_floor_without_total_value() {
+        let eq = ledger_equity(&balance_body("111.62", None, None));
+        assert_eq!(eq.figure(), Decimal::from_str("111.62").unwrap());
+        assert!(
+            eq.degraded().is_some(),
+            "the cash floor must be visible as a DEGRADED read, not a silent default"
+        );
+        let rendered = eq.to_string();
+        assert!(rendered.contains("DEGRADED"), "{rendered}");
+        assert!(rendered.contains("issue #877"), "{rendered}");
+        assert!(rendered.contains("cash=111.62"), "{rendered}");
+    }
+
+    /// A long-only venue's equity can never sit below its available cash —
+    /// a `total_value` that does is a wire inconsistency: refused
+    /// (fail-closed), the figure falls back to the cash floor loudly.
+    #[test]
+    fn ledger_seed_refuses_a_total_value_below_cash() {
+        let eq = ledger_equity(&balance_body("111.62", Some("90.00"), None));
+        assert_eq!(eq.figure(), Decimal::from_str("111.62").unwrap());
+        assert!(
+            eq.degraded().is_some(),
+            "the refused field must degrade visibly, not pass through"
+        );
+    }
+
+    /// Flat account (no open positions): `total_value` == balance — the
+    /// venue-reported path holds with a zero positions component, no
+    /// degradation.
+    #[test]
+    fn flat_account_reports_equity_equal_to_cash_without_degradation() {
+        let eq = ledger_equity(&balance_body("100.00", Some("100.00"), Some("0.00")));
+        assert!(eq.degraded().is_none());
+        assert_eq!(eq.figure(), Decimal::from_str("100.00").unwrap());
+        assert!(eq.to_string().contains("positions=0.00"));
     }
 }

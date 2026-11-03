@@ -46,6 +46,12 @@
 //!    plugin declares exactly `SIMULATED` and nothing else: the parasitic
 //!    form carries no data feed of its own, so a `LEVEL2_SNAPSHOT` bit would
 //!    be a lie about the seam this plugin actually exercises.
+//! 9. **the ledger figure is the venue's equity (#877)** — the number
+//!    seeded at boot and re-aligned on every sweep is the venue's own
+//!    `total_value` (available cash + open positions, the website's
+//!    account-equity identity), never bare cash; a balance report without
+//!    that field degrades to the cash floor on BOTH paths — loudly, never a
+//!    silent zero for open positions.
 
 use blitzkrieg_market_api::{
     BookUpdate, CoreError, CoreErrorCode, FillPolicy, MarketFill, MarketHost, MarketResolution,
@@ -1099,5 +1105,96 @@ fn the_plugin_declares_exactly_simulated() {
     assert!(
         names.contains(&"simulated"),
         "capability names must render 'simulated' for the declared bit; got {names:?}"
+    );
+}
+
+// ── 9. the ledger figure is the venue's equity (#877) ───────────────────
+
+#[tokio::test]
+async fn the_ledger_seed_and_every_sweep_carry_the_venues_equity_not_bare_cash() {
+    // #877, the website identity as one balance body: available cash 111.62
+    // + open positions 20.00 = account equity 131.62. The ledger figure is
+    // the EQUITY on both the boot seed (seed_balance) and every sweep's
+    // re-align (venue_free_balance) — seeding bare cash left the replay
+    // equity systematically short by the open-position value (20 of the
+    // +31.6% points). `unrealized_pnl` rides the evidence line, never the
+    // arithmetic.
+    let (url, _recorded) = mock_server(routes_for(
+        r#"{"balance":"111.62","currency":"USDC","starting_balance":"100.00","unrealized_pnl":"0.00","total_value":"131.62"}"#,
+        r#"{"orders":[]}"#,
+        r#"{"data":[]}"#,
+        RESOLVE_BODY,
+        vec![],
+        vec![],
+    ));
+    let sink = ExecSink::default();
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    // The boot seed lands immediately; the first re-align follows one sweep
+    // period later (~5s). Two pushes of the SAME equity figure prove BOTH
+    // paths merged the open positions.
+    wait_until(15_000, || {
+        sink.balances
+            .try_lock()
+            .map(|b| b.len() >= 2)
+            .unwrap_or(false)
+    })
+    .await;
+    let balances = sink.balances.lock().await;
+    let equity = Decimal::from_str("131.62").unwrap();
+    assert_eq!(
+        balances.first().copied(),
+        Some(equity),
+        "the boot seed must carry the venue equity (cash 111.62 + positions 20.00), got {:?}",
+        balances.first()
+    );
+    assert!(
+        balances.iter().all(|b| *b == equity),
+        "every sweep re-align must carry the same equity figure, got {balances:?}"
+    );
+    assert!(
+        !balances.contains(&Decimal::from_str("111.62").unwrap()),
+        "bare cash must never reach the ledger while the venue reports equity"
+    );
+}
+
+#[tokio::test]
+async fn a_balance_report_without_total_value_degrades_to_the_cash_floor() {
+    // #877, fail-closed: an older website build without `total_value` /
+    // `unrealized_pnl` must NOT silently treat open positions as zero equity
+    // — the figure degrades to the cash floor on the boot seed AND every
+    // sweep (the executor logs the degradation), and nothing above cash is
+    // ever fabricated from the missing fields.
+    let (url, _recorded) = mock_server(routes_for(
+        r#"{"balance":"111.62"}"#,
+        r#"{"orders":[]}"#,
+        r#"{"data":[]}"#,
+        RESOLVE_BODY,
+        vec![],
+        vec![],
+    ));
+    let sink = ExecSink::default();
+    executor::executor_tests_only_spawn(
+        Arc::new(sink.clone()) as Arc<dyn MarketHost>,
+        client_for(&url),
+    );
+    wait_until(15_000, || {
+        sink.balances
+            .try_lock()
+            .map(|b| b.len() >= 2)
+            .unwrap_or(false)
+    })
+    .await;
+    let balances = sink.balances.lock().await;
+    let cash = Decimal::from_str("111.62").unwrap();
+    assert!(
+        balances.len() >= 2,
+        "boot seed + at least one sweep must have reported"
+    );
+    assert!(
+        balances.iter().all(|b| *b == cash),
+        "degraded reads must carry the cash floor and nothing else, got {balances:?}"
     );
 }
