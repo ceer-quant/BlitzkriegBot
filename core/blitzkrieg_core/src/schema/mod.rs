@@ -915,17 +915,20 @@ pub struct RiskLimitUpdate {
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// ALWAYS `false`, and on the wire on purpose: a hot update is memory-only.
-    /// A restart re-applies the startup flags/env/TOML, so "I changed it" must
-    /// never be read as "it stuck".
+    /// `true` when the kernel has a risk-state file (`risk_state_path`) and
+    /// the write landed there — the update recovers across a restart (#861).
+    /// `false` for cores without one (backtester, most tests): the update is
+    /// then genuinely memory-only, and a restart re-applies the startup
+    /// flags/env/TOML. "I changed it" reads as "it stuck" only when this
+    /// says so.
     pub persisted: bool,
     /// The same statement in words, for a panel or a log reader.
     pub note: &'static str,
 }
 
 /// [`RiskLimitUpdate::note`] — one spelling, used by the reply and the log.
-pub const RISK_LIMIT_UPDATE_NOTE: &str =
-    "in-memory only: a restart re-applies the startup flags/env/TOML";
+pub const RISK_LIMIT_UPDATE_NOTE: &str = "hot-applied; persisted to the risk-state file when the kernel has one, \
+     in-memory only otherwise";
 
 // ── 生效风控可编辑 — risk.setSystemic（九项系统性限额的运行时写路径）─────────
 
@@ -1008,10 +1011,11 @@ pub struct SystemicLimitChange {
 }
 
 /// `risk.setSystemic` result: the audited change list, in the
-/// `RiskLimitUpdate` shape. `persisted` is ALWAYS false — the systemic set is
-/// a boot-time resolution ([`SystemicRiskLimits::from_file`]); a hot edit
-/// lives exactly as long as this process, and the note says so in the same
-/// breath as the drawdown/breaker "next session" rows.
+/// `RiskLimitUpdate` shape. `persisted` is `true` when the kernel has a
+/// risk-state file and the write landed there — the nine bounds recover
+/// across a restart (#861); `false` for cores without one (backtester, most
+/// tests), where a hot edit lives exactly as long as this process. The note
+/// says so in the same breath as the drawdown/breaker "next session" rows.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemicLimitUpdate {
@@ -1025,8 +1029,8 @@ pub struct SystemicLimitUpdate {
 }
 
 /// [`SystemicLimitUpdate::note`] — one spelling, used by the reply and the log.
-pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "six bounds live, drawdown + breaker pair arm next session; a restart \
-     re-applies the startup flags/env/TOML (in-memory, not persisted)";
+pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "six bounds live, drawdown + breaker pair arm next session; persisted to \
+     the risk-state file when the kernel has one, in-memory only otherwise";
 
 // ── 退出纪律可编辑 — risk.setExit（止损/止盈/强平的运行时写路径）────────────
 

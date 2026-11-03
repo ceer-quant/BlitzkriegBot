@@ -27,6 +27,7 @@ use super::{EXIT_REPORT_BEAT_MS, marketable_exit_price};
 mod admission;
 mod exits;
 mod freeze;
+mod persist;
 
 #[cfg(test)]
 pub(crate) use exits::strategy_signal_sell_bid;
@@ -35,3 +36,11 @@ pub(crate) use exits::strategy_signal_sell_bid;
 // manager; `service.rs` re-exports it for the struct field and the
 // integration tree's handle.
 pub(crate) use freeze::FreezeBook;
+
+// #861: the runtime risk state's durable side file (hot entry caps, systemic
+// bounds, kill switch, freeze book) — the cell type `service.rs`'s Core
+// struct holds, the kill cell the freeze writers stamp, and the boot-restore
+// half `assembly.rs` drives.
+pub(crate) use persist::{
+    KillCell, RiskStateCell, RiskStateLoad, apply_restored_limits, load_risk_state_file,
+};

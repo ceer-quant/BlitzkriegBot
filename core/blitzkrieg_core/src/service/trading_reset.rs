@@ -141,6 +141,10 @@ impl Core {
             }
         }
 
+        // #861: the hot values land in the risk-state file too — the caps
+        // recover across a kill -9 (the reply's `persisted` field says which
+        // posture this kernel has: file-backed or memory-only).
+        let persisted = self.risk_state_record_limits(&changes);
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -161,7 +165,7 @@ impl Core {
             at_ms: now_ms,
             actor: actor.to_string(),
             reason: patch.reason.clone(),
-            persisted: false,
+            persisted,
             note: RISK_LIMIT_UPDATE_NOTE,
         })
     }
@@ -356,6 +360,10 @@ impl Core {
             );
         }
 
+        // #861: same durable ride as `risk.setLimits` — the nine bounds
+        // recover across a restart (provenance `flag`, exactly as written
+        // above).
+        let persisted = self.risk_state_record_systemic(&changes);
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -377,7 +385,7 @@ impl Core {
             at_ms: now_ms,
             actor: actor.to_string(),
             reason: patch.reason.clone(),
-            persisted: false,
+            persisted,
             note: SYSTEMIC_LIMIT_UPDATE_NOTE,
         })
     }
@@ -960,6 +968,16 @@ impl Core {
             self.config.breaker_cooldown_sec,
         );
         self.risk.resume();
+        // #861: the reset scrubbed the freeze book directly (not via
+        // `resume_account`), so the durable cell needs the same scrub — the
+        // account's freeze/stamp rows go with the reset (the `risk.resume()`
+        // above already cleared the kill in the cell).
+        if let Some(c) = &mut self.risk_state {
+            c.file.account_freezes.remove(account_id.as_str());
+            c.file.auto_frozen.remove(account_id.as_str());
+            c.file.saved_at_ms = now_ms;
+        }
+        self.persist_risk_state();
 
         // 4) 持仓簿账户维摘除 + 磁盘记录按账户截断（不重启进程）。
         let open_before = pre.open_positions;

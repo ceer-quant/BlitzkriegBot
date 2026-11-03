@@ -68,6 +68,15 @@ impl Core {
         }
         let _ = now_ms;
         self.risk.kill(reason.clone());
+        // #861: the kill switch outlives the process — the reason an operator
+        // must see travels with it.
+        if let Some(c) = &mut self.risk_state {
+            c.file.kill = Some(KillCell {
+                reason: reason.clone(),
+            });
+            c.file.saved_at_ms = now_ms;
+        }
+        self.persist_risk_state();
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             message: format!("trading frozen: {reason}"),
@@ -93,6 +102,16 @@ impl Core {
         self.freeze_book
             .account_freezes
             .insert(account.to_string(), reason.clone());
+        // #861: the freeze outlives the process. Note the restart default
+        // freeze rides this same write path — it is therefore durable too,
+        // and only an operator's resume clears it.
+        if let Some(c) = &mut self.risk_state {
+            c.file
+                .account_freezes
+                .insert(account.to_string(), reason.clone());
+            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
+        }
+        self.persist_risk_state();
         self.engine_set_account_frozen(account, true);
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
@@ -117,6 +136,15 @@ impl Core {
             self.freeze_book
                 .auto_frozen
                 .insert(account.to_string(), now_ms);
+            // #861: the stamp is what separates a circumstantial freeze (the
+            // self-heal may lift it) from an operator verdict (never) — it
+            // rides the risk-state file too, or a restart would turn every
+            // auto freeze into an un-liftable manual one.
+            if let Some(c) = &mut self.risk_state {
+                c.file.auto_frozen.insert(account.to_string(), now_ms);
+                c.file.saved_at_ms = now_ms;
+            }
+            self.persist_risk_state();
         }
     }
 
@@ -131,6 +159,16 @@ impl Core {
     pub fn freeze_account_manual(&mut self, account: &str, reason: String) {
         self.freeze_book.auto_frozen.remove(account);
         self.freeze_account(account, reason);
+        // #861: the durable stamp goes the same way — a manual re-freeze of
+        // an auto-frozen account must not leave the file stamping a verdict
+        // the kernel now treats as an operator's (it would survive the
+        // restart and re-arm the self-heal).
+        if let Some(c) = &mut self.risk_state
+            && c.file.auto_frozen.remove(account).is_some()
+        {
+            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
+            self.persist_risk_state();
+        }
     }
 
     /// 冻结自愈的解冻半边：only an AUTO-frozen account may self-lift, and
@@ -181,6 +219,13 @@ impl Core {
         // 账户要么都有意、要么都干净，半悬空状态只会让下一次 auto-lift
         // 读到一个已不存在的冻结。
         self.freeze_book.auto_frozen.remove(account);
+        // #861: the lift is an operator verdict — it must survive as one.
+        if let Some(c) = &mut self.risk_state {
+            c.file.account_freezes.remove(account);
+            c.file.auto_frozen.remove(account);
+            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
+        }
+        self.persist_risk_state();
     }
 
     /// Why an account is frozen, when it is.
@@ -272,6 +317,15 @@ impl Core {
     // ── Risk ───────────────────────────────────────────────────────────────
     pub fn kill(&mut self, reason: String) {
         self.risk.kill(reason.clone());
+        // #861: same durable kill as freeze_trading — the direct path (no
+        // freeze_trading alarm) still must not die with the process.
+        if let Some(c) = &mut self.risk_state {
+            c.file.kill = Some(KillCell {
+                reason: reason.clone(),
+            });
+            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
+        }
+        self.persist_risk_state();
         self.emit(Event::RiskAlert {
             code: CoreErrorCode::KillSwitchActive,
             message: reason,
@@ -297,6 +351,12 @@ impl Core {
 
     pub fn resume(&mut self) {
         self.risk.resume();
+        // #861: a lifted kill stays lifted across the restart.
+        if let Some(c) = &mut self.risk_state {
+            c.file.kill = None;
+            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
+        }
+        self.persist_risk_state();
     }
 
     pub fn is_killed(&self) -> bool {
