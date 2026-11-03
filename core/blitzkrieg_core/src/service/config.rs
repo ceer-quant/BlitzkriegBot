@@ -1368,6 +1368,13 @@ pub(super) struct AuditRuntime {
     /// entries over it. Keyed by venue: a realign explains a residual only on
     /// the book that venue's cash belongs to.
     pub(super) last_realign: std::collections::HashMap<String, (i64, Decimal)>,
+    /// Issue #921: the audit-instant at which a venue's standing correction was
+    /// last CLAIMED as the explanation for a trade-leg residual (venue →
+    /// at_ms). Present = the correction is spent: it cannot excuse a second
+    /// residual until the venue overwrites the slot with a fresher correction
+    /// (which clears this entry below in `realign_venue_cash`). Mirrors
+    /// `AuditInput.realign_explained_at` into the per-venue runtime state.
+    pub(super) realign_explained: std::collections::HashMap<String, i64>,
 }
 
 /// The kernel's last recorded error, as `engine.stats.lastError` exposes it.
