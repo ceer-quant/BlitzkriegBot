@@ -169,16 +169,46 @@ pub(crate) fn spawn(
     round_sec: i64,
     poll_sec: u64,
 ) -> tokio::task::JoinHandle<()> {
+    discovery_loop(host, client, assets, round_sec, poll_sec)
+}
+
+/// Test-only entry for the #899 gate: drive the real discovery loop against a
+/// mock server with an explicit cadence. Not part of the public surface —
+/// it exists so the reverse-acceptance gate exercises the production loop,
+/// not a copy of it (same pattern as `feed_tests_only_spawn` and kalshi's
+/// `discovery_tests_only_spawn`).
+#[doc(hidden)]
+pub fn discovery_tests_only_spawn(
+    host: Arc<dyn MarketHost>,
+    client: Arc<PredictRest>,
+    assets: Vec<String>,
+    round_sec: i64,
+    poll_sec: u64,
+) -> tokio::task::JoinHandle<()> {
+    discovery_loop(host, client, assets, round_sec, poll_sec)
+}
+
+fn discovery_loop(
+    host: Arc<dyn MarketHost>,
+    client: Arc<PredictRest>,
+    assets: Vec<String>,
+    round_sec: i64,
+    poll_sec: u64,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_slot = i64::MIN;
+        // #899：最近一次实际喂入的 (slot, 批签名)。顶部逐 poll 重查 + 这个
+        // 闸替代了旧「slot == last_slot → continue」守卫（它让轮内补上架
+        // —— staggered listing / 扩批 —— 永远吞在第一个 poll 的子集里，
+        // #498 同族冻结 bug，kalshi 侧 #548 已修、predictfun 漏了）：同
+        // slot 批未变跳过重喂；轮内新增/移除市场改变签名 → 重喂（engine
+        // 同 slot merge 按 token 去重，只增不炸）。
+        let mut last_fed_slot = i64::MIN;
+        let mut last_fed_signature = String::new();
         let mut tick = tokio::time::interval(Duration::from_secs(poll_sec.max(3)));
         loop {
             tick.tick().await;
             let now = now_ms();
             let slot = now / 1000 / round_sec;
-            if slot == last_slot {
-                continue; // same round already fed
-            }
 
             // One page of live markets (paging beyond that is a stage-4
             // concern; the engine trades one round's binaries, not the venue).
@@ -247,7 +277,23 @@ pub(crate) fn spawn(
             if markets.is_empty() {
                 continue; // retry next tick (nothing open for the configured assets)
             }
-            last_slot = slot;
+
+            // #899：批签名 = 本批每对 UP/DOWN token 的稳定指纹。排序后拼接
+            // —— `pair_markets` 走 HashMap 分组，同一批的行序在两次 poll 之
+            // 间不稳定，不排序会把「同一批」误判成「批变了」，去重门退化成
+            // 每 poll 重喂。签名对新增/移除一个市场敏感；行情变化不改变签
+            // 名（价格本来就该逐 poll 前进，由 feed 通道承担）。
+            let mut fingerprints: Vec<String> = markets
+                .iter()
+                .map(|m| format!("{}:{}|{}", m.asset, m.up_token_id, m.down_token_id))
+                .collect();
+            fingerprints.sort();
+            let signature = fingerprints.join(",");
+            // #548 同款闸：同 slot 且批未变 → 跳过重喂（防 poll 节拍下重复
+            // RoundMarkets）；同 slot 批变了 → 落到下面的重喂。
+            if slot == last_fed_slot && signature == last_fed_signature {
+                continue;
+            }
 
             let count = markets.len();
             let joined = summary.join(",");
@@ -256,6 +302,8 @@ pub(crate) fn spawn(
             // on the running data feed (both inside the host).
             host.on_round_markets(markets).await;
             eprintln!("predictfun-extension: discovered slot={slot} ({count} markets: {joined})");
+            last_fed_slot = slot;
+            last_fed_signature = signature;
         }
     })
 }
