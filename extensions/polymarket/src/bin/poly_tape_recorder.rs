@@ -85,6 +85,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLY_STALL: Duration = Duration::from_secs(30);
 const SPOT_STALL: Duration = Duration::from_secs(60);
 
+/// CLOB WS 应用层心跳间隔（客户端 "PING" 文本帧；SDK 默认同拍 5s）。
+const POLY_PING_INTERVAL: Duration = Duration::from_secs(5);
+
 /// 工单失败阈值：断线 >1%/h、p99 >1s。
 const MAX_DISCONNECT_RATE_PCT: f64 = 1.0;
 const MAX_P99_LATENCY_MS: i64 = 1_000;
@@ -433,17 +436,18 @@ fn poly_symbol(v: &Value) -> Option<&str> {
     v.get("event_type").and_then(|e| e.as_str())
 }
 
-/// 市场频道订阅帧（与 SDK `SubscriptionRequest::market` 同形：十进制字符串
-/// asset_ids + initial_dump 拿全量首帧盘口）。
+/// 市场频道订阅帧：**最小形态** `{"assets_ids":[...],"type":"market"}`。
+/// 实测（2026-11-03 裸探针）：SDK 形态多出的 `operation`/`markets`/
+/// `initial_dump` 字段会被场地静默忽略订阅（连接保活但零数据帧），官方
+/// 文档的最小帧立即开始推 book/price_change/last_trade_price。
 fn market_sub_frame(asset_ids: &[String]) -> String {
-    json!({
-        "type": "market",
-        "operation": "subscribe",
-        "markets": [],
-        "asset_ids": asset_ids,
-        "initial_dump": true,
-    })
-    .to_string()
+    // 场地解析器对键序敏感：`assets_ids` 必须是首个键。不能走
+    // serde_json::Map（键序受 preserve_order 特性支配，本仓库恰好开着
+    // insertion-order，写 "type" 在前就真发 "type" 在前）——实测 2026-11-03
+    // A/B：同 token 同链路，assets_ids 在前=1383 帧，type 在前=0 帧。
+    // 手工拼帧，键序钉死；token 逐个过 json! 转义。
+    let ids: Vec<String> = asset_ids.iter().map(|id| json!(id).to_string()).collect();
+    format!(r#"{{"assets_ids":[{}],"type":"market"}}"#, ids.join(","))
 }
 
 /// Binance 现货帧解析：兼容组合流包裹（`{stream, data}`）与单流裸帧。
@@ -1069,6 +1073,12 @@ async fn poly_market_loop(
         if !sub_ok {
             break_reason = Some(BreakReason::Unplanned("subscribe 发送失败".into()));
         } else {
+            // 应用层心跳：CLOB WS 要求客户端周期发 "PING" 文本帧、场地回
+            // "PONG"（SDK 默认 5s 发一次、15s 无回包判死）。不发 PING 的
+            // 连接会被场地静默——冒烟实测 30s 零帧。
+            let mut ping = tokio::time::interval(POLY_PING_INTERVAL);
+            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ping.tick().await; // 首拍立即返回，先吃掉
             let mut last_frame = std::time::Instant::now();
             loop {
                 let residual = POLY_STALL
@@ -1094,6 +1104,11 @@ async fn poly_market_loop(
                         last_frame = std::time::Instant::now();
                         match next {
                             Some(Ok(Message::Text(txt))) => {
+                                // 应用层心跳回包（以及场地罕见的服务端 PING）：
+                                // 只当活性证据，不进 tape、不进统计。
+                                if txt == "PONG" || txt == "PING" {
+                                    continue;
+                                }
                                 let recv = now_ms();
                                 let bytes = txt.len() as u64;
                                 let v: Value = serde_json::from_str(&txt)
@@ -1123,6 +1138,13 @@ async fn poly_market_loop(
                                 break_reason = Some(BreakReason::Unplanned("流 EOF".into()));
                                 break;
                             }
+                        }
+                    }
+                    // 应用层心跳：到点即发 "PING" 文本帧。
+                    _ = ping.tick() => {
+                        if write.send(Message::text("PING")).await.is_err() {
+                            break_reason = Some(BreakReason::Unplanned("PING 发送失败".into()));
+                            break;
                         }
                     }
                     _ = tokio::time::sleep(residual) => {
@@ -1617,18 +1639,22 @@ fn test_poly_symbol() -> Result<(), String> {
 }
 
 fn test_sub_frame() -> Result<(), String> {
-    let f: Value = serde_json::from_str(&market_sub_frame(&["123".into(), "456".into()]))
-        .map_err(|e| e.to_string())?;
-    if f["type"] != "market"
-        || f["operation"] != "subscribe"
-        || !f["initial_dump"].as_bool().unwrap_or(false)
-    {
-        return Err(format!("{f}"));
+    let f_str = market_sub_frame(&["123".into(), "456".into()]);
+    let f: Value = serde_json::from_str(&f_str).map_err(|e| e.to_string())?;
+    // 实测：场地解析器键序敏感 + 多余字段静默拒订阅——assets_ids 必须是
+    // 首个键，且帧里不许有 operation/initial_dump/markets。
+    if !f_str.starts_with("{\"assets_ids\":[") || !f_str.ends_with("\"type\":\"market\"}") {
+        return Err(format!("订阅帧键序/形态错: {f_str}"));
+    }
+    for bad in ["operation", "initial_dump", "markets"] {
+        if f.get(bad).is_some() {
+            return Err(format!("订阅帧不应含 {bad}: {f}"));
+        }
     }
     let ids: Vec<String> =
-        serde_json::from_value(f["asset_ids"].clone()).map_err(|e| e.to_string())?;
+        serde_json::from_value(f["assets_ids"].clone()).map_err(|e| e.to_string())?;
     if ids != vec!["123".to_string(), "456".to_string()] {
-        return Err(format!("asset_ids: {ids:?}"));
+        return Err(format!("assets_ids: {ids:?}"));
     }
     Ok(())
 }
