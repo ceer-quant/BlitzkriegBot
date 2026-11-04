@@ -117,18 +117,29 @@ pub(crate) async fn handle_strategy(
                 // had simply never hosted.
                 let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
                 let mut kept_exits_only: Vec<String> = Vec::new();
-                // Gate-sandboxes run with no .env backing at all —
-                // there "no .env = persistence disabled" (the boot rule this
-                // mirror inherits) and the toggle must keep its legacy
-                // engine-only success. Only a path that EXISTS but refuses
-                // the write is an error.
+                // The gate used to demand the legacy accounts file ON DISK
+                // (`accounts_config_path.exists()`). #920 retired that file
+                // to make .env the single config source, which flipped this
+                // gate to permanently false: the engine flag still moved, but
+                // the .env half of the write was silently skipped and every
+                // default-account toggle died at the next boot (issue 925).
+                // The honest gate now is the persistence-axes check the
+                // service layer itself performs: a configured accounts path
+                // (the book's durable home) admits the write, and a None —
+                // replays and in-process tests, per backtest.rs's None-ing —
+                // keeps the legacy engine-only success. Sandboxes with a
+                // configured path but no .env on disk simply CREATE the env
+                // file on first toggle (`env_file::write_atomic` makes
+                // parents); legacy-exists refusal stays fail-closed inside
+                // `set_scoped_strategy_enabled` →
+                // `refuse_while_legacy_toml` (book.rs), so a write that would
+                // be dead data still errors instead of lying quiet.
                 let mirror_persistence = core
                     .lock()
                     .await
                     .config()
-                    .accounts_config_path
-                    .as_deref()
-                    .is_some_and(|p| std::path::Path::new(p).exists());
+                    .account_env_write_paths()
+                    .is_some();
                 if reason.is_none() && mirror_persistence {
                     let default_id = crate::account::default_account_id();
                     let mut c = core.lock().await;
