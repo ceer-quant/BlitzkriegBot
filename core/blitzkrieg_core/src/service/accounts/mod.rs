@@ -2,12 +2,12 @@
 //! verbatim from `service.rs` (pure code motion, no logic edits): balance
 //! seeding and venue-cash realignment (with the #702 windowed venue-evidence
 //! family — `window_cash_facts` / `report_venue_cash_move` / ghost alerts —
-//! kept together), the accounts.toml persisting writers, the cross-venue arb
+//! kept together), the account (`.env`) persisting writers, the cross-venue arb
 //! config and RFC 568 pair book, the in-kernel accounting audit, the venue
 //! reconcile sweep with external-fill folding, the order/position restore
 //! helpers and the expiry/order sweeps that guard them.
 //!
-//! #780: the file is split into cohesive children — `persist` (accounts.toml
+//! #780: the file is split into cohesive children — `persist` (the account
 //! writers + scope rebuild), `audit` (the in-kernel accounting audit and its
 //! journal), `reconcile` (venue self-check / reconcile bookkeeping) and
 //! `sweeps` (expiry, pair-orphan and force-close sweeps). This module keeps

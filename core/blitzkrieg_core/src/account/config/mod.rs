@@ -1,16 +1,24 @@
-//! `user_layer/configs/accounts.toml` — the account book's config source
-//! (DEV_V0_3 §9.5), parsed under the same precedence family as every other
-//! config file (CLI > env > toml > default). This module is the toml + default
-//! half; reading credential VALUES from the kernel's environment is
-//! [`read_credential_keys`] below.
+//! The account book's config source is the `.env` ACCOUNT_* grammar (issue
+//! 751, the .env single-source ruling) — not a config file. This module owns
+//! that grammar: parsing the ACCOUNT_* keys (env-only credentials are probed
+//! by [`read_credential_keys`]), the runtime write faces that upsert the keys,
+//! and the RESIDUE handling of the legacy `user_layer/configs/accounts.toml`
+//! the single-source ruling retired: the file is no longer a config source
+//! and is never read back into the book — its only remaining role in the
+//! loader is the existence check that shouts at the residue (the migration
+//! script removed the factory copy; an operator one is deleted by hand or
+//! migrated). The toml parse/lift machinery below (`from_str`, the file
+//! types, the validate faces) stays because the RESIDUE-REFUSAL and write
+//! faces still describe the same shapes, and because the parse types are the
+//! wire contract the env grammar mirrors field for field.
 //!
-//! The file is OPTIONAL: a missing file → the single `default` account (§9.5:
-//! a 0.2 deployment without the file keeps exactly today's behaviour — one
-//! active account, no keys named, the plugin's own env handling untouched).
-//! A file that EXISTS but does not parse, declares no account, or declares a
-//! duplicate id is refused loudly (fail-closed): a config typo must never
-//! silently shrink the book to "one default account", because the operator
-//! believes the restrictions in it are live.
+//! Zero config is legal: no ACCOUNT_* keys anywhere → the single `default`
+//! account (§9.5's zero-config deployment — one active account, no keys
+//! named, the plugin's own env handling untouched). A PRESENT but broken
+//! source (a bad status, a rounds value no plugin declared, a dangling
+//! display id, a duplicate id) is refused loudly (fail-closed): a config
+//! typo must never silently shrink the book to "one default account",
+//! because the operator believes the restrictions in it are live.
 
 use super::{
     Account, AccountId, AccountLedgers, AccountStatus, CredentialKeys, default_account_id,
@@ -26,16 +34,19 @@ pub use book::*;
 #[cfg(test)]
 mod config_tests;
 
-/// The optional config file (§9.5). Absent → single `default` account.
+/// The legacy config file's path spelling (§9.5). NOT a config source any
+/// more (issue 751): no loader reads it; `CoreConfig::account_env_write_paths`
+/// still carries the path because a live file at this path REFUSES every
+/// runtime write and the loader SHOUTS at it as residue.
 pub const ACCOUNTS_CONFIG_PATH: &str = "user_layer/configs/accounts.toml";
 
 /// One `[[account]]` table as it sits on disk. Credential fields hold the
 /// NAMES of environment variables — §9.4: the value never appears in any
 /// config file, log, or IPC answer.
 ///
-/// `Serialize` exists for the venue write-back only ([`persist_account_venue`]
-/// re-renders the parsed file); the wire types are separate (§12.1), so this
-/// never leaves the config layer.
+/// `Serialize` exists for the toml render path the cross-venue-arb / display
+/// faces once ran; the wire types are separate (§12.1), so this never leaves
+/// the config layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct AccountFileEntry {
@@ -322,9 +333,10 @@ fn validate_rounds_from(
 /// judges nothing on its own: which durations are legal is venue knowledge
 /// (§7.2), reported by the declaration face, not a kernel constant.
 ///
-/// This is the TOML-ONLY reader: the migration-window fallback and the tests'
-/// entry. Production boots through [`load_account_ledgers_single_source`],
-/// which consults the ACCOUNT_* env grammar first.
+/// This is the TOML-ONLY reader: the tests' parse-text entry (via
+/// [`from_str`]) and the legacy fixture reader. NO production path calls it
+/// since issue 923 removed the migration-window fallback — the boot and the
+/// reload read the ACCOUNT_* env grammar only.
 pub fn load_account_ledgers(
     path: &Path,
     now_ms: i64,
@@ -343,44 +355,69 @@ pub fn load_account_ledgers(
     from_str(&text, now_ms, allowed)
 }
 
-/// The production boot entry (issue 751, the .env single-source ruling):
-/// ACCOUNT_* (process environment first, then the `.env` file the launcher
-/// owns) beats the toml file; the toml file beats the single default. Env and
-/// file NEVER merge — when ACCOUNT_LIST is in force and the legacy toml file
-/// still exists, env wins and the residue is shouted at (one source, the
-/// migration script removes the file).
+/// The production boot entry (issue 751, the .env single-source ruling;
+/// issue 923 retired the fallback): the book comes from the ACCOUNT_* keys —
+/// process environment first, then the `.env` file the launcher owns. There
+/// is NO legacy toml fallback any more: a boot with no ACCOUNT_* keys
+/// anywhere is the zero-config deployment and loads the single `default`
+/// account.
 ///
-/// `toml_path` is the legacy `accounts.toml` (compat fallback only);
-/// `env_path` is the `.env` file (the same one `env_file_path` names —
-/// `None` skips the file face and reads the process environment alone).
+/// `legacy_path` names the retired `accounts.toml` — no longer read for
+/// configuration; its existence is only a RESIDUE signal: when the file is
+/// still on disk (the factory copy was deleted from the repo and production;
+/// an operator copy migrated otherwise) the boot warns that it is IGNORED so
+/// a stale file never silently masquerades as the live book. `env_path` is
+/// the `.env` file (the same one `env_file_path` names — `None` skips the
+/// file face and reads the process environment alone).
 pub fn load_account_ledgers_single_source(
-    toml_path: &Path,
+    legacy_path: &Path,
     env_path: Option<&Path>,
     now_ms: i64,
     allowed: &[i64],
 ) -> Result<AccountLedgers, CoreError> {
     let env = env_lookup_from_sources(env_path);
     let from_env = load_account_ledgers_from_env(now_ms, allowed, &env)?;
-    let toml_present = toml_path.exists();
     match from_env {
         Some(book) => {
-            if toml_present {
+            if legacy_path.exists() {
                 tracing::warn!(
                     "accounts: ACCOUNT_* keys are in force; the legacy {} still \
                      exists and is IGNORED — delete it \
                      (scripts/migrate-config-to-env.sh)",
-                    toml_path.display()
+                    legacy_path.display()
                 );
             }
             Ok(book)
         }
-        None => load_account_ledgers(toml_path, now_ms, allowed),
+        None => {
+            // Issue 923: the toml fallback is REMOVED — env accounts only.
+            // No ACCOUNT_* keys anywhere is the zero-config deployment: the
+            // single default account. A residue file at the legacy path is
+            // still shouted at (same family as the env-wins branch) so an
+            // operator who still believes the toml rules the book learns it
+            // does not.
+            if legacy_path.exists() {
+                tracing::warn!(
+                    "accounts: NO ACCOUNT_* keys found — booting the zero-config \
+                     single-default book; the legacy {} is no longer a config \
+                     source (the toml fallback was removed, issue 751 / issue \
+                     923) and is IGNORED — run scripts/migrate-config-to-env.sh \
+                     to migrate or delete it",
+                    legacy_path.display()
+                );
+            }
+            Ok(AccountLedgers::single_default(now_ms))
+        }
     }
 }
 
 /// Reload entry: the edited file must beat the process copy loaded at startup.
+/// Env-only (issue 923): the ACCOUNT_* keys from the `.env` file decide the
+/// whole book — no ACCOUNT_LIST in the file reloads the zero-config single
+/// default (no legacy toml fallback exists any more). A malformed `.env`
+/// (unreadable, or keys that fail the fail-closed parse) refuses the reload
+/// and the caller keeps the current configuration.
 pub fn load_account_ledgers_for_reload(
-    toml_path: &Path,
     env_path: &Path,
     now_ms: i64,
     allowed: &[i64],
@@ -397,12 +434,14 @@ pub fn load_account_ledgers_for_reload(
         .collect();
     match load_account_ledgers_from_env(now_ms, allowed, &|key| file_map.get(key).cloned())? {
         Some(book) => Ok(book),
-        None => load_account_ledgers(toml_path, now_ms, allowed),
+        None => Ok(AccountLedgers::single_default(now_ms)),
     }
 }
 
 /// Parse the toml text into the book. Split from [`load_account_ledgers`] so
-/// tests (and a future CLI override) can feed strings directly.
+/// tests can feed strings directly. The ENV grammar mirrors this parse face
+/// shape for shape (the same refusals, the same defaults); production loads
+/// the env face, never this file text.
 pub fn from_str(text: &str, now_ms: i64, allowed: &[i64]) -> Result<AccountLedgers, CoreError> {
     let file: AccountsFile = toml::from_str(text).map_err(|e| {
         CoreError::new(
@@ -520,91 +559,6 @@ fn lift_cross_venue_arb(a: &CrossVenueArbFileSection) -> CrossVenueArbConfig {
     }
 }
 
-/// Read the `[cross_venue_arb]` section back from the file on disk (the
-/// `arb.config.get` shape: `None` = unconfigured). A file that does not parse
-/// is REFUSED — the get answers the truth, it does not paper over a broken
-/// book (the boot would refuse the same file anyway).
-pub fn read_cross_venue_arb(path: &Path) -> Result<Option<CrossVenueArbConfig>, CoreError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml unreadable: {e}"),
-        )
-    })?;
-    let file: AccountsFile = toml::from_str(&text).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not parse: {e}"),
-        )
-    })?;
-    Ok(file.cross_venue_arb.as_ref().map(lift_cross_venue_arb))
-}
-
-/// The persisted write of the `[cross_venue_arb]` section: read-modify-write
-/// over the whole file, the exact fail-closed posture every other accounts.toml
-/// writer runs (a non-parsing file is REFUSED, never flattened; same-directory
-/// temp + rename; the re-render does not carry comments — every FIELD
-/// round-trips because the parse is `deny_unknown_fields`). The CALLER owns
-/// the semantic validations (venues distinct, accounts exist — it has the
-/// book); this layer only owns the file.
-pub fn persist_cross_venue_arb(path: &Path, cfg: &CrossVenueArbConfig) -> Result<(), CoreError> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml unreadable, refusing the arb config write: {e}"),
-        )
-    })?;
-    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not parse; refusing the arb config write: {e}"),
-        )
-    })?;
-    file.cross_venue_arb = Some(CrossVenueArbFileSection {
-        leg_a_venue: cfg.leg_a_venue.trim().to_string(),
-        leg_a_account: cfg.leg_a_account.trim().to_string(),
-        leg_b_venue: cfg.leg_b_venue.trim().to_string(),
-        leg_b_account: cfg.leg_b_account.trim().to_string(),
-        pairs: cfg.pairs.iter().map(|p| p.trim().to_uppercase()).collect(),
-    });
-    let out = toml::to_string(&file).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not render: {e}"),
-        )
-    })?;
-    write_accounts_file_atomic(path, &out, "arbcfg")
-}
-
-/// The persisted removal of the `[cross_venue_arb]` section (`arb.config.clear`):
-/// the section key is REMOVED — the file returns to the pre-v2 shape a file
-/// without the key has. Same fail-closed posture as every writer above.
-pub fn clear_cross_venue_arb(path: &Path) -> Result<(), CoreError> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml unreadable, refusing the arb config clear: {e}"),
-        )
-    })?;
-    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not parse; refusing the arb config clear: {e}"),
-        )
-    })?;
-    file.cross_venue_arb = None;
-    let out = toml::to_string(&file).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not render: {e}"),
-        )
-    })?;
-    write_accounts_file_atomic(path, &out, "arbcfg")
-}
-
 /// The coherence rules a `[cross_venue_arb]` section must satisfy, shared by
 /// the boot loader (`from_str`) and the runtime write path (`persist_…`'s
 /// caller validates BEFORE the file is touched — a refused set moves nothing).
@@ -691,85 +645,9 @@ pub fn validate_cross_venue_arb_section(
     Ok(())
 }
 
-/// The persisted write-back of ONE account's venue binding
-/// (`account.venue.set`). Read-modify-write over the whole file: parse the
-/// existing toml, update the named `[[account]]`'s `venue` key (an empty
-/// `venue` REMOVES the key — the file spells "unbound" by absence, the same
-/// shape a pre-binding file had), render, atomically replace (same-directory
-/// temp + rename, so a half-written file can never be what the next boot
-/// reads).
-///
-/// Rendering disclosure: the toml crate re-serialises the whole document, so
-/// comments and layout above/inside the file do NOT survive a venue write —
-/// the re-rendered file carries every FIELD (the parse is `deny_unknown_
-/// fields`, so nothing unparseable could have been in there anyway) but not
-/// the operator's comments. Accepted trade-off: hand-maintaining a
-/// comment-preserving TOML editor is not worth it for a value the panel now
-/// owns; every semantic field round-trips, which is the invariant the tests
-/// pin. A file that does not parse is REFUSED, never overwritten (fail-
-/// closed: a write must not be able to "fix" a typo by flattening the
-/// operator's book into a shape they never wrote).
-///
-/// Forward-looking: `Account.venue` is the next batch's plugin-ENABLEMENT
-/// derivation input (boot reads this book and enables every venue at least
-/// one account is bound to), so this persist is the durability half of the
-/// whole multi-plugin model — losing a sibling account's fields here would
-/// silently shrink both the book and the derived enablement set.
-pub fn persist_account_venue(path: &Path, account_id: &str, venue: &str) -> Result<(), CoreError> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml unreadable, refusing the venue write: {e}"),
-        )
-    })?;
-    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not parse; refusing the venue write: {e}"),
-        )
-    })?;
-    let target = file
-        .account
-        .iter_mut()
-        .find(|a| a.id == account_id)
-        .ok_or_else(|| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
-            )
-        })?;
-    if venue.is_empty() {
-        target.venue = None;
-    } else {
-        target.venue = Some(venue.to_string());
-    }
-    let out = toml::to_string(&file).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml does not render: {e}"),
-        )
-    })?;
-    // Atomic replace: write the sibling temp first, then rename over the
-    // original — the boot's read and a concurrent reload can never see a
-    // partial document.
-    let tmp = path.with_extension("toml.venue.tmp");
-    std::fs::write(&tmp, out).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml venue write failed: {e}"),
-        )
-    })?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("accounts.toml venue rename failed: {e}"),
-        )
-    })
-}
-
 /// The persisted write of a NEW account (`account.create`): append one
 /// `[[account]]` row to the book — read-modify-write over the whole file, the
-/// exact posture [`persist_account_venue`] runs (a non-parsing file is
+/// exact posture the retired toml venue writer ran (a non-parsing file is
 /// REFUSED, never flattened; atomic same-directory temp + rename; the toml
 /// re-render does not carry the operator's comments — the same accepted
 /// trade-off, every FIELD round-trips because the parse is
@@ -837,7 +715,7 @@ pub fn persist_account_create(
 
 /// The persisted write of ONE account's trading switch
 /// (`account.trading.set`): read-modify-write over the whole file, the exact
-/// fail-closed posture [`persist_account_venue`] runs (a non-parsing file is
+/// fail-closed posture [`persist_account_create`] runs (a non-parsing file is
 /// REFUSED, never flattened; same-directory temp + rename; the re-render
 /// does not carry comments — every FIELD round-trips). `false` is written
 /// explicitly; `true` REMOVES the key (the file spells "trading" by
@@ -938,7 +816,7 @@ pub fn persist_account_strategies(
 
 /// The persisted write of ONE account's round-length FAMILY set
 /// (`account.rounds.set`, 轮次多族 B2). Read-modify-write over the whole
-/// file, the exact posture [`persist_account_venue`] runs (a non-parsing
+/// file, the exact posture [`persist_account_create`] runs (a non-parsing
 /// file is REFUSED, never flattened; atomic same-directory temp + rename via
 /// [`write_accounts_file_atomic`]; the toml re-render does not carry the
 /// operator's comments — the same accepted trade-off, every FIELD
@@ -1169,10 +1047,12 @@ pub fn read_credential_keys(keys: &CredentialKeys) -> CredentialKeys {
 //   ACCOUNT_ARB_LEG_A_VENUE / _LEG_A_ACCOUNT / _LEG_B_VENUE / _LEG_B_ACCOUNT /
 //                   _ARB_PAIRS (comma list)   — the [cross_venue_arb] legs
 //
-// Precedence: ACCOUNT_* env > accounts.toml (compat fallback during the
-// migration window) > single default. A file that parses coexists with env
-// keys ONLY when ACCOUNT_LIST is absent (env keys are then ignored — one
-// source wins, no merge); the migration script removes the file.
+// Precedence (issue 923: the migration window is closed): the ACCOUNT_* keys
+// are the ONLY source — no ACCOUNT_LIST anywhere is the zero-config
+// deployment (single default). The legacy accounts.toml is no longer a fallback
+// and no loader reads it: a residue file on disk is IGNORED and shouted at,
+// and while it exists every runtime write face still refuses (one source —
+// the operator deletes or migrates the file).
 
 /// `default` for `ACCOUNT_<ID>_TRADING_ENABLED`; absent key = true.
 fn env_status(raw: Option<String>) -> Result<AccountStatus, CoreError> {

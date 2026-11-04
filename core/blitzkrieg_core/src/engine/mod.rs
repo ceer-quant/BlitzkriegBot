@@ -466,7 +466,7 @@ pub struct Engine {
     unified_mappings:
         std::collections::BTreeMap<String, blitzkrieg_market_api::unified::UnifiedEvent>,
     /// 跨所套利弹窗 v2: the arb leg configuration in force (the host's hot
-    /// push, mirroring accounts.toml's `[cross_venue_arb]`). `None` =
+    /// push, mirroring the ACCOUNT_ARB_* env rows). `None` =
     /// unconfigured — every stamp falls back to the instance account and no
     /// arb params are merged. Read by `evaluate`'s strategy loop (each
     /// adapter re-resolves the leg map per candidate) and by the params

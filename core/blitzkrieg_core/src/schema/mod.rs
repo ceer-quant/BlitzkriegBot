@@ -343,27 +343,30 @@ pub mod method {
     /// guard reads the in-memory field), and — forward-looking — it becomes
     /// the next batch's plugin-ENABLEMENT derivation input (boot reads the
     /// account book and enables every venue at least one account is bound
-    /// to), which is why the write persists to accounts.toml and must never
-    /// lose a sibling account's fields on the way.
+    /// to), which is why the write persists to the operator's `.env` (the
+    /// ACCOUNT_* grammar, issue 751) and must never
+    /// lose a sibling account's row on the way.
     pub const ACCOUNT_VENUE_SET: &str = "account.venue.set";
     /// The account's round-length FAMILY write (`account.rounds.set`,
     /// 轮次多族 B2): the set spells exactly which (venue, duration) families
     /// the account trades. An ACCOUNT-CONFIGURATION MANAGEMENT verb, the same
     /// family as `account.venue.set`/`account.list` — it writes the CONFIG
-    /// PLANE's fact (accounts.toml + the in-memory book), its consumers are
+    /// PLANE's fact (the operator's `.env` ACCOUNT_* rows + the in-memory
+    /// book), its consumers are
     /// the panel's account card and the ops CLI, and it is NOT the strategy
     /// runtime's business-verb family #568 vetoed (策略运行时对周期集的感知
     /// 走内存共享态，不另开业务动词). The write is ONE transaction (persist
     /// FIRST, then memory): a removed family with open positions refuses the
     /// WHOLE write, a removal with no exposure soft-unloads the family's
     /// poll output, an added family mounts its discovery instance at runtime
-    /// (增族即挂). Empty set = the key is REMOVED from accounts.toml (the
+    /// (增族即挂). Empty set = the ACCOUNT_*_ROUNDS key is REMOVED from the
+    /// operator's `.env` (the
     /// unrestricted spelling, identical to a missing key at the next boot).
     pub const ACCOUNT_ROUNDS_SET: &str = "account.rounds.set";
     /// The per-account trading switch (`account.trading.set`): `false` =
     /// this account's NEW ENTRIES are refused while its EXITS keep flowing
-    /// (positions stay strategy-managed until flat). Persisted to
-    /// accounts.toml, re-read at next boot.
+    /// (positions stay strategy-managed until flat). Persisted to the
+    /// operator's `.env` (ACCOUNT_*_TRADING_ENABLED), re-read at next boot.
     pub const ACCOUNT_TRADING_SET: &str = "account.trading.set";
     /// The per-account FREEZE (account-scoped kill switch,
     /// `account.freeze`): `{accountId, frozen, reason}` — a frozen account
@@ -383,9 +386,9 @@ pub mod method {
     /// presentation pointer — it does NOT touch the active/accounting/
     /// strategy-enablement axes and no trading semantics attach to it.
     /// The kernel validates the account exists AND is `active` (plan-first),
-    /// updates the in-memory pointer AND persists the accounts.toml
-    /// top-level `display_account` key in one transaction; the next boot
-    /// re-reads the file (fail-closed on a dangling id).
+    /// updates the in-memory pointer AND persists the `ACCOUNT_DISPLAY` key
+    /// into the operator's `.env` in one transaction; the next boot
+    /// re-reads it (fail-closed on a dangling id).
     pub const DISPLAY_ACCOUNT_SET: &str = "display.account.set";
     /// One account's cash-journal tail (#509's read surface): the append-only
     /// `JournalEntry` rows the ledger records for every balance change.
@@ -395,7 +398,8 @@ pub mod method {
     /// uses); `limit` defaults to 100, capped at 500.
     pub const ACCOUNT_JOURNAL: &str = "account.journal";
     /// Create ONE account at runtime (`accountId` + optional `name`/`venue`):
-    /// the identity lands in the in-memory book AND accounts.toml — the same
+    /// the identity lands in the in-memory book AND the operator's `.env`
+    /// (ACCOUNT_* rows) — the same
     /// plan-and-persist transaction `account.venue.set` runs. Status is
     /// ALWAYS `active` (a runtime call that minted a restricted account would
     /// be a loosening in disguise — tightening is `account.status`'s job);
@@ -406,7 +410,7 @@ pub mod method {
     /// panel after the identity exists. `default` is refused (reserved).
     pub const ACCOUNT_CREATE: &str = "account.create";
     /// Remove ONE account at runtime: the row leaves the in-memory book AND
-    /// accounts.toml. `default` is refused (reserved); an account with any
+    /// the operator's `.env` ACCOUNT_* grammar. `default` is refused (reserved); an account with any
     /// OPEN position is refused (its money must not become unaddressable);
     /// removing the process-active account re-activates `default` (the
     /// session switchers resolve against the book, this only fixes the
@@ -497,10 +501,11 @@ pub mod method {
     /// strategy pairs across them. Fail-closed validation names the offending
     /// field (version, venue/account presence, venue distinctness, account
     /// existence, account venue-binding coverage, pairs non-empty); a refused
-    /// write moves NOTHING (file and memory stay untouched). The kernel
-    /// persists the section to accounts.toml top-level `[cross_venue_arb]` in
+    /// write moves NOTHING (env rows and memory stay untouched). The kernel
+    /// persists the section as `ACCOUNT_ARB_*` env keys in the operator's
+    /// `.env` in
     /// the same transaction the memory mirror + engine push update — the next
-    /// boot re-reads the file (fail-closed on a bad hand edit).
+    /// boot re-reads them (fail-closed on a bad hand edit).
     pub const ARB_CONFIG_SET: &str = "arb.config.set";
     /// The leg configuration readout (`arb.config.get`): `configured: true`
     /// with the four leg fields + `pairs`, or `configured: false` with null

@@ -132,7 +132,7 @@ impl Core {
     ///
     /// PERSISTENCE ASYMMETRY (issue 552 audit, honest wording): this toggle is
     /// a SESSION-level fact on the default scope's enabled flag — it does not
-    /// persist. The durable per-account truth is only the accounts.toml
+    /// persist. The durable per-account truth is only the operator's `.env`
     /// enablement set: a kernel restart replays it, so a scope named in an
     /// account's set boots ENABLED even if the session toggled the global
     /// switch off. To keep a strategy off across restarts, remove it from

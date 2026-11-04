@@ -69,9 +69,9 @@ pub struct Core {
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
-    /// 跨所套利弹窗 v2: the leg configuration in force (the accounts.toml
-    /// `[cross_venue_arb]` section's memory mirror). `None` = unconfigured.
-    /// Written by `arb_config_set_persisting` (file + memory in one
+    /// 跨所套利弹窗 v2: the leg configuration in force (the `ACCOUNT_ARB_*`
+    /// env grammar's memory mirror). `None` = unconfigured.
+    /// Written by `arb_config_set_persisting` (`.env` + memory in one
     /// transaction), read by the engine hot-push (the adapter's account
     /// stamp + the strategy's `bk.params()` leg entries).
     arb_leg_config: Option<crate::account::CrossVenueArbConfig>,
@@ -1005,7 +1005,7 @@ impl Core {
     // ── 账户↔venue 解耦：per-account strategy ENABLEMENT 语义层 ─────────────
     //
     // 语义裁决（本轮）：不存在「为账户分配策略」的呈现逻辑 —— 策略全局可见；
-    // accounts.toml 的 `strategies` 记录的是每账户×策略的启用状态（面板启用
+    // operator `.env` 的 ACCOUNT_<ID>_STRATEGIES 记录的是每账户×策略的启用状态（面板启用
     // 按钮的持久化）。scope (strategy, account) 运行 ⇔ 策略已安装 AND 账户
     // 已启用 AND 策略 ∈ 该账户启用集。被停用的 scope 若有持仓 → exits-only：
     // 不再开新仓，TP/SL/挂单巡逻/退出意图照常管理到平完。以下三个原语是

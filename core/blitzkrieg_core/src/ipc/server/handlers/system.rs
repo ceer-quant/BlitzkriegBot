@@ -89,8 +89,8 @@ pub(crate) async fn handle_system(
             if !update_state.snapshot().check_enabled {
                 Err((
                     Failure::APPLICATION,
-                    "update checking is disabled (checkEnabled=false); enable it in \
-                     user_layer/configs/update.toml or via system.update.configure"
+                    "update checking is disabled (checkEnabled=false); configure \
+                     via the BLITZKRIEG_UPDATE_* env keys or via system.update.configure"
                         .to_string(),
                     None,
                 ))

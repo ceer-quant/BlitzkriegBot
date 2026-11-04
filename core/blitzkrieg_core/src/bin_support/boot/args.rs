@@ -927,7 +927,9 @@ pub(crate) fn parse_args(
             }),
         file.shadow.auto_evolve
     );
-    // VERSIONING.md §7: CLI > env > update.toml > built-in default (off).
+    // VERSIONING.md §7 (as amended by issue 751): CLI > env > built-in default
+    // (off). The update.toml file layer is retired — the switches answer to the
+    // operator (CLI, or `.env` read into the env layer) and to nobody else.
     let update_check_enabled = resolve_opt!(
         "update.check_enabled",
         update_check_enabled,
@@ -937,7 +939,7 @@ pub(crate) fn parse_args(
                 "false" | "0" | "off" | "no" => Some(false),
                 _ => None,
             }),
-        file.update.check_enabled
+        None::<bool>
     );
     let update_auto = resolve_opt!(
         "update.auto_update",
@@ -948,7 +950,7 @@ pub(crate) fn parse_args(
                 "false" | "0" | "off" | "no" => Some(false),
                 _ => None,
             }),
-        file.update.auto_update
+        None::<bool>
     );
     // #379: the automatic-check clock. Same chain; 0 = scheduler off. A
     // persisted interval is NOT used here by design — the clock is
@@ -958,7 +960,7 @@ pub(crate) fn parse_args(
         update_interval_secs,
         env.text("BLITZKRIEG_UPDATE_INTERVAL_SECS")
             .and_then(|v| v.trim().parse::<i64>().ok()),
-        file.update.interval_secs
+        None::<i64>
     )
     .filter(|s| *s >= 0);
     let se_cycle_secs = resolve_opt!(

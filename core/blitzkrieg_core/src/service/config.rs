@@ -47,7 +47,7 @@ pub struct CoreConfig {
     /// armed is venue knowledge, so the kernel keeps no hardcoded list; this
     /// field only mirrors what the plugins declared. EVERY consumer
     /// (`round_duration.get` readout, `round_duration.set`, the persisted-cell
-    /// reader, the accounts.toml parser, `account.rounds.set`) admits a value
+    /// reader, the ACCOUNT_* parser, `account.rounds.set`) admits a value
     /// only when this union contains it, and an EMPTY union refuses EVERY
     /// value (fail-closed: with no plugin claiming a family, accepting any
     /// value would be the kernel inventing knowledge the declaration face
@@ -91,17 +91,19 @@ pub struct CoreConfig {
     /// kernel holds no hardcoded venue→env table of its own. Empty map = no
     /// credential-bearing plugin is compiled in.
     pub credential_vars: std::collections::BTreeMap<String, Vec<String>>,
-    /// The account book's own file (`user_layer/configs/accounts.toml` in
-    /// production) — the write half of `account.venue.set` persists the
-    /// binding HERE, read back at the next boot. `None` disables the write
+    /// The account book's own legacy path (`user_layer/configs/accounts.toml`
+    /// in production; retired as a configuration source by issue 751/923 —
+    /// now the write-gate basis) — the write half of `account.venue.set`
+    /// refuses while a file exists at this path; the book is re-read from
+    /// the `.env` alone at the next boot. `None` disables the write
     /// path: the backtester and most in-process tests run with `None`, and a
     /// venue bind then refuses with "persistence is disabled" instead of
     /// writing into whatever checkout the caller happens to run from (the
     /// same posture as `runtime_config_path`, which this mirrors). The READ
-    /// half never consults this — `Core::new` loads the book from the
-    /// cwd-relative `ACCOUNTS_CONFIG_PATH` at boot, tests inject a book via
-    /// [`Core::with_account_book`]; only tests that exercise the persist
-    /// round-trip set this to their own private file.
+    /// half never consults this as a source — `Core::new` hands the path to
+    /// the loader (which probes it as residue and warns), tests inject a
+    /// book via [`Core::with_account_book`]; only tests that exercise the
+    /// persist round-trip set this to their own private file.
     pub accounts_config_path: Option<String>,
     /// #458: where manual, destructive operations (`system.reset_trading`,
     /// and later `orders.force_close`) append their audit record. `None`
@@ -254,7 +256,7 @@ pub struct CoreConfig {
     /// Node to push `engine.markets`. Default true when the engine is on.
     pub discovery_enabled: bool,
     /// Update-check switches (VERSIONING.md §7). Resolved in `main` through
-    /// CLI > env > `configs/update.toml`; the runtime cell persisted in
+    /// CLI > env; the runtime cell persisted in
     /// `data/update/state.json` outranks all three. Both default false — a
     /// default-configured stack makes zero outbound connections (INV-3).
     pub update_check_enabled: bool,
@@ -263,8 +265,8 @@ pub struct CoreConfig {
     pub update_auto: bool,
     /// #379: seconds between AUTOMATIC update checks. `0` (the default) means
     /// NO scheduler task exists — the clock is an explicit configuration
-    /// choice (`--update-interval-secs` / `BLITZKRIEG_UPDATE_INTERVAL_SECS` /
-    /// `update.interval_secs`), never a default.
+    /// choice (`--update-interval-secs` / `BLITZKRIEG_UPDATE_INTERVAL_SECS`),
+    /// never a default.
     pub update_interval_secs: u64,
     /// Start with Shadow Evolution enabled (opt-in; default false).
     pub shadow_evolution_enabled: bool,

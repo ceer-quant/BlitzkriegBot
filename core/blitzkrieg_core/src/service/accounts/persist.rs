@@ -1,4 +1,4 @@
-//! accounts.toml persisting writers, scope rebuild and account lifecycle (#780).
+//! account (`.env`) persisting writers, scope rebuild and account lifecycle (#780).
 
 use crate::model::*;
 use blitzkrieg_market_api::net::now_ms;
@@ -142,7 +142,7 @@ impl Core {
              gate reads the new set immediately{}; the declaration re-reads at \
              next boot ({ACCOUNT_ROUNDS_SET_NOTE})",
             if rounds.is_empty() {
-                " (empty set = unrestricted, key removed from accounts.toml)"
+                " (empty set = unrestricted, ACCOUNT_*_STRATEGIES key removed)"
             } else {
                 ""
             },
@@ -164,7 +164,7 @@ impl Core {
     ///
     /// Validations (fail-closed, every refusal names its field):
     ///   * both venues non-empty AND distinct;
-    ///   * both accounts exist in the book (accounts.toml's `[[account]]`s);
+    ///   * both accounts exist in the book (the .env ACCOUNT_* rows);
     ///   * when an account carries a venue binding, that binding must admit
     ///     its own leg's venue (an account pinned to venue V cannot trade
     ///     leg venue W — the scope gate would refuse every leg);
@@ -275,7 +275,7 @@ impl Core {
             if !bound.is_empty() && bound != leg_venue {
                 return Err(err(format!(
                     "arb.config.set: {field} `{id}` is bound to venue `{bound}` — it cannot \
-                     trade leg venue `{leg_venue}` (unbind it in accounts.toml or pick another \
+                     trade leg venue `{leg_venue}` (rebind it via arb.config or pick another \
                      account)"
                 )));
             }
@@ -330,7 +330,7 @@ impl Core {
 
     /// The MEMORY-ONLY leg-configuration write: the same validations and the
     /// same hot-push as [`Self::arb_config_set_persisting`], without the file.
-    /// The shape a core without an `accounts.toml` path takes (backtests and
+    /// The shape a core without an account-store path takes (backtests and
     /// in-process tests) — a restart forgets it, exactly like every other
     /// in-memory knob those cores run.
     pub fn arb_config_set(&mut self, cfg: &crate::account::CrossVenueArbConfig) -> CoreResult<()> {
@@ -502,7 +502,7 @@ impl Core {
     }
 
     /// The trading-switch write (`account.trading.set`): memory AND
-    /// accounts.toml in one transaction — persist FIRST (a failure leaves
+    /// the operator's `.env` in one transaction — persist FIRST (a failure leaves
     /// both stores untouched), memory after. The engine mirror needs no
     /// separate push here: the next evaluation cycle re-pushes every
     /// account's trading fact, so the gate is in force within one cycle.
@@ -557,7 +557,7 @@ impl Core {
     }
 
     /// The display-pointer write (显示账户配置化 / `display.account.set`):
-    /// memory AND accounts.toml in one transaction — persist FIRST (a failure
+    /// memory AND the operator's `.env` in one transaction — persist FIRST (a failure
     /// leaves both stores untouched), memory after. The refusals are ALL
     /// plan-first: the id must name a CONFIGURED account.
     ///
@@ -614,7 +614,7 @@ impl Core {
     }
 
     /// The strategy-assignment write (`account.strategies.set`): memory AND
-    /// accounts.toml in one transaction, plus the engine scope rebuild.
+    /// the operator's `.env` in one transaction, plus the engine scope rebuild.
     ///
     /// Names are validated against the engine's REGISTERED set (plan-first —
     /// a typo fails here, never as a silently inert assignment). The rebuild:
@@ -630,7 +630,7 @@ impl Core {
     /// 账户↔venue 解耦语义: `requested` is the account's strategy
     /// ENABLEMENT set (the 启用按钮's persistence), not an assignment or a
     /// visibility filter — strategies are global. The write is a whole-set
-    /// decision: memory AND accounts.toml in one transaction (persist
+    /// decision: memory AND the operator's `.env` in one transaction (persist
     /// first), then the engine scopes rebuilt from it (removed-and-flat
     /// drop; removed-and-held demote exits-only; added instantiate enabled).
     ///
@@ -727,7 +727,7 @@ impl Core {
         // in lockstep. The boot migrates the state file's set into the file
         // ONLY while the default account has no `strategies` key; without
         // this mirror, a set the operator emptied (key removed from
-        // accounts.toml) would be re-imported from a stale state file at the
+        // the .env) would be re-imported from a stale state file at the
         // next boot — the exact resurrection the default-toggle mirror above
         // closes. Non-default accounts never migrate, so their state file is
         // untouched (the global toggle's file stays theirs alone).
@@ -786,8 +786,8 @@ impl Core {
     /// the named scopes are instantiated and ENABLED; the default account
     /// with NO key and a non-empty persisted enabled-set (strategy-state
     /// .json — the old global toggle's durable form) is MIGRATED once: that
-    /// set is materialized as the default account's enablement set in
-    /// accounts.toml, so the upgrade keeps the production behaviour exactly
+    /// set is materialized as the default account's enablement rows in
+    /// the operator's `.env`, so the upgrade keeps the production behaviour exactly
     /// (default 账户 strategies=["pair_discount_arb","spread_arb"] 升级后
     /// 行为不变) and the file is the only truth from that boot on.
     ///
@@ -845,8 +845,8 @@ impl Core {
                 tracing::info!(
                     strategies = ?migrated,
                     "strategy enablement migration: the default account's persisted \
-                     enabled set is materialized as its accounts.toml enablement set — \
-                     the file is the only truth from here on"
+                     enabled set is materialized as its .env enablement rows — \
+                     the env rows are the only truth from here on"
                 );
             }
         }
@@ -898,7 +898,7 @@ impl Core {
     }
 
     /// `account.create`（账户簿运行时增删的建半）：新账户落内存 AND
-    /// accounts.toml，一个事务 —— persist 先行（失败则两个存储都不动），文件
+    /// operator `.env`，一个事务 —— persist 先行（失败则两个存储都不动），落盘
     /// 收下后才动内存，与 [`Self::set_account_venue_persisting`] 同一姿态。
     /// 身份合同在这里钉死：id 非空 / trim 后非空 / 不允许保留名 `default` /
     /// 不允许与簿内现有 id 重复；status 恒 `Active`（运行时铸造一个受限账户
@@ -1030,7 +1030,7 @@ impl Core {
     }
 
     /// `account.remove`（账户簿运行时增删的删半）：账户离开内存 AND
-    /// accounts.toml，同一事务姿态。拒绝面：账簿的最后一个账户（空簿会让
+    /// operator `.env`，同一事务姿态。拒绝面：账簿的最后一个账户（空簿会让
     /// 下一次 boot 拒载，删掉它是删库式脚枪）；仍有 open position 的账户
     /// （钱不能变成不可寻址的）；未知 id 标准拒绝。`default` 只是普通账户
     /// —— 所有账户都可删（用户裁决：绑定只在建户时绑定、编辑面已收，
@@ -1056,7 +1056,7 @@ impl Core {
                 CoreErrorCode::InvalidParams,
                 format!(
                     "account.remove：`{id}` 是账户簿里最后一个账户——至少要保留一个账户 \
-                     （下一次启动会拒绝空账户簿；确要清空部署请直接删除 accounts.toml）"
+                     （下一次启动会拒绝空账户簿；确要清空部署请直接清空 .env 的 ACCOUNT_* 行）"
                 ),
             ));
         }
@@ -1102,14 +1102,14 @@ impl Core {
         // `account.create` 是新账本，不是老账户续弦 —— 留着旧文件，下一次
         // boot 的 attach_journals 会把上一世的成交流水整表回放进来（生产
         // kalshi 实锤：6 轮建/删叠出 6 笔幽灵 seed@account.create，Σamount
-        // 比真实余额多 5000）。删文件失败则整体拒绝 —— 此时 accounts.toml
+        // 比真实余额多 5000）。删文件失败则整体拒绝 —— 此时 .env
         // 已收下了删除（persist 先行的代价），但内存未动、旧 journal 还在，
         // 重试一次即可收敛；拒绝的消息如实告知。
         if !self.accounts.get_mut(id)?.retire_journal_file() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "account.remove：`{id}` 的流水文件删除失败 —— accounts.toml \
+                    "account.remove：`{id}` 的流水文件删除失败 —— .env \
                      已落盘但内存未动，旧流水文件还在；请重试一次，问题持续 \
                      请检查 data/ledger/ 的写权限"
                 ),

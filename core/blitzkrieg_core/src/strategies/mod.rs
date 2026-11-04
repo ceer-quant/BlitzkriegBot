@@ -579,8 +579,8 @@ pub trait EngineStrategy: Send + Sync {
         None
     }
 
-    /// 跨所套利弹窗 v2: the arb leg configuration in force (the accounts.toml
-    /// `[cross_venue_arb]` section, memory-mirrored on the engine). Two
+    /// 跨所套利弹窗 v2: the arb leg configuration in force (the `ACCOUNT_ARB_*`
+    /// env grammar, memory-mirrored on the engine). Two
     /// consumers ride one push: the adapter's account STAMP (entry signals
     /// and exit intents carry the token's OWN venue's leg account, falling
     /// back to the instance account for venues outside the configuration)

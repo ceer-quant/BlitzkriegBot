@@ -351,8 +351,13 @@ id = "from-file"
     }
 
     #[test]
-    fn single_source_falls_back_to_the_toml_then_the_default() {
-        // No ACCOUNT_LIST anywhere: the legacy file still rules.
+    fn single_source_env_absent_boots_the_default_and_shouts_at_the_toml_residue() {
+        // Issue 923: the legacy toml fallback is REMOVED. A residue
+        // accounts.toml on the disk NO feed of the book — env absent boots
+        // the ZERO-CONFIG single default, not the file's rows. (The mutation
+        // note: resurrecting the old `None => load_account_ledgers(...)` arm
+        // turns the two `default` assertions below red — the residue file
+        // declares `legacy` instead.)
         let toml = write_temp(
             r#"
 [[account]]
@@ -362,10 +367,12 @@ id = "legacy"
         let missing_env = Path::new("/nonexistent/bk-none/.env");
         let book =
             load_account_ledgers_single_source(&toml, Some(missing_env), 5, TEST_ALLOWED_ROUNDS)
-                .expect("toml fallback");
-        assert_eq!(book.account_list()[0].id.as_str(), "legacy");
+                .expect("env absent is legal: zero-config single default");
+        assert_eq!(book.account_list().len(), 1);
+        assert_eq!(book.active_id().as_str(), "default");
 
-        // No file, no env: the single default.
+        // No file either: the same single default, the #920 zero-config
+        // fail-open semantics — one test, both spellings.
         let book = load_account_ledgers_single_source(
             Path::new("/nonexistent/bk-none/accounts.toml"),
             Some(missing_env),
@@ -375,6 +382,55 @@ id = "legacy"
         .expect("zero-config default");
         assert_eq!(book.account_list().len(), 1);
         assert_eq!(book.active_id().as_str(), "default");
+    }
+
+    #[test]
+    fn reload_reads_the_env_only_and_never_the_legacy_toml() {
+        // Issue 923: the reload entry is env-only. A residue toml must NOT
+        // sneak back into the reloaded book either — the same posture the
+        // boot runs (env absent → single default, residue ignored).
+        let dir = std::env::temp_dir().join(format!("bk-reload-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("accounts.toml");
+        std::fs::write(
+            &toml,
+            r#"
+[[account]]
+id = "legacy"
+"#,
+        )
+        .unwrap();
+        let dot_env = dir.join(".env");
+        // No ACCOUNT_LIST in the file: the reload reloads the single default.
+        std::fs::write(&dot_env, "# operator config, no account keys\n").unwrap();
+        let book = load_account_ledgers_for_reload(&dot_env, 5, TEST_ALLOWED_ROUNDS)
+            .expect("a malformed-free .env reloads");
+        assert_eq!(book.account_list().len(), 1);
+        assert_eq!(book.active_id().as_str(), "default");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reload_refuses_a_malformed_env_and_dies_on_an_unreadable_one() {
+        // The malformed contract: a bad ACCOUNT_* value refuses the reload
+        // (fail-closed, the caller keeps the current configuration), and an
+        // UNREADABLE .env refuses too.
+        let dir = std::env::temp_dir().join(format!("bk-reload-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dot_env = dir.join(".env");
+        std::fs::write(&dot_env, "ACCOUNT_LIST=a\nACCOUNT_A_STATUS=magical\n").unwrap();
+        let err = load_account_ledgers_for_reload(&dot_env, 5, TEST_ALLOWED_ROUNDS)
+            .expect_err("a bad status refuses the reload");
+        assert!(err.message.contains("STATUS=`magical`"), "{}", err.message);
+
+        let err = load_account_ledgers_for_reload(
+            Path::new("/nonexistent/bk-none/.env"),
+            5,
+            TEST_ALLOWED_ROUNDS,
+        )
+        .expect_err("an unreadable .env refuses the reload");
+        assert!(err.message.contains("unreadable"), "{}", err.message);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -828,7 +884,7 @@ rounds = [3600, 900, 3600, 86_400]
         );
     }
 
-    // ── account.venue.set persistence (write-back of the venue binding) ──────
+    // ── account.venue.set persistence (the ENV write face, issue 751) ────────
 
     /// A multi-field, multi-account fixture — the file the persist must NOT
     /// shrink: every field of BOTH entries must survive a one-account venue
@@ -850,135 +906,6 @@ market_type = "prediction"
 status = "read_only"
 venue = "kalshi"
 "#;
-
-    #[test]
-    fn persist_account_venue_writes_back_and_every_sibling_field_survives() {
-        // Mutation note: this test is the "the persist call happens" guard.
-        // Delete the persist_account_venue call from the venue.set arm (or
-        // make it a no-op) and the reloaded book below still parses — but the
-        // `venue` assertion on the RELOADED file goes red: the in-memory
-        // write alone never reaches this file.
-        let dir = std::env::temp_dir().join(format!("bk-venue-persist-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let p = dir.join("accounts.toml");
-        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
-
-        // Bind `default` to polymarket: the write lands, and a FRESH load —
-        // the same call the boot makes — sees the binding plus EVERY sibling
-        // field of BOTH accounts.
-        persist_account_venue(&p, "default", "polymarket").expect("the write lands");
-        let book =
-            load_account_ledgers(&p, 3, TEST_ALLOWED_ROUNDS).expect("the written file re-parses");
-        assert_eq!(
-            book.account(&AccountId("default".into())).unwrap().venue,
-            "polymarket",
-            "the new binding is durable"
-        );
-        assert_eq!(
-            book.account(&AccountId("paper".into())).unwrap().venue,
-            "kalshi",
-            "a sibling account's binding is untouched"
-        );
-        let d = book.account(&AccountId("default".into())).unwrap();
-        assert_eq!(d.name, "Poly Main");
-        assert!(matches!(d.market_type, MarketType::Prediction));
-        assert!(matches!(d.status, Active));
-        assert_eq!(
-            d.credential_keys.api_key_env.as_deref(),
-            Some("POLY_API_KEY")
-        );
-        assert_eq!(d.credential_keys.secret_env.as_deref(), Some("POLY_SECRET"));
-        assert_eq!(
-            d.credential_keys.passphrase_env.as_deref(),
-            Some("POLY_PASSPHRASE")
-        );
-        assert_eq!(
-            d.credential_keys.private_key_env.as_deref(),
-            Some("POLY_PRIVATE")
-        );
-        // The other account's status — the file's only restriction — rode
-        // through: a persist must never loosen what the operator wrote.
-        assert!(matches!(
-            book.account(&AccountId("paper".into())).unwrap().status,
-            ReadOnly
-        ));
-
-        // Re-binding the SECOND account over its existing value: same
-        // guarantees on a file the writer itself produced (round two of the
-        // read-modify-write cycle).
-        persist_account_venue(&p, "paper", "polymarket").expect("rebind lands");
-        let book = load_account_ledgers(&p, 4, TEST_ALLOWED_ROUNDS).expect("round two re-parses");
-        assert_eq!(
-            book.account(&AccountId("paper".into())).unwrap().venue,
-            "polymarket"
-        );
-        assert_eq!(
-            book.account(&AccountId("default".into())).unwrap().venue,
-            "polymarket",
-            "the first write survived the second"
-        );
-
-        // Unbind: venue = "" REMOVES the key — the file returns to the
-        // "unbound by absence" shape a pre-binding deployment had.
-        persist_account_venue(&p, "paper", "").expect("unbind lands");
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            !text.contains("paper") || !text.split("[[account]]").nth(2).unwrap().contains("venue"),
-            "the unbound entry carries no venue key: {text}"
-        );
-        let book =
-            load_account_ledgers(&p, 5, TEST_ALLOWED_ROUNDS).expect("the unbound file re-parses");
-        assert_eq!(
-            book.account(&AccountId("paper".into())).unwrap().venue,
-            "",
-            "absence loads as unbound"
-        );
-        assert_eq!(
-            book.account(&AccountId("default".into())).unwrap().venue,
-            "polymarket",
-            "the other account's binding survives the unbind"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn persist_account_venue_refuses_unknown_ids_and_broken_files() {
-        let dir = std::env::temp_dir().join(format!("bk-venue-persist2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let p = dir.join("accounts.toml");
-        std::fs::write(&p, MULTI_FIELD_BOOK).expect("fixture");
-
-        // An id the file never declared: refused, and the file is untouched.
-        let before = std::fs::read_to_string(&p).unwrap();
-        let err = persist_account_venue(&p, "ghost", "polymarket").expect_err("unknown id");
-        assert!(
-            err.message.contains("no `[[account]]` with id `ghost`"),
-            "{}",
-            err.message
-        );
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            before,
-            "a refused write leaves the file byte-identical"
-        );
-
-        // A file that does not parse: refused fail-closed, never flattened.
-        std::fs::write(&p, "[[account]]\nid = \"x\"\nbogus = 1\n").unwrap();
-        let err = persist_account_venue(&p, "x", "polymarket").expect_err("does not parse");
-        assert!(
-            err.message.contains("does not parse; refusing"),
-            "{}",
-            err.message
-        );
-
-        // A file that cannot even be read: refused with the same posture.
-        let err = persist_account_venue(&dir.join("nope.toml"), "x", "polymarket")
-            .expect_err("unreadable file");
-        assert!(err.message.contains("unreadable"), "{}", err.message);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn persist_account_rounds_writes_back_and_every_sibling_field_survives() {

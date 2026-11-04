@@ -986,7 +986,7 @@ impl Engine {
     /// is a session-level fact on the default scope's `enabled` flag — it is
     /// NOT persisted anywhere, so a kernel restart hands the decision back to
     /// the persisted enablement sets again (a fresh boot replays
-    /// accounts.toml, and a scope named in an account's set boots ENABLED —
+    /// the operator's `.env`, and a scope named in an account's set boots ENABLED —
     /// see the scope-rebuild rule). A global ON is likewise session-level.
     /// The DURABLE per-account truth is only the enablement set: to keep a
     /// strategy off across restarts, remove it from every account's set

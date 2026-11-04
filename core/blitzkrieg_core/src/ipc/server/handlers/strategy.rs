@@ -39,7 +39,7 @@ pub(crate) async fn handle_strategy(
                     // `enabled` 口径（issue 552 审计）：这是 master-power 位
                     // —— 默认 scope 的全局开关，**不是** (账户,策略) 复合键
                     // 的真值。复合真值在 `accounts`（有 scope = 该账户的启
-                    // 用集点名了它）∪ accounts.toml 启用集；面板的策略页启
+                    // 用集点名了它）∪ operator `.env` 启用集；面板的策略页启
                     // 用按钮按「账户+策略」读写（feature-detect），不直接
                     // 消费这个位。is_on 只在单账户/老面板降级面上近似正确。
                     let accounts = c
@@ -99,7 +99,7 @@ pub(crate) async fn handle_strategy(
                 // exact legacy bytes.
                 //
                 // Bugfix (2026-10, 0.4.1): the legacy global toggle reads the
-                // engine's LIVE dispatch. A boot whose accounts.toml gives
+                // engine's LIVE dispatch. A boot whose .env rows give
                 // every account an empty (or absent) enablement set
                 // instantiates NO scopes — `apply_account_strategy_assignments_
                 // at_boot` only builds scopes for non-empty sets — so the
@@ -117,8 +117,8 @@ pub(crate) async fn handle_strategy(
                 // had simply never hosted.
                 let mut mirror_error: Option<(i32, String, Option<ErrorData>)> = None;
                 let mut kept_exits_only: Vec<String> = Vec::new();
-                // Gate-sandboxes run with no accounts.toml on disk at all —
-                // there "no file = persistence disabled" (the boot rule this
+                // Gate-sandboxes run with no .env backing at all —
+                // there "no .env = persistence disabled" (the boot rule this
                 // mirror inherits) and the toggle must keep its legacy
                 // engine-only success. Only a path that EXISTS but refuses
                 // the write is an error.

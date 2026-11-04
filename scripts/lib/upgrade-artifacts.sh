@@ -33,13 +33,17 @@
 # STAGE layout: bin/<name>, dylibs/<rel_dir>/<name>, dylibs.list, dist/,
 # configs/ (only when a caller stages one — ua_stage itself ships no toml).
 
-# Legacy config files the kernel read before the `.env` single source (issue
-# 751). On an UNMIGRATED deployment these are OPERATOR STATE: the account
-# loader still falls back to accounts.toml when ACCOUNT_LIST is absent, so an
-# upgrade must never replace them with factory copies (#758). On a MIGRATED
-# deployment the same files are dead residue: `.env` is the truth and every
-# runtime write face refuses while a legacy toml exists, so an upgrade must
-# never (re)install them either — both directions are enforced below.
+# Legacy config files from before the `.env` single source (issue 751). The
+# three factory tomls in `user_layer/configs/` (accounts / execution_policy /
+# update) were retired and deleted from the tree by #920, and the kernel no
+# longer reads the legacy accounts.toml fallback either (issue 923, Phase 4).
+# On an EXISTING deployment these files are still operator state: UNMIGRATED,
+# an upgrade must keep them and never replace them with factory copies
+# (#758); MIGRATED, they are dead residue — `.env` is the truth and every
+# runtime write face refuses while a legacy toml exists — and an upgrade
+# must never (re)install them either. Migrating the deployment to `.env` is
+# an upgrade prerequisite (scripts/migrate-config-to-env.sh). Both
+# directions are enforced below.
 UA_LEGACY_CONFIGS="accounts.toml shadow_evolution.toml execution_policy.toml update.toml default.toml"
 # Which legacy files actually carry operator state while the deployment is
 # unmigrated. default.toml is documentation-only and is NOT state.
@@ -61,8 +65,9 @@ ua_env_value() {
 
 # Migration confirmation, per config family (#758: "does the target actually
 # carry the migrated keys?" — never "the new release supports env"). ACCOUNT_LIST
-# is the account loader's switch (absent => it falls back to accounts.toml);
-# the other families use their own env keys.
+# is the account family's key (absent => the deployment is unmigrated; the
+# kernel no longer reads the legacy file); the other families use their own
+# env keys.
 ua_account_config_migrated() {
   [ -n "$(ua_env_value ACCOUNT_LIST)" ]
 }
@@ -266,9 +271,9 @@ ua_install() {
   # is the sole configuration source, so a normal upgrade never touches
   # $CONFIG_DIR. If a caller DOES stage configs/ (an older bundle, or the #758
   # test), the migration-aware rules below still apply:
-  #   * unmigrated + live file   -> preserve the operator copy (the account
-  #                                loader would otherwise fall back to factory
-  #                                values after the upgrade);
+  #   * unmigrated + live file   -> preserve the operator copy (overwriting it
+  #                                would replace live operator state with
+  #                                factory values after the upgrade);
   #   * migrated legacy toml     -> never reinstall it (the kernel's write
   #                                faces refuse while it exists; `.env` is the
   #                                truth now);

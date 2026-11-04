@@ -224,6 +224,137 @@ fn the_update_interval_keeps_explicit_zero_and_positives() {
     assert_eq!(a.update_interval_secs, Some(3600));
 }
 
+// ── update switches, env tier (issue 751 / issue 923) ───────────────────
+
+/// The three update switches answer to the env layer (`BLITZKRIEG_UPDATE_*`)
+/// in BOTH directions: true|1|on|yes arm, false|0|off|no disarm. The
+/// update.toml file layer is retired (issue 923), so with no CLI flag and no
+/// env key the field stays `None` and main falls through to the built-in
+/// default (off) — there is no third source that could resurrect a switch.
+#[test]
+fn the_update_switches_answer_to_the_env_in_both_directions() {
+    // Nothing speaks: the file layer is gone, so the chain lands on the
+    // built-in default (None here; main.rs maps it to off).
+    let a = args_from(&[]);
+    assert_eq!(a.update_check_enabled, None);
+    assert_eq!(a.update_auto, None);
+    assert_eq!(a.update_interval_secs, None);
+
+    // Every positive spelling arms, at the env tier.
+    for spelling in ["true", "1", "on", "yes"] {
+        let env = env_of(&[
+            ("BLITZKRIEG_UPDATE_CHECK", spelling),
+            ("BLITZKRIEG_UPDATE_AUTO", spelling),
+        ]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        assert_eq!(a.update_check_enabled, Some(true), "{spelling:?}");
+        assert_eq!(a.update_auto, Some(true), "{spelling:?}");
+        for line in [
+            "update.check_enabled=true (env)",
+            "update.auto_update=true (env)",
+        ] {
+            assert!(
+                a.config_report.iter().any(|l| l == line),
+                "{line} missing from {:?}",
+                a.config_report
+            );
+        }
+    }
+
+    // Every negative spelling disarms — and an explicit env OFF is still an
+    // explicit value: the report names it, the caller cannot mistake it for
+    // "nobody spoke".
+    for spelling in ["false", "0", "off", "no"] {
+        let env = env_of(&[
+            ("BLITZKRIEG_UPDATE_CHECK", spelling),
+            ("BLITZKRIEG_UPDATE_AUTO", spelling),
+        ]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        assert_eq!(a.update_check_enabled, Some(false), "{spelling:?}");
+        assert_eq!(a.update_auto, Some(false), "{spelling:?}");
+        for line in [
+            "update.check_enabled=false (env)",
+            "update.auto_update=false (env)",
+        ] {
+            assert!(
+                a.config_report.iter().any(|l| l == line),
+                "{line} missing from {:?}",
+                a.config_report
+            );
+        }
+    }
+
+    // A spelling outside the vocabulary is "not configured", never a guess.
+    let env = env_of(&[("BLITZKRIEG_UPDATE_CHECK", "yeah-nah")]);
+    let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+    assert_eq!(a.update_check_enabled, None, "an unknown word is silence");
+    assert!(a.config_report.is_empty(), "{:?}", a.config_report);
+}
+
+/// #379: the interval parses at the env tier like it does at the CLI tier —
+/// 0 keeps the "scheduler off" spelling, positives carry — and an explicit
+/// env value is reported so the log alone answers "why is this checking".
+#[test]
+fn the_update_interval_answers_to_the_env_tier() {
+    for (text, want) in [("0", Some(0)), ("3600", Some(3600)), (" 600 ", Some(600))] {
+        let env = env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", text)]);
+        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        assert_eq!(a.update_interval_secs, want, "{text:?}");
+    }
+    let a = parse_args(
+        &blitzkrieg_core::config::FileConfig::default(),
+        &[],
+        &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "3600")]),
+    );
+    assert!(
+        a.config_report
+            .iter()
+            .any(|l| l == "update.interval_secs=3600 (env)"),
+        "{:?}",
+        a.config_report
+    );
+    // Unparsable text is "not configured", never a silent default.
+    let a = parse_args(
+        &blitzkrieg_core::config::FileConfig::default(),
+        &[],
+        &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "soon")]),
+    );
+    assert_eq!(a.update_interval_secs, None);
+}
+
+/// The chain is still CLI > env: a spelled flag outranks the env key, so an
+/// operator's `-c`-style override cannot be undone by a stale `.env` line.
+#[test]
+fn the_update_cli_flag_outranks_the_env() {
+    let env = env_of(&[
+        ("BLITZKRIEG_UPDATE_CHECK", "false"),
+        ("BLITZKRIEG_UPDATE_INTERVAL_SECS", "0"),
+    ]);
+    let a = parse_args(
+        &blitzkrieg_core::config::FileConfig::default(),
+        &["--update-check".into(), "true".into()],
+        &env,
+    );
+    assert_eq!(
+        a.update_check_enabled,
+        Some(true),
+        "the CLI flag outranks the env's OFF"
+    );
+    assert!(
+        a.config_report
+            .iter()
+            .any(|l| l == "update.check_enabled=true (cli)"),
+        "{:?}",
+        a.config_report
+    );
+    let a = parse_args(
+        &blitzkrieg_core::config::FileConfig::default(),
+        &["--update-interval-secs".into(), "60".into()],
+        &env,
+    );
+    assert_eq!(a.update_interval_secs, Some(60), "CLI > env");
+}
+
 // 任务二 1-3: the NTP probe flags. The empty host string is the documented
 // "off" spelling (zero network tasks — the replay-safe posture); an
 // explicit 0 interval disarms the periodic loop; a negative interval is a
