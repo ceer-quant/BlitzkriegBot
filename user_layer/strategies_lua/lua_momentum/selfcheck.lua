@@ -147,26 +147,65 @@ do
     "reason names the direction gate")
 end
 
--- ═══ DIRECTION GATE — NEGATIVE: the UP leg never bids ═══════════════════════
+-- ═══ DIRECTION GATE — the UP leg (re-armed, operator ruling 2026-11-04) ════
 
--- the deleted WR-7.5% leg: an UP-token spike confirms nothing, bids nothing.
+-- an UP-token spike arms the UP leg: ONE entry rests at ITS best_bid.
 do
   reset()
   feed("down-1", 0.50, 0)
   feed("up-1", 0.50, 0)
-  feed("up-1", 0.60, 1000) -- +20%: the old up arm's exact trigger shape
+  feed("up-1", 0.60, 1000) -- +20%: ≥ threshold
   local r = evaluate()
-  ok(#r.entries == 0, "an UP-token spike bids nothing (the up leg is deleted)")
+  ok(#r.entries == 1, "a rising UP leg fires exactly one entry, got " .. #r.entries)
+  local e = r.entries[1]
+  ok(e ~= nil and e.token == "up-1", "the UP premise buys the UP leg (up-1)")
+  ok(e ~= nil and e.price == "0.59", "UP entry rests at its own best_bid 0.59")
 end
 
--- the UP token falling is still the wrong token: only the DOWN leg is
--- buyable, ever.
+-- a falling UP leg is the wrong direction for that token: the DOWN premise
+-- belongs to the DOWN token only — up-1 crashing arms nothing buyable (its
+-- own premise would be "down", but the entry gate matches the leg's want).
 do
   reset()
   feed("up-1", 0.50, 0)
-  feed("up-1", 0.40, 1000) -- −20%: a falling UP leg
+  feed("up-1", 0.40, 1000) -- −20%: up-1 is crashing, not rising
   local r = evaluate()
-  ok(#r.entries == 0, "a falling UP leg bids nothing (only down-1 is read)")
+  ok(#r.entries == 0,
+    "a falling UP leg buys nothing — its premise says down, its leg wants up")
+end
+
+-- ═══ 筹码地板 (min_entry_price, default 0.15) ══════════════════════════════
+
+-- the 0.007 lottery shape: a crash onto a dust bid buys NOTHING.
+do
+  reset()
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.007, 1000) -- −98.6%: the crash arms the premise...
+  state.books["down-1"].best_bid = "0.007"
+  local r = evaluate()
+  ok(#r.entries == 0, "a dust best_bid (0.007 < 0.15 floor) buys nothing")
+end
+
+-- the floor is the tunable: 0 disables it entirely (the pre-ruling shape).
+do
+  reset()
+  state.params = { min_entry_price = "0" }
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.10, 1000)
+  state.books["down-1"].best_bid = "0.09"
+  local r = evaluate()
+  ok(#r.entries == 1, "min_entry_price = 0 disables the floor (dust buys again)")
+end
+
+-- a bid exactly AT the floor passes (>=).
+do
+  reset()
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.16, 1000)
+  state.books["down-1"].best_bid = "0.15"
+  local r = evaluate()
+  ok(#r.entries == 1 and r.entries[1].price == "0.15",
+    "a bid exactly at the floor is buyable")
 end
 
 -- a RISING DOWN leg is not a falling knife: no premise, no bid.
