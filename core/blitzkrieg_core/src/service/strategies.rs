@@ -1110,16 +1110,26 @@ impl Core {
     /// a broken build can never blank a running dispatch. Because the swap is
     /// name-keyed, after-reload enable state is preserved.
     pub fn reload_strategy(&mut self, name: &str, path: &str) -> String {
-        // 1. The old one must be removable-by-name (enabled/in-tree/open-pos
-        //    guards all run below, BEFORE the new instance replaces it).
-        let source = self
+        // 1. The name must be KNOWN to this session. A live instance names
+        //    itself in the dispatch; a torn-down scope still names the
+        //    PACKAGE in the engine's provenance ledger (issue 925: the
+        //    default-account disable now tears the scope down outright — a
+        //    devloader's disable→reload round-trip must survive that, so a
+        //    provenance-only package reloads as a fresh load instead of
+        //    dying "not found").
+        let live = self
             .engine
             .as_ref()
             .map(|e| e.strategy_source(name).map(|s| s.to_string()))
             .unwrap_or(None);
-        let Some(old_source) = source else {
+        let packaged = self
+            .engine
+            .as_ref()
+            .map(|e| e.strategy_registered(name))
+            .unwrap_or(false);
+        if !packaged {
             return format!("not found: no strategy named {name}");
-        };
+        }
         let was_enabled = self.enabled_names_contains(name);
         // Temporary disable is NOT needed — the swap runs below; but a still-
         // enabled strategy cannot be swapped by the engine's guard, so the
@@ -1136,14 +1146,16 @@ impl Core {
             );
         }
 
-        // 2. Load the new instance in a SCRATCH seat (a temp name would confuse
-        //    profiles; instead we stage the strategy outside the engine only if
-        //    the name differs). The kernel's loader gives us the Received view;
-        //    both old and new live in the dispatch under the SAME name below.
-        let old = self.unload_strategy(name);
-        if !old.starts_with(name) && !old.contains("unloaded") {
-            // rejected/not-found/Failed — refuse before loading new
-            return format!("reload aborted: {old}");
+        // 2. Load the new instance (both old and new live in the dispatch
+        //    under the SAME name). An instance that is no longer in the
+        //    dispatch has nothing to drop — the load alone re-instantiates
+        //    the package (the provenance-only path above).
+        if live.is_some() {
+            let old = self.unload_strategy(name);
+            if !old.starts_with(name) && !old.contains("unloaded") {
+                // rejected/Failed — refuse before loading new
+                return format!("reload aborted: {old}");
+            }
         }
         let receipt = self.load_strategy_lib(path);
         if !receipt.contains("registered") {
@@ -1153,7 +1165,7 @@ impl Core {
         if was_enabled {
             self.set_strategy_enabled(name, true);
         }
-        let _ = old_source; // receipt text already carries the new source
+        let _ = live; // receipt text already carries the new source
         format!("reload OK: {receipt}")
     }
 
