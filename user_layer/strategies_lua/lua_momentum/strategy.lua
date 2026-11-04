@@ -222,7 +222,8 @@ end
 
 -- ── state (per state machine; the host runs one Lua VM per strategy) ────────
 local last_mid = {}       -- token -> last mid seen (string)
-local confirmed = {}      -- token -> true while the DOWN-leg premise holds
+local confirmed = {}      -- token -> true while a momentum premise holds
+local direction = {}      -- token -> "up" | "down" (which premise is armed)
 local peak_proceeds = {}  -- token -> best (bid − taker fee) seen while held
 -- (round slot, condition) -> { count, open, last_exit_ms }. `open` means a
 -- resting attempt is still being quoted; `count` is how many attempts this
@@ -242,6 +243,19 @@ local function threshold()
     return t
 end
 
+-- 筹码地板 (operator ruling 2026-11-04): a best_bid below this is dust the
+-- strategy does not buy — the 0.007 lottery tickets ARE the structure's
+-- confession that a near-zero leg has nothing left to catch. Default 0.15;
+-- 0 disables the floor entirely.
+local function min_entry_price()
+    local raw = bk.params().min_entry_price
+    local p = tonumber(raw)
+    if p == nil or p < 0 then
+        return 0.15
+    end
+    return p
+end
+
 local function classify(token, mid)
     local prev = last_mid[token]
     last_mid[token] = mid
@@ -254,14 +268,20 @@ local function classify(token, mid)
         return
     end
     local move_pct = (cm - pm) / pm * 100.0
-    -- Direction gate: only a FALLING leg is ever buyable. An up-move — or
-    -- any move smaller than `threshold` — clears the confirmation. There is
-    -- no "up" state anymore: the up leg was deleted (live WR 7.5%, net
-    -- −$40.37), so a premise that stops falling is simply not a trade.
-    if move_pct >= 0 or math.abs(move_pct) < threshold() then
+    -- Direction gate (two legs again, operator ruling 2026-11-04): a leg
+    -- crashing ≥ threshold arms "down"; a leg rising ≥ threshold arms "up".
+    -- A sub-threshold move clears the confirmation; a flip breaks the old
+    -- premise (bk_evaluate turns the break into a bid cancel).
+    if math.abs(move_pct) < threshold() then
         confirmed[token] = nil
         return
     end
+    local dir = move_pct > 0 and "up" or "down"
+    if confirmed[token] == true and direction[token] ~= dir then
+        direction[token] = dir
+        return
+    end
+    direction[token] = dir
     confirmed[token] = true
 end
 
@@ -557,28 +577,30 @@ function bk_evaluate()
     local held = held_index()
     forget_unheld(held)
 
-    -- Held→flat on the DOWN leg is an exit even when this evaluate did not
+    -- Held→flat on either leg is an exit even when this evaluate did not
     -- emit one (the sell filled on a previous cycle, or the kernel settled
-    -- the leg). An opposite-leg holding is the both-sides guard's problem,
-    -- not an entry this budget already spent.
-    local held_down = {}
+    -- the leg). Only the fill of an attempt WE opened closes that attempt —
+    -- an external holding (manual buy, restored position) must not spend
+    -- this strategy's entry budget for the condition.
+    local held_any = {}
     for _, market in ipairs(bk.markets()) do
-        if market.condition_id ~= nil and held[market.down_token] ~= nil then
-            held_down[market.condition_id] = true
+        if market.condition_id ~= nil
+            and (held[market.down_token] ~= nil or held[market.up_token] ~= nil)
+        then
+            held_any[market.condition_id] = true
             local st = attempt_of(round.slot, market.condition_id)
-            if st.count < 1 then
-                st.count = 1
+            if st.open then
+                st.open = false
             end
-            st.open = false
         end
     end
     local now_ms = bk.now_ms()
     for cond, _ in pairs(prev_held) do
-        if not held_down[cond] then
+        if not held_any[cond] then
             note_exit(round.slot, cond, now_ms)
         end
     end
-    prev_held = held_down
+    prev_held = held_any
 
     for _, row in pairs(held) do
         consider_exit(out, row, round)
@@ -595,32 +617,49 @@ function bk_evaluate()
     end
 
     local allow_both = int_param(bk.params(), "allow_both_sides", 0) == 1
+    local floor = min_entry_price()
     local exiting = {}
     for i = 1, #out.exits do
         exiting[out.exits[i].token] = true
     end
 
     for _, market in ipairs(bk.markets()) do
-        local token = market.down_token
-        -- A token we are already asking to sell is not re-bought this cycle.
-        if confirmed[token] == true and not exiting[token] then
-            -- The kernel's hold-to-settlement exemption would ADMIT the
-            -- opposite leg ("Already in {asset}" waived). This strategy is
-            -- not collecting a pair, so the second side is refused unless
-            -- the operator sets allow_both_sides = 1.
-            local opposite_held = market.up_token ~= nil and held[market.up_token] ~= nil
-            if (allow_both or not opposite_held)
-                and may_open_entry(round.slot, market.condition_id, token, held, bk.now_ms())
+        -- Both legs again (operator ruling 2026-11-04): the UP leg chases a
+        -- rising leg at its own best_bid, the DOWN leg catches a crashing
+        -- one — each only while ITS own momentum premise is armed.
+        local legs = {
+            { token = market.up_token,   want = "up" },
+            { token = market.down_token, want = "down" },
+        }
+        for _, leg in ipairs(legs) do
+            local token = leg.token
+            if token ~= nil and confirmed[token] == true and direction[token] == leg.want
+                and not exiting[token]
             then
-                local book = bk.book(token)
-                -- §6.6: price ONLY off a fresh, two-sided book.
-                if book ~= nil and book.fresh == true and book.best_bid ~= nil then
-                    begin_attempt(round.slot, market.condition_id)
-                    out.entries[#out.entries + 1] = {
-                        token = token,
-                        price = book.best_bid,
-                        reason = "lua momentum down",
-                    }
+                -- The kernel's hold-to-settlement exemption would ADMIT the
+                -- opposite leg ("Already in {asset}" waived). This strategy is
+                -- not collecting a pair, so the second side is refused unless
+                -- the operator sets allow_both_sides = 1.
+                local other = leg.want == "up" and market.down_token or market.up_token
+                local opposite_held = other ~= nil and held[other] ~= nil
+                if (allow_both or not opposite_held)
+                    and may_open_entry(round.slot, market.condition_id, token, held, bk.now_ms())
+                then
+                    local book = bk.book(token)
+                    -- §6.6: price ONLY off a fresh, two-sided book.
+                    if book ~= nil and book.fresh == true and book.best_bid ~= nil then
+                        -- 筹码地板: a bid below `min_entry_price` is dust —
+                        -- the near-zero leg has nothing left to catch.
+                        local bid = tonumber(book.best_bid)
+                        if bid ~= nil and (floor <= 0 or bid >= floor) then
+                            begin_attempt(round.slot, market.condition_id)
+                            out.entries[#out.entries + 1] = {
+                                token = token,
+                                price = book.best_bid,
+                                reason = "lua momentum " .. leg.want,
+                            }
+                        end
+                    end
                 end
             end
         end
