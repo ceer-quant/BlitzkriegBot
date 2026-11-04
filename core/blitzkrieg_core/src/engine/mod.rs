@@ -684,7 +684,30 @@ impl Engine {
                 "equity sizing overflow: budget / price does not fit Decimal — no ticket (#779)");
             return Decimal::ZERO;
         };
-        ticket.floor().max(Decimal::ZERO).min(sizing.max_shares)
+        // The share floor participates (operator ruling 2026-11-04, "账户
+        // 余额实在很少但勉勉强强也能下 5 股，就直接按照最低 5 股"): a
+        // percentage budget of 1% on a $75 book divides to a size-1 ticket
+        // that dies at the venue's own minimum-order gate while the account
+        // CAN afford the minimum lot. `floor()` alone kept the ticket under
+        // the budget even when the floor was affordable — a different
+        // rejection from the same poverty. Refine #202: the budget stays the
+        // ceiling for the FLOOR-RAISED ticket — if even one minimum lot does
+        // not fit, the account really cannot trade this price and the
+        // floor must not resurrect the order (the #202 bug shape).
+        let floored = ticket.floor();
+        // The share floor is an affordance gate, not a raiser (operator
+        // ruling 2026-11-04): when the budget cannot pay for one minimum
+        // lot, the ticket under it would die at the venue's own
+        // minimum-order gate — return zero (honest skip, the caller counts
+        // it) instead of a sub-floor ticket. When the budget CAN pay for it
+        // the division above already yields floored >= min (raw < min
+        // ⟺ budget < min·price), so no raising branch exists: at 3.5% of a
+        // $75.66 book the $2.68 budget at price 0.28 divides to 9.5 — the
+        // floor is simply affordable and `floor()` keeps 9 shares.
+        if floored < sizing.min_shares {
+            return Decimal::ZERO;
+        }
+        floored.min(sizing.max_shares)
     }
 
     /// The freshness budget in force (#205): the engine refuses to price a book
