@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | `pair_discount_arb` | 1.3.0 | NO-GO |
 | `single_leg_pair` | 1.1.0 | NO-GO |
-| `lua_momentum` | 0.2.1 | NO-GO |
+| `lua_momentum` | 0.3.0 | NO-GO |
 | `spread_arb` | 1.0.0 | NO-GO |
 | `mad_dog` | 1.0.0 | NO-GO |
 | `market_maker` | 1.1.0 | NO-GO |
