@@ -47,7 +47,9 @@ pub const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
 
 /// #932: the legacy sizing entry points' placeholder token — never declared
 /// in `venue_min_shares`, so the legacy paths keep the configured band
-/// byte-identically. Production submissions use the signal's real token.
+/// byte-identically. Test-only: production submissions use the signal's
+/// real token.
+#[cfg(test)]
 pub(crate) const LEGACY_NO_VENUE_MIN: &str = "\u{0}legacy";
 
 #[derive(Debug, Clone)]
@@ -596,6 +598,9 @@ impl Engine {
         out
     }
 
+    /// Test-only legacy spelling (see `entry_ticket`): production callers all
+    /// carry a real token through `compute_token_shares`.
+    #[cfg(test)]
     fn compute_shares(&self, price: Decimal, strategy: &str, account: &str) -> Decimal {
         self.compute_token_shares(LEGACY_NO_VENUE_MIN, price, strategy, account)
     }
@@ -655,6 +660,10 @@ impl Engine {
     /// the account (too small for this percentage), and a 0-size order would
     /// only convert it into a per-tick "size must be positive" rejection; the
     /// skip is counted instead (`size_pct_skip_count`) so it stays visible.
+    /// Test-only legacy spelling: production submissions use
+    /// `entry_token_ticket` with the signal's real token (#932), so the
+    /// placeholder-token form only exists for the banded tests.
+    #[cfg(test)]
     fn entry_ticket(&self, price: Decimal, strategy: &str, account: &str) -> Option<Decimal> {
         self.entry_token_ticket(LEGACY_NO_VENUE_MIN, price, strategy, account)
     }
