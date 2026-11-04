@@ -301,6 +301,7 @@ fn book_update_golden() {
         bids: vec![(d("0.55"), d("10.5")), (d("0.54"), d("20"))],
         asks: vec![(d("0.56"), d("30.25"))],
         ts_ms: TS,
+        min_order_size: None,
     };
     // Depth levels are plain Decimals → JSON STRINGS, not numbers.
     assert_round_trip(
@@ -308,6 +309,23 @@ fn book_update_golden() {
         concat!(
             r#"{"tokenId":"tok-up","bids":[["0.55","10.5"],["0.54","20"]],"#,
             r#""asks":[["0.56","30.25"]],"tsMs":1000000000000}"#
+        ),
+    );
+    // #932: a DECLARED venue minimum rides the type (skipped when absent —
+    // `#[serde(default)]` keeps the wire round-trip of undeclared books
+    // byte-identical to the golden above).
+    let declared = BookUpdate {
+        token_id: "tok-down".into(),
+        bids: vec![(d("0.40"), d("5"))],
+        asks: vec![(d("0.50"), d("5"))],
+        ts_ms: TS,
+        min_order_size: Some(d("5")),
+    };
+    assert_round_trip(
+        &declared,
+        concat!(
+            r#"{"tokenId":"tok-down","bids":[["0.40","5"]],"asks":[["0.50","5"]],"#,
+            r#""tsMs":1000000000000,"minOrderSize":"5"}"#
         ),
     );
 }

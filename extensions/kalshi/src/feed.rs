@@ -150,6 +150,7 @@ pub(crate) fn spawn_feed_with(
                             token_id,
                             bids,
                             asks,
+                            min_order_size: None, // kalshi feed carries no venue minimum; the band stays local
                             ts_ms: now_ms(),
                         })
                         .await;

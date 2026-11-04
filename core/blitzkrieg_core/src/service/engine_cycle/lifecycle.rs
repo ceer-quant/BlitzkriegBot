@@ -128,6 +128,16 @@ impl Core {
         self.engine.as_ref()
     }
 
+    /// #932 seam: record one token's declared venue minimum order size. The
+    /// market host (outside `service`) delivers the feed's batch-level
+    /// declaration here — a pure map write on the sizing side-channel, like
+    /// the host's per-cycle equity pushes; no install invariant involved.
+    pub fn note_venue_min_shares(&mut self, token_id: &str, min: Option<rust_decimal::Decimal>) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_venue_min_shares(token_id, min);
+        }
+    }
+
     /// Replay seam (the backtest host path): register one additional user
     /// strategy into the running engine WITHOUT going through the loader —
     /// the same `EngineStrategy` contract a loaded library implements. A

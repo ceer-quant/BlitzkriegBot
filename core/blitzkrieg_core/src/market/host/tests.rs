@@ -537,6 +537,7 @@ async fn on_books_applies_the_whole_batch_under_one_lock() {
         bids: vec![(bid, dec!(10))],
         asks: vec![(rust_decimal_macros::dec!(0.60), dec!(10))],
         ts_ms: 20_000,
+        min_order_size: None,
     };
     host.on_books(
         vec![
@@ -732,6 +733,7 @@ async fn consumer_rows_read_the_reused_stream_and_stay_venue_distinct() {
         bids: vec![(dec!(0.51), dec!(10))],
         asks: vec![(dec!(0.55), dec!(10))],
         ts_ms: 20_000,
+        min_order_size: None,
     })
     .await;
 

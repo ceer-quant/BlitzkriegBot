@@ -40,6 +40,7 @@ impl Engine {
             arb_leg_config: None,
             pair_declarations: Vec::new(),
             pair_refusals: Vec::new(),
+            venue_min_shares: HashMap::new(),
         }
     }
 
@@ -158,6 +159,27 @@ impl Engine {
     pub fn set_account_venue(&mut self, account: &str, venue: &str) {
         self.venue_by_account
             .insert(account.to_string(), venue.to_string());
+    }
+
+    /// #932: record one token's declared venue minimum order size (a
+    /// feed-side mandate, not an event). `None` clears — a venue that
+    /// stops declaring must not leave a stale floor behind. Tokens never
+    /// declared here keep the configured band (#933 semantics).
+    pub fn set_venue_min_shares(&mut self, token_id: &str, min: Option<Decimal>) {
+        match min {
+            Some(m) => {
+                self.venue_min_shares.insert(token_id.to_string(), m);
+            }
+            None => {
+                self.venue_min_shares.remove(token_id);
+            }
+        }
+    }
+
+    /// The venue's declared minimum for one token, or `None` when the venue
+    /// said nothing — sizing then keeps the configured band.
+    pub fn venue_min_shares(&self, token_id: &str) -> Option<Decimal> {
+        self.venue_min_shares.get(token_id).copied()
     }
 
     /// The equity a scope's sizing reads: the account's own pushed book for

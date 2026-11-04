@@ -168,9 +168,16 @@ fn cadence_warning(poll_ms: u64) -> Option<String> {
     cadence_warning_with(poll_ms, effective_stale_budget_ms())
 }
 
-/// One book of a batch: `(token_id, bids, asks)` — the same shape
-/// `MarketHost::on_books` carries, named so the event/loop literals stay readable.
-pub type BatchBook = (String, Vec<(Decimal, Decimal)>, Vec<(Decimal, Decimal)>);
+/// One book of a batch: `(token_id, min_order_size, bids, asks)` — the same
+/// shape `MarketHost::on_books` carries, named so the event/loop literals stay
+/// readable. `min_order_size` rides the venue's own `/books` answer (issue
+/// #932): a `None` means the venue said nothing about a minimum this round.
+pub type BatchBook = (
+    String,
+    Option<Decimal>,
+    Vec<(Decimal, Decimal)>,
+    Vec<(Decimal, Decimal)>,
+);
 
 /// Market-data event produced by the feed loops, consumed by the pump which
 /// forwards each one onto the [`MarketHost`].
@@ -226,6 +233,7 @@ pub async fn spawn_feed(
                             bids,
                             asks,
                             ts_ms: now_ms,
+                            min_order_size: None,
                         })
                         .await;
                     }
@@ -233,11 +241,12 @@ pub async fn spawn_feed(
                     FeedEvent::Books { books, now_ms } => {
                         let updates: Vec<BookUpdate> = books
                             .into_iter()
-                            .map(|(token_id, bids, asks)| BookUpdate {
+                            .map(|(token_id, min_order_size, bids, asks)| BookUpdate {
                                 token_id,
                                 bids,
                                 asks,
                                 ts_ms: now_ms,
+                                min_order_size,
                             })
                             .collect();
                         host.on_books(updates, now_ms).await;
@@ -482,7 +491,14 @@ async fn poly_rest_loop(
                     // path from a quiet book. It stays out of the archive line,
                     // which replays byte-for-byte on the local clock alone.
                     venue_ms.push(book.timestamp.timestamp_millis());
-                    batch.push((book.asset_id.to_string(), bids, asks));
+                    // #932: the venue's own minimum rides the batch — None
+                    // only when the venue's answer lacks the field.
+                    batch.push((
+                        book.asset_id.to_string(),
+                        Some(book.min_order_size),
+                        bids,
+                        asks,
+                    ));
                 }
                 let n = batch.len();
                 if !batch.is_empty()
@@ -941,7 +957,7 @@ mod tests {
         };
         assert_eq!(books.len(), 2, "the whole poll batch rides one event");
         let mut seen: HashMap<String, Depth> = HashMap::new();
-        for (token_id, bids, asks) in books {
+        for (token_id, _min, bids, asks) in books {
             seen.insert(token_id, (bids, asks));
         }
         let (bids, asks) = seen.get(&a).expect("no book for the first token");

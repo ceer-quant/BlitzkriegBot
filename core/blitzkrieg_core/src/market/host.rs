@@ -389,6 +389,13 @@ impl MarketHost for CoreHost {
     fn on_books<'a>(&'a self, updates: Vec<api::BookUpdate>, ts_ms: i64) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let mut c = self.core.lock().await;
+            // #932: the venue's own minimum rides the batch as a DECLARATION
+            // — recorded before the books apply so sizing reads the mandate
+            // in the same locked interval (a batch's floor can only tighten
+            // an affordability gate; the books themselves stay event-typed).
+            for u in &updates {
+                c.note_venue_min_shares(&u.token_id, u.min_order_size);
+            }
             c.engine_on_books(
                 updates
                     .into_iter()

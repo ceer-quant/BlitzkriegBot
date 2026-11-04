@@ -327,7 +327,13 @@ impl Engine {
                     let sizing = self.effective_sizing(&sig.strategy);
                     let mut capped = n.min(sizing.max_shares);
                     if sizing.size_pct > Decimal::ZERO {
-                        let ticket = self.equity_shares(sig.price, &sizing, &sig.account_id);
+                        // #932: the venue's own declared minimum rides the
+                        // affordability gate — a depth-shaped leg dies inside
+                        // the kernel on the same floor it would die at the
+                        // venue, before a rejection streak can freeze the
+                        // account.
+                        let ticket =
+                            self.equity_shares(&sig.token_id, sig.price, &sizing, &sig.account_id);
                         if ticket <= Decimal::ZERO {
                             self.size_pct_skipped += 1;
                             continue;
@@ -339,8 +345,12 @@ impl Engine {
                 // #202: an equity-relative budget too small for one whole share
                 // produces NO order (counted, not emitted as a 0-size rejection).
                 None => {
-                    let Some(size) = self.entry_ticket(sig.price, &sig.strategy, &sig.account_id)
-                    else {
+                    let Some(size) = self.entry_token_ticket(
+                        &sig.token_id,
+                        sig.price,
+                        &sig.strategy,
+                        &sig.account_id,
+                    ) else {
                         self.size_pct_skipped += 1;
                         continue;
                     };
