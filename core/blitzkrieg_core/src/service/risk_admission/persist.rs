@@ -23,18 +23,10 @@
 //! operator's last deliberate act outranks yesterday's flags, and #861's
 //! acceptance is "kill -9 演练后 caps 恢复".
 //!
-//! Restart default freeze (the acceptance's other half, 「账户默认冻结」):
-//! whenever a risk-state file is on disk at boot, EVERY account that is not
-//! already frozen comes up frozen with [`RESTART_FREEZE_REASON`] — a crashed
-//! kernel must not quietly resume trading as if nothing happened. The
-//! freeze is NOT stamped `auto_frozen`, so the self-heal can never lift it
-//! (#685's shape: only an operator's `resume` clears it). Exits keep flowing —
-//! the 「拒开仓、放平仓」 contract every freeze here shares.
-//!
 //! A file that EXISTS but does not parse is fail-CLOSED, never fail-open: no
-//! restore (the boot-resolved caps stand), and the restart default freeze
-//! applies anyway — the loud error log is the contract (the daily-loss
-//! store's #463 posture).
+//! restore (the boot-resolved caps stand), and the corrupt-boot freeze
+//! applies — the loud error log is the contract (the daily-loss store's #463
+//! posture).
 
 use crate::service::CoreConfig;
 use blitzkrieg_market_api::net::now_ms;
@@ -42,12 +34,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::*;
-
-/// The reason every restart default-freeze carries. A stable prefix an
-/// operator (and a test) can grep; cleared only by an explicit
-/// `account.freeze {frozen:false}` / `resume_account`.
-pub(crate) const RESTART_FREEZE_REASON: &str =
-    "restart: trading frozen by default until an operator resumes it (issue #861)";
 
 /// One systemic bound as the file carries it: the value (decimal string,
 /// "0" = off) and the provenance word it had when written (`Bound`'s wire
@@ -343,10 +329,13 @@ impl Core {
 
     /// The boot half of #861, called once from [`Core::with_account_book`]
     /// after the struct is built: restore the kill switch and the freeze
-    /// book from the loaded file, then apply the restart default freeze, then
-    /// persist the boot state. `state_file_present` is true whenever a file
-    /// was found — parsed OR corrupt (the corrupt case restored nothing, and
-    /// THAT is exactly when the fail-closed freeze must apply).
+    /// book from the loaded file, then persist the boot state.
+    /// `state_file_present` is true only for a file that PARSED (the corrupt
+    /// case restored nothing and gets the fail-closed freeze instead —
+    /// `freeze_all_accounts_corrupt_boot`). A clean boot does NOT
+    /// default-freeze accounts (「重启就不需要再维持冻结状态」operator
+    /// ruling, issue #928): the freeze book on the disk is the only freeze
+    /// that survives a restart.
     pub(crate) fn restore_risk_state_at_boot(&mut self, state_file_present: bool) {
         // Snapshot everything the restore needs out of the cell FIRST — the
         // restore itself runs the freeze paths, which take `&mut self`.
@@ -393,10 +382,24 @@ impl Core {
                 self.freeze_book.auto_frozen.insert(id, at);
             }
         }
-        // 3) the restart default freeze (「账户默认冻结」): every account not
-        //    already frozen comes up frozen. NOT stamped auto_frozen — the
-        //    self-heal must never lift it; only an operator's resume does.
-        let mut defaulted = 0usize;
+        // A CLEAN boot freezes nobody (issue #928: the #861 restart default
+        // freeze is retired — the disk's freeze book is the posture, not a
+        // blanket). The corrupt-boot fail-closed freeze is the only remaining
+        // boot-time freeze (`freeze_all_accounts_corrupt_boot`, called from
+        // the assembly for the Corrupt case only).
+        self.persist_risk_state();
+    }
+
+    /// The corrupt-boot fail-closed freeze (issue #861's surviving clause):
+    /// every account freezes when the risk-state file exists but does not
+    /// parse — a kernel that cannot read its own risk posture must not
+    /// quietly resume trading. Called from [`Core::with_account_book`] ONLY
+    /// for the `RiskStateLoad::Corrupt` case; a missing file and a clean
+    /// parse freeze nobody (#928).
+    pub(crate) fn freeze_all_accounts_corrupt_boot(&mut self) {
+        let reason = "risk-state file unreadable — risk posture unverifiable until resumed \
+                      (fail-closed, issue #861)"
+            .to_string();
         let accounts: Vec<String> = self
             .accounts
             .account_list()
@@ -404,18 +407,7 @@ impl Core {
             .map(|a| a.id.as_str().to_string())
             .collect();
         for id in &accounts {
-            if !self.freeze_book.account_freezes.contains_key(id) {
-                self.freeze_account(id, RESTART_FREEZE_REASON.to_string());
-                defaulted += 1;
-            }
-        }
-        if defaulted > 0 {
-            tracing::warn!(
-                accounts = defaulted,
-                path = %path,
-                "restart default freeze: {defaulted} account(s) came up FROZEN (issue #861) — \
-                 a restart must not resume trading on its own; resume each account explicitly"
-            );
+            self.freeze_account(id, reason.clone());
         }
         self.persist_risk_state();
     }
