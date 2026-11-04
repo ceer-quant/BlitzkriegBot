@@ -344,6 +344,18 @@ pub struct BookUpdate {
     pub bids: Vec<(Decimal, Decimal)>,
     pub asks: Vec<(Decimal, Decimal)>,
     pub ts_ms: i64,
+    /// The venue's own minimum order size for this token when its API
+    /// advertises one (polymarket CLOB `/books` carries `min_order_size`).
+    /// `None` = the venue said nothing: sizing keeps the configured band and
+    /// the venue's own minimum-gate remains the last line of defence (issue
+    /// #932). The core ingests this into per-token sizing so an entry is
+    /// never a doomed sub-minimum ticket.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "decimal::opt"
+    )]
+    pub min_order_size: Option<Decimal>,
 }
 
 /// Top-of-book-only update (price_change / best_bid_ask carry no depth).

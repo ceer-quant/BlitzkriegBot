@@ -45,6 +45,13 @@ pub const DEFAULT_MAX_ORDERBOOK_STALE_MS: i64 = 8_000;
 /// has `0` for that, spelled out in the usage text.
 pub const MAX_ORDERBOOK_STALE_MS_CEILING: i64 = 600_000;
 
+/// #932: the legacy sizing entry points' placeholder token — never declared
+/// in `venue_min_shares`, so the legacy paths keep the configured band
+/// byte-identically. Test-only: production submissions use the signal's
+/// real token.
+#[cfg(test)]
+pub(crate) const LEGACY_NO_VENUE_MIN: &str = "\u{0}legacy";
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub scanner: ScannerConfig,
@@ -481,6 +488,17 @@ pub struct Engine {
     /// effective account_id 相同 ⇒ 拒绝声明）。Core 转 APPLICATION 错误
     /// 事件（点名字段）；被拒声明对应的腿声明不产出（订单路径照旧）。
     pair_refusals: Vec<String>,
+    /// #932: the venue's own minimum order size per token, pushed by the
+    /// host side-channel when a feed declares one (polymarket CLOB
+    /// `/books` carries `min_order_size`). A DECLARATION, not an event:
+    /// slow-changing policy, not event payload, so it rides the sizing
+    /// push instead of the archive wire (`k:"books"` is a frozen replay
+    /// corpus that `(t, b, a)` must not grow on). Absent token = the venue
+    /// said nothing; sizing keeps the configured band (#933) and the
+    /// venue's own minimum-gate stays the last line of defence. A
+    /// declaration only ever TIGHTENS sizing against the venue — the
+    /// configured band itself is never widened past an operator knob.
+    venue_min_shares: HashMap<String, Decimal>,
 }
 
 /// RFC 568 阶段一：一条过了 scope 门的配对声明（engine → Core 的提交伴生
@@ -580,13 +598,30 @@ impl Engine {
         out
     }
 
+    /// Test-only legacy spelling (see `entry_ticket`): production callers all
+    /// carry a real token through `compute_token_shares`.
+    #[cfg(test)]
     fn compute_shares(&self, price: Decimal, strategy: &str, account: &str) -> Decimal {
+        self.compute_token_shares(LEGACY_NO_VENUE_MIN, price, strategy, account)
+    }
+
+    /// The #932 spelling carries the token so a DECLARED venue minimum can
+    /// raise the affordability gate's landing zone; the legacy call keeps
+    /// every banded/test behaviour byte-identical (`LEGACY_NO_VENUE_MIN` is
+    /// never declared).
+    fn compute_token_shares(
+        &self,
+        token_id: &str,
+        price: Decimal,
+        strategy: &str,
+        account: &str,
+    ) -> Decimal {
         let sizing = self.effective_sizing(strategy);
         // P0 #202: the equity-relative mode REPLACES the absolute budget when
         // it is armed. Everything below this line is the historical path, and
         // with `size_pct = 0` (the default) it is reached unchanged.
         if sizing.size_pct > Decimal::ZERO {
-            return self.equity_shares(price, &sizing, account);
+            return self.equity_shares(token_id, price, &sizing, account);
         }
         // A zero budget zeroes the leg outright (an explicit weight-0 off
         // switch): the share floor exists to protect a real entry, not to
@@ -625,8 +660,24 @@ impl Engine {
     /// the account (too small for this percentage), and a 0-size order would
     /// only convert it into a per-tick "size must be positive" rejection; the
     /// skip is counted instead (`size_pct_skip_count`) so it stays visible.
+    /// Test-only legacy spelling: production submissions use
+    /// `entry_token_ticket` with the signal's real token (#932), so the
+    /// placeholder-token form only exists for the banded tests.
+    #[cfg(test)]
     fn entry_ticket(&self, price: Decimal, strategy: &str, account: &str) -> Option<Decimal> {
-        let size = self.compute_shares(price, strategy, account);
+        self.entry_token_ticket(LEGACY_NO_VENUE_MIN, price, strategy, account)
+    }
+
+    /// #932 spelling (see `compute_token_shares`): the token rides the
+    /// ticket so a declared venue minimum raises the affordability gate.
+    fn entry_token_ticket(
+        &self,
+        token_id: &str,
+        price: Decimal,
+        strategy: &str,
+        account: &str,
+    ) -> Option<Decimal> {
+        let size = self.compute_token_shares(token_id, price, strategy, account);
         if size > Decimal::ZERO {
             return Some(size);
         }
@@ -649,7 +700,13 @@ impl Engine {
     /// this mode exists to remove it. One whole share is the floor of last
     /// resort; a budget that cannot buy even that emits nothing (see
     /// `entry_ticket`).
-    fn equity_shares(&self, price: Decimal, sizing: &EffectiveSizing, account: &str) -> Decimal {
+    fn equity_shares(
+        &self,
+        token_id: &str,
+        price: Decimal,
+        sizing: &EffectiveSizing,
+        account: &str,
+    ) -> Decimal {
         let equity = self.scope_equity(account);
         if equity <= Decimal::ZERO || price <= Decimal::ZERO {
             return Decimal::ZERO;
@@ -694,6 +751,14 @@ impl Engine {
         // ceiling for the FLOOR-RAISED ticket — if even one minimum lot does
         // not fit, the account really cannot trade this price and the
         // floor must not resurrect the order (the #202 bug shape).
+        // #932: the venue's own DECLARED minimum (polymarket `/books`
+        // `min_order_size`) raises the same gate's landing zone when it
+        // exceeds the configured band — the mandate is the venue's, the
+        // configured floor stays a last-resort stair under it. A round the
+        // ticket is compared against `floored`, not the bare floor, so a
+        // declared 5 on a banded 10 is a no-op and the banded step keeps
+        // grounding the gate when the venue declares less.
+        let min_shares = self.venue_min_shares_floor(token_id).max(sizing.min_shares);
         let floored = ticket.floor();
         // The share floor is an affordance gate, not a raiser (operator
         // ruling 2026-11-04): when the budget cannot pay for one minimum
@@ -704,10 +769,21 @@ impl Engine {
         // ⟺ budget < min·price), so no raising branch exists: at 3.5% of a
         // $75.66 book the $2.68 budget at price 0.28 divides to 9.5 — the
         // floor is simply affordable and `floor()` keeps 9 shares.
-        if floored < sizing.min_shares {
+        if floored < min_shares {
             return Decimal::ZERO;
         }
         floored.min(sizing.max_shares)
+    }
+
+    /// #932: the venue's own declared minimum for a token as read from
+    /// `effect` — the band's gate reads it as a floor RAISE, never a
+    /// DROP (an absent or smaller declaration leaves the configured
+    /// band untouched).
+    fn venue_min_shares_floor(&self, token_id: &str) -> Decimal {
+        self.venue_min_shares
+            .get(token_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// The freshness budget in force (#205): the engine refuses to price a book

@@ -89,7 +89,7 @@ fn equity_sizing_needs_a_budget_it_can_actually_spend() {
     // A non-positive price and a zero ceiling are dead ends too, never a
     // panic or an unbounded ticket.
     assert_eq!(
-        tiny.equity_shares(Decimal::ZERO, &tiny.global_sizing(), "default"),
+        tiny.equity_shares("tok", Decimal::ZERO, &tiny.global_sizing(), "default"),
         Decimal::ZERO
     );
     let mut closed = engine_from(pct_cfg(dec!(20), dec!(10), Decimal::ZERO));
@@ -647,4 +647,108 @@ fn two_strategies_size_independently_in_one_evaluation() {
     assert_eq!(big.size, dec!(20));
     assert_eq!(small.price, dec!(0.44), "same dip price for both");
     assert_eq!(big.price, dec!(0.44));
+}
+
+// ── #932 venue-declared minimum (side-channel, declaration not event) ────
+
+/// The venue's own minimum raises the affordability gate's landing zone:
+/// a budget that CAN pay the declared lot is floor-raised to exactly it
+/// (the "勉勉强强也能下 5 股就直接按 5" reading, now venue-driven), a
+/// budget that cannot buys nothing at all. The configured band never
+/// participates as a raiser — the venue mandate, when declared, IS the
+/// floor of this gate.
+#[test]
+fn venue_declared_minimum_raises_the_affordability_gate() {
+    // Band [1, 100]: the local stair would ground at 1 share; the venue
+    // says 5 at this token. equity 10 × 7.5% = 0.75 USD budget.
+    // At 0.20: raw = 3.75 → declares 5·0.20 = 1.00 > 0.75 = UNAFFORDABLE
+    // → honest skip (a size-3 ticket would die at the venue's gate).
+    let mut e = engine_from(pct_cfg(dec!(7.5), dec!(1), dec!(100)));
+    e.set_venue_min_shares("tok", Some(dec!(5)));
+    e.set_equity_usd(dec!(10));
+    assert_eq!(
+        e.compute_token_shares("tok", dec!(0.20), "spread_arb", "default"),
+        Decimal::ZERO
+    );
+    // At 0.15: raw = 5 exactly → floor 5 ≥ declared 5 AND affordable
+    // → exactly the declared lot rides out (no raising branch exists:
+    // raw < 5 ⟺ budget < 5·0.15, and the budget IS 0.75).
+    assert_eq!(
+        e.compute_token_shares("tok", dec!(0.15), "spread_arb", "default"),
+        dec!(5)
+    );
+    // Richer budget (equity 30 × 7.5% = 2.25 at 0.20 → raw 11.25 → 11):
+    // the gate merges BOTH stairs — banded 1, declared 5 — and the natural
+    // floor 11 clears the higher one with no raise of any kind.
+    e.set_equity_usd(dec!(30));
+    assert_eq!(
+        e.compute_token_shares("tok", dec!(0.20), "spread_arb", "default"),
+        dec!(11)
+    );
+    // The absolute path obeys the same landing zone: the declared minimum
+    // raises the ticket's ground like the band always did (max, not min),
+    // and the same gate semantics hold — 5·0.20 = 1.00 over the
+    // 0.75 budget's affordable shape is a VENUE-gate call, not this band's,
+    // so the mandate only participates through the equity gate above.
+    let mut abs = engine_from(cfg());
+    abs.cfg.size_pct = Decimal::ZERO;
+    abs.cfg.size_usd = dec!(2.5);
+    abs.cfg.min_shares = dec!(1);
+    abs.cfg.max_shares = dec!(100);
+    abs.set_venue_min_shares("abs-tok", Some(dec!(5)));
+    // raw = 2.5/0.55 = 4.54… → max(banded raw floor 1) — the declaration
+    // only matters when it EXCEEDS the raw ticket: at 0.30 raw = 8, well
+    // over the 5 mandate, no raise; at 0.46 raw = 5.43 → 5 still clears it
+    // naturally; the raise shows at 0.55 where raw = 4 < 5.
+    assert_eq!(
+        abs.compute_token_shares("abs-tok", dec!(0.55), "spread_arb", "default"),
+        dec!(5)
+    );
+}
+
+/// A declaration only ever TIGHTENS sizing: a token the venue said
+/// nothing about keeps the #933 band semantics byte-stable, a stale
+/// declaration is clearable, and a declared minimum BELOW the configured
+/// band never lowers the gate (the operator's band stays in force).
+#[test]
+fn venue_declaration_never_widens_the_configured_band() {
+    let mut e = engine_from(pct_cfg(dec!(20), dec!(10), dec!(1000)));
+    e.set_equity_usd(dec!(4.8));
+    // Undeclared token: 0.96 budget at 0.40 → raw 2.4 → band 10 unaffordable
+    // → skip, byte-identical to the #933 assertion.
+    assert_eq!(
+        e.compute_token_shares("no-mandate", dec!(0.40), "spread_arb", "default"),
+        Decimal::ZERO
+    );
+    // Declared 5 (LESS than the band's 10): the gate grounds at max(5, 10)
+    // = 10 — the operator's band, not the venue's easier number, wins, and
+    // 5·0.40 = 2.00 of the band lot is still unaffordable → skip.
+    e.set_venue_min_shares("lod", Some(dec!(5)));
+    assert_eq!(
+        e.compute_token_shares("lod", dec!(0.40), "spread_arb", "default"),
+        Decimal::ZERO
+    );
+    // Clearing the declaration restores the band exactly.
+    e.set_venue_min_shares("lod", None);
+    assert_eq!(e.venue_min_shares("lod"), None);
+    assert_eq!(
+        e.compute_token_shares("lod", dec!(0.40), "spread_arb", "default"),
+        Decimal::ZERO
+    );
+}
+
+/// The declared-count path (pair legs, `sig.shares = Some(n)`) dies against
+/// the SAME raised gate: a depth-shaped leg that cannot afford the venue's
+/// declared lot is a kernel skip, not a venue-rejection streak feeding the
+/// freeze book.
+#[test]
+fn declared_shares_dies_against_the_venue_mandate() {
+    let mut e = engine_from(pct_cfg(dec!(20), dec!(10), dec!(1000)));
+    e.set_venue_min_shares("pair-up", Some(dec!(5)));
+    e.set_equity_usd(dec!(4.8));
+    // The equity ticket against the mandate: 0.96 budget at 0.20 buys 4.8
+    // → floor 4 < declared 5 → ZERO (unaffordable mandate) → the declared
+    // 20-share leg caps to 0 and skips.
+    let ticket = e.equity_shares("pair-up", dec!(0.20), &e.global_sizing(), "default");
+    assert_eq!(ticket, Decimal::ZERO);
 }
