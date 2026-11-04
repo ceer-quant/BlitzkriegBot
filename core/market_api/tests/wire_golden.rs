@@ -311,9 +311,10 @@ fn book_update_golden() {
             r#""asks":[["0.56","30.25"]],"tsMs":1000000000000}"#
         ),
     );
-    // #932: a DECLARED venue minimum rides the type (skipped when absent —
-    // `#[serde(default)]` keeps the wire round-trip of undeclared books
-    // byte-identical to the golden above).
+    // #932: a DECLARED venue minimum rides the type. Same wire convention as
+    // `OrderIntent.price` (finite decimal → JSON number); absent → the field
+    // is skipped entirely, so an undeclared book byte-identically equals the
+    // pre-#932 golden above.
     let declared = BookUpdate {
         token_id: "tok-down".into(),
         bids: vec![(d("0.40"), d("5"))],
@@ -325,7 +326,7 @@ fn book_update_golden() {
         &declared,
         concat!(
             r#"{"tokenId":"tok-down","bids":[["0.40","5"]],"asks":[["0.50","5"]],"#,
-            r#""tsMs":1000000000000,"minOrderSize":"5"}"#
+            r#""tsMs":1000000000000,"minOrderSize":5.0}"#
         ),
     );
 }

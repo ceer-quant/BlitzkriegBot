@@ -350,7 +350,11 @@ pub struct BookUpdate {
     /// the venue's own minimum-gate remains the last line of defence (issue
     /// #932). The core ingests this into per-token sizing so an entry is
     /// never a doomed sub-minimum ticket.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "decimal::opt"
+    )]
     pub min_order_size: Option<Decimal>,
 }
 
