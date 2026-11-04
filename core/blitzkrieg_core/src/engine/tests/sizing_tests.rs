@@ -16,21 +16,17 @@ use rust_decimal_macros::dec;
 fn equity_sizing_replaces_the_fixed_lot_and_follows_the_account() {
     let mut e = engine_from(pct_cfg(dec!(20), dec!(10), dec!(1000)));
     e.set_equity_usd(dec!(4.8));
-    // 4.8 × 20% = 0.96 USD → 0.96/0.40 = 2.4 → 2 whole shares (floor: a
-    // percentage budget is an upper bound). The absolute path sends 10
-    // shares = 4.00 USD = 83% of this book.
+    // 4.8 × 20% = 0.96 USD → 0.96/0.40 = 2.4 → 2 whole shares, but the
+    // band's floor is 10 shares = 4.00 USD > the 0.96 budget: the account
+    // cannot afford one minimum lot at this price, so the ticket is a
+    // SKIP, not a floor-raised order a later gate rejects (operator
+    // ruling 2026-11-04 + #202's original intent both say so: the floor
+    // participates exactly when paying for it fits the budget).
     assert_eq!(
         e.compute_shares(dec!(0.40), "spread_arb", "default"),
-        dec!(2)
+        Decimal::ZERO
     );
     assert_eq!(e.entry_budget_usd("spread_arb"), dec!(0.96));
-    // The band's own floor (min_shares = 10) must NOT lift it back over the
-    // budget — that floor is the #202 bug itself.
-    assert_eq!(e.effective_sizing("spread_arb").min_shares, dec!(10));
-    assert_eq!(
-        e.compute_shares(dec!(0.40), "spread_arb", "default"),
-        dec!(2)
-    );
     // The same percentage on a 100× account is 100× the budget, and the lot
     // follows (the point of the knob: 4.8 → 480 must move the order size).
     e.set_equity_usd(dec!(480));
@@ -61,9 +57,24 @@ fn equity_sizing_needs_a_budget_it_can_actually_spend() {
         Decimal::ZERO
     );
     unknown.set_equity_usd(dec!(4.8));
+    // 2.4 whole shares rounds below the 10-share floor, and 10 × 0.40 = 4.00
+    // USD exceeds the 0.96 budget — the account cannot afford one minimum
+    // lot at this price: honest skip (zero), never a sub-floor ticket that
+    // dies at the venue's minimum-order gate (2026-11-04 production shape:
+    // 15 consecutive INVALID_ORDER_MIN_SIZE rejections).
     assert_eq!(
         unknown.compute_shares(dec!(0.40), "spread_arb", "default"),
-        dec!(2)
+        Decimal::ZERO
+    );
+    // The affordable shape: a bigger budget (or cheaper price) makes the
+    // floor a non-event — raw >= min and the normal ticket flows. (Arithmetically
+    // the floor can never RAISE a percentage ticket: raw < min ⟺ budget <
+    // min·price. The floor only ever zeroes, it never lifts.)
+    let mut small = engine_from(pct_cfg(dec!(25), dec!(10), dec!(1000)));
+    small.set_equity_usd(dec!(10));
+    assert_eq!(
+        small.compute_shares(dec!(0.20), "spread_arb", "default"),
+        dec!(12)
     );
     // A budget that cannot buy one whole share (1% of 4.8 = 0.048 at 0.40)
     // emits NO order rather than a 0-size one that becomes a per-tick
