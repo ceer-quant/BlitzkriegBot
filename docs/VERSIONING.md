@@ -1263,10 +1263,11 @@ check('TUI 设置页 ↔ WebUI 设置页版本卡片同源', () => {
 
 ### 6.5 默认值：三处默认必须一致地为「关闭」
 
+> 注：`user_layer/configs/update.toml`（连同 accounts / execution_policy 两个工厂 toml）已随 #920 退役删除，随后 issue 923（2026-11-04、Phase 4）摘除了内核对该文件的解析层——表中原「工厂默认」一行的翻转途径已消灭：更新开关的配置链现在是 CLI > env（`BLITZKRIEG_UPDATE_*`）> 内置默认 false，运行时开关仍是下列 `data/update/state.json`。
 | 位置 | 默认 | 谁来翻转 |
 |---|---|---|
-| `user_layer/configs/update.toml`（工厂默认） | `check_enabled = false`、`auto_update = false` | 操作者手工编辑（工厂默认） |
-| `data/update/state.json`（运行时开关） | 不存在 = 采用工厂默认 | UI 开关 / IPC 写操作 |
+| ~~`user_layer/configs/update.toml`（工厂默认）~~ | `check_enabled = false`、`auto_update = false` | **已退役（#920，删文件；issue 923 摘解析层）** |
+| `data/update/state.json`（运行时开关） | 不存在 = 内置默认 | UI 开关 / IPC 写操作 |
 | 内核内置默认（编译进二进制） | 两者都为 `false` | 不允许翻转（这是 INI-3，见 1.3） |
 
 三者一致的证明方式是 V6-5 的对抗性验收，而不是靠这三行文字。
@@ -1685,8 +1686,9 @@ async fn fetch_latest_release_with_token(token: &str) -> Result<String, String> 
 **持久化落点**（沿用 `data/evolution/state.json` 的既有形态，现状 0.22）：
 
 ```rust
-/// `data/update/state.json` —— 运行时开关（压过工厂默认的 update.toml）。
-/// 只存开关与上次检查摘要；**不存**任何令牌。
+/// `data/update/state.json` —— 运行时单真源（system.update.configure 写入；
+/// 压过 CLI/env 配置层，同 `data/evolution/state.json` 模型；issue 923 起
+/// 工厂 update.toml 不复存在）。只存开关与上次检查摘要；**不存**任何令牌。
 fn state_path() -> std::path::PathBuf { std::path::PathBuf::from("data/update/state.json") }
 
 pub fn persist(state: &UpdateState) -> std::io::Result<()> {
@@ -1739,8 +1741,8 @@ method::SYSTEM_UPDATE_CHECK => {
     if !update_state.snapshot().check_enabled {
         return Err((
             Failure::APPLICATION,
-            "update checking is disabled (checkEnabled=false); enable it in \
-             user_layer/configs/update.toml or via system.update.configure"
+            "update checking is disabled (checkEnabled=false); configure \
+             via the BLITZKRIEG_UPDATE_* env keys or via system.update.configure"
                 .to_string(),
             None,
         ));
@@ -1771,7 +1773,7 @@ method::SYSTEM_UPDATE_CHECK => {
 进程、无人值守机器）用 #379 的调度器补上，规则与启动检查同源：
 
 * **配置链**：CLI `--update-interval-secs` > env `BLITZKRIEG_UPDATE_INTERVAL_SECS`
-  > `update.toml` 的 `update.interval_secs` > 默认 `0`。
+  > 默认 `0`（issue 923 起 update.toml 文件层已退役摘除）。
 * **0 = 没有调度器任务**（不是「间隔无限长」）：结构上不存在，与 INV-3
   的「关闭 = 无 spawn」同一条款；出厂配置下栈依然零出站连接。
 * `check_enabled=false` 时同样**不 spawn**；且每一轮都重读开关 ——
@@ -2565,7 +2567,7 @@ on:
 |---|---|---|---|
 | V4-1 | semver 比较（唯一比较点） | `parse_release_tag` / `is_newer` + 反向测试（`0.10.0 > 0.9.0`、rc 不打扰正式版、垃圾输入不产生提示） | V3-1 |
 | V4-2 | 出网与状态 | `reqwest` 直连依赖；`check_once(fetch)` 注入式设计；`UpdateState` + 持久化到 `data/update/state.json`（原子写） | V4-1 |
-| V4-3 | 启动挂载（默认静默） | `spawn_startup_check`：`checkEnabled=false` 时**不 spawn**；开关来源 CLI > env > `configs/update.toml` > 默认 false | V4-2 |
+| V4-3 | 启动挂载（默认静默） | `spawn_startup_check`：`checkEnabled=false` 时**不 spawn**；开关来源 CLI > env > 默认 false（issue 923：原 `configs/update.toml` 文件层随 #920 退役，2026-11-04 摘解析层） | V4-2 |
 | V4-4 | 两个 IPC 动词 | `system.update.check` / `system.update.configure`（含审计、落盘失败必须报错） | V4-3 |
 | V4-5 | 出网零泄漏验收 | 7.6 的 A1/A2/A3/A4/A5/A6/A13 全部落地为可跑断言 | V4-4 |
 

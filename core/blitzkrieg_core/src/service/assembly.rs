@@ -6,10 +6,13 @@ use super::*;
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
-        // E28 (§9.5) + issue 751 (.env single source): the account book loads
-        // through the ACCOUNT_* env grammar first (process env, then the
-        // `.env` file), falling back to the legacy `user_layer/configs/
-        // accounts.toml`, falling back to one `default` account. A malformed
+        // E28 (§9.5) + issue 751 (.env single source) + issue 923 (the
+        // migration window closed): the account book loads through the
+        // ACCOUNT_* env grammar only — process env first, then the `.env`
+        // file — with NO legacy toml fallback. No ACCOUNT_* keys anywhere is
+        // the zero-config deployment: one `default` account. A legacy
+        // accounts.toml still on disk is never read for configuration; it is
+        // only a residue whose existence the loader warns at. A malformed
         // source refuses the boot (fail-closed: a book that is not what the
         // operator wrote must not trade). The credential probe runs here too,
         // so `account.list` answers `credentialsLoaded` from boot-time facts.
@@ -31,10 +34,10 @@ impl Core {
     }
 
     /// The constructor with the account book SUPPLIED (E28): a multi-account
-    /// book for tests without touching the real `user_layer/configs/
-    /// accounts.toml` the process cwd decides. Production always enters
-    /// through [`Core::new`], which fails closed on a malformed file; this
-    /// variant trusts the caller's book.
+    /// book for tests without touching the operator's `.env` account rows the
+    /// process cwd decides. Production always enters through [`Core::new`],
+    /// which fails closed on a malformed source; this variant trusts the
+    /// caller's book.
     pub fn with_account_book(
         mut config: CoreConfig,
         mut accounts: crate::account::AccountLedgers,
@@ -240,54 +243,33 @@ impl Core {
         intent_audit.enabled = config.intent_audit_enabled;
         // 跨所套利弹窗 v2: the leg configuration reads from the SAME source
         // the book came from (issue 751: ACCOUNT_* env — process env, then
-        // the `.env` file — with the toml file as the migration-window
-        // fallback). The parse layer validates coherence (from_str /
-        // load_account_ledgers_from_env refuse an incoherent section), so a
-        // read here after a successful book load cannot fail semantically —
-        // the fallback below is reachable only when the source vanished
-        // between the two reads, and then "unconfigured" is the honest
-        // answer.
-        let arb_leg_config = {
-            let from_env = crate::account::config::read_cross_venue_arb_from_env(
-                &crate::account::config::env_lookup_from_sources(
-                    config.env_file_path.as_deref().map(std::path::Path::new),
-                ),
-            )
-            .map_err(|e| {
-                tracing::warn!(
-                    error = %e.message,
-                    "cross_venue_arb env section invalid at boot — running unconfigured"
-                );
-            })
-            .ok()
-            .flatten();
-            match from_env {
-                Some(cfg) => Some(cfg),
-                None => config
-                    .accounts_config_path
-                    .as_deref()
-                    .map(std::path::Path::new)
-                    .and_then(|p| {
-                        crate::account::config::read_cross_venue_arb(p)
-                            .map_err(|e| {
-                                tracing::warn!(
-                                    error = %e.message,
-                                    "cross_venue_arb section unreadable at boot — running unconfigured"
-                                );
-                            })
-                            .ok()
-                            .flatten()
-                    }),
-            }
-        }
-            .inspect(|cfg| {
-                tracing::info!(
-                    leg_a = %format!("{}/{}", cfg.leg_a_venue, cfg.leg_a_account),
-                    leg_b = %format!("{}/{}", cfg.leg_b_venue, cfg.leg_b_account),
-                    pairs = ?cfg.pairs,
-                    "cross-venue arb legs configured (accounts.toml [cross_venue_arb])"
-                );
-            });
+        // the `.env` file; issue 923 closed the migration window — the toml
+        // fallback is gone with the account one). The parse layer validates
+        // coherence (load_account_ledgers_from_env refuses an incoherent
+        // section), so a read here after a successful book load cannot fail
+        // semantically — "unconfigured" is the honest answer when no keys
+        // are present.
+        let arb_leg_config = crate::account::config::read_cross_venue_arb_from_env(
+            &crate::account::config::env_lookup_from_sources(
+                config.env_file_path.as_deref().map(std::path::Path::new),
+            ),
+        )
+        .map_err(|e| {
+            tracing::warn!(
+                error = %e.message,
+                "cross_venue_arb env section invalid at boot — running unconfigured"
+            );
+        })
+        .ok()
+        .flatten()
+        .inspect(|cfg| {
+            tracing::info!(
+                leg_a = %format!("{}/{}", cfg.leg_a_venue, cfg.leg_a_account),
+                leg_b = %format!("{}/{}", cfg.leg_b_venue, cfg.leg_b_account),
+                pairs = ?cfg.pairs,
+                "cross-venue arb legs configured (.env ACCOUNT_ARB_* rows)"
+            );
+        });
         // E-VA: the virtual pots are built from the config's caps BEFORE the
         // config moves into the struct (the caps are copied, so a later
         // runtime config mutation cannot move a quota mid-session).
@@ -473,7 +455,7 @@ impl Core {
             #[cfg(test)]
             test_escalation_snapshot_fill: None,
             // 跨所套利弹窗 v2: the boot-loaded leg configuration (memory
-            // mirror of accounts.toml's `[cross_venue_arb]` — the file is the
+            // mirror of the ACCOUNT_ARB_* env rows — .env is the
             // durable truth, this cell feeds the engine hot). None =
             // unconfigured: the legacy unified-confirm chain stays the only
             // pairing source and the account-stamp is inert.
@@ -792,12 +774,11 @@ impl Core {
             .as_deref()
             .map(std::path::Path::new)
             .ok_or_else(|| "env_file_path not set".to_string())?;
-        let path = std::path::Path::new(crate::account::config::ACCOUNTS_CONFIG_PATH);
         let now_ms = blitzkrieg_market_api::net::now_ms();
         let allowed = &self.config.allowed_round_secs;
-        match crate::account::config::load_account_ledgers_for_reload(
-            path, env_file, now_ms, allowed,
-        ) {
+        // Env-only (issue 923): no legacy toml fallback — a .env without
+        // ACCOUNT_LIST reloads into the zero-config single default.
+        match crate::account::config::load_account_ledgers_for_reload(env_file, now_ms, allowed) {
             Ok(accounts) => self.accounts.reload_config(accounts),
             Err(e) => Err(e.to_string()),
         }

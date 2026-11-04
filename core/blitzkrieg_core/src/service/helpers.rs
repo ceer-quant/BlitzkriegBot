@@ -251,7 +251,7 @@ pub(super) fn strategy_acc_key(strategy: &str, account: &str) -> String {
 }
 
 /// The ONE cross-venue arbitrage strategy's package name. Single-instance by
-/// contract: accounts.toml carries exactly one `[cross_venue_arb]` section,
+/// contract: the ACCOUNT_ARB_* env rows carry exactly one arb leg config,
 /// so the arb totals on the stats rows ARE the arb unit's totals.
 /// ponytail: 平台化多套利实例留待真有第二个实例再谈。
 pub(crate) const ARB_STRATEGY: &str = "cross_venue_arb";

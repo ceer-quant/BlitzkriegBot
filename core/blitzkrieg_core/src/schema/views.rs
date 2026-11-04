@@ -724,7 +724,7 @@ pub struct AccountVenueSetParams {
 }
 
 /// `account.venue.set` result: the binding that is now in force (memory AND
-/// accounts.toml — `persisted` says the file write landed; a persist failure
+/// the operator's `.env` — `persisted` says the env write landed; a persist failure
 /// refuses the whole write so the two stores cannot disagree).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -749,15 +749,16 @@ pub struct AccountVenueSetResult {
 /// [`AccountVenueSetResult::note`] — one spelling, used by the reply and the
 /// log line.
 pub const ACCOUNT_VENUE_SET_NOTE: &str = "binds orders.place to the named venue's markets (empty = \
-     unbound); persisted to accounts.toml, re-read at next boot; the same \
-     venue on several accounts is the deployment model, not a conflict";
+     unbound); persisted to the operator's `.env` (ACCOUNT_*), re-read at next \
+     boot; the same venue on several accounts is the deployment model, not a \
+     conflict";
 
 // ── round-length family write — account.rounds.set (轮次多族 B2) ─────────────
 
 /// `account.rounds.set` params: the WHOLE replacement set (not a delta — the
 /// panel's card edits a list, the wire carries the list). `rounds` is
 /// whitelist-validated and deduplicated (first-seen order kept), the empty
-/// list removes the accounts.toml key (the unrestricted spelling). `reason`
+/// list removes the ACCOUNT_*_ROUNDS key (the unrestricted spelling). `reason`
 /// is audit-only.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -770,7 +771,7 @@ pub struct AccountRoundsSetParams {
 }
 
 /// `account.rounds.set` result: the set now in force (memory AND
-/// accounts.toml — `persisted` says the file write landed; a persist failure
+/// the operator's `.env` — `persisted` says the env write landed; a persist failure
 /// refuses the whole write so the two stores cannot disagree). Shape follows
 /// [`AccountVenueSetResult`] minus the venue-specific fields — no per-family
 /// change list: the reply's `rounds` IS the fact.
@@ -797,7 +798,8 @@ pub struct AccountRoundsSetResult {
 /// [`AccountRoundsSetResult::note`] — one spelling, used by the reply and the
 /// log line.
 pub const ACCOUNT_ROUNDS_SET_NOTE: &str = "replaces the account's (venue, duration) family set \
-     (empty = unrestricted, the key is removed from accounts.toml); persisted \
+     (empty = unrestricted, the ACCOUNT_*_ROUNDS key is removed from the \
+     operator's `.env`); persisted \
      first, memory second — a removal with open positions in the removed \
      families refuses the WHOLE write, a clean removal soft-unloads the \
      families' poll output without killing the running discovery instances, \
@@ -869,7 +871,7 @@ pub struct AccountTradingSetParams {
 }
 
 /// `account.trading.set` result: the switch that is now in force (memory
-/// AND accounts.toml; a persist failure refuses the whole write).
+/// AND the operator's `.env`; a persist failure refuses the whole write).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountTradingSetResult {
@@ -883,13 +885,13 @@ pub struct AccountTradingSetResult {
 }
 
 pub const ACCOUNT_TRADING_SET_NOTE: &str = "false = new entries refused for this account, existing \
-     positions stay managed until flat (exits always flow); persisted to \
-     accounts.toml, re-read at next boot";
+     positions stay managed until flat (exits always flow); persisted to the \
+     operator's `.env` (ACCOUNT_*), re-read at next boot";
 
 /// `account.freeze` params: the account-scoped kill switch. `frozen: true`
 /// refuses the account's NEW orders (manual and strategy entries) while its
 /// EXITS keep flowing; `frozen: false` lifts the freeze. Session-scoped —
-/// not persisted to accounts.toml (an automatic freeze must not outlive the
+/// not persisted (an automatic freeze must not outlive the
 /// process that observed its cause; a restart re-probes).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -958,7 +960,7 @@ pub const ACCOUNT_STRATEGIES_SET_NOTE: &str = "the account's strategy ENABLEMENT
 /// `display.account.set` params: the account the snapshot's
 /// `displayAccount`/`displayVenue` should point at. The kernel validates the
 /// account EXISTS and is `active` (plan-first), then updates the runtime
-/// pointer AND the accounts.toml top-level `display_account` key in one
+/// pointer AND the operator's `.env` `ACCOUNT_DISPLAY` key in one
 /// transaction. `reason` is audit-only.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -969,7 +971,7 @@ pub struct DisplayAccountSetParams {
 }
 
 /// `display.account.set` result: the pointer now in force (memory AND
-/// accounts.toml; a persist failure refuses the whole write). `displayVenue`
+/// the operator's `.env`; a persist failure refuses the whole write). `displayVenue`
 /// is the pointed-at account's venue binding — empty = unbound.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -986,7 +988,7 @@ pub struct DisplayAccountSetResult {
 pub const DISPLAY_ACCOUNT_SET_NOTE: &str = "points the snapshot's displayAccount/displayVenue at \
      the named account — a pure presentation pointer (NOT the active/ \
      accounting/strategy-enablement axis; no trading semantics attach); \
-     persisted to accounts.toml's top-level display_account key, re-read at \
+     persisted to the operator's `.env` (ACCOUNT_DISPLAY), re-read at \
      next boot (fail-closed on a dangling id)";
 
 // ── account.create / account.remove — 账户簿运行时增删 ──────────────────────
@@ -1014,7 +1016,7 @@ pub struct AccountCreateParams {
     pub reason: Option<String>,
 }
 
-/// `account.create` result: the created id, whether the accounts.toml write
+/// `account.create` result: the created id, whether the .env write
 /// landed (`false` is impossible today — a persist failure refuses the whole
 /// call, the field is the contract's honesty disclosure), one fixed note, and
 /// whether the named venue's data plane was mounted into the running session.
@@ -1041,7 +1043,8 @@ pub struct AccountCreateResult {
 /// [`AccountCreateResult::note`] — one spelling, used by the reply and the
 /// log line.
 pub const ACCOUNT_CREATE_NOTE: &str = "creates one ACTIVE prediction account (a restricted one is \
-     account.status's job, never a runtime mint); persisted to accounts.toml, \
+     account.status's job, never a runtime mint); persisted to the operator's \
+     `.env` (ACCOUNT_*), \
      re-read at next boot; plugin credential names are attached automatically, \
      while values travel separately through market.credentials.set";
 
@@ -1057,7 +1060,7 @@ pub struct AccountRemoveParams {
     pub reason: Option<String>,
 }
 
-/// `account.remove` result: the retired id, whether the accounts.toml write
+/// `account.remove` result: the retired id, whether the .env write
 /// landed, and one fixed note.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1073,8 +1076,9 @@ pub struct AccountRemoveResult {
 
 /// [`AccountRemoveResult::note`] — one spelling, used by the reply and the
 /// log line.
-pub const ACCOUNT_REMOVE_NOTE: &str = "removes the account from the book (memory AND accounts.toml, \
-     re-read at next boot); every account is removable — `default` included — \
+pub const ACCOUNT_REMOVE_NOTE: &str = "removes the account from the book (memory AND the \
+     operator's `.env` ACCOUNT_* rows, re-read at next boot); every account is \
+     removable — `default` included — \
      but the LAST account and an account still holding open positions are \
      refused; removing the process-active account re-activates the first \
      surviving account";

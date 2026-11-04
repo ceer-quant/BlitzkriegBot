@@ -335,8 +335,8 @@ impl AccountLedgers {
         Self::new_with_display(accounts, active, display)
     }
 
-    /// [`Self::new`] with the display pointer SUPPLIED — the accounts.toml
-    /// loader's constructor (the file is the display pointer's only config
+    /// [`Self::new`] with the display pointer SUPPLIED — the .env loader's
+    /// constructor (ACCOUNT_DISPLAY is the display pointer's only config
     /// source). `display` MUST name a configured account; enforcing that is
     /// the caller's job (the loader validates before calling, fail-closed).
     pub fn new_with_display(accounts: Vec<Account>, active: AccountId, display: AccountId) -> Self {
@@ -354,9 +354,9 @@ impl AccountLedgers {
         }
     }
 
-    /// The single `default` account a 0.2 deployment gets when
-    /// `user_layer/configs/accounts.toml` does not exist (§9.5: file missing =
-    /// zero config change). Credential key names stay empty — the plugin's own
+    /// The single `default` account of a zero-config deployment (§9.5: no
+    /// ACCOUNT_* keys anywhere = zero config change; issue 923 retired the
+    /// legacy file fallback, so this is also the loader's floor). Credential key names stay empty — the plugin's own
     /// environment handling is untouched (0.2 behaviour).
     pub fn single_default(now_ms: i64) -> Self {
         Self::new(
@@ -620,7 +620,7 @@ impl AccountLedgers {
 
     /// Replace ONE account's round-family declaration (轮次多族) in memory.
     /// The durable half is the caller's job (B2's `account.rounds.set`
-    /// persists into accounts.toml beside this write — the venue.set
+    /// persists into the operator's `.env` beside this write — the venue.set
     /// transaction posture). Unknown ids refuse (the book never mints an
     /// implicit account). The value arrives parse-validated and
     /// deduplicated; the set path re-checks the plugins' DECLARED union
@@ -690,7 +690,7 @@ impl AccountLedgers {
     /// Forward-looking: this field is the input face of the next batch's
     /// plugin-ENABLEMENT derivation (boot reads the account book and enables
     /// every venue at least one account is bound to), so both arms of the
-    /// write — this in-memory one and the accounts.toml persist beside it —
+    /// write — this in-memory one and the `.env` persist beside it —
     /// must stay exactly correct.
     pub fn set_venue(&mut self, id: &AccountId, venue: &str, now_ms: i64) -> CoreResult<()> {
         {
@@ -774,7 +774,7 @@ impl AccountLedgers {
     /// account's NEW ENTRIES are refused at Gate 2 while its EXITS keep
     /// flowing; `true` re-opens entries. A separate boolean axis from
     /// `status` — this is the operator's day-to-day switch, `status` is the
-    /// risk posture (tighten-only). The caller owns the accounts.toml
+    /// risk posture (tighten-only). The caller owns the `.env`
     /// persist (memory first, disk after — a persist failure refuses the
     /// whole write upstream).
     pub fn set_trading(&mut self, id: &AccountId, enabled: bool, now_ms: i64) -> CoreResult<()> {
@@ -961,7 +961,7 @@ fn unknown_account(id: &AccountId) -> CoreError {
         CoreErrorCode::InvalidParams,
         format!(
             "unknown account `{id}` — accounts are deployment facts \
-             (user_layer/configs/accounts.toml + restart), never created \
+             (operator .env + restart), never created \
              implicitly at runtime"
         ),
     )

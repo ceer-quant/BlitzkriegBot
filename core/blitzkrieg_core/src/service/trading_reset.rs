@@ -839,7 +839,7 @@ impl Core {
         // 1) 停用目标账户 scopes 里的已启用策略（复用 strategy.enable 的
         //    停用路径）。账户维裁决：只动该账户的 scopes —— 全局
         //    `enabled_strategy_names` 会连其他账户的同名 scope 一起停。
-        //    accounts.toml 的启用集（持久真相）不写回：重置是运行时清洗
+        //    operator `.env` 的启用集（持久真相）不写回：重置是运行时清洗
         //    （会话级 OFF），不是授权变更，重启后启用集原样生效。
         let account_scopes: Vec<String> = self
             .engine

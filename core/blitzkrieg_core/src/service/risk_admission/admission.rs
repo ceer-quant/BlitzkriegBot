@@ -148,7 +148,7 @@ impl Core {
     /// The account's SUBSCRIBED round-duration families — the set of
     /// (venue, duration_sec) pairs this account is allowed to trade — as the
     /// admission gate sees it. THIS PR (B1c) the account book carries no
-    /// subscription field (accounts.toml has no `rounds` key; B1d adds it),
+    /// subscription field (pre-B1d env rows have no rounds key; B1d adds it),
     /// so the set is EMPTY for every account: an empty set means "no declared
     /// restriction", and the gate admits everything — today's behaviour,
     /// byte-identical. B1d assembles the real set here (the comment above the

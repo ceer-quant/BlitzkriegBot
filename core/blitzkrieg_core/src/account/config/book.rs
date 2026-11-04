@@ -4,7 +4,8 @@ use super::*;
 
 /// Load the account book from ACCOUNT_* environment keys (issue 751).
 /// `ACCOUNT_LIST` names the ids in book order; a missing/empty value →
-/// `None` (the caller falls back — the toml file or the single default).
+/// `None` (the caller decides what no env book means — issue 923: the
+/// zero-config single default; the legacy toml fallback is retired).
 ///
 /// Fail-closed, the same discipline `from_str` runs: a bad status, a
 /// `rounds` value outside the plugins' declared union, or a display id

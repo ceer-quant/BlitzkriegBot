@@ -232,7 +232,9 @@ rm "$REPO_ROOT/.env"
 printf '\nlegacy configs: unmigrated deployment keeps operator state (#758)\n'
 rm -f "$REPO_ROOT/$CONFIG_DIR"/*.toml
 rm -rf "$ROLLBACK/configs"
-# No migrated key in .env: the account loader still falls back to accounts.toml.
+# No migrated key in .env: the deployment is unmigrated (the kernel no longer
+# reads the legacy account file, but the live operator state still belongs to
+# these tomls).
 printf 'BLITZKRIEG_PANEL_ADDR=127.0.0.1:51888\n' > "$REPO_ROOT/.env"
 
 printf '[[account]]\nid = "live"\n' > "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
@@ -319,6 +321,41 @@ for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; 
   fi
 done
 check_same "rollback leaves the migrated .env byte-identical" "$tmp/migrated-dot-env" "$REPO_ROOT/.env"
+
+# The residue direction of the same guard: a legacy toml that still EXISTS on a
+# migrated deployment must be left exactly as is — the staged factory copy is
+# never installed over it (the kernel's write gate refuses while the file
+# exists), and it is not backed up by the install either.
+printf '\nlegacy configs: migrated deployment keeps residue bytes untouched (#758)\n'
+printf 'id = "residue"\n' > "$REPO_ROOT/$CONFIG_DIR/accounts.toml"
+printf 'enabled = false\n# residue\n' > "$REPO_ROOT/$CONFIG_DIR/shadow_evolution.toml"
+printf 'version = 1\n[defaults]\nmax_budget_usd = 9\n' > "$REPO_ROOT/$CONFIG_DIR/execution_policy.toml"
+printf '[update]\ncheck_enabled = false\n' > "$REPO_ROOT/$CONFIG_DIR/update.toml"
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  cp "$REPO_ROOT/$CONFIG_DIR/$t" "$tmp/residue-$t"
+done
+
+ua_drift > "$tmp/drift-residue.txt"
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check "drift: residue $t marked retired" "1" \
+    "$(grep -cF -- "- $t (legacy retired" "$tmp/drift-residue.txt" || true)"
+done
+
+ua_install > "$tmp/install-residue.txt"
+ua_verify
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check_same "install leaves residue $t byte-identical" "$tmp/residue-$t" \
+    "$REPO_ROOT/$CONFIG_DIR/$t"
+done
+check "residue install backs nothing up (nothing was replaced)" "0" \
+  "$(find "$ROLLBACK" -name '*.toml' | wc -l | tr -d ' ')"
+ua_rollback
+for t in accounts.toml shadow_evolution.toml execution_policy.toml update.toml; do
+  check_same "rollback leaves residue $t byte-identical" "$tmp/residue-$t" \
+    "$REPO_ROOT/$CONFIG_DIR/$t"
+done
+rm -f "$REPO_ROOT/$CONFIG_DIR"/*.toml
+
 rm -f "$REPO_ROOT/.env"
 rm -rf "$STAGE/configs"
 

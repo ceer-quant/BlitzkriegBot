@@ -908,9 +908,10 @@ pub fn spawn_auto_check_scheduler(
     })
 }
 
-/// `data/update/state.json` — the runtime switches (outrank the factory
-/// `update.toml`, same model as `data/evolution/state.json`). Stores switches
-/// and the last check summary only; NEVER a token.
+/// `data/update/state.json` — the runtime single source of truth for the
+/// update switches (written through `system.update.configure`; the wrapper
+/// CLI/env layer resolves before it, same model as `data/evolution/state.json`).
+/// Stores switches and the last check summary only; NEVER a token.
 fn state_path() -> std::path::PathBuf {
     std::path::PathBuf::from("data/update/state.json")
 }
