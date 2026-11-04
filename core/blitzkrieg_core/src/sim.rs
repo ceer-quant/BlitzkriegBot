@@ -494,6 +494,7 @@ mod tests {
             account_id: crate::model::default_account_id(),
             venue: String::new(),
             round_duration_sec: 0,
+            rejected_reason: None,
         }
     }
 

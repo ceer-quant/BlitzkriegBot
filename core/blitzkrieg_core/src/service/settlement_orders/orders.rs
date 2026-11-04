@@ -201,13 +201,18 @@ impl Core {
                     &o.token_id,
                 );
             }
-            self.emit_order(id);
             let e = err.unwrap_or_else(|| {
                 crate::model::CoreError::new(
                     blitzkrieg_market_api::CoreErrorCode::VenueError,
                     "venue rejected order",
                 )
             });
+            // Stamp the venue's own refusal text onto the row BEFORE
+            // emit_order so the journalled snapshot already names WHY (issue
+            // #930): a REJECTED line with no reason made every audit a grep
+            // across risk-state streak files.
+            self.ome.mark_rejected_with_reason(id, &e.message, now_ms)?;
+            self.emit_order(id);
             // A `maker_then_taker` entry whose maker leg cannot even REST
             // (post-only would cross the book) never gets a turn to escalate
             // by timer — the venue refused the resting order itself. The

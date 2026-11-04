@@ -1130,6 +1130,10 @@ pub struct AccountJournalResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+// rejected_reason pushed Fill's TrackedOrder past clippy's variant-size
+// heuristic; the enum is wire (serde tag on the enum, not a boxed field), so
+// boxing would change the serialization shape for a lint-only gain.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Ready {
         version: String,

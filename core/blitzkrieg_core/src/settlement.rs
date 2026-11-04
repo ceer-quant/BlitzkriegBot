@@ -81,7 +81,13 @@ pub const EXPIRY_TRUST_MS: i64 = 300_000;
 /// does so within one re-query interval (every answer counts, including a
 /// `resolved: false` "not yet"). Unanswered past this bound means the venue
 /// will never rule on this condition, structurally.
-pub const EXPIRY_FALLBACK_AFTER_MS: i64 = 7_200_000;
+///
+/// Operator ruling 2026-11-04 ("15 分钟的轮次持仓一个多小时 怎么可能"): the
+/// bound was 2h and round trips drift far past their own expiry before the
+/// sweep ever closed them while the venue's structural silence is already
+/// legible after two re-query cycles. 120s = two requery intervals — the
+/// same evidence, caught before a 15-minute round has outlived its length.
+pub const EXPIRY_FALLBACK_AFTER_MS: i64 = 120_000;
 /// The exit reason a settled position closes with (`exit:settlement`).
 pub const SETTLEMENT_EXIT_REASON: ExitReason = ExitReason::Settlement;
 /// #684: the exit reason a fallback-closed position carries

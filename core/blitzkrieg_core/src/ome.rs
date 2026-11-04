@@ -749,6 +749,9 @@ impl Ome {
             // had no family fact, the order then falls back through the
             // market declaration (B1a's tri-state) at every read.
             round_duration_sec: p.round_duration_sec,
+            // Only a terminal Rejected transition ever writes this (issue
+            // #930); a fresh order carries no refusal text.
+            rejected_reason: None,
         };
         self.by_internal
             .insert(r.internal_key.clone(), p.order_id.clone());
@@ -867,6 +870,22 @@ impl Ome {
         }
         self.sync_live_index(id, was_live);
         Ok(())
+    }
+
+    /// Terminal reject that stamps the venue's own refusal text (issue
+    /// #930). The reason rides on the order row so orders.jsonl - and the
+    /// panel - name WHY the placement died, not just that it did.
+    pub fn mark_rejected_with_reason(
+        &mut self,
+        id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        self.mutate(id, now_ms, |o| {
+            o.status = OrderStatus::Rejected;
+            o.rejected_reason = Some(reason.to_string());
+            Ok(())
+        })
     }
 
     /// Resolve an inbound fill to a tracked order: exact core/venue id, else

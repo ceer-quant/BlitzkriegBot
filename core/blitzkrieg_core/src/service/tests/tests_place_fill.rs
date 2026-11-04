@@ -91,6 +91,7 @@ fn restored_live_orders_push_the_id_counter_past_their_ids() {
         account_id: crate::model::default_account_id(),
         venue: String::new(),
         round_duration_sec: 0,
+        rejected_reason: None,
     };
     std::fs::write(&log, serde_json::to_string(&restored).unwrap() + "\n").unwrap();
     let mut c = Core::new(CoreConfig {

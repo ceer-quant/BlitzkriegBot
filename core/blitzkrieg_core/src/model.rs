@@ -290,6 +290,13 @@ pub struct TrackedOrder {
     /// resolves the three-state fallback (own > market declaration > global).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub round_duration_sec: i64,
+    /// The venue's own refusal text when `status` is `Rejected` (issue #930):
+    /// the 400 body flows venue → CoreError → this field → orders.jsonl, so
+    /// an audit no longer greps risk-state streak files to learn WHY a
+    /// placement died. None for every other status; defaulted so old lines
+    /// load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_reason: Option<String>,
 }
 
 impl TrackedOrder {
@@ -465,6 +472,7 @@ mod round_duration_tests {
             account_id: default_account_id(),
             venue: String::new(),
             round_duration_sec: 0,
+            rejected_reason: None,
         }
     }
 
