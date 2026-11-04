@@ -163,10 +163,14 @@ fn a_corrupt_risk_state_file_boots_fail_closed() {
         "a corrupt file must not restore caps the boot cannot vouch for"
     );
     // Every account comes up frozen — a kernel that cannot read its own risk
-    // posture must not quietly resume trading.
+    // posture must not quietly resume trading (the corrupt-boot clause that
+    // survives the #928 retirement of the restart default freeze).
     assert_eq!(
         c2.account_freeze_reason("default"),
-        Some(RESTART_FREEZE_REASON)
+        Some(
+            "risk-state file unreadable — risk posture unverifiable until resumed \
+                      (fail-closed, issue #861)"
+        )
     );
     // The boot's persist rewrote a valid file (the frozen boot state).
     assert!(
@@ -205,13 +209,12 @@ fn manual_freeze_survives_restart_and_never_self_lifts() {
     assert!(c2.account_freeze_reason("default").is_none());
     drop(c2);
 
-    // The lift is durable — but a boot WITH a risk-state file still applies
-    // the restart default freeze (「账户默认冻结」): the account comes back
-    // frozen under the restart reason, not trading, until resumed again.
+    // The lift is durable (#928): a clean boot does NOT re-freeze — the
+    // account with an empty freeze book on the disk comes up trading.
     let c3 = core_with(&path, &["default"]);
-    assert_eq!(
-        c3.account_freeze_reason("default"),
-        Some(RESTART_FREEZE_REASON)
+    assert!(
+        c3.account_freeze_reason("default").is_none(),
+        "issue 928: a clean restart must not re-freeze a resumed account"
     );
 }
 
@@ -261,7 +264,7 @@ fn auto_frozen_stamp_survives_and_still_self_lifts() {
 
 /// (d) The global kill switch outlives the process — with the reason an
 /// operator must see — and an explicit resume stays lifted across the next
-/// boot (the restart default freeze is an ACCOUNT-level posture; it does not
+/// boot (the corrupt-boot freeze is an ACCOUNT-level posture; it does not
 /// re-arm a killed kernel's switch).
 #[test]
 fn kill_switch_survives_restart_and_resume_stays_lifted() {
@@ -326,22 +329,24 @@ fn a_pathless_core_stays_memory_only_and_never_boot_freezes() {
     );
     assert!(
         c.account_freeze_reason("default").is_none(),
-        "no risk-state file was ever present: no restart default freeze"
+        "no risk-state file was ever present: no boot freeze of any kind"
     );
     // And nothing was written under the (unused) temp root.
     assert!(!root.file().exists());
 }
 
-/// The restart default freeze (「账户默认冻结」) covers EVERY account and
-/// re-applies on EVERY boot that finds a risk-state file — including a clean
-/// restart after a full resume. A restart must never quietly resume trading.
+/// A restart with a risk-state file on disk does NOT blanket-freeze (#928:
+/// the #861 restart default freeze is retired by operator ruling). The
+/// freeze book the disk carries is the whole posture: a frozen account
+/// stays frozen with its reason, a resumed account comes up trading, and
+/// the caps still recover.
 #[test]
-fn restart_default_freeze_covers_every_account_on_every_boot() {
+fn a_clean_restart_freezes_nobody_and_keeps_the_disk_freeze_book() {
     let root = TempRoot::new("default-freeze");
     let path = root.file();
 
-    // Boot 1: the file does not exist yet — first boot keeps today's
-    // behaviour (no freeze). A hot write creates the file.
+    // Boot 1: the file does not exist yet — no freeze, and a hot write
+    // creates the file.
     let mut c = core_with(&path, &["default", "paper"]);
     assert!(c.account_freeze_reason("default").is_none());
     assert!(c.account_freeze_reason("paper").is_none());
@@ -351,36 +356,32 @@ fn restart_default_freeze_covers_every_account_on_every_boot() {
     };
     c.apply_risk_limits(&patch, "op", 1_000)
         .expect("limits apply");
+    // One account frozen at runtime (the operator's own verdict).
+    c.freeze_account_manual("paper", "operator pause".to_string());
     drop(c);
 
-    // Boot 2: the file exists — every account that is not already frozen
-    // comes up frozen.
+    // Boot 2: the file exists — the disk freeze book is the ENTIRE boot
+    // posture. paper stays frozen (its reason rides along); the never-frozen
+    // default comes up TRADING (#928).
     let mut c2 = core_with(&path, &["default", "paper"]);
-    assert_eq!(
-        c2.account_freeze_reason("default"),
-        Some(RESTART_FREEZE_REASON)
+    assert!(
+        c2.account_freeze_reason("default").is_none(),
+        "issue 928: a restart must not blanket-freeze an unfrozen account"
     );
     assert_eq!(
         c2.account_freeze_reason("paper"),
-        Some(RESTART_FREEZE_REASON)
+        Some("operator pause"),
+        "the disk's manual freeze survives the restart unchanged"
     );
-    // An operator resumes both.
-    c2.resume_account("default");
+    // Resuming paper is durable now too — no boot re-freezes behind the
+    // operator's back.
     c2.resume_account("paper");
     drop(c2);
 
-    // Boot 3: a CLEAN restart (nothing frozen on disk) still defaults to
-    // frozen — the file's presence, not a crash, is the trigger.
+    // Boot 3: a CLEAN restart (nothing frozen on disk) — nobody freezes, and
+    // the operator's caps still recovered through all of it.
     let c3 = core_with(&path, &["default", "paper"]);
-    assert_eq!(
-        c3.account_freeze_reason("default"),
-        Some(RESTART_FREEZE_REASON),
-        "a clean restart must not resume trading on its own either"
-    );
-    assert_eq!(
-        c3.account_freeze_reason("paper"),
-        Some(RESTART_FREEZE_REASON)
-    );
-    // The operator's caps still recovered through all of it.
+    assert!(c3.account_freeze_reason("default").is_none());
+    assert!(c3.account_freeze_reason("paper").is_none());
     assert_eq!(c3.risk.config().max_order_notional, dec!(250));
 }

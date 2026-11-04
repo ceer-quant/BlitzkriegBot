@@ -284,12 +284,14 @@ impl Core {
         // switch, freeze book). Loaded BEFORE the config moves into the struct
         // so the restored caps land in the gate the boot builds. `None` (the
         // backtester, most in-process tests) keeps every knob session-scoped:
-        // nothing is written, nothing is restored, no restart freeze applies.
+        // nothing is written, nothing is restored, and no boot freeze applies.
         // A file that exists but does not parse is fail-CLOSED — nothing is
-        // restored, and `risk_state_boot_freeze` still forces the restart
-        // default freeze (the loud error is the contract, persist.rs).
+        // restored, and `risk_state_corrupt` forces the every-account corrupt
+        // freeze (the loud error is the contract, persist.rs). A CLEAN parse
+        // freezes nobody (#928 — the #861 restart default freeze is retired).
         let risk_state_path = config.risk_state_path.clone().map(std::path::PathBuf::from);
-        let mut risk_state_boot_freeze = false;
+        let mut risk_state_corrupt = false;
+        let mut risk_state_restorable = false;
         let risk_state = risk_state_path.map(|path| {
             use crate::service::risk_admission::{
                 RiskStateLoad, apply_restored_limits, load_risk_state_file,
@@ -307,7 +309,7 @@ impl Core {
                          every account will boot FROZEN (fail-closed, issue #861). \
                          Repair or delete the file, then resume trading explicitly."
                     );
-                    risk_state_boot_freeze = true;
+                    risk_state_corrupt = true;
                     RiskStateCell {
                         path,
                         file: Default::default(),
@@ -315,7 +317,7 @@ impl Core {
                 }
                 RiskStateLoad::Ok(file) => {
                     apply_restored_limits(&mut config, &file, &path);
-                    risk_state_boot_freeze = true;
+                    risk_state_restorable = true;
                     RiskStateCell { path, file }
                 }
             }
@@ -467,11 +469,16 @@ impl Core {
             // the backtester/most-test shape: session-scoped, as always).
             risk_state,
         };
-        // The kill switch, the freeze book and the restart default freeze land
-        // AFTER the struct exists (they run the freeze paths, which emit and
-        // touch the book). The entry caps were restored into `config` above,
-        // so the gate the boot builds already carries them.
-        core.restore_risk_state_at_boot(risk_state_boot_freeze);
+        // The kill switch and the freeze book land AFTER the struct exists
+        // (they run the freeze paths, which emit and touch the book). The
+        // entry caps were restored into `config` above, so the gate the boot
+        // builds already carries them. A clean boot freezes nobody (#928 —
+        // the #861 restart default freeze is retired); the corrupt-boot
+        // fail-closed freeze is the only blanket left.
+        core.restore_risk_state_at_boot(risk_state_restorable);
+        if risk_state_corrupt {
+            core.freeze_all_accounts_corrupt_boot();
+        }
         core
     }
 
