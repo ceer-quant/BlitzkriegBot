@@ -1018,3 +1018,64 @@ fn vanished_partial_sweep_releases_the_remaining_reservation() {
     );
     assert!(c.run_accounting_audit(5).ok);
 }
+
+/// issue #930: the venue's own refusal text (e.g. the 5-share minimum
+/// INVALID_PARAMS body) must survive onto the orders.jsonl REJECTED row.
+/// Before the stamp a REJECTED line carried no reason at all: every
+/// "why did this die" audit was a grep across the risk-state streak file.
+#[test]
+fn a_rejected_order_row_carries_the_venue_reason() {
+    let dir = std::env::temp_dir().join(format!("bk-reject-reason-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("orders.jsonl");
+
+    let mut c = Core::new(CoreConfig {
+        order_log_path: Some(log.to_string_lossy().into_owned()),
+        risk: RiskConfig {
+            max_order_notional: dec!(3),
+            ..Default::default()
+        },
+        dry_seed_balance: Decimal::from(10_000),
+        ..Default::default()
+    });
+    c.set_balance(dec!(10));
+
+    let (id, _) = c
+        .place(order(FillPolicy::Maker, dec!(0.40), dec!(2), "k1"), 1, 1)
+        .unwrap();
+    assert!(
+        c.ome().get(&id).unwrap().status.is_live(),
+        "the order rests"
+    );
+
+    // The venue's own 400 text flows in as the CoreError message.
+    let err = CoreError::new(
+        CoreErrorCode::InvalidParams,
+        "Order size (2.0000) is below this market's minimum order size (5 shares)",
+    );
+    c.reject_live_result(&id, Some(err), 2).unwrap();
+
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let rejected = rows
+        .iter()
+        .find(|r| r["status"] == "REJECTED")
+        .expect("the rejected snapshot is journalled");
+    // camelCase wire: the panel reads the same field the file line carries.
+    assert_eq!(
+        rejected["rejectedReason"],
+        "Order size (2.0000) is below this market's minimum order size (5 shares)",
+        "the venue's own refusal text rides the row"
+    );
+    assert!(
+        rows.iter()
+            .filter(|r| r["status"] == "LIVE")
+            .all(|r| r.get("rejectedReason").is_none()),
+        "a non-rejected snapshot carries no reason"
+    );
+    assert!(c.run_accounting_audit(3).ok, "the reject stays auditable");
+}
