@@ -50,6 +50,18 @@ pub(crate) fn reason_is_profit_side(reason: ExitReason) -> bool {
     matches!(reason, ExitReason::TakeProfit | ExitReason::TrailingStop)
 }
 
+/// #939: the position's holders' PnL mark, in the kernel's own exit-discipline
+/// unit (the same `((price − entry)/entry)*100` shape `exit_policy::pnl_pct`
+/// judges every rule on).
+///
+/// `current_price` is the position's latest valuation mark (best bid when a
+/// book lives, else the remembered mark) — exactly the reference a resting
+/// maker close has to beat. Entry price <= 0 keeps the mark at zero (a
+/// degenerate open can never be held "underwater" by arithmetic).
+pub(crate) fn position_pnl_pct(pos: &crate::position::OpenPosition) -> Decimal {
+    crate::exit_policy::pnl_pct(pos.current_price, pos.entry_price)
+}
+
 impl Core {
     pub fn cancel(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
         let order = self
@@ -1183,15 +1195,31 @@ impl Core {
             // counterfactual showed a resting stop does not protect a
             // crashing leg (0/2), so `use_maker` on those reasons is ignored
             // no matter what the strategy declared.
+            // #939: the depth-loss half. `reason_is_profit_side` passes a
+            // `trailing_stop` tag from the ROUND side of the ledger, but the
+            // trailing math itself anchors nothing at entry (`gave_back`
+            // constrains peak−cur only; manifest knobs like arm=0/give=500
+            // fire it below the entry too) — gate on the position's own
+            // holders' PnL mark instead: a close the kernel is ALREADY below
+            // its entry on is a loss to be escaped, not a profit to bank.
+            // Resting it above the bid would repeat #915's "stop resting,
+            // 0/2 filled" (the maker-first maker never crosses a falling
+            // touch until `maker_timeout_ms` escalates it), so when the
+            // position is underwater the advisory degrades to the taker
+            // sweep right here.
+            let pnl_pct = position_pnl_pct(&pos);
             let use_maker = intent.use_maker
                 && reason_is_profit_side(reason)
-                && self.config.positions.exit.strategy_exit_maker_first;
+                && self.config.positions.exit.strategy_exit_maker_first
+                // #939 labor-core kernel PnL guard: proceeds at-or-above entry only.
+                && pnl_pct >= Decimal::ZERO;
             if intent.use_maker && !use_maker {
                 tracing::debug!(
                     token = %pos.token_id,
                     strategy = %pos.strategy,
                     reason = %intent.reason,
-                    "maker-first exit advisory not applied (reason class or kernel gate)"
+                    pnl_pct = %pnl_pct,
+                    "maker-first exit advisory not applied (reason class, kernel gate, or underwater)"
                 );
             }
             jobs.push(ExitJob {
