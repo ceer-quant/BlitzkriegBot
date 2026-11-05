@@ -1111,29 +1111,26 @@ impl Core {
         // 重试一次即可收敛；拒绝的消息如实告知。
         //
         // issue #941：dual-ledger 起一个账户有两份按 mode 命名的流水 +
-        // 升级期可能还挂着旧单文件/存档 —— remove 一次清全部四个名字
-        // （缺席是合法 no-op），否则「删了 dry 留着 live」在下次 boot
-        // 复活半本账。legacy 文件的删除失败不拒绝（它本就不在当前
-        // 交易路径上，只是考古遗留），由 warn 交代。
+        // 升级期可能还挂着旧单文件 —— remove 一次清全部三个名字（缺席是
+        // 合法 no-op），否则「删了 dry 留着 live」在下次 boot 复活半本账。
+        // legacy 文件的删除失败不拒绝（它本就不在当前交易路径上，只是
+        // 考古遗留——下次 boot 的退役步兜底），由 warn 交代。
         for name in [
             crate::account::AccountLedgers::journal_file_name(true, id.as_str()),
             crate::account::AccountLedgers::journal_file_name(false, id.as_str()),
             format!("{}.journal.jsonl", id.as_str()),
-            format!("{}.journal.dry-archive.jsonl", id.as_str()),
         ] {
             if let Some(dir) = self.config.ledger_journal_dir.as_deref() {
                 let path = std::path::Path::new(dir).join(&name);
+                let archaeology = name.ends_with(".journal.jsonl");
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e)
-                        if name.ends_with("dry-archive.jsonl")
-                            || name.ends_with(".journal.jsonl") =>
-                    {
+                    Err(e) if archaeology => {
                         tracing::warn!(
                             path = %path.display(),
                             error = %e,
-                            "issue 941: legacy/archive journal cleanup failed at account.remove — non-trading-path archaeology remains"
+                            "issue 941: legacy journal cleanup failed at account.remove — non-trading-path archaeology remains"
                         );
                     }
                     Err(e) => {

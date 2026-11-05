@@ -528,20 +528,17 @@ impl AccountLedgers {
         )
     }
 
-    /// issue #941: pre-replay archival. A deployment upgrading from the
+    /// issue #941: pre-replay retirement. A deployment upgrading from the
     /// single-file era carries every historical row in
-    /// `<account>.journal.jsonl`. Decision D (operator): the single file is
-    /// RENAMED to `<account>.journal.dry-archive.jsonl` — kept exactly as it
-    /// stands, not deleted, not paraphrased into a side choice. It is never
-    /// replayed by anything: the live side starts from the venue (749), the
-    /// dry side from the seed. (The operator's first wording
-    /// `.journal.dry.jsonl` collides with the NEW live dry-side ledger's own
-    /// file name — boot would replay the old tail right back and resurrect
-    /// the 71.59 circuit-base pollution this issue exists to kill — hence the
-    /// distinct `-archive` name. One line to change back should the operator
-    /// rule otherwise.)
+    /// `<account>.journal.jsonl`. Operator ruling (second pass): the single
+    /// file is DELETED outright — nothing replays it (the live side starts
+    /// from the venue (749), the dry side from the seed), the two books own
+    /// their histories from the split onward, and no archive is kept. The
+    /// pre-split era was ONE book; its rows record a ledger that no longer
+    /// exists and cannot be interpreted per-mode anyway (mode boundaries
+    /// unguessable — the reason plan A was never chosen).
     pub(crate) fn archive_legacy_journals(dir: &std::path::Path) {
-        let mut archived_any = false;
+        let mut removed_any = false;
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -554,49 +551,32 @@ impl AccountLedgers {
             };
             // The legacy single-file name: `<id>.journal.jsonl` with the
             // account id before it — never matches the new dual names
-            // (`<id>.journal.live.jsonl` / `.journal.dry.jsonl`) nor the
-            // archive itself, because those carry an extra dot-segment.
+            // (`<id>.journal.live.jsonl` / `.journal.dry.jsonl`), which carry
+            // an extra dot-segment.
             if !name.ends_with(".journal.jsonl") {
                 continue;
             }
             let from = entry.path();
-            let account_id = name.trim_end_matches(".journal.jsonl");
-            let to = dir.join(format!("{}.journal.dry-archive.jsonl", account_id));
-            if to.exists() {
-                // Upgraded already (a previous boot archiving here) but the
-                // old file reappeared (e.g. a mid-upgrade downgrade): the
-                // archive is the boot fact, the new user file wins nothing —
-                // drop the leftover by renaming to a bounded collision name.
-                let clash = dir.join(format!("{}.journal.orphan.jsonl", account_id));
-                let _ = std::fs::rename(&from, &clash);
-                tracing::warn!(
-                    archived = %clash.display(),
-                    "issue 941: legacy single-file journal reappeared after migration; moved aside as orphan"
-                );
-                continue;
-            }
-            match std::fs::rename(&from, &to) {
+            match std::fs::remove_file(&from) {
                 Ok(()) => {
-                    archived_any = true;
+                    removed_any = true;
                     tracing::info!(
-                        from = %from.display(),
-                        to = %to.display(),
-                        "issue 941: legacy single-file journal archived (migration D — dry side reseeds from zero)"
+                        path = %from.display(),
+                        "issue 941: pre-split single-file journal DELETED (operator ruling — the pre-split era was one book, its rows belong to no side)"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
-                        from = %from.display(),
-                        to = %to.display(),
+                        path = %from.display(),
                         error = %e,
-                        "issue 941: legacy journal archive rename failed — leaving the file for a later boot"
+                        "issue 941: legacy journal delete failed — will retry on the next boot"
                     );
                 }
             }
         }
-        if archived_any {
+        if removed_any {
             eprintln!(
-                "core: issue 941 journal split — legacy single-file journals archived, see log"
+                "core: issue 941 journal split — pre-split single-file journals deleted (per-mode books carry their own history)"
             );
         }
     }

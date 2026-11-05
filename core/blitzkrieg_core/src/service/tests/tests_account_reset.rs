@@ -921,7 +921,7 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
 /// the balance, the seed is skipped (journal present on the live side gates
 /// it) and live's balance does NOT inherit dry's rows.
 #[test]
-fn boot_replays_only_this_modes_side_and_archives_the_legacy_file() {
+fn boot_replays_only_this_modes_side_and_deletes_the_legacy_file() {
     let dir = std::env::temp_dir().join(format!(
         "bk-941-boot-split-{}-{}",
         std::process::id(),
@@ -979,7 +979,7 @@ fn boot_replays_only_this_modes_side_and_archives_the_legacy_file() {
         )
     }
 
-    // DRY boot: the dry side replays ($1000), the legacy file is archived —
+    // DRY boot: the dry side replays ($1000), the legacy file is deleted —
     // its $73.90 NEVER becomes the dry balance (the pollution kill).
     let c = boot(Mode::Dry, &dir, &env_path, &accounts_path, &journal_dir);
     assert_eq!(
@@ -993,17 +993,11 @@ fn boot_replays_only_this_modes_side_and_archives_the_legacy_file() {
     assert!(
         c.boot_replayed_journal(),
         "the DRY side's file replayed, so the boot seed is skipped — and \
-         the legacy file was archived, never replayed"
+         the legacy file was deleted before anything could read it"
     );
     assert!(
         !journal_dir.join("default.journal.jsonl").exists(),
-        "the legacy single file is gone from its old name"
-    );
-    assert!(
-        journal_dir
-            .join("default.journal.dry-archive.jsonl")
-            .exists(),
-        "the legacy file lives on as the archive (migration D: kept, never replayed)"
+        "the pre-split single file is DELETED at the dry boot (operator ruling)"
     );
     assert_eq!(
         c.accounts
@@ -1017,9 +1011,9 @@ fn boot_replays_only_this_modes_side_and_archives_the_legacy_file() {
     );
     drop(c);
 
-    // LIVE boot: only the live side's file counts; the dry file and the
-    // archive are invisible. No live file exists → 749 zero-projection, no
-    // seed, and the legacy archive stays put.
+    // LIVE boot: only the live side's file counts; the dry file is invisible.
+    // No live file exists → 749 zero-projection, no seed. (A live boot does
+    // NOT run the legacy-file retirement — it never reads that name anyway.)
     let live = boot(Mode::Live, &dir, &env_path, &accounts_path, &journal_dir);
     assert_eq!(
         live.accounts
@@ -1029,19 +1023,13 @@ fn boot_replays_only_this_modes_side_and_archives_the_legacy_file() {
         Decimal::ZERO,
         "live boot: no live journal — the venue owns the opening truth (749), the seed does not run"
     );
-    assert!(
-        journal_dir
-            .join("default.journal.dry-archive.jsonl")
-            .exists(),
-        "a live boot does not touch the archive"
-    );
     drop(live);
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// issue #941 contract 4 — `account.remove` sweeps BOTH sides' files (plus
-/// the legacy/archive archaeology):删户清完四个名字，同名重建从零开始,
-/// no half-ledger resurrection at the next boot.
+/// legacy archaeology):删户清完四个名字，同名重建从零开始, no half-ledger
+/// resurrection at the next boot.
 #[test]
 fn account_remove_sweeps_both_sides_and_the_archaeology() {
     let dir = std::env::temp_dir().join(format!(
@@ -1077,12 +1065,12 @@ fn account_remove_sweeps_both_sides_and_the_archaeology() {
         )
         .unwrap(),
     );
-    // Plant all four names under `paper`'s id.
+    // Plant all three removable names under `paper`'s id (both mode sides
+    // plus the pre-split legacy file).
     let names: Vec<String> = vec![
         crate::account::AccountLedgers::journal_file_name(true, "paper"),
         crate::account::AccountLedgers::journal_file_name(false, "paper"),
         "paper.journal.jsonl".to_string(),
-        "paper.journal.dry-archive.jsonl".to_string(),
     ];
     for n in &names {
         std::fs::write(journal_dir.join(n), "x\n").expect("plant");

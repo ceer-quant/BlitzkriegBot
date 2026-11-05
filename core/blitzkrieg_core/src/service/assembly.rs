@@ -214,9 +214,10 @@ impl Core {
         // after the split) takes the seed_all path, bit for bit: lived
         // history is never carried across the dry/live boundary (operator
         // ruling: dry = seeded simulation cash, live = venue cash). The
-        // pre-replay archiver folds the pre-#941 single-file era away
-        // (rename to <account>.journal.dry-archive.jsonl, decision D — kept,
-        // never replayed). A malformed journal line is skipped with one warn
+        // pre-replay retirement folds the pre-#941 single-file era away
+        // (DELETED outright — operator second-pass ruling: the pre-split era
+        // was one book, its rows belong to no side and are never replayed). A
+        // malformed journal line is skipped with one warn
         // (the jsonl::load contract — the trailing balance comes from the
         // last GOOD row); the file itself is append-only evidence, never
         // rewritten by this path.
