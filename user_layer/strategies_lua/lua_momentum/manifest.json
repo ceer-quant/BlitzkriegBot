@@ -1,11 +1,11 @@
 {
   "name": "lua_momentum",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "7fb1a2b26f0dbc135be65fb6136610f13771daed260c79cbdf633411662289ae",
+  "sha256": "929a6a90632bdd5cfd377e2c48b6b1b1a433665197dd505bef65d7afb382aea4",
   "author": "BlitzkriegBot",
-  "description": "Official Lua example (E30/issue 336), both legs re-armed (operator ruling 2026-11-04, undoing #849's down-only gate) with a dust floor and configurable exits. Momentum premise: a leg whose own mid moves >= threshold (default 4%) in one tick arms its direction — a crashing leg buys the DOWN token, a rising leg buys the UP token; a sub-threshold move disarms, an opposite move flips the premise and cancels the resting bid. Entries rest pure maker (issue 742's entry_maker declaration) at the leg's own best_bid under the never-escalate clock. min_entry_price (default 0.15, the operator's 筹码地板) refuses any entry whose best_bid is below it — the near-zero lottery leg (0.007 tickets bought because they were the best_bid) has nothing left to catch; 0 disables the floor. The #849 live split is kept in the description for the record: DOWN-on-crash filled 44 trades at WR 56.8% net +$22.79 (0.20-0.35 band at WR 75%), UP-on-rise filled 40 at WR 7.5% net -$40.37 (the 17 fills at 0.40+ all lost) — with the floor at 0.15 the up leg only ever buys below that, the exact opposite of the band that lost. Exits are strategy signals judged on the fresh best bid after a taker fee (official 0.07*p*(1-p); a zero PolySim schedule does not zero the model): take_profit_pct (default 40), optional take_profit_price, a trailing stop that arms after trail_arm_pct (default 20) and sells on trail_giveback_pct percentage points of giveback (default 15), and an optional exit_time_left_sec deadline (default 0 = off). A position that hits none of them still holds to settlement. allow_both_sides defaults to 0: the opposite token of the same condition is not bought, even though holds_to_settlement would waive the kernel's one-per-asset gate. max_entries_per_round defaults to 1: after an exit in a condition, that round gets no new entry (the unfilled maker bid may still be re-quoted). reentry_cooldown_sec defaults to 0.",
+  "description": "Official Lua example (E30/issue 336), both legs re-armed (operator ruling 2026-11-04, undoing #849's down-only gate) with a dust floor and configurable exits. Momentum premise: a leg whose own mid moves >= threshold (default 4%) in one tick arms its direction — a crashing leg buys the DOWN token, a rising leg buys the UP token; a sub-threshold move disarms, an opposite move flips the premise and cancels the resting bid. Entries rest pure maker (issue 742's entry_maker declaration) at the leg's own best_bid under the never-escalate clock. min_entry_price (default 0.15, the operator's 筹码地板) refuses any entry whose best_bid is below it — the near-zero lottery leg (0.007 tickets bought because they were the best_bid) has nothing left to catch; 0 disables the floor. Exits are strategy signals judged on the fresh best bid after a taker fee (official 0.07*p*(1-p); a zero PolySim schedule does not zero the model): take_profit_pct (default 40), optional take_profit_price, a trailing stop that arms after trail_arm_pct (default 20) and sells on trail_giveback_pct percentage points of giveback (default 15), and an optional exit_time_left_sec deadline (default 0 = off). A position that hits none of them still holds to settlement. Time-weighted tightening (2026-11-06 operator rule, v0.4.0): take_profit_pct_tight / trail_arm_pct_tight / trail_giveback_pct_tight (each default 0 = the flat band unchanged) slide their base band LINEARLY from base at round start to the tight value as the round clock drains — binary pricing converges to {0,1} like the time-weighted coin it is, so a band sized for 900s is mispriced late. The elapsed fraction is the round's own (duration − time_left)/duration; bands never dip below the tight value, and a tight >= base stays flat (a wrong config cannot loosen). allow_both_sides defaults to 0: the opposite token of the same condition is not bought, even though holds_to_settlement would waive the kernel's one-per-asset gate. max_entries_per_round defaults to 1: after an exit in a condition, that round gets no new entry (the unfilled maker bid may still be re-quoted). reentry_cooldown_sec defaults to 0.",
   "trailing_exit": false,
   "holds_to_settlement": true,
   "entry_maker": true,
@@ -28,6 +28,12 @@
       "min": "0",
       "max": "500"
     },
+    "take_profit_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "500"
+    },
     "take_profit_price": {
       "type": "decimal",
       "default": "0",
@@ -40,9 +46,21 @@
       "min": "0",
       "max": "500"
     },
+    "trail_arm_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "500"
+    },
     "trail_giveback_pct": {
       "type": "decimal",
       "default": "15",
+      "min": "0",
+      "max": "500"
+    },
+    "trail_giveback_pct_tight": {
+      "type": "decimal",
+      "default": "0",
       "min": "0",
       "max": "500"
     },

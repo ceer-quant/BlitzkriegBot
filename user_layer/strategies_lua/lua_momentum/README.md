@@ -105,9 +105,12 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 |:---|:---|:---|:---|:---|
 | `threshold` | `0.04` | `0.005` | `1` | single-tick mid drop (%) that confirms the DOWN leg |
 | `take_profit_pct` | `40` | `0` | `500` | sell when net PnL on the best bid, after the taker fee, reaches this many percent. `0` disables |
+| `take_profit_pct_tight` | `0` | `0` | `500` | the band's value at the END of the round: the band slides LINEARLY from `take_profit_pct` at round start to this as the clock drains (time-weighted tightening, 2026-11-06). `0` keeps the flat band exactly |
 | `take_profit_price` | `0` | `0` | `0.99` | sell when the best bid reaches this price AND the fee-net proceeds still beat the entry. `0` disables |
 | `trail_arm_pct` | `20` | `0` | `500` | arm the trailing stop once peak net PnL reaches this. `0` disables the trail |
+| `trail_arm_pct_tight` | `0` | `0` | `500` | `trail_arm_pct`'s end-of-round value (linear slide, same clock). `0` keeps the flat band |
 | `trail_giveback_pct` | `15` | `0` | `500` | once armed, sell when net PnL has fallen this many percentage points from the peak. `0` disables |
+| `trail_giveback_pct_tight` | `0` | `0` | `500` | `trail_giveback_pct`'s end-of-round value (linear slide, same clock). `0` keeps the flat band |
 | `exit_time_left_sec` | `0` | `0` | `900` | sell whatever is held once this many seconds remain, even at a loss. `0` disables (hold to settlement) |
 | `allow_both_sides` | `0` | `0` | `1` | `1` permits an entry while the opposite token of the same condition is held. Default refuses it |
 | `max_entries_per_round` | `1` | `0` | `20` | position attempts per condition in one round. The unfilled bid may be re-quoted; after an exit, a new entry needs another slot. `1` means no re-entry. `0` quotes nothing |
