@@ -1,0 +1,578 @@
+{
+  "semantics": "mining",
+  "note": "挖掘档候选池读数（#914/#915 数据面）：按 EV 降序，无 GO/NO-GO 判决——采用判决只属于 #854 门与运营者",
+  "modeSemantics": "mode = 逐臂自证的成交/费率坐标（identity = 0 tick 滑点 0 延迟 touch 即成交 fill prob 100%）",
+  "pool": [
+    {
+      "arm": "lum-both-base-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "885714",
+      "n": 14,
+      "wilsonLb": 0.26799202452413634,
+      "pf": 1.3701492537313433,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.985-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "20000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0829015544041452,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.99-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "20000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0829015544041452,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.985-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "20000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0829015544041452,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-XRP.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.99-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "20000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0829015544041452,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-XRP.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.985-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "17500",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0717948717948718,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.99-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "17500",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0717948717948718,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.985-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "17500",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0717948717948718,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-SOL.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.99-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "17500",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0717948717948718,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-SOL.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.985-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "15000",
+      "n": 12,
+      "wilsonLb": 0.2537815976337061,
+      "pf": 1.0520231213872833,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-BTC.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.99-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "15000",
+      "n": 12,
+      "wilsonLb": 0.2537815976337061,
+      "pf": 1.0520231213872833,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-BTC.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.985-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "11000",
+      "n": 10,
+      "wilsonLb": 0.236593090512564,
+      "pf": 1.0372881355932204,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.99-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "11000",
+      "n": 10,
+      "wilsonLb": 0.236593090512564,
+      "pf": 1.0372881355932204,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.985-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 3,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.99-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 3,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.985-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0512820512820513,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.985-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0277777777777777,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.985-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0476190476190477,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.99-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0512820512820513,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.99-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0277777777777777,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.99-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 2,
+      "wilsonLb": 0.09453120573423071,
+      "pf": 1.0476190476190477,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.985-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0377358490566038,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m3-c0.99-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0377358490566038,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.985-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0377358490566038,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-ETH.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-mp-m3-c0.99-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "10000",
+      "n": 8,
+      "wilsonLb": 0.2152160622138776,
+      "pf": 1.0377358490566038,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-ETH.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.985-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-10000",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.985-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-10000",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.99-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-10000",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.99-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-10000",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-tp5n-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-268368",
+      "n": 12,
+      "wilsonLb": 0.5519691377470266,
+      "pf": 0.6574010261245704,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-ETH.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-tp5n-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-275862",
+      "n": 11,
+      "wilsonLb": 0.523019438039156,
+      "pf": 0.6665392433619419,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-XRP.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-base-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-285713",
+      "n": 7,
+      "wilsonLb": 0.15821985525146973,
+      "pf": 0.8895027624309392,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-base-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-371428",
+      "n": 7,
+      "wilsonLb": 0.15821985525146973,
+      "pf": 0.8586956521739131,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-XRP.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-pass-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-490245",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-md-pass-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-490245",
+      "n": 1,
+      "wilsonLb": null,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-XRP.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-tp5n-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-654273",
+      "n": 8,
+      "wilsonLb": 0.40927543031016894,
+      "pf": 0.44317103477646275,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-md-pass-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-693244",
+      "n": 3,
+      "wilsonLb": 4.8683609171202235e-17,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-BTC.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-tp5n-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-712052",
+      "n": 12,
+      "wilsonLb": 0.46769466506643437,
+      "pf": 0.4024726722027972,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-BTC.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-pass-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-757073",
+      "n": 4,
+      "wilsonLb": 0,
+      "pf": 0,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-tp5n-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-916926",
+      "n": 8,
+      "wilsonLb": 0.40927543031016894,
+      "pf": 0.30138898472320685,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-tp5n-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1003414",
+      "n": 8,
+      "wilsonLb": 0.40927543031016894,
+      "pf": 0.23549324404761904,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "probe-tp5n",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1003414",
+      "n": 8,
+      "wilsonLb": 0.40927543031016894,
+      "pf": 0.23549324404761904,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-tp5n-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1185360",
+      "n": 9,
+      "wilsonLb": 0.35420213558039626,
+      "pf": 0.22129559392107664,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-SOL.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-tp5n-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1363254",
+      "n": 6,
+      "wilsonLb": 0.299993315138392,
+      "pf": 0.1653543125,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-base-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1416666",
+      "n": 6,
+      "wilsonLb": 0.09677141110578043,
+      "pf": 0.5277777777777778,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-base-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1483332",
+      "n": 6,
+      "wilsonLb": 0.09677141110578043,
+      "pf": 0.5163043478260869,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-SOL.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-base-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1871428",
+      "n": 7,
+      "wilsonLb": 0.0822189240040568,
+      "pf": 0.49808429118773945,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-ETH.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-lum-down-base-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1899999",
+      "n": 7,
+      "wilsonLb": 0.0822189240040568,
+      "pf": 0.4763779527559055,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-BTC.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-base-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1914285",
+      "n": 7,
+      "wilsonLb": 0.0822189240040568,
+      "pf": 0.49242424242424243,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-base-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1942856",
+      "n": 7,
+      "wilsonLb": 0.0822189240040568,
+      "pf": 0.4708171206225681,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "lum-down-tp5kernel-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": "-1942856",
+      "n": 7,
+      "wilsonLb": 0.0822189240040568,
+      "pf": 0.4708171206225681,
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-block-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-block-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-block-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-block-XRP",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-XRP-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-pass-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-ETH-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "md-pass-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.985-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m1-c0.99-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-SOL-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.985-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "mp-m2-c0.99-BTC",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../replay-862/corpus/corpus-BTC-pm.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-md-pass-ETH",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-ETH.jsonl (1 segment(s))"
+    },
+    {
+      "arm": "tw-md-pass-SOL",
+      "mode": "mine:identity@0tick/0ms+legacy_quadratic",
+      "evMicro": null,
+      "n": 0,
+      "wilsonLb": null,
+      "pf": "na",
+      "corpus": "replay /Volumes/Hard Disk/bk-tmp/dig-rescan/../twap-859/corpus/corpus-SOL.jsonl (1 segment(s))"
+    }
+  ],
+  "generatedAtMs": 1793887289305,
+  "source": "/Volumes/Hard Disk/bk-tmp/dig-rescan",
+  "sourceSha": "2487420dcf7d642ffcda21c31a2d23d5ffa8a9392b2d02f3fe68fbaea6a17aa1:rows-fingerprint-over-63-shards",
+  "inputSchema": "run-directory"
+}
