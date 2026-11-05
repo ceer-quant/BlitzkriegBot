@@ -550,7 +550,7 @@ fn seed_closed_trade(c: &mut Core, account: &str, id: &str, net: Decimal) {
         state: crate::exit_policy::ExitState::new(Decimal::ONE / Decimal::from(2), 0),
         flows: CashFlows::default(),
     };
-    c.positions.restore_open(vec![held]);
+    c.positions.restore_open(vec![held], None);
     let closed = c
         .positions
         .close(

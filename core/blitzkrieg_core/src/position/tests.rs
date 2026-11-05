@@ -673,6 +673,38 @@ fn enter_marked(
     pos.id
 }
 
+/// issue #942: the id counter clears BOTH durable memories. Shape: the open
+/// log is FLAT (a whole-set rewrite leaves nothing behind), but the
+/// closed-trade history carries `hft-11` — the next minted id must be
+/// `hft-12`, never `hft-1` (9 duplicate ids observed in production when the
+/// counter seeded from the open log alone).
+#[test]
+fn the_id_counter_also_seeds_from_the_trade_history() {
+    let mut pm = PositionManager::new(PositionConfig::default());
+    // A flat open book + a history that reaches hft-11.
+    pm.restore_open(Vec::new(), Some(11));
+    let id = enter_marked(&mut pm, dec!(0.40), dec!(100), dec!(0.30));
+    assert_eq!(
+        id, "hft-12",
+        "the new position clears the history's max tail"
+    );
+
+    // The open log's own max still governs when it is the higher of the two:
+    // a held hft-50 rides restore_open, the history stops at hft-11.
+    let mut pm2 = PositionManager::new(PositionConfig::default());
+    let first = enter_marked(&mut pm2, dec!(0.40), dec!(100), dec!(0.30));
+    let mut held = pm2
+        .open_positions()
+        .iter()
+        .find(|p| p.id == first)
+        .unwrap()
+        .clone();
+    held.id = "hft-50".into();
+    pm2.restore_open(vec![held], Some(11));
+    let id2 = enter_marked(&mut pm2, dec!(0.40), dec!(100), dec!(0.30));
+    assert_eq!(id2, "hft-51", "the open log's own max still wins");
+}
+
 /// #464: the breaker must read the day's NET loss. A realized −6 against a
 /// 10 cap is still alive; the open position's −20 paper loss takes the
 /// judgement input to ≈ −26, past the cap — entries freeze BEFORE the loss
@@ -770,7 +802,7 @@ fn a_zero_mark_contributes_no_unrealized_pnl() {
         .unwrap()
         .clone();
     held.current_price = Decimal::ZERO;
-    pm.restore_open(vec![held]);
+    pm.restore_open(vec![held], None);
     assert_eq!(pm.unrealized_pnl_usd(), Decimal::ZERO);
     assert!(!pm.daily_loss_tripped_for("default"));
 }

@@ -971,11 +971,15 @@ impl Core {
         // remember which external fills were already accounted for.
         self.recon_watermark_ms = db.load_watermark();
         let loaded = db.load();
-        if loaded.is_empty() {
+        // issue #942: the counter also clears the closed-trade history's own
+        // max tail — the open log goes flat while the history keeps every
+        // id ever issued, so the history is the surviving full memory.
+        let history_max = self.trade_db.as_ref().map(|t| t.max_hft_tail());
+        if loaded.is_empty() && history_max.unwrap_or(0) == 0 {
             return 0;
         }
         let n = loaded.len();
-        self.positions.restore_open(loaded);
+        self.positions.restore_open(loaded, history_max);
         if n > 0 {
             self.emit(Event::RiskAlert {
                 code: CoreErrorCode::Internal,

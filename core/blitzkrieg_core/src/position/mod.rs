@@ -1041,15 +1041,23 @@ impl PositionManager {
     /// Rebuild the open book from durable storage (crash recovery). Replaces any
     /// in-memory state and advances `next_id` past the restored ids so a new
     /// position can never collide with a recovered one (`hft-N`).
-    pub fn restore_open(&mut self, positions: Vec<OpenPosition>) {
+    ///
+    /// issue #942: the OPEN log alone under-seeds — it is a whole-set rewrite,
+    /// so a flat book carries no ids at all and a fresh session reissues ids
+    /// the closed-trade history already carries (9 duplicate ids observed in
+    /// production). `history_max_hft` is the closed-trade log's boot-scan max;
+    /// the counter clears BOTH bounds.
+    pub fn restore_open(&mut self, positions: Vec<OpenPosition>, history_max_hft: Option<u64>) {
         let max_id = positions
             .iter()
             .filter_map(|p| p.id.strip_prefix("hft-"))
             .filter_map(|n| n.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
-        if max_id + 1 > self.next_id {
-            self.next_id = max_id + 1;
+        let history_max = history_max_hft.unwrap_or(0);
+        let seed = max_id.max(history_max);
+        if seed + 1 > self.next_id {
+            self.next_id = seed + 1;
         }
         self.open = positions;
         // #390: the restored book replaces the in-memory one wholesale —
