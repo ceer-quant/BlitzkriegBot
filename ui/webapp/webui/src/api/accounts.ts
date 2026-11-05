@@ -137,6 +137,23 @@ export interface AccountStrategiesSetDoc {
   error?: string
 }
 
+// ── 账户级急冻（account.freeze，issue 943 解锁面）───────────────────────────
+// PR G 的写动词（网关 /api/account-freeze/set 路由已存在）：冻结 = 该账户拒
+// 一切新单（手动+策略 entry）、平仓照放；会话级不持久化。面板常态只读
+// stats.accountFreezes；这里只补「解锁」半边 —— 冻结的下单入口是自动的风控
+// 后果，手冻入口留在行情/账户卡，设置页不自造重复闸门。
+
+/** `account.freeze` 回执（ Klein 口径同 trading/strategies 回执族）。 */
+export interface AccountFreezeSetDoc {
+  accountId: string
+  frozen: boolean
+  persisted: boolean
+  atMs: number
+  reason?: string
+  note: string
+  error?: string
+}
+
 // ── 账户簿运行时增删（account.create / account.remove，#516 内核面）─────────
 
 /** `account.create` 回执。 */
@@ -260,6 +277,16 @@ export const accountsApi = {
   /** 交易开关写：关 = 该账户拒开仓、平仓照放（内核 Gate 2 裁决并持久化）。 */
   accountTradingSet: (body: { accountId: string; enabled: boolean; reason?: string }) =>
     request<AccountTradingSetDoc>('/account-trading/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 账户级急冻写（PR G / issue 943 解锁面）：frozen=false = 解锁 —— 该账户
+   * 恢复接新单。body 即 `account.freeze` params（`{accountId, frozen,
+   * reason?}`）逐字转发，同 account-trading/set 的纪律。
+   */
+  accountFreezeSet: (body: { accountId: string; frozen: boolean; reason?: string }) =>
+    request<AccountFreezeSetDoc>('/account-freeze/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

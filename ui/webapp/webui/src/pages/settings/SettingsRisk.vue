@@ -17,13 +17,14 @@
  * 落盘→重读→落审计后才应答），不新增任何旁路。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { RefreshCw, LockOpen } from 'lucide-vue-next'
 import {
   api,
   type ExecutionPolicyListDoc, type ExecutionPolicySectionDoc,
   type ExecutionPolicyPreviewDoc, type ExecutionPolicyHistoryDoc,
   type ExecutionPolicySetParams, type PolicyRuleView,
 } from '@/api/client'
+import { usePanelStore } from '@/stores/panel'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
@@ -31,6 +32,7 @@ import SettingsRiskLimits from './SettingsRiskLimits.vue'
 import SettingsExecutionPolicy from './SettingsExecutionPolicy.vue'
 import PolicyRulesEditor from './PolicyRulesEditor.vue'
 
+const store = usePanelStore()
 const policyList = ref<ExecutionPolicyListDoc | null>(null)
 const policySection = ref<ExecutionPolicySectionDoc | null>(null)
 const policyPreview = ref<ExecutionPolicyPreviewDoc | null>(null)
@@ -96,6 +98,39 @@ async function switchAccount(id: string): Promise<void> {
   if (policyBusy.value || id === policyAccountId.value) return
   policyAccountId.value = id
   await loadPolicy()
+}
+
+// ── 账户冻结解锁（issue 943，红色横幅的另一半）──────────────────────────────
+// 当前冻结中的账户列表（来源 stats.accountFreezes：`accountId → reason`，
+// 与 lib/safety 的红横幅同一份数据 —— 看见何处、解锁处也何处）。解锁走
+// account.freeze {frozen:false}（PR G 写动词）：会话级自动冻结的解除即恢
+// 复接新单；若原因链仍在（比如场地 401），内核会按既有 streak 规则随交易
+// 再次冻结 —— 面板不猜原因是否清除，行内反馈只转述内核回执/错误。
+const freezeOperateId = ref<string | null>(null)
+
+const frozenAccounts = computed(() => {
+  const freezes = store.snapshot?.stats?.accountFreezes
+  if (!freezes) return []
+  return Object.entries(freezes)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, reason]) => ({ id, reason }))
+})
+
+async function unfreeze(accountId: string): Promise<void> {
+  if (freezeOperateId.value) return
+  freezeOperateId.value = accountId
+  policyErr.value = null
+  policyMsg.value = null
+  try {
+    const r = await api.accountFreezeSet({ accountId, frozen: false })
+    if (r.error) throw new Error(r.error)
+    policyMsg.value = `已解锁 ${accountId}（冻结户恢复接新单；重启即清的会话级冻结不复存在）。`
+    await store.refresh()
+  } catch (e) {
+    policyErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    freezeOperateId.value = null
+  }
 }
 
 /** 「恢复 defaults 后自定义」：把当前编辑缓冲清回全局段的值（仍需保存落盘）。 */
@@ -195,6 +230,33 @@ async function rollbackPolicy(): Promise<void> {
 
     <!-- 生效风控读数（只读，boot 快照）+ 就地可编辑的账户生效参数（#params）。 -->
     <SettingsRiskLimits>
+      <template #unfreezes>
+        <div v-if="frozenAccounts.length" class="mt-3 border-t border-line pt-3">
+          <div class="label-micro text-down">冻结中的账户（issue 943 解锁）</div>
+          <p class="mt-1 text-[11px] leading-snug text-faint-fg">
+            冻结 = 该账户拒一切新单（手动 + 策略开仓），平仓照放；只影响这一个账户，其他账户照常交易。解锁恢复接新单 —— 若原因链仍在，内核会按既有 streak 规则随交易再次冻结。
+          </p>
+          <div
+            v-for="fa in frozenAccounts"
+            :key="fa.id"
+            class="mt-2 flex flex-wrap items-center gap-2 rounded border border-line bg-panel-2 px-2.5 py-2"
+          >
+            <LockOpen class="size-3.5 shrink-0 text-down" />
+            <span class="text-[12px] font-semibold text-fg">{{ fa.id }}</span>
+            <span class="min-w-0 flex-1 truncate text-[11px] text-muted-fg" :title="fa.reason">
+              {{ fa.reason || '原因未上报' }}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="freezeOperateId !== null"
+              @click="unfreeze(fa.id)"
+            >
+              {{ freezeOperateId === fa.id ? '解锁中…' : '解锁' }}
+            </Button>
+          </div>
+        </div>
+      </template>
       <template #params>
         <div v-if="policySection" class="mt-3 border-t border-line pt-3">
           <div class="label-micro">账户生效参数（execution_policy · 可编辑）</div>

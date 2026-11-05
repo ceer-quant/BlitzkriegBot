@@ -169,6 +169,51 @@ export function selfCheckBanner(stats: EngineStats | null | undefined): SafetyBa
 }
 
 /**
+ * Per-account freezes (issue 943, red banner #2): the kernel freezes ONE
+ * account on its venue-rejection streak while every other account keeps
+ * trading — the global `tradingFrozen` banner above stays dark, and without
+ * this the panel looks perfectly normal to the operator of the frozen
+ * account. Reads `stats.accountFreezes` (`{accountId: reason}`): one urgent
+ * banner per frozen account, so a two-account freeze means two red lines.
+ * Absent/empty on the wire (older core, or nothing frozen) renders nothing —
+ * never an invented freeze. The lift lives on 设置·风险 (account.freeze
+ * `{frozen:false}`) — the banner names that door instead of pretending the
+ * operator must restart the kernel.
+ */
+export function accountFreezeBanners(stats: EngineStats | null | undefined): SafetyBanner[] {
+  const freezes = stats?.accountFreezes
+  if (!freezes) return []
+  return Object.entries(freezes)
+    .filter(([id]) => id !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, reason]) => ({
+      // Urgent per the 2026-10-28 operator call: while THIS account is frozen
+      // its trading is down right now — red, pinned, no ✕, no auto-dismiss.
+      // Urgent banners carry no identity: they cannot be dismissed away.
+      tone: 'error' as const,
+      urgent: true,
+      title: `账户已冻结（${id}）`,
+      body: reason || '该账户已被冻结，原因未上报。',
+      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解锁（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
+    }))
+}
+
+/**
+ * Is this account currently frozen (issue 943 ③, the countdown pause)? A thin
+ * predicate over the same `accountFreezes` read: the HFT page stops
+ * interpolating its countdown while the DISPLAYED account is frozen — the
+ * clock the kernel keeps running says nothing about trading being down, and
+ * a countdown that keeps ticking reads as "everything is fine".
+ */
+export function accountFrozen(
+  stats: EngineStats | null | undefined,
+  accountId: string | null | undefined,
+): boolean {
+  if (!accountId) return false
+  return Boolean(stats?.accountFreezes && accountId in stats.accountFreezes)
+}
+
+/**
  * The market-data archive stopped recording (issue 669 ②). The kernel's own
  * stop is a single journal warn line — an external operator found FIVE DAYS of
  * silently missing backtest corpus with a manual `df`. The kernel also emits
