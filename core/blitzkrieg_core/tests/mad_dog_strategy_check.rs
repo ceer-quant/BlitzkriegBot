@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use blitzkrieg_core::strategies::{EngineStrategy, StrategyCtx};
+use blitzkrieg_core::strategies::{EngineStrategy, HeldPosition, StrategyCtx, StrategyExitIntent};
 use blitzkrieg_core::strategy_engine::lua_loader::{LuaEngineAdapter, load_lua_package};
 use blitzkrieg_core::{kline::Kline, model::CryptoMarket, model::OrderbookSnapshot};
 use blitzkrieg_lua_runtime::bk_api::AccountView;
@@ -1027,5 +1027,138 @@ fn spot_max_scale_tiny_move_still_passes() {
         lua_errors(&mut a),
         0,
         "no Lua callback error may be swallowed"
+    );
+}
+
+// ── contract: the thesis-death exit (issue #847, the probe2 shape) ──────────
+//
+// The exits-wire regression: the package used to return `exits = {}` at both
+// return sites (the seal), so a filled resting bid's only survival was the
+// kernel ladder — probe2 rode MFE +45.8% bare to −11.59% for want of a
+// strategy-owned exit. The wire: the suggestion anchors `st.anchor` at the
+// resting price it is issued at; a HELD token (host-pushed via
+// bk.holdings()) whose fresh mid falls more than `thesis_break_pct` under
+// that anchor emits ONE { token, reason } row — no price (the exits wire
+// carries none; the kernel prices it), never time-gated, latched per round.
+
+/// A held position on the UP leg, shaped exactly the way the host's flat
+/// book carries one. Piping it through `StrategyCtx::with_positions` is the
+/// REAL path: the loader maps ctx-held rows into `HoldingView`s verbatim
+/// and overwrites the sandbox's `bk.holdings()` snapshot each cycle
+/// (lua_loader's on_holdings push); a direct state write would be clobbered
+/// by the next evaluate.
+fn held_up(shares: &str) -> HeldPosition {
+    HeldPosition {
+        strategy: "mad_dog".into(),
+        account_id: blitzkrieg_core::model::default_account_id().to_string(),
+        condition_id: "cond".into(),
+        token_id: UP.into(),
+        direction: "up".into(),
+        shares: shares.into(),
+        entry_price: "0.26".into(),
+        round_slot: NOW / 900_000,
+    }
+}
+
+/// The full happy path: dominance + wick arms the suggestion at 0.26, the
+/// position fills, the mid collapses past the thesis death (0.26 −30% of
+/// the anchor = 0.182, so a mid of 0.18 is under it) and the held token
+/// emits EXACTLY ONE kernel-priced verdict, whose reason names the shape.
+#[test]
+fn held_leg_past_the_thesis_death_emits_one_exit() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, SPOT_OPEN, &flat_spot(SPOT_OPEN, 10));
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    a.on_book(UP, &wick, SPOT_NOW);
+
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    let got = candidates_of(&mut a, &markets, 600, SPOT_NOW, &fresh);
+    assert_eq!(got.len(), 1, "the arm cycle must still suggest: {got:?}");
+    assert_eq!(got[0].price, dec!(0.26), "the anchor is the resting price");
+
+    // Filled and held: the host pushes the position through the engine's
+    // real seam (StrategyCtx::with_positions), then the knife continues to
+    // a mid of 0.18 — past the thesis death of the 0.26 anchor.
+    let held = vec![held_up("1.00")];
+    let collapse = book(dec!(0.17), dec!(0.19), dec!(600), SPOT_NOW + 1_000);
+    a.on_book(UP, &collapse, SPOT_NOW + 1_000);
+    let collapse_for_fresh = collapse.clone();
+    let fresh = move |t: &str| (t == UP).then(|| collapse_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
+
+    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
+    assert_eq!(exits.len(), 1, "the exit wire must carry the verdict");
+    assert!(
+        exits[0].reason.starts_with("thesis_reversed"),
+        "the verdict's reason is the thesis-death shape, not a ladder stop"
+    );
+
+    // The verdict resolves to the RIGHT token (a held leg, by name).
+    assert_eq!(exits[0].token_id, UP, "the held leg is what gets closed");
+}
+
+/// The latch and the under-threshold guard: a held leg ABOVE its death line
+/// emits nothing (the +45.8% MFE must not be sold), and after the verdict
+/// fires once it never repeats within the round (the kernel owns sizing —
+/// a strategy that re-sends the close every book tick is a duplicate-order
+/// spammer).
+#[test]
+fn thesis_exit_is_latched_and_the_calm_leg_sells_nothing() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, SPOT_OPEN, &flat_spot(SPOT_OPEN, 10));
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    a.on_book(UP, &wick, SPOT_NOW);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    assert_eq!(
+        candidates_of(&mut a, &markets, 600, SPOT_NOW, &fresh).len(),
+        1,
+        "the arm cycle must still suggest"
+    );
+
+    // Held and MFE: mid 0.35 (the BROKEN level's own height, 45% ABOVE the
+    // 0.24 anchor extreme and way over the death line) — no exit.
+    let held = vec![held_up("1.00")];
+    let mfe = book(dec!(0.34), dec!(0.36), dec!(600), SPOT_NOW + 1_000);
+    a.on_book(UP, &mfe, SPOT_NOW + 1_000);
+    let mfe_for_fresh = mfe.clone();
+    let fresh = move |t: &str| (t == UP).then(|| mfe_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "a held leg above its death line must not sell: no exit rows"
+    );
+
+    // Now the death: 0.18 is >30% under the 0.26 anchor → one verdict.
+    let collapse = book(dec!(0.17), dec!(0.19), dec!(600), SPOT_NOW + 2_000);
+    a.on_book(UP, &collapse, SPOT_NOW + 2_000);
+    let collapse_for_fresh = collapse.clone();
+    let fresh = move |t: &str| (t == UP).then(|| collapse_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 2_000, &fresh).with_positions(&held));
+    assert_eq!(
+        a.take_exit_intents().len(),
+        1,
+        "past the death line the ONE verdict fires"
+    );
+
+    // Latched: the same held book again — nothing new, no re-fire, no spam.
+    let _ = candidates_of(&mut a, &markets, 600, SPOT_NOW + 2_000, &fresh);
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "the verdict never repeats within the round (the kernel owns sizing)"
+    );
+
+    // A fresh round completely resets the tracker (anchors die with the
+    // round — held positions never carry a stale anchor into the next one).
+    a.on_round(NOW / 900_000 + 1, 900, SPOT_NOW + 2_000);
+    let _ = candidates_of(&mut a, &markets, 600, SPOT_NOW + 2_000, &fresh);
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "a new round resets the tracker: no stale anchor, no verdict"
     );
 }
