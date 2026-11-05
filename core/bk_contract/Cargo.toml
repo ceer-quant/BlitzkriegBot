@@ -1,0 +1,15 @@
+[package]
+name = "blitzkrieg-bk-contract"
+version.workspace = true
+edition = "2024"
+description = "Canonical market-plugin contract (#840 Wave 1): wire DTOs, MarketHost/DataFeed/MarketDiscovery/OrderExecutor/MarketPlugin traits, mode declaration parsing and the unified event model. A leaf crate: depends only on serde/serde_json/rust_decimal — no internal dependency, no I/O (the unified ledger's persistence stays in blitzkrieg-market-api, which re-exports everything below)."
+
+[lib]
+name = "blitzkrieg_bk_contract"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = "1"

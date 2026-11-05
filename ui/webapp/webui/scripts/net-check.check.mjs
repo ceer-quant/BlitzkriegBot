@@ -171,7 +171,9 @@ check('an unknown hint code falls back to a neutral title', () => {
 // 任何一份手抄列表：内核改词表，这里自动跟着改判。
 console.log('网络自检：四张标签表与内核词表逐项相等')
 
-const typesRs = read('core', 'market_api', 'src', 'types.rs')
+// #840 Wave 1 之后内核词表 canonically 住 `core/bk_contract/src/types.rs`；
+// `core/market_api/src/types.rs` 只是 re-export 门面。
+const typesRs = read('core', 'bk_contract', 'src', 'types.rs')
 const netCheckRs = read('ui', 'ui_kit', 'src', 'core', 'net_check.rs')
 const netCheckTs = read('ui', 'webapp', 'webui', 'src', 'lib', 'net-check.ts')
 

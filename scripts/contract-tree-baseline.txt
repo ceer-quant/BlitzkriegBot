@@ -23,6 +23,7 @@ blitzkrieg-core > strategy-logic
 blitzkrieg-data-model > blitzkrieg-market-api
 blitzkrieg-kalshi > blitzkrieg-market-api
 blitzkrieg-lua-runtime > blitzkrieg-strategy-api
+blitzkrieg-market-api > blitzkrieg-bk-contract
 blitzkrieg-onchain-pull > blitzkrieg-data-model
 blitzkrieg-polysimulator > blitzkrieg-market-api
 blitzkrieg-predictfun > blitzkrieg-market-api
@@ -32,6 +33,9 @@ blitzkrieg-ui-panel > blitzkrieg-ui-kit
 polymarket-extension > blitzkrieg-market-api
 strategy-logic > blitzkrieg-market-api
 [external]
+blitzkrieg-bk-contract :: rust_decimal
+blitzkrieg-bk-contract :: serde
+blitzkrieg-bk-contract :: serde_json
 blitzkrieg-core :: anyhow
 blitzkrieg-core :: arc-swap
 blitzkrieg-core :: async-trait
