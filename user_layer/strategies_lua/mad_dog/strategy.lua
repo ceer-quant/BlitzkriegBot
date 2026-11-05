@@ -6,13 +6,22 @@
 -- chase. This is not a direction predictor; it is a liquidity-vacuum buyer.
 --
 -- The seal (the「止损不归你管」contract, gated by strategy-no-stop-loss-check):
--- this file computes no exit, monitors no exit, expresses no exit, and sends
--- no size. Entries cross as { token, price, reason } suggestions — the kernel
--- adjudicates, sizes (shares omitted → kernel budget), funds-gates and posts
--- them post_only. `exits` is never populated; the only non-entry row this
--- strategy emits is a `break` when the panic leg ENDS by recovery (mid back
--- above the broken level), which cancels the now-stale resting bid — the
--- mirror image of spread_arb's cancel-on-break.
+-- this file computes no stop-loss, monitors no stop-loss, expresses no
+-- stop-loss, and sends no size. Entries cross as { token, price, reason }
+-- suggestions — the kernel adjudicates, sizes (shares omitted → kernel
+-- budget), funds-gates and posts them post_only. The ONE exit row this
+-- strategy emits is the thesis-death verdict (issue #847 fix 2, the
+-- smart_money_reverse shape): once a leg is HELD, a mid more than
+-- `thesis_break_pct` under the entry anchor emits ONE { token, reason }
+-- THESIS row into `exits` — no price (the kernel prices and executes it,
+-- the exits wire gives no price field). This is not a stop: the anchor is
+-- the entry's own resting price, the threshold is the thesis's death, and
+-- #847's autopsy (probe2: MFE +45.8% rode bare to −11.59%) is exactly the
+-- round this verdict exists for. The kernel's exit ladder and systemic
+-- breakers stay the real survival layer. The remaining non-entry row is a
+-- `break` when the panic leg ENDS by recovery (mid back above the broken
+-- level), which cancels the now-stale resting bid — the mirror image of
+-- spread_arb's cancel-on-break.
 --
 -- Data notes, stated because they change what the gates can see:
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule, same
@@ -281,13 +290,18 @@ local function read_config()
     max_abs_obi = dec_param(p, "max_abs_obi", { m = 5, s = 1 }),
     min_available_usd = dec_param(p, "min_available_usd", { m = 100, s = 2 }),
     wick_offset = dec_param(p, "wick_offset", { m = 2, s = 2 }),
+    -- thesis-death exit (issue #847 fix 2): a held leg whose mid falls more
+    -- than this under the entry anchor emits ONE kernel-priced exit verdict.
+    thesis_break_pct = dec_param(p, "thesis_break_pct", { m = 30, s = 0 }),
   }
 end
 
 -- ── per-token book tracker ──────────────────────────────────────────────────
 -- tokens[tok] = { samples = { {ts, dec}, ... } (oldest first, one per 250ms
 -- bucket), dominant = bool (latched for the round), episode = { extreme } |
--- nil, pending_break = dec | nil }
+-- nil, pending_break = dec | nil, anchor = dec | nil (the entry suggestion's
+-- resting price — latches the thesis-death exit's reference, survives the
+-- empty-episode phase a fillless round enters), exited = bool }
 
 local BUCKET_MS = 250
 
@@ -296,7 +310,10 @@ local tracker = { slot = nil, tokens = {} }
 local function token_state(tok)
   local st = tracker.tokens[tok]
   if not st then
-    st = { samples = {}, dominant = false, episode = nil, pending_break = nil }
+    st = {
+      samples = {}, dominant = false, episode = nil, pending_break = nil,
+      anchor = nil, exited = false,
+    }
     tracker.tokens[tok] = st
   end
   return st
@@ -501,15 +518,16 @@ function bk_on_round(round)
 end
 
 --- The suggestion surface. Entries are resting maker bids 0.02 under the
---- armed episode's extreme; exits are NEVER emitted (the seal); breaks
---- cancel the stale bid of a panic leg that ended by recovery.
+--- armed episode's extreme; ONE exit row fires per held token (the
+--- thesis-death verdict, kernel-priced); breaks cancel the stale bid of a
+--- panic leg that ended by recovery.
 function bk_evaluate()
   local cfg = read_config()
-  local entries, breaks = {}, {}
+  local entries, exits, breaks = {}, {}, {}
 
   local round = bk.round()
   if round == nil or round.time_left_sec < cfg.min_time_left_sec then
-    return { entries = entries, exits = {}, breaks = breaks }
+    return { entries = entries, exits = exits, breaks = breaks }
   end
 
   local now_ms = bk.now_ms()
@@ -518,6 +536,45 @@ function bk_evaluate()
     if st.pending_break then
       breaks[#breaks + 1] = { token = tok, broken_price = dec_fmt(st.pending_break) }
       st.pending_break = nil
+    end
+  end
+
+  -- The thesis-death watch (never time-gated): a HELD leg (host-pushed via
+  -- bk.holdings()) whose fresh mid falls more than thesis_break_pct under
+  -- its latched anchor emits ONE exit verdict per round; the kernel prices
+  -- and executes it (the exits wire carries no price). The watch reads the
+  -- anchor, not the episode: a fill unarms the wick phase, but the held
+  -- position's thesis verdict must still fire (issue #847 fix 2 — probe2
+  -- rode MFE +45.8% bare to −11.59% for want of exactly this row).
+  -- mid < anchor * (1 - pct/100)  ⟺  mid * 100 < anchor * (100 - pct).
+  local held = {}
+  local holdings = bk.holdings()
+  if type(holdings) == "table" then
+    for i = 1, #holdings do
+      local h = holdings[i]
+      if type(h) == "table" and type(h.token_id) == "string" then held[h.token_id] = true end
+    end
+  end
+  for tok, st in pairs(tracker.tokens) do
+    if st.anchor and held[tok] and not st.exited then
+      local book = bk.book(tok)
+      if book and book.fresh == true then
+        local mid = dec_parse(book.mid)
+        if mid and mid.m > 0 then
+          local lhs = dec_mul(mid, DEC_100)
+          local rhs = dec_mul(st.anchor, dec_sub(DEC_100, cfg.thesis_break_pct))
+          if dec_cmp(lhs, rhs) < 0 then
+            st.exited = true
+            exits[#exits + 1] = {
+              token = tok,
+              reason = string.format(
+                "thesis_reversed: mid %s is more than %s%% under entry anchor %s",
+                dec_fmt(mid), dec_fmt(cfg.thesis_break_pct), dec_fmt(st.anchor)
+              ),
+            }
+          end
+        end
+      end
     end
   end
 
@@ -550,6 +607,13 @@ function bk_evaluate()
             if depth_ok and obi_ok and avail_ok and spot_ok(cfg, m.asset, dir_up, now_ms) then
               local entry = dec_round2(dec_sub(st.episode.extreme, cfg.wick_offset))
               if dec_cmp(entry, DEC_001) >= 0 and dec_cmp(entry, ask) < 0 then
+                if not st.anchor then
+                  -- The thesis-death anchor latches on the FIRST suggestion
+                  -- this token emits: a filled resting bid lives under the
+                  -- price it rested at, and a later re-arm must not move a
+                  -- held leg's reference.
+                  st.anchor = entry
+                end
                 entries[#entries + 1] = {
                   token = tok,
                   price = dec_fmt(entry),
@@ -569,5 +633,5 @@ function bk_evaluate()
       end
     end
   end
-  return { entries = entries, exits = {}, breaks = breaks }
+  return { entries = entries, exits = exits, breaks = breaks }
 end

@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "4c9b295a87c672ff80ae4f9a38ad2770cd050f8ebe2d2f20acad0a8dd25a85f5",
+  "sha256": "a75df0244a8df7f98ef6c91901390ba1bf6b914a6b189bbc40ff110916a2e0c9",
   "author": "BlitzkriegBot",
-  "description": "FROZEN pending issue #847 positioning verdict — the spot waterfall veto is fixed (exact-rational), but the structural flaws stand: the extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill / 0.65%) and the post-breakdown edge is zero (0/1,928 settlements). Do not enable without repositioning. Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "description": "FROZEN pending issue #847 positioning verdict — the spot waterfall veto is fixed (exact-rational) and the thesis-death exit is wired (a held leg more than thesis_break_pct under its entry anchor emits ONE kernel-priced exit), but the structural flaw stands: the extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill / 0.65%) and the post-breakdown edge is zero (0/1,928 settlements) — deferred to issue #915. Do not enable without repositioning. Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
   "tunables": {
     "dominant_min_price": {
       "type": "decimal",
@@ -88,6 +88,12 @@
       "default": "0.02",
       "min": "0",
       "max": "0.20"
+    },
+    "thesis_break_pct": {
+      "type": "decimal",
+      "default": "30",
+      "min": "1",
+      "max": "90"
     }
   },
   "modes": [
