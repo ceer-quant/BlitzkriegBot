@@ -456,13 +456,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // #173: the daily-loss budget's durable side file follows the position log
-    // (the struct literal below consumes `position_log_path`).
-    let daily_pnl_path = position_log_path.as_deref().map(daily_loss_path_for);
+    // (the struct literal below consumes `position_log_path`). issue #941
+    // (freeze follows the ledger): per-mode, like the journal split — the
+    // daily breaker of the dry book must never be seeded from the live
+    // book's day.
+    let trading = mode.may_trade();
+    let daily_pnl_path = position_log_path
+        .as_deref()
+        .map(|p| daily_loss_path_for(p, trading));
 
     // #861: the runtime risk state's durable side file — the daily-loss
     // file's family, beside the position log. Only a real process has it
     // (the backtester/tests run without, session-scoped as before).
-    let risk_state_path = position_log_path.as_deref().map(risk_state_path_for);
+    // issue #941: per-mode — a live kill switch / account freeze recorded
+    // here must never gate the dry process (the other book trades on), and
+    // vice versa. Same split the journals got.
+    let risk_state_path = position_log_path
+        .as_deref()
+        .map(|p| risk_state_path_for(p, trading));
 
     // #380: WHERE the execution-policy file lives, settled BEFORE the core is
     // constructed. An explicit --execution-policy wins; the shipped default is

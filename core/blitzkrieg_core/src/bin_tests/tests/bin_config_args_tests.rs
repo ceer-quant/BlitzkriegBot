@@ -498,16 +498,26 @@ fn a_disabled_daily_loss_budget_is_announced() {
 }
 
 /// The budget's side file is a sibling of the position log, the way the
-/// `.recon` watermark is: same directory, derived name.
+/// `.recon` watermark is: same directory, derived name. issue #941: the
+/// name is per-mode — dry adds a `.dry` tag, live keeps the bare name,
+/// so the two books' files never meet.
 #[test]
 fn the_daily_loss_file_follows_the_position_log() {
     assert_eq!(
-        daily_loss_path_for("data/positions/positions.jsonl"),
+        daily_loss_path_for("data/positions/positions.jsonl", true),
         "data/positions/positions.daily-loss.json"
     );
     assert_eq!(
-        daily_loss_path_for("/tmp/x/pos.jsonl"),
+        daily_loss_path_for("/tmp/x/pos.jsonl", true),
         "/tmp/x/pos.daily-loss.json"
+    );
+    assert_eq!(
+        daily_loss_path_for("data/positions/positions.jsonl", false),
+        "data/positions/positions.daily-loss.dry.json"
+    );
+    assert_eq!(
+        risk_state_path_for("data/positions/positions.jsonl", false),
+        "data/positions/positions.risk-state.dry.json"
     );
 }
 
