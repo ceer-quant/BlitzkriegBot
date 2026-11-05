@@ -2,7 +2,7 @@
 name = "blitzkrieg-market-api"
 version.workspace = true
 edition = "2024"
-description = "Market-agnostic plugin contract: domain DTOs + DataFeed/MarketDiscovery/OrderExecutor traits + MarketHost. Depends on nothing internal, so both the core and every market extension can link it without a dependency cycle."
+description = "Market-agnostic plugin contract: domain DTOs + DataFeed/MarketDiscovery/OrderExecutor traits + MarketHost. Since #840 Wave 1 this is a compatibility facade — the canonical types/traits live in blitzkrieg-bk-contract and are re-exported verbatim; the unified mapping ledger (std::fs persistence) remains implemented here. Depends on nothing else internal, so both the core and every market extension can link it without a dependency cycle."
 
 [lib]
 name = "blitzkrieg_market_api"
@@ -10,6 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+blitzkrieg-bk-contract = { path = "../bk_contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = "1"

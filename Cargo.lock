@@ -1166,6 +1166,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blitzkrieg-bk-contract"
+version = "0.4.1"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "blitzkrieg-build-info"
 version = "0.4.1"
 dependencies = [
@@ -1266,6 +1275,7 @@ dependencies = [
 name = "blitzkrieg-market-api"
 version = "0.4.1"
 dependencies = [
+ "blitzkrieg-bk-contract",
  "rust_decimal",
  "serde",
  "serde_json",

@@ -7,6 +7,7 @@ members = [
     "core/build_support", # 构建期注入逻辑（build.rs 专用，VERSIONING.md §3.2）
     "core/build_info", # 运行期构建常量的唯一出口（BUILD_INFO）
     "core/market_api",
+    "core/bk_contract", # #840 Wave 1: canonical market-plugin contract (leaf: serde/serde_json/rust_decimal only)
     "core/data_model", # #648 C: 叶子数据合同（DataEvent 流分类 + 回读层）——内核与离线拉取器共享
     "core/blitzkrieg_core",
     "extensions/polymarket",
