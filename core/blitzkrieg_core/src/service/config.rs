@@ -347,7 +347,7 @@ pub struct CoreConfig {
     /// `settlements.jsonl` beside the order log; `order_log_path: None` means no
     /// persistence, i.e. settlement idempotency is per-session.
     pub settlement_log_path: Option<String>,
-    /// The ledger cash journal directory: one `data/ledger/<account>.journal.jsonl`
+    /// The ledger cash journal directory, one file per account per mode (issue #941): `data/ledger/<account>.journal.live.jsonl` (live trades) / `.journal.dry.jsonl` (dry trades),
     /// per account, one append per cash movement, replayed at boot so the
     /// balance survives a restart (last row's `balance_after`). `None` = the
     /// historical memory-only ledger (`--no-ledger-journal`, the backtester,

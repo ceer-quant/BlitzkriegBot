@@ -563,7 +563,7 @@ pub const FLAGS: &[FlagSpec] = &[
         "Do not persist the per-account cash journal (data/ledger/): the \
          in-memory balance runs the session and boot re-seeds instead of \
          replaying — the盈亏 history does not survive a restart.",
-        "the cash journal IS persisted (data/ledger/<account>.journal.jsonl) — \
+        "the cash journal IS persisted (data/ledger/<account>.journal.live.jsonl | .journal.dry.jsonl, split per mode — issue 941) — \
          boot replays it and the balance survives restarts",
     ),
     flag(

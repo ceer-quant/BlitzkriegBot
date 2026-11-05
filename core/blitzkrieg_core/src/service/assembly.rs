@@ -3,6 +3,7 @@
 //! motion from `service.rs` (#780) — no logic edits.
 
 use super::*;
+use crate::account::AccountLedgers;
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
@@ -202,20 +203,50 @@ impl Core {
                 }
             }
         });
-        // Durable cash journals (data/ledger/<account>.journal.jsonl): replay
-        // BEFORE seeding. A deployment with journals on disk restores the
-        // opening balance from each journal's last row and skips the boot seed
-        // — re-seeding over a replay would reset the balance to the seed and
-        // vaporize the盈亏 history across every restart. A fresh deployment
-        // (no journal files — first boot, or a replay corpus) takes the
-        // historical seed_all path, bit for bit. A malformed journal line is
-        // skipped with one warn (the jsonl::load contract — the trailing
-        // balance comes from the last GOOD row); the file itself is append-
-        // only evidence, never rewritten by this path.
+        // Durable cash journals (issue #941: data/ledger/<account>.journal.
+        // live.jsonl / .journal.dry.jsonl): replay BEFORE seeding, THIS MODE'S
+        // file only — the two modes are absolutely independent books, so a
+        // dry boot never sees live's rows and vice versa. A deployment with a
+        // journal on disk restores the opening balance from its last row and
+        // skips the boot seed — re-seeding over a replay would reset the
+        // balance to the seed and vaporize the盈亏 history across every
+        // restart. A fresh side (no journal file for this mode — first boot
+        // after the split) takes the seed_all path, bit for bit: lived
+        // history is never carried across the dry/live boundary (operator
+        // ruling: dry = seeded simulation cash, live = venue cash). The
+        // pre-replay archiver folds the pre-#941 single-file era away
+        // (rename to <account>.journal.dry-archive.jsonl, decision D — kept,
+        // never replayed). A malformed journal line is skipped with one warn
+        // (the jsonl::load contract — the trailing balance comes from the
+        // last GOOD row); the file itself is append-only evidence, never
+        // rewritten by this path.
         if let Some(dir) = config.ledger_journal_dir.as_deref() {
             let dir = std::path::Path::new(dir);
-            let replayed = accounts.any_journal_on_disk(dir);
-            accounts.attach_journals(dir);
+            let trading = config.mode.may_trade();
+            if !trading {
+                AccountLedgers::archive_legacy_journals(dir);
+            }
+            let replayed = accounts.any_journal_on_disk(trading, dir);
+            // issue #941 (migration D's hard half): the first post-split boot
+            // of the DRY (locally-settling) side drops the daily-loss ledger's
+            // persisted day states to an empty envelope. The old file's
+            // openingEquity numbers were measured against the OTHER book (the
+            // $71.59 → $3.58 cap pollution observed in production); kept, they
+            // would survive the upgrade because `reconcile_same_day_base`
+            // re-anchors only TIGHTER — a bigger seed never overwrites a
+            // smaller polluted base. Live side does not take this branch: its
+            // basis is the venue's report and refreshes every sweep.
+            if !trading
+                && !replayed
+                && let Some(daily_path) = config.positions.daily_pnl_path.as_deref()
+            {
+                DailyLossStore::reset_file_to_empty(daily_path);
+                tracing::info!(
+                    path = %daily_path,
+                    "issue 941 migration: daily-loss day states reset for the dry side's first post-split boot"
+                );
+            }
+            accounts.attach_journals(trading, dir);
             // E28 (§9.5): a locally-settling mode has no venue to reconcile
             // against; seed the local cash so the reserve/overspend gate is
             // meaningful for embedders that don't seed it. Uses the predicate,
@@ -224,7 +255,9 @@ impl Core {
             // the books are separate wallets, not one wallet with aliases);
             // with one account this is exactly the single `seed` 0.2 ran.
             // Skipped when a journal replayed: the balance is a boot-replay
-            // fact now, not the seed.
+            // fact now, not the seed. (issue #941: a mode's first boot after
+            // the split starts from the seed — the other mode's journal is a
+            // different book and never replays here.)
             if config.mode.settles_locally() && !replayed {
                 accounts.seed_all(config.dry_seed_balance);
             }

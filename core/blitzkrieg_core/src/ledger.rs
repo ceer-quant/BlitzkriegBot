@@ -1077,4 +1077,109 @@ mod tests {
         assert!(l.retire_journal_file());
         assert!(!l.venue_reported(), "a retired identity claims nothing");
     }
+
+    /// issue #941 contract 1 — the file NAME is the whole routing, so the two
+    /// modes must never share a path. `journal_file_name(trading, account)`
+    /// is the single name-song: live → `.journal.live.jsonl`, dry →
+    /// `.journal.dry.jsonl`, and the two are distinct for every account id.
+    #[test]
+    fn journal_file_names_route_by_mode_and_never_collide() {
+        let live = crate::account::AccountLedgers::journal_file_name(true, "default");
+        let dry = crate::account::AccountLedgers::journal_file_name(false, "default");
+        assert_eq!(live, "default.journal.live.jsonl");
+        assert_eq!(dry, "default.journal.dry.jsonl");
+        assert_ne!(live, dry, "the two books live in two different files");
+
+        // The legacy single-file name is distinct from BOTH: the migration
+        // archiver keys on it and must not match the new names' suffixes.
+        let legacy = "default.journal.jsonl";
+        assert_ne!(legacy, live);
+        assert_ne!(legacy, dry);
+        // The suffix trap: `.journal.dry.jsonl` does NOT end with
+        // `.journal.jsonl`-as-`<id>.journal.jsonl` — trim_end_matches on the
+        // archive key can only strip the full `<id>.journal.jsonl`.
+        assert!(
+            !dry.ends_with(legacy),
+            "the dry name must not share the legacy name's full suffix"
+        );
+        assert!(
+            live.ends_with("live.jsonl"),
+            "the live name carries its mode segment"
+        );
+    }
+
+    /// issue #941 contract 2 — migration D: a legacy single-file journal is
+    /// archived (renamed, NOT deleted) by the pre-replay archiver, and the new
+    /// dual files replay independently of it. Shape: a dir holding
+    /// `<a>.journal.jsonl` (the old era) → after `archive_legacy_journals` the
+    /// legacy name is gone, the archive exists at `<a>.journal.dry-archive.jsonl`,
+    /// and a fresh dry-side `attach_journals(false, ..)` finds NOTHING (seeds
+    /// from zero — the ruling). Same for the live side.
+    #[test]
+    fn legacy_single_file_is_archived_and_never_replays() {
+        let dir = std::env::temp_dir().join(format!(
+            "bk-941-archive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let legacy = dir.join("default.journal.jsonl");
+        std::fs::write(&legacy, "{\"atMs\":1,\"kind\":\"seed\",\"amount\":\"100\",\"balanceAfter\":\"100\",\"ref\":\"boot\"}\n")
+            .expect("legacy fixture");
+
+        crate::account::AccountLedgers::archive_legacy_journals(&dir);
+        assert!(!legacy.exists(), "the legacy name is retired by rename");
+        let archive = dir.join("default.journal.dry-archive.jsonl");
+        assert!(
+            archive.exists(),
+            "the archive holds the bytes verbatim — a non-deleting migration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&archive).unwrap().lines().count(),
+            1,
+            "the archived file is byte-for-byte the old journal"
+        );
+
+        // Replay on BOTH sides after the archive: neither reads it.
+        let mut book = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: crate::account::AccountId::from("default"),
+                name: "d".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                updated_at_ms: 0,
+            }],
+            crate::account::AccountId::from("default"),
+        );
+        assert!(
+            !book.any_journal_on_disk(false, &dir),
+            "dry side: the archive is NOT a journal — a fresh boot seeds"
+        );
+        assert!(
+            !book.any_journal_on_disk(true, &dir),
+            "live side: same — the venue owns live's opening truth"
+        );
+        book.attach_journals(false, &dir);
+        assert_eq!(
+            book.ledger_of(&crate::account::AccountId::from("default"))
+                .unwrap()
+                .balance(),
+            Decimal::ZERO,
+            "the archived tail never replays into the new dry book"
+        );
+
+        // Idempotence: a second archiver pass with nothing left does nothing
+        // (no error, archive preserved).
+        crate::account::AccountLedgers::archive_legacy_journals(&dir);
+        assert!(archive.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

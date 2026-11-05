@@ -4,7 +4,7 @@
 
 use crate::model::*;
 use crate::ome::Ome;
-use crate::position::{OpenPosition, PositionManager};
+use crate::position::{DailyLossStore, OpenPosition, PositionManager};
 use crate::risk::{LossBreakers, RiskGate};
 use crate::schema::Event;
 use crate::settlement::SettlementBook;
@@ -219,7 +219,8 @@ pub struct Core {
     /// position book; persisted next to the position log.
     recon_watermark_ms: i64,
     /// Whether this core's boot REPLAYED durable cash journals (at least one
-    /// `data/ledger/<account>.journal.jsonl` existed on disk). The server's
+    /// `data/ledger/<account>.journal.<live|dry>.jsonl` existed on disk, issue
+    /// #941). The server's
     /// post-construction seed reads it: a replayed balance is a boot fact and
     /// must not be re-seeded over. Always false when
     /// `config.ledger_journal_dir` is `None`.

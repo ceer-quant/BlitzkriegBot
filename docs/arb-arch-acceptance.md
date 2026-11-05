@@ -12,7 +12,7 @@
   `ledger.rs` = `core/market_api/src/unified/ledger.rs`；`live.rs` = `extensions/polymarket/src/live.rs`；
   `executor.rs` = `extensions/kalshi/src/executor.rs`；订单日志默认 `data/orders/orders.jsonl`
   （service.rs:202/:883），成交 `data/trades/trades.jsonl`（service.rs:882），持仓
-  `data/positions/positions.jsonl`（service.rs:884），账本流水 `data/ledger/<account>.journal.jsonl`
+  `data/positions/positions.jsonl`（service.rs:884），账本流水 `data/ledger/<account>.journal.{live,dry}.jsonl`（issue 941 双账本拆分）
   （service.rs:302），对账审计 `reconcile.jsonl`（service.rs:286，audit_interval_sec 默认 30s）。
 - 订单日志行是 `TrackedOrder` 的 camelCase JSON（model.rs:204-205）：关键字段
   `internalKey` / `submittedAtMs` / `avgFillPrice` / `filledSize` / `status` / `accountId` / `venue` / `mode`。
@@ -44,7 +44,7 @@ host.rs:461-494 → `set_balance` service.rs:2774-2796，:2795-2796 只写 `acti
 
 | # | 升格判据 | 可执行核对方法 | 状态 |
 |---|---------|---------------|------|
-| R-⑥a | 出现第一笔「风控读到错误 venue 余额而放行的超额订单」（对账/工单证据） | ① 从工单/告警拿订单号 O，取提交时刻与名义价值：`jq 'select(.orderId=="O") \| {internalKey,accountId,submittedAtMs,price,size,status,avgFillPrice}' data/orders/orders.jsonl`；② 找 O 提交前 ~10s 的余额覆盖现场：stderr `grep 'core: venue cash reconcile'`（host.rs:480）与 `grep 'ledger cash set from the venue'`（service.rs:2787-2792）；③ 取审计面同窗记录：`jq 'select(.ledgerRealigned != null)' <audit 文件>`（reconcile.jsonl，service.rs:8267，30s 间隔）；④ 用 `data/ledger/<account>.journal.jsonl` 复原 O 所落 venue 的真实余额 | 核对方法就绪；触发与否待生产数据（有据即升格 P0） |
+| R-⑥a | 出现第一笔「风控读到错误 venue 余额而放行的超额订单」（对账/工单证据） | ① 从工单/告警拿订单号 O，取提交时刻与名义价值：`jq 'select(.orderId=="O") \| {internalKey,accountId,submittedAtMs,price,size,status,avgFillPrice}' data/orders/orders.jsonl`；② 找 O 提交前 ~10s 的余额覆盖现场：stderr `grep 'core: venue cash reconcile'`（host.rs:480）与 `grep 'ledger cash set from the venue'`（service.rs:2787-2792）；③ 取审计面同窗记录：`jq 'select(.ledgerRealigned != null)' <audit 文件>`（reconcile.jsonl，service.rs:8267，30s 间隔）；④ 用 `data/ledger/<account>.journal.<live|dry>.jsonl`（按 mode 取对应侧）复原 O 所落 venue 的真实余额 | 核对方法就绪；触发与否待生产数据（有据即升格 P0） |
 | R-⑥b | `ledger.rs:181-185` 的 asset 冲突静默放行**被修复后**，仍出现映射错误导致的结算不收敛工单 | 当前静默分支已核：`asset_conflict = match (&ids[i].asset, &ids[j].asset) { (Some(x), Some(y)) => !x.eq_ignore_ascii_case(y), _ => false }`（ledger.rs:181-185，任一侧 None ⇒ false 放行）；工单侧判据 = 同一 unified 映射两腿结算合计 ≠ $1。修复 PR 合入时间戳之后的第一笔 ⇒ 命中 | 静态核对绿；触发待修复后生产数据 |
 
 **R-⑥a 判定规则**：journal 复原的「O 所落 venue 真实余额」< O 名义价值（price×size），且 O 提交前
