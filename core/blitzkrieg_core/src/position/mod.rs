@@ -473,7 +473,7 @@ impl SuppressedStopEvent {
 /// family, and one account's losses must never burn a sibling's budget). A
 /// file written before per-account days holds a bare `DailyLossState`; that
 /// migrates to the `default` account's bucket on load.
-struct DailyLossStore {
+pub(crate) struct DailyLossStore {
     path: std::path::PathBuf,
 }
 
@@ -547,6 +547,39 @@ impl DailyLossStore {
                      Repair or delete the file before trusting the loss budget."
                 );
                 Default::default()
+            }
+        }
+    }
+
+    /// issue #941 (migration D, one shot): the day's states recorded under the
+    /// single-ledger era carry an OPENING EQUITY from the OTHER book — a dry
+    /// boot replaying live's journal tail seeded its breaker from live's real
+    /// money ($71.59 → $3.58 cap on a $1000 dry seed is the observed fault).
+    /// The persisted number is unreadable as a statement about THIS book, so
+    /// rather than inventing per-account surgery on a file whose every number
+    /// is suspect, the whole envelope is dropped to disk-zero: the first post-
+    /// upgrade tick re-stamps opening equity from the seed (and realized loss
+    /// restarts from zero for the day — an honest restart of the budget, not
+    /// laundered losses: the era before the split is a different book).
+    /// Day-index survivability note: `roll_daily` only carries state across a
+    /// same-DAY restart (previous_day_index == today); after midnight the day
+    /// is fresh anyway, so dropping the file loses nothing that would have
+    /// been carried.
+    pub(crate) fn reset_file_to_empty(path: &str) {
+        let empty = DailyLossFile {
+            accounts: Default::default(),
+        };
+        match serde_json::to_string_pretty(&empty) {
+            Ok(text) => {
+                if !crate::jsonl::rewrite_atomic(std::path::Path::new(path), text.as_bytes()) {
+                    tracing::warn!(
+                        path = %path,
+                        "issue 941 migration: daily-loss file reset failed — the old base may re-arm"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "issue 941 migration: daily-loss serialize failed")
             }
         }
     }
@@ -1008,15 +1041,23 @@ impl PositionManager {
     /// Rebuild the open book from durable storage (crash recovery). Replaces any
     /// in-memory state and advances `next_id` past the restored ids so a new
     /// position can never collide with a recovered one (`hft-N`).
-    pub fn restore_open(&mut self, positions: Vec<OpenPosition>) {
+    ///
+    /// issue #942: the OPEN log alone under-seeds — it is a whole-set rewrite,
+    /// so a flat book carries no ids at all and a fresh session reissues ids
+    /// the closed-trade history already carries (9 duplicate ids observed in
+    /// production). `history_max_hft` is the closed-trade log's boot-scan max;
+    /// the counter clears BOTH bounds.
+    pub fn restore_open(&mut self, positions: Vec<OpenPosition>, history_max_hft: Option<u64>) {
         let max_id = positions
             .iter()
             .filter_map(|p| p.id.strip_prefix("hft-"))
             .filter_map(|n| n.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
-        if max_id + 1 > self.next_id {
-            self.next_id = max_id + 1;
+        let history_max = history_max_hft.unwrap_or(0);
+        let seed = max_id.max(history_max);
+        if seed + 1 > self.next_id {
+            self.next_id = seed + 1;
         }
         self.open = positions;
         // #390: the restored book replaces the in-memory one wholesale —
@@ -1075,3 +1116,8 @@ mod tests;
 /// ledger in `service::account_precision_tests`; these pin the arithmetic.
 #[cfg(test)]
 mod precision_tests;
+
+/// MERGE (task 2.2): pair collection for pair-discount arbitrage — the
+/// pair-collection suite, split out of `tests.rs` (#780 ratchet).
+#[cfg(test)]
+mod merge_tests;

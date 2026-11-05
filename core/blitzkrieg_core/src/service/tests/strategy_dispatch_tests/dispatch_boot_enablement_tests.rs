@@ -64,10 +64,21 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         "the mint wakes with the configured seed, not zero"
     );
 
-    // The funding row is DURABLE: the mint attached the journal path, so
-    // the row landed on disk and a fresh boot's `attach_journals` replay
-    // restores the balance — the restart does not vaporize it.
-    let journal_path = journal_dir.join("probe2.journal.jsonl");
+    // The funding row is DURABLE (issue #941: into the DRY side's file —
+    // a dry mint never writes the live book): the mint attached the journal
+    // path, so the row landed on disk and a fresh boot's `attach_journals`
+    // replay restores the balance — the restart does not vaporize it.
+    let journal_path = journal_dir.join(crate::account::AccountLedgers::journal_file_name(
+        false, "probe2",
+    ));
+    assert!(
+        !journal_dir
+            .join(crate::account::AccountLedgers::journal_file_name(
+                true, "probe2"
+            ))
+            .exists(),
+        "a dry mint never creates the live side's file"
+    );
     let rows: Vec<crate::ledger::JournalEntry> = crate::jsonl::load(&journal_path, "test journal");
     let seed_row = rows
         .iter()
@@ -121,7 +132,16 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         "LIVE mints stay at zero — venue cash is the balance"
     );
     assert!(
-        !journal_dir_live.join("probe3.journal.jsonl").exists(),
+        !journal_dir_live
+            .join(crate::account::AccountLedgers::journal_file_name(
+                true, "probe3"
+            ))
+            .exists()
+            && !journal_dir_live
+                .join(crate::account::AccountLedgers::journal_file_name(
+                    false, "probe3"
+                ))
+                .exists(),
         "a zero funding records no journal row, so no file is created"
     );
     let _ = std::fs::remove_dir_all(&dir);

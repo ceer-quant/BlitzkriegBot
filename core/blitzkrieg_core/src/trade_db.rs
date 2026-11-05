@@ -163,6 +163,10 @@ pub struct TradeDb {
     /// never touched. Rebuilt from the JSONL at open, folded alongside the
     /// global summary on record, rebuilt from the kept rows on retract.
     by_account: std::collections::HashMap<AccountId, TradeSummary>,
+    /// issue #942: the highest `hft-N` id tail in the history at boot. The
+    /// position book's counter seeds past it (restore path), so a flat open
+    /// book never reissues ids the closed-trade log already carries.
+    max_hft_tail: u64,
 }
 
 impl TradeDb {
@@ -190,12 +194,24 @@ impl TradeDb {
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
         // Boot scan: the per-account buckets are derived state (not persisted)
-        // — one pass over the JSONL the boot already knows how to read.
+        // — one pass over the JSONL the boot already knows how to read. The
+        // same pass records the highest `hft-N` tail ever written here
+        // (issue #942): the position book's id counter seeds from the OPEN
+        // positions log alone, which resets wholesale on a flat book — a
+        // fresh session then reissues ids that already live in THIS file's
+        // history (9 duplicate ids observed in production) and the panel
+        // rows collide. The closed-trade log is the full-id memory.
+        let mut max_hft_tail: u64 = 0;
         let mut by_account: std::collections::HashMap<AccountId, TradeSummary> =
             std::collections::HashMap::new();
         if let Ok(text) = std::fs::read_to_string(&jsonl_path) {
             for line in text.lines() {
                 if let Ok(rec) = serde_json::from_str::<TradeRecord>(line) {
+                    if let Some(tail) = rec.id.strip_prefix("hft-")
+                        && let Ok(n) = tail.parse::<u64>()
+                    {
+                        max_hft_tail = max_hft_tail.max(n);
+                    }
                     let bucket = by_account.entry(rec.account_id.clone()).or_default();
                     Self::fold_into(bucket, &rec);
                 }
@@ -206,7 +222,16 @@ impl TradeDb {
             summary_path,
             summary,
             by_account,
+            max_hft_tail,
         }
+    }
+
+    /// issue #942: the highest `hft-N` tail found in this ledger's closed-trade
+    /// history at boot (0 = no rows / no hft-prefixed ids). The position book
+    /// seeds its id counter past this on restore so a flat book never reissues
+    /// an id the history already carries.
+    pub fn max_hft_tail(&self) -> u64 {
+        self.max_hft_tail
     }
 
     /// Append a closed trade and update the summary (best effort, never panics).

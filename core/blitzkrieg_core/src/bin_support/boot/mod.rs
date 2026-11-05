@@ -900,19 +900,39 @@ pub(crate) fn parse_virtual_limits(
 /// `data/positions/positions.daily-loss.json` beside it: the two files describe
 /// the same book and belong in the same place (both under the git-ignored
 /// `data/`).
-pub(crate) fn daily_loss_path_for(position_log: &str) -> String {
+/// issue #941 (freeze follows the ledger): the risk posture files are
+/// PER-MODE like the ledger journals themselves — the trailing `.dry` tag
+/// keys the file to the dry book (`positions.daily-loss.dry.json`), live
+/// keeps the extension-less name (`positions.daily-loss.json`) so one of
+/// the two shapes stays unchanged and the dry book's files never meet the
+/// live book's files.
+pub(crate) fn daily_loss_path_for(position_log: &str, trading: bool) -> String {
+    let semantic = if trading {
+        "daily-loss.json"
+    } else {
+        "daily-loss.dry.json"
+    };
     std::path::Path::new(position_log)
-        .with_extension("daily-loss.json")
+        .with_extension(semantic)
         .to_string_lossy()
         .into_owned()
 }
 
 /// #861: where the RUNTIME risk state persists — the daily-loss file's own
-/// family (`positions.risk-state.json` beside the position log): the two
-/// files describe the same book's risk posture and belong in the same place.
-pub(crate) fn risk_state_path_for(position_log: &str) -> String {
+/// family (beside the position log): the two files describe the same book's
+/// risk posture and belong in the same place. issue #941 (freeze follows the
+/// ledger): per-mode like the daily-loss file above — kill switch and
+/// account freezes recorded by the live process must never gate the dry
+/// process (separate books) and vice versa; a mode switch gets a FRESH
+/// posture the way a fresh boot does.
+pub(crate) fn risk_state_path_for(position_log: &str, trading: bool) -> String {
+    let semantic = if trading {
+        "risk-state.json"
+    } else {
+        "risk-state.dry.json"
+    };
     std::path::Path::new(position_log)
-        .with_extension("risk-state.json")
+        .with_extension(semantic)
         .to_string_lossy()
         .into_owned()
 }

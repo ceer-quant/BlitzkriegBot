@@ -357,7 +357,7 @@ fn force_close_expiry_uses_the_positions_own_family_clock() {
     p.round_slot = 2;
     p.round_duration_sec = 3600;
     // 直接把带戳的持仓放回账本（开仓路径的戳来自成交行，这里测判定门本身）。
-    c.positions_mut().restore_open(vec![p.clone()]);
+    c.positions_mut().restore_open(vec![p.clone()], None);
 
     // 自身钟下仍在轮内：(slot+1)·3600 = 10_800_000，此刻 5_400_001 → 拒。
     let err = c
@@ -429,7 +429,7 @@ fn the_zero_mid_fallback_recovers_cost_via_the_entry_price() {
     let mut dead = p.clone();
     dead.current_price = dec!(0);
     dead.prev_price = dec!(0);
-    c.positions.restore_open(vec![dead]);
+    c.positions.restore_open(vec![dead], None);
     assert_eq!(
         c.positions().open_positions()[0].current_price,
         dec!(0),

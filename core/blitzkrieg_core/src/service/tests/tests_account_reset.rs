@@ -550,7 +550,7 @@ fn seed_closed_trade(c: &mut Core, account: &str, id: &str, net: Decimal) {
         state: crate::exit_policy::ExitState::new(Decimal::ONE / Decimal::from(2), 0),
         flows: CashFlows::default(),
     };
-    c.positions.restore_open(vec![held]);
+    c.positions.restore_open(vec![held], None);
     let closed = c
         .positions
         .close(
@@ -840,10 +840,15 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
         },
         book,
     );
-    // Attach journals by hand (the boot path's job): both accounts get a
-    // durable trail, default accumulates fills, paper stays on its seed.
-    let default_path = journal_dir.join("default.journal.jsonl");
-    let paper_path = journal_dir.join("paper.journal.jsonl");
+    // Attach journals by hand (the boot path's job, issue #941 file names):
+    // both accounts get a durable trail, default accumulates fills, paper
+    // stays on its seed. Mode is Dry, so the files are the DRY side's.
+    let default_path = journal_dir.join(crate::account::AccountLedgers::journal_file_name(
+        false, "default",
+    ));
+    let paper_path = journal_dir.join(crate::account::AccountLedgers::journal_file_name(
+        false, "paper",
+    ));
     c.accounts
         .get_mut(&crate::account::AccountId::from("default"))
         .unwrap()
@@ -903,6 +908,182 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
          boot Seed row stays exactly as the boot wrote it)"
     );
     assert_eq!(paper_rows[0].kind, crate::ledger::JournalKind::Seed);
+    drop(c);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// issue #941 contract 3 — boot 分家: a DRY boot replays ONLY the dry side's
+/// file and seeds a fresh account; a LIVE boot replays ONLY the live side's
+/// file (and skips the seed even when the dry side has a journal — the two
+/// books never gate each other). Shape: pre-write both sides of one account
+/// plus the legacy single file; boot dry → the dry tail is the balance and
+/// the legacy file is ARCHIVED (not replayed); boot live → the live tail is
+/// the balance, the seed is skipped (journal present on the live side gates
+/// it) and live's balance does NOT inherit dry's rows.
+#[test]
+fn boot_replays_only_this_modes_side_and_deletes_the_legacy_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "bk-941-boot-split-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
+    let journal_dir = dir.join("ledger");
+    std::fs::create_dir_all(&journal_dir).expect("journal dir");
+    std::fs::write(
+        &env_path,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_NAME=\"main\"\n",
+    )
+    .expect("fixture");
+    // The old era: one single-file journal with a live-world tail ($73.90 —
+    // the production pollution number). Money is a STRING on the file
+    // (crate::decimal's contract).
+    std::fs::write(
+        journal_dir.join("default.journal.jsonl"),
+        "{\"atMs\":1,\"kind\":\"seed\",\"amount\":\"100\",\"balanceAfter\":\"100\",\"ref\":\"boot\"}\n{\"atMs\":2,\"kind\":\"realign\",\"amount\":\"-26.10\",\"balanceAfter\":\"73.90\",\"ref\":\"venue\"}\n",
+    )
+    .expect("legacy fixture");
+    // The dry side of the split era: a trail ending at the seed world ($1000).
+    std::fs::write(
+        journal_dir.join(crate::account::AccountLedgers::journal_file_name(false, "default")),
+        "{\"atMs\":3,\"kind\":\"seed\",\"amount\":\"1000\",\"balanceAfter\":\"1000\",\"ref\":\"boot\"}\n",
+    )
+    .expect("dry fixture");
+
+    fn boot(
+        mode: Mode,
+        _dir: &std::path::Path,
+        env_path: &std::path::Path,
+        accounts_path: &std::path::Path,
+        journal_dir: &std::path::Path,
+    ) -> crate::service::Core {
+        crate::service::Core::with_account_book(
+            CoreConfig {
+                mode,
+                accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+                ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            crate::account::config::load_account_ledgers_single_source(
+                accounts_path,
+                Some(env_path),
+                1,
+                crate::account::config::TEST_ALLOWED_ROUNDS,
+            )
+            .unwrap(),
+        )
+    }
+
+    // DRY boot: the dry side replays ($1000), the legacy file is deleted —
+    // its $73.90 NEVER becomes the dry balance (the pollution kill).
+    let c = boot(Mode::Dry, &dir, &env_path, &accounts_path, &journal_dir);
+    assert_eq!(
+        c.accounts
+            .ledger_of(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .balance(),
+        dec!(1000),
+        "dry boot: the dry side's own tail is the balance"
+    );
+    assert!(
+        c.boot_replayed_journal(),
+        "the DRY side's file replayed, so the boot seed is skipped — and \
+         the legacy file was deleted before anything could read it"
+    );
+    assert!(
+        !journal_dir.join("default.journal.jsonl").exists(),
+        "the pre-split single file is DELETED at the dry boot (operator ruling)"
+    );
+    assert_eq!(
+        c.accounts
+            .ledger_of(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .journal_snapshot()
+            .last()
+            .map(|r| (r.kind, r.balance_after)),
+        Some((crate::ledger::JournalKind::Seed, dec!(1000))),
+        "the dry balance came from the dry file's tail, byte-level"
+    );
+    drop(c);
+
+    // LIVE boot: only the live side's file counts; the dry file is invisible.
+    // No live file exists → 749 zero-projection, no seed. (A live boot does
+    // NOT run the legacy-file retirement — it never reads that name anyway.)
+    let live = boot(Mode::Live, &dir, &env_path, &accounts_path, &journal_dir);
+    assert_eq!(
+        live.accounts
+            .ledger_of(&crate::account::AccountId::from("default"))
+            .unwrap()
+            .balance(),
+        Decimal::ZERO,
+        "live boot: no live journal — the venue owns the opening truth (749), the seed does not run"
+    );
+    drop(live);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// issue #941 contract 4 — `account.remove` sweeps BOTH sides' files (plus
+/// legacy archaeology):删户清完四个名字，同名重建从零开始, no half-ledger
+/// resurrection at the next boot.
+#[test]
+fn account_remove_sweeps_both_sides_and_the_archaeology() {
+    let dir = std::env::temp_dir().join(format!(
+        "bk-941-remove-sweep-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
+    let env_path = dir.join(".env");
+    let journal_dir = dir.join("ledger");
+    std::fs::create_dir_all(&journal_dir).expect("journal dir");
+    std::fs::write(
+        &env_path,
+        "ACCOUNT_LIST=default,paper\nACCOUNT_DEFAULT_NAME=\"main\"\nACCOUNT_PAPER_NAME=\"paper\"\n",
+    )
+    .expect("fixture");
+    let mut c = crate::service::Core::with_account_book(
+        CoreConfig {
+            mode: Mode::Dry,
+            accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        crate::account::config::load_account_ledgers_single_source(
+            &accounts_path,
+            Some(&env_path),
+            1,
+            crate::account::config::TEST_ALLOWED_ROUNDS,
+        )
+        .unwrap(),
+    );
+    // Plant all three removable names under `paper`'s id (both mode sides
+    // plus the pre-split legacy file).
+    let names: Vec<String> = vec![
+        crate::account::AccountLedgers::journal_file_name(true, "paper"),
+        crate::account::AccountLedgers::journal_file_name(false, "paper"),
+        "paper.journal.jsonl".to_string(),
+    ];
+    for n in &names {
+        std::fs::write(journal_dir.join(n), "x\n").expect("plant");
+    }
+    let reply =
+        c.remove_account_persisting(&crate::account::AccountId::from("paper"), "panel", "retire");
+    assert!(reply.is_ok(), "remove lands: {:?}", reply.is_ok());
+    for n in &names {
+        assert!(
+            !journal_dir.join(n).exists(),
+            "file {n} swept with the account"
+        );
+    }
     drop(c);
     let _ = std::fs::remove_dir_all(dir);
 }

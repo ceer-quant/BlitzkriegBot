@@ -1,5 +1,6 @@
 //! account (`.env`) persisting writers, scope rebuild and account lifecycle (#780).
 
+use crate::account::AccountLedgers;
 use crate::model::*;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
@@ -1006,9 +1007,12 @@ impl Core {
         // (生产 probe2 实锤: balance 1000 → restart → 0).
         let ledger = self.accounts.get_mut(&id)?;
         if let Some(dir) = self.config.ledger_journal_dir.as_deref() {
-            ledger.set_journal_path(
-                std::path::Path::new(dir).join(format!("{}.journal.jsonl", id.as_str())),
-            );
+            // issue #941: the journal file name carries the mode — a live
+            // mint writes the live book, a dry mint writes the dry book; the
+            // two never share a file.
+            ledger.set_journal_path(std::path::Path::new(dir).join(
+                AccountLedgers::journal_file_name(self.config.mode.may_trade(), id.as_str()),
+            ));
         }
         if self.config.mode.settles_locally()
             && self.config.dry_seed_balance > rust_decimal::Decimal::ZERO
@@ -1105,6 +1109,56 @@ impl Core {
         // 比真实余额多 5000）。删文件失败则整体拒绝 —— 此时 .env
         // 已收下了删除（persist 先行的代价），但内存未动、旧 journal 还在，
         // 重试一次即可收敛；拒绝的消息如实告知。
+        //
+        // issue #941：dual-ledger 起一个账户有两份按 mode 命名的流水 +
+        // 升级期可能还挂着旧单文件 —— remove 一次清全部三个名字（缺席是
+        // 合法 no-op），否则「删了 dry 留着 live」在下次 boot 复活半本账。
+        // legacy 文件的删除失败不拒绝（它本就不在当前交易路径上，只是
+        // 考古遗留——下次 boot 的退役步兜底），由 warn 交代。
+        for name in [
+            crate::account::AccountLedgers::journal_file_name(true, id.as_str()),
+            crate::account::AccountLedgers::journal_file_name(false, id.as_str()),
+            format!("{}.journal.jsonl", id.as_str()),
+        ] {
+            if let Some(dir) = self.config.ledger_journal_dir.as_deref() {
+                let path = std::path::Path::new(dir).join(&name);
+                let archaeology = name.ends_with(".journal.jsonl");
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) if archaeology => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "issue 941: legacy journal cleanup failed at account.remove — non-trading-path archaeology remains"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "account.remove: journal file delete failed"
+                        );
+                        if !self.accounts.get_mut(id)?.retire_journal_file() {
+                            return Err(CoreError::new(
+                                CoreErrorCode::InvalidParams,
+                                format!(
+                                    "account.remove：`{id}` 的流水文件删除失败 —— .env \
+                                     已落盘但内存未动，旧流水文件还在；请重试一次，问题持续 \
+                                     请检查 data/ledger/ 的写权限"
+                                ),
+                            ));
+                        }
+                        return Err(CoreError::new(
+                            CoreErrorCode::InvalidParams,
+                            format!(
+                                "account.remove：`{id}` 的流水文件 {name} 删除失败（{e}）—— .env 已落盘但内存未动，旧流水文件还在；请重试一次"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         if !self.accounts.get_mut(id)?.retire_journal_file() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,

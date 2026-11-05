@@ -514,16 +514,84 @@ impl AccountLedgers {
         Ok(())
     }
 
-    /// Attach the durable cash-journal file to every account's ledger
-    /// (`data/ledger/<account>.journal.jsonl` in the caller-provided
-    /// directory) and REPLAY it: the last row's `balance_after` becomes the
-    /// account's opening balance. The boot seed (`seed_all`) runs AFTER this
-    /// and the caller must SKIP it for accounts that replayed a journal —
-    /// [`Core::with_account_book`] reports which did through
-    /// [`Self::any_journal_on_disk`]-style checks at the call site.
-    pub(crate) fn attach_journals(&mut self, dir: &std::path::Path) {
+    /// issue #941: the durable cash-journal file name for ONE account under
+    /// ONE mode. Absolute ledger independence — dry and live are two ledgers,
+    /// never one wallet viewed at two times — lives in FILE NAMES: live rows
+    /// can only ever land in `<account>.journal.live.jsonl`, dry rows in
+    /// `<account>.journal.dry.jsonl`, and a mode switch leaves the other
+    /// side's history untouched on disk.
+    pub fn journal_file_name(trading: bool, account: &str) -> String {
+        format!(
+            "{}.journal.{}.jsonl",
+            account,
+            if trading { "live" } else { "dry" }
+        )
+    }
+
+    /// issue #941: pre-replay retirement. A deployment upgrading from the
+    /// single-file era carries every historical row in
+    /// `<account>.journal.jsonl`. Operator ruling (second pass): the single
+    /// file is DELETED outright — nothing replays it (the live side starts
+    /// from the venue (749), the dry side from the seed), the two books own
+    /// their histories from the split onward, and no archive is kept. The
+    /// pre-split era was ONE book; its rows record a ledger that no longer
+    /// exists and cannot be interpreted per-mode anyway (mode boundaries
+    /// unguessable — the reason plan A was never chosen).
+    pub(crate) fn archive_legacy_journals(dir: &std::path::Path) {
+        let mut removed_any = false;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = match name.to_str() {
+                Some(n) => n,
+                None => continue,
+            };
+            // The legacy single-file name: `<id>.journal.jsonl` with the
+            // account id before it — never matches the new dual names
+            // (`<id>.journal.live.jsonl` / `.journal.dry.jsonl`), which carry
+            // an extra dot-segment.
+            if !name.ends_with(".journal.jsonl") {
+                continue;
+            }
+            let from = entry.path();
+            match std::fs::remove_file(&from) {
+                Ok(()) => {
+                    removed_any = true;
+                    tracing::info!(
+                        path = %from.display(),
+                        "issue 941: pre-split single-file journal DELETED (operator ruling — the pre-split era was one book, its rows belong to no side)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %from.display(),
+                        error = %e,
+                        "issue 941: legacy journal delete failed — will retry on the next boot"
+                    );
+                }
+            }
+        }
+        if removed_any {
+            eprintln!(
+                "core: issue 941 journal split — pre-split single-file journals deleted (per-mode books carry their own history)"
+            );
+        }
+    }
+
+    /// Attach the durable cash-journal file FOR THIS MODE (issue #941:
+    /// `<account>.journal.live.jsonl` / `<account>.journal.dry.jsonl` in the
+    /// caller-provided directory) to every account's ledger and REPLAY it:
+    /// the last row's `balance_after` becomes the account's opening balance.
+    /// The boot seed (`seed_all`) runs AFTER this and the caller must SKIP it
+    /// for accounts that replayed a journal — a re-seed over a replay would
+    /// reset the balance to the seed and vaporize the盈亏 history the journal
+    /// exists to keep.
+    pub(crate) fn attach_journals(&mut self, trading: bool, dir: &std::path::Path) {
         for (id, ledger) in self.ledgers.iter_mut() {
-            let path = dir.join(format!("{}.journal.jsonl", id.as_str()));
+            let path = dir.join(Self::journal_file_name(trading, id.as_str()));
             ledger.set_journal_path(path.clone());
             let rows = crate::jsonl::load::<crate::ledger::JournalEntry>(
                 &path,
@@ -541,15 +609,17 @@ impl AccountLedgers {
         }
     }
 
-    /// Whether ANY account's journal file already exists on disk. The boot
-    /// seed decision reads this: a deployment with journals replays them and
-    /// must NOT be re-seeded (a re-seed would overwrite the restored balance
-    /// and vaporize the盈亏 history — the exact fault this migration exists
-    /// to fix); a fresh deployment (no journal files) seeds exactly as before.
-    pub fn any_journal_on_disk(&self, dir: &std::path::Path) -> bool {
-        self.accounts
-            .keys()
-            .any(|id| dir.join(format!("{}.journal.jsonl", id.as_str())).exists())
+    /// Whether ANY account's journal file FOR THIS MODE already exists on
+    /// disk. The boot seed decision reads this: a deployment with journals
+    /// replays them and must NOT be re-seeded (a re-seed would overwrite the
+    /// restored balance and vaporize the盈亏 history — the exact fault this
+    /// migration exists to fix); a fresh deployment (no journal files)
+    /// seeds exactly as before.
+    pub fn any_journal_on_disk(&self, trading: bool, dir: &std::path::Path) -> bool {
+        self.accounts.keys().any(|id| {
+            dir.join(Self::journal_file_name(trading, id.as_str()))
+                .exists()
+        })
     }
 
     pub fn active_ledger(&self) -> &Ledger {
