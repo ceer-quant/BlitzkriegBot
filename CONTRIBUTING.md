@@ -2,6 +2,13 @@
 
 Thanks for your interest in contributing! (`ceer-quant/BlitzkriegBot`, MIT).
 
+**Build Once, Trade Everywhere.** BlitzkriegBot is the independent trader's
+TradingOS: venues may change (swap an extension crate) and strategies may
+iterate (swap a strategy package), but the trading kernel stays stable —
+market-agnostic, with one ledger across dry/live. The architecture rules
+below are how that promise is kept; violating them breaks the product, not
+just the code.
+
 ## Architecture first
 
 This is a **Rust-only** project: all money, order, risk and state-consistency
@@ -65,9 +72,9 @@ cd ui/webapp/webui && npm run check:all
 
 Built-in strategies live in `core/blitzkrieg_core/src/strategies/`.
 External strategies are cdylibs built against `user_layer/strategy_api`
-and loaded at runtime. See
-[docs/rust-core/STRATEGY_GUIDE.md](docs/rust-core/STRATEGY_GUIDE.md) and
-[docs/rust-core/ABI_V2_DESIGN.md](docs/rust-core/ABI_V2_DESIGN.md).
+(the frozen BlitzkriegStrategy API, `BK_ABI_VERSION = 2`) and loaded at
+runtime. See
+[docs/rust-core/STRATEGY_GUIDE.md](docs/rust-core/STRATEGY_GUIDE.md).
 
 ## Pull Request Guidelines
 

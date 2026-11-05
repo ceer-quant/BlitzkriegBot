@@ -1,6 +1,7 @@
 # 版本管理体系（VERSIONING）
 
 > 适用：BlitzkriegBot（Rust workspace + Lua 沙箱 + 系统级风控 + TUI/WebUI）
+> 定位：独立交易者的 TradingOS——策略与市场是可换层，版本单事实来源守护的就是那条稳定内核：**Build Once, Trade Everywhere**。
 > 状态：**规范与实施设计**。本文是唯一权威来源；第 9 节是可直接排期的 Epic 拆分，第 10 节是验收标准。
 > 基线：`0.2.0` 已发布（实盘链路已验证），本次目标是把开发分支收敛到规范的 `0.2.x` 补丁线。
 

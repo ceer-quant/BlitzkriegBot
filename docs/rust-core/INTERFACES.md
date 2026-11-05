@@ -3,6 +3,8 @@
 > 传输：Unix Domain Socket，一行一个 JSON 对象（`\n` 分帧），JSON-RPC 2.0。
 > **每条消息都带 `version` 字段**（当前 `1.1`）；Rust serde 结构体是唯一契约，Node 侧用 zod 镜像校验。
 > Node 不持有私钥：凭证由内核进程从自身环境读取。
+>
+> 有的接口是 TradingOS 的壳与内核之间的缝：UI 随便换代，契约按版本演进，稳定内核的读数语义不变。
 
 ## 0. 信封
 

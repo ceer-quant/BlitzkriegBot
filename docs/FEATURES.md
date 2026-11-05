@@ -24,7 +24,7 @@
 
 ## 0. 一句话总览
 
-BlitzkriegBot 是一个面向 **Polymarket 加密二元（UP/DOWN）预测市场**的自动化交易系统：
+BlitzkriegBot 是独立交易者的 TradingOS：**Build Once, Trade Everywhere** —— 用 Rust 重构散户高频交易基础设施，策略迭代（策略包可换）、市场扩展（一个场地一个 crate）、风控执行与账务全部统一在一个稳定的交易内核里。当前形态是面向 **Polymarket 加密二元（UP/DOWN）预测市场**的自动化交易系统：
 **Rust 交易内核 + 可插拔市场扩展 + 多策略宿主 + 影子进化 + Vue 面板 / TUI**。
 
 - **核心交易链路**：已跑通并有实况 dry 证据。

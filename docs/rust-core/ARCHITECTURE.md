@@ -2,6 +2,16 @@
 
 > 版本：**P0.6**（市场插件化：内核零市场代码）
 > 核心原则：**内核只负责规则，扩展负责玩法。市场细节不进内核。**
+>
+> 定位：这是 BlitzkriegBot —— 独立交易者的 TradingOS —— 的稳定内核。市场可以变化（换一个扩展 crate），策略可以迭代（换一个策略包），交易内核永远稳定可靠：市场无关、无交易所 SDK、dry/live 同一本账。**Build Once, Trade Everywhere.**
+>
+> 对外统一为**三大 API**：
+>
+> | API | 载体 | 本文档集的权威 |
+> |:---|:---|:---|
+> | **BlitzkriegExtensionAPI** | `core/market_api`（`DataFeed` / `MarketDiscovery` / `OrderExecutor` / `MarketPlugin` + 通用 `Extension` 生命周期钩子） | [`EXTENSION_GUIDE.md`](EXTENSION_GUIDE.md) |
+> | **BlitzkriegStrategy API** | `user_layer/strategy_api`（冻结 C ABI v2，`BK_ABI_VERSION = 2`，Rust + Lua 双栈） | [`STRATEGY_GUIDE.md`](STRATEGY_GUIDE.md) |
+> | **BlitzkriegUIKit** | `ui/ui_kit`（Web 网关 + `ui_kit_panel` TUI + Vue webapp） | 本文档 §8 目录 |
 
 ## 1. 分层
 
@@ -128,7 +138,8 @@ per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`�
   内核复制后经同一库的 `bk_strategy_free_string` 归还，分配器不跨边界。
 - 外挂边界只传只读借用视图与意图数据：策略拿不到凭证/下单管理器/UDS/网络，无法绕过
   RiskGate/ImmutableConfig/kill switch。出场意图经 `ExitReason::StrategySignal` 与策略出场合流到
-  同一条提交路径（见 `STRATEGY_GUIDE.md`、`ABI_V2_DESIGN.md`）。
+  同一条提交路径（见 `STRATEGY_GUIDE.md`；原 `ABI_V2_DESIGN.md` 已退役，
+  冻结契约以 `user_layer/strategy_api` crate 与 `STRATEGY_GUIDE.md §1.5` 为准）。
 
 ## 5. 两套"插件"系统（务必区分）
 

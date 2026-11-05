@@ -2,6 +2,8 @@
 
 > **一句话**：你写策略"逻辑"，内核执行"交易"。
 > 策略逻辑只接收行情，返回一个信号；其余（校验、风控、资金、签名、下单、对账、平仓）全部由内核负责。
+>
+> 这正是 TradingOS 的分层承诺：策略是可以迭代的可换层——改策略、换策略、调参数，内核零改动；你的交易内核永远稳定可靠。**Build Once, Trade Everywhere** 的前半句就是从这里开始的：同一份策略逻辑跨回放、模拟、实盘复用。
 
 ## 0. 止损不归你管
 
@@ -51,7 +53,7 @@ grep -rE "reqwest|hyper|http" user_layer/strategies/      # 应为空
 
 ## 1.5 冻结的 C ABI v2（动态库）
 
-用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v2**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）。v2 是**全功能**契约：外挂策略与内核内树策略实现同一个 `EngineStrategy`，「外挂」只是加载方式不同（树里现在没有内树策略）。设计全文见 [ABI_V2_DESIGN.md](ABI_V2_DESIGN.md)。
+用户层策略以共享库（`.dylib`/`.so`/`.dll`）交付时，走 **冻结的 C ABI v2**（crate `blitzkrieg-strategy-api`，`#[repr(C)]`，无 Rust 特有类型）。v2 是**全功能**契约：外挂策略与内核内树策略实现同一个 `EngineStrategy`，「外挂」只是加载方式不同（树里现在没有内树策略）。本契约即 **BlitzkriegStrategy API**（对外命名见 `DEV_V0_3.md` §2；原先的设计稿 `ABI_V2_DESIGN.md` 已退役，冻结真值以 `user_layer/strategy_api` crate 为准）。
 
 ```c
 uint32_t bk_strategy_abi_version(void);           // 必须 == 2（协商先于读 vtable）

@@ -4,9 +4,13 @@
 
 <img src="assets/logo.png" alt="BlitzkriegBot" width="200"/>
 
-### 把交易想法，变成可运行的策略。
+### 独立交易者的 TradingOS
 
-用可视化蓝图或 Lua 创建策略，在回测与模拟环境中验证，通过面板管理账户与风险。
+市场可以变化，策略可以迭代，你的交易内核永远稳定可靠。
+
+用 Rust 重构散户高频交易基础设施：策略开发、风控执行、多市场扩展全面统一。
+
+**Build Once, Trade Everywhere.** 让个人拥有机构级交易能力。
 
 **[开始模拟](#quickstart) · [创建第一条策略](#blueprint) · [查看验证范围](./docs/FEATURES.md)**
 
@@ -17,6 +21,22 @@
 </div>
 
 默认 dry 模拟，策略安装后默认关闭。实盘涉及真实资金风险，需要充分验证与明确授权；本项目不构成投资建议。
+
+## TradingOS 的分层
+
+**策略层可换，内核不变。**
+
+| 层 | 是什么 | 换掉它意味着什么 |
+| --- | --- | --- |
+| **策略包**（Blueprint / Lua） | 把交易想法写成可运行的规则 | 迭代想法：改 Lua、调参数、换策略，**内核零改动** |
+| **市场扩展**（Polymarket / Kalshi / predict.fun / PolySimulator） | 一个场地一个扩展 crate，接 market_api 契约 | 迁移市场：**写一个扩展 crate，内核不改一行** |
+| **交易内核**（Rust） | OME 订单引擎 · 风控 · 持仓 · 结算 · 对账 | **永远稳定可靠**：市场无关、无交易所 SDK、dry/live 同一本账 |
+
+```
+市场可以变化 ──────────────► 换扩展 crate
+策略可以迭代 ──────────────► 换 Lua 策略包
+交易内核 ──────────────────► 永远稳定可靠（Build Once, Trade Everywhere）
+```
 
 ## 从一个想法开始
 
@@ -47,7 +67,7 @@
 
 ## 一套策略包，逐步验证
 
-策略包可在支持的回放、模拟与实盘入口复用，减少维护多套策略实现的负担。核心账务路径有 dry/live 对拍门禁，验证范围可在 [功能证据表](./docs/FEATURES.md) 查阅。
+**Build Once**：同一个策略包跨回放、模拟、实盘三个入口复用，改想法不用维护三套实现。核心账务路径有 dry/live 对拍门禁，验证范围见 [功能证据表](./docs/FEATURES.md)。
 
 **复用代码，不等于复现市场。** 实盘仍受流动性、滑点、费用、网络延迟和场地规则影响；离线测试、dry 实况与部分真实下单验证分别说明不同范围，不能替代完整的实盘验收。
 
@@ -61,16 +81,16 @@
 
 示例是研究起点，是否启用应由验证结果决定。
 
-## Risk First：每次试跑都有边界
+## Risk First：机构级风控，个人可拥有
 
-- **默认先模拟**：出厂使用 dry，策略安装不等于启用，按账户分别控制。
-- **订单先过风控**：持仓数、单笔名义额等限制由内核执行，策略不能自行豁免。
+- **订单先过风控**：持仓数、单笔名义额等限制由内核强制执行，策略不能自行豁免——策略再失控，也超不出你定的边界。
+- **默认先模拟**：出厂 dry，策略安装不等于启用，按账户分别控制。
 - **异常可追踪**：无法归属的成交与现金异动进入告警和审计，便于核对账本。
-- **可以只观察**：`--readonly` 不构造下单通道，用于只读检查。
+- **可以只观察**：`--readonly` 结构性只读，连下单通道都不构造——个人也有 fail-safe。
 
 ## 从面板看到策略实际做了什么
 
-Web 面板提供行情、订单、持仓、账本和策略管理；TUI 支持终端查看与操作。账户切换帮助你分别观察不同策略与场地的执行情况。
+Web 面板提供行情、订单、持仓、账本和策略管理；TUI 支持终端查看与操作。账户切换帮助你分别观察不同策略与场地的执行情况——机构级的审计视野，个人也能拥有。
 
 <details>
 <summary>查看行情面板</summary>
@@ -81,11 +101,11 @@ Web 面板提供行情、订单、持仓、账本和策略管理；TUI 支持终
 
 </details>
 
-## 为策略研究提供可扩展的底座
+## Trade Everywhere：一个内核，四个市场
+
+Polymarket、Kalshi、predict.fun、PolySimulator 连接器各自验证范围见 [功能证据表](./docs/FEATURES.md)；换交易所 = 写一个扩展 crate，内核不改一行。技术细节在 [开发者文档](#developer-guide)。
 
 交易核心与服务进程使用 Rust，策略宿主内嵌 Lua，Web 面板使用 Vue。运行预编译发行包无需另装 Node 或 Python；开发与构建依赖见下方文档。
-
-项目提供 Polymarket、Kalshi、predict.fun 与 PolySimulator 连接器，各自的验证范围见 [功能证据表](./docs/FEATURES.md)。市场扩展与策略包通过独立契约接入，技术细节放在 [开发者文档](#developer-guide)。
 
 [![CI](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/ci.yml)
 [![Security](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml/badge.svg)](https://github.com/ceer-quant/BlitzkriegBot/actions/workflows/security.yml)
@@ -170,15 +190,16 @@ blitzkrieg run
 | 文档 | 内容 |
 | --- | --- |
 | [docs/FEATURES.md](./docs/FEATURES.md) | 功能清单与**证据分级**（哪个功能被什么验证过） |
-| [docs/rust-core/ARCHITECTURE.md](./docs/rust-core/ARCHITECTURE.md) | Rust 分层架构与扩展体系 |
-| [docs/rust-core/STRATEGY_GUIDE.md](./docs/rust-core/STRATEGY_GUIDE.md) | 编写与加载策略 |
-| [docs/rust-core/EXTENSION_GUIDE.md](./docs/rust-core/EXTENSION_GUIDE.md) | 新增一个市场扩展 |
-| [docs/rust-core/INTERFACES.md](./docs/rust-core/INTERFACES.md) | UDS JSON-RPC 2.0 契约 |
-| [docs/rust-core/ABI_V2_DESIGN.md](./docs/rust-core/ABI_V2_DESIGN.md) | 策略 C ABI v2 设计 |
+| [docs/rust-core/ARCHITECTURE.md](./docs/rust-core/ARCHITECTURE.md) | Rust 分层架构与**三大 API**总览 |
+| [docs/rust-core/EXTENSION_GUIDE.md](./docs/rust-core/EXTENSION_GUIDE.md) | **BlitzkriegExtensionAPI**：新增一个市场/数据源扩展 |
+| [docs/rust-core/STRATEGY_GUIDE.md](./docs/rust-core/STRATEGY_GUIDE.md) | **BlitzkriegStrategy API**：编写与加载策略 |
+| [docs/rust-core/INTERFACES.md](./docs/rust-core/INTERFACES.md) | 内核 ↔ 用户层 UDS JSON-RPC 2.0 契约 |
 | [docs/VERSIONING.md](./docs/VERSIONING.md) | 版本单事实来源与发布流水线 |
 | [scripts/README.md](./scripts/README.md) | 运维脚本手册（看门狗/备份/巡检） |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | 贡献流程（架构红线与门禁是硬性的） |
 | [.env.example](./.env.example) | 环境变量全家福（`BK_*` / `BLITZKRIEG_*` / `POLYMARKET_*`） |
+
+**三大 API**（UI 框架由 `ui/` 下的 BlitzkriegUIKit 提供，含 Web 网关与 Vue 面板）：
 
 <a id="developer-guide"></a>
 
@@ -195,27 +216,27 @@ blitzkrieg run
 └──────────────────────────────┘     JSON-RPC 2.0，'\n' 分帧       │
                                             ▲                       ▼
 ┌───────────────────────────────────────────┴───────────────────────────┐
-│                         blitzkrieg-core（Rust）                          │
+│              blitzkrieg-core  ──  TradingOS 的稳定内核                  │
 │  engine/ome · order · position · risk · exit_policy · reconcile        │
 │  strategy_engine（cdylib + Lua 热加载，内核 0 策略） · shadow/evolution │
 │  hedge（跨平台两腿对冲） · kline · execution_policy                    │
 │  market registry（core 市场无关，无任何交易所 SDK）                      │
 └────────────────────────────────────────┬───────────────────────────────┘
-                                 │ 依 feature 挂接
+                                 │ 依 feature 挂接（可换层）
                     ┌────────────┴────────────┐
                     │ extensions/*            │  polymarket / kalshi / predict.fun / polysimulator
                     └─────────────────────────┘
 ```
 
 - 面板 ↔ 核心：本机 Unix 域套接字 + 换行分帧 JSON-RPC 2.0；IPC 契约唯一来源是 Rust serde 结构体（[`docs/rust-core/INTERFACES.md`](./docs/rust-core/INTERFACES.md)）。
-- 市场抽象契约：`core/market_api` 的 `DataFeed` / `MarketDiscovery` / `OrderExecutor` / `MarketPlugin` trait——换交易所 = 写一个扩展 crate，内核不改一行。
+- 市场抽象契约：`core/market_api` 的 `DataFeed` / `MarketDiscovery` / `OrderExecutor` / `MarketPlugin` trait——**Trade Everywhere 的接缝**：换交易所 = 写一个扩展 crate，内核不改一行。
 
 ### 目录结构
 
 ```
-core/blitzkrieg_core   交易核心（市场无关）      core/market_api        市场扩展契约
-extensions/*           polymarket/kalshi/predictfun/polysimulator
-user_layer/            strategy_api · lua_runtime · strategies_lua（官方 11 包）· configs
+core/blitzkrieg_core   交易内核（市场无关 = 稳定层）   core/market_api        市场扩展契约（可换层接缝）
+extensions/*           polymarket/kalshi/predictfun/polysimulator（可换层：一个场地一个 crate）
+user_layer/            strategy_api · lua_runtime · strategies_lua（官方 11 包，可换层：策略迭代区）· configs
 ui/                    ui_kit（Web 网关）· ui_kit_panel（TUI + 单二进制启动器）· webapp（Vue）
 scripts/               门禁与运维脚本（零 npm 依赖）
 docs/ · dev-docs/      公开文档 · 内部文档（不入库）
@@ -253,3 +274,7 @@ mutator，#825 起该 feature 不再在 default 里——release 构建照旧走
 ---
 
 **再次提醒**：预测市场交易有真实资金风险。本项目按「现状」提供，仅供学习与研究——默认 dry 模拟，请勿在未经充分测试与明确授权的情况下接入真实资金。
+
+---
+
+**BlitzkriegBot — Build Once, Trade Everywhere.** 市场可以变化，策略可以迭代，你的交易内核永远稳定可靠。
