@@ -114,6 +114,14 @@ export interface EngineStats {
   /** Trading freeze (kill switch) state. Older cores omit. */
   tradingFrozen?: { active: boolean; reason?: string } | null
   /**
+   * Per-account freezes (issue 943): `accountId → freeze reason`. The kernel
+   * freezes an account on a venue-rejection streak (session-scoped, survives
+   * as long as the process does); entries are absent once lifted. An older
+   * core omits the key entirely — absence renders nothing, never an invented
+   * freeze. The account-freeze banner and the HFT countdown pause read this.
+   */
+  accountFreezes?: Record<string, string> | null
+  /**
    * The market-data event archive's status (issue 669), mirrored from the
    * kernel's `ArchiveStatus` (data_source.rs, camelCase on the wire). `null` =
    * no archive configured, or an older core. The stopped-recording banner

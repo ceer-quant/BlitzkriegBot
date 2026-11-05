@@ -17,6 +17,7 @@ import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
+  accountFreezeBanners,
 } from '@/lib/safety'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
@@ -42,7 +43,14 @@ const strategyRows = computed(() => store.strategyRows)
 const stats = computed(() => snap.value?.stats ?? null)
 const connBanner = computed(() => connectionBanner(snap.value))
 const freeze = computed(() => freezeBanner(stats.value))
-const lastError = computed(() => lastErrorBanner(stats.value, freeze.value !== null))
+// issue 943: per-account freezes — the kernel froze ONE account while others
+// keep trading, and without these lines the panel looks perfectly normal.
+// Reading rule + copy live in lib/safety.ts; each frozen account gets its own
+// urgent red banner (a two-account freeze is two red lines).
+const accountFreezes = computed(() => accountFreezeBanners(stats.value))
+const lastError = computed(
+  () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
+)
 const selfCheck = computed(() => selfCheckBanner(stats.value))
 // issue 669: the event archive stopped recording — the kernel's stop was a
 // single journal line, so an operator found days of missing backtest corpus by
@@ -450,6 +458,15 @@ const needsStrategyHint = computed(() => {
       >
         <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
       </AlertBanner>
+    </div>
+    <div
+      v-for="af in accountFreezes"
+      :key="`account-freeze-${af.title}`"
+      class="mb-3.5"
+    >
+      <!-- 紧急：issue 943 —— 单账户冻结不设全局 kill，藏掉它就是把事故说成
+           正常。每冻结户一条红横幅：钉住、无 ✕；指引去 设置·风控 解锁 -->
+      <AlertBanner tone="error" :title="af.title" :hint="af.hint">{{ af.body }}</AlertBanner>
     </div>
     <div v-if="selfCheck" class="mb-3.5">
       <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->

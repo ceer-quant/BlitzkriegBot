@@ -409,6 +409,10 @@ onMounted(() => void loadRisk())
            风控参数与系统限额同卡呈现，各归各位（插槽内容来自编排壳）。 -->
       <slot name="params" />
 
+      <!-- issue 943: 冻结账户解锁行插进来 —— 红横幅（总览）的另一半：看得见
+           何处被冻，也能就地解锁（插槽内容来自编排壳）。 -->
+      <slot name="unfreezes" />
+
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <Button
           variant="outline" size="sm" :disabled="riskBusy" title="重新读取内核的风控读数（放弃未保存的编辑）"

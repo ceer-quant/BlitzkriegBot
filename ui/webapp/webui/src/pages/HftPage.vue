@@ -16,6 +16,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, Play, Square, Bell, BellOff, X, Clock, Filter, Info, Timer, Check } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type OrderRow, type NetCheckDoc } from '@/api/client'
+import { accountFrozen } from '@/lib/safety'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
@@ -84,6 +85,17 @@ const identityVenue = computed<string>(() => {
   }
   return store.activeAccountVenue
 })
+
+// issue 943 ③：本页倒计时跟随的账户（快照 displayAccount 直接读，与
+// identityVenue 同一显示指针；老内核缺字段回落 null → 永不冻结）。
+const identityAccount = computed<string | null>(
+  () => snap.value?.displayAccount ?? null,
+)
+// 该账户被冻结时倒计时必须停下：内核的轮钟照跑（平仓还在流），但挂钟读数
+// 会把「没在交易」读成「一切正常」。停法 = 本地插值不再前进（serverLeft/
+// serverAt 冻在场值，leftSec 钉在冻结瞬间的残值），新钟首帧也不换锚 ——
+// 解锁瞬间从钉住的残值继续本地插值，等下一帧 server 值自然校准。
+const frozenClock = computed(() => accountFrozen(snap.value?.stats, identityAccount.value))
 const marketName = computed(() => {
   if (!identityVenue.value) return snap.value?.marketActiveName ?? null
   const row = (snap.value?.round?.prices ?? []).find(
@@ -185,6 +197,11 @@ watch(engineUp, (up, was) => {
 })
 
 watch(snap, (s) => {
+  // issue 943：冻结账户的钟不喂新值 —— serverLeft/serverAt 钉在冻结瞬间的
+  // 场值（冻结后内核的 venue 钟照跑，但那不是交易在跑的钟）；解锁后下一帧
+  // server 值自然重新校准。换 venue 的 key 清链照走（识别残值属 venue，不属
+  // 冻结）。
+  if (frozenClock.value) return
   const vr = venueRound.value
   if (vr) {
     // The identity venue has its own clock row: bind to it. The venue key
@@ -213,6 +230,10 @@ watch(snap, (s) => {
 }, { immediate: true })
 
 const { pause: stopTick } = useIntervalFn(() => {
+  // issue 943：冻结期间本地插值不再前进 —— 挂钟上倒数的读数会把「没在交易」
+  // 读成「一切正常」。leftSec 钉在冻结瞬间的残值；解锁后从场值续走，等下一
+  // 帧 server 值重新校准（场值泄漏 ≤1 tick）。
+  if (frozenClock.value) return
   leftSec.value = Math.max(0, Math.round(serverLeft.value - (Date.now() - serverAt.value) / 1000))
 }, 500)
 onUnmounted(() => { stopTick() })
@@ -876,7 +897,14 @@ const journalOpen = ref(false)
               <span class="ml-0.5">s 已过</span>
             </span>
             <span class="opacity-40">·</span>
-            <span :class="round?.canTrade ? 'text-up font-semibold' : 'text-primary'">
+            <!-- issue 943：倒计时随冻结停走 —— 状态词必须说为什么停，只剩
+                 TRADING/WAITING 会把冻结读成等待。FROZEN 优先于其他两态。 -->
+            <span
+              v-if="frozenClock"
+              class="font-semibold text-down"
+              title="该账户已被风控冻结（设置 · 风控可解锁）：倒计时暂停，新单被拒绝"
+            >FROZEN</span>
+            <span v-else :class="round?.canTrade ? 'text-up font-semibold' : 'text-primary'">
               {{ round?.canTrade ? 'TRADING' : 'WAITING' }}
             </span>
           </div>
