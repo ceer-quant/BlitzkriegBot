@@ -1077,7 +1077,7 @@ fn account_remove_sweeps_both_sides_and_the_archaeology() {
     }
     let reply =
         c.remove_account_persisting(&crate::account::AccountId::from("paper"), "panel", "retire");
-    assert!(reply.is_ok(), "remove lands: {reply:?}");
+    assert!(reply.is_ok(), "remove lands: {:?}", reply.is_ok());
     for n in &names {
         assert!(
             !journal_dir.join(n).exists(),
