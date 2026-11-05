@@ -853,3 +853,52 @@ fn an_unknown_book_age_is_fresh_by_choice_and_a_far_expired_one_is_not() {
     );
     assert!(book_is_fresh(&inside, now, &cfg));
 }
+
+/// #935 follow-up (operator: 打不开): the maker-first gate is hot-writable
+/// via `risk.setExit`, so it MUST ride the `risk.limits` readout — that is
+/// the panel's arm signal (`strategyExitMakerFirst !== undefined`). PR #936
+/// shipped the write path but dropped the readout pass-through; the Vue gate
+/// saw `undefined` forever and the toggle stayed honestly-disabled. This is
+/// the contract test: every hot-writable exit knob is on the readout.
+#[test]
+fn exit_readout_carries_the_maker_first_gate() {
+    let exit = ExitConfig::default();
+    let doc = serde_json::to_value(crate::schema::RiskLimitsResult::snapshot(
+        &crate::risk::limits::SystemicRiskLimits::default(),
+        &exit,
+    ))
+    .expect("readout serializes");
+
+    let e = doc.get("exit").expect("exit section");
+    assert_eq!(
+        e.get("strategyExitMakerFirst"),
+        Some(&serde_json::json!(false)),
+        "the gate must ride the readout, default off — its ABSENCE is what kept the panel toggle disabled"
+    );
+    assert_eq!(
+        e.get("trailingEnabled"),
+        Some(&serde_json::json!(exit.trailing_enabled)),
+        "the sibling hot knob stays on the readout (regression guard)"
+    );
+    assert_eq!(
+        e.get("holderStopPct"),
+        Some(&serde_json::json!(50.0)),
+        "the calibrated 50% display row stays (PR 936 fix 3 regression guard)"
+    );
+
+    // Hot-writable mirrors hot-read: flip the knob, readout follows.
+    let on = ExitConfig {
+        strategy_exit_maker_first: true,
+        ..ExitConfig::default()
+    };
+    let doc = serde_json::to_value(crate::schema::RiskLimitsResult::snapshot(
+        &crate::risk::limits::SystemicRiskLimits::default(),
+        &on,
+    ))
+    .expect("readout serializes");
+    assert_eq!(
+        doc.get("exit")
+            .and_then(|e| e.get("strategyExitMakerFirst")),
+        Some(&serde_json::json!(true))
+    );
+}
