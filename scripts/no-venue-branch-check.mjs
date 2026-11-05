@@ -95,6 +95,9 @@ const BRANCH_SHAPES = [
 //   SEGMENT entries: a `/…/` directory segment marking test code anywhere in
 //     the tree (endsWith('/' + seg + '/') on the file's directory part).
 const ALLOW_PREFIXES = [
+  // #840 Wave 1: the unified model lives canonically in the contract crate;
+  // core/market_api/src/unified/ keeps matching a facade re-export only.
+  'core/bk_contract/src/unified/',
   'core/market_api/src/unified/',
   'core/blitzkrieg_core/src/market/mod.rs',
   'extensions/',
