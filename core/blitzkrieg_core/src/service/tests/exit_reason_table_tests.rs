@@ -587,3 +587,108 @@ fn gate_on_profit_side_advisory_rests_a_maker_close() {
     assert_eq!(rested.mode, FillPolicy::Maker);
     assert_eq!(rested.price, dec!(0.41));
 }
+
+/// #939: gate ON + a profit-side reason (`trailing_stop`, the very tag the
+/// probe caught resting 0.11 across the touch) + the position UNDERWATER —
+/// the holder-side pnl guard degrades the advisory to the immediate taker
+/// sweep. A deep-loss close left resting above the bid is #915 in reverse:
+/// the maker never crosses a falling touch until `maker_timeout_ms` gives
+/// up, while the position keeps losing.
+#[test]
+fn the_pnl_guard_bars_maker_first_on_an_underwater_close() {
+    let mut c = core();
+    // Gate ON (the setting the issue is about), advisory ON, reason on the
+    // profit-side side of #936's whitelist.
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    // 0.40 entry, bids now 0.30: the position is 25% underwater (a deep-loss
+    // `trailing_stop` manifest can legally fire here — arm/giveback anchor
+    // on the peak, not on the entry).
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.30), dec!(500))],
+        vec![(dec!(0.34), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "trailing_stop".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+        });
+    c.tick(2_000).unwrap();
+    // The close swept the touch as a taker: gone now, no live sell resting.
+    assert!(
+        c.positions().open_positions().is_empty(),
+        "an underwater advisory close must sweep, not rest"
+    );
+    assert!(
+        !c.ome()
+            .live_orders()
+            .iter()
+            .any(|o| o.side == Side::Sell && o.mode == FillPolicy::Maker),
+        "the pnl guard must degrade the maker-first advisory to taker on an underwater close"
+    );
+    // The ledger still stamps the close with the strategy's own tag (the
+    // guard is an execution gate, #936's passthrough is untouched).
+    assert_eq!(
+        c.positions().closed_positions()[0].exit_reason,
+        ExitReason::TrailingStop
+    );
+}
+
+/// …and a FLAT-to-profit close (proceeds at/above entry) keeps the #936
+/// behavior: maker-first still rests its inside quote. The guard fees in
+/// breadth only, never depth on the profit side.
+#[test]
+fn the_pnl_guard_lets_a_profit_side_close_still_rest_as_maker() {
+    let mut c = core();
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    // 0.40 entry, bids 0.44: the close is IN profit, the guard is inert here.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.44), dec!(500))],
+        vec![(dec!(0.48), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "trailing_stop".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+        });
+    c.tick(2_000).unwrap();
+    // One-tick spread: no inside grid point, the maker close rests at 0.45
+    // (one tick above the 0.44 bid). The position stays open like #936.
+    assert_eq!(
+        c.positions().open_positions().len(),
+        1,
+        "a profitable advisory close still rests as a maker"
+    );
+    let rested: Vec<_> = c
+        .ome()
+        .live_orders()
+        .into_iter()
+        .filter(|o| o.side == Side::Sell)
+        .collect();
+    let rested = rested.first().expect("the maker close must be live");
+    assert_eq!(rested.mode, FillPolicy::Maker);
+    assert_eq!(rested.price, dec!(0.45));
+}
