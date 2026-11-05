@@ -684,6 +684,7 @@ impl RiskLimitsResult {
                 force_exit_sec: exit.force_exit_sec,
                 trailing_enabled: exit.trailing_enabled,
                 holder_stop_pct: exit.holder_stop_pct,
+                strategy_exit_maker_first: exit.strategy_exit_maker_first,
             },
         }
     }
@@ -728,6 +729,13 @@ pub struct RiskExitView {
     /// change is a separate ruling); old panels ignore it.
     #[serde(with = "crate::decimal")]
     pub holder_stop_pct: Decimal,
+    /// #935 fix 2: strategy-exit maker-first gate's current state — the
+    /// panel's toggle row arms on this (undefined = old kernel → the Vue
+    /// gate keeps the row honestly disabled). Same hot-writable-via-
+    /// `risk.setExit` semantics as `trailing_enabled` above; old panels
+    /// ignore it.
+    #[serde(default)]
+    pub strategy_exit_maker_first: bool,
 }
 
 // ── E29 (§12.2) — K-line subscriptions ───────────────────────────────────────
