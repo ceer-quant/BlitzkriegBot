@@ -1,0 +1,73 @@
+{
+  "name": "postonly_pair",
+  "version": "1.0.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "bb182c2201349b414caef384358e99475e4532ab765578560cf9af22a5666608",
+  "author": "BlitzkriegBot",
+  "description": "Post-only paired maker with a pairing LOOP (issue #872): when the sum of the two RESTABLE post-only quotes is under max_pair_cost, buy BOTH legs with EQUAL declared share counts, each quote strictly UNDER its own ask (the kernel refuses an at-ask post-only POST, #464 — there is no at-ask mode). The pair is NOT a single frozen batch: a fresh attempt emits both legs instantly, then every later cycle re-quotes BOTH legs under the per-leg requote_sec throttle (default 15 s — the ticket's 10-20 s rhythm), so a moved book gets a moved quote. Maker fee = 0 is the premise (the manifest declares entry_maker — #742 post-only, never escalates; bk.fees() is touched ONLY for the naked-remainder's fallback cost). INVENTORY CAP: held shares (bk.holdings() — this strategy's positions) count against max_shares_per_leg; the pair declares the SMALLER leg's head-room; at cap the condition is done — no further sizing, the ticket's hard single-side ceiling. NAKED REMAINDER: the completion leg is qualified every cycle by the top-up rule (incremental all-in = ask + the fallback taker fee vs max_top_up_cost), sized to the exact shortfall, and throttled like any leg — #848 hold-to-settlement release is its re-entry; a gap past the ceiling is dead and the held leg rides to settlement. NEAR-EXPIRY PULL: at time_left <= pull_before_sec the condition's lingering bids are pulled via the kernel's breaks channel (#904's cancel vocabulary), once per round, and nothing re-quotes after. MERGE: a complete pair in hand emits reason=merge for BOTH legs every cycle (the kernel burns stacked pairs at $1/pair, fee-free). ZERO kernel changes; same surfaces as maker_pair (#871): entry_maker, atomic_batch (NO pot ships — the allowlist stays empty until replay + soak say GO), holds_to_settlement, breaks; trailing_exit NOT declared (the three-state default, #742). The conservative replay stance: only trade-through maker fills count, no rebate inside the strategy's own math. Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "holds_to_settlement": true,
+  "entry_maker": true,
+  "atomic_batch": true,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 60
+  },
+  "tunables": {
+    "max_pair_cost": {
+      "type": "decimal",
+      "default": "0.985",
+      "min": "0.98",
+      "max": "0.999"
+    },
+    "max_shares_per_leg": {
+      "type": "decimal",
+      "default": "1",
+      "min": "1",
+      "max": "100"
+    },
+    "max_top_up_cost": {
+      "type": "decimal",
+      "default": "0.985",
+      "min": "0.98",
+      "max": "0.999"
+    },
+    "requote_sec": {
+      "type": "int",
+      "default": "15",
+      "min": "0",
+      "max": "120"
+    },
+    "min_time_left_sec": {
+      "type": "int",
+      "default": "60",
+      "min": "30",
+      "max": "300"
+    },
+    "pull_before_sec": {
+      "type": "int",
+      "default": "20",
+      "min": "0",
+      "max": "60"
+    },
+    "entry_quote_mode": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "3"
+    },
+    "entry_reprice_ticks": {
+      "type": "int",
+      "default": "1",
+      "min": "1",
+      "max": "10"
+    }
+  },
+  "modes": [
+    {
+      "market_type": "prediction",
+      "structure": "binary_outcome_wheel"
+    }
+  ]
+}
