@@ -1116,3 +1116,8 @@ mod tests;
 /// ledger in `service::account_precision_tests`; these pin the arithmetic.
 #[cfg(test)]
 mod precision_tests;
+
+/// MERGE (task 2.2): pair collection for pair-discount arbitrage — the
+/// pair-collection suite, split out of `tests.rs` (#780 ratchet).
+#[cfg(test)]
+mod merge_tests;
