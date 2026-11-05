@@ -30,7 +30,9 @@ mod freeze;
 mod persist;
 
 #[cfg(test)]
-pub(crate) use exits::strategy_signal_sell_bid;
+pub(crate) use exits::{
+    exit_reason_from_strategy_tag, reason_is_profit_side, strategy_signal_sell_bid,
+};
 
 // #834 cycle 1: the freeze/circuit-breaker state book lives beside its only
 // manager; `service.rs` re-exports it for the struct field and the

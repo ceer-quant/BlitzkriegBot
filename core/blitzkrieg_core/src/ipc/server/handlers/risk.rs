@@ -114,7 +114,8 @@ pub(crate) async fn handle_risk(
                     "{e} — nothing was applied; the exit fields are \
                          stopLossPct (percent of entry price, > 0), takeProfitPct \
                          (percent of entry price, > 0), forceExitSec (seconds, \
-                         0 = the guillotine is OFF), trailingEnabled (bool)"
+                         0 = the guillotine is OFF), trailingEnabled (bool), \
+                         strategyExitMakerFirst (bool)"
                 ),
                 None,
             )),

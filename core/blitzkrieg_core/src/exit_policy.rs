@@ -154,6 +154,14 @@ pub struct ExitConfig {
     pub exit_grace_sec: i64,
     pub maker_exits_for_tp_only: bool,
     pub maker_first_exit_enabled: bool,
+    /// #935 fix 2: strategy-signal exits that declare `use_maker` AND carry a
+    /// profit-side reason (take_profit / trailing_stop) rest as a maker
+    /// (escalating on the OME's `maker_timeout_ms` clock, like every maker).
+    /// Default OFF — byte behaviour until the operator opts in (`risk.setExit`,
+    /// hot). Protective reasons (stop_loss, time_exit) never convert
+    /// regardless of this switch or the advisory (#915: a resting stop does
+    /// not protect a crashing leg — 0/2).
+    pub strategy_exit_maker_first: bool,
     /// F6: a book older than this (sec, measured against the tick's `now_ms`)
     /// must not price an exit — a stale quote is not an executable one.
     /// Snapshots with `timestamp <= 0` (synthetic tests, legacy records) are
@@ -288,6 +296,7 @@ impl Default for ExitConfig {
             exit_grace_sec: 3,
             maker_exits_for_tp_only: false,
             maker_first_exit_enabled: true,
+            strategy_exit_maker_first: false,
             max_book_age_sec: BOOK_TRUST_SEC,
         }
     }

@@ -1090,6 +1090,7 @@ fn a_merge_intent_collects_one_dollar_per_pair_and_the_audit_stays_true() {
             token_id: "tok-up".into(),
             reason: "merge".into(),
             account_id: crate::account::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(3).unwrap();
 
@@ -1160,6 +1161,7 @@ fn a_merge_intent_without_a_pair_collects_nothing() {
             token_id: "tok-up".into(),
             reason: "merge".into(),
             account_id: crate::account::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(3).unwrap();
 
@@ -1208,6 +1210,7 @@ fn a_failed_merge_receipt_never_credits_cash() {
             token_id: "tok-up".into(),
             reason: "merge".into(),
             account_id: crate::account::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(3).unwrap();
     assert!(c.positions().open_positions().is_empty());
@@ -1327,6 +1330,7 @@ fn a_merge_claim_survives_a_restart_and_credits_once() {
             token_id: "tok-up".into(),
             reason: "merge".into(),
             account_id: crate::account::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(3).unwrap();
     assert_eq!(c.settlement.merge_receivable_usd(), dec!(5));

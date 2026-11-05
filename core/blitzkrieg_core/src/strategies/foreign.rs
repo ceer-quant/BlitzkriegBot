@@ -1215,12 +1215,20 @@ fn adopt_eval_json(
                     .and_then(|r| r.as_str())
                     .unwrap_or("strategy")
                     .to_string();
+                // #935 fix 2: the advisory is opt-IN — an absent/absent-minded
+                // `use_maker` stays the historic taker sweep (advisory
+                // default-false; the kernel gate does the rest).
+                let use_maker = e
+                    .get("use_maker")
+                    .and_then(|m| m.as_bool())
+                    .unwrap_or(false);
                 exit_intents.push(StrategyExitIntent {
                     token_id: token.to_string(),
                     reason,
                     // The intent closes THIS scope's row (the emitting scope's
                     // account — the same second slice key the held view uses).
                     account_id: scope.to_string(),
+                    use_maker,
                 });
             }
         }

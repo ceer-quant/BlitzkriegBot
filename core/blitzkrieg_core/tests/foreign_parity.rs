@@ -225,6 +225,7 @@ impl EngineStrategy for InTreeParity {
                 token_id: e.token,
                 reason: e.reason,
                 account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                use_maker: false,
             });
         }
         let mut out = Vec::new();

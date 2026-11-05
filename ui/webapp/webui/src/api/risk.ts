@@ -45,6 +45,16 @@ export interface RiskExitView {
    * 开关降级为不可用态，不造默认值。
    */
   trailingEnabled?: boolean
+  /**
+   * issue 935：持有到期策略的真实停损带宽（出厂 50）——面板通用 12% 不绑
+   * holder，只显示 12% 会误读内核姿势。老内核缺省 → undefined，如实降级。
+   */
+  holderStopPct?: number | string
+  /**
+   * issue 935：策略出场 maker-first 总开关（出厂 false，字节保持）。
+   * 老内核缺省 → undefined，开关降级为不可用态，不造默认值。
+   */
+  strategyExitMakerFirst?: boolean
 }
 
 /** The whole `risk.limits` readout. */
@@ -104,6 +114,8 @@ export interface RiskSetExitBody {
   forceExitSec?: number
   /** 移动止盈武装开关（出厂 false，issue 356 校准）；热配升格后进请求体。 */
   trailingEnabled?: boolean
+  /** issue 935：策略出场 maker-first 总开关（出厂 false，字节保持）。 */
+  strategyExitMakerFirst?: boolean
   reason?: string
 }
 

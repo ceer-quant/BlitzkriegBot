@@ -161,6 +161,13 @@ pub struct EntryPairDecl {
 pub struct Exit {
     pub token: String,
     pub reason: String,
+    /// #935 fix 2: the strategy MAY advise resting this close as a maker
+    /// instead of sweeping the touch. It is an advisory only — the kernel
+    /// converts it to a maker close only for PROFIT-SIDE reasons
+    /// (take_profit / trailing_stop) and only when the operator's
+    /// `strategy_exit_maker_first` gate is on; protective reasons (stop_loss /
+    /// time_exit) stay taker regardless (#915).
+    pub use_maker: bool,
 }
 
 /// A trend break (the kernel cancels the token's resting bids). `broken_price`

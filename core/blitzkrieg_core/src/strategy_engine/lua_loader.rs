@@ -900,6 +900,7 @@ impl EngineStrategy for LuaEngineAdapter {
                 } else {
                     e.reason
                 },
+                use_maker: e.use_maker,
             });
         }
         for b in intents.breaks {
