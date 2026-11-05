@@ -5,6 +5,11 @@ zero-dependency bare Node (stdlib only) — no `npm install` needed at the repo
 root.** The production runtime is 100% Rust; Node here only drives temporary,
 isolated cores for verification.
 
+These gates are how the TradingOS promise is enforced: the kernel stays stable
+(**Build Once, Trade Everywhere**) only while every change proves the
+dry/live ledger parity, the market-agnostic core boundary, and the risk
+invariants hold.
+
 Most gates spawn a temporary `blitzkrieg-core` (isolated socket via `TMPDIR` or
 `BZK_CORE_ISOLATION`) and talk JSON-RPC over UDS through
 [`lib/core-client.mjs`](lib/core-client.mjs). Build the core first:
