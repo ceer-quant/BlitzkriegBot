@@ -352,6 +352,7 @@ fn a_strategy_exit_sells_the_best_bid_not_the_mid() {
             token_id: "tok".into(),
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(2_000).unwrap();
 
@@ -360,7 +361,7 @@ fn a_strategy_exit_sells_the_best_bid_not_the_mid() {
         "the bid was marketable; the position must close"
     );
     let closed = &c.positions().closed_positions()[0];
-    assert_eq!(closed.exit_reason, ExitReason::StrategySignal);
+    assert_eq!(closed.exit_reason, ExitReason::TakeProfit);
     assert_eq!(
         closed.exit_price,
         dec!(0.42),
@@ -403,11 +404,12 @@ fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
             token_id: "tok".into(),
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(2_000).unwrap();
     assert_eq!(c.positions().open_positions().len(), 1);
     assert!(
-        c.ome.live_orders().is_empty(),
+        c.ome().live_orders().is_empty(),
         "no sell is rested off a mark"
     );
 
@@ -423,6 +425,7 @@ fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
             token_id: "tok".into(),
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
+            use_maker: false,
         });
     c.tick(71_000).unwrap();
     assert_eq!(
@@ -430,4 +433,157 @@ fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
         1,
         "a stale bid does not close the position"
     );
+}
+
+/// #935 fix 1: the strategy's own reason tag is what the ledger stamps when
+/// the close fills — a take_profit close reads as `take_profit`, not the
+/// blanket `strategy_signal`. Unknown tags keep the historic stamp.
+#[test]
+fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("take_profit"),
+        ExitReason::TakeProfit
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("take_profit_price"),
+        ExitReason::TakeProfit
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("trailing_stop"),
+        ExitReason::TrailingStop
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("time_exit"),
+        ExitReason::TimeExit
+    );
+    // Unknown tags fall back — no invented categories.
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("momentum_flip"),
+        ExitReason::StrategySignal
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag(""),
+        ExitReason::StrategySignal
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("merge"),
+        ExitReason::StrategySignal,
+        "merge never routes through the sell path; a stray tag must not resemble one"
+    );
+
+    // End-to-end: the intent's tag lands on the closed row.
+    let mut c = core();
+    open_position(&mut c, "tok", 1_000);
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.60), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: false,
+        });
+    c.tick(2_000).unwrap();
+    assert!(c.positions().open_positions().is_empty());
+    let closed = &c.positions().closed_positions()[0];
+    assert_eq!(closed.exit_reason, ExitReason::TakeProfit);
+}
+
+/// #935 fix 2: the maker advisory converts ONLY when reason is profit-side
+/// AND the kernel gate is on. Gate off (the shipped default) keeps the taker
+/// sweep for every declaration; a `use_maker` stop never converts either way.
+#[test]
+fn the_maker_advisory_converts_only_profit_side_exits_behind_the_gate() {
+    assert!(super::risk_admission::reason_is_profit_side(
+        ExitReason::TakeProfit
+    ));
+    assert!(super::risk_admission::reason_is_profit_side(
+        ExitReason::TrailingStop
+    ));
+    assert!(!super::risk_admission::reason_is_profit_side(
+        ExitReason::StopLoss
+    ));
+    assert!(!super::risk_admission::reason_is_profit_side(
+        ExitReason::TimeExit
+    ));
+    assert!(!super::risk_admission::reason_is_profit_side(
+        ExitReason::StrategySignal
+    ));
+
+    let mut c = core();
+    open_position(&mut c, "tok", 1_000);
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.60), dec!(500))],
+        2_000,
+    );
+    // Advisory on, gate OFF (the shipped default): the order goes out taker.
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+        });
+    c.tick(2_000).unwrap();
+    assert!(c.positions().open_positions().is_empty());
+    assert!(
+        c.ome
+            .live_orders()
+            .iter()
+            .all(|o| o.side == Side::Sell && o.mode != FillPolicy::Maker),
+        "the default gate-off posture stays the taker sweep"
+    );
+}
+
+/// #935 fix 2 end-to-end: gate ON + a declared advisory + a profit-side
+/// reason → the close rests as a MAKER instead of sweeping the touch.
+#[test]
+fn gate_on_profit_side_advisory_rests_a_maker_close() {
+    let mut c = core();
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.40), dec!(500))],
+        vec![(dec!(0.44), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+        });
+    c.tick(2_000).unwrap();
+    // A one-tick spread (0.40 bid / 0.44 ask) leaves an inside rest at 0.41:
+    // the maker close rests and the position stays open until it fills or
+    // times out — not swept at the 0.40 touch.
+    assert_eq!(
+        c.positions().open_positions().len(),
+        1,
+        "the maker close is resting, not swept"
+    );
+    let rested: Vec<_> = c
+        .ome()
+        .live_orders()
+        .into_iter()
+        .filter(|o| o.side == Side::Sell)
+        .collect();
+    let rested = rested.first().expect("the maker close must be live");
+    assert_eq!(rested.mode, FillPolicy::Maker);
+    assert_eq!(rested.price, dec!(0.41));
 }

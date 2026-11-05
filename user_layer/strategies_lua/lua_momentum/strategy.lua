@@ -505,7 +505,10 @@ local function consider_exit(out, row, round)
 
     local tp = dec_param(params, "take_profit_pct", DEFAULT_TP)
     if tp.m > 0 and net_reaches(proceeds, entry, tp) then
-        out.exits[#out.exits + 1] = { token = token, reason = "take_profit" }
+        -- #935: TP-class exits are the maker-first candidates — the gate
+        -- (strategyExitMakerFirst) converts the advisory only when it's on,
+        -- so this field is inert until the operator opts in.
+        out.exits[#out.exits + 1] = { token = token, reason = "take_profit", use_maker = true }
         return
     end
 
@@ -514,7 +517,7 @@ local function consider_exit(out, row, round)
     -- loss-capable exit).
     local px = dec_param(params, "take_profit_price", DEC_0)
     if px.m > 0 and dec_cmp(bid, px) >= 0 and net_reaches(proceeds, entry, DEC_0) then
-        out.exits[#out.exits + 1] = { token = token, reason = "take_profit_price" }
+        out.exits[#out.exits + 1] = { token = token, reason = "take_profit_price", use_maker = true }
         return
     end
 
@@ -523,7 +526,7 @@ local function consider_exit(out, row, round)
     if arm.m > 0 and give.m > 0 and peak ~= nil
         and net_reaches(peak, entry, arm)
         and gave_back(peak, proceeds, entry, give) then
-        out.exits[#out.exits + 1] = { token = token, reason = "trailing_stop" }
+        out.exits[#out.exits + 1] = { token = token, reason = "trailing_stop", use_maker = true }
         return
     end
 

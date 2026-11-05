@@ -93,6 +93,7 @@ function syncBuffers(d: RiskLimitsDoc): void {
   // 老内核缺 trailingEnabled → undefined：开关缺省 = 关（显示层如实降级，
   // 发送的 patch 里也不带它 —— 不会意外把未声明的开关拨到 true）。
   next['trailingEnabled'] = String(d.exit.trailingEnabled ?? false)
+  next['makerFirstExits'] = String(d.exit.strategyExitMakerFirst ?? false)
   editBufs.value = next
   riskReceipt.value = null
   exitReceipt.value = null
@@ -112,9 +113,10 @@ function fieldUnit(field: string): string {
   if (field === 'forceExitSec') return 's'
   return ''
 }
-/** trailing 行的回执 from/to 是 'true'/'false' 原文 —— 展示成 开/关。 */
+/** bool 行（移动止盈 / maker-first）的回执 from/to 是 'true'/'false' 原文 —— 展示成 开/关。 */
+const EXIT_BOOL_FIELDS = new Set(['trailingEnabled', 'strategyExitMakerFirst'])
 function changeText(c: { field: string; from: string; to: string }): string {
-  if (c.field !== 'trailingEnabled') {
+  if (EXIT_BOOL_FIELDS.has(c.field)) {
     const u = fieldUnit(c.field)
     const f = c.from === '0' ? '关闭' : c.from
     const t = c.to === '0' ? '关闭' : c.to
@@ -144,7 +146,7 @@ function buildPatch(): Record<string, string> | string {
 // 内核里它是行为旋钮），percentages 拒绝 ≤ 0，forceExitSec 0 = 关闭强平
 // （出厂校准值）。生效 = live：新入场下一笔按新值绑定，已开仓位的退出扫描
 // 同步跟随 —— 内核回执逐项 old→new。
-interface ExitRowDef { field: string; label: string; toggle?: boolean; hint?: string }
+interface ExitRowDef { field: string; label: string; toggle?: boolean; hint?: string; readOnly?: boolean }
 const EXIT_ROW_DEFS: ExitRowDef[] = [
   { field: 'stopLossPct', label: '止损' },
   { field: 'takeProfitPct', label: '止盈' },
@@ -155,6 +157,18 @@ const EXIT_ROW_DEFS: ExitRowDef[] = [
     toggle: true,
     hint: '浮盈回吐即锁利离场。出厂关（issue 356 校准：旧操盘手全部持有到期）；spread_arb 一类价差策略建议开。',
   },
+  {
+    field: 'makerFirstExits',
+    label: '策略出场 maker-first',
+    toggle: true,
+    hint: 'issue 935：on 时利润侧策略出场（止盈/移动止盈）先挂单后升级，降出场烧格；保护侧（止损/强平）永不转挂单。',
+  },
+  {
+    field: 'holderStopPct',
+    label: '止损（持有到期口径）',
+    readOnly: true,
+    hint: 'issue 935：holds_to_settlement 策略的真实硬止损带宽（内核校准，只读不改）。',
+  },
 ]
 const EXIT_FIELDS = new Set(EXIT_ROW_DEFS.map((r) => r.field))
 
@@ -164,14 +178,19 @@ function exitCurrentText(field: string): string {
   if (!e) return '—'
   if (field === 'stopLossPct') return `%（当前 ${e.stopLossPct}%）`
   if (field === 'takeProfitPct') return `%（当前 ${e.takeProfitPct}%）`
+  if (field === 'holderStopPct') return `%（持有到期策略生效 ${e.holderStopPct ?? '—'}%；通用 12% 不绑它们）`
   return `秒（当前 ${e.forceExitSec}s${Number(e.forceExitSec) === 0 ? '，关闭' : ''}）`
 }
 function exitPlaceholder(field: string): string {
   const e = riskDoc.value?.exit
-  if (!e) return ''
+  if (!e || rowIsReadOnly(field)) return ''
   if (field === 'stopLossPct') return String(e.stopLossPct)
   if (field === 'takeProfitPct') return String(e.takeProfitPct)
   return String(e.forceExitSec)
+}
+/** issue 935：holderStopPct 是内核校准的显示行，不是可写旋钮。 */
+function rowIsReadOnly(field: string): boolean {
+  return EXIT_ROW_DEFS.find((r) => r.field === field)?.readOnly ?? false
 }
 /** trailing 开关（toggle 行）：草稿缓冲存 'true'/'false' 字符串。 */
 function trailingOn(): boolean {
@@ -184,6 +203,17 @@ function setTrailing(on: boolean): void {
 }
 /** 老内核不认识 trailingEnabled（读数缺字段）→ 开关禁用并说明。 */
 const trailingSupported = computed(() => riskDoc.value?.exit.trailingEnabled !== undefined)
+
+/** issue 935 maker-first 开关（toggle 行，同 trailing 的缓冲/适用性约定）。 */
+function makerFirstOn(): boolean {
+  return (editBufs.value['makerFirstExits'] ?? 'false') === 'true'
+}
+function setMakerFirst(on: boolean): void {
+  editBufs.value['makerFirstExits'] = String(on)
+  riskMsg.value = null
+  exitReceipt.value = null
+}
+const makerFirstSupported = computed(() => riskDoc.value?.exit.strategyExitMakerFirst !== undefined)
 
 /** 退出纪律没有 LimitSource 枚举：热改后 badge 如实写「热改」。 */
 function exitSourceLabel(): string {
@@ -218,6 +248,11 @@ function buildExitPatch(): Record<string, string | number | boolean> | string {
   if (e.trailingEnabled !== undefined) {
     const tr = (editBufs.value['trailingEnabled'] ?? 'false') === 'true'
     if (tr !== e.trailingEnabled) patch.trailingEnabled = tr
+  }
+  // issue 935 maker-first 开关同约定：老内核缺字段不拨。
+  if (e.strategyExitMakerFirst !== undefined) {
+    const mf = (editBufs.value['makerFirstExits'] ?? 'false') === 'true'
+    if (mf !== e.strategyExitMakerFirst) patch.strategyExitMakerFirst = mf
   }
   return patch
 }
@@ -345,14 +380,16 @@ onMounted(() => void loadRisk())
             <span class="text-faint-fg">{{ row.label }}<span v-if="row.hint" class="ml-1 text-[10.5px] text-faint-fg">{{ row.hint }}</span></span>
             <span class="flex items-center gap-2">
               <!-- issue 356 升格：trailingEnabled 热配开关（bool 行用 Switch，
-                   数值行保持 Input；老内核缺字段 → 禁用态，不造默认值）。 -->
+                   数值行保持 Input；老内核缺字段 → 禁用态，不造默认值）。
+                   issue 935：holderStopPct 只读显示行（无输入框）。 -->
               <Switch
                 v-if="row.toggle"
-                :model-value="trailingOn()"
-                :disabled="!trailingSupported"
+                :model-value="row.field === 'trailingEnabled' ? trailingOn() : makerFirstOn()"
+                :disabled="row.field === 'trailingEnabled' ? !trailingSupported : !makerFirstSupported"
                 :aria-label="row.label"
-                @update:model-value="(v: boolean) => setTrailing(v)"
+                @update:model-value="(v: boolean) => (row.field === 'trailingEnabled' ? setTrailing(v) : setMakerFirst(v))"
               />
+              <span v-else-if="row.readOnly" class="text-[12px] text-fg">{{ riskDoc?.exit?.holderStopPct ?? '—' }}%</span>
               <Input
                 v-else
                 v-model="editBufs[row.field]"
@@ -363,7 +400,7 @@ onMounted(() => void loadRisk())
                 :placeholder="exitPlaceholder(row.field)"
                 :aria-label="row.label"
               />
-              <span class="text-[10.5px] font-normal text-faint-fg">{{ row.toggle ? (trailingSupported ? (trailingOn() ? '开' : '关') : '内核不支持') : exitCurrentText(row.field) }}</span>
+              <span class="text-[10.5px] font-normal text-faint-fg">{{ row.readOnly ? '内核校准' : row.field === 'trailingEnabled' ? (trailingSupported ? (trailingOn() ? '开' : '关') : '内核不支持') : row.toggle ? (makerFirstSupported ? (makerFirstOn() ? '开' : '关') : '内核不支持') : exitCurrentText(row.field) }}</span>
               <Badge variant="gold">{{ exitSourceLabel() }}</Badge>
             </span>
           </div>

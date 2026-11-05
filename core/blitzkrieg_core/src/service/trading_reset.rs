@@ -499,6 +499,17 @@ impl Core {
             });
         }
 
+        // #935 fix 2: same bool convention as trailingEnabled — no illegal
+        // value to refuse, the patch either names it or it doesn't.
+        if let Some(on) = patch.strategy_exit_maker_first {
+            changes.push(ExitSetChange {
+                field: "strategyExitMakerFirst",
+                from: current.strategy_exit_maker_first.to_string(),
+                to: on.to_string(),
+                effect: "live",
+            });
+        }
+
         if changes.is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -524,6 +535,9 @@ impl Core {
             }
             if let Some(on) = patch.trailing_enabled {
                 exit.trailing_enabled = on;
+            }
+            if let Some(on) = patch.strategy_exit_maker_first {
+                exit.strategy_exit_maker_first = on;
             }
             self.config.positions.exit = exit.clone();
             let mut positions = self.config.positions.clone();

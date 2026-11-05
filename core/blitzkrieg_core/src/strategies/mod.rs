@@ -172,6 +172,14 @@ pub struct StrategyExitIntent {
     /// intent): the field is written by the engine at emission, never parsed,
     /// so there is no back-compat shape to keep.
     pub account_id: String,
+    /// The strategy's own suggestion to rest the close as a MAKER instead of
+    /// sweeping the touch (#935): the execution advisory rides the intent, the
+    /// kernel still decides — a TP-class reason the exit config's maker-first
+    /// gate agrees with converts to `FillPolicy::Maker`; everything else
+    /// (stops, time outs, momentum reversals) stays taker regardless of the
+    /// flag (#915: a resting stop is no protection against a crashing leg).
+    /// Default `false` — every existing emitter keeps byte behaviour.
+    pub use_maker: bool,
 }
 
 /// A position slice the host hands a strategy for one evaluation cycle —

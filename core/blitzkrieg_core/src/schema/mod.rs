@@ -683,6 +683,7 @@ impl RiskLimitsResult {
                 take_profit_pct: exit.take_profit_pct,
                 force_exit_sec: exit.force_exit_sec,
                 trailing_enabled: exit.trailing_enabled,
+                holder_stop_pct: exit.holder_stop_pct,
             },
         }
     }
@@ -720,6 +721,13 @@ pub struct RiskExitView {
     /// (hot-writable via `risk.setExit`). Incremental field — old panels
     /// ignore it.
     pub trailing_enabled: bool,
+    /// #935 fix 3: the stop width a hold-to-settlement strategy's positions
+    /// actually run on (`holder_stop_pct`) — the panel's 12% readout does not
+    /// bind holders, and showing only it misstates the kernel's posture.
+    /// Read-only display field (the 50% semantics are calibrated, funadmental
+    /// change is a separate ruling); old panels ignore it.
+    #[serde(with = "crate::decimal")]
+    pub holder_stop_pct: Decimal,
 }
 
 // ── E29 (§12.2) — K-line subscriptions ───────────────────────────────────────
@@ -1068,6 +1076,13 @@ pub struct SetExitParams {
     /// 都是合法值（bool 没有「非法值」可拒）。
     #[serde(default)]
     pub trailing_enabled: Option<bool>,
+    /// #935 fix 2：策略出场 maker-first 总开关。**出厂 false**（字节保持）。
+    /// on 时：策略出场建议里带 `use_maker` 且 reason 是利润侧
+    /// （take_profit / trailing_stop）的平仓先挂 maker（`maker_timeout_ms`
+    /// 期满升 taker）；保护侧（stop_loss / time_exit）永不转 maker
+    /// （#915 反事实：挂单止损对崩腿 0/2 无效）。
+    #[serde(default)]
+    pub strategy_exit_maker_first: Option<bool>,
     /// Free-text note from the caller, echoed into the audit line.
     #[serde(default)]
     pub reason: Option<String>,
@@ -1081,6 +1096,7 @@ impl SetExitParams {
             && self.take_profit_pct.is_none()
             && self.force_exit_sec.is_none()
             && self.trailing_enabled.is_none()
+            && self.strategy_exit_maker_first.is_none()
     }
 }
 

@@ -469,6 +469,7 @@ mod tests {
                     token_id: self.token.clone(),
                     reason: "stub-close".into(),
                     account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+                    use_maker: false,
                 }]
             } else {
                 Vec::new()

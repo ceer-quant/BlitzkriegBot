@@ -259,6 +259,7 @@ fn disabling_a_scope_with_positions_demotes_exits_only() {
                 token_id: "held_tok".into(),
                 reason: "manual (exit-only probe)".into(),
                 account_id: "paper".into(),
+                use_maker: false,
             }]
         }
     }

@@ -24,6 +24,32 @@ pub(crate) fn strategy_signal_sell_bid(
     book.best_bid().filter(|b| *b > Decimal::ZERO)
 }
 
+/// #935 fix 1: map a strategy's own exit tag onto the ledger's `ExitReason`.
+///
+/// The strategy-signal channel used to stamp EVERY close
+/// `ExitReason::StrategySignal` while the strategy's tag survived only inside
+/// the order's internal key — a take-profit close and a panic close were
+/// indistinguishable everywhere the ledger is read. Real tags from the shipped
+/// emitters map to the variant they name; an unknown tag keeps the historic
+/// blanket stamp (open emission, no invented categories).
+pub(crate) fn exit_reason_from_strategy_tag(reason: &str) -> ExitReason {
+    match reason {
+        "take_profit" | "take_profit_price" => ExitReason::TakeProfit,
+        "trailing_stop" => ExitReason::TrailingStop,
+        "time_exit" => ExitReason::TimeExit,
+        _ => ExitReason::StrategySignal,
+    }
+}
+
+/// #935 fix 2's reason half: only the PROFIT side of the exit table may take
+/// the maker-first advisory. A tag mapped to a stop-ish variant is ignored by
+/// design — #915's counterfactual showed a resting stop does not protect a
+/// crashing leg (0/2 fills), so "use_maker" on the protective side stays dead
+/// even if a strategy declares it.
+pub(crate) fn reason_is_profit_side(reason: ExitReason) -> bool {
+    matches!(reason, ExitReason::TakeProfit | ExitReason::TrailingStop)
+}
+
 impl Core {
     pub fn cancel(&mut self, id: &str, now_ms: i64) -> CoreResult<()> {
         let order = self
@@ -1145,13 +1171,36 @@ impl Core {
                 })
                 .take(32)
                 .collect();
+            // #935 fix 1: the strategy's own reason is what the ledger records
+            // when this close fills. Only tags that map to a real `ExitReason`
+            // variant pass through; an unknown tag keeps the historic blanket
+            // `StrategySignal` stamp (old files are never rewritten either
+            // way, so history stays stable).
+            let reason = exit_reason_from_strategy_tag(&intent.reason);
+            // #935 fix 2: a TP-class close may rest as a maker (the advisory
+            // rides the intent; the gate + the driver's own `use_maker` have
+            // to agree). Stops and time outs never convert — #915's
+            // counterfactual showed a resting stop does not protect a
+            // crashing leg (0/2), so `use_maker` on those reasons is ignored
+            // no matter what the strategy declared.
+            let use_maker = intent.use_maker
+                && reason_is_profit_side(reason)
+                && self.config.positions.exit.strategy_exit_maker_first;
+            if intent.use_maker && !use_maker {
+                tracing::debug!(
+                    token = %pos.token_id,
+                    strategy = %pos.strategy,
+                    reason = %intent.reason,
+                    "maker-first exit advisory not applied (reason class or kernel gate)"
+                );
+            }
             jobs.push(ExitJob {
                 position_id: pos.id.clone(),
                 token: pos.token_id.clone(),
                 condition_id: pos.condition_id.clone(),
                 price,
-                reason: ExitReason::StrategySignal,
-                use_maker: false,
+                reason,
+                use_maker,
                 internal_key: exit_intent_key("exit-strategy", &pos, &tag),
                 strategy: pos.strategy.clone(),
                 asset: pos.asset.clone(),
