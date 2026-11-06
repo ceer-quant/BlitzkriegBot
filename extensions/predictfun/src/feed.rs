@@ -19,8 +19,8 @@
 //!     engine's clock domain (`PREDICT_POLL_MS` sets the cadence).
 
 use crate::rest::PredictRest;
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{BookUpdate, MarketHost, TokenId};
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{BookUpdate, MarketHost, TokenId};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +81,7 @@ impl FeedHandle {
     }
 }
 
-impl blitzkrieg_market_api::SubscriptionControl for FeedHandle {
+impl blitzkrieg_bk_contract::SubscriptionControl for FeedHandle {
     fn set_tokens(&self, tokens: Vec<TokenId>) {
         let _ = self.tx.try_send(tokens);
     }

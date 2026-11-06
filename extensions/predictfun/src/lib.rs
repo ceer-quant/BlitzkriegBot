@@ -6,7 +6,7 @@
 //! error onto the kernel's [`CoreError`].
 //!
 //! Stage 2 (#424) adds the market-plugin components behind the
-//! `blitzkrieg-market-api` contract: the orderbook feed ([`feed`]), market
+//! `blitzkrieg-bk-contract` contract: the orderbook feed ([`feed`]), market
 //! discovery ([`discovery`]) and the network probe ([`net_check`]), bundled by
 //! [`plugin::PredictFunPlugin`]. Everything the core sees is the market seam;
 //! all predict.fun knowledge lives here. Prices are 0..1 probabilities at the

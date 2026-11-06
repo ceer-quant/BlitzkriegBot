@@ -59,7 +59,7 @@ mod tape;
 mod twap;
 mod verdict;
 
-use blitzkrieg_market_api::net::now_ms;
+use blitzkrieg_bk_contract::net::now_ms;
 use futures_util::{SinkExt, StreamExt};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;

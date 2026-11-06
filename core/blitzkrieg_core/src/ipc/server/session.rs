@@ -4,11 +4,18 @@
 use super::*;
 
 /// Run the UDS server until the shutdown oneshot fires or a signal arrives.
+///
+/// #841: the market plugins are linked and registered ONLY by the composition
+/// root (core/blitzkrieg_launcher) — this server RECEIVES the registry instead
+/// of compiling them in. The caller's registry is the whole compiled-in plugin
+/// face of this boot: boot enablement, multi-plugin data planes and the IPC
+/// readouts all resolve against it.
 pub async fn run(
     socket_path: String,
     config: CoreConfig,
     tick_ms: u64,
     shutdown: oneshot::Receiver<()>,
+    registry: crate::market::registry::MarketPluginRegistry,
 ) -> anyhow::Result<()> {
     // Event plumbing: Core -> mpsc -> broadcast -> every session.
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<Event>();
@@ -58,14 +65,14 @@ pub async fn run(
         core.set_balance(config.dry_seed_balance);
     }
 
-    // Market plugins: the concrete venue is compiled in via a feature and
-    // registered here; the core drives its components through the market seam.
-    // E27 (§8.2): this MUST run before `install_engine`, which loads and
-    // enables strategies — the startup `--enable-strategy` request and both
-    // IPC handshake sites judge against the same declaration snapshot.
-    // `None` would leave the handshake inert.
-    let registry = crate::market::registry::MarketPluginRegistry::new();
-    crate::market::register_builtin_markets(&registry);
+    // Market plugins: the registry arrives from the composition root
+    // (core/blitzkrieg_launcher, #841) — the core drives its components
+    // through the market seam without naming any venue.
+    // E27 (§8.2): registration at the composition root MUST happen before
+    // `install_engine` runs here — it loads and enables strategies, and the
+    // startup `--enable-strategy` request and both IPC handshake sites judge
+    // against the same declaration snapshot. `None` would leave the handshake
+    // inert.
     // The enablement chain resolves here — four layers, first non-empty wins:
     // 1. an explicit `--market-plugin` flag — everything else is ignored
     //    (replays and the corpus baselines pin their plugin this way);

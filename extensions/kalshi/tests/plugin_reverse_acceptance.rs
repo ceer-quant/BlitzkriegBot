@@ -22,7 +22,7 @@
 //!    asserts every emitted `ts_ms` falls within the local wall-clock window
 //!    of the test itself — no venue-provided timestamp can leak through.
 
-use blitzkrieg_market_api::{BookUpdate, MarketHost, TokenId};
+use blitzkrieg_bk_contract::{BookUpdate, MarketHost, TokenId};
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -53,7 +53,7 @@ impl BookSink {
 /// when the venue's batch grows mid-round, and NOT re-feed an unchanged batch).
 #[derive(Clone, Default)]
 struct DiscoverySink {
-    rounds: Arc<Mutex<Vec<Vec<blitzkrieg_market_api::MarketDescriptor>>>>,
+    rounds: Arc<Mutex<Vec<Vec<blitzkrieg_bk_contract::MarketDescriptor>>>>,
 }
 
 impl DiscoverySink {
@@ -83,25 +83,25 @@ impl DiscoverySink {
 }
 
 impl MarketHost for DiscoverySink {
-    fn on_book(&self, _: BookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_book(&self, _: BookUpdate) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_top_of_book(
         &self,
-        _: blitzkrieg_market_api::TopOfBookUpdate,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::TopOfBookUpdate,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_spot(
         &self,
-        _: blitzkrieg_market_api::SpotUpdate,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::SpotUpdate,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_round_markets(
         &self,
-        markets: Vec<blitzkrieg_market_api::MarketDescriptor>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        markets: Vec<blitzkrieg_bk_contract::MarketDescriptor>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.rounds.lock().await.push(markets);
         })
@@ -110,166 +110,166 @@ impl MarketHost for DiscoverySink {
         &self,
         _: &str,
         _: Vec<TokenId>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn install_subscription_control(
         &self,
         _: &str,
-        _: Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Arc<dyn blitzkrieg_bk_contract::SubscriptionControl>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_orders(
         &self,
         _: &str,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::PendingOrder>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::PendingOrder>> {
         Box::pin(async { Vec::new() })
     }
-    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
-    fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_order_rejected(
         &self,
         _: &str,
-        _: Option<blitzkrieg_market_api::CoreError>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Option<blitzkrieg_bk_contract::CoreError>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_place_timeout(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_place_timeout(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_fill(
         &self,
-        _: blitzkrieg_market_api::MarketFill,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MarketFill,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_order_live(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_live(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_reconcile(
         &self,
-        _: blitzkrieg_market_api::ReconcileSnapshot,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::ReconcileSnapshot,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_reconcile_failed(
         &self,
         _: &str,
-        _: blitzkrieg_market_api::CoreError,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::CoreError,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_self_check(
         &self,
         _: &str,
-        _: blitzkrieg_market_api::SelfCheckReport,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::SelfCheckReport,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn venue_free_balance(
         &self,
         _venue: &str,
         _: Decimal,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn known_venue_order_ids(&self) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
-    fn note_orphan_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn note_orphan_cancelled(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn report_error(
         &self,
-        _: blitzkrieg_market_api::CoreError,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::CoreError,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_settlement_queries(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::SettlementQuery>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::SettlementQuery>> {
         Box::pin(async { Vec::new() })
     }
     fn on_market_resolution(
         &self,
-        _: blitzkrieg_market_api::MarketResolution,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MarketResolution,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_redemptions(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::RedemptionRequest>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::RedemptionRequest>> {
         Box::pin(async { Vec::new() })
     }
     fn on_redemption_result(
         &self,
-        _: blitzkrieg_market_api::RedemptionResult,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::RedemptionResult,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_merges(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::MergeRequest>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::MergeRequest>> {
         Box::pin(async { Vec::new() })
     }
     fn on_merge_result(
         &self,
-        _: blitzkrieg_market_api::MergeResult,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MergeResult,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }
 
 impl MarketHost for BookSink {
-    fn on_book(&self, update: BookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_book(&self, update: BookUpdate) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.books
                 .lock()
                 .await
-                .push((update, blitzkrieg_market_api::net::now_ms()));
+                .push((update, blitzkrieg_bk_contract::net::now_ms()));
         })
     }
     fn on_top_of_book(
         &self,
-        _: blitzkrieg_market_api::TopOfBookUpdate,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::TopOfBookUpdate,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_spot(
         &self,
-        _: blitzkrieg_market_api::SpotUpdate,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::SpotUpdate,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_round_markets(
         &self,
-        _: Vec<blitzkrieg_market_api::MarketDescriptor>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Vec<blitzkrieg_bk_contract::MarketDescriptor>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn subscribe_tokens(
         &self,
         _: &str,
         _: Vec<TokenId>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn install_subscription_control(
         &self,
         _: &str,
-        _: Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Arc<dyn blitzkrieg_bk_contract::SubscriptionControl>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     // Egress / settlement seams are out of scope for a feed-only sink: the
@@ -277,110 +277,110 @@ impl MarketHost for BookSink {
     fn take_pending_orders(
         &self,
         _: &str,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::PendingOrder>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::PendingOrder>> {
         Box::pin(async { Vec::new() })
     }
-    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
-    fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_accepted(&self, _: &str, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_order_rejected(
         &self,
         _: &str,
-        _: Option<blitzkrieg_market_api::CoreError>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Option<blitzkrieg_bk_contract::CoreError>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_place_timeout(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_place_timeout(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_fill(
         &self,
-        _: blitzkrieg_market_api::MarketFill,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MarketFill,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_order_live(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_live(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_reconcile(
         &self,
-        _: blitzkrieg_market_api::ReconcileSnapshot,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::ReconcileSnapshot,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_reconcile_failed(
         &self,
         _: &str,
-        _: blitzkrieg_market_api::CoreError,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::CoreError,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_self_check(
         &self,
         _: &str,
-        _: blitzkrieg_market_api::SelfCheckReport,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::SelfCheckReport,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn seed_balance(&self, _venue: &str, _: Decimal) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn venue_free_balance(
         &self,
         _venue: &str,
         _: Decimal,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn known_venue_order_ids(&self) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
-    fn note_orphan_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn note_orphan_cancelled(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn report_error(
         &self,
-        _: blitzkrieg_market_api::CoreError,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::CoreError,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_settlement_queries(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::SettlementQuery>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::SettlementQuery>> {
         Box::pin(async { Vec::new() })
     }
     fn on_market_resolution(
         &self,
-        _: blitzkrieg_market_api::MarketResolution,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MarketResolution,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_redemptions(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::RedemptionRequest>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::RedemptionRequest>> {
         Box::pin(async { Vec::new() })
     }
     fn on_redemption_result(
         &self,
-        _: blitzkrieg_market_api::RedemptionResult,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::RedemptionResult,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_merges(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<blitzkrieg_market_api::MergeRequest>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<blitzkrieg_bk_contract::MergeRequest>> {
         Box::pin(async { Vec::new() })
     }
     fn on_merge_result(
         &self,
-        _: blitzkrieg_market_api::MergeResult,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: blitzkrieg_bk_contract::MergeResult,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }
@@ -600,7 +600,7 @@ async fn reverse_c_book_timestamps_stay_in_the_local_clock_domain() {
         .pipe(|c| blitzkrieg_kalshi::KalshiRest::new(c, None).expect("client")),
     );
     let host = Arc::new(BookSink::default());
-    let started = blitzkrieg_market_api::net::now_ms();
+    let started = blitzkrieg_bk_contract::net::now_ms();
     let _handle = blitzkrieg_kalshi::feed_tests_only_spawn(
         host.clone(),
         client,
@@ -615,7 +615,7 @@ async fn reverse_c_book_timestamps_stay_in_the_local_clock_domain() {
     // The mock's canned payload has NO timestamps at all — so a leak would
     // have to come from a venue field. For domain proof, also drive the
     // normalization path directly with a hostile venue timestamp present.
-    let ended = blitzkrieg_market_api::net::now_ms();
+    let ended = blitzkrieg_bk_contract::net::now_ms();
     for (book, received_local) in &books {
         assert!(
             book.ts_ms >= started - 5 && book.ts_ms <= ended + 5,
@@ -690,7 +690,7 @@ fn discovery_events_body(ticker: &str, asset: &str, mid: &str) -> String {
 /// `close_time` ~14 min out: ISO YYYY-MM-DDTHH:MM:SSZ from the local clock
 /// (civil-from-days, Howard Hinnant — the inverse of `close_time_to_ms`).
 fn chrono_like_close() -> String {
-    let now = blitzkrieg_market_api::net::now_ms();
+    let now = blitzkrieg_bk_contract::net::now_ms();
     let secs = (now + 14 * 60 * 1000) / 1000;
     let days = secs / 86_400;
     let rem = secs % 86_400;

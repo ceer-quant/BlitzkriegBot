@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use crate::rest::PolySimRest;
-use blitzkrieg_market_api::{MarketResolution, SettlementQuery};
+use blitzkrieg_bk_contract::{MarketResolution, SettlementQuery};
 
 /// The venue's verdict for one settlement query, read off the updown rows:
 /// a query whose condition_id matches a RESOLVED row pays its outcome prices

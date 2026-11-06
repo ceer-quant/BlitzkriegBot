@@ -9,8 +9,8 @@
 //! finds its own markets, pulls its own books/spot, decides and trades.
 
 use crate::gamma::{duration_label, slug_for};
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{MarketDescriptor, MarketHost};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_client_sdk_v2::gamma::types::request::MarketsRequest;
 use std::sync::Arc;

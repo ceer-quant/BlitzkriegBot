@@ -16,8 +16,8 @@
 //! market, so it costs almost nothing, and a fill wants to arrive as an event
 //! rather than on a poll boundary.
 
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{BookUpdate, MarketHost, SpotUpdate};
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{BookUpdate, MarketHost, SpotUpdate};
 use futures_util::StreamExt;
 use polymarket_client_sdk_v2::error::{
     Error as SdkError, Kind as SdkErrorKind, Status as SdkErrorStatus,
@@ -327,7 +327,7 @@ impl FeedHandle {
     }
 }
 
-impl blitzkrieg_market_api::SubscriptionControl for FeedHandle {
+impl blitzkrieg_bk_contract::SubscriptionControl for FeedHandle {
     fn set_tokens(&self, tokens: Vec<String>) {
         // Non-async control surface: `try_send` avoids blocking the host's tick.
         // The channel has capacity 16 and is only written on round rollovers.

@@ -4,7 +4,7 @@
 //! behind the generic `MarketPlugin` contract. Everything the core sees is the
 //! market-api boundary; all Polymarket/SDK knowledge lives in this crate.
 
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
     ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
     MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,

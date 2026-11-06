@@ -14,7 +14,7 @@ use alloy::signers::local::LocalSigner;
 use anyhow::Context as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE;
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     CoreError, CoreErrorCode, CoreResult, FillPolicy, MarketFill, MarketResolution, PendingOrder,
     SelfCheckItem, SelfCheckReport, SettlementQuery, Side, VenueTradeInfo, net::now_ms,
 };
@@ -1014,9 +1014,9 @@ async fn start_user_ws(
 /// of the maker legs is. Legs that cannot prove ownership are DROPPED.
 fn trade_fills(t: &TradeMessage, our_key: &ApiKey) -> Vec<MarketFill> {
     let status = match t.status {
-        TradeMessageStatus::Confirmed => blitzkrieg_market_api::FillStatus::Confirmed,
-        TradeMessageStatus::Failed => blitzkrieg_market_api::FillStatus::Failed,
-        _ => blitzkrieg_market_api::FillStatus::Matched,
+        TradeMessageStatus::Confirmed => blitzkrieg_bk_contract::FillStatus::Confirmed,
+        TradeMessageStatus::Failed => blitzkrieg_bk_contract::FillStatus::Failed,
+        _ => blitzkrieg_bk_contract::FillStatus::Matched,
     };
     let ts = t.timestamp.unwrap_or(0);
     let tx = t.transaction_hash.as_ref().map(|h| format!("{h}"));

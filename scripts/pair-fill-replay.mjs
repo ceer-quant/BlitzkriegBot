@@ -519,7 +519,7 @@ if (scanMode) {
 
 // replay mode preflight
 const missing = [];
-if (!existsSync(BIN)) missing.push(`core binary ${BIN} (build: cargo build --release -p blitzkrieg-core)`);
+if (!existsSync(BIN)) missing.push(`core binary ${BIN} (build: cargo build --release -p blitzkrieg-launcher)`);
 if (!existsSync(PKG.dir)) missing.push(`strategy package ${PKG.dir}`);
 if (missing.length) {
   console.error('preflight FAILED — refusing:');

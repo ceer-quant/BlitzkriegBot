@@ -2,40 +2,23 @@
 name = "blitzkrieg-core"
 version.workspace = true
 edition = "2024"
-description = "Blitzkrieg Quant Core: market-agnostic trading core (strategy engine, OME, risk, ledger, market data, execution). Node/UI is a shell over this."
-
-[[bin]]
-name = "blitzkrieg-core"
-path = "src/main.rs"
+description = "Blitzkrieg Quant Core: market-agnostic trading core (strategy engine, OME, risk, ledger, market data, execution). Node/UI is a shell over this. Since #841 this crate links NO concrete market plugin — the `blitzkrieg-core` binary lives in the composition root (core/blitzkrieg_launcher)."
 
 [lib]
 name = "blitzkrieg_core"
 path = "src/lib.rs"
 
 [features]
-# The core itself is market-agnostic and has NO market SDK dependency. A market
-# is supplied by an extension crate, linked in via a feature (see below). The
-# default ships all built-in market extensions (Polymarket, Kalshi,
-# predict.fun, PolySimulator) so a plain build can reach every venue;
-# `--market-plugin` still picks exactly one operative venue at runtime.
-default = ["polymarket", "kalshi", "predictfun", "polysimulator", "strategy-loading", "account-precision"]
-# Link the official Polymarket market extension as the operative market.
-polymarket = ["dep:polymarket-extension"]
-# 0.3.3 stage 2 (#424): Kalshi + predict.fun market extensions, opt-in features
-# following the same shape as `polymarket`. (0.4.1: promoted into `default` so
-# they show up in the plugin list without a custom rebuild — #460's PR carries
-# the flip; the runtime contract is unchanged: still one `--market-plugin`.)
-kalshi = ["dep:kalshi-extension"]
-predictfun = ["dep:predictfun-extension"]
-# 0.4.1 (#454/#455): the PolySimulator SIMULATED venue extension, same shape —
-# a third-party paper-trading venue whose fills are its own model. Declared in
-# default for parity with the other plugins; the declaration carries the
-# `simulated` capability bit so every surface can label it honestly.
-polysimulator = ["dep:polysimulator-extension"]
+# The core itself is market-agnostic — including the composition: the market
+# plugins are linked and registered ONLY by the composition root
+# (core/blitzkrieg_launcher, #841), which receives `MarketPluginRegistry`
+# filling into `ipc::server::run`. `--market-plugin` still picks operative
+# venues at runtime.
+default = ["strategy-loading", "account-precision"]
 # Dynamic user-layer strategy loading (shared libraries). On by default since
 # E7 (#38): the external v2 strategy interface is the SAME full contract as an
 # in-tree strategy, and CI builds/drives a real cdylib. Exclude with
-# `--no-default-features --features polymarket`.
+# `--no-default-features`.
 strategy-loading = ["dep:libloading"]
 # E17 accounting-precision gate. Enables the exhaustive maker/taker × partial-fill
 # matrix and the dry/live ledger-parity harness (`cargo test --features
@@ -56,7 +39,11 @@ blitzkrieg-build-info = { path = "../build_info" }
 # Update check (VERSIONING.md §7.3): both are already in the dependency tree
 # (reqwest via the market extension, semver transitively) — direct use adds no
 # new tree, only a named edge (P26). rustls-only, no default features.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
+# #841: the `json` feature is named HERE now — it used to arrive transitively
+# through the market extensions the kernel used to link; the composition root
+# owns those edges today, and a feature that rides on a plugin's dependency
+# list is not a contract.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "json"] }
 # #355: bounded-concurrency metadata/price fetching (FuturesUnordered +
 # Semaphore polling) — 28k conditions would take 10+ hours serially.
 # Already in the dependency tree (reqwest/tokio peers); this names the edge.
@@ -98,12 +85,6 @@ blitzkrieg-data-model = { path = "../data_model" }
 # pull jobs calling into the crate that owns the implementation. No pull logic
 # lives in the kernel any more.
 blitzkrieg-onchain-pull = { path = "../../tools/onchain_pull" }
-# Official Polymarket market extension (optional; the default feature links it).
-# The core never imports it directly except at the single assembly seam.
-polymarket-extension = { path = "../../extensions/polymarket", optional = true }
-kalshi-extension = { package = "blitzkrieg-kalshi", path = "../../extensions/kalshi", optional = true }
-predictfun-extension = { package = "blitzkrieg-predictfun", path = "../../extensions/predictfun", optional = true }
-polysimulator-extension = { package = "blitzkrieg-polysimulator", path = "../../extensions/polysimulator", optional = true }
 async-trait = "0.1"
 # Lock-free atomic parameter swap for Shadow Evolution (strategy hot path).
 arc-swap = "1"

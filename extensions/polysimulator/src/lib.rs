@@ -21,6 +21,13 @@
 //!     `GET /v1/markets/updown`;
 //!   * [`net_check`] — staged read-only probe.
 //!
+//! #841: every `reqwest` client construction in this crate lives in
+//! [`http`] — the single place that owns the HTTP face (timeout, User-Agent,
+//! proxy posture via bk_contract's `net` helpers). The parasitic feed form is
+//! preserved: no module here implements a `DataFeed`/`MarketDiscovery`
+//! component, so the plugin's only direct HTTP paths are the executor
+//! transport and the net-check probe, both assembly-wise through `http`.
+//!
 //! Credentials come from the process environment only (`POLYSIM_API_KEY`).
 //! No credential material may appear in source, examples or tests — the
 //! mock-server test suite runs entirely without it (unauthenticated paths
@@ -28,6 +35,7 @@
 
 pub mod error;
 pub mod executor;
+pub mod http;
 pub mod net_check;
 pub mod plugin;
 pub mod rate_limit;

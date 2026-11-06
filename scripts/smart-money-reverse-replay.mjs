@@ -187,7 +187,7 @@ if ((fromArg || customWindows.length) && !archiveDir) {
 
 const missing = [];
 if (!existsSync(BIN)) {
-  missing.push(`core binary ${BIN} (build: cargo build --release -p blitzkrieg-core)`);
+  missing.push(`core binary ${BIN} (build: cargo build --release -p blitzkrieg-launcher)`);
 } else {
   try {
     if (!statSync(BIN).mode & 0o111) missing.push(`core binary ${BIN} is not executable`);

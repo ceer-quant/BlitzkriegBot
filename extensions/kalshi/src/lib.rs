@@ -6,7 +6,7 @@
 //! kernel's [`CoreError`].
 //!
 //! Stage 2 (#424) adds the market-plugin components behind the
-//! `blitzkrieg-market-api` contract: the orderbook feed ([`feed`]), event
+//! `blitzkrieg-bk-contract` contract: the orderbook feed ([`feed`]), event
 //! discovery ([`discovery`]) and the network probe ([`net_check`]), bundled by
 //! [`plugin::KalshiPlugin`]. Everything the core sees is the market seam; all
 //! Kalshi knowledge lives here. Normalization happens at the plugin boundary

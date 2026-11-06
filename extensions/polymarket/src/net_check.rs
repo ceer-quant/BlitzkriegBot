@@ -30,7 +30,7 @@
 use crate::venue::{
     DEFAULT_CLOB_URL, DEFAULT_WS_URL, GAMMA_URL, validate_venue_host, validate_ws_host,
 };
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     NetCheckItem, NetCheckReport,
     net::{annotate, error_chain, finish_with, is_fake_ip, now_ms, proxy_view},
 };
@@ -142,7 +142,7 @@ async fn attach_proxy(
     mut items: Vec<NetCheckItem>,
 ) -> (
     Vec<NetCheckItem>,
-    blitzkrieg_market_api::net::ProxyObservation,
+    blitzkrieg_bk_contract::net::ProxyObservation,
     Vec<String>,
 ) {
     let view = match proxy_view() {
@@ -163,7 +163,7 @@ async fn attach_proxy(
             );
             return (
                 items,
-                blitzkrieg_market_api::net::ProxyObservation::legacy(),
+                blitzkrieg_bk_contract::net::ProxyObservation::legacy(),
                 Vec::new(),
             );
         }
@@ -180,7 +180,7 @@ async fn attach_proxy(
     (items, obs, names)
 }
 
-async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i64, String> {
+async fn dial_proxy(ep: &blitzkrieg_bk_contract::net::ProxyEndpoint) -> Result<i64, String> {
     let start = Instant::now();
     match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(ep.dial_addr())).await {
         Ok(Ok(stream)) => {
@@ -830,7 +830,7 @@ mod tests {
                 !top.to_ascii_lowercase().contains("refused"),
                 "{scheme} display should not be the only place the refusal lives: {top}"
             );
-            let chain = blitzkrieg_market_api::net::error_chain(&err);
+            let chain = blitzkrieg_bk_contract::net::error_chain(&err);
             let lower = chain.to_ascii_lowercase();
             // HTTP proxies surface the OS refusal. SOCKS wraps it one layer
             // deeper than `source()` exposes ("failed to create underlying

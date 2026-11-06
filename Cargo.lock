@@ -1194,12 +1194,9 @@ dependencies = [
  "async-trait",
  "blitzkrieg-build-info",
  "blitzkrieg-data-model",
- "blitzkrieg-kalshi",
  "blitzkrieg-lua-runtime",
  "blitzkrieg-market-api",
  "blitzkrieg-onchain-pull",
- "blitzkrieg-polysimulator",
- "blitzkrieg-predictfun",
  "blitzkrieg-strategy-api",
  "blitzkrieg-ui-kit",
  "criterion",
@@ -1208,7 +1205,6 @@ dependencies = [
  "libc",
  "libloading",
  "parity-logic",
- "polymarket-extension",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
@@ -1242,7 +1238,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "blitzkrieg-market-api",
+ "blitzkrieg-bk-contract",
  "futures-util",
  "mime",
  "rand 0.8.8",
@@ -1258,6 +1254,27 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "blitzkrieg-launcher"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "blitzkrieg-core",
+ "blitzkrieg-kalshi",
+ "blitzkrieg-market-api",
+ "blitzkrieg-onchain-pull",
+ "blitzkrieg-polysimulator",
+ "blitzkrieg-predictfun",
+ "polymarket-extension",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "strategy-logic",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1299,7 +1316,7 @@ dependencies = [
 name = "blitzkrieg-polysimulator"
 version = "0.4.1"
 dependencies = [
- "blitzkrieg-market-api",
+ "blitzkrieg-bk-contract",
  "mime",
  "reqwest",
  "rust_decimal",
@@ -1317,7 +1334,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
- "blitzkrieg-market-api",
+ "blitzkrieg-bk-contract",
  "futures-util",
  "mime",
  "rand 0.8.8",
@@ -4105,7 +4122,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "base64 0.22.1",
- "blitzkrieg-market-api",
+ "blitzkrieg-bk-contract",
  "chrono",
  "chrono-tz",
  "futures-util",

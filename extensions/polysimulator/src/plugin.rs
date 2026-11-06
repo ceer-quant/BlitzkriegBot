@@ -31,7 +31,7 @@
 //! seam): the only remaining channel is the executor's REST polling, so the
 //! plugin declares `SIMULATED` and nothing else.
 
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     BoxFuture, CoreResult, ExecutorConfig, MarketCapabilities, MarketHost, MarketMode,
     MarketPlugin, MarketStructure, MarketType, NetCheckReport, OrderExecutor,
 };

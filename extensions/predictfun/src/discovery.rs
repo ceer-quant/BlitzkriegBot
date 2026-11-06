@@ -27,8 +27,8 @@
 //!     it does not belong to.
 
 use crate::rest::PredictRest;
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{MarketDescriptor, MarketHost};
 use std::sync::Arc;
 use std::time::Duration;
 

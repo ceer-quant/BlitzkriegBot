@@ -6,7 +6,7 @@
 //! `CoreError::raw`. A transport failure that bypasses this mapping is a
 //! red-bar test.
 
-use blitzkrieg_market_api::{CoreError, CoreErrorCode};
+use blitzkrieg_bk_contract::{CoreError, CoreErrorCode};
 
 /// Everything that can go wrong inside the PolySimulator transport.
 #[derive(Debug, thiserror::Error)]

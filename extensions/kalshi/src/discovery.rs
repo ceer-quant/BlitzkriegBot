@@ -33,8 +33,8 @@
 //!     (strike ladder expiring in years) under the current slot.
 
 use crate::rest::KalshiRest;
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{MarketDescriptor, MarketHost};
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{MarketDescriptor, MarketHost};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -418,7 +418,7 @@ fn discovery_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blitzkrieg_market_api::MarketPlugin as _;
+    use blitzkrieg_bk_contract::MarketPlugin as _;
     use rust_decimal_macros::dec;
 
     #[test]

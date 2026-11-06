@@ -20,7 +20,7 @@
 //!     failing because the network is down.
 
 use crate::rest::PRODUCTION_BASE_URL;
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     NetCheckItem, NetCheckReport,
     net::{annotate, error_chain, finish_with, is_fake_ip, now_ms, proxy_view},
 };
@@ -184,7 +184,7 @@ async fn attach_proxy(
     mut items: Vec<NetCheckItem>,
 ) -> (
     Vec<NetCheckItem>,
-    blitzkrieg_market_api::net::ProxyObservation,
+    blitzkrieg_bk_contract::net::ProxyObservation,
     Vec<String>,
 ) {
     let view = match proxy_view() {
@@ -205,7 +205,7 @@ async fn attach_proxy(
             );
             return (
                 items,
-                blitzkrieg_market_api::net::ProxyObservation::legacy(),
+                blitzkrieg_bk_contract::net::ProxyObservation::legacy(),
                 Vec::new(),
             );
         }
@@ -222,7 +222,7 @@ async fn attach_proxy(
     (items, obs, names)
 }
 
-async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i64, String> {
+async fn dial_proxy(ep: &blitzkrieg_bk_contract::net::ProxyEndpoint) -> Result<i64, String> {
     let start = Instant::now();
     match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(ep.dial_addr())).await {
         Ok(Ok(stream)) => {
@@ -231,18 +231,6 @@ async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i6
         }
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("no answer within 1s".to_string()),
-    }
-}
-
-fn apply_bk_proxy(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
-    match blitzkrieg_market_api::net::client_proxy()? {
-        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
-        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
-        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
-            let proxy = reqwest::Proxy::all(url)
-                .map_err(|e| format!("proxy URL rejected: {}", error_chain(&e)))?;
-            Ok(builder.proxy(proxy))
-        }
     }
 }
 
@@ -426,10 +414,10 @@ async fn probe_one(t: &Target) -> NetCheckItem {
     }
 
     // ── 3. TLS + one request ────────────────────────────────────────────────
+    // #841: the client is assembled by `crate::http` — the probe has no
+    // transport wiring of its own (timeout budget + proxy posture live there).
     let req_start = Instant::now();
-    let client = match apply_bk_proxy(reqwest::Client::builder().timeout(REQUEST_TIMEOUT))
-        .and_then(|b| b.build().map_err(|e| error_chain(&e)))
-    {
+    let client = match crate::http::build_client(REQUEST_TIMEOUT, false) {
         Ok(c) => c,
         Err(e) => {
             return item(

@@ -395,7 +395,7 @@ async function main() {
   const arms = teethAt >= 0 ? TEETH_ARMS : [{ label: arm.join(' '), flags: arm }];
 
   if (!existsSync(BIN)) {
-    console.error(`missing binary ${BIN}: cargo build --release --workspace --locked`);
+    console.error(`missing binary ${BIN}: cargo build --release --workspace --locked (the bin lives in the composition root: -p blitzkrieg-launcher, #841)`);
     process.exit(2);
   }
 

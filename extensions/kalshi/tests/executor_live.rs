@@ -29,14 +29,14 @@
 //!    same tick's pending order is POSTed (the #462 rule).
 //! 5. **unreadable fill rows** are skipped, never forwarded as garbage.
 
-use blitzkrieg_kalshi::rest::Credentials;
-use blitzkrieg_kalshi::{KalshiRest, RestConfig, executor};
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     BookUpdate, CoreError, FillPolicy, MarketFill, MarketHost, MarketResolution, MergeRequest,
     MergeResult, PendingOrder, ReconcileSnapshot, RedemptionRequest, RedemptionResult,
     SelfCheckReport, SettlementQuery, Side, SpotUpdate, SubscriptionControl, TokenId,
     TopOfBookUpdate,
 };
+use blitzkrieg_kalshi::rest::Credentials;
+use blitzkrieg_kalshi::{KalshiRest, RestConfig, executor};
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -75,49 +75,49 @@ impl ExecSink {
 }
 
 impl MarketHost for ExecSink {
-    fn on_book(&self, _: BookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_book(&self, _: BookUpdate) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_top_of_book(&self, _: TopOfBookUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_top_of_book(&self, _: TopOfBookUpdate) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_spot(&self, _: SpotUpdate) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_spot(&self, _: SpotUpdate) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_round_markets(
         &self,
-        _: Vec<blitzkrieg_market_api::MarketDescriptor>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+        _: Vec<blitzkrieg_bk_contract::MarketDescriptor>,
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn subscribe_tokens(
         &self,
         _: &str,
         _: Vec<TokenId>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn install_subscription_control(
         &self,
         _: &str,
         _: Arc<dyn SubscriptionControl>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_orders(
         &self,
         _: &str,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<PendingOrder>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<PendingOrder>> {
         Box::pin(async { std::mem::take(&mut *self.pending_orders.lock().await) })
     }
-    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn take_pending_cancels(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { std::mem::take(&mut *self.pending_cancels.lock().await) })
     }
     fn on_order_accepted(
         &self,
         core_id: &str,
         venue_id: &str,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         let pair = (core_id.to_string(), venue_id.to_string());
         Box::pin(async move {
             self.accepted.lock().await.push(pair);
@@ -127,30 +127,30 @@ impl MarketHost for ExecSink {
         &self,
         core_id: &str,
         error: Option<CoreError>,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         let core_id = core_id.to_string();
         Box::pin(async move {
             self.rejected.lock().await.push((core_id, error));
         })
     }
-    fn on_place_timeout(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_place_timeout(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_fill(&self, fill: MarketFill) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_fill(&self, fill: MarketFill) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.fills.lock().await.push(fill);
         })
     }
-    fn on_order_live(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_live(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_order_cancelled(&self, _: &str) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_reconcile(
         &self,
         snapshot: ReconcileSnapshot,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.reconciles.lock().await.push(snapshot);
         })
@@ -159,14 +159,14 @@ impl MarketHost for ExecSink {
         &self,
         _: &str,
         _: CoreError,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn on_self_check(
         &self,
         _: &str,
         report: SelfCheckReport,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.self_checks.lock().await.push(report);
         })
@@ -175,7 +175,7 @@ impl MarketHost for ExecSink {
         &self,
         _venue: &str,
         balance: Decimal,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.balances.lock().await.push(balance);
         })
@@ -184,54 +184,54 @@ impl MarketHost for ExecSink {
         &self,
         _venue: &str,
         free: Decimal,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.balances.lock().await.push(free);
         })
     }
-    fn known_venue_order_ids(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<String>> {
+    fn known_venue_order_ids(&self) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<String>> {
         Box::pin(async { self.known_ids.lock().await.clone() })
     }
     fn note_orphan_cancelled(
         &self,
         venue_order_id: &str,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         let id = venue_order_id.to_string();
         Box::pin(async move {
             self.orphan_cancels.lock().await.push(id);
         })
     }
-    fn report_error(&self, error: CoreError) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn report_error(&self, error: CoreError) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async move {
             self.errors.lock().await.push(error);
         })
     }
     fn take_settlement_queries(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<SettlementQuery>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<SettlementQuery>> {
         Box::pin(async { Vec::new() })
     }
     fn on_market_resolution(
         &self,
         _: MarketResolution,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
     fn take_pending_redemptions(
         &self,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, Vec<RedemptionRequest>> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<RedemptionRequest>> {
         Box::pin(async { Vec::new() })
     }
     fn on_redemption_result(
         &self,
         _: RedemptionResult,
-    ) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    ) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
-    fn take_pending_merges(&self) -> blitzkrieg_market_api::BoxFuture<'_, Vec<MergeRequest>> {
+    fn take_pending_merges(&self) -> blitzkrieg_bk_contract::BoxFuture<'_, Vec<MergeRequest>> {
         Box::pin(async { Vec::new() })
     }
-    fn on_merge_result(&self, _: MergeResult) -> blitzkrieg_market_api::BoxFuture<'_, ()> {
+    fn on_merge_result(&self, _: MergeResult) -> blitzkrieg_bk_contract::BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }
@@ -402,7 +402,7 @@ async fn without_credentials_the_production_spawn_is_inert() {
     let sink = ExecSink::default();
     let outcome = executor::spawn_if_configured(
         Arc::new(sink.clone()) as Arc<dyn MarketHost>,
-        blitzkrieg_market_api::ExecutorConfig::default(),
+        blitzkrieg_bk_contract::ExecutorConfig::default(),
     )
     .await
     .expect("inert is not an error");

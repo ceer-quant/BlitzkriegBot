@@ -15,6 +15,10 @@
 //! unlike Polymarket proper. The base URL defaults to the production host and
 //! can be pointed at a mock server for tests. Only `https` is accepted
 //! outside loopback tests.
+//!
+//! #841: the HTTP client itself is assembled by [`crate::http`] — this file
+//! owns the protocol (paths, bodies, retry classification), not the socket
+//! stack.
 
 use crate::error::PolySimError;
 use crate::rate_limit::{Class, RateLimit};
@@ -26,13 +30,6 @@ use std::time::Duration;
 
 /// Production API root.
 pub const PRODUCTION_BASE_URL: &str = "https://api.polysimulator.com";
-
-/// The User-Agent every request carries. The venue's Cloudflare rule 1010s
-/// non-browser UAs (curl/python/reqwest defaults) in waves; a browser-shaped
-/// string is what their WAF admits. Honest and boring: it identifies nothing
-/// false — it is a compatibility knob for a WAF that does not know this
-/// venue's own API consumers exist.
-const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 BlitzkriegBot/0.4.1";
 
 /// The wait a venue 429 advertises when it sends no `Retry-After` header —
 /// the free tier's own documented advice ("Retry after 1s").
@@ -118,50 +115,20 @@ impl std::fmt::Debug for PolySimRest {
     }
 }
 
-fn apply_process_proxy(
-    builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, PolySimError> {
-    match blitzkrieg_market_api::net::client_proxy().map_err(PolySimError::Transport)? {
-        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
-        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
-        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
-            let proxy = reqwest::Proxy::all(&url).map_err(|e| {
-                PolySimError::Transport(format!(
-                    "proxy URL rejected: {}",
-                    blitzkrieg_market_api::net::error_chain(&e)
-                ))
-            })?;
-            Ok(builder.proxy(proxy))
-        }
-    }
-}
-
 impl PolySimRest {
     /// Build a client. Without [`Credentials`] the client can only hit
     /// public endpoints; most account endpoints need the key.
     pub fn new(config: RestConfig, credentials: Option<Credentials>) -> Result<Self, PolySimError> {
         Self::validate_base_url(&config.base_url)?;
-        let mut builder = reqwest::Client::builder()
-            .timeout(config.timeout)
-            // The venue sits behind Cloudflare, whose bot rule 1010s
-            // non-browser User-Agents on market-data paths in waves (live
-            // 2026-10-25: reqwest's own UA 403×4 while a browser UA passed
-            // 200×2, same IP, same minute). A browser-shaped UA is the
-            // compatibility knob; revisit if the venue re-scopes its WAF to
-            // admit API clients.
-            .user_agent(BROWSER_UA);
-        // reqwest reads env proxies AND (on macOS) the system proxy config;
-        // when the operator's ambient proxy is down or refuses loopback,
-        // every mock-server request dies through it. The tests opt out
-        // unconditionally; production keeps the default.
-        if config.no_proxy {
-            builder = builder.no_proxy();
-        } else {
-            builder = apply_process_proxy(builder)?;
-        }
-        let http = builder
-            .build()
-            .map_err(|e| PolySimError::Transport(e.to_string()))?;
+        // #841: the builder work (timeout, WAF-compatible User-Agent, proxy
+        // posture — env/system rules through bk_contract's `net::client_proxy`,
+        // or the tests' unconditional opt-out) lives in `crate::http`. The
+        // WAF note: the venue sits behind Cloudflare, whose bot rule 1010s
+        // non-browser User-Agents on market-data paths in waves (live
+        // 2026-10-25: reqwest's own UA 403×4 while a browser UA passed
+        // 200×2, same IP, same minute); the UA is the compatibility knob.
+        let http = crate::http::build_client(config.timeout, config.no_proxy)
+            .map_err(PolySimError::Transport)?;
         Ok(Self {
             http,
             base_url: config.base_url.trim_end_matches('/').to_string(),

@@ -39,7 +39,7 @@ use crate::error::PredictError;
 use crate::into_core_error;
 use crate::rest::{Credentials, PlacedOrder, PredictRest, RestConfig};
 use crate::signing::{OrderSigner, exchange_address};
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillStatus, MarketFill, MarketHost,
     PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side, VenueTradeInfo,
     net::now_ms,

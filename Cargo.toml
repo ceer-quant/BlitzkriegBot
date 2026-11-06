@@ -1,6 +1,7 @@
 # Cargo workspace: the generic core plus official market extensions.
-# The core (core/blitzkrieg_core) must NOT depend on any specific market SDK;
-# concrete markets live under extensions/* and are wired in by feature.
+# The core (core/blitzkrieg_core) must NOT depend on any specific market SDK or
+# extension crate; concrete markets live under extensions/* and are linked ONLY
+# by the composition root (core/blitzkrieg_launcher, #841).
 [workspace]
 resolver = "2"
 members = [
@@ -10,6 +11,9 @@ members = [
     "core/bk_contract", # #840 Wave 1: canonical market-plugin contract (leaf: serde/serde_json/rust_decimal only)
     "core/data_model", # #648 C: 叶子数据合同（DataEvent 流分类 + 回读层）——内核与离线拉取器共享
     "core/blitzkrieg_core",
+    # #841: the external composition root — the ONLY member that links the
+    # concrete market extensions and produces the `blitzkrieg-core` binary.
+    "core/blitzkrieg_launcher",
     "extensions/polymarket",
     "extensions/kalshi",
     "extensions/predictfun",
