@@ -677,6 +677,11 @@ async fn main() -> anyhow::Result<()> {
                 trailing_min_high_pct: args.exit_trailing_min_high_pct,
                 min_trail_pct: args.exit_min_trail_pct,
                 force_exit_sec: args.exit_force_sec,
+                // #966 runtime-persistence: these two booleans are read from
+                // `BK_EXIT_TRAILING_ENABLED` / `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST`
+                // in args.rs so a `risk.setExit` hot edit survives a restart.
+                trailing_enabled: args.exit_trailing_enabled,
+                strategy_exit_maker_first: args.exit_strategy_exit_maker_first,
                 ..Default::default()
             },
             // Issue #464: the operator's `[[risk.ladder]]` also drives the

@@ -8,6 +8,90 @@ use crate::schema::*;
 // the pre-split ones; the shared skeleton (READONLY gate, version gate, reply
 // encoding) stays in `server.rs`.
 
+/// Map a systemic-limit field name (the camelCase wire spelling) to its
+/// `.env` key so `risk.setSystemic` can persist the hot edit across a restart
+/// (issue #966). Only the nine `SystemicRiskLimits` fields are mapped — any
+/// other field name returns `None` and is skipped (a future field added to
+/// the wire without an env key must not crash the write).
+fn systemic_env_key(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "maxSingleLossUsd" => "BK_RISK_SINGLE_LOSS_USD",
+        "maxDailyDrawdownUsd" => "BK_RISK_DAILY_DRAWDOWN_USD",
+        "maxPositionSize" => "BK_RISK_POSITION_SIZE",
+        "maxConsecutiveLosses" => "BK_RISK_CONSECUTIVE_LOSSES",
+        "cooldownMinutes" => "BK_RISK_COOLDOWN_MINUTES",
+        "maxTotalPosition" => "BK_RISK_MAX_TOTAL_POSITION",
+        "maxTotalExposureUsd" => "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
+        "maxCorrelationUsd" => "BK_RISK_MAX_CORRELATION_USD",
+        "globalKillSwitchLossUsd" => "BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
+        _ => return None,
+    })
+}
+
+/// Map an exit-discipline field name to its `.env` key (issue #966). The
+/// five `risk.setExit` fields map to `BK_EXIT_*` keys; trailing-enabled and
+/// strategy-exit-maker-first gained env support in #966 so a hot edit
+/// survives a restart.
+fn exit_env_key(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "stopLossPct" => "BK_EXIT_STOP_LOSS_PCT",
+        "takeProfitPct" => "BK_EXIT_TAKE_PROFIT_PCT",
+        "forceExitSec" => "BK_EXIT_FORCE_EXIT_SEC",
+        "trailingEnabled" => "BK_EXIT_TRAILING_ENABLED",
+        "strategyExitMakerFirst" => "BK_EXIT_STRATEGY_EXIT_MAKER_FIRST",
+        _ => return None,
+    })
+}
+
+/// Persist a set of field→value changes to the kernel's `.env` file (issue
+/// #966). Skipped silently when the core has no `env_file_path` (backtester,
+/// tests that don't wire one) — the hot edit still lives in memory for this
+/// process. A write failure is logged but does NOT fail the RPC: the in-memory
+/// apply already succeeded; the operator sees the change immediately and the
+/// log tells them persistence failed.
+fn persist_changes_to_env(
+    env_path: Option<&std::path::Path>,
+    changes: &[(&'static str, String)],
+) {
+    let Some(env_path) = env_path else { return };
+    let vars: std::collections::BTreeMap<String, String> = changes
+        .iter()
+        .filter_map(|(field, value)| Some((systemic_env_key(field)?.to_string(), value.clone())))
+        .collect();
+    if vars.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
+        tracing::warn!(
+            "risk.setSystemic: persistence to {} failed ({e}); the in-memory \
+             change is live for this process but will NOT survive a restart",
+            env_path.display()
+        );
+    }
+}
+
+/// Same as [`persist_changes_to_env`] but for exit-discipline field names.
+fn persist_exit_changes_to_env(
+    env_path: Option<&std::path::Path>,
+    changes: &[(&'static str, String)],
+) {
+    let Some(env_path) = env_path else { return };
+    let vars: std::collections::BTreeMap<String, String> = changes
+        .iter()
+        .filter_map(|(field, value)| Some((exit_env_key(field)?.to_string(), value.clone())))
+        .collect();
+    if vars.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
+        tracing::warn!(
+            "risk.setExit: persistence to {} failed ({e}); the in-memory \
+             change is live for this process but will NOT survive a restart",
+            env_path.display()
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_risk(
     method: &str,
@@ -101,7 +185,26 @@ pub(crate) async fn handle_risk(
                         .await
                         .apply_systemic_limits(&p, &actor, now_ms())
                     {
-                        Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
+                        Ok(update) => {
+                            // #966: persist every changed bound to `.env` so a
+                            // restart re-arms the same values. The in-memory
+                            // apply already succeeded; a persistence failure is
+                            // logged but does not fail the RPC.
+                            let env_file = core
+                                .lock()
+                                .await
+                                .config()
+                                .env_file_path
+                                .clone();
+                            let env_path = env_file.as_deref().map(std::path::Path::new);
+                            let changes: Vec<(&'static str, String)> = update
+                                .applied
+                                .iter()
+                                .map(|c| (c.field, c.to.clone()))
+                                .collect();
+                            persist_changes_to_env(env_path, &changes);
+                            Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                        }
                         Err(e) => Err(core_err(e)),
                     }
                 }
@@ -125,7 +228,23 @@ pub(crate) async fn handle_risk(
                     _ => "uid:unknown".to_string(),
                 };
                 match core.lock().await.apply_exit_set(&p, &actor, now_ms()) {
-                    Ok(update) => Ok(serde_json::to_value(update).unwrap_or(Value::Null)),
+                    Ok(update) => {
+                        // #966: persist the exit-discipline changes to `.env`.
+                        let env_file = core
+                            .lock()
+                            .await
+                            .config()
+                            .env_file_path
+                            .clone();
+                        let env_path = env_file.as_deref().map(std::path::Path::new);
+                        let changes: Vec<(&'static str, String)> = update
+                            .applied
+                            .iter()
+                            .map(|c| (c.field, c.to.clone()))
+                            .collect();
+                        persist_exit_changes_to_env(env_path, &changes);
+                        Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                    }
                     Err(e) => Err(core_err(e)),
                 }
             }

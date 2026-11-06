@@ -99,6 +99,15 @@ pub(crate) struct Args {
     /// (calibration: the deadline amputated rounds that went on to pay); a
     /// non-zero value re-arms it.
     pub(crate) exit_force_sec: i64,
+    /// #966 runtime-persistence: the trailing-stop master switch, resolved
+    /// `BK_EXIT_TRAILING_ENABLED` > compiled default (false). The
+    /// `risk.setExit` hot path writes this key so the choice survives a
+    /// restart.
+    pub(crate) exit_trailing_enabled: bool,
+    /// #966 runtime-persistence: the strategy-exit maker-first switch,
+    /// resolved `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST` > compiled default
+    /// (false). Same persistence contract as `exit_trailing_enabled`.
+    pub(crate) exit_strategy_exit_maker_first: bool,
     pub(crate) feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,

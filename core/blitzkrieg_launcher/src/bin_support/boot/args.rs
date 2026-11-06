@@ -1227,6 +1227,36 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         s.value
     };
 
+    // #966: trailing-enabled and strategy-exit-maker-first are runtime-persisted
+    // booleans — `risk.setExit` writes `BK_EXIT_TRAILING_ENABLED` and
+    // `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST` to `.env`, and the boot reads them
+    // back so a hot-edited switch survives a restart. No CLI flag: these are
+    // cockpit-operated knobs, not launch-time ones.
+    let exit_trailing_enabled = pick(
+        None::<bool>,
+        env.num::<bool>("BK_EXIT_TRAILING_ENABLED"),
+        exit_defaults.trailing_enabled,
+    );
+    if exit_trailing_enabled.is_explicit() {
+        report.push(format!(
+            "exit.trailing_enabled={} ({})",
+            exit_trailing_enabled.value,
+            exit_trailing_enabled.source.as_str()
+        ));
+    }
+    let exit_strategy_exit_maker_first = pick(
+        None::<bool>,
+        env.num::<bool>("BK_EXIT_STRATEGY_EXIT_MAKER_FIRST"),
+        exit_defaults.strategy_exit_maker_first,
+    );
+    if exit_strategy_exit_maker_first.is_explicit() {
+        report.push(format!(
+            "exit.strategy_exit_maker_first={} ({})",
+            exit_strategy_exit_maker_first.value,
+            exit_strategy_exit_maker_first.source.as_str()
+        ));
+    }
+
     // ── #269: is the evolution engine running? ──────────────────────────────
     // The one shadow-evolution setting whose origin was never printed, and the
     // question the switch-conflict warning is about ("the file says off" is only
@@ -1305,6 +1335,8 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         exit_trailing_min_high_pct,
         exit_min_trail_pct,
         exit_force_sec,
+        exit_trailing_enabled: exit_trailing_enabled.value,
+        exit_strategy_exit_maker_first: exit_strategy_exit_maker_first.value,
         feed_ws,
         net_check,
         replay,
