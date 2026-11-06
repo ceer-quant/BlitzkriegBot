@@ -212,7 +212,7 @@ onMounted(() => {
     </header>
 
     <!-- compact nav for narrow viewports with smooth horizontal scroll and touch padding -->
-    <nav class="mx-auto mt-4 flex max-w-[1280px] justify-start overflow-x-auto px-2 no-scrollbar sm:mt-6 sm:justify-center sm:px-4 md:hidden">
+    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-start overflow-x-auto px-2 no-scrollbar sm:mt-6 sm:justify-center sm:px-4 md:hidden">
       <SegmentedControl
         :model-value="activeGroup?.id ?? tab"
         :segments="topSegments"
