@@ -11,8 +11,28 @@
 //! that is O(few) and needs no tombstones to express a close. `load` reads the
 //! snapshot back; unparseable lines are skipped, not fatal.
 
+use crate::model::Mode;
 use crate::position::OpenPosition;
 use std::path::{Path, PathBuf};
+
+/// issue #953 (the snapshot follows the book): the DEFAULT open-position
+/// snapshot is per-run-mode, closing the same gap the trade log's split
+/// closed (`default_trade_log_path`) and #941 closed for the risk side
+/// files — live KEEPS the historical `data/positions/positions.jsonl`
+/// spelling byte for byte (upgrade = zero migration, acceptance C), and
+/// the dry book derives `data/positions/positions.dry.jsonl` so a
+/// same-directory live→dry sequence switch boots into the dry book's OWN
+/// snapshot (empty on first boot) instead of inheriting live's held
+/// positions and id baseline. An explicit `--position-log` outranks the
+/// derivation; no existing file is moved, renamed or deleted (acceptance
+/// E) — the bare name BELONGS to live from this split on.
+pub fn default_position_log_for(mode: Mode) -> &'static str {
+    if mode.may_trade() {
+        "data/positions/positions.jsonl"
+    } else {
+        "data/positions/positions.dry.jsonl"
+    }
+}
 
 /// A position snapshot file bound to a path.
 pub struct PositionDb {
@@ -303,5 +323,26 @@ mod tests {
         // No .bak was consulted or created.
         assert!(!dir.join("positions.bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #953: the DEFAULT snapshot is per-mode — live keeps the
+    /// historical spelling byte for byte (upgrade = zero migration,
+    /// acceptance C), dry derives `.dry.jsonl` beside it so a
+    /// same-directory live→dry switch boots into the dry book's OWN file.
+    /// Mirrors the trade-log split's contract test.
+    #[test]
+    fn default_position_log_path_splits_by_mode() {
+        assert_eq!(
+            default_position_log_for(crate::model::Mode::Live),
+            "data/positions/positions.jsonl"
+        );
+        assert_eq!(
+            default_position_log_for(crate::model::Mode::Dry),
+            "data/positions/positions.dry.jsonl"
+        );
+        assert_eq!(
+            default_position_log_for(crate::model::Mode::ReadOnly),
+            "data/positions/positions.dry.jsonl"
+        );
     }
 }

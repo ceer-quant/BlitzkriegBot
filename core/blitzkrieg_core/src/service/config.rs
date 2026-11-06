@@ -162,8 +162,9 @@ pub struct CoreConfig {
     /// default `user_layer/strategies_lua` under the repo.
     pub lua_strategy_dir: Option<String>,
     /// Where the effective enabled-set is recorded so runtime toggles and boot
-    /// flags survive a restart (`data/strategy-state.json` in production; see
-    /// [`crate::strategy_state`]). `None` disables persistence — the backtester
+    /// flags survive a restart (`data/strategy-state.json` in production —
+    /// per-mode `data/strategy-state.dry.json` for the dry book, issue 953;
+    /// see [`crate::strategy_state`]). `None` disables persistence — the backtester
     /// and most in-process tests run with `None`, and a toggle then changes
     /// nothing on disk.
     pub strategy_state_path: Option<String>,
@@ -250,7 +251,10 @@ pub struct CoreConfig {
     /// None = off. Default `data/orders/orders.jsonl`.
     pub order_log_path: Option<String>,
     /// Where to persist OPEN POSITIONS (crash recovery). None = off.
-    /// Default `data/positions/positions.jsonl`.
+    /// Default `data/positions/positions.jsonl` live (per-mode
+    /// `data/positions/positions.dry.jsonl` for the dry book's own snapshot,
+    /// issue 953; the binary's `main` derives the default like the trade
+    /// log's split above).
     pub position_log_path: Option<String>,
     /// Discover rounds inside the core (Gamma slug queries) instead of relying on
     /// Node to push `engine.markets`. Default true when the engine is on.

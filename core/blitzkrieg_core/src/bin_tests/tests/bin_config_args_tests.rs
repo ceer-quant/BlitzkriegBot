@@ -521,6 +521,86 @@ fn the_daily_loss_file_follows_the_position_log() {
     );
 }
 
+// ── issue #953: the open-position snapshot and the persisted strategy set
+//    follow the book ─────────────────────────────────────────────────────
+
+/// The DEFAULT open-position snapshot and strategy-state file are per-mode,
+/// the same name-song #941 gave the side files: live keeps the historical
+/// spellings byte for byte (upgrade = zero migration — acceptance C), dry
+/// gets the `.dry.` tag beside them (`positions.dry.jsonl`,
+/// `strategy-state.dry.json`), so a same-directory live→dry switch boots
+/// into the dry book's own snapshot and persisted enablement and the two
+/// books' files never meet. Acceptance E: the bare names belong to live
+/// from this split on — nothing on disk is moved or renamed.
+#[test]
+fn the_snapshot_defaults_split_by_mode_like_the_side_files() {
+    // Acceptance C: live paths byte-identical to the pre-#953 defaults.
+    assert_eq!(
+        default_position_log_for(Mode::Live),
+        "data/positions/positions.jsonl"
+    );
+    assert_eq!(
+        default_strategy_state_for(Mode::Live),
+        "data/strategy-state.json"
+    );
+    // The dry family matches #941's naming convention (semantic tag before
+    // the final extension), so the naming song stays one song.
+    assert_eq!(
+        default_position_log_for(Mode::Dry),
+        "data/positions/positions.dry.jsonl"
+    );
+    assert_eq!(
+        default_strategy_state_for(Mode::Dry),
+        "data/strategy-state.dry.json"
+    );
+    // Read-only settles locally — the simulation book, not the venue book.
+    assert_eq!(
+        default_position_log_for(Mode::ReadOnly),
+        "data/positions/positions.dry.jsonl"
+    );
+    assert_eq!(
+        default_strategy_state_for(Mode::ReadOnly),
+        "data/strategy-state.dry.json"
+    );
+}
+
+/// The explicit flag outranks the per-mode derivation on both faces, and an
+/// explicit off stays off. A bare boot carries the historical (live)
+/// spellings as its RAW shape — the mode split is the binary's job (the
+/// resolved `Mode` is only available there), so `parse_args` itself stays
+/// mode-free and the snapshot gate keeps pinning exactly this raw shape.
+#[test]
+fn the_snapshot_flags_outrank_the_mode_derivation() {
+    // Explicit paths survive untouched (the binary rewrites nothing.
+    let a = args_from(&[
+        "--mode",
+        "live",
+        "--position-log",
+        "/tmp/bk/book.jsonl",
+        "--strategy-state",
+        "/tmp/bk/state.json",
+    ]);
+    assert_eq!(a.position_log.as_deref(), Some("/tmp/bk/book.jsonl"));
+    assert_eq!(a.strategy_state.as_deref(), Some("/tmp/bk/state.json"));
+
+    // A bare boot keeps the bare shape (the historical spelling) — this is
+    // the line the snapshot gate pins; `main` swaps the dry spelling in when
+    // the resolved mode does not trade.
+    let a = args_from(&[]);
+    assert_eq!(
+        a.position_log, None,
+        "parse_args never minted a position-log default (the binary does)"
+    );
+    assert_eq!(
+        a.strategy_state.as_deref(),
+        Some("data/strategy-state.json")
+    );
+
+    // An explicit off stays off on both faces.
+    let a = args_from(&["--no-strategy-state"]);
+    assert_eq!(a.strategy_state, None);
+}
+
 // ── #202: the equity-relative sizing / per-order bound ──────────────────
 
 /// Both knobs default to OFF — the shipped absolute path, order sizes

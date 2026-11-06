@@ -1386,10 +1386,17 @@ pub(crate) fn parse_args(
         enable_strategy,
         disable_strategy,
         allow_zero_strategies,
+        // issue #953: the MODE-SPLIT default is derived in `main` (the only
+        // place the resolved run mode decides a default path — the trade log
+        // precedent) from the bare-flag shape below; `parse_args` itself only
+        // distinguishes off (explicit `--no-strategy-state`) from
+        // "no flag given" so the snapshot test keeps pinning the raw shape.
         strategy_state: if no_strategy_state {
             None
+        } else if strategy_state.is_some() {
+            strategy_state
         } else {
-            Some(strategy_state.unwrap_or_else(|| "data/strategy-state.json".to_string()))
+            Some("data/strategy-state.json".to_string())
         },
         strategy_dir: if no_strategy_dir {
             None

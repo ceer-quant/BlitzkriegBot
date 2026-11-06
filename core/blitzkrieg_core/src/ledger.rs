@@ -93,7 +93,11 @@ pub struct Ledger {
     /// [`Self::journal_seq_basis`]). Not serialized: the JournalEntry shape
     /// and the journal.jsonl contract are untouched.
     journal_total: u64,
-    /// Where journal rows append (`data/ledger/<account>.journal.jsonl`).
+    /// Where journal rows append — per-mode since issue 941
+    /// (`data/ledger/<account>.journal.live.jsonl` trading,
+    /// `<account>.journal.dry.jsonl` locally-settling; the pre-941
+    /// `<account>.journal.jsonl` spelling is the deleted single-file era,
+    /// never written again).
     /// `None` = memory-only (backtester, in-process tests): nothing is
     /// written or replayed.
     journal_path: Option<PathBuf>,

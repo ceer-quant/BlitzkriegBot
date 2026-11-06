@@ -1273,6 +1273,7 @@ mod tests {
     mod ghost_fill_tests;
     mod journal_cursor_tests;
     mod maker_rebate_tests;
+    mod mode_snapshot_tests;
     mod order_state_machine_462_tests;
     mod pair_entry_maker_tests;
     mod postonly_entry_maker_tests;

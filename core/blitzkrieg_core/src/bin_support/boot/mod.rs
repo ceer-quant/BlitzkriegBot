@@ -180,8 +180,12 @@ pub(crate) struct Args {
     /// trading logic. This never enables anything: it only stops the refusal.
     pub(crate) allow_zero_strategies: bool,
     /// Where the effective enabled-set is recorded so toggles and boot flags
-    /// survive a restart. Default `data/strategy-state.json`; `none`/empty = no
-    /// persistence (a backtest or a hermetic harness wants this).
+    /// survive a restart. A bare default resolves to the historical
+    /// `data/strategy-state.json`; the binary's `main` then rewrites THAT
+    /// bare shape per resolved run mode (issue #953: live keeps it, dry gets
+    /// `data/strategy-state.dry.json`) — an explicit `--strategy-state`
+    /// survives verbatim. `none`/empty = no persistence (a backtest or a
+    /// hermetic harness wants this).
     pub(crate) strategy_state: Option<String>,
     /// Directory scanned at startup for user-layer strategy libraries
     /// (`*.dylib`/`*.so`): every library found is LOADED, and registers
@@ -936,6 +940,15 @@ pub(crate) fn risk_state_path_for(position_log: &str, trading: bool) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// issue #953: the DEFAULT open-position snapshot and strategy-state file
+/// are per-run-mode — `crate::position_db::default_position_log_for` /
+/// `crate::strategy_state::default_strategy_state_for` own the name song
+/// (live keeps the historical bare spellings, dry derives the `.dry.`
+/// family). Re-exports so the bin's boot face reads them by the same
+/// short names `main` uses; the snapshot gate pins them through these.
+pub(crate) use blitzkrieg_core::position_db::default_position_log_for;
+pub(crate) use blitzkrieg_core::strategy_state::default_strategy_state_for;
 
 /// `--net-check`: probe every network path the ACTIVE market plugin uses and
 /// print one JSON `NetCheckReport` on stdout, returning the code the shell

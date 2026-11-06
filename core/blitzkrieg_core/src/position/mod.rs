@@ -1101,6 +1101,17 @@ impl PositionManager {
     pub fn push_closed_for_test(&mut self, closed: ClosedPosition) {
         self.closed.push(closed);
     }
+
+    /// issue #953 (test seam): the NEXT id the book would mint
+    /// (`hft-{next_id}`) without opening anything. The mode-snapshot
+    /// acceptance tests assert "a mode switch does not inherit the other
+    /// book's id baseline" straight off this — asserting an opened
+    /// position's id after a real entry would bake the entry path's
+    /// risk-gate shape into a name-isolation test.
+    #[cfg(test)]
+    pub fn next_id_for_test(&self) -> u64 {
+        self.next_id
+    }
 }
 
 // SignalDirection::as_str lives on the shared type (strategy_logic::model) —
