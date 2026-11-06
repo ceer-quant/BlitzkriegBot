@@ -256,6 +256,13 @@ local function min_entry_price()
     return p
 end
 
+-- 保护性止损 (operator ruling 2026-11-06 follow-up): 浮亏达到 -stop_loss_pct
+-- 时策略自己发 exit signal，不给 kernel exit ladder 一个人扛。默认 50%
+-- （对应 kernel holder_stop_pct 的 50% containment）。0 禁用。
+-- 注意：用 NET proceeds (bid - taker fee) 判断——名义 -40% 但 fee 吃掉后
+-- 可能已经 net -48%，所以 net 比名义更保守。
+local DEFAULT_SL = { m = 50, s = 0 }
+
 local function classify(token, mid)
     local prev = last_mid[token]
     last_mid[token] = mid
@@ -563,6 +570,23 @@ local function consider_exit(out, row, round)
     -- Time-weighted bands (2026-11-06): each band slides from its base
     -- toward `*_tight_pct` as the round drains; *_tight_pct=0 keeps the
     -- flat band exactly (default — no behavior change without an opt-in).
+    --
+    --保护性止损 (stop_loss_pct) 优先级最高：浮亏达到阈值立即市价出。
+    --用 net proceeds 算（bid - taker fee），不是名义 bid——保守一点。
+    local sl = dec_param(params, "stop_loss_pct", DEFAULT_SL)
+    if sl.m > 0 then
+        -- net_reaches(proceeds, entry, sl) means (proceeds-entry)/entry >= sl%
+        -- 我们要反向：(proceeds-entry)/entry <= -sl% → proceeds <= entry*(1-sl/100)
+        -- 用 dec_mul: entry * (100 - sl) / 100
+        local floor_entry = dec_mul(entry, { m = 100 - sl.m, s = 0 })
+        floor_entry = dec_mul(floor_entry, { m = 1, s = -2 }) -- /100
+        if dec_cmp(proceeds, floor_entry) <= 0 then
+            -- 净亏损达到 -sl%，立即市价止损。use_maker=false → 立即 taker 成交。
+            out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
+            return
+        end
+    end
+
     local tp = tighten(dec_param(params, "take_profit_pct", DEFAULT_TP),
         dec_param(params, "take_profit_pct_tight", DEC_0), round)
     if tp.m > 0 and net_reaches(proceeds, entry, tp) then
