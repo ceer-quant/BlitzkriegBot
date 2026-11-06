@@ -69,10 +69,6 @@ const ROW_DEFS: RiskRowDef[] = [
   { field: 'maxPositionSize', label: '单仓上限', unit: '股', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxPositionSize },
   { field: 'maxConsecutiveLosses', label: '连亏熔断', unit: '次', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxConsecutiveLosses },
   { field: 'cooldownMinutes', label: '熔断冷静期', unit: '分钟', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.cooldownMinutes },
-  { field: 'maxTotalPosition', label: '全局总仓位', unit: '笔', group: '全局', int: true, bound: () => riskDoc.value?.global.limits.maxTotalPosition },
-  { field: 'maxTotalExposureUsd', label: '全局总敞口', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.maxTotalExposureUsd },
-  { field: 'maxCorrelationUsd', label: '同资产敞口上限', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.maxCorrelationUsd },
-  { field: 'globalKillSwitchLossUsd', label: '全局急停亏损', unit: 'USD', group: '全局', int: false, bound: () => riskDoc.value?.global.limits.globalKillSwitchLossUsd },
 ]
 
 // ── 编辑缓冲 + 保存（risk.setSystemic，只发改动项）──

@@ -21,21 +21,14 @@ export interface RiskBound {
   source: LimitSource | string
 }
 
-/** The per-account matrix (§4.2, five). */
+/** The per-account matrix (§4.2, five). Risk control follows the account's
+ *  capital — there is no process-wide (global) cap (issue #983). */
 export interface AccountRiskLimitsView {
   maxSingleLossUsd: RiskBound
   maxDailyDrawdownUsd: RiskBound
   maxPositionSize: RiskBound
   maxConsecutiveLosses: RiskBound
   cooldownMinutes: RiskBound
-}
-
-/** The process-wide matrix (§4.2, four). */
-export interface GlobalRiskLimitsView {
-  maxTotalPosition: RiskBound
-  maxTotalExposureUsd: RiskBound
-  maxCorrelationUsd: RiskBound
-  globalKillSwitchLossUsd: RiskBound
 }
 
 /** The exit triple Gate 4 binds per entry (plain numbers, not Bounds). */
@@ -64,14 +57,14 @@ export interface RiskExitView {
 export interface RiskLimitsDoc {
   version: string
   account: { id: string; limits: AccountRiskLimitsView }
-  global: { limits: GlobalRiskLimitsView }
   exit: RiskExitView
   error?: string
 }
 
 /**
- * `risk.setSystemic` 请求体：九项任选（只发改动项），小数跨线是字符串（内核
+ * `risk.setSystemic` 请求体：五项任选（只发改动项），小数跨线是字符串（内核
  * serde 的 Decimal 约定）；`0` = 关闭该限额。`reason` 进审计行。
+ * issue #983：全部为账户级限额，无全局限额。
  */
 export interface RiskSetSystemicBody {
   maxSingleLossUsd?: string | number
@@ -79,10 +72,6 @@ export interface RiskSetSystemicBody {
   maxPositionSize?: string | number
   maxConsecutiveLosses?: string | number
   cooldownMinutes?: string | number
-  maxTotalPosition?: string | number
-  maxTotalExposureUsd?: string | number
-  maxCorrelationUsd?: string | number
-  globalKillSwitchLossUsd?: string | number
   reason?: string
 }
 

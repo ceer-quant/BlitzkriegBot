@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
     };
     // Issue #967 (Phase-5) A-item: the `blitzkrieg` wrapper folds `.env` into
     // the process environment, so a bare `blitzkrieg-core` run sees none of the
-    // nine BK_RISK_* keys. If `.env` itself is missing or unreadable too, the
+    // five BK_RISK_* keys. If `.env` itself is missing or unreadable too, the
     // silent factory posture would be invisible — name the file so the boot log
     // answers "where did the limits go?".
     let env_path = ".env";
@@ -278,18 +278,14 @@ async fn main() -> anyhow::Result<()> {
         "BK_RISK_MAX_POSITION_SIZE",
         "BK_RISK_MAX_CONSECUTIVE_LOSSES",
         "BK_RISK_COOLDOWN_MINUTES",
-        "BK_RISK_MAX_TOTAL_POSITION",
-        "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
-        "BK_RISK_MAX_CORRELATION_USD",
-        "BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
     ]
     .iter()
     .all(|key| std::env::var(key).is_err());
     if all_keys_absent && !std::path::Path::new(env_path).is_file() {
         eprintln!(
             "blitzkrieg-core: WARNING {env_path} is missing or unreadable; \
-             all nine BK_RISK_* limits are unset — running at factory \
-             (nine limits at factory off)"
+             all five BK_RISK_* limits are unset — running at factory \
+             (five per-account limits at factory off)"
         );
     }
     // Issue #967 (Phase-5): the `[[risk.ladder]]` opt-in lived in TOML. The

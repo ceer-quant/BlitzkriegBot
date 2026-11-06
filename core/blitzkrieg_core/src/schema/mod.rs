@@ -662,8 +662,6 @@ pub struct RiskLimitsResult {
     /// The per-account matrix, shown for the kernel's default account
     /// (§4.2: every account runs under the SAME configured matrix).
     pub account: RiskAccountLimitsView,
-    /// The process-wide matrix.
-    pub global: RiskGlobalLimitsView,
     /// The exit triple Gate 4 binds per entry.
     pub exit: RiskExitView,
 }
@@ -680,9 +678,6 @@ impl RiskLimitsResult {
             account: RiskAccountLimitsView {
                 id: default_account_id().as_str().to_owned(),
                 limits: systemic.account.clone(),
-            },
-            global: RiskGlobalLimitsView {
-                limits: systemic.global.clone(),
             },
             exit: RiskExitView {
                 stop_loss_pct: exit.stop_loss_pct,
@@ -702,14 +697,6 @@ impl RiskLimitsResult {
 pub struct RiskAccountLimitsView {
     pub id: String,
     pub limits: crate::risk::limits::AccountRiskLimits,
-}
-
-/// The process-wide matrix. Bare `limits` (no id): the holder is the kernel
-/// process itself, not any one account.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RiskGlobalLimitsView {
-    pub limits: crate::risk::limits::GlobalRiskLimits,
 }
 
 /// The exit resolution Gate 4 binds: stop/take percentages of the entry fill
@@ -983,19 +970,6 @@ pub struct SetSystemicLimitsParams {
     /// 熔断冷静期（分钟）：**下次会话生效** —— 与连亏熔断同一裁决。
     #[serde(default, with = "crate::decimal::opt")]
     pub cooldown_minutes: Option<Decimal>,
-    // ── 全局级（四项）──
-    /// 全局总仓位（笔，全账户合计）。
-    #[serde(default, with = "crate::decimal::opt")]
-    pub max_total_position: Option<Decimal>,
-    /// 全局总敞口（USD，全账户开仓名义合计）。
-    #[serde(default, with = "crate::decimal::opt")]
-    pub max_total_exposure_usd: Option<Decimal>,
-    /// 同资产敞口上限（USD，逐资产取最大）。
-    #[serde(default, with = "crate::decimal::opt")]
-    pub max_correlation_usd: Option<Decimal>,
-    /// 全局急停亏损（USD）：当日全账户合计已实现亏损越过即拒新开仓。
-    #[serde(default, with = "crate::decimal::opt")]
-    pub global_kill_switch_loss_usd: Option<Decimal>,
     /// Free-text note from the caller, echoed into the audit line.
     #[serde(default)]
     pub reason: Option<String>,
@@ -1010,10 +984,6 @@ impl SetSystemicLimitsParams {
             && self.max_position_size.is_none()
             && self.max_consecutive_losses.is_none()
             && self.cooldown_minutes.is_none()
-            && self.max_total_position.is_none()
-            && self.max_total_exposure_usd.is_none()
-            && self.max_correlation_usd.is_none()
-            && self.global_kill_switch_loss_usd.is_none()
     }
 }
 

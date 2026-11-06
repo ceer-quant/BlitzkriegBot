@@ -250,16 +250,23 @@ impl Core {
             String,
             Result<crate::execution_policy::PolicyOutput, crate::execution_policy::PolicyRefusal>,
         > = if self.execution_policy.is_some() {
-            // The open_positions fact counts LIVE positions GLOBALLY (all
-            // accounts) — an expired round's stuck position is settlement-dead
-            // (same rule as PositionManager::can_open) and must not trip the
-            // shipped `open_positions >= N` backstop. Counting per-account
-            // defeats the global_backstop rule when positions span accounts.
+            // issue #983: the open_positions fact counts LIVE positions for the
+            // request's OWN account only — risk control follows the account's
+            // capital, not a global pool. An expired round's stuck position is
+            // settlement-dead (same rule as PositionManager::can_open) and must
+            // not trip the shipped `open_positions >= N` backstop. Counting
+            // globally would let one account's positions cap another account's
+            // entries — the opposite of per-account risk isolation.
             let open = self.positions.open_positions();
-            let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
             tokens
                 .iter()
                 .map(|(_, req)| {
+                    let account_id = req.account_id.as_str();
+                    let live = open
+                        .iter()
+                        .filter(|p| p.account_id.as_str() == account_id)
+                        .filter(|p| p.expires_at_ms > now_ms)
+                        .count() as u32;
                     let facts = crate::execution_policy::PolicyInput {
                         available_balance: self
                             .accounts
@@ -390,8 +397,14 @@ impl Core {
             > = if already_placed > 0 {
                 match &self.execution_policy {
                     Some(policy) => {
+                        // issue #983: count LIVE positions for THIS account only.
+                        let account_id = req.account_id.as_str();
                         let open = self.positions.open_positions();
-                        let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
+                        let live = open
+                            .iter()
+                            .filter(|p| p.account_id.as_str() == account_id)
+                            .filter(|p| p.expires_at_ms > now_ms)
+                            .count() as u32;
                         let facts = crate::execution_policy::PolicyInput {
                             available_balance: self
                                 .accounts
@@ -558,10 +571,8 @@ impl Core {
                     .as_ref()
                     .map(|e| e.last_time_left_sec())
                     .unwrap_or(0);
-                // E26 (§4.2) + #461: the systemic aggregates are read BEFORE
-                // the account borrow — resting BUY notional joins the
-                // exposure (cash already promised).
-                let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
+                // issue #983: systemic limits are per-account only — no
+                // process-wide aggregates needed.
                 // The PHYSICS projection needs the strategy's own doctrine:
                 // a hold-to-settlement declaration widens the bound stop
                 // (the wide containment width, not the 12% ladder).
@@ -598,7 +609,6 @@ impl Core {
                             now_ms,
                             equity,
                             account_entry_block,
-                            systemic_facts,
                             strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)
@@ -880,13 +890,17 @@ impl Core {
                 .unwrap_or(0);
             let policy = self.execution_policy.clone();
             let policy_verdict = policy.map(|policy| {
-                // open_positions counts LIVE positions only (expired rounds
-                // open_positions counts LIVE positions GLOBALLY (all accounts)
-                // (expired rounds are settlement-dead; see engine_evaluate's
-                // verdict map). Counting per-account defeats the global_backstop
-                // rule when positions span accounts.
+                // issue #983: open_positions counts LIVE positions for this
+                // account only (expired rounds are settlement-dead). Per-account
+                // risk isolation — one account's open book must not cap another
+                // account's entries.
+                let account_id = req.account_id.as_str();
                 let open = self.positions.open_positions();
-                let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
+                let live = open
+                    .iter()
+                    .filter(|p| p.account_id.as_str() == account_id)
+                    .filter(|p| p.expires_at_ms > now_ms)
+                    .count() as u32;
                 let facts = crate::execution_policy::PolicyInput {
                     available_balance: self
                         .accounts
@@ -1015,9 +1029,8 @@ impl Core {
                     .as_ref()
                     .map(|e| e.round_token_ids())
                     .unwrap_or_default();
-                // #461: the systemic aggregates are read BEFORE the account
-                // borrow — resting BUY notional joins the exposure.
-                let systemic_facts = self.systemic_facts(&intent.request.asset, now_ms);
+                // issue #983: systemic limits are per-account only — no
+                // process-wide aggregates needed.
                 // Same PHYSICS doctrine read as the real cycle: a
                 // hold-to-settlement declaration widens the bound stop.
                 let strategy_holds_to_settlement = self
@@ -1047,7 +1060,6 @@ impl Core {
                             now_ms,
                             equity,
                             account_entry_block,
-                            systemic_facts,
                             strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)

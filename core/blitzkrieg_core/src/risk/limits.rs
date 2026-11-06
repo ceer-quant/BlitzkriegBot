@@ -142,27 +142,10 @@ pub struct AccountRiskLimits {
     pub cooldown_minutes: Bound,
 }
 
-/// Process-wide limits (§4.2). One per kernel; they bound the SUM of what all
-/// accounts are doing, which no per-account view can see.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GlobalRiskLimits {
-    /// Concurrent open positions across ALL accounts (the existing per-account
-    /// `max_positions` still applies; both active = the stricter wins).
-    pub max_total_position: Bound,
-    /// Total open notional across ALL accounts (USD).
-    pub max_total_exposure_usd: Bound,
-    /// Same-`asset` notional ceiling (USD). §4.2's honest definition: "same
-    /// asset = same group" — per-asset exposure, max over assets. NO
-    /// correlation matrix exists in 0.3 (§17).
-    pub max_correlation_usd: Bound,
-    /// All-accounts daily-loss kill switch (USD): the process-level stop that
-    /// fires when the SUMMED day loss crosses the line.
-    pub global_kill_switch_loss_usd: Bound,
-}
-
-/// The whole systemic-limit set a kernel runs under: the per-account matrix,
-/// the process-wide matrix, and the resolution entry the config layer uses.
+/// The whole systemic-limit set a kernel runs under: the per-account matrix
+/// only. Risk control follows the account's capital — there is NO process-wide
+/// (global) cap; every bound here is judged against the request's OWN account
+/// (issue #983).
 ///
 /// `Default` is the FACTORY posture (§4.1): every `Bound` off, every source
 /// `default` — an unconfigured kernel answers `risk.limits` with the §4.4
@@ -171,19 +154,19 @@ pub struct GlobalRiskLimits {
 #[serde(rename_all = "camelCase")]
 pub struct SystemicRiskLimits {
     pub account: AccountRiskLimits,
-    pub global: GlobalRiskLimits,
 }
 
 impl SystemicRiskLimits {
     /// Phase-5 (issue #967): the env face is the ONLY effective source. `.env`
-    /// (folded into the process environment by the launcher) supplies the nine
-    /// `BK_RISK_*` keys; a missing key stays the factory `Bound::off()`. No
-    /// TOML layer is consulted — a `[risk]` section in a config file is inert.
+    /// (folded into the process environment by the launcher) supplies the five
+    /// per-account `BK_RISK_*` keys; a missing key stays the factory
+    /// `Bound::off()`. No TOML layer is consulted — a `[risk]` section in a
+    /// config file is inert.
     ///
     /// A key that is present but unparseable is surfaced as a `tracing::warn`
     /// naming the key and its raw value; an absent key stays the silent
     /// factory `Bound::off()` (§4.1). The boot layer emits a separate WARN
-    /// when `.env` itself is missing or unreadable and all nine keys are
+    /// when `.env` itself is missing or unreadable and all five keys are
     /// absent, so an operator bypassing the `blitzkrieg` wrapper is not left
     /// guessing why every limit stayed off.
     pub fn from_env() -> Self {
@@ -216,12 +199,6 @@ impl SystemicRiskLimits {
                 max_consecutive_losses: one("BK_RISK_MAX_CONSECUTIVE_LOSSES"),
                 cooldown_minutes: one("BK_RISK_COOLDOWN_MINUTES"),
             },
-            global: GlobalRiskLimits {
-                max_total_position: one("BK_RISK_MAX_TOTAL_POSITION"),
-                max_total_exposure_usd: one("BK_RISK_MAX_TOTAL_EXPOSURE_USD"),
-                max_correlation_usd: one("BK_RISK_MAX_CORRELATION_USD"),
-                global_kill_switch_loss_usd: one("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD"),
-            },
         }
     }
 
@@ -252,18 +229,8 @@ impl SystemicRiskLimits {
             &self.account.max_consecutive_losses,
         );
         push("cooldown_minutes", &self.account.cooldown_minutes);
-        push("max_total_position", &self.global.max_total_position);
-        push(
-            "max_total_exposure_usd",
-            &self.global.max_total_exposure_usd,
-        );
-        push("max_correlation_usd", &self.global.max_correlation_usd);
-        push(
-            "global_kill_switch_loss_usd",
-            &self.global.global_kill_switch_loss_usd,
-        );
         if out.is_empty() {
-            out.push("risk.systemic: at factory (all nine limits off)".to_string());
+            out.push("risk.systemic: at factory (all five per-account limits off)".to_string());
         }
         out
     }
@@ -274,16 +241,11 @@ impl SystemicRiskLimits {
     /// is a byte gate, and an extra "nothing armed" trace would break it).
     pub fn any_armed(&self) -> bool {
         let a = &self.account;
-        let g = &self.global;
         a.max_single_loss_usd.is_enabled()
             || a.max_daily_drawdown_usd.is_enabled()
             || a.max_position_size.is_enabled()
             || a.max_consecutive_losses.is_enabled()
             || a.cooldown_minutes.is_enabled()
-            || g.max_total_position.is_enabled()
-            || g.max_total_exposure_usd.is_enabled()
-            || g.max_correlation_usd.is_enabled()
-            || g.global_kill_switch_loss_usd.is_enabled()
     }
 }
 
@@ -335,35 +297,13 @@ pub fn single_loss_verdict(
     SingleLossVerdict::Reduce { approved }
 }
 
-/// The aggregates the systemic block judges (§4.2), read from the books the
-/// kernel already maintains — carried per judgment so the verdict below stays
-/// a pure function and the pipeline never re-derives a threshold.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SystemicFacts {
-    /// Open positions across ALL accounts (the global caps are process-wide).
-    pub open_positions: usize,
-    /// Sum of open cost basis, all accounts.
-    pub open_exposure_usd: Decimal,
-    /// Open cost basis in the incoming entry's OWN asset — the honest
-    /// "correlation" proxy (§4.2): same asset = same settlement driver.
-    pub same_asset_exposure_usd: Decimal,
-    /// The day's realized PnL (the #173 budget's own number; negative when
-    /// losing). The drawdown cap IS this budget (§4.2: no second counter) —
-    /// it is enforced by the existing daily-loss breaker, never re-judged
-    /// here; the kill-switch cap below reads the same fact.
-    pub day_realized_usd: Decimal,
-}
-
 /// Which rejection vocabulary a systemic verdict speaks — mapped 1:1 onto the
 /// arbitration pipeline's existing [`crate::arbitration::RejectReason`] arms.
+/// Only the per-account matrix can refuse here (issue #983: no global caps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemicReject {
     /// The account matrix refused / could not size the entry.
     AccountLimit,
-    /// A process-wide cap refused the entry.
-    GlobalLimit,
-    /// The day's loss reached the kill-switch cap: stop opening new wounds.
-    KillSwitch,
 }
 
 /// Gate 2's systemic verdict for one entry (§4.2): pass, shrink, or refuse.
@@ -384,79 +324,23 @@ pub enum EntryJudgment {
     },
 }
 
-/// Judge one ENTRY against the systemic limits (§4.2). Order is deliberate:
-/// the kill-switch cap first (a day at its loss ceiling must not open new
-/// wounds), then the global caps (process-wide facts), then the account
-/// sizing bounds (which SHRINK rather than refuse when they can). A factory
-/// kernel has every bound off, so every suggestion passes — the shipped
-/// behavior, structurally silent until `[risk]` speaks.
+/// Judge one ENTRY against the per-account systemic limits (issue #983: risk
+/// control follows the account's capital — NO process-wide caps). The account
+/// sizing bounds (share cap, single-loss cap) SHRINK rather than refuse when
+/// they can. A factory kernel has every bound off, so every suggestion passes.
 ///
 /// `bound_stop_pct` is the BOUND stop (`effective_stop_pct` at entry time) —
 /// the same number the survival binding carries, so the single-loss cap is
 /// computed against the discipline that will actually fire.
 pub fn judge_entry(
     limits: &SystemicRiskLimits,
-    facts: &SystemicFacts,
     entry_price: Decimal,
     entry_size: Decimal,
     bound_stop_pct: Decimal,
 ) -> EntryJudgment {
-    // 1. Kill-switch cap: the day is lost — refuse new exposure. Closing is
-    //    not this path's business (close intents never reach here).
-    let ks = &limits.global.global_kill_switch_loss_usd;
-    if ks.is_enabled() && facts.day_realized_usd <= -ks.value() {
-        return EntryJudgment::Reject {
-            reject: SystemicReject::KillSwitch,
-            detail: format!(
-                "global_kill_switch_loss_usd {}: day realized {} — new entries refused",
-                ks.value(),
-                facts.day_realized_usd
-            ),
-        };
-    }
-    // 2. Global position count: the table cannot grow past the cap.
-    let count_cap = &limits.global.max_total_position;
-    if count_cap.is_enabled() && Decimal::from(facts.open_positions + 1) > count_cap.value() {
-        return EntryJudgment::Reject {
-            reject: SystemicReject::GlobalLimit,
-            detail: format!(
-                "max_total_position {}: {} open + this entry exceeds the cap",
-                count_cap.value(),
-                facts.open_positions
-            ),
-        };
-    }
-    // 3. Global exposure: open commitment plus this entry's notional.
-    let incoming = entry_price * entry_size;
-    let exposure_cap = &limits.global.max_total_exposure_usd;
-    if exposure_cap.is_enabled() && facts.open_exposure_usd + incoming > exposure_cap.value() {
-        return EntryJudgment::Reject {
-            reject: SystemicReject::GlobalLimit,
-            detail: format!(
-                "max_total_exposure_usd {}: {} open + {} incoming exceeds the cap",
-                exposure_cap.value(),
-                facts.open_exposure_usd,
-                incoming
-            ),
-        };
-    }
-    // 4. Correlation: same-asset commitment plus this entry (§4.2's honest
-    //    definition — no correlation matrix, one settlement driver per asset).
-    let corr_cap = &limits.global.max_correlation_usd;
-    if corr_cap.is_enabled() && facts.same_asset_exposure_usd + incoming > corr_cap.value() {
-        return EntryJudgment::Reject {
-            reject: SystemicReject::GlobalLimit,
-            detail: format!(
-                "max_correlation_usd {}: {} in this asset + {} incoming exceeds the cap",
-                corr_cap.value(),
-                facts.same_asset_exposure_usd,
-                incoming
-            ),
-        };
-    }
-    // 5+6. Account sizing: the share cap and the single-loss cap both SHRINK
-    //    the entry; the tighter survives and names itself. A cap that cannot
-    //    fit even the reduced entry refuses (`缩不下`).
+    // Account sizing: the share cap and the single-loss cap both SHRINK the
+    // entry; the tighter survives and names itself. A cap that cannot fit
+    // even the reduced entry refuses (`缩不下`).
     let mut approved = entry_size;
     let mut binding: Option<&'static str> = None;
     let size_cap = &limits.account.max_position_size;
@@ -537,9 +421,6 @@ mod tests {
             assert!(!b.is_enabled(), "{name} must ship disabled");
             assert_eq!(b.source(), LimitSource::Default, "{name} provenance");
         }
-        let g = GlobalRiskLimits::default();
-        assert!(!g.max_total_exposure_usd.is_enabled());
-        assert!(!g.global_kill_switch_loss_usd.is_enabled());
     }
 
     #[test]
@@ -553,17 +434,13 @@ mod tests {
     /// armed bound must name `env` and a missing key must stay at the factory
     /// posture (no TOML fallback anywhere in the chain).
     #[test]
-    fn env_lookup_arms_all_nine_and_names_env() {
+    fn env_lookup_arms_all_five_and_names_env() {
         let keys = std::collections::HashMap::from([
             ("BK_RISK_MAX_SINGLE_LOSS_USD", dec!(0.5)),
             ("BK_RISK_MAX_DAILY_DRAWDOWN_USD", dec!(5)),
             ("BK_RISK_MAX_POSITION_SIZE", dec!(5)),
             ("BK_RISK_MAX_CONSECUTIVE_LOSSES", dec!(4)),
             ("BK_RISK_COOLDOWN_MINUTES", dec!(30)),
-            ("BK_RISK_MAX_TOTAL_POSITION", dec!(6)),
-            ("BK_RISK_MAX_TOTAL_EXPOSURE_USD", dec!(20)),
-            ("BK_RISK_MAX_CORRELATION_USD", dec!(12)),
-            ("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD", dec!(8)),
         ]);
         let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).map(|v| v.to_string()));
         for (name, b) in [
@@ -572,13 +449,6 @@ mod tests {
             ("max_position_size", &s.account.max_position_size),
             ("max_consecutive_losses", &s.account.max_consecutive_losses),
             ("cooldown_minutes", &s.account.cooldown_minutes),
-            ("max_total_position", &s.global.max_total_position),
-            ("max_total_exposure_usd", &s.global.max_total_exposure_usd),
-            ("max_correlation_usd", &s.global.max_correlation_usd),
-            (
-                "global_kill_switch_loss_usd",
-                &s.global.global_kill_switch_loss_usd,
-            ),
         ] {
             assert!(b.is_enabled(), "{name} must be armed by .env");
             assert_eq!(b.source(), LimitSource::Env, "{name} provenance");
@@ -614,15 +484,6 @@ mod tests {
         ] {
             assert!(doc.get(key).is_some(), "missing wire key {key}");
         }
-        let doc = serde_json::to_value(GlobalRiskLimits::default()).unwrap();
-        for key in [
-            "maxTotalPosition",
-            "maxTotalExposureUsd",
-            "maxCorrelationUsd",
-            "globalKillSwitchLossUsd",
-        ] {
-            assert!(doc.get(key).is_some(), "missing wire key {key}");
-        }
     }
 
     #[test]
@@ -630,14 +491,18 @@ mod tests {
         let lines = SystemicRiskLimits::default().report_lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("at factory"), "{}", lines[0]);
-        assert!(lines[0].contains("all nine limits off"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("all five per-account limits off"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[test]
     fn report_lines_name_only_the_armed_limits_with_their_source() {
         let mut sys = SystemicRiskLimits::default();
         sys.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Env);
-        sys.global.global_kill_switch_loss_usd = Bound::new(dec!(1000), LimitSource::Flag);
+        sys.account.max_position_size = Bound::new(dec!(1000), LimitSource::Flag);
         let lines = sys.report_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
@@ -646,7 +511,7 @@ mod tests {
             lines[0]
         );
         assert!(
-            lines[1].contains("global_kill_switch_loss_usd=1000 (flag)"),
+            lines[1].contains("max_position_size=1000 (flag)"),
             "{}",
             lines[1]
         );
@@ -734,16 +599,9 @@ mod tests {
     fn judge_entry_at_factory_passes_everything() {
         // §4.1: with every bound off, no suggestion is ever judged — not even
         // an absurd one. The shipped behavior, structurally silent.
-        let facts = SystemicFacts {
-            open_positions: 999,
-            open_exposure_usd: dec!(999_999),
-            same_asset_exposure_usd: dec!(999_999),
-            day_realized_usd: dec!(-999_999),
-        };
         assert_eq!(
             judge_entry(
                 &SystemicRiskLimits::default(),
-                &facts,
                 dec!(0.5),
                 dec!(100),
                 dec!(12)
@@ -753,110 +611,10 @@ mod tests {
     }
 
     #[test]
-    fn kill_switch_cap_refuses_new_entries_when_the_day_is_lost() {
-        let mut limits = SystemicRiskLimits::default();
-        limits.global.global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Env);
-        let facts = SystemicFacts {
-            day_realized_usd: dec!(-50),
-            ..Default::default()
-        };
-        match judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)) {
-            EntryJudgment::Reject {
-                reject: SystemicReject::KillSwitch,
-                detail,
-            } => assert!(detail.contains("global_kill_switch_loss_usd"), "{detail}"),
-            other => panic!("expected kill-switch rejection, got {other:?}"),
-        }
-        // Not yet AT the cap: the entry passes (the cap bounds, it does not
-        // fire early).
-        let facts = SystemicFacts {
-            day_realized_usd: dec!(-49.99),
-            ..Default::default()
-        };
-        assert_eq!(
-            judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)),
-            EntryJudgment::Pass
-        );
-    }
-
-    #[test]
-    fn total_position_cap_refuses_when_the_table_is_full() {
-        let mut limits = SystemicRiskLimits::default();
-        limits.global.max_total_position = Bound::new(dec!(2), LimitSource::Env);
-        let facts = SystemicFacts {
-            open_positions: 2,
-            ..Default::default()
-        };
-        match judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)) {
-            EntryJudgment::Reject {
-                reject: SystemicReject::GlobalLimit,
-                detail,
-            } => assert!(detail.contains("max_total_position"), "{detail}"),
-            other => panic!("expected global rejection, got {other:?}"),
-        }
-        // One slot free: the entry takes it.
-        let facts = SystemicFacts {
-            open_positions: 1,
-            ..Default::default()
-        };
-        assert_eq!(
-            judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)),
-            EntryJudgment::Pass
-        );
-    }
-
-    #[test]
-    fn total_exposure_cap_refuses_when_open_plus_incoming_over_commits() {
-        let mut limits = SystemicRiskLimits::default();
-        limits.global.max_total_exposure_usd = Bound::new(dec!(100), LimitSource::Env);
-        let facts = SystemicFacts {
-            open_exposure_usd: dec!(95),
-            ..Default::default()
-        };
-        // 95 + 10 = 105 > 100.
-        match judge_entry(&limits, &facts, dec!(0.5), dec!(20), dec!(12)) {
-            EntryJudgment::Reject {
-                reject: SystemicReject::GlobalLimit,
-                detail,
-            } => assert!(detail.contains("max_total_exposure_usd"), "{detail}"),
-            other => panic!("expected global rejection, got {other:?}"),
-        }
-        // 95 + 5 = 100 <= 100: exactly at the cap fits.
-        assert_eq!(
-            judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)),
-            EntryJudgment::Pass
-        );
-    }
-
-    #[test]
-    fn correlation_cap_bounds_the_same_asset_commitment() {
-        let mut limits = SystemicRiskLimits::default();
-        limits.global.max_correlation_usd = Bound::new(dec!(20), LimitSource::Env);
-        let facts = SystemicFacts {
-            same_asset_exposure_usd: dec!(18),
-            ..Default::default()
-        };
-        // 18 + 5 = 23 > 20 (§4.2: same asset = one settlement driver).
-        match judge_entry(&limits, &facts, dec!(0.5), dec!(10), dec!(12)) {
-            EntryJudgment::Reject {
-                reject: SystemicReject::GlobalLimit,
-                detail,
-            } => assert!(detail.contains("max_correlation_usd"), "{detail}"),
-            other => panic!("expected global rejection, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn position_size_cap_shrinks_to_whole_shares() {
         let mut limits = SystemicRiskLimits::default();
         limits.account.max_position_size = Bound::new(dec!(7.5), LimitSource::Env);
-        match judge_entry(
-            &limits,
-            &SystemicFacts::default(),
-            dec!(0.5),
-            dec!(100),
-            dec!(12),
-        ) {
+        match judge_entry(&limits, dec!(0.5), dec!(100), dec!(12)) {
             EntryJudgment::Reduce { approved, limit } => {
                 assert_eq!(approved, dec!(7), "the cap floors to whole shares");
                 assert_eq!(limit, "max_position_size");
@@ -873,24 +631,12 @@ mod tests {
         // cap; the size cap allows 100 → the loss cap does not bite.
         limits.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Env);
         assert_eq!(
-            judge_entry(
-                &limits,
-                &SystemicFacts::default(),
-                dec!(0.5),
-                dec!(100),
-                dec!(12)
-            ),
+            judge_entry(&limits, dec!(0.5), dec!(100), dec!(12)),
             EntryJudgment::Pass
         );
         // A tighter loss cap bites: 6 × 0.06 = 0.36 <= 0.40 < 7 × 0.06.
         limits.account.max_single_loss_usd = Bound::new(dec!(0.40), LimitSource::Env);
-        match judge_entry(
-            &limits,
-            &SystemicFacts::default(),
-            dec!(0.5),
-            dec!(100),
-            dec!(12),
-        ) {
+        match judge_entry(&limits, dec!(0.5), dec!(100), dec!(12)) {
             EntryJudgment::Reduce { approved, limit } => {
                 assert_eq!(approved, dec!(6));
                 assert_eq!(limit, "max_single_loss_usd");
@@ -904,13 +650,7 @@ mod tests {
         let mut limits = SystemicRiskLimits::default();
         limits.account.max_single_loss_usd = Bound::new(dec!(0.01), LimitSource::Env);
         // One share's worst case (0.06) alone over-commits the 0.01 cap.
-        match judge_entry(
-            &limits,
-            &SystemicFacts::default(),
-            dec!(0.5),
-            dec!(100),
-            dec!(12),
-        ) {
+        match judge_entry(&limits, dec!(0.5), dec!(100), dec!(12)) {
             EntryJudgment::Reject {
                 reject: SystemicReject::AccountLimit,
                 detail,
@@ -923,13 +663,7 @@ mod tests {
     fn a_size_cap_below_one_share_refuses() {
         let mut limits = SystemicRiskLimits::default();
         limits.account.max_position_size = Bound::new(dec!(0.5), LimitSource::Env);
-        match judge_entry(
-            &limits,
-            &SystemicFacts::default(),
-            dec!(0.5),
-            dec!(100),
-            dec!(12),
-        ) {
+        match judge_entry(&limits, dec!(0.5), dec!(100), dec!(12)) {
             EntryJudgment::Reject {
                 reject: SystemicReject::AccountLimit,
                 detail,

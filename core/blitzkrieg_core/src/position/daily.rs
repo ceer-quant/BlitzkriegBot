@@ -7,9 +7,8 @@ impl PositionManager {
         self.daily_bucket(account).realized_pnl_usd
     }
 
-    /// The process-wide day realized — every account's bucket summed. This is
-    /// the SYSTEMIC fact (the `global_kill_switch_loss_usd` cap reads it); the
-    /// per-account caps read [`Self::daily_pnl_for`] instead.
+    /// The process-wide day realized — every account's bucket summed. Used for
+    /// reporting; per-account risk caps read [`Self::daily_pnl_for`] instead.
     pub fn daily_pnl_total(&self) -> Decimal {
         self.daily_by_account
             .values()

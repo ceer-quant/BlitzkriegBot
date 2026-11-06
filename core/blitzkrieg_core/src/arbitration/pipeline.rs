@@ -20,9 +20,7 @@ use super::{Decision, GateId, GateOutcome, GateTrace, Modification, PhysicsBindi
 use crate::exit_policy::{ExitConfig, effective_stop_pct};
 use crate::ledger::Ledger;
 use crate::model::{OrderRequest, Side};
-use crate::risk::limits::{
-    EntryJudgment, SystemicFacts, SystemicReject, account_breaker_key, judge_entry,
-};
+use crate::risk::limits::{EntryJudgment, SystemicReject, account_breaker_key, judge_entry};
 use crate::risk::physics::apply_physics;
 use crate::risk::{LossBreakers, RiskGate, is_close_intent};
 use blitzkrieg_market_api::{MarketType, OrderIntent, OrderKind, TimeInForce};
@@ -97,13 +95,6 @@ pub struct IntentCtx<'a> {
     /// settlement is proven. `false` = the ordinary projection,
     /// byte-identical to history.
     pub strategy_holds_to_settlement: bool,
-    /// E26 (§4.2): the aggregates the systemic limits judge, read from the
-    /// books by the caller. Carried rather than computed here so this module
-    /// stays a pure shape (rule 1) and never needs a second path to the
-    /// position table. Default (all zero) = the factory facts: a caller that
-    /// does not supply them cannot accidentally arm a cap — arming needs the
-    /// operator's explicit `[risk]` values on `RiskGate`'s config.
-    pub systemic_facts: SystemicFacts,
 }
 
 /// The pipeline's full product: the decision AND the traces the audit needs
@@ -283,21 +274,20 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
             outcome: GateOutcome::Pass,
             detail: "RiskGate::check_with_equity ok, breaker clear".into(),
         });
-        // E26 (§4.2): the systemic block — the kill-switch cap, the three
-        // global caps, and the account sizing bounds — judged ONLY when the
-        // operator armed something. With every bound off (the factory
-        // posture, §4.1) this block is INVISIBLE: no judgment, no trace, and
-        // the shipped pipeline's output stays byte-identical (the audit's
-        // parity is a byte gate). When armed, a bound that bites either
-        // refuses here or shrinks the entry — the reduced size rides through
-        // Gate 3's probe and the decision comes back MODIFIED.
+        // E26 (§4.2): the systemic block — the per-account sizing bounds —
+        // judged ONLY when the operator armed something. With every bound off
+        // (the factory posture, §4.1) this block is INVISIBLE: no judgment, no
+        // trace, and the shipped pipeline's output stays byte-identical (the
+        // audit's parity is a byte gate). When armed, a bound that bites
+        // either refuses here or shrinks the entry — the reduced size rides
+        // through Gate 3's probe and the decision comes back MODIFIED.
+        // issue #983: risk control follows the account — no global caps.
         let limits = ctx.risk.systemic_snapshot();
         if limits.any_armed() {
             let bound_stop_pct =
                 effective_stop_pct(ctx.exit_cfg.stop_loss_pct, ctx.time_left_sec, ctx.exit_cfg);
             match judge_entry(
                 limits,
-                &ctx.systemic_facts,
                 intent.request.price,
                 intent.request.size,
                 bound_stop_pct,
@@ -322,8 +312,6 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
                 }
                 EntryJudgment::Reject { reject, detail } => {
                     let reason = match reject {
-                        SystemicReject::KillSwitch => RejectReason::KillSwitch,
-                        SystemicReject::GlobalLimit => RejectReason::GlobalLimit,
                         SystemicReject::AccountLimit => RejectReason::AccountLimit,
                     };
                     gates.push(GateTrace {
@@ -529,7 +517,6 @@ mod tests {
             now_ms: 1_000,
             equity: dec!(1000),
             account_entry_block: None,
-            systemic_facts: SystemicFacts::default(),
             strategy_holds_to_settlement: false,
         }
     }
@@ -968,55 +955,6 @@ mod tests {
             4,
             "the systemic block never runs for a close"
         );
-    }
-
-    /// §4.2: the kill-switch cap refuses new entries when the day's loss
-    /// reached it — with the same KillSwitch vocabulary the existing gate
-    /// maps from `check_with_equity`.
-    #[test]
-    fn the_kill_switch_cap_refuses_entries_when_the_day_is_lost() {
-        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
-        risk.config_mut()
-            .systemic
-            .global
-            .global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Env);
-        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
-        c.systemic_facts.day_realized_usd = dec!(-50);
-        let out = process_intent(
-            &StrategyIntent::from_request(request(dec!(0.40), dec!(10))),
-            &mut c,
-        );
-        match out.decision {
-            Decision::Rejected {
-                reason: RejectReason::KillSwitch,
-                gate: GateId::Risk,
-                detail,
-            } => assert!(detail.contains("global_kill_switch_loss_usd"), "{detail}"),
-            other => panic!("expected KillSwitch, got {other:?}"),
-        }
-    }
-
-    /// §4.2: the global exposure cap refuses an entry whose notional plus the
-    /// open commitment exceeds it.
-    #[test]
-    fn the_global_exposure_cap_refuses_an_entry_that_over_commits() {
-        let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
-        risk.config_mut().systemic.global.max_total_exposure_usd =
-            Bound::new(dec!(100), LimitSource::Env);
-        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
-        c.systemic_facts.open_exposure_usd = dec!(95);
-        let out = process_intent(
-            &StrategyIntent::from_request(request(dec!(0.50), dec!(20))),
-            &mut c,
-        );
-        match out.decision {
-            Decision::Rejected {
-                reason: RejectReason::GlobalLimit,
-                gate: GateId::Risk,
-                detail,
-            } => assert!(detail.contains("max_total_exposure_usd"), "{detail}"),
-            other => panic!("expected GlobalLimit, got {other:?}"),
-        }
     }
 
     /// §4.2: the ACCOUNT-level streak trips through the SAME breaker map

@@ -371,7 +371,8 @@ impl Core {
         if req.side == Side::Buy {
             let limits = self.risk.systemic_snapshot();
             if limits.any_armed() {
-                let facts = self.systemic_facts(&req.asset, now_ms);
+                // issue #983: systemic limits are per-account only — no
+                // process-wide facts needed.
                 // The bound stop is the discipline that will ACTUALLY fire:
                 // a hold-to-settlement strategy's ladder walks the wide
                 // containment width, so the cap judges on that number too
@@ -389,13 +390,8 @@ impl Core {
                         &self.config.positions.exit,
                     )
                 };
-                match crate::risk::limits::judge_entry(
-                    limits,
-                    &facts,
-                    req.price,
-                    req.size,
-                    bound_stop_pct,
-                ) {
+                match crate::risk::limits::judge_entry(limits, req.price, req.size, bound_stop_pct)
+                {
                     crate::risk::limits::EntryJudgment::Pass => {}
                     crate::risk::limits::EntryJudgment::Reduce { approved, limit } => {
                         tracing::info!(

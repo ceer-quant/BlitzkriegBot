@@ -572,34 +572,11 @@ impl Core {
         if let Err(e) = self.risk.check_with_equity(req, equity) {
             return Err(e.message);
         }
-        // 2. The systemic nine. Armed bounds judge this entry exactly as the
-        //    pipeline would judge a fresh strategy entry (the aggregates are
-        //    built the same way — positions only, the incoming notional on top).
+        // 2. The systemic per-account limits (issue #983: no global caps).
+        //    Armed bounds judge this entry exactly as the pipeline would judge
+        //    a fresh strategy entry.
         let limits = self.risk.systemic_snapshot();
         if limits.any_armed() {
-            let now_ms = blitzkrieg_market_api::net::now_ms();
-            let facts = crate::risk::limits::SystemicFacts {
-                open_positions: self
-                    .positions
-                    .open_positions()
-                    .iter()
-                    .filter(|p| p.expires_at_ms > now_ms)
-                    .count(),
-                open_exposure_usd: self
-                    .positions
-                    .open_positions()
-                    .iter()
-                    .map(|p| p.cost_usd)
-                    .sum(),
-                same_asset_exposure_usd: self
-                    .positions
-                    .open_positions()
-                    .iter()
-                    .filter(|p| p.asset == req.asset)
-                    .map(|p| p.cost_usd)
-                    .sum(),
-                day_realized_usd: self.positions.daily_pnl_total(),
-            };
             // Same doctrine as the pipeline gate: a holder's bound stop is
             // the wide containment width the walker will actually enforce.
             let holder = self
@@ -619,13 +596,7 @@ impl Core {
                 )
             };
             if let crate::risk::limits::EntryJudgment::Reject { detail, .. } =
-                crate::risk::limits::judge_entry(
-                    limits,
-                    &facts,
-                    chase_price,
-                    req.size,
-                    bound_stop_pct,
-                )
+                crate::risk::limits::judge_entry(limits, chase_price, req.size, bound_stop_pct)
             {
                 return Err(detail);
             }
