@@ -8,6 +8,7 @@
  * 复用节点）；瀑布 sentinel 与 加载更多 的 fallback 按钮经 slot 传入（状态
  * 在页面）。
  */
+import { computed } from 'vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import Button from '@/components/ui/button/Button.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
@@ -104,12 +105,26 @@ const orderRowIsSynthetic = (t: TradeRow): boolean => t.orderStatus !== undefine
 function shortId(id: string): string {
   return id.length > 16 ? `${id.slice(0, 16)}…` : id
 }
+
+/**
+ * 活跃持仓（Trae 1077/1098）：当前持仓只读 positions.jsonl（exitRole=pending 或 status=open），
+ * 过滤掉任何已平仓/非 pending 的历史 close 记录。
+ */
+const activePositions = computed(() =>
+  props.positions.filter((p) => {
+    const raw = p as any
+    if (raw.closed === true) return false
+    if (typeof raw.exitRole === 'string' && raw.exitRole !== '' && raw.exitRole !== 'pending') return false
+    if (typeof raw.status === 'string' && raw.status !== '' && raw.status !== 'pending' && raw.status !== 'open') return false
+    return true
+  }),
+)
 </script>
 
 <template>
   <!-- positions -->
   <div v-if="tab === 'positions'">
-    <div v-if="positions.length" class="overflow-x-auto">
+    <div v-if="activePositions.length" class="overflow-x-auto">
       <table class="w-full min-w-[640px] text-[13px]">
         <thead>
           <tr class="text-left">
@@ -127,7 +142,7 @@ function shortId(id: string): string {
         </thead>
         <tbody>
           <tr
-            v-for="p in positions"
+            v-for="p in activePositions"
             :key="p.id"
             class="border-t border-line transition-colors hover:bg-panel-2"
           >
@@ -291,7 +306,13 @@ function shortId(id: string): string {
               <span v-else class="text-faint-fg">—</span>
             </td>
             <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="signedMoney(t.netPnlUsd, 2)" />
+              <template v-if="!orderRowIsSynthetic(t)">
+                <RollingNumber :value="signedMoney(t.netPnlUsd, 2)" />
+                <span
+                  v-if="t.exitReason === 'unverifiable_expiry'"
+                  class="block text-[10.5px] font-normal text-muted-fg"
+                >（fallback 记账，结算未裁决）</span>
+              </template>
               <span v-else class="text-faint-fg">—</span>
             </td>
             <td class="px-2 py-2.5 text-right num" :class="Number(t.netPnlPct ?? 0) >= 0 ? 'text-up' : 'text-down'">
@@ -312,6 +333,7 @@ function shortId(id: string): string {
                 <RollingNumber class="ml-1.5 text-[11px] text-faint-fg" :value="`#${t.orderRoundSlot ?? 0}`" />
                 <span class="ml-1.5 text-[10.5px] text-faint-fg">订单</span>
               </template>
+              <Badge v-else-if="t.exitReason === 'unverifiable_expiry'" variant="down">结算未裁决</Badge>
               <Badge v-else-if="t.exitReason" :variant="exitReasonTone(t.exitReason)">{{ t.exitReason }}</Badge>
               <span v-else class="text-faint-fg">—</span>
             </td>

@@ -504,7 +504,7 @@ const balanceLabel = computed(() =>
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
 const fAsset = ref('all')
-const fOutcome = ref<'all' | 'win' | 'loss'>('all')
+const fOutcome = ref<'all' | 'win' | 'loss' | 'unverifiable'>('all')
 const fStrategy = ref('all')
 
 const assetOptions = computed(() => [...new Set(historyRows.value.map((t) => t.asset).filter(Boolean))].sort())
@@ -533,6 +533,7 @@ const filteredRows = computed<TradeRow[]>(() => {
     const pnl = Number(t.netPnlUsd) || 0
     if (fOutcome.value === 'win' && pnl <= 0) return false
     if (fOutcome.value === 'loss' && pnl > 0) return false
+    if (fOutcome.value === 'unverifiable' && t.exitReason !== 'unverifiable_expiry') return false
     return true
   })
   // Newest first for display; the totals below are order-independent.
@@ -775,11 +776,18 @@ const tab = ref<'positions' | 'orders' | 'history'>('positions')
 // E28 (§9.5) + issue 561: positions follow the display account — same filter
 // discipline as the history rows (unattributed rows from a pre-E28 core stay
 // visible).
+// Trae 1077/1098: 当前持仓只读活跃持仓（exitRole=pending 或 status=open），过滤历史 close 记录
 const positions = computed(() =>
   filterByVenue(
     filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
     activeVenue.value,
-  ).rows,
+  ).rows.filter((p) => {
+    const raw = p as any
+    if (raw.closed === true) return false
+    if (typeof raw.exitRole === 'string' && raw.exitRole !== '' && raw.exitRole !== 'pending') return false
+    if (typeof raw.status === 'string' && raw.status !== '' && raw.status !== 'pending' && raw.status !== 'open') return false
+    return true
+  }),
 )
 
 // ── issue 456: 挂单簿 + 强平 ────────────────────────────────────────────────
@@ -1208,6 +1216,7 @@ const journalOpen = ref(false)
             <option value="all">全部盈亏</option>
             <option value="win">仅盈利</option>
             <option value="loss">仅亏损</option>
+            <option value="unverifiable">结算未裁决</option>
           </select>
           <select v-model="fStrategy" class="filter-select">
             <option value="all">全部策略</option>
