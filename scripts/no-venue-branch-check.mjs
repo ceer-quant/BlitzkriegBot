@@ -99,7 +99,10 @@ const ALLOW_PREFIXES = [
   // core/market_api/src/unified/ keeps matching a facade re-export only.
   'core/bk_contract/src/unified/',
   'core/market_api/src/unified/',
-  'core/blitzkrieg_core/src/market/mod.rs',
+  // #841: the registration seam (register_builtin_markets) moved to the
+  // composition root — the ONE member that links the concrete plugins and
+  // builds their registry; the whole launcher tree is that single seam now.
+  'core/blitzkrieg_launcher/',
   'extensions/',
   'scripts/', // this gate and its family quote the vocabulary
   // the onchain converter is a single-venue ARCHIVE tool (its whole contract
@@ -286,7 +289,7 @@ function selfTest() {
   // the same code one directory over would NOT. Integration-test files are
   // out of scope by their /tests/ segment or tests_*_tests.rs name.
   const seamOk = isAllowedPath('core/market_api/src/unified/model.rs')
-    && isAllowedPath('core/blitzkrieg_core/src/market/mod.rs')
+    && isAllowedPath('core/blitzkrieg_launcher/src/bin_support/boot/mod.rs')
     && isAllowedPath('extensions/kalshi/src/lib.rs')
     && isAllowedPath('core/blitzkrieg_core/tests/hedge_fault_matrix.rs')
     && isAllowedPath('core/market_api/tests/unified_reverse_acceptance.rs')

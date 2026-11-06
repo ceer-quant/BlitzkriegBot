@@ -21,7 +21,7 @@
 //! YES/NO book split is documented in [`crate::discovery`].
 
 use crate::rest::{Credentials, KalshiRest, RestConfig};
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
     ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
     MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,

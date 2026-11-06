@@ -71,11 +71,12 @@ pub trait MarketPlugin: Send + Sync {
 `seed_balance`/`report_error`（取订单、报成交、报错）。
 插件**拿不到** OME、账本、风控、私钥、socket。
 
-**依赖方向（硬性）**：`market_api ← 内核`、`market_api ← 扩展`；扩展**不得**依赖内核
-（否则成环）。参考实现：`extensions/polymarket/`。
+**依赖方向（硬性）**：`bk_contract ← 内核`、`bk_contract ← 扩展`；扩展**不得**依赖内核
+或另一个扩展（#841：依赖环之外，反向边本身就破坏插件/内核边界）。参考实现：`extensions/polymarket/`。
 
-**装配与选择**：扩展是 workspace 成员，用 Cargo feature 静态链接进内核；内核里**唯一**点名市场的
-地方是 `market::register_builtin_markets()`。运行时用 `--market-plugin <name>` 选择（未注册则回退
+**装配与选择**：扩展是 workspace 成员，用 Cargo feature 静态链接进**组合根**
+`core/blitzkrieg_launcher`（#841 起内核不再链接任何插件）；仓库里**唯一**点名市场的
+地方是 launcher 的 `boot::builtin_registry()`。运行时用 `--market-plugin <name>` 选择（未注册则回退
 第一个并告警）。
 
 ## 2.6 模式声明（`declare_modes`，E27）

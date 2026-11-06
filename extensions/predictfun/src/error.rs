@@ -13,7 +13,7 @@
 //! reference), so [`PredictError::Api`] carries the slug and the numeric
 //! code together and the mapper reads both.
 
-use blitzkrieg_market_api::{CoreError, CoreErrorCode};
+use blitzkrieg_bk_contract::{CoreError, CoreErrorCode};
 
 /// Everything that can go wrong inside the predict.fun transport.
 #[derive(Debug, thiserror::Error)]

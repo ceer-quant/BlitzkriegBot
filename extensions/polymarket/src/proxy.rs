@@ -6,7 +6,7 @@
 //! stay in the URL reqwest and the tunnel consume; nothing here prints them.
 
 use base64::Engine;
-use blitzkrieg_market_api::net::{
+use blitzkrieg_bk_contract::net::{
     self, ClientProxy, ProxyEndpoint, error_chain, is_fake_ip, proxy_view,
 };
 use std::net::IpAddr;
@@ -293,7 +293,7 @@ fn host_port(url: &str) -> Option<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blitzkrieg_market_api::net::parse_proxy_endpoint;
+    use blitzkrieg_bk_contract::net::parse_proxy_endpoint;
 
     #[test]
     fn socks5h_request_carries_the_hostname_so_the_proxy_resolves_it() {

@@ -23,7 +23,7 @@ use alloy::rpc::types::Log;
 use alloy::signers::Signer as _;
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
 use anyhow::Context as _;
-use blitzkrieg_market_api::{RedemptionFailure, RedemptionRequest, RedemptionResult};
+use blitzkrieg_bk_contract::{RedemptionFailure, RedemptionRequest, RedemptionResult};
 use polymarket_client_sdk_v2::ctf::Client as CtfClient;
 use polymarket_client_sdk_v2::ctf::types::{RedeemNegRiskRequest, RedeemPositionsRequest};
 use polymarket_client_sdk_v2::types::{Address, B256, U256};
@@ -447,7 +447,7 @@ pub fn base_units_to_decimal(units: U256) -> Decimal {
 /// `Transfer` logs the same way a redeem is.
 pub async fn merge_pairs(
     config: &RedeemConfig,
-    request: &blitzkrieg_market_api::MergeRequest,
+    request: &blitzkrieg_bk_contract::MergeRequest,
 ) -> Result<MergeReceipt, RedemptionFailure> {
     let fail = |manual: bool, message: String| Err(RedemptionFailure { manual, message });
     config.holder_check()?;
@@ -536,12 +536,12 @@ pub struct MergeReceipt {
 
 /// Report a merge outcome back to the host in the boundary shape.
 pub fn merge_to_result(
-    request: &blitzkrieg_market_api::MergeRequest,
+    request: &blitzkrieg_bk_contract::MergeRequest,
     outcome: Result<MergeReceipt, RedemptionFailure>,
     now_ms: i64,
-) -> blitzkrieg_market_api::MergeResult {
+) -> blitzkrieg_bk_contract::MergeResult {
     match outcome {
-        Ok(r) => blitzkrieg_market_api::MergeResult {
+        Ok(r) => blitzkrieg_bk_contract::MergeResult {
             id: request.id.clone(),
             condition_id: request.condition_id.clone(),
             tx_hash: Some(r.tx_hash),
@@ -549,7 +549,7 @@ pub fn merge_to_result(
             failure: None,
             at_ms: now_ms,
         },
-        Err(f) => blitzkrieg_market_api::MergeResult {
+        Err(f) => blitzkrieg_bk_contract::MergeResult {
             id: request.id.clone(),
             condition_id: request.condition_id.clone(),
             tx_hash: None,

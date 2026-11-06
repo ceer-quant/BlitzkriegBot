@@ -1044,9 +1044,13 @@ mod tests {
     /// #780: `parse_args` moved to `bin_support/boot/args.rs`, and the
     /// contiguous tail of its flag match to `bin_support/boot/replay_flags.rs`;
     /// both are read so the comparison still sees every accepted spelling.
+    /// #841: the bin tree moved to the composition root
+    /// `core/blitzkrieg_launcher`, so the paths cross the crate boundary to
+    /// it (`include_str!` is relative to THIS file).
     fn flags_matched_by_the_parser() -> Vec<String> {
-        const SRC: &str = include_str!("bin_support/boot/args.rs");
-        const TAIL: &str = include_str!("bin_support/boot/replay_flags.rs");
+        const SRC: &str = include_str!("../../blitzkrieg_launcher/src/bin_support/boot/args.rs");
+        const TAIL: &str =
+            include_str!("../../blitzkrieg_launcher/src/bin_support/boot/replay_flags.rs");
         const START: &str = "let mut it = argv.iter().cloned();";
         const END: &str = "// ── Resolve the file-settable settings";
         let start = SRC

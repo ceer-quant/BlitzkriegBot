@@ -1,0 +1,55 @@
+[package]
+name = "blitzkrieg-launcher"
+version.workspace = true
+edition = "2024"
+description = "External composition root for the Blitzkrieg kernel (#841): links the core library with the official market extensions and registers them, then serves the blitzkrieg-core binary. The kernel itself (core/blitzkrieg_core) carries no concrete plugin any more — this crate is the ONE place that names them."
+
+# The shipped binary destination name is unchanged: every launcher/gate drives
+# `target/release/blitzkrieg-core`, which this bin produces (the kernel crate
+# no longer declares a bin of its own).
+[[bin]]
+name = "blitzkrieg-core"
+path = "src/main.rs"
+
+[features]
+default = ["polymarket", "kalshi", "predictfun", "polysimulator"]
+# The four official market extensions, one feature each — the same names the
+# kernel used to own (0.4.1 and earlier). The registration seam lives here
+# (`boot::builtin_registry`), feature-gated exactly like the old seam.
+polymarket = ["dep:polymarket-extension"]
+kalshi = ["dep:kalshi-extension"]
+predictfun = ["dep:predictfun-extension"]
+polysimulator = ["dep:polysimulator-extension"]
+
+[dependencies]
+# The trading kernel: still market-agnostic, now REALLY — see #841.
+blitzkrieg-core = { path = "../blitzkrieg_core" }
+# The market-plugin contract facade (net/proxy policy helpers, round-labels
+# vocabulary): the same crate the kernel speaks, kept so the composition data
+# (registry, credential vars) shares the kernel's blast radius.
+blitzkrieg-market-api = { path = "../market_api" }
+# The official market extensions (#841: the composition root is the ONLY
+# workspace member that links them) — optional, one Cargo feature each,
+# exactly like the old kernel-owned feature set.
+polymarket-extension = { path = "../../extensions/polymarket", optional = true }
+kalshi-extension = { package = "blitzkrieg-kalshi", path = "../../extensions/kalshi", optional = true }
+predictfun-extension = { package = "blitzkrieg-predictfun", path = "../../extensions/predictfun", optional = true }
+polysimulator-extension = { package = "blitzkrieg-polysimulator", path = "../../extensions/polysimulator", optional = true }
+# The shared strategy reference implementation main.rs reaches for the
+# --regime-eval defaults (strategy_logic::MarketRegimeConfig).
+strategy-logic = { path = "../../user_layer/strategy_logic" }
+# The #352 on-chain pull entry point: the `--onchain-pull` dispatch lives in
+# the bin (main.rs) and calls into the implementation crate — same seam the
+# kernel used to own.
+blitzkrieg-onchain-pull = { path = "../../tools/onchain_pull" }
+anyhow = { workspace = true }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+
+[dev-dependencies]
+# tests/core_args.rs asserts the CLI flag table through the library contract.
+blitzkrieg-core = { path = "../blitzkrieg_core" }

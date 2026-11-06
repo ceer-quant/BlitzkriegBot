@@ -11,8 +11,10 @@ Two kinds of plugin live in the kernel, and they are **not** the same thing:
 | Example | `extensions/polymarket/` | `extension/builtins.rs::BinanceSpotExtension` |
 
 A market is linked in by a Cargo feature and selected at runtime with
-`--market-plugin <name>`. It must depend on `blitzkrieg-market-api` only — **never
-on `blitzkrieg-core`** (that would form a dependency cycle).
+`--market-plugin <name>`. It must depend on `blitzkrieg-bk-contract` only — **never
+on `blitzkrieg-core`** (since #841 only the composition root
+`core/blitzkrieg_launcher` links the extensions; an inverse edge breaks the
+plugin/kernel boundary, not just forms a cycle).
 
 > `config.toml` under `extensions/<name>/` **is read** (KI-11). The kernel parses
 > `[meta]` at startup and checks it against the linked extension — a name/version/

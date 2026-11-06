@@ -5,7 +5,7 @@
 //! each one removes a protection and asserts the failure the kernel would
 //! otherwise be blind to.
 
-use blitzkrieg_market_api::CoreErrorCode;
+use blitzkrieg_bk_contract::CoreErrorCode;
 use blitzkrieg_predictfun::error::{PredictError, into_core_error};
 use std::io::{Read, Write};
 use std::net::TcpListener;

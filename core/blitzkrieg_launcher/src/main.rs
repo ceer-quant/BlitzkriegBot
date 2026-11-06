@@ -159,10 +159,10 @@ mod bin_tests;
 // modules (`crate::position_db` / `crate::strategy_state`) so the bin and
 // any embedded reader share ONE name song.
 use bin_support::boot::{
-    ConfigChoice, EnvVars, config_choice, daily_loss_path_for, default_position_log_for,
-    default_strategy_state_for, parse_args, parse_strategy_limits, parse_virtual_limits,
-    resolve_event_archive, resolved_policy_path, risk_state_path_for, round_duration_source_from,
-    run_net_check,
+    ConfigChoice, EnvVars, builtin_registry, config_choice, daily_loss_path_for,
+    default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
+    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
+    round_duration_source_from, run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -1127,21 +1127,21 @@ async fn main() -> anyhow::Result<()> {
     // The round-duration admission set: the market plugins' DECLARED union
     // (`supported_round_secs`), reported by the registry — which durations may
     // be armed is venue knowledge, so the kernel hardcodes no list; this is a
-    // report of what the compiled-in plugins claim. Computed once here and
+    // report of what the registered plugins claim. Computed once here and
     // stored in the config (every admission consumer reads it from there); a
     // runtime enable flip stays within the registered set, so the union cannot
     // change after boot. An EMPTY union refuses every duration (fail-closed).
-    config.allowed_round_secs = {
-        let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
-        blitzkrieg_core::market::register_builtin_markets(&registry);
-        config.credential_vars = registry.credential_vars();
-        // The labels travel with the durations (issue 648): the plugins'
-        // declared `sec → label` vocabulary, so the readout renders exactly
-        // the names the plugins claim (was the kernel's hardcoded
-        // `duration_label_for` table).
-        config.round_labels = registry.round_labels();
-        registry.allowed_round_secs()
-    };
+    // #841: the registry is built and populated by THIS crate (the composition
+    // root — `builtin_registry`), then handed to `server::run` below; the
+    // kernel receives it instead of compiling the venues in.
+    let registry = builtin_registry();
+    config.credential_vars = registry.credential_vars();
+    // The labels travel with the durations (issue 648): the plugins'
+    // declared `sec → label` vocabulary, so the readout renders exactly
+    // the names the plugins claim (was the kernel's hardcoded
+    // `duration_label_for` table).
+    config.round_labels = registry.round_labels();
+    config.allowed_round_secs = registry.allowed_round_secs();
     eprintln!(
         "blitzkrieg-core: declared round durations {:?} (market plugins' \
          supported_round_secs union)",
@@ -1223,7 +1223,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    server::run(args.socket.clone(), config, args.tick_ms, rx).await?;
+    server::run(args.socket.clone(), config, args.tick_ms, rx, registry).await?;
     eprintln!("blitzkrieg-core stopped");
     Ok(())
 }

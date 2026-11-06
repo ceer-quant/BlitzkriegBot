@@ -1,6 +1,6 @@
 //! 落盘通道（单 jsonl + 每来源 seq）与每来源会话统计（原样迁出）。
 
-use blitzkrieg_market_api::net::now_ms;
+use blitzkrieg_bk_contract::net::now_ms;
 use serde_json::{Value, json};
 use std::io::Write as IoWrite;
 use std::path::PathBuf;

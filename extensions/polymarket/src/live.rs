@@ -11,8 +11,8 @@
 use crate::redeem::{self, RedeemConfig, RedeemOutcome};
 use crate::venue::{VenueEvent, spawn_from_env};
 use alloy::primitives::Address;
-use blitzkrieg_market_api::net::now_ms;
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::net::now_ms;
+use blitzkrieg_bk_contract::{
     CoreError, CoreErrorCode, MarketHost, ReconcileSnapshot, RedemptionFailure, RedemptionRequest,
 };
 use std::str::FromStr;
@@ -163,7 +163,7 @@ pub async fn spawn_if_configured(
         let mut redeem_queue: std::collections::VecDeque<RedemptionRequest> =
             std::collections::VecDeque::new();
         // Merge claims queued behind a full in-flight window (same nonce rule).
-        let mut merge_queue: std::collections::VecDeque<blitzkrieg_market_api::MergeRequest> =
+        let mut merge_queue: std::collections::VecDeque<blitzkrieg_bk_contract::MergeRequest> =
             std::collections::VecDeque::new();
         loop {
             tick.tick().await;
@@ -326,20 +326,20 @@ pub async fn spawn_if_configured(
                 redeems.spawn(async move {
                     let result = match &redeem_cfg {
                         Ok(config) => match redeem::merge_pairs(config, &request).await {
-                            Ok(receipt) => blitzkrieg_market_api::MergeResult::success(
+                            Ok(receipt) => blitzkrieg_bk_contract::MergeResult::success(
                                 &request,
                                 &receipt.tx_hash,
                                 receipt.block_number,
                                 now_ms(),
                             ),
-                            Err(failure) => blitzkrieg_market_api::MergeResult::failure(
+                            Err(failure) => blitzkrieg_bk_contract::MergeResult::failure(
                                 &request,
                                 &failure.message,
                                 failure.manual,
                                 now_ms(),
                             ),
                         },
-                        Err(failure) => blitzkrieg_market_api::MergeResult::failure(
+                        Err(failure) => blitzkrieg_bk_contract::MergeResult::failure(
                             &request,
                             &failure.message,
                             failure.manual,

@@ -3,32 +3,14 @@
 //! The core (OME, risk, ledger, strategy engine) speaks only market-api boundary
 //! types. A `MarketPlugin` supplies a `DataFeed`, `MarketDiscovery` and
 //! `OrderExecutor`, all driving the core through `MarketHost`. Concrete venues
-//! live in their own crates (see `extensions/*`); this module only hosts the
-//! registry and the feature-gated registration seam.
+//! live in their own crates (see `extensions/*`); since #841 they are linked
+//! ONLY by the composition root (core/blitzkrieg_launcher), which builds a
+//! `MarketPluginRegistry` and hands it to [`ipc::server::run`](crate::ipc).
+//! This module hosts the registry and the enablement/boot logic only — the
+//! core names no market.
 
 pub mod host;
 pub mod registry;
-
-/// Register the market plugins compiled into this build.
-///
-/// This is the ONE place the core names a concrete market. Each entry is behind
-/// a feature so the core can be built market-free (`--no-default-features`) and
-/// so a different market is a Cargo feature rather than a code change.
-pub fn register_builtin_markets(reg: &registry::MarketPluginRegistry) {
-    #[cfg(feature = "polymarket")]
-    reg.register(Box::new(polymarket_extension::PolymarketPlugin::new()));
-    #[cfg(feature = "kalshi")]
-    reg.register(Box::new(kalshi_extension::KalshiPlugin::new()));
-    #[cfg(feature = "predictfun")]
-    reg.register(Box::new(predictfun_extension::PredictFunPlugin::new()));
-    #[cfg(feature = "polysimulator")]
-    reg.register(Box::new(polysimulator_extension::PolySimulatorPlugin::new()));
-    #[cfg(not(feature = "polymarket"))]
-    #[cfg(not(feature = "kalshi"))]
-    #[cfg(not(feature = "predictfun"))]
-    #[cfg(not(feature = "polysimulator"))]
-    let _ = reg; // market-free build: nothing to register
-}
 
 /// Where a session's plugin ENABLEMENT set came from — the boot resolution's
 /// four-layer chain, made honest on the wire (`market.plugin.get`'s `source`).

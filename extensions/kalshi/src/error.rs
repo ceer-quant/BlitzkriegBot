@@ -6,7 +6,7 @@
 //! (the kernel's contract: raw text is kept, never altered or hidden).
 //! A transport failure that bypasses this mapping is a red-bar test.
 
-use blitzkrieg_market_api::{CoreError, CoreErrorCode};
+use blitzkrieg_bk_contract::{CoreError, CoreErrorCode};
 
 /// Everything that can go wrong inside the Kalshi transport.
 #[derive(Debug, thiserror::Error)]

@@ -20,7 +20,7 @@
 //!     one failing because the network is down.
 
 use crate::rest::PRODUCTION_BASE_URL;
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     NetCheckItem, NetCheckReport,
     net::{annotate, error_chain, finish_with, is_fake_ip, now_ms, proxy_view},
 };
@@ -184,7 +184,7 @@ async fn attach_proxy(
     mut items: Vec<NetCheckItem>,
 ) -> (
     Vec<NetCheckItem>,
-    blitzkrieg_market_api::net::ProxyObservation,
+    blitzkrieg_bk_contract::net::ProxyObservation,
     Vec<String>,
 ) {
     let view = match proxy_view() {
@@ -205,7 +205,7 @@ async fn attach_proxy(
             );
             return (
                 items,
-                blitzkrieg_market_api::net::ProxyObservation::legacy(),
+                blitzkrieg_bk_contract::net::ProxyObservation::legacy(),
                 Vec::new(),
             );
         }
@@ -222,7 +222,7 @@ async fn attach_proxy(
     (items, obs, names)
 }
 
-async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i64, String> {
+async fn dial_proxy(ep: &blitzkrieg_bk_contract::net::ProxyEndpoint) -> Result<i64, String> {
     let start = Instant::now();
     match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(ep.dial_addr())).await {
         Ok(Ok(stream)) => {
@@ -235,10 +235,10 @@ async fn dial_proxy(ep: &blitzkrieg_market_api::net::ProxyEndpoint) -> Result<i6
 }
 
 fn apply_bk_proxy(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
-    match blitzkrieg_market_api::net::client_proxy()? {
-        blitzkrieg_market_api::net::ClientProxy::FromEnvironment => Ok(builder),
-        blitzkrieg_market_api::net::ClientProxy::Disable => Ok(builder.no_proxy()),
-        blitzkrieg_market_api::net::ClientProxy::Explicit(url) => {
+    match blitzkrieg_bk_contract::net::client_proxy()? {
+        blitzkrieg_bk_contract::net::ClientProxy::FromEnvironment => Ok(builder),
+        blitzkrieg_bk_contract::net::ClientProxy::Disable => Ok(builder.no_proxy()),
+        blitzkrieg_bk_contract::net::ClientProxy::Explicit(url) => {
             let proxy = reqwest::Proxy::all(url)
                 .map_err(|e| format!("proxy URL rejected: {}", error_chain(&e)))?;
             Ok(builder.proxy(proxy))

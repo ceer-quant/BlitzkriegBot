@@ -4,7 +4,7 @@
 //! the core's `scanner.rs` because it is venue-agnostic; only slug construction
 //! and Gamma JSON parsing live here.
 
-use blitzkrieg_market_api::MarketResolution;
+use blitzkrieg_bk_contract::MarketResolution;
 use chrono::{DateTime, Datelike, Timelike};
 use rust_decimal::Decimal;
 

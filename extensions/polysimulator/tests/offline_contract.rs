@@ -17,7 +17,7 @@
 //! termination rules the venue's own recovery script
 //! (`scripts/polysim-history.mjs`) follows.
 
-use blitzkrieg_market_api::CoreErrorCode;
+use blitzkrieg_bk_contract::CoreErrorCode;
 use blitzkrieg_polysimulator::rest::SWEEP_MAX_PAGES;
 use blitzkrieg_polysimulator::types::PlaceOrderBody;
 use blitzkrieg_polysimulator::{
@@ -622,4 +622,95 @@ fn credentials_debug_never_shows_the_key() {
     let shown = format!("{creds:?}");
     assert!(shown.contains("<redacted>"));
     assert!(!shown.contains("debug-check"));
+}
+
+// ── #841: the parasitic feed form is pinned, not promised ────────────────
+
+/// Every direct `reqwest` construction site in this crate must live in the
+/// dedicated `http` module (#841): the two remaining HTTP paths (executor
+/// transport in `rest.rs`, net-check probe in `net_check.rs`) both assemble
+/// their client through `crate::http::build_client`, so the plugin's HTTP
+/// face is ONE auditable module instead of a scatter of builders. Text-scan
+/// of this crate's own sources — the same deny shape the repo's gate scripts
+/// use (`no-venue-branch-check.mjs` et al.) — so a future `Client::builder`
+/// outside `http.rs` cannot compile in unnoticed.
+#[test]
+fn reqwest_construction_is_converged_into_the_http_module() {
+    // Walk the crate's real source tree on disk (tests run from the crate
+    // root: CARGO_MANIFEST_DIR + src).
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    for entry in std::fs::read_dir(format!("{manifest}/src")).expect("src tree readable") {
+        let path = entry.expect("src entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "http.rs" {
+            continue; // the ONE sanctioned owner of the reqwest surface
+        }
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for line in text.lines() {
+            let line = line.trim_start();
+            // Doc comments and plain prose mentioning reqwest are fine; what
+            // this test refuses is CODE building clients or fetching:
+            // `reqwest::` occurrences outside the allow shapes (typed method
+            // params/uses like `reqwest::Method`/`reqwest::Error`/header
+            // constants are transport plumbing, not construction).
+            if !line.contains("reqwest::") || line.starts_with("//") {
+                continue;
+            }
+            let construction = line.contains("Client::builder")
+                || line.contains("ClientBuilder")
+                || line.contains("Proxy::")
+                || line.contains("reqwest::Proxy")
+                || line == "use reqwest" && !line.contains("::");
+            assert!(
+                !construction,
+                "direct reqwest construction outside src/http.rs — {name}: {line}"
+            );
+        }
+    }
+    // And the sanctioned path is real: the module exists and exposes exactly
+    // the converged seam (builder + proxy posture + the WAF User-Agent).
+    let http_src =
+        std::fs::read_to_string(format!("{manifest}/src/http.rs")).expect("http.rs readable");
+    assert!(
+        http_src.contains("fn build_client") && http_src.contains("fn apply_bk_proxy"),
+        "src/http.rs must own the client assembly surface"
+    );
+}
+
+/// The parasitic declaration (`feed_source = Some("polymarket")`, RFC-661 M2)
+/// means this plugin implements NO market-data component: feed and discovery
+/// are served by the plugin it parasitizes, and its own direct HTTP paths are
+/// only the executor transport and the read-only net-check. Contract scan:
+/// none of the crate's modules may even mention implementing the
+/// data-component traits, and no module named feed/discovery may exist — a
+/// future "just one small polling feed" cannot land here without this test
+/// failing first.
+#[test]
+fn no_market_data_component_is_implemented_in_this_crate() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let lib_src = std::fs::read_to_string(format!("{manifest}/src/lib.rs")).expect("lib.rs");
+    for banned in ["impl DataFeed", "impl MarketDiscovery", "mod feed", "mod discovery"] {
+        assert!(
+            !lib_src.contains(banned),
+            "polysimulator must stay execution-only — found {banned:?} in src/lib.rs"
+        );
+    }
+    // The plugin itself declares the parasitic source — the ONE market-data
+    // claim this crate makes, riding another plugin's feed.
+    let plugin_src =
+        std::fs::read_to_string(format!("{manifest}/src/plugin.rs")).expect("plugin.rs");
+    assert!(
+        plugin_src.contains("feed_source"),
+        "plugin.rs must keep the feed_source declaration (the parasitic form's whole point)"
+    );
+    // No module carries the feed/discovery names at all.
+    for banned_path in ["src/feed.rs", "src/discovery.rs"] {
+        assert!(
+            !std::path::PathBuf::from(format!("{manifest}/{banned_path}")).exists(),
+            "{banned_path} must not exist in an execution-only plugin"
+        );
+    }
 }

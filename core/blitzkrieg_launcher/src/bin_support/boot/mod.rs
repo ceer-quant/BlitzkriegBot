@@ -950,19 +950,44 @@ pub(crate) fn risk_state_path_for(position_log: &str, trading: bool) -> String {
 pub(crate) use blitzkrieg_core::position_db::default_position_log_for;
 pub(crate) use blitzkrieg_core::strategy_state::default_strategy_state_for;
 
+/// #841: the market plugins this build registers — THE registration seam,
+/// moved here verbatim from the kernel (`blitzkrieg_core::market::register_
+/// builtin_markets`, which no longer exists: the kernel names no market).
+/// Each entry is behind a feature so the launcher can be built market-free
+/// (`--no-default-features`) and so a different market is a Cargo feature
+/// rather than a code change.
+pub(crate) fn builtin_registry()
+-> blitzkrieg_core::market::registry::MarketPluginRegistry {
+    let reg = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
+    #[cfg(feature = "polymarket")]
+    reg.register(Box::new(polymarket_extension::PolymarketPlugin::new()));
+    #[cfg(feature = "kalshi")]
+    reg.register(Box::new(kalshi_extension::KalshiPlugin::new()));
+    #[cfg(feature = "predictfun")]
+    reg.register(Box::new(predictfun_extension::PredictFunPlugin::new()));
+    #[cfg(feature = "polysimulator")]
+    reg.register(Box::new(polysimulator_extension::PolySimulatorPlugin::new()));
+    #[cfg(not(feature = "polymarket"))]
+    #[cfg(not(feature = "kalshi"))]
+    #[cfg(not(feature = "predictfun"))]
+    #[cfg(not(feature = "polysimulator"))]
+    let _ = &reg; // market-free build: nothing to register
+    reg
+}
+
 /// `--net-check`: probe every network path the ACTIVE market plugin uses and
 /// print one JSON `NetCheckReport` on stdout, returning the code the shell
 /// should see (0 = every probe passed, 1 = something failed).
 ///
-/// The registry is built exactly as the server builds it, so the probe covers
-/// the venue this build and its `--market-plugin` would actually talk to —
-/// answering "is it us or the venue?" for the run that is in front of you
-/// rather than for a hardcoded host. The answer is JSON because it is a data
-/// contract: the launcher, the TUI overlay and the WebUI card all render the
-/// same struct in Chinese, and no user-facing wording belongs in the core.
+/// The registry is built exactly as the server builds it (`builtin_registry`),
+/// so the probe covers the venue this build and its `--market-plugin` would
+/// actually talk to — answering "is it us or the venue?" for the run that is
+/// in front of you rather than for a hardcoded host. The answer is JSON
+/// because it is a data contract: the launcher, the TUI overlay and the WebUI
+/// card all render the same struct in Chinese, and no user-facing wording
+/// belongs in the core.
 pub(crate) async fn run_net_check(plugin: Option<&str>) -> i32 {
-    let registry = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
-    blitzkrieg_core::market::register_builtin_markets(&registry);
+    let registry = builtin_registry();
     let active = blitzkrieg_core::market::active_market_plugin(&registry, plugin);
     let report = active.net_check().await;
     match serde_json::to_string_pretty(&report) {

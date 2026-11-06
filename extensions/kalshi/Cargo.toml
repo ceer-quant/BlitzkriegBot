@@ -10,9 +10,12 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-# The extension depends ONLY on the market contract. It must NOT depend on
-# blitzkrieg-core (dependency cycle once the core links this crate).
-blitzkrieg-market-api = { path = "../../core/market_api" }
+# The extension depends ONLY on the market contract (blitzkrieg-bk-contract,
+# #841: the canonical leaf; no market_api internal paths). It must NOT depend
+# on blitzkrieg-core — since #841 only the composition root
+# (core/blitzkrieg_launcher) links this crate, so an inverse edge would not
+# only form a cycle, it would break the plugin/kernel boundary.
+blitzkrieg-bk-contract = { path = "../../core/bk_contract" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 async-trait = "0.1"
 rust_decimal = { workspace = true }

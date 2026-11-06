@@ -20,8 +20,9 @@
  * the fix promises, each one on the artifact that ships:
  *
  *   1. `--help` / `-h` — exit 0, and the list names EVERY flag the parser in
- *      `core/blitzkrieg_core/src/bin_support/boot/` accepts (#699 moved it out
- *      of main.rs, #780 split it into that directory module; both directions:
+ *      `core/blitzkrieg_launcher/src/bin_support/boot/` accepts (#699 moved it out
+ *      of main.rs, #780 split it into that directory module; #841 moved the bin
+ *      tree to the composition root; both directions:
  *      no accepted
  *      flag unlisted, no listed flag unaccepted). A help list that drifts from
  *      the parser is this defect in a new spelling.
@@ -85,9 +86,12 @@ const { check } = gate;
 function bootModuleSource() {
   // #699/#780: the parse loop moved from main.rs into bin_support/boot.rs and
   // then into the bin_support/boot/ directory module (both pure code moves).
-  // This gate reads the SOURCE the binary is built from, so it follows the loop:
-  // read every module file when the directory exists, the single file otherwise.
-  const dir = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot');
+  // #841: the bin tree itself moved to the composition root
+  // (core/blitzkrieg_launcher), which is where the shipped binary is built
+  // from now. This gate reads the SOURCE the binary is built from, so it
+  // follows the loop: read every module file when the directory exists, the
+  // single file otherwise.
+  const dir = join(ROOT, 'core', 'blitzkrieg_launcher', 'src', 'bin_support', 'boot');
   if (existsSync(dir)) {
     return readdirSync(dir)
       .filter((name) => name.endsWith('.rs'))
@@ -95,7 +99,7 @@ function bootModuleSource() {
       .map((name) => readFileSync(join(dir, name), 'utf8'))
       .join('\n');
   }
-  return readFileSync(join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot.rs'), 'utf8');
+  return readFileSync(join(ROOT, 'core', 'blitzkrieg_launcher', 'src', 'bin_support', 'boot.rs'), 'utf8');
 }
 
 /**
@@ -104,7 +108,7 @@ function bootModuleSource() {
  * this file; it is scanned too, exactly like `cli.rs`'s unit-test extractor.
  */
 function delegatedTail() {
-  const p = join(ROOT, 'core', 'blitzkrieg_core', 'src', 'bin_support', 'boot', 'replay_flags.rs');
+  const p = join(ROOT, 'core', 'blitzkrieg_launcher', 'src', 'bin_support', 'boot', 'replay_flags.rs');
   return existsSync(p) ? readFileSync(p, 'utf8') : '';
 }
 
@@ -113,7 +117,7 @@ function parserFlags() {
   const start = src.indexOf('let mut it = argv.iter().cloned();');
   const end = src.indexOf('// ── Resolve the file-settable settings');
   if (start < 0 || end < 0 || end <= start) {
-    check('parse-loop markers found in core/blitzkrieg_core/src/bin_support/boot', false,
+    check('parse-loop markers found in core/blitzkrieg_launcher/src/bin_support/boot', false,
       `the help/parser comparison cannot run (start=${start}, end=${end})`);
     return [];
   }

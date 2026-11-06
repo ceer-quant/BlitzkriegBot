@@ -164,8 +164,10 @@ per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`�
 ## 6. 通用化边界（不做的事）
 
 - 内核不得依赖 Node 侧代码。
-- **内核不得有具体市场代码**：Polymarket 细节全在 `extensions/polymarket/`；内核里唯一的
-  名字出现在 `market::register_builtin_markets()` 的 `#[cfg(feature="polymarket")]` 注册行。
+- **内核不得有具体市场代码**：Polymarket 细节全在 `extensions/polymarket/`；#841 起内核
+  连注册行也没有了——唯一的名字出现在组合根 `core/blitzkrieg_launcher` 的
+  `builtin_registry()` `#[cfg(feature="polymarket")]` 注册行（`ipc::server::run` 接收组装
+  好的 registry，内核只依赖 bk_contract 合同）。
 - 内核 Cargo 不含 `polymarket-client-sdk-v2`；扩展不依赖 `blitzkrieg-core`（无依赖环）。
 - 扩展不得直接访问内核内部状态或私钥（只能经 `MarketHost`）。
 

@@ -19,7 +19,7 @@
 //! pairing is documented in [`crate::discovery`].
 
 use crate::rest::{Credentials, PredictRest, RestConfig};
-use blitzkrieg_market_api::{
+use blitzkrieg_bk_contract::{
     BoxFuture, CoreError, CoreErrorCode, CoreResult, DataFeed, DataFeedConfig, DiscoveryConfig,
     ExecutorConfig, MarketCapabilities, MarketDiscovery, MarketHost, MarketMode, MarketPlugin,
     MarketStructure, MarketType, NetCheckReport, OrderExecutor, TokenId,
@@ -154,7 +154,7 @@ impl DataFeed for PredictDataFeed {
 async fn install_control(host: &Arc<dyn MarketHost>, handle: crate::feed::FeedHandle) {
     host.install_subscription_control(
         "predictfun",
-        Arc::new(handle) as Arc<dyn blitzkrieg_market_api::SubscriptionControl>,
+        Arc::new(handle) as Arc<dyn blitzkrieg_bk_contract::SubscriptionControl>,
     )
     .await;
 }

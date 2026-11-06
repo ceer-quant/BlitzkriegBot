@@ -7,7 +7,7 @@
 
 use base64::Engine as _;
 use blitzkrieg_kalshi::error::{KalshiError, into_core_error};
-use blitzkrieg_market_api::CoreErrorCode;
+use blitzkrieg_bk_contract::CoreErrorCode;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::str::FromStr;
