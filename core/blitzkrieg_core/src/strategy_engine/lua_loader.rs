@@ -921,6 +921,10 @@ impl EngineStrategy for LuaEngineAdapter {
                     e.reason
                 },
                 use_maker: e.use_maker,
+                // #915: the strategy's own maker-TP limit (an absent key stays
+                // the historic price-less row; the kernel gates whether it is
+                // ever honoured).
+                exit_price: e.price,
             });
         }
         for b in intents.breaks {

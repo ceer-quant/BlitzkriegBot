@@ -470,6 +470,7 @@ mod tests {
                     reason: "stub-close".into(),
                     account_id: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
                     use_maker: false,
+                    exit_price: None,
                 }]
             } else {
                 Vec::new()

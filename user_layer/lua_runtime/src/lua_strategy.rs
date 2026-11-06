@@ -299,7 +299,7 @@ impl SafeStrategy for LuaStrategy {
 /// ignore unknown keys in TOTAL silence).
 const ENTRY_KEYS: &[&str] = &["token", "price", "reason", "shares", "pair"];
 /// Keys a returned exit row may carry.
-const EXIT_KEYS: &[&str] = &["token", "reason", "use_maker"];
+const EXIT_KEYS: &[&str] = &["token", "reason", "use_maker", "price"];
 /// Keys a returned break row may carry.
 const BREAK_KEYS: &[&str] = &["token", "broken_price"];
 
@@ -371,6 +371,10 @@ fn parse_intents(v: &Value, strategy: &str) -> (Intents, Option<String>) {
                 // taker sweep (false), a present key carries the strategy's
                 // own maker-first suggestion for the kernel to gate.
                 use_maker: row.raw_get::<bool>("use_maker").unwrap_or(false),
+                // #915: optional maker-TP limit (exact decimal string). An
+                // absent key stays the historic price-less row (None) — the
+                // kernel keeps pricing every close off the live book.
+                price: row.raw_get::<String>("price").ok(),
             });
         }
     }

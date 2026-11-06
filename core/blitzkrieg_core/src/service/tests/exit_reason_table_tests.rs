@@ -353,6 +353,7 @@ fn a_strategy_exit_sells_the_best_bid_not_the_mid() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: false,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
 
@@ -405,6 +406,7 @@ fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: false,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     assert_eq!(c.positions().open_positions().len(), 1);
@@ -426,6 +428,7 @@ fn a_strategy_exit_without_a_fresh_bid_does_not_sell() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: false,
+            exit_price: None,
         });
     c.tick(71_000).unwrap();
     assert_eq!(
@@ -486,6 +489,7 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: false,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     assert!(c.positions().open_positions().is_empty());
@@ -529,6 +533,7 @@ fn the_maker_advisory_converts_only_profit_side_exits_behind_the_gate() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: true,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     assert!(c.positions().open_positions().is_empty());
@@ -567,6 +572,7 @@ fn gate_on_profit_side_advisory_rests_a_maker_close() {
             reason: "take_profit".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: true,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     // A one-tick spread (0.40 bid / 0.44 ask) leaves an inside rest at 0.41:
@@ -623,6 +629,7 @@ fn the_pnl_guard_bars_maker_first_on_an_underwater_close() {
             reason: "trailing_stop".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: true,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     // The close swept the touch as a taker: gone now, no live sell resting.
@@ -673,6 +680,7 @@ fn the_pnl_guard_lets_a_profit_side_close_still_rest_as_maker() {
             reason: "trailing_stop".into(),
             account_id: crate::model::default_account_id().to_string(),
             use_maker: true,
+            exit_price: None,
         });
     c.tick(2_000).unwrap();
     // One-tick spread: no inside grid point, the maker close rests at 0.45
@@ -691,4 +699,103 @@ fn the_pnl_guard_lets_a_profit_side_close_still_rest_as_maker() {
     let rested = rested.first().expect("the maker close must be live");
     assert_eq!(rested.mode, FillPolicy::Maker);
     assert_eq!(rested.price, dec!(0.45));
+}
+
+/// #915 convergence: a strategy that quotes its OWN maker-TP limit on the
+/// intent (`exit_price = Some`, the mad_dog graduation row) has that price
+/// HONOURED at the suggestion surface — the SELL rests post-only at the
+/// quoted limit, not the kernel's own bid+1-tick pick. The gate stack is
+/// unchanged (gate ON, profit-side reason, position in profit); only the
+/// pricing input changed.
+#[test]
+fn the_strategy_quoted_maker_tp_limit_is_rested_as_quoted() {
+    let mut c = core();
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    // 0.40 entry, bid 0.42 / ask 0.46: the close is IN profit and the
+    // strategy's own limit (0.44) is strictly inside the spread —
+    // post-only-safe, so it is used verbatim (the kernel's own pick would
+    // be 0.43).
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.46), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+            exit_price: Some("0.44".into()),
+        });
+    c.tick(2_000).unwrap();
+    assert_eq!(
+        c.positions().open_positions().len(),
+        1,
+        "the maker close is resting, not swept"
+    );
+    let rested: Vec<_> = c
+        .ome()
+        .live_orders()
+        .into_iter()
+        .filter(|o| o.side == Side::Sell)
+        .collect();
+    let rested = rested.first().expect("the quoted close must be live");
+    assert_eq!(rested.mode, FillPolicy::Maker);
+    // The strategy's own number, on the grid, exactly as the wire carried it.
+    assert_eq!(rested.price, dec!(0.44));
+}
+
+/// …and a quoted limit that is NOT post-only-safe against the live book
+/// (0.29 = AT the bid, a crossing post-only sell the venue would refuse) is
+/// silently dropped in favour of the kernel's own bid+1-tick rest — the
+/// advisory may never create an order the venue rejects (the 0/2 lesson).
+#[test]
+fn an_unsafe_strategy_quote_falls_back_to_kernel_pricing() {
+    let mut c = core();
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    // Same profitable shape, but the quote (0.42) is AT the bid — a crossing
+    // post-only sell the venue would refuse flat.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.42), dec!(500))],
+        vec![(dec!(0.46), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "take_profit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+            exit_price: Some("0.42".into()),
+        });
+    c.tick(2_000).unwrap();
+    let rested: Vec<_> = c
+        .ome()
+        .live_orders()
+        .into_iter()
+        .filter(|o| o.side == Side::Sell)
+        .collect();
+    let rested = rested.first().expect("the fallback close must be live");
+    assert_eq!(rested.mode, FillPolicy::Maker);
+    // Kernel pricing took over: bid + one tick.
+    assert_eq!(rested.price, dec!(0.43));
 }

@@ -192,6 +192,17 @@ pub struct StrategyExitIntent {
     /// flag (#915: a resting stop is no protection against a crashing leg).
     /// Default `false` — every existing emitter keeps byte behaviour.
     pub use_maker: bool,
+    /// #915 convergence: the strategy's own maker-TP LIMIT, as the exact
+    /// decimal string the wire carried (`Exit.price` / the C-ABI JSON `price`
+    /// key). `None` = the pre-#915 shape — every existing emitter and every
+    /// protective path keeps the kernel's own pricing bit-identically. `Some`
+    /// is only HONOURED in the profit-side maker path (the same gate stack as
+    /// `use_maker`: reason class + `strategy_exit_maker_first` + PnL ≥ 0), and
+    /// only while the price is post-only-safe against the live book (strictly
+    /// above the fresh best bid, not at-or-above the best ask); anything else
+    /// falls back to the kernel's own pricing — an advisory can reprice a
+    /// resting quote, never widen what the kernel pays for.
+    pub exit_price: Option<String>,
 }
 
 /// A position slice the host hands a strategy for one evaluation cycle —

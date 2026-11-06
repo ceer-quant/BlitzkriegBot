@@ -1101,10 +1101,12 @@ fn held_leg_past_the_thesis_death_emits_one_exit() {
 }
 
 /// The latch and the under-threshold guard: a held leg ABOVE its death line
-/// emits nothing (the +45.8% MFE must not be sold), and after the verdict
-/// fires once it never repeats within the round (the kernel owns sizing —
-/// a strategy that re-sends the close every book tick is a duplicate-order
-/// spammer).
+/// but UNDER the maker-TP graduation line (mid 0.35 over the tiny 0.27 bid;
+/// graduation needs the BID at 0.273+, the trigger is bid-only) emits
+/// nothing from either watch, and after the verdict fires once it never
+/// repeats within the round (the kernel owns sizing — a strategy that
+/// re-sends the close every book tick is a duplicate-order spammer). The
+/// graduation arm has its own dedicated rows below (#915).
 #[test]
 fn thesis_exit_is_latched_and_the_calm_leg_sells_nothing() {
     let mut a = adapter();
@@ -1121,17 +1123,18 @@ fn thesis_exit_is_latched_and_the_calm_leg_sells_nothing() {
         "the arm cycle must still suggest"
     );
 
-    // Held and MFE: mid 0.35 (the BROKEN level's own height, 45% ABOVE the
-    // 0.24 anchor extreme and way over the death line) — no exit.
+    // Held and MFE-ISH: mid 0.35 (the BROKEN level's own height, 45% ABOVE
+    // the 0.24 anchor extreme and way over the death line) but bid 0.27 —
+    // two ticks UNDER the 0.273 graduation line → no exit, either arm.
     let held = vec![held_up("1.00")];
-    let mfe = book(dec!(0.34), dec!(0.36), dec!(600), SPOT_NOW + 1_000);
+    let mfe = book(dec!(0.27), dec!(0.35), dec!(600), SPOT_NOW + 1_000);
     a.on_book(UP, &mfe, SPOT_NOW + 1_000);
     let mfe_for_fresh = mfe.clone();
     let fresh = move |t: &str| (t == UP).then(|| mfe_for_fresh.clone());
     let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
     assert!(
         a.take_exit_intents().is_empty(),
-        "a held leg above its death line must not sell: no exit rows"
+        "a held leg above its death line but under the bid-only graduation must not sell"
     );
 
     // Now the death: 0.18 is >30% under the 0.26 anchor → one verdict.
@@ -1160,5 +1163,172 @@ fn thesis_exit_is_latched_and_the_calm_leg_sells_nothing() {
     assert!(
         a.take_exit_intents().is_empty(),
         "a new round resets the tracker: no stale anchor, no verdict"
+    );
+}
+
+// ── contract: the maker-TP graduation exit (issue #915 convergence) ─────────
+//
+// #915's counterfactual verdict, made executable: the taker-TP trigger
+// (`bid − fee ≥ 1.05 × entry`) guarantees the bid has CROSSED 1.05 × entry
+// before the taker close fires, so a post-only rest at 1.05 × entry fills
+// with zero fee + rebate — and it does not depend on the strategy's own
+// signal channel (the field-side gain, the hft-2 shape). The wire: a HELD
+// leg whose FRESH best bid reaches `maker_tp_gain_pct` above its latched
+// anchor emits ONE { token, reason: take_profit, use_maker, price } row —
+// price = the resting limit a bid + 1 tick above the touch (a crossing
+// post-only sell is refused flat, so the rest must be strictly inside the
+// spread). Latched with the thesis-death verdict: at most ONE exit row per
+// held token per round. With the shipped defaults the graduation line of
+// the 0.26 anchor sits at 0.26 × 1.05 = 0.273.
+
+/// Held leg, fresh bid ABOVE the graduation line → ONE maker-TP row whose
+/// price rests one tick above that bid (never at/under it), reason class
+/// take_profit (the one the kernel's profit side honours), use_maker true.
+#[test]
+fn held_leg_graduating_above_the_line_emits_one_maker_tp_row() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, SPOT_OPEN, &flat_spot(SPOT_OPEN, 10));
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    a.on_book(UP, &wick, SPOT_NOW);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    assert_eq!(
+        candidates_of(&mut a, &markets, 600, SPOT_NOW, &fresh).len(),
+        1,
+        "the arm cycle must still suggest (anchor = 0.26)"
+    );
+
+    // Held; the bid rallies to 0.28 — over the line (0.273) by two ticks.
+    let held = vec![held_up("1.00")];
+    let rally = book(dec!(0.28), dec!(0.30), dec!(600), SPOT_NOW + 1_000);
+    a.on_book(UP, &rally, SPOT_NOW + 1_000);
+    let rallied_for_fresh = rally.clone();
+    let fresh = move |t: &str| (t == UP).then(|| rallied_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
+
+    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
+    assert_eq!(exits.len(), 1, "the graduation fires exactly one row");
+    assert_eq!(exits[0].token_id, UP);
+    assert!(
+        exits[0].reason.starts_with("take_profit:"),
+        "the reason must be the profit-side tag: {}",
+        exits[0].reason
+    );
+    assert!(exits[0].use_maker, "the row carries the maker advisory");
+    // The rest is one tick above the bid — the only shape a post-only sell
+    // is accepted at. bid 0.28 → rest 0.29 (on the venue grid, ≤ 0.99).
+    assert_eq!(
+        exits[0].exit_price.as_deref(),
+        Some("0.29"),
+        "the quoted limit must rest one tick above the bid"
+    );
+
+    // Latched: the same held book again — no second row, no doubling.
+    let _ = candidates_of(&mut a, &markets, 600, SPOT_NOW + 1_000, &fresh);
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "the maker-TP verdict never repeats within the round"
+    );
+}
+
+/// The line is the BID crossing it, not the mid: a bid two ticks short of
+/// `1.05 × anchor` (with the mid well above) sells NOTHING — a post-only
+/// rest under a below-line price never fills (the 0/2 lesson, mirrored to
+/// the profit side), and the row must not exist for the kernel to "help".
+#[test]
+fn bid_below_the_graduation_line_sells_nothing() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, SPOT_OPEN, &flat_spot(SPOT_OPEN, 10));
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    a.on_book(UP, &wick, SPOT_NOW);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    assert_eq!(
+        candidates_of(&mut a, &markets, 600, SPOT_NOW, &fresh).len(),
+        1,
+        "the arm cycle must still suggest"
+    );
+
+    let held = vec![held_up("1.00")];
+    // bid 0.27 — exactly two ticks under 0.26 × 1.05 = 0.273; mid 0.28 sits
+    // above the line by one tick. Only the BID crossing counts.
+    let short = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW + 1_000);
+    a.on_book(UP, &short, SPOT_NOW + 1_000);
+    let short_for_fresh = short.clone();
+    let fresh = move |t: &str| (t == UP).then(|| short_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "a bid below the graduation line must not fire (no row, no doubling)"
+    );
+
+    // The thesis-death side of the same anchor stays armed exactly as
+    // before, and fires the one price-less row when the knife returns.
+    let collapse = book(dec!(0.17), dec!(0.19), dec!(600), SPOT_NOW + 2_000);
+    a.on_book(UP, &collapse, SPOT_NOW + 2_000);
+    let collapse_for_fresh = collapse.clone();
+    let fresh = move |t: &str| (t == UP).then(|| collapse_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 2_000, &fresh).with_positions(&held));
+    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
+    assert_eq!(exits.len(), 1, "the death verdict survives alongside");
+    assert!(exits[0].reason.starts_with("thesis_reversed"));
+    assert_eq!(
+        exits[0].exit_price.as_deref(),
+        None,
+        "the death is price-less"
+    );
+}
+
+/// The death and the graduation share ONE latch per held token per round:
+/// whichever fires first consumes the exit slot, and the round boundary
+/// resets it (a held leg whose anchors died with the round graduates
+/// nothing). A STALE evaluation (the freshness gate answers None — a book
+/// the host refuses to price off) emits NOTHING even under a graduating
+/// bid: a graduate judged on a dead quote is the profit side of #177's
+/// phantom.
+#[test]
+fn one_exit_per_round_whichever_watch_fires_first() {
+    let mut a = adapter();
+    feed_dominance(&mut a, UP, NOW, 22, dec!(0.56));
+    feed_spot(&mut a, SPOT_OPEN, &flat_spot(SPOT_OPEN, 10));
+    let wick = book(dec!(0.27), dec!(0.29), dec!(600), SPOT_NOW);
+    a.on_book(UP, &wick, SPOT_NOW);
+    let markets = vec![market()];
+    let wick_for_fresh = wick.clone();
+    let fresh = move |t: &str| (t == UP).then(|| wick_for_fresh.clone());
+    assert_eq!(
+        candidates_of(&mut a, &markets, 600, SPOT_NOW, &fresh).len(),
+        1,
+        "the arm cycle must still suggest"
+    );
+
+    let held = vec![held_up("1.00")];
+    let no_fresh = move |t: &str| (t == UP).then_some(None::<OrderbookSnapshot>).flatten();
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 500, &no_fresh).with_positions(&held));
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "no fresh book, no graduation (a dead quote never sells)"
+    );
+
+    // Graduation first: bid 0.28 crosses the line → the ONE row.
+    let rally = book(dec!(0.28), dec!(0.30), dec!(600), SPOT_NOW + 1_000);
+    a.on_book(UP, &rally, SPOT_NOW + 1_000);
+    let rallied_for_fresh = rally.clone();
+    let fresh = move |t: &str| (t == UP).then(|| rallied_for_fresh.clone());
+    let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 1_000, &fresh).with_positions(&held));
+    assert_eq!(a.take_exit_intents().len(), 1, "graduation fired");
+
+    // A fresh round resets the latch: the SAME graduating book suggests
+    // nothing (entries need a wick episode), and a held leg whose anchors
+    // died with the round graduates nothing either — no anchor, no verdict.
+    a.on_round(NOW / 900_000 + 1, 900, SPOT_NOW + 2_000);
+    let _ = candidates_of(&mut a, &markets, 600, SPOT_NOW + 2_000, &fresh);
+    assert!(
+        a.take_exit_intents().is_empty(),
+        "a new round resets the exit latch: no stale graduation"
     );
 }

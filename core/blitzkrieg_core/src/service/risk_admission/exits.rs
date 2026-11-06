@@ -1017,6 +1017,10 @@ impl Core {
             price: Decimal,
             reason: ExitReason,
             use_maker: bool,
+            /// #915: the strategy's own maker-TP limit (validated against the
+            /// live book in the submission loop before it is used). `None` =
+            /// the kernel's own maker pricing (`maker_exit_price`).
+            exit_price: Option<Decimal>,
             internal_key: String,
             strategy: String,
             asset: String,
@@ -1119,6 +1123,9 @@ impl Core {
                     price: req.exit_price,
                     reason: req.reason,
                     use_maker: req.use_maker,
+                    // The automated ladder's verdicts carry their own
+                    // pricing — never a strategy-quoted limit.
+                    exit_price: None,
                     internal_key: exit_intent_key("exit", &pos, &format!("{:?}", req.reason)),
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
@@ -1142,6 +1149,14 @@ impl Core {
         // map. A legacy intent (no account — the pre-fanout shape) resolves
         // to `default`, the same row it always hit.
         for intent in intents {
+            // #915: the strategy MAY ride its own maker-TP limit
+            // (`exit_price`) on the intent. It is honoured ONLY when the same
+            // maker-first gate stack accepts the close as a maker — a price
+            // advisory can never convert a taker exit into a maker one.
+            let strategy_exit_price = intent
+                .exit_price
+                .as_deref()
+                .and_then(|s| Decimal::from_str_exact(s).ok());
             let intent_account = AccountId::from(intent.account_id.as_str());
             let Some(pos) = self
                 .positions
@@ -1222,6 +1237,13 @@ impl Core {
                     "maker-first exit advisory not applied (reason class, kernel gate, or underwater)"
                 );
             }
+            // #915: the intent's own price is candidate material ONLY in the
+            // maker path. Taker closes always price off the fresh best bid
+            // (the #180 rule — the kernel sells at what a buyer offers, never
+            // at a number a strategy quoted); a `Some` price on a taker
+            // conversion is advisory-only and silently unused, matching how
+            // `use_maker` degrades.
+            let exit_price = if use_maker { strategy_exit_price } else { None };
             jobs.push(ExitJob {
                 position_id: pos.id.clone(),
                 token: pos.token_id.clone(),
@@ -1229,6 +1251,10 @@ impl Core {
                 price,
                 reason,
                 use_maker,
+                // #915: the strategy's own post-only limit rides the job —
+                // the submission loop validates it against the live book
+                // before using it.
+                exit_price,
                 internal_key: exit_intent_key("exit-strategy", &pos, &tag),
                 strategy: pos.strategy.clone(),
                 asset: pos.asset.clone(),
@@ -1311,6 +1337,7 @@ impl Core {
                     price,
                     reason: ExitReason::ForceExit,
                     use_maker: false,
+                    exit_price: None,
                     internal_key: exit_intent_key("exit-residual", &pos, ""),
                     strategy: pos.strategy.clone(),
                     asset: pos.asset.clone(),
@@ -1373,10 +1400,48 @@ impl Core {
             // be refused too). No bid or no book: there is nothing to rest
             // against, so the job's judged price stands and the venue's own
             // refusal (or the dry book aging) reports it.
+            //
+            // #915: a strategy-quoted maker limit (`exit_price`) is honoured
+            // only when it is post-only-safe against the LIVE book — strictly
+            // above the best bid (resting, never crossing) and at or below
+            // the best ask (never crossing the other side). Anything else
+            // (no book, no bid,<=bid,>=ask) falls back to the kernel's own
+            // maker pricing: the advisory can choose where to rest among the
+            // legal grid points, it cannot widen what the kernel pays for.
             let price = if mode == FillPolicy::Taker {
                 marketable_exit_price(job.price, self.config.exit_taker_slip_ticks)
             } else {
-                self.maker_exit_price(&job.token, job.price)
+                match job.exit_price {
+                    Some(quoted) => {
+                        // #915: live book only. A quote is post-only-safe
+                        // when it rests STRICTLY above the best bid (never
+                        // crossing) at or under a LIVE best ask (never
+                        // crossing the other side) — otherwise the kernel's
+                        // own maker pricing takes over. The 0.99 / 0.01
+                        // clamp is the same cell the path's other legs use.
+                        let safe = self
+                            .books
+                            .get(&job.token)
+                            .map(|b| {
+                                b.best_bid()
+                                    .zip(b.best_ask().filter(|a| *a > Decimal::ZERO))
+                                    .is_some_and(|(bid, ask)| quoted > bid && quoted <= ask)
+                            })
+                            .unwrap_or(false);
+                        let price = if safe {
+                            quoted
+                        } else {
+                            tracing::debug!(
+                                token = %job.token,
+                                quoted = %quoted,
+                                "strategy maker-TP limit not post-only-safe — kernel pricing takes over"
+                            );
+                            self.maker_exit_price(&job.token, job.price)
+                        };
+                        price.min(Decimal::new(99, 2)).max(Decimal::new(1, 2))
+                    }
+                    None => self.maker_exit_price(&job.token, job.price),
+                }
             };
             let order = OrderRequest {
                 token_id: job.token.clone(),
