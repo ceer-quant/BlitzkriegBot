@@ -191,7 +191,6 @@ fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
 
 // ── #380: the boot-time policy-path contract ────────────────────────────
 
-
 /// #380: an EXPLICIT policy path is honoured verbatim by the boot load —
 /// a file written anywhere the cwd's spelling names is loaded, with the
 /// file's own rule in force. (The install-root resolution itself is
@@ -215,7 +214,11 @@ fn boot_loads_the_explicit_policy_path_verbatim() {
     )
     .expect("write env fixture");
     let cfg = CoreConfig {
-        execution_policy_path: Some(tree.join("execution_policy.toml").to_string_lossy().into_owned()),
+        execution_policy_path: Some(
+            tree.join("execution_policy.toml")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         env_file_path: Some(env_file.to_string_lossy().into_owned()),
         dry_seed_balance: dec!(100),
         trade_log_path: None,
@@ -354,6 +357,97 @@ fn policy_skip_refuses_the_entry_before_the_risk_gate() {
         c.engine_evaluate(now + 1_000),
         0,
         "policy skip removes the order"
+    );
+    assert!(c.list_orders().is_empty(), "nothing reached place()");
+    let stats = c.strategy_stats();
+    let s = strategy_entry(&stats, "dip");
+    assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+}
+
+/// #966 regression: `open_positions` counts LIVE positions GLOBALLY across
+/// all accounts. Two live positions on DIFFERENT accounts must trip the
+/// `global_backstop` (open_positions >= 2 → skip), so a 3rd entry is refused
+/// even though no single account individually holds 2 positions. The pre-fix
+/// per-account counting let this slip through.
+#[test]
+fn global_backstop_skips_when_positions_span_accounts() {
+    let mut policy = neutral_policy();
+    policy.defaults.rules = vec![crate::execution_policy::Rule {
+        name: "global_backstop".into(),
+        priority: 100,
+        enabled: true,
+        when: crate::execution_policy::When {
+            field: crate::execution_policy::ConditionField::OpenPositions,
+            op: crate::execution_policy::CompareOp::Ge,
+            value: crate::execution_policy::ConditionValue::Num(Decimal::from(2)),
+        },
+        then: crate::execution_policy::Action {
+            action: Some(crate::execution_policy::SkipAction::Skip),
+            budget_ratio: None,
+            min_budget_usd: None,
+            max_budget_usd: None,
+            cooldown_sec: None,
+        },
+        reason: Some("全局兜底：持仓数达上限".into()),
+    }];
+
+    let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy);
+    let now = 1_000_000i64;
+
+    // Seed one live position on "default" and one on "acct_b" — neither
+    // account individually holds 2, but globally there are 2 live positions.
+    c.positions_mut().open(
+        crate::position::OpenParams {
+            strategy: "dip".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "btc_up".into(),
+            condition_id: "cond".into(),
+            account_id: crate::model::default_account_id(),
+            venue: String::new(),
+            partner_token_id: "btc_down".into(),
+            entry_price: dec!(0.44),
+            expires_at_ms: now + 900_000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: 900,
+            round_slot: 1,
+        },
+        now,
+    );
+    c.positions_mut().open(
+        crate::position::OpenParams {
+            strategy: "dip".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "eth_up".into(),
+            condition_id: "cond_eth".into(),
+            account_id: crate::model::AccountId::from("acct_b"),
+            venue: String::new(),
+            partner_token_id: "eth_down".into(),
+            entry_price: dec!(0.44),
+            expires_at_ms: now + 900_000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: 900,
+            round_slot: 1,
+        },
+        now,
+    );
+    assert_eq!(
+        c.positions().open_positions().len(),
+        2,
+        "fixture premise: two live positions across two accounts"
+    );
+
+    // Feed the dip book so the "dip" strategy emits a candidate entry.
+    feed_btc_dip(&mut c, now);
+
+    // The global backstop must refuse the entry: open_positions == 2 >= 2.
+    assert_eq!(
+        c.engine_evaluate(now + 1_000),
+        0,
+        "global backstop skips the entry when positions span accounts"
     );
     assert!(c.list_orders().is_empty(), "nothing reached place()");
     let stats = c.strategy_stats();

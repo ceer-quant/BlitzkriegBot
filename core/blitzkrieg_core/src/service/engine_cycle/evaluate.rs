@@ -250,16 +250,13 @@ impl Core {
             String,
             Result<crate::execution_policy::PolicyOutput, crate::execution_policy::PolicyRefusal>,
         > = if self.execution_policy.is_some() {
-            // The open_positions fact counts LIVE positions only — an expired
-            // round's stuck position is settlement-dead (same rule as
-            // PositionManager::can_open) and must not trip the shipped
-            // `open_positions >= N` backstop.
+            // The open_positions fact counts LIVE positions GLOBALLY (all
+            // accounts) — an expired round's stuck position is settlement-dead
+            // (same rule as PositionManager::can_open) and must not trip the
+            // shipped `open_positions >= N` backstop. Counting per-account
+            // defeats the global_backstop rule when positions span accounts.
             let open = self.positions.open_positions();
-            let open_for = |acct: &str| {
-                open.iter()
-                    .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
-                    .count() as u32
-            };
+            let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
             tokens
                 .iter()
                 .map(|(_, req)| {
@@ -274,7 +271,7 @@ impl Core {
                             .ledger_of(&req.account_id)
                             .map(|l| l.balance())
                             .unwrap_or_default(),
-                        open_positions: open_for(req.account_id.as_str()),
+                        open_positions: live,
                         current_price: req.price,
                         time_left_sec: policy_time_left_sec,
                         symbol: req.asset.clone(),
@@ -394,13 +391,10 @@ impl Core {
                 match &self.execution_policy {
                     Some(policy) => {
                         let open = self.positions.open_positions();
-                        let open_for = |acct: &str| {
-                            open.iter()
-                                .filter(|p| {
-                                    p.account_id.as_str() == acct && p.expires_at_ms > now_ms
-                                })
-                                .count() as u32
-                        };
+                        let live = open
+                            .iter()
+                            .filter(|p| p.expires_at_ms > now_ms)
+                            .count() as u32;
                         let facts = crate::execution_policy::PolicyInput {
                             available_balance: self
                                 .accounts
@@ -412,7 +406,7 @@ impl Core {
                                 .ledger_of(&req.account_id)
                                 .map(|l| l.balance())
                                 .unwrap_or_default(),
-                            open_positions: open_for(req.account_id.as_str()) + already_placed,
+                            open_positions: live + already_placed,
                             current_price: req.price,
                             time_left_sec: policy_time_left_sec,
                             symbol: req.asset.clone(),
@@ -890,13 +884,12 @@ impl Core {
             let policy = self.execution_policy.clone();
             let policy_verdict = policy.map(|policy| {
                 // open_positions counts LIVE positions only (expired rounds
-                // are settlement-dead; see engine_evaluate's verdict map).
+                // open_positions counts LIVE positions GLOBALLY (all accounts)
+                // (expired rounds are settlement-dead; see engine_evaluate's
+                // verdict map). Counting per-account defeats the global_backstop
+                // rule when positions span accounts.
                 let open = self.positions.open_positions();
-                let open_for = |acct: &str| {
-                    open.iter()
-                        .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
-                        .count() as u32
-                };
+                let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
                 let facts = crate::execution_policy::PolicyInput {
                     available_balance: self
                         .accounts
@@ -908,7 +901,7 @@ impl Core {
                         .ledger_of(&req.account_id)
                         .map(|l| l.balance())
                         .unwrap_or_default(),
-                    open_positions: open_for(req.account_id.as_str()) + already_placed,
+                    open_positions: live + already_placed,
                     current_price: req.price,
                     time_left_sec: policy_time_left_sec,
                     symbol: req.asset.clone(),
