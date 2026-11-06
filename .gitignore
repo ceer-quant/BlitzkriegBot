@@ -80,6 +80,9 @@ user_layer/strategies/target/
 # Local agent/tooling session state (hook state, continue files)
 .mimosa/
 
+# Worktrees (temporary checkouts; never version their content).
+worktrees/
+
 # Scratch files
 *.tmp.mjs
 
