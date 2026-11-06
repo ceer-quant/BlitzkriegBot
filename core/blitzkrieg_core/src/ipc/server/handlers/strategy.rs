@@ -301,6 +301,14 @@ pub(crate) async fn handle_strategy(
                 Ok(serde_json::to_value(c.strategy_params_readout(name)).unwrap_or(Value::Null))
             }
         }
+        method::STRATEGY_PACKAGES_RELOAD => {
+            let mut c = core.lock().await;
+            let loaded = c.reload_lua_packages();
+            Ok(serde_json::json!({
+                "loaded": loaded,
+                "note": "re-scanned user_layer/strategies_lua and registered packages not already in the engine dispatch",
+            }))
+        }
         method::STRATEGY_PARAMS_SET => {
             match serde_json::from_value::<StrategyParamsSetParams>(params.clone()) {
                 Err(e) => Err((

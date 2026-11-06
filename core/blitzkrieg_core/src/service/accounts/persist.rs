@@ -663,30 +663,45 @@ impl Core {
                 requested.push(name.to_string());
             }
         }
-        // Plan-first validation: every requested name must be REGISTERED in
-        // the engine (any scope). The registered set is the loadable set —
-        // the default scope hosts every loaded package.
+        // Plan-first validation: every NEW name in this request
+        // (`requested − persisted`) must be REGISTERED in the engine (any
+        // scope). Already-persisted-but-unregistered names are warn-skipped
+        // instead of refusing the whole write — otherwise a stale name that
+        // can no longer be loaded (e.g. a Lua package refused at boot) poisons
+        // `account.strategies.set` forever and even removing it becomes
+        // impossible (issue #975). The assignable set is what `strategy.list`
+        // reports.
         if self.engine.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.strategies.set: no strategy engine attached".to_string(),
             ));
         }
-        for name in &requested {
+        let persisted: Vec<String> = self
+            .accounts
+            .account(id)
+            .map(|a| a.strategies.clone())
+            .unwrap_or_default();
+        let new_names: Vec<&str> = requested
+            .iter()
+            .filter(|name| !persisted.iter().any(|p| p == *name))
+            .map(|s| s.as_str())
+            .collect();
+        for name in &new_names {
             if !self
                 .engine
                 .as_ref()
                 .expect("engine presence checked above")
                 .strategy_registered(name)
             {
-                return Err(CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "account.strategies.set: strategy `{name}` is not \
-                         registered — the assignable set is what \
-                         `strategy.list` reports"
-                    ),
-                ));
+                tracing::warn!(
+                    strategy = name,
+                    account = %id,
+                    "account.strategies.set: strategy `{name}` is not registered \
+                     but is already persisted for this account — warn-skipping \
+                     the name so it can still be removed; the assignable set \
+                     is what `strategy.list` reports",
+                );
             }
         }
         // Positions THIS account holds, by strategy — the exits-only safety

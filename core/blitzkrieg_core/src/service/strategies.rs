@@ -1069,6 +1069,44 @@ impl Core {
         }
     }
 
+    /// Re-scan the Lua strategy dir (`user_layer/strategies_lua`) and register
+    /// any package not already in the engine's provenance ledger
+    /// (`package_sources`). No disk write — pure re-scan plus in-memory
+    /// registration. The non-restart recovery path for a package refused at
+    /// boot (e.g. a stale manifest sha that has since been corrected): after
+    /// reload, `strategy.list` shows it again and `account.strategies.set` can
+    /// add it back (issue #975). Returns the names freshly loaded.
+    pub fn reload_lua_packages(&mut self) -> Vec<String> {
+        use std::collections::HashSet;
+        use std::path::Path;
+        let Some(dir) = self.config.lua_strategy_dir.as_deref() else {
+            return Vec::new();
+        };
+        let Some(engine) = self.engine.as_mut() else {
+            return Vec::new();
+        };
+        let already: HashSet<String> = engine
+            .scope_sources()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let mut loaded: Vec<String> = Vec::new();
+        for pkg in crate::strategy_engine::lua_loader::discover_lua_packages(Path::new(dir)) {
+            let name = match pkg.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if already.contains(&name) {
+                continue;
+            }
+            let receipt = self.load_lua_package_inner(&pkg, false);
+            if receipt.contains("registered into the engine dispatch") {
+                loaded.push(name);
+            }
+        }
+        loaded
+    }
+
     /// Unload a dynamic strategy library (E9-b): drop its instance from the
     /// live dispatch and `dlclose` it. The engine refuses in-tree or still-
     /// enabled strategies; here we additionally refuse an OPEN POSITION held

@@ -242,6 +242,12 @@ pub mod method {
     /// `risk.setExit` posture: refused values move nothing, receipts name
     /// every old→new.
     pub const STRATEGY_PARAMS_SET: &str = "strategy.params.set";
+    /// Re-scan the Lua strategy dir (`user_layer/strategies_lua`) and register
+    /// any package not already in the engine's provenance ledger — the
+    /// non-restart recovery path for a package refused at boot (issue #975).
+    /// `params: {}` (no arguments). Returns the names freshly loaded so
+    /// `strategy.list` shows them again.
+    pub const STRATEGY_PACKAGES_RELOAD: &str = "strategy.packages.reload";
     /// Issue #481 (G4): the confirmed cross-venue mappings as a read-only
     /// snapshot — per event: status, the venues holding a leg, and the
     /// discrepancy marks. The panel's 配对视图 data source.
