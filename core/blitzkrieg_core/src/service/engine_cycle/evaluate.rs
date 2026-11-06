@@ -391,10 +391,7 @@ impl Core {
                 match &self.execution_policy {
                     Some(policy) => {
                         let open = self.positions.open_positions();
-                        let live = open
-                            .iter()
-                            .filter(|p| p.expires_at_ms > now_ms)
-                            .count() as u32;
+                        let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
                         let facts = crate::execution_policy::PolicyInput {
                             available_balance: self
                                 .accounts
