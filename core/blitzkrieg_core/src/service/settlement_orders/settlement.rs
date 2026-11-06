@@ -762,6 +762,17 @@ impl Core {
     /// the market through [`Self::sync_settlement_watch`] once its last
     /// position is gone.
     pub(crate) fn run_expiry_fallback_sweep(&mut self, now_ms: i64) {
+        // Floor for the unverifiable-expiry fallback price, as a percentage of
+        // the entry price. Default 50% — a market the venue never answered at
+        // expiry must not liquidate a position at the residual mid (0.001–0.02
+        // for a binary option the market wrote off) for a -99% loss. Override
+        // via BK_SETTLEMENT_FALLBACK_FLOOR_PCT (0–100); 0 disables the floor
+        // and restores the pre-fix behaviour of using the raw mid.
+        let floor_pct: u32 = std::env::var("BK_SETTLEMENT_FALLBACK_FLOOR_PCT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|p| p.min(100))
+            .unwrap_or(50);
         // Only markets the venue has structurally never answered, past the
         // silence bound. `answers > 0` means the venue is ruling on this
         // condition honestly (even "not resolved yet") — keep waiting.
@@ -794,8 +805,23 @@ impl Core {
             // Fallback price: the last known mid; a zeroed feed recovers cost
             // via the entry price. Both are bookkeeping values — the venue's
             // real cash position is what the reconcile sweep reports.
+            //
+            // Floor at `floor_pct`% of entry: an unverifiable expiry must NOT
+            // liquidate a position at the residual mid (0.001–0.02 for a
+            // binary option the market has written off) for a -99% loss. The
+            // venue never answered the settlement query, so the true outcome
+            // is unknown; capping the loss is a conservative safety net that
+            // stops one unanswered market from wiping out the account's
+            // equity. The reconcile sweep is the cash truth — this floor only
+            // bounds the bookkeeping PnL booked when the venue goes silent at
+            // expiry. `floor_pct = 0` disables the floor (raw mid behaviour).
             let price = if pos.current_price > Decimal::ZERO {
-                pos.current_price
+                if floor_pct == 0 {
+                    pos.current_price
+                } else {
+                    let floor = pos.entry_price * Decimal::from(floor_pct) / Decimal::from(100);
+                    pos.current_price.max(floor)
+                }
             } else {
                 pos.entry_price
             };
