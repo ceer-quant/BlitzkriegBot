@@ -388,6 +388,28 @@ pub struct ApiErrorBody {
     pub message: Option<String>,
 }
 
+/// The verdict end of `GET /v1/markets/{condition_id}` (wire shape verified
+/// live 2026-11-06): the top-level fields the settlement sweep needs.
+///
+/// The updown LIST only carries rounds ending in the future — an
+/// already-resolved condition rotates out within an hour, so the sweep's
+/// list-based path structurally cannot rule on it (`unverifiable_expiry`
+/// fallback, −98% rows on the panel). The SINGLE-market endpoint keeps the
+/// verdict after close: `resolved_outcome` is `"Up"` or `"Down"` once
+/// `closed` is true, and `outcomes` fixes the polarity order. Token ids are
+/// absent here (`clob_token_ids: null`), so the caller pairs the verdict to
+/// the query's tokens through the trade rows' own `outcome` labels.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SingleMarketVerdict {
+    pub condition_id: String,
+    pub closed: Option<bool>,
+    /// The market's my-outcome words, in polarity order: `["Up","Down"]`.
+    pub outcomes: Option<Vec<String>>,
+    /// The winning outcome word once the market has resolved (`"Up"` /
+    /// `"Down"`); absent/none while the market runs.
+    pub resolved_outcome: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

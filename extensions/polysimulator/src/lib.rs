@@ -32,6 +32,7 @@ pub mod net_check;
 pub mod plugin;
 pub mod rate_limit;
 pub mod rest;
+pub mod settlement;
 pub mod types;
 
 pub use error::{PolySimError, into_core_error};

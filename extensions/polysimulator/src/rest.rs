@@ -224,6 +224,23 @@ impl PolySimRest {
         Ok(body.markets.unwrap_or_default())
     }
 
+    /// The verdict for ONE market, by condition id: `GET /v1/markets/{cid}`
+    /// (verified live 2026-11-06). The updown list rotates resolved rows out
+    /// within an hour, but this endpoint keeps the verdict after close —
+    /// `resolved_outcome` names the winning outcome even when every list
+    /// window has forgotten the condition. Unauthenticated market data, same
+    /// as the list.
+    pub async fn single_market(
+        &self,
+        condition_id: &str,
+    ) -> Result<crate::types::SingleMarketVerdict, PolySimError> {
+        self.get_json(
+            Class::Read,
+            &format!("/v1/markets/{}", urlencode(condition_id)),
+        )
+        .await
+    }
+
     // ── trading (authenticated) ──────────────────────────────────────────
 
     /// Account endpoints and order writes require the API key. A client built
