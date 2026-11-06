@@ -387,7 +387,7 @@ onBeforeUnmount(() => {
       @click="toggle"
     >
       <Wallet class="size-3.5" />
-      <span class="num max-w-[70px] truncate sm:max-w-[120px]">{{ active || '账户' }}</span>
+      <span class="num hidden sm:inline max-w-[70px] truncate sm:max-w-[120px]">{{ active || '账户' }}</span>
       <ChevronDown class="size-3 opacity-60" :class="open ? 'rotate-180' : ''" />
     </button>
 
