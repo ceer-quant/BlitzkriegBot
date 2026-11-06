@@ -956,8 +956,7 @@ pub(crate) use blitzkrieg_core::strategy_state::default_strategy_state_for;
 /// Each entry is behind a feature so the launcher can be built market-free
 /// (`--no-default-features`) and so a different market is a Cargo feature
 /// rather than a code change.
-pub(crate) fn builtin_registry()
--> blitzkrieg_core::market::registry::MarketPluginRegistry {
+pub(crate) fn builtin_registry() -> blitzkrieg_core::market::registry::MarketPluginRegistry {
     let reg = blitzkrieg_core::market::registry::MarketPluginRegistry::new();
     #[cfg(feature = "polymarket")]
     reg.register(Box::new(polymarket_extension::PolymarketPlugin::new()));

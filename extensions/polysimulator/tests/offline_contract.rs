@@ -692,7 +692,12 @@ fn reqwest_construction_is_converged_into_the_http_module() {
 fn no_market_data_component_is_implemented_in_this_crate() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let lib_src = std::fs::read_to_string(format!("{manifest}/src/lib.rs")).expect("lib.rs");
-    for banned in ["impl DataFeed", "impl MarketDiscovery", "mod feed", "mod discovery"] {
+    for banned in [
+        "impl DataFeed",
+        "impl MarketDiscovery",
+        "mod feed",
+        "mod discovery",
+    ] {
         assert!(
             !lib_src.contains(banned),
             "polysimulator must stay execution-only — found {banned:?} in src/lib.rs"

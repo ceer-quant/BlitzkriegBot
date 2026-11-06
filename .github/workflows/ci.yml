@@ -279,8 +279,11 @@ jobs:
       # The reference cdylib is built because the PTY gate below reads the panel's
       # Strategies pane, and that pane is filled by a LOADED library — the kernel
       # registers no strategy of its own. The gate points `--strategy-dir` at it.
+      # #841: the `blitzkrieg-core` BINARY lives in the composition root now
+      # (core/blitzkrieg_launcher) — building the core LIB package alone no
+      # longer materializes the executable.
       - name: Build the gateway and core (release)
-        run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-core -p blitzkrieg-ui-panel
+        run: cargo build --release --locked -p blitzkrieg-ui-kit -p blitzkrieg-launcher -p blitzkrieg-ui-panel
       - name: Build the reference strategy cdylib (standalone workspace)
         run: (cd user_layer/parity_strategy && cargo build --release --locked)
       - name: Build the panel bundle
@@ -795,8 +798,10 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      # #841: the `blitzkrieg-core` binary lives in the composition root
+      # (core/blitzkrieg_launcher); the core lib package no longer declares a bin.
       - name: Build the core (release)
-        run: cargo build --release --locked -p blitzkrieg-core
+        run: cargo build --release --locked -p blitzkrieg-launcher
       # The fixture is the Lua `spread_arb` package (user_layer/strategies_lua)
       # — data, not a build: the manifest sha256 is its integrity, there is
       # nothing to compile.

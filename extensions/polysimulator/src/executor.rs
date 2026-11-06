@@ -56,7 +56,7 @@
 use crate::into_core_error;
 use crate::rest::{Credentials, PolySimRest, RestConfig};
 use crate::settlement::{resolution_by_single_market, resolution_for};
-use crate::types::{BalanceBody, PlaceOrderBody, UpDownRow};
+use crate::types::{BalanceBody, PlaceOrderBody};
 use blitzkrieg_bk_contract::{
     CoreError, CoreErrorCode, CoreResult, ExecutorConfig, FillStatus, MarketFill, MarketHost,
     PendingOrder, ReconcileSnapshot, SelfCheckItem, SelfCheckReport, Side, VenueTradeInfo,

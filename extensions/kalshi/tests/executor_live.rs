@@ -29,14 +29,14 @@
 //!    same tick's pending order is POSTed (the #462 rule).
 //! 5. **unreadable fill rows** are skipped, never forwarded as garbage.
 
-use blitzkrieg_kalshi::rest::Credentials;
-use blitzkrieg_kalshi::{KalshiRest, RestConfig, executor};
 use blitzkrieg_bk_contract::{
     BookUpdate, CoreError, FillPolicy, MarketFill, MarketHost, MarketResolution, MergeRequest,
     MergeResult, PendingOrder, ReconcileSnapshot, RedemptionRequest, RedemptionResult,
     SelfCheckReport, SettlementQuery, Side, SpotUpdate, SubscriptionControl, TokenId,
     TopOfBookUpdate,
 };
+use blitzkrieg_kalshi::rest::Credentials;
+use blitzkrieg_kalshi::{KalshiRest, RestConfig, executor};
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
 use std::net::TcpListener;

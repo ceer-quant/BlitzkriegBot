@@ -95,7 +95,7 @@ export function expectedRevision(repoRoot = ROOT) {
 export function checkCoreProvenance(binPath, check, { repoRoot = ROOT } = {}) {
   const version = binaryVersion(binPath);
   if (version === null) {
-    check('binary answers --version', false, `${binPath} (missing or not executable — build it: cargo build --release -p blitzkrieg-core)`);
+    check('binary answers --version', false, `${binPath} (missing or not executable — build it: cargo build --release -p blitzkrieg-launcher)`);
     return { version: null, revision: null };
   }
   check('binary reports <semver>+g<sha> provenance', VERSION_RE.test(version), `got ${JSON.stringify(version)}`);
