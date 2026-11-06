@@ -170,6 +170,7 @@
 | `strategy.params.set` | `{ name, params: { <knob>: <decimal-string>, … }, reason? }` | `{ name, applied: [{knob, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 逐旋钮对照声明域校验（plan first, write later）；多旋钮 patch **原子**（一个坏值整体拒绝、什么都不动）；热生效：策略下个 evaluate 周期合并 registry cell；重启回落 manifest 缺省（+已采纳的进化晋升） |
 | `strategy.unload` | `{ name }` | 文本回执：`"<name> unloaded (engine dispatch removed); library freed"` / `"not found: …"` / `"rejected: …"`（仍启用、in-tree 或仍有持仓时拒绝） |
 | `strategy.reload` | `{ name, path }` | 文本回执（E9-b 原子换装）：先装新库、同名字解析成功才卸旧实例；失败旧实例原样活着 —— 坏构建永远不能把在跑的 dispatch 洗白 |
+| `strategy.packages.reload` | `{}` | `{ "loaded": [<name>…], "note": "re-scanned user_layer/strategies_lua and registered packages not already in the engine dispatch" }` —— 重扫 Lua 策略目录，把还未在引擎分发表里的包注册进来（issue #975 的非重启恢复路径）。`params: {}`（无参数）。返回刚加载的包名，以便 `strategy.list` 再列出它们。 |
 
 #### 2.5.5 统一映射确认面（RFC 568 · ④ 操作员裁决，2026-10-26 补册）
 
