@@ -155,10 +155,14 @@ mod bin_support;
 #[cfg(test)]
 mod bin_tests;
 
+// The boot layer's default-path helpers, re-exported from the lib's own
+// modules (`crate::position_db` / `crate::strategy_state`) so the bin and
+// any embedded reader share ONE name song.
 use bin_support::boot::{
-    ConfigChoice, EnvVars, config_choice, daily_loss_path_for, parse_args, parse_strategy_limits,
-    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
-    round_duration_source_from, run_net_check,
+    ConfigChoice, EnvVars, config_choice, daily_loss_path_for, default_position_log_for,
+    default_strategy_state_for, parse_args, parse_strategy_limits, parse_virtual_limits,
+    resolve_event_archive, resolved_policy_path, risk_state_path_for, round_duration_source_from,
+    run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -394,13 +398,22 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Position log: durable snapshot of the OPEN position book (crash recovery).
+    // issue #953 (the snapshot follows the book): the DEFAULT is derived from
+    // the resolved run mode — live keeps the historical
+    // `data/positions/positions.jsonl` byte for byte, dry derives
+    // `data/positions/positions.dry.jsonl` (the trade-log's
+    // `trades-live.jsonl` song): the open-position snapshot and the position
+    // id baseline it seeds are PER-BOOK state, so a same-directory live→dry
+    // switch boots into the dry book's own snapshot (empty on first boot)
+    // instead of inheriting live's held positions. `--position-log <path>`
+    // still wins over both; nothing on disk is moved or renamed.
     let position_log_path = if args.no_position_log {
         None
     } else {
         Some(
             args.position_log
                 .clone()
-                .unwrap_or_else(|| "data/positions/positions.jsonl".to_string()),
+                .unwrap_or_else(|| default_position_log_for(mode).to_string()),
         )
     };
 
@@ -533,7 +546,21 @@ async fn main() -> anyhow::Result<()> {
         // was not given.
         requested_strategies: args.enable_strategy.clone(),
         allow_zero_strategies: args.allow_zero_strategies,
-        strategy_state_path: args.strategy_state,
+        // issue #953 (the persisted enabled-set follows the book): the
+        // DEFAULT is derived HERE from the resolved run mode — live keeps the
+        // historical `data/strategy-state.json` byte for byte, dry derives
+        // `data/strategy-state.dry.json` — so the dry book's toggles never
+        // rewrite the live book's persisted enablement (and vice versa). An
+        // explicit `--strategy-state <path>` wins verbatim; an explicit
+        // `--no-strategy-state` stays off. `parse_args` distinguishes only
+        // "off" from "no flag given" (the latter carries the historical
+        // spelling as its raw shape); the mode decides which book the flag
+        // did not speak for.
+        strategy_state_path: if args.strategy_state.as_deref() == Some("data/strategy-state.json") {
+            Some(default_strategy_state_for(mode).to_string())
+        } else {
+            args.strategy_state
+        },
         strategy_dir: args.strategy_dir,
         lua_strategy_dir: args.lua_strategy_dir,
         markets: args.markets,
@@ -1034,11 +1061,14 @@ async fn main() -> anyhow::Result<()> {
     // directories, so a latch on the log file alone would not describe the
     // footprint. Naming them here keeps the banner honest about the set. The
     // mode-split ledger renames the live trade summary, so the banner spells
-    // the rule instead of one filename.
+    // the rule instead of one filename (same rule for the position side
+    // files and the dry position log itself — issue 953; the .dry tags key
+    // every file to its book).
     eprintln!(
         "blitzkrieg-core: side files: <trade-log stem>.summary.json beside the trade log \
          (the historical `trades.jsonl` keeps `summary.json`); applied-fills.jsonl / \
-         reconcile.jsonl / settlements.jsonl beside the order log; <position-log>.daily-loss.json \
+         reconcile.jsonl / settlements.jsonl beside the order log; \
+         <position-log>.daily-loss.json|daily-loss.dry.json / risk-state.json|risk-state.dry.json \
          beside the position log"
     );
 

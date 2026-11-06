@@ -434,8 +434,9 @@ pub const FLAGS: &[FlagSpec] = &[
     flag(
         "--strategy-state",
         "<path|none>",
-        "Where the enabled-strategy set is persisted (default \
-         `data/strategy-state.json`; `none` = do not persist).",
+        "Where the enabled-strategy set is persisted (default derived from the \
+         mode: `data/strategy-state.json` live, `data/strategy-state.dry.json` \
+         dry/readonly — issue 953; `none` = do not persist).",
     ),
     flag(
         "--no-strategy-state",
@@ -548,14 +549,18 @@ pub const FLAGS: &[FlagSpec] = &[
     risky(
         "--position-log",
         "<path>",
-        "Open-position snapshot (default `data/positions/positions.jsonl`).",
-        "positions go to the DEFAULT path (`data/positions/positions.jsonl`)",
+        "Open-position snapshot (default derived from the mode: \
+         `data/positions/positions.jsonl` live, `data/positions/positions.dry.jsonl` \
+         dry/readonly — issue 953).",
+        "positions go to the DEFAULT ledger path for the mode \
+         (`data/positions/positions.jsonl` live, `data/positions/positions.dry.jsonl` \
+         dry/readonly), not the file you named",
     ),
     risky(
         "--no-position-log",
         "",
         "Do not persist positions.",
-        "positions ARE persisted — to the default path",
+        "positions ARE persisted — to the default ledger path",
     ),
     risky(
         "--no-ledger-journal",

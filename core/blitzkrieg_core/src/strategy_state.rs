@@ -25,7 +25,24 @@
 //!   Writes are atomic (tmp + rename) so a crash mid-toggle cannot leave a
 //!   half-written state behind.
 
+use crate::model::Mode;
 use std::path::Path;
+
+/// issue #953 (the persisted enablement set follows the book): the DEFAULT
+/// strategy-state file is per-run-mode under the same song as the position
+/// log's split — live keeps the historical `data/strategy-state.json`
+/// spelling byte for byte, the dry book derives
+/// `data/strategy-state.dry.json`, so the dry book's toggles never rewrite
+/// (or boot-enable against) the live book's persisted set after a
+/// same-directory mode switch, and vice versa. An explicit
+/// `--strategy-state` outranks the derivation.
+pub fn default_strategy_state_for(mode: Mode) -> &'static str {
+    if mode.may_trade() {
+        "data/strategy-state.json"
+    } else {
+        "data/strategy-state.dry.json"
+    }
+}
 
 /// Read the persisted enabled-set. Missing or malformed file → empty (a warn
 /// for malformed, silence for absent — a fresh checkout is not a problem).
@@ -130,5 +147,25 @@ mod tests {
         save(&path, &["alpha_strategy".into()]);
         assert_eq!(load(&path), vec!["alpha_strategy"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// issue #953: the DEFAULT state file is per-mode — live keeps the
+    /// historical spelling byte for byte (upgrade = zero migration), dry
+    /// derives the `.dry.` file beside it. A dry toggle then never rewrites
+    /// (or boots against) the live book's persisted enablement.
+    #[test]
+    fn default_strategy_state_path_splits_by_mode() {
+        assert_eq!(
+            default_strategy_state_for(crate::model::Mode::Live),
+            "data/strategy-state.json"
+        );
+        assert_eq!(
+            default_strategy_state_for(crate::model::Mode::Dry),
+            "data/strategy-state.dry.json"
+        );
+        assert_eq!(
+            default_strategy_state_for(crate::model::Mode::ReadOnly),
+            "data/strategy-state.dry.json"
+        );
     }
 }
