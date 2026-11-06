@@ -206,7 +206,7 @@ async function doResetTrading(): Promise<void> {
       </div>
 
       <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
-        <div class="flex items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
+        <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
           <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
           <span>{{ sessionHint || '正在探测网关会话状态…' }}</span>
         </div>
@@ -228,7 +228,7 @@ async function doResetTrading(): Promise<void> {
         </template>
       </CardHeader>
       <div class="flex items-start justify-between gap-3">
-        <div>
+        <div class="min-w-0 flex-1">
           <div class="text-[12.5px] font-semibold">重新读取 .env</div>
           <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
             原地更新账户元数据、执行策略和影子进化开关，并保留余额、挂单与持仓。新增或删除账户、轮次等启动期设置仍需重启。
@@ -279,7 +279,7 @@ async function doResetTrading(): Promise<void> {
         </div>
 
         <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
-          <div class="flex items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
+          <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
             <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
             <span v-if="roundFlagLocked">
               当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
@@ -351,7 +351,7 @@ async function doResetTrading(): Promise<void> {
       </CardHeader>
 
       <div class="flex items-start justify-between gap-3">
-        <div>
+        <div class="min-w-0 flex-1">
           <div class="text-[12.5px] font-semibold">清空当前账户的交易历史并复原虚拟资金</div>
           <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
             对当前显示账户：停用其已启用策略 → 撤销其挂单 → 清空其订单/成交/持仓记录 → 按配置 seed 复原其现金。
