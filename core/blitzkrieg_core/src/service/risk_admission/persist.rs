@@ -390,6 +390,57 @@ impl Core {
         self.persist_risk_state();
     }
 
+    /// Issue #965: write the boot-resolved nine systemic limits into the
+    /// risk-state file so they survive restart. Only bounds not already in the
+    /// file (never hot-written) are inserted — hot values already there are
+    /// left alone, preserving the tiering rule that a hot value outranks the
+    /// boot chain. Stamped with each bound's actual boot source (toml/env/
+    /// flag/default), not `flag` — `flag` is reserved for runtime hot writes.
+    pub(crate) fn persist_boot_systemic_limits(
+        &mut self,
+        boot_systemic: &crate::risk::limits::SystemicRiskLimits,
+    ) {
+        let Some(cell) = &mut self.risk_state else {
+            return;
+        };
+        let mut inserted = false;
+        let record = |cell: &mut RiskStateCell,
+                      field: &str,
+                      bound: &crate::risk::limits::Bound|
+         -> bool {
+            if cell.file.systemic.contains_key(field) {
+                return false;
+            }
+            cell.file.systemic.insert(
+                field.to_string(),
+                SystemicBoundCell {
+                    value: bound.value().to_string(),
+                    source: bound.source().as_str().to_string(),
+                },
+            );
+            true
+        };
+        let a = &boot_systemic.account;
+        let g = &boot_systemic.global;
+        inserted |= record(cell, "maxSingleLossUsd", &a.max_single_loss_usd);
+        inserted |= record(cell, "maxDailyDrawdownUsd", &a.max_daily_drawdown_usd);
+        inserted |= record(cell, "maxPositionSize", &a.max_position_size);
+        inserted |= record(cell, "maxConsecutiveLosses", &a.max_consecutive_losses);
+        inserted |= record(cell, "cooldownMinutes", &a.cooldown_minutes);
+        inserted |= record(cell, "maxTotalPosition", &g.max_total_position);
+        inserted |= record(cell, "maxTotalExposureUsd", &g.max_total_exposure_usd);
+        inserted |= record(cell, "maxCorrelationUsd", &g.max_correlation_usd);
+        inserted |= record(
+            cell,
+            "globalKillSwitchLossUsd",
+            &g.global_kill_switch_loss_usd,
+        );
+        if inserted {
+            cell.file.saved_at_ms = now_ms();
+            cell.save();
+        }
+    }
+
     /// The corrupt-boot fail-closed freeze (issue #861's surviving clause):
     /// every account freezes when the risk-state file exists but does not
     /// parse — a kernel that cannot read its own risk posture must not

@@ -503,6 +503,32 @@ async fn main() -> anyhow::Result<()> {
             Some(r.path.to_string_lossy().into_owned())
         }
     };
+    // Issue #965: self-bootstrap execution_policy.toml with an explicit warning
+    // + template when missing (default path only; an explicit --execution-policy
+    // path is honoured verbatim and not bootstrapped).
+    if let blitzkrieg_core::execution_policy::ResolvedPolicyPath::Default(r) = &resolved_policy {
+        if !r.path.is_file() {
+            if let Some(parent) = r.path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&r.path, blitzkrieg_core::execution_policy::BOOTSTRAP_TEMPLATE) {
+                Ok(()) => {
+                    eprintln!(
+                        "blitzkrieg-core: execution_policy.toml missing — generated template at {}; \
+                         edit it to arm per-account rules (code defaults are the neutral kernel)",
+                        r.path.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "blitzkrieg-core: execution_policy.toml missing at {}; could not generate \
+                         template: {e} — running neutral kernel",
+                        r.path.display()
+                    );
+                }
+            }
+        }
+    }
 
     let mut config = CoreConfig {
         mode,

@@ -92,7 +92,10 @@ export interface SystemicLimitChange {
   effect: 'live' | 'next_session' | string
 }
 
-/** `risk.setSystemic` 回执：改了什么、谁改的、何时、未持久化。 */
+/** `risk.setSystemic` 回执：改了什么、谁改的、何时。persistence = file（已写入
+ * 风控状态文件，重启后保留）；每项 applied 带 effect=live|next_session，
+ * 六项 live、三项 next_session（见 trading_reset）。
+ */
 export interface SystemicLimitUpdateDoc {
   applied: SystemicLimitChange[]
   atMs: number
@@ -128,7 +131,9 @@ export interface ExitSetChange {
   effect: 'live' | string
 }
 
-/** `risk.setExit` 回执：改了什么、谁改的、何时、未持久化。 */
+/** `risk.setExit` 回执：改了什么、谁改的、何时。persistence = memory（仅内存，
+ * 未写入风控状态文件，重启回到启动 flag/env/TOML 的解析结果）；effect=live。
+ */
 export interface ExitSetUpdateDoc {
   applied: ExitSetChange[]
   atMs: number
@@ -147,10 +152,15 @@ export const riskApi = {
    */
   riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
   /**
-   * 生效风控可编辑的写路径（`risk.setSystemic`）：九项系统限额的内存热写。
-   * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，回执
-   * 里每个 bound 带效果等级（live / next_session）。未持久化：重启回到
-   * 启动 flag/env/TOML 的解析结果。
+   * 生效风控可编辑的写路径（`risk.setSystemic`）：九项系统限额的热写。
+   * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，
+   * 回执里每个 bound 带 effect（live / next_session）。六项 live：
+   * maxSingleLossUsd / maxPositionSize / maxTotalPosition / maxTotalExposureUsd /
+   * maxCorrelationUsd / globalKillSwitchLossUsd —— 立即约束下一笔。
+   * 三项 next_session：maxDailyDrawdownUsd / maxConsecutiveLosses /
+   * cooldownMinutes —— 重启后生效，本会话不追溯改判。
+   * persistence = file：写入风控状态文件（risk-state.json），重启后保留；
+   * apply_restored_limits 在 boot 读回。
    */
   riskSetSystemic: (body: RiskSetSystemicBody) =>
     request<SystemicLimitUpdateDoc>('/risk/set-systemic', {
@@ -158,10 +168,11 @@ export const riskApi = {
       body: JSON.stringify(body),
     }),
   /**
-   * 退出纪律的写路径（`risk.setExit`）：止损/止盈/强平三项的内存热写。
+   * 退出纪律的写路径（`risk.setExit`）：止损/止盈/强平三项的热写。
    * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，
-   * 回执里每项带 old→new 与 effect=live（新入场下一笔按新值绑定，已开仓位
-   * 的退出扫描同步跟随）。未持久化：重启回到启动 flag/env/TOML 的解析结果。
+   * 回执里每项带 effect=live（新入场下一笔按新值绑定，已开仓位的退出扫描
+   * 同步跟随）。persistence = memory：仅内存，不写入风控状态文件，重启回到
+   * 启动 flag/env/TOML 的解析结果。
    */
   riskSetExit: (body: RiskSetExitBody) =>
     request<ExitSetUpdateDoc>('/risk/set-exit', {

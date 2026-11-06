@@ -356,6 +356,12 @@ impl Core {
                 }
             }
         });
+        // Issue #965: capture the boot-resolved systemic limits before `config`
+        // moves into the core. They get persisted into the risk-state file at
+        // boot so they survive restart (only bounds not already in the file
+        // are written — hot values already there are left alone).
+        let boot_systemic = config.risk.systemic.clone();
+
         let mut core = Self {
             risk: RiskGate::new(config.risk.clone()),
             config,
@@ -513,6 +519,10 @@ impl Core {
         if risk_state_corrupt {
             core.freeze_all_accounts_corrupt_boot();
         }
+        // Issue #965: persist boot-resolved systemic limits into the risk-state
+        // file so they survive restart. Only bounds the runtime never hot-wrote
+        // are written — hot values already in the file are left alone.
+        core.persist_boot_systemic_limits(&boot_systemic);
         core
     }
 

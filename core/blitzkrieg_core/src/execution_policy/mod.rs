@@ -100,6 +100,61 @@ mod tests;
 /// uses in `main.rs`.
 pub const EXECUTION_POLICY_CONFIG_PATH: &str = "user_layer/configs/execution_policy.toml";
 
+/// The self-bootstrap template written when no `execution_policy.toml` exists.
+/// The compiled defaults are the neutral kernel; this template is the SHIPPED
+/// file's `[defaults]` so an operator has a concrete starting point.
+pub const BOOTSTRAP_TEMPLATE: &str = r#"# execution_policy.toml — per-account execution policy (issue #363).
+# AUTO-GENERATED: no execution_policy.toml was found at this path, so this
+# template was written. Edit it to arm per-account rules; the compiled defaults
+# are the neutral kernel (no rules, full budget) — safe but unguarded.
+#
+# Precedence: per-account env > per-account TOML > global env > global TOML >
+# compiled default. The POLICY_* env family is the write surface
+# (execution_policy.set / execution_policy.reset).
+
+version = 1
+
+[defaults]
+budget_ratio = 0.10
+min_budget_usd = 1.00
+max_budget_usd = 50.00
+min_equity_usd = 1.00
+max_positions_per_asset = 1
+
+[[defaults.rules]]
+name = "global_backstop"
+enabled = true
+priority = 100
+when = "open_positions >= 2"
+then = { action = "skip" }
+reason = "全局兜底：持仓数达上限"
+"#;
+
+/// Read the policy file at `path`; if missing, write the bootstrap template
+/// and warn loudly. Returns the file text (the template when bootstrapped).
+pub fn read_or_bootstrap(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(gen_err) = std::fs::write(path, BOOTSTRAP_TEMPLATE) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %gen_err,
+                    "execution_policy.toml missing and could not be generated — running neutral kernel"
+                );
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "execution_policy.toml missing — generated template at this path; \
+                     edit it to arm per-account rules (code defaults are the neutral kernel)"
+                );
+            }
+            Ok(BOOTSTRAP_TEMPLATE.to_string())
+        }
+        Err(e) => Err(format!("{} unreadable: {e}", path.display())),
+    }
+}
+
 /// Where a resolved DEFAULT path was found. The boot log names the winner so
 /// "which base decided?" is answerable from the run log alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
