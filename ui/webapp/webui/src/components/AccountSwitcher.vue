@@ -387,13 +387,13 @@ onBeforeUnmount(() => {
       @click="toggle"
     >
       <Wallet class="size-3.5" />
-      <span class="num max-w-[120px] truncate">{{ active || '账户' }}</span>
+      <span class="num hidden sm:inline max-w-[70px] truncate sm:max-w-[120px]">{{ active || '账户' }}</span>
       <ChevronDown class="size-3 opacity-60" :class="open ? 'rotate-180' : ''" />
     </button>
 
     <div
       v-if="open"
-      class="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-line bg-panel-solid p-2 shadow-lg"
+      class="absolute right-0 top-full z-30 mt-2 w-[calc(100vw-32px)] max-w-xs rounded-xl border border-line bg-panel-solid p-2 shadow-lg sm:w-80"
     >
       <div class="mb-1 flex items-center justify-between px-2 py-1">
         <span class="label-micro">账户账本</span>

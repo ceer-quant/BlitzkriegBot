@@ -146,21 +146,21 @@ onMounted(() => {
 <template>
   <template v-if="authed">
     <header
-      class="glass-header sticky top-3 z-20 mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5"
-      style="width: calc(100% - 32px)"
+      class="glass-header sticky top-3 z-20 mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-2.5 py-2 sm:gap-4 sm:px-4 sm:py-2.5"
+      style="width: calc(100% - 16px); max-width: 1280px;"
     >
       <!-- brand -->
-      <div class="flex shrink-0 items-center gap-2.5">
+      <div class="flex shrink-0 items-center gap-2 sm:gap-2.5">
         <img
           :src="brandMark"
           alt=""
           aria-hidden="true"
-          class="size-9 shrink-0 select-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)]"
+          class="size-8 shrink-0 select-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)] sm:size-9"
           draggable="false"
         >
         <div class="leading-tight">
-          <h1 class="text-[15px] font-bold tracking-[-0.01em]">闪电战机器人</h1>
-          <p class="label-micro" style="letter-spacing: 0.14em">BLITZKRIEG</p>
+          <h1 class="max-w-[90px] truncate text-[13px] font-bold tracking-[-0.01em] xs:max-w-none sm:text-[15px]">闪电战机器人</h1>
+          <p class="label-micro hidden xs:block" style="letter-spacing: 0.14em">BLITZKRIEG</p>
         </div>
       </div>
 
@@ -174,7 +174,7 @@ onMounted(() => {
       </nav>
 
       <!-- telemetry -->
-      <div class="ml-auto flex shrink-0 items-center gap-2">
+      <div class="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
         <span class="hidden items-center gap-2 rounded-full border border-line bg-panel-2 px-2.5 py-1 lg:flex">
           <span
             class="pulse-dot size-1.5 rounded-full"
@@ -211,12 +211,13 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- compact nav for narrow viewports -->
-    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-center px-4 md:hidden">
+    <!-- compact nav for narrow viewports with smooth horizontal scroll and touch padding -->
+    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-start overflow-x-auto px-2 no-scrollbar sm:mt-6 sm:justify-center sm:px-4 md:hidden">
       <SegmentedControl
         :model-value="activeGroup?.id ?? tab"
         :segments="topSegments"
         size="sm"
+        class="min-w-max"
         @update:model-value="onTopNav"
       />
     </nav>
