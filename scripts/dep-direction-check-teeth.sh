@@ -56,7 +56,7 @@ out=$(node "$GUARD" --fixture-edges '[
  {"from":"blitzkrieg-core","to":"fancy-plugin","kinds":["normal"],"optional":false}]' 2>&1); rc=$?
 check "arm 1 (core->plugin) exits 1" 1 "$rc"
 check "arm 1 names the exact edge" \
-  "yes" "$(printf '%s' "$out" | grep -q 'core -> concrete plugin is forbidden' && grep -q 'blitzkrieg-core -> fancy-plugin' <<<"$out" && echo yes || echo no)"
+  "yes" "$(printf '%s' "$out" | grep -q 'core -> concrete plugin is forbidden' && printf '%s' "$out" | grep -q 'blitzkrieg-core -> fancy-plugin' && echo yes || echo no)"
 
 # arm 2: core -> concrete UI on a NORMAL edge (the dev-seam rot direction).
 out=$(node "$GUARD" --fixture-edges '[
@@ -70,14 +70,14 @@ out=$(node "$GUARD" --fixture-edges '[
  {"from":"fancy-plugin","to":"blitzkrieg-core","kinds":["dev"],"optional":false}]' 2>&1); rc=$?
 check "arm 3 (plugin->core, even dev) exits 1" 1 "$rc"
 check "arm 3 names plugin -> core" \
-  "yes" "$(printf '%s' "$out" | grep -q 'plugin -> core is forbidden' && grep -q 'fancy-plugin -> blitzkrieg-core' <<<"$out" && echo yes || echo no)"
+  "yes" "$(printf '%s' "$out" | grep -q 'plugin -> core is forbidden' && printf '%s' "$out" | grep -q 'fancy-plugin -> blitzkrieg-core' && echo yes || echo no)"
 
 # arm 4: plugin -> plugin.
 out=$(node "$GUARD" --fixture-edges '[
  {"from":"polymarket-extension","to":"blitzkrieg-kalshi","kinds":["normal"],"optional":false}]' 2>&1); rc=$?
 check "arm 4 (plugin->plugin) exits 1" 1 "$rc"
 check "arm 4 names plugin -> plugin" \
-  "yes" "$(printf '%s' "$out" | grep -q 'plugin -> another concrete plugin is forbidden' && grep -q 'polymarket-extension -> blitzkrieg-kalshi' <<<"$out" && echo yes || echo no)"
+  "yes" "$(printf '%s' "$out" | grep -q 'plugin -> another concrete plugin is forbidden' && printf '%s' "$out" | grep -q 'polymarket-extension -> blitzkrieg-kalshi' && echo yes || echo no)"
 
 # arm 5: the three-crate CYCLE — exact offending path.
 out=$(node "$GUARD" --fixture-edges '[
@@ -113,7 +113,7 @@ printf '#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct BookUpdate {
 out=$(node "$GUARD" --fixture-dto "$tmp/contract/src" "plugin:$tmp/plugin/src:plugin" 2>&1); rc=$?
 check "arm 6 (DTO redefined outside bk_contract) exits 1" 1 "$rc"
 check "arm 6 names the wire type and the offending file" \
-  "yes" "$(printf '%s' "$out" | grep -q "wire DTO 'BookUpdate' redefined outside bk_contract" && grep -q 'plugin/src/host.rs' <<<"$out" && echo yes || echo no)"
+  "yes" "$(printf '%s' "$out" | grep -q "wire DTO 'BookUpdate' redefined outside bk_contract" && printf '%s' "$out" | grep -q 'plugin/src/host.rs' && echo yes || echo no)"
 
 # arm 7: the SAME name in an UNREACHED file must NOT flag — the module-tree
 # walk only collects what Rust actually compiles.
