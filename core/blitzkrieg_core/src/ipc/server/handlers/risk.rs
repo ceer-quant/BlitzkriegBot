@@ -200,6 +200,10 @@ pub(crate) async fn handle_risk(
                         PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                         _ => "uid:unknown".to_string(),
                     };
+                    // Hoisted above the `match` for the same reason as
+                    // `RISK_SET_EXIT`: no `core.lock()` may run inside an arm
+                    // whose scrutinee still holds the guard.
+                    let env_file = core.lock().await.config().env_file_path.clone();
                     match core
                         .lock()
                         .await
@@ -210,7 +214,6 @@ pub(crate) async fn handle_risk(
                             // restart re-arms the same values. The in-memory
                             // apply already succeeded; a persistence failure is
                             // logged but does not fail the RPC.
-                            let env_file = core.lock().await.config().env_file_path.clone();
                             let env_path = env_file.as_deref().map(std::path::Path::new);
                             let changes: Vec<(&'static str, String)> = update
                                 .applied
@@ -245,10 +248,14 @@ pub(crate) async fn handle_risk(
                     PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                     _ => "uid:unknown".to_string(),
                 };
+                // Read the env path BEFORE taking the lock for the apply:
+                // a `core.lock().await` inside the match arm would re-lock the
+                // same mutex while the scrutinee's guard is still alive (the
+                // guard lives to the end of the `match`), deadlocking the RPC.
+                let env_file = core.lock().await.config().env_file_path.clone();
                 match core.lock().await.apply_exit_set(&p, &actor, now_ms()) {
                     Ok(update) => {
                         // #966: persist the exit-discipline changes to `.env`.
-                        let env_file = core.lock().await.config().env_file_path.clone();
                         let env_path = env_file.as_deref().map(std::path::Path::new);
                         let changes: Vec<(&'static str, String)> = update
                             .applied
