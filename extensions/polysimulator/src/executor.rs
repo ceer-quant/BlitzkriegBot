@@ -405,6 +405,13 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
     let mut placements: std::collections::HashMap<String, Placement> =
         std::collections::HashMap::new();
     const ORPHAN_GRACE_MS: i64 = 30_000;
+    // Token id → the venue's own outcome word for it ("Up"/"Down"), watched
+    // from every trade row the reconciles sweep sees. This is the POLARITY
+    // side of the single-market verdict fallback: that endpoint names the
+    // winning outcome word but not the token ids, so the trade row's outcome
+    // label is the only honest (venue-sourced) mapping we have.
+    let mut outcome_polarity: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Seed the ledger from the venue so the reserve gate reflects real
     // money. #877: the seed is the venue's account EQUITY (cash + open
@@ -519,6 +526,7 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
             &client,
             &mut seen_trades,
             &mut placements,
+            &mut outcome_polarity,
             ORPHAN_GRACE_MS,
         )
         .await
@@ -554,12 +562,40 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         match client.updown_markets(None, None).await {
             Ok(rows) => {
                 for query in &queries {
-                    if let Some(resolution) = resolution_for(query, &rows) {
-                        eprintln!(
-                            "polysimulator-extension: settlement {} payouts={:?}",
-                            resolution.condition_id, resolution.payouts
-                        );
-                        host.on_market_resolution(resolution).await;
+                    match resolution_for(query, &rows) {
+                        Some(resolution) => {
+                            eprintln!(
+                                "polysimulator-extension: settlement {} payouts={:?}",
+                                resolution.condition_id, resolution.payouts
+                            );
+                            host.on_market_resolution(resolution).await;
+                        }
+                        // The list carries only rounds ending in the future;
+                        // an already-resolved condition rotates out within an
+                        // hour, so every query the list does not name falls
+                        // to the single-market verdict endpoint — the same
+                        // discipline the list path follows: unreadable or
+                        // not-yet-terminal answers NOTHING and never fabricates.
+                        None => match resolution_by_single_market(
+                            query,
+                            client.as_ref(),
+                            &outcome_polarity,
+                        )
+                        .await
+                        {
+                            Ok(Some(resolution)) => {
+                                eprintln!(
+                                    "polysimulator-extension: settlement (single-market verdict) {} payouts={:?}",
+                                    resolution.condition_id, resolution.payouts
+                                );
+                                host.on_market_resolution(resolution).await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => eprintln!(
+                                "polysimulator-extension: settlement single-market query {} failed: {e}",
+                                query.condition_id
+                            ),
+                        },
                     }
                 }
             }
@@ -741,6 +777,63 @@ fn resolution_for(query: &SettlementQuery, rows: &[UpDownRow]) -> Option<MarketR
     })
 }
 
+/// The single-market verdict path (verified live 2026-11-06): the updown list
+/// only carries rounds ending in the future, so an already-resolved condition
+/// the list does not name is ruled by `GET /v1/markets/{cid}` — it keeps
+/// `resolved_outcome` ("Up"/"Down") after close. The endpoint does NOT carry
+/// token ids, so the payout pair needs the polarity side: the outcome word a
+/// token was sold under, watched from the trade rows (`asset_id` →
+/// `outcome`). A market without a polarity word for the queried token answers
+/// NOTHING — no payout is ever fabricated from a word the venue did source.
+///
+/// The kernel reads `payout_per_share(held_token)`, so the pair the list path
+/// returns is not required: one entry for the held token carries the full
+/// redemption value.
+async fn resolution_by_single_market(
+    query: &SettlementQuery,
+    client: &PolySimRest,
+    polarity: &std::collections::HashMap<String, String>,
+) -> Result<Option<MarketResolution>, crate::PolySimError> {
+    let market = client.single_market(&query.condition_id).await?;
+    if !market.closed.unwrap_or(false) {
+        return Ok(None); // still running: the core re-queries
+    }
+    let winner_word = market
+        .resolved_outcome
+        .as_deref()
+        .map(str::to_ascii_uppercase);
+    let Some(winner_word) = winner_word else {
+        return Ok(None); // closed but not yet announced
+    };
+    // The winner must be one of the market's own outcomes (a words mismatch
+    // between endpoints would price an unrelated leg).
+    if market.outcomes.as_ref().is_some_and(|outcomes| {
+        !outcomes
+            .iter()
+            .any(|o| o.to_ascii_uppercase() == winner_word)
+    }) {
+        return Ok(None);
+    }
+    for token in &query.token_ids {
+        let Some(side_word) = polarity.get(token) else {
+            continue; // unknown polarity: keep the other tokens honest
+        };
+        let payout = if side_word.to_ascii_uppercase() == *winner_word {
+            Decimal::ONE
+        } else {
+            Decimal::ZERO
+        };
+        return Ok(Some(MarketResolution {
+            condition_id: query.condition_id.clone(),
+            resolved: true,
+            payouts: vec![(token.clone(), payout)],
+            neg_risk: false,
+            source: "polysimulator-single-market".to_string(),
+        }));
+    }
+    Ok(None) // no token in the query has a polarity word: never fabricate
+}
+
 /// One reconciliation pass: open orders + new trades + orphan cleanup + free
 /// balance. Any transport failure aborts the pass so the failure counter sees
 /// a coherent "sweep did not complete", not a half-swept ledger.
@@ -756,6 +849,7 @@ async fn sweep(
     client: &PolySimRest,
     seen_trades: &mut std::collections::HashSet<String>,
     placements: &mut std::collections::HashMap<String, Placement>,
+    outcome_polarity: &mut std::collections::HashMap<String, String>,
     orphan_grace_ms: i64,
 ) -> CoreResult<()> {
     let open = client
@@ -806,6 +900,17 @@ async fn sweep(
     for row in &trades {
         if seen_trades.contains(&row.id) {
             continue;
+        }
+        // Polarity watch (the single-market verdict's counterpart): the trade
+        // row's own `outcome` label names which side of the market this
+        // TOKEN is. Every readable row feeds the map, ours or not — the
+        // verdict endpoint will pair against whichever token the settlement
+        // query carries.
+        match (&row.asset_id, &row.outcome) {
+            (Some(token), Some(word)) if !token.is_empty() && !word.is_empty() => {
+                outcome_polarity.insert(token.clone(), word.clone());
+            }
+            _ => {}
         }
         if let Some((vid, maker)) = our_leg(row, &known) {
             if placements
@@ -1191,6 +1296,90 @@ mod tests {
         assert!(
             resolution_for(&query("0xunknown"), &rows).is_none(),
             "unknown condition answers nothing"
+        );
+    }
+
+    // ── single-market verdict fallback (verified live 2026-11-06) ────────
+    // The updown list rotates resolved rows out within an hour; the verdict
+    // end `GET /v1/markets/{cid}` keeps them. The endpoint names the winning
+    // WORD but not the token ids — the polarity comes from the trade rows'
+    // own outcome labels.
+
+    /// The wire shape the single-market endpoint returns (keys verified live
+    /// 2026-11-06; token-id fields are null there).
+    fn single_market_json(cid: &str, closed: bool, winner: Option<&str>) -> String {
+        let winner_json = winner
+            .map(|w| format!("\"{w}\""))
+            .unwrap_or_else(|| "null".into());
+        format!(
+            r#"{{"condition_id":"{cid}","slug":"btc-updown-15m-1793886300","question":"X","outcomes":["Up","Down"],"active":false,"closed":{closed},"clob_token_ids":null,"tokens":null,"end_date":"2026-11-05T14:00:00+00:00","resolved_outcome":{winner_json},"archived":false}}"#
+        )
+    }
+
+    fn verdict_verdict_is(cid: &str, json: &str) -> crate::types::SingleMarketVerdict {
+        serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("single-market fixture for {cid} must parse: {e}"))
+    }
+
+    // Polarity map builder: same shape the sweep writes from trade rows.
+    fn polarity(entry: (&str, &str)) -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(entry.0.to_string(), entry.1.to_string());
+        m
+    }
+
+    // The full mapping is end-to-end over the networkfaced client, pinned by
+    // decoding: verdict parsing + the payout mapping decision that pairs the
+    // winning word to the held token's polarity. Mocking the transport adds
+    // nothing — the wire contract lives in the two serde types.
+    #[test]
+    fn single_market_verdict_decodes_and_maps_polarity() {
+        // Closed market, winner announced: parses with the word intact.
+        let v = verdict_verdict_is("0xres", &single_market_json("0xres", true, Some("Down")));
+        assert_eq!(v.closed, Some(true));
+        assert_eq!(v.resolved_outcome.as_deref(), Some("Down"));
+        assert_eq!(v.outcomes, Some(vec!["Up".to_string(), "Down".to_string()]));
+
+        // Not-closed market: no verdict word.
+        let v = verdict_verdict_is("0xlive", &single_market_json("0xlive", false, None));
+        assert_eq!(v.resolved_outcome, None);
+    }
+
+    #[test]
+    fn polarity_map_pairs_held_token_with_the_winning_word() {
+        // The decision table the fallback pricing walks: held token's
+        // polarity word == the winner word → 1, otherwise 0. The mapping
+        // pins the same expression `resolution_by_single_market` prices with.
+        let held = "26626601389303902895425220343255367316695970074145368347301309748071599473770";
+        let winner = "Up".to_ascii_uppercase();
+
+        let payout_for =
+            |polarity: &std::collections::HashMap<String, String>| match polarity.get(held) {
+                Some(w) if w.to_ascii_uppercase() == winner => Decimal::ONE,
+                Some(_) => Decimal::ZERO,
+                // Absent polarity answers NOTHING — never fabricated.
+                None => Decimal::ZERO,
+            };
+
+        // Bought the WINNING side (trade row labelled "Up"): pays 1.
+        assert_eq!(
+            payout_for(&polarity((held, "Up"))),
+            Decimal::ONE,
+            "winning leg pays 1"
+        );
+        // Bought the LOSING side (trade row labelled "Down"): pays 0 — and
+        // the loser branch must be distinguishable from "nothing priced".
+        assert_eq!(
+            payout_for(&polarity((held, "Down"))),
+            Decimal::ZERO,
+            "losing leg pays 0"
+        );
+
+        // No polarity word for the held token: nothing is priced.
+        let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        assert!(
+            !empty.contains_key(held),
+            "absent polarity must answer nothing, never fabricate"
         );
     }
 
