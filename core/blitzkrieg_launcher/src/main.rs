@@ -264,13 +264,13 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.ntp_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
-    // E26 (§4): the systemic risk limits in force, resolved from the config
-    // file's [risk] section — this Epic's only wired input — and echoed
-    // unconditionally like every other budget above: the factory posture
-    // (all nine off, §4.1) must be visible in the boot log, not greppable.
-    // The set is then handed to the core through `RiskConfig`, the one
-    // hand-off `RiskGate::new` already makes.
-    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
+    // E26 (§4) / issue #967 (Phase-5): the systemic risk limits are resolved
+    // from the `.env` face ONLY (`BK_RISK_*`, folded into the process env by
+    // the launcher). The TOML `[risk]` section is retired as an effective
+    // source; a file that still carries one is inert. Echoed unconditionally:
+    // the factory posture (all nine off, §4.1) must be visible in the boot log.
+    let systemic =
+        blitzkrieg_core::risk::limits::SystemicRiskLimits::from_env();
     // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
     // armed the budget. The resolver already picked CLI > env > [risk] > the
     // compiled default for the daily-loss breaker — the matrix must agree
@@ -288,8 +288,10 @@ async fn main() -> anyhow::Result<()> {
         };
         s
     };
-    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> =
-        file.risk.ladder.iter().map(|row| row.to_step()).collect();
+    // Issue #967 (Phase-5): the `[[risk.ladder]]` opt-in lived in TOML. The
+    // env face has no ladder array (by design — an array cannot be expressed
+    // as a scalar), so an explicit ladder is no longer sourced from the file.
+    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> = Vec::new();
     for line in systemic.report_lines() {
         eprintln!("blitzkrieg-core: {line}");
     }

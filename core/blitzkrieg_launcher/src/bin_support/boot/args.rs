@@ -991,9 +991,11 @@ pub(crate) fn parse_args(
     let daily_loss_usd = pick(
         max_daily_loss,
         env.num::<Decimal>("BK_MAX_DAILY_LOSS"),
-        // E26 (§4.2): the [risk] drawdown key IS this budget's TOML face —
-        // one budget, resolved through the one chain, never a second counter.
-        file.risk.max_daily_drawdown_usd,
+        // Issue #967 (Phase-5): `[risk].max_daily_drawdown_usd` is retired with
+        // the rest of the TOML risk layer — this budget's durable face is now
+        // `BK_MAX_DAILY_LOSS` (or `BK_RISK_MAX_DAILY_DRAWDOWN_USD` in the
+        // systemic readout), never a file.
+        None,
         daily_loss_defaults.max_daily_loss_usd,
     );
     let daily_loss_pct = pick(
@@ -1194,19 +1196,29 @@ pub(crate) fn parse_args(
         )
     }];
 
-    // ── E17/#264: the engine-level exit ladder ──────────────────────────────
-    // Same chain as every other file-settable knob (CLI > TOML > compiled
-    // default). No env layer: `--spread-arb-*`, the sibling this pipeline
-    // mirrors, has none either, and the durable layer for a ladder is the file.
+    // ── E17/#264 + issue #967 (Phase-5): the engine-level exit ladder ───────
+    // Effective chain: CLI > env(.env) > compiled default. The TOML `[exit]`
+    // section is retired as an effective source, so the toml slot of `pick`
+    // is always `None` — a file that still carries `[exit]` is inert.
     // The defaults are read off `ExitConfig::default()` rather than re-typed, so
     // "unchanged" is a property of the code, not of a comment.
     let exit_defaults = blitzkrieg_core::exit_policy::ExitConfig::default();
+    let env_dec = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<Decimal>().ok())
+    };
+    let env_int = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    };
     let exit_knob = |report: &mut Vec<String>,
                      label: &str,
                      cli: Option<Decimal>,
-                     toml: Option<Decimal>,
+                     env: Option<Decimal>,
                      default: Decimal| {
-        let s = pick(cli, None::<Decimal>, toml, default);
+        let s = pick(cli, env, None::<Decimal>, default);
         if s.is_explicit() {
             report.push(format!("{label}={} ({})", s.value, s.source.as_str()));
         }
@@ -1216,37 +1228,37 @@ pub(crate) fn parse_args(
         &mut report,
         "exit.take_profit_pct",
         exit_take_profit_pct,
-        file.exit.take_profit_pct,
+        env_dec("BK_EXIT_TAKE_PROFIT_PCT"),
         exit_defaults.take_profit_pct,
     );
     let exit_stop_loss_pct = exit_knob(
         &mut report,
         "exit.stop_loss_pct",
         exit_stop_loss_pct,
-        file.exit.stop_loss_pct,
+        env_dec("BK_EXIT_STOP_LOSS_PCT"),
         exit_defaults.stop_loss_pct,
     );
     let exit_trailing_min_high_pct = exit_knob(
         &mut report,
         "exit.trailing_min_high_pct",
         exit_trailing_min_high_pct,
-        file.exit.trailing_min_high_pct,
+        env_dec("BK_EXIT_TRAILING_MIN_HIGH_PCT"),
         exit_defaults.trailing_min_high_pct,
     );
     let exit_min_trail_pct = exit_knob(
         &mut report,
         "exit.min_trail_pct",
         exit_min_trail_pct,
-        file.exit.min_trail_pct,
+        env_dec("BK_EXIT_MIN_TRAIL_PCT"),
         exit_defaults.min_trail_pct,
     );
     // force_exit_sec is an INT knob (seconds), so the Decimal-typed `exit_knob`
-    // closure above does not fit; the chain is the same CLI > TOML > default.
+    // closure above does not fit; the chain is the same CLI > env > default.
     let exit_force_sec = {
         let s = pick(
             exit_force_sec,
+            env_int("BK_EXIT_FORCE_EXIT_SEC"),
             None::<i64>,
-            file.exit.force_exit_sec,
             exit_defaults.force_exit_sec,
         );
         if s.is_explicit() {

@@ -157,15 +157,20 @@ BLITZKRIEG_*    面板 / 网关 / 更新检查 / 启动脚本进程设置
 - **PR-1（#588，已完成）**：出厂四键退役，编译缺省同值零漂移；`default.toml`
   的 `[engine]` 清空。
 - **PR-2（本 PR，第一阶段）**：`.env.example` 零漂移对齐 + 死键清单 + 本判决文档。
-  **读序维持现状（env 优先、旧文件回退）**：CLI > env > toml > 编译缺省。这是
-  兼容期读序也是终态读序——toml 层保留为「写回型持久态 + 显式 act 面」，与
-  env 不构成双可信源（toml 里不再有 env 能覆盖的出厂引擎键）。
+  〔2026-11-06 运营者裁决推翻「维持现状」〕读序终态改为 **CLI > env > 编译缺省**：
+  risk/exit 的 toml 层已从生效链删除（#967 stage 1，`BK_RISK_*` / `BK_EXIT_*` 为唯一
+  有效源，`[risk]` / `[exit]` 段落写进文件也不生效）；其余兼容回退读点（
+  shadow_evolution.toml、update.toml、accounts.toml 回退）在 stage 2 清零。
 - **PR-3（生产重写，主窗口执行）**：按 §4 清单重写 live `.env`（删 4 死键），
   随下一次生产升级落地；升级前 `grep -o '^[A-Z_]*=' .env` 留档键名清单。
 - **PR-4（后续，可选）**：评估删除 `default.toml` 文档壳（内核已容忍缺失）；
   评估 `bug_report.yml` 等文档面残留。**不删除**：accounts.toml、
   shadow_evolution.toml、update.toml、execution_policy.toml、manifest.json、
   data/runtime/config.json（判决见 §1）。
+- **PR-5（#967，进行中）**：TOML 退场。stage 1 已落地 env 面（`BK_RISK_*` 九键 +
+  `BK_EXIT_*` 五键）与启动回显（`source ∈ {flag, env, default}`，出现 `toml`
+  即回归失败）；stage 2 删除剩余 legacy 读点，`execution_policy.toml` 的结构化
+  合同迁为 env/JSON 后再评估退役。
 
 ## 9. 「toml/json 可以删了吗」的直接回答
 

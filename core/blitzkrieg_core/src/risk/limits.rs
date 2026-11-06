@@ -184,12 +184,46 @@ pub struct SystemicRiskLimits {
 }
 
 impl SystemicRiskLimits {
+    /// Phase-5 (issue #967): the env face is the ONLY effective source. `.env`
+    /// (folded into the process environment by the launcher) supplies the nine
+    /// `BK_RISK_*` keys; a missing key stays the factory `Bound::off()`. No
+    /// TOML layer is consulted — a `[risk]` section in a config file is inert.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<Decimal>().ok())
+        })
+    }
+
+    /// The pure lookup form of [`Self::from_env`] (tests drive it without
+    /// touching the process environment).
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<Decimal>) -> Self {
+        let one = |key: &str| {
+            lookup(key)
+                .map(|v| Bound::new(v, LimitSource::Env))
+                .unwrap_or_default()
+        };
+        Self {
+            account: AccountRiskLimits {
+                max_single_loss_usd: one("BK_RISK_MAX_SINGLE_LOSS_USD"),
+                max_daily_drawdown_usd: one("BK_RISK_MAX_DAILY_DRAWDOWN_USD"),
+                max_position_size: one("BK_RISK_MAX_POSITION_SIZE"),
+                max_consecutive_losses: one("BK_RISK_MAX_CONSECUTIVE_LOSSES"),
+                cooldown_minutes: one("BK_RISK_COOLDOWN_MINUTES"),
+            },
+            global: GlobalRiskLimits {
+                max_total_position: one("BK_RISK_MAX_TOTAL_POSITION"),
+                max_total_exposure_usd: one("BK_RISK_MAX_TOTAL_EXPOSURE_USD"),
+                max_correlation_usd: one("BK_RISK_MAX_CORRELATION_USD"),
+                global_kill_switch_loss_usd: one("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD"),
+            },
+        }
+    }
+
     /// Resolve the config-file face (all-optional `[risk]` keys) into the
-    /// effective set. This Epic's only wired input is the TOML layer, so a
-    /// present key is a `toml`-sourced `Bound` and an absent one stays the
-    /// factory `Bound::off()`; `env`/`flag` remain members of the source
-    /// vocabulary (§4.4) for a later wiring, not dead variants — the wire
-    /// contract names all four.
+    /// effective set. Kept for the parser's own tests only: the boot path no
+    /// longer calls it (issue #967 — TOML retired as an effective source).
     pub fn from_file(file: &crate::config::RiskFile) -> Self {
         let one = |v: Option<Decimal>| {
             v.map(|v| Bound::new(v, LimitSource::Toml))
@@ -534,6 +568,46 @@ mod tests {
         assert!(!Bound::new(Decimal::ZERO, LimitSource::Toml).is_enabled());
         assert!(Bound::new(dec!(0.01), LimitSource::Toml).is_enabled());
         assert!(Bound::new(dec!(35), LimitSource::Flag).is_enabled());
+    }
+
+    /// Issue #967 (Phase-5): the env face is the only effective source; every
+    /// armed bound must name `env` and a missing key must stay at the factory
+    /// posture (no TOML fallback anywhere in the chain).
+    #[test]
+    fn env_lookup_arms_all_nine_and_names_env() {
+        let keys = std::collections::HashMap::from([
+            ("BK_RISK_MAX_SINGLE_LOSS_USD", dec!(0.5)),
+            ("BK_RISK_MAX_DAILY_DRAWDOWN_USD", dec!(5)),
+            ("BK_RISK_MAX_POSITION_SIZE", dec!(5)),
+            ("BK_RISK_MAX_CONSECUTIVE_LOSSES", dec!(4)),
+            ("BK_RISK_COOLDOWN_MINUTES", dec!(30)),
+            ("BK_RISK_MAX_TOTAL_POSITION", dec!(6)),
+            ("BK_RISK_MAX_TOTAL_EXPOSURE_USD", dec!(20)),
+            ("BK_RISK_MAX_CORRELATION_USD", dec!(12)),
+            ("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD", dec!(8)),
+        ]);
+        let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).copied());
+        for (name, b) in [
+            ("max_single_loss_usd", &s.account.max_single_loss_usd),
+            ("max_daily_drawdown_usd", &s.account.max_daily_drawdown_usd),
+            ("max_position_size", &s.account.max_position_size),
+            ("max_consecutive_losses", &s.account.max_consecutive_losses),
+            ("cooldown_minutes", &s.account.cooldown_minutes),
+            ("max_total_position", &s.global.max_total_position),
+            ("max_total_exposure_usd", &s.global.max_total_exposure_usd),
+            ("max_correlation_usd", &s.global.max_correlation_usd),
+            (
+                "global_kill_switch_loss_usd",
+                &s.global.global_kill_switch_loss_usd,
+            ),
+        ] {
+            assert!(b.is_enabled(), "{name} must be armed by .env");
+            assert_eq!(b.source(), LimitSource::Env, "{name} provenance");
+        }
+        // No key → factory posture, never `toml`.
+        let empty = SystemicRiskLimits::from_lookup(|_| None);
+        assert!(!empty.account.max_position_size.is_enabled());
+        assert_eq!(empty.account.max_position_size.source(), LimitSource::Default);
     }
 
     #[test]
