@@ -159,7 +159,7 @@ mod bin_tests;
 // modules (`crate::position_db` / `crate::strategy_state`) so the bin and
 // any embedded reader share ONE name song.
 use bin_support::boot::{
-    ConfigChoice, EnvVars, builtin_registry, config_choice, daily_loss_path_for,
+    EnvVars, builtin_registry, config_choice, daily_loss_path_for,
     default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
     parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
     round_duration_source_from, run_net_check,
@@ -214,29 +214,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let env = EnvVars::from_process();
-    let choice = config_choice(&argv, &env);
-    let file = match &choice {
-        ConfigChoice::Off => blitzkrieg_core::config::FileConfig::default(),
-        ConfigChoice::Path(p) => {
-            blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(p)))
-        }
-    };
-    for w in &file.warnings {
-        eprintln!("blitzkrieg-core: config warning: {w}");
-    }
-    // An unknown key is the exact failure mode this layer exists to prevent
-    // (KI-11), so it is loud — but never fatal.
-    for k in &file.unknown_keys {
-        eprintln!("blitzkrieg-core: config key not understood (ignored): {k}");
-    }
-
-    let args = parse_args(&file, &argv, &env);
+    let _choice = config_choice(&argv, &env);
+    // NO TOML: the config file layer is deleted (issue 967). `parse_args`
+    // resolves everything through CLI > env > compiled default now.
+    let args = parse_args(&argv, &env);
 
     // Say where the non-default settings came from. A declarative config layer is
     // only auditable if the effective value and its origin are both observable.
-    if let Some(p) = &file.path {
-        eprintln!("blitzkrieg-core: config file {}", p.display());
-    }
     for line in &args.config_report {
         eprintln!("blitzkrieg-core: config {line}");
     }
@@ -264,35 +248,46 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.ntp_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
-    // E26 (§4): the systemic risk limits in force, resolved from the config
-    // file's [risk] section — this Epic's only wired input — and echoed
-    // unconditionally like every other budget above: the factory posture
-    // (all nine off, §4.1) must be visible in the boot log, not greppable.
-    // The set is then handed to the core through `RiskConfig`, the one
-    // hand-off `RiskGate::new` already makes.
-    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
-    // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
-    // armed the budget. The resolver already picked CLI > env > [risk] > the
-    // compiled default for the daily-loss breaker — the matrix must agree
-    // with what it prints, not silently claim `default` (or `toml`) for a
-    // number a flag overrode.
-    let systemic = {
-        let mut s = systemic;
-        s.account.max_daily_drawdown_usd = if args.daily_loss_usd > Decimal::ZERO {
-            blitzkrieg_core::risk::limits::Bound::new(
-                args.daily_loss_usd,
-                args.daily_loss_source.into(),
-            )
+    // E26 (§4): the systemic risk limits in force, resolved CLI > env >
+    // compiled default (issue #967: no TOML). All nine come from BK_RISK_*
+    // env vars; zero = off (§4.1 factory posture). The set is handed to the
+    // core through `RiskConfig`.
+    use blitzkrieg_core::risk::limits::Bound;
+    let risk_bound = |value: Decimal| {
+        if value > Decimal::ZERO {
+            Bound::new(value, blitzkrieg_core::risk::limits::LimitSource::Env)
         } else {
-            blitzkrieg_core::risk::limits::Bound::off()
-        };
-        s
+            Bound::off()
+        }
     };
-    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> =
-        file.risk.ladder.iter().map(|row| row.to_step()).collect();
+    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits {
+        account: blitzkrieg_core::risk::limits::AccountRiskLimits {
+            max_single_loss_usd: risk_bound(args.risk_max_single_loss_usd),
+            // The daily-loss breaker's budget IS the drawdown bound (§4.2):
+            // one budget, one chain — the resolved daily_loss_usd wins when
+            // armed, otherwise the BK_RISK_MAX_DAILY_DRAWDOWN_USD value stands.
+            max_daily_drawdown_usd: if args.daily_loss_usd > Decimal::ZERO {
+                Bound::new(args.daily_loss_usd, args.daily_loss_source.into())
+            } else {
+                risk_bound(args.risk_max_daily_drawdown_usd)
+            },
+            max_position_size: risk_bound(args.risk_max_position_size),
+            max_consecutive_losses: risk_bound(args.risk_max_consecutive_losses),
+            cooldown_minutes: risk_bound(args.risk_cooldown_minutes),
+        },
+        global: blitzkrieg_core::risk::limits::GlobalRiskLimits {
+            max_total_position: risk_bound(args.risk_max_total_position),
+            max_total_exposure_usd: risk_bound(args.risk_max_total_exposure_usd),
+            max_correlation_usd: risk_bound(args.risk_max_correlation_usd),
+            global_kill_switch_loss_usd: risk_bound(args.risk_global_kill_switch_loss_usd),
+        },
+    };
     for line in systemic.report_lines() {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // No TOML: no [[risk.ladder]] file rows exist any more. The exit sweep is
+    // then byte-identical to its historical behavior.
+    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> = Vec::new();
     // #269: same reason again — "is the evolution evaluator running?" is the
     // question an incident responder asks first, and it used to be answerable
     // only from the IPC status, never from the boot log.
@@ -696,6 +691,8 @@ async fn main() -> anyhow::Result<()> {
                 trailing_min_high_pct: args.exit_trailing_min_high_pct,
                 min_trail_pct: args.exit_min_trail_pct,
                 force_exit_sec: args.exit_force_sec,
+                trailing_enabled: args.exit_trailing_enabled,
+                strategy_exit_maker_first: args.exit_strategy_maker_first,
                 ..Default::default()
             },
             // Issue #464: the operator's `[[risk.ladder]]` also drives the

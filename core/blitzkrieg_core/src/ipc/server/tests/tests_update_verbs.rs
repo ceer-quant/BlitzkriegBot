@@ -65,7 +65,7 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
             max_order_notional: dec!(3),
             systemic: SystemicRiskLimits {
                 account: AccountRiskLimits {
-                    max_single_loss_usd: Bound::new(dec!(35), LimitSource::Toml),
+                    max_single_loss_usd: Bound::new(dec!(35), LimitSource::Env),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -90,7 +90,7 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
     .await;
     let single = &reply["result"]["account"]["limits"]["maxSingleLossUsd"];
     assert_eq!(single["value"], "35");
-    assert_eq!(single["source"], "toml");
+    assert_eq!(single["source"], "env");
     assert_eq!(
         reply["result"]["global"]["limits"]["maxTotalPosition"]["value"],
         "0"

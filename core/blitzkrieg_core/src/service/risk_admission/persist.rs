@@ -182,7 +182,7 @@ fn parse_source_cell(
 ) -> Option<crate::risk::limits::LimitSource> {
     match raw {
         "default" => Some(crate::risk::limits::LimitSource::Default),
-        "toml" => Some(crate::risk::limits::LimitSource::Toml),
+        "toml" => Some(crate::risk::limits::LimitSource::Env),
         "env" => Some(crate::risk::limits::LimitSource::Env),
         "flag" => Some(crate::risk::limits::LimitSource::Flag),
         other => {

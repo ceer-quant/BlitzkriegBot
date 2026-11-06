@@ -70,6 +70,18 @@ pub(crate) struct Args {
     /// bound on `risk.limits` must name the TRUE source (a `--max-daily-loss`
     /// run reads `flag` there, not `default`), and only the resolver knows.
     pub(crate) daily_loss_source: blitzkrieg_core::config::Source,
+    /// E26 (§4.2) / issue #967: the nine systemic risk limits, resolved CLI >
+    /// env > compiled default (Decimal::ZERO = off factory posture). No TOML
+    /// layer. All sourced from `BK_RISK_*` env vars or the compiled default.
+    pub(crate) risk_max_single_loss_usd: Decimal,
+    pub(crate) risk_max_daily_drawdown_usd: Decimal,
+    pub(crate) risk_max_position_size: Decimal,
+    pub(crate) risk_max_consecutive_losses: Decimal,
+    pub(crate) risk_cooldown_minutes: Decimal,
+    pub(crate) risk_max_total_position: Decimal,
+    pub(crate) risk_max_total_exposure_usd: Decimal,
+    pub(crate) risk_max_correlation_usd: Decimal,
+    pub(crate) risk_global_kill_switch_loss_usd: Decimal,
     /// The startup echo lines for the daily-loss budget, printed unconditionally
     /// (kept out of `config_report`, which lists only settings moved away from
     /// their compiled default).
@@ -99,6 +111,10 @@ pub(crate) struct Args {
     /// (calibration: the deadline amputated rounds that went on to pay); a
     /// non-zero value re-arms it.
     pub(crate) exit_force_sec: i64,
+    /// `BK_EXIT_TRAILING_ENABLED`: env-only switch (no CLI flag today).
+    pub(crate) exit_trailing_enabled: bool,
+    /// `BK_EXIT_STRATEGY_MAKER_FIRST`: env-only switch (no CLI flag today).
+    pub(crate) exit_strategy_maker_first: bool,
     pub(crate) feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,
@@ -560,10 +576,10 @@ pub(crate) fn prescan_config(argv: &[String]) -> Option<ConfigChoice> {
     None
 }
 
-/// Resolve the config file: `--config` wins over `BK_CONFIG`, which wins over the
-/// repo's shipped default. `BK_CONFIG=none` (like `--no-config`) turns the file
-/// off entirely, which is what a harness wants when it must not inherit an
-/// operator's edits.
+/// Resolve the config file: `--config` wins over `BK_CONFIG`, which wins over
+/// nothing — there is no shipped default TOML any more (issue 967: NO TOML as
+/// live source or fallback layer). `BK_CONFIG=none` (like `--no-config`) turns
+/// the file off entirely.
 pub(crate) fn config_choice(argv: &[String], env: &EnvVars) -> ConfigChoice {
     if let Some(c) = prescan_config(argv) {
         return c;
@@ -571,7 +587,7 @@ pub(crate) fn config_choice(argv: &[String], env: &EnvVars) -> ConfigChoice {
     match env.text("BK_CONFIG") {
         Some(v) if v.trim() == "none" => ConfigChoice::Off,
         Some(v) if !v.trim().is_empty() => ConfigChoice::Path(v.trim().to_string()),
-        _ => ConfigChoice::Path(blitzkrieg_core::config::DEFAULT_CONFIG_PATH.to_string()),
+        _ => ConfigChoice::Off,
     }
 }
 
