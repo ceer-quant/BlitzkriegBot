@@ -9,17 +9,17 @@
  *
  * WHAT IT ASSERTS (against real dry cores, over the wire):
  *
- *   1. FACTORY POSTURE — a `--no-config` core: `risk.limits` answers all
- *      nine limits as {"value":"0","source":"default"} with the exit triple
+ *   1. FACTORY POSTURE — an unconfigured core (no `BK_RISK_*` set): `risk.limits`
+ *      answers all nine limits as {"value":"0","source":"default"} with the exit triple
  *      at the calibrated factory resolution (12 / 100 / 0 — the guillotine
  *      is OFF since @almach, 561c1f5e); the boot log carries the
  *      "at factory (all nine limits off)" line; and the probe strategy's
  *      approved audit record shows four gates with NO systemic trace —
  *      the pipeline the shipped kernel runs, byte for byte.
- *   2. ARMED POSTURE + PROVENANCE — a core configured through `[risk]`:
- *      the readout shows the configured bounds as STRINGS sourced "toml",
- *      the untouched siblings still 0/"default", and the exit triple read
- *      from `[exit]` — §4.4's rule that a number without its provenance is
+ *   2. ARMED POSTURE + PROVENANCE — a core configured through the `BK_RISK_*`
+ *      env keys: the readout shows the configured bounds as STRINGS sourced
+ *      "env", the untouched siblings still 0/"default", and the exit triple read
+ *      from `BK_EXIT_*` — §4.4's rule that a number without its provenance is
  *      not an answer an operator can act on.
  *   3. THE SHRINK IS REAL — with `max_single_loss_usd = 0.20` and a 20%
  *      stop, the engine's 10-share suggestion comes back MODIFIED at
@@ -55,7 +55,7 @@ import { createChecks } from './lib/gate-harness.mjs';
 import { waitForSocket, sleep } from './lib/wait.mjs';
 import { join, resolve, dirname } from 'path';
 import { tmpdir } from 'os';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,20 +70,19 @@ const DYLIB = join(
 const ROUND_SEC = 3600;
 const EPS = 1e-6;
 
-// The armed run's numbers. The single-loss cap must shrink the template's
+// The armed run's numbers, delivered the only way a boot accepts them now
+// (issue #967: `.env` / process-env `BK_*` keys — a `[risk]` or `[exit]` section
+// in a TOML file is inert). The single-loss cap must shrink the template's
 // 10-share band suggestion: entry 0.40, stop 20% → per-share 0.08 →
 // approved 2. The breaker pair (2 losses, 0.05 min = 3 s) keeps the whole
 // cycle inside a few seconds; the strategy-level shipped breaker (3 / 300 s)
 // stays dormant — exactly two losses are booked before the account one fires.
-const TOML = `# scratch config written by risk-systemic-check.mjs
-[exit]
-stop_loss_pct = "20"
-
-[risk]
-max_single_loss_usd = "0.20"
-max_consecutive_losses = "2"
-cooldown_minutes = "0.05"
-`;
+const ARMED_ENV = {
+  BK_EXIT_STOP_LOSS_PCT: '20',
+  BK_RISK_MAX_SINGLE_LOSS_USD: '0.20',
+  BK_RISK_MAX_CONSECUTIVE_LOSSES: '2',
+  BK_RISK_COOLDOWN_MINUTES: '0.05',
+};
 const CAP = 0.20;
 const STOP_PCT = 20;
 const LOSSES_TO_TRIP = 2;
@@ -99,7 +98,7 @@ const num = (v) => {
 /** The §4.4 readout verdict: every limit is {value, source}, the nine NEW
  * ones silent at the factory, the exit triple present, provenance named.
  * `posture` is 'factory' (all nine 0/default) or 'armed' (the three bounds
- * this gate configures arrive toml-sourced, the rest stay factory-silent). */
+ * this gate configures arrive env-sourced, the rest stay factory-silent). */
 export function judgeReadout(r, posture = 'factory') {
   const problems = [];
   if (!r || typeof r !== 'object') return ['readout is not an object'];
@@ -110,7 +109,7 @@ export function judgeReadout(r, posture = 'factory') {
   if (typeof acct.id !== 'string' || acct.id.length === 0) {
     problems.push(`account.id missing: ${JSON.stringify(acct.id)}`);
   }
-  // TOML strings parse EXACTLY (rust_decimal), so the expected spellings are
+  // Env strings parse EXACTLY (rust_decimal), so the expected spellings are
   // exact — "0.20" must not come back as "0.2".
   const armedBounds = {
     maxSingleLossUsd: '0.20',
@@ -131,7 +130,7 @@ export function judgeReadout(r, posture = 'factory') {
     }
     const armedValue = posture === 'armed' ? armedBounds[key] : undefined;
     const wantValue = armedValue ?? '0';
-    const wantSource = armedValue ? 'toml' : 'default';
+    const wantSource = armedValue ? 'env' : 'default';
     if (String(b.value) !== wantValue) {
       problems.push(`${key}.value must be ${JSON.stringify(wantValue)}, got ${JSON.stringify(b.value)}`);
     }
@@ -416,11 +415,11 @@ function armedReadoutFixture() {
   return {
     version: '1.1',
     account: { id: 'default', limits: {
-      maxSingleLossUsd: { value: '0.20', source: 'toml' },
+      maxSingleLossUsd: { value: '0.20', source: 'env' },
       maxDailyDrawdownUsd: { value: '0', source: 'default' },
       maxPositionSize: { value: '0', source: 'default' },
-      maxConsecutiveLosses: { value: '2', source: 'toml' },
-      cooldownMinutes: { value: '0.05', source: 'toml' },
+      maxConsecutiveLosses: { value: '2', source: 'env' },
+      cooldownMinutes: { value: '0.05', source: 'env' },
     } },
     global: { limits: {
       maxTotalPosition: { value: '0', source: 'default' },
@@ -507,12 +506,24 @@ async function waitFor(desc, ms, step, probe) {
   return null;
 }
 
+/** The child env: ours minus any `BK_RISK_*` / `BK_EXIT_*` the operator exported,
+ * so "factory posture" means what it says no matter who runs the gate. Since
+ * issue #967 those keys are the ONLY arming path (no TOML layer), so this is
+ * what the retired `--no-config` pin used to buy. */
+function coreEnv(extra = {}) {
+  const out = { ...process.env };
+  for (const k of Object.keys(out)) {
+    if (k.startsWith('BK_RISK_') || k.startsWith('BK_EXIT_')) delete out[k];
+  }
+  return { ...out, ...extra };
+}
+
 /** One boot: spawn, wait for the socket, connect, answer core.ready. */
-async function boot({ args, cwd, stderr }) {
+async function boot({ args, cwd, stderr, env = {} }) {
   const sock = join(cwd, `bk-e26-${Math.random().toString(36).slice(2, 8)}.sock`);
   try { unlinkSync(sock); } catch { /* fresh */ }
   const proc = spawn(CORE, [...args, '--socket', sock], {
-    stdio: ['ignore', 'ignore', 'pipe'], cwd,
+    stdio: ['ignore', 'ignore', 'pipe'], cwd, env: coreEnv(env),
   });
   proc.stderr?.on('data', (d) => { if (stderr) stderr.buf = (stderr.buf + String(d)).slice(-32768); });
   await waitForSocket(sock, { timeoutMs: 15000 });
@@ -544,8 +555,6 @@ async function main() {
   const { execFileSync } = await import('./lib/child-guard.mjs');
   const tempFactory = mkdtempSync(join(tmpdir(), 'bk-e26-factory-'));
   const tempArmed = mkdtempSync(join(tmpdir(), 'bk-e26-armed-'));
-  const tomlPath = join(tempArmed, 'risk.toml');
-  writeFileSync(tomlPath, TOML);
   try {
     execFileSync('/bin/bash', ['-c',
       `cd "${ROOT}" && node scripts/blitzkrieg-new-strategy.mjs ${NAME} && ` +
@@ -565,7 +574,7 @@ async function main() {
     // ── boot 1: factory core (§4.1 出厂即静默) ──
     const stderr = { buf: '' };
     {
-      const { client, proc } = await boot({ args: [...baseArgs, '--no-config'], cwd: tempFactory, stderr });
+      const { client, proc } = await boot({ args: [...baseArgs], cwd: tempFactory, stderr });
       try {
         checkCoreProvenance(CORE, check);
         const readout = await client.request('risk.limits');
@@ -614,12 +623,12 @@ async function main() {
     // ── boot 2: armed core (§4.2 enforcement) ──
     const events = [];
     {
-      const { client, proc } = await boot({ args: [...baseArgs, '--config', tomlPath], cwd: tempArmed });
+      const { client, proc } = await boot({ args: baseArgs, cwd: tempArmed, env: ARMED_ENV });
       client.onEvent = (e) => events.push(e);
       try {
         const readout = await client.request('risk.limits');
         const rp = judgeReadout(readout, 'armed');
-        check('armed readout: toml-sourced bounds + silent siblings + [exit] triple',
+        check('armed readout: env-sourced bounds + silent siblings + exit triple',
           rp.length === 0, rp.join(' | ').slice(0, 200));
 
         await loadProbe(client);

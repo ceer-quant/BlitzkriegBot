@@ -675,7 +675,7 @@ fn an_escalation_chase_that_would_price_the_pair_over_a_dollar_is_refused() {
 fn a_resting_bid_counts_toward_the_exposure_cap() {
     let mut c = dry_core(dec!(10));
     c.risk_config_mut().systemic.global.max_total_exposure_usd =
-        crate::risk::limits::Bound::new(dec!(3), crate::risk::limits::LimitSource::Toml);
+        crate::risk::limits::Bound::new(dec!(3), crate::risk::limits::LimitSource::Env);
 
     // A 0.40 × 5 = 2.00 bid rests (no ask to cross it).
     let (id, st) = c
@@ -714,7 +714,7 @@ fn a_resting_bid_counts_toward_the_exposure_cap() {
 fn a_manual_entry_over_an_armed_systemic_limit_is_refused() {
     let mut c = dry_core(dec!(10));
     c.risk_config_mut().systemic.global.max_total_position =
-        crate::risk::limits::Bound::new(dec!(1), crate::risk::limits::LimitSource::Toml);
+        crate::risk::limits::Bound::new(dec!(1), crate::risk::limits::LimitSource::Env);
 
     // One open position (taker fill at 0.40).
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
@@ -747,7 +747,7 @@ fn a_manual_entry_over_an_armed_systemic_limit_is_refused() {
 fn an_armed_size_cap_shrinks_a_manual_entry_at_the_submission_gate() {
     let mut c = dry_core(dec!(10));
     c.risk_config_mut().systemic.account.max_position_size =
-        crate::risk::limits::Bound::new(dec!(5), crate::risk::limits::LimitSource::Toml);
+        crate::risk::limits::Bound::new(dec!(5), crate::risk::limits::LimitSource::Env);
 
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
     let (_id, st) = c

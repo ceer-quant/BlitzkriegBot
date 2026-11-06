@@ -943,11 +943,13 @@ impl Policy {
         })
     }
 
-    /// The single-source load (issue 751): same toml-then-env layering, but
-    /// the env reader ALSO sees the `.env` file the launcher owns — the write
-    /// face lands POLICY_* keys there, and a same-process reload must observe
-    /// them before the next launcher restart puts them into the process
-    /// environment. Process environment first (12-factor), file lines second.
+    /// The single-source load (issue 751 → #967): the TOML file layer is
+    /// RETIRED. The loader resolves the policy from the env layer ONLY —
+    /// POLICY_* keys in the process environment and the `.env` file the
+    /// launcher owns. A version-1 empty skeleton supplies the typed shape;
+    /// `path` is kept in the signature only so the IPC write face can refuse
+    /// when a stale `execution_policy.toml` still exists on disk (the write
+    /// is the only path that would have created one, and it refuses to).
     pub fn load_single_source(path: &Path, env_path: Option<&Path>) -> Result<Self, String> {
         let file_map: std::collections::HashMap<String, String> = env_path
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -963,12 +965,11 @@ impl Policy {
                 .filter(|v| !v.trim().is_empty())
                 .or_else(|| file_map.get(key).cloned())
         };
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "version = 1\n".to_string(),
-            Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
-        };
-        Self::load_with_env(&text, env)
+        // The TOML skeleton is a constant — no file is read. If `path` exists
+        // on disk it is inert (the write face refuses to create one; a hand-
+        // planted file is dead data the loader never consults).
+        let _ = path;
+        Self::load_with_env("version = 1\n", env)
     }
 
     /// Same parser as boot, but an explicit reload resolves the writable
@@ -1011,11 +1012,11 @@ impl Policy {
             .lines()
             .filter_map(crate::env_file::parse_line)
             .collect();
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "version = 1\n".to_string(),
-            Err(e) => return Err(format!("{} unreadable: {e}", path.display())),
-        };
+        // Issue #967: the TOML file is retired. The reload resolves from the
+        // env layer (`.env` file > IPC write snapshot > process env) only;
+        // `path` is kept in the signature for the write face's stale-file
+        // guard and is never read here.
+        let _ = path;
         let env = |key: &str| -> Option<String> {
             if let Some(v) = file_map.get(key) {
                 return Some(v.clone());
@@ -1028,7 +1029,7 @@ impl Policy {
             }
             process_env(key)
         };
-        Self::load_with_env(&text, env)
+        Self::load_with_env("version = 1\n", env)
     }
 
     /// Parse with an injected env reader — the test seam (mutating the

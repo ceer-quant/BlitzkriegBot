@@ -3,11 +3,14 @@
  * RiskLimitsResult), the exit-discipline triple, and their write paths.
  */
 import { request } from './core.ts'
+import type { AccountFreezeSetDoc } from './accounts.ts'
+
+export type { AccountFreezeSetDoc }
 
 // ── E26 systemic risk readout (mirror ipc/schema.rs's RiskLimitsResult) ──────
 
-/** WHERE a limit's effective value came from (§4.4). */
-export type LimitSource = 'default' | 'toml' | 'env' | 'flag'
+/** WHERE a limit's effective value came from (§4.4) — flag/env/default (toml retired). */
+export type LimitSource = 'default' | 'env' | 'flag'
 
 /**
  * One limit: value AND provenance, together (§4.4) — "35" without "toml" is
@@ -92,13 +95,14 @@ export interface SystemicLimitChange {
   effect: 'live' | 'next_session' | string
 }
 
-/** `risk.setSystemic` 回执：改了什么、谁改的、何时、未持久化。 */
+/** `risk.setSystemic` 回执：改了什么、谁改的、何时、持久化方式（env）。 */
 export interface SystemicLimitUpdateDoc {
   applied: SystemicLimitChange[]
   atMs: number
   actor: string
   reason?: string
   persisted: boolean
+  persistence?: 'env' | 'none' | string
   note: string
   error?: string
 }
@@ -128,13 +132,14 @@ export interface ExitSetChange {
   effect: 'live' | string
 }
 
-/** `risk.setExit` 回执：改了什么、谁改的、何时、未持久化。 */
+/** `risk.setExit` 回执：改了什么、谁改的、何时、持久化方式（env）。 */
 export interface ExitSetUpdateDoc {
   applied: ExitSetChange[]
   atMs: number
   actor: string
   reason?: string
   persisted: boolean
+  persistence?: 'env' | 'none' | string
   note: string
   error?: string
 }
@@ -150,7 +155,7 @@ export const riskApi = {
    * 生效风控可编辑的写路径（`risk.setSystemic`）：九项系统限额的内存热写。
    * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，回执
    * 里每个 bound 带效果等级（live / next_session）。未持久化：重启回到
-   * 启动 flag/env/TOML 的解析结果。
+   * 启动 flag/env 的解析结果。
    */
   riskSetSystemic: (body: RiskSetSystemicBody) =>
     request<SystemicLimitUpdateDoc>('/risk/set-systemic', {
@@ -161,10 +166,19 @@ export const riskApi = {
    * 退出纪律的写路径（`risk.setExit`）：止损/止盈/强平三项的内存热写。
    * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，
    * 回执里每项带 old→new 与 effect=live（新入场下一笔按新值绑定，已开仓位
-   * 的退出扫描同步跟随）。未持久化：重启回到启动 flag/env/TOML 的解析结果。
+   * 的退出扫描同步跟随）。未持久化：重启回到启动 flag/env 的解析结果。
    */
   riskSetExit: (body: RiskSetExitBody) =>
     request<ExitSetUpdateDoc>('/risk/set-exit', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 账户级急冻/解冻写（issue 927 / issue 943）：`{ accountId, frozen: false }`
+   * 为账户解锁恢复接新单。
+   */
+  accountFreezeSet: (body: { accountId: string; frozen: boolean; reason?: string }) =>
+    request<AccountFreezeSetDoc>('/account-freeze/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

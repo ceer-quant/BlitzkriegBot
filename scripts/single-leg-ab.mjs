@@ -76,7 +76,7 @@ function runReplay(enable, outName) {
     return out;
   }
   const argv = [
-    '--no-config', '--engine', '--fee-model', 'official',
+    '--engine', '--fee-model', 'official',
     '--round-sec', '900', '--min-round-age', '0', '--min-time-left', '0',
     '--slippage-ticks', '1', '--seed-balance', '100000',
     '--enable-strategy', 'pair_discount_arb',

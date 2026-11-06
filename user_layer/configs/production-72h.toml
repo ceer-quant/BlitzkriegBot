@@ -1,5 +1,12 @@
 # 72-hour dry profile (issues #864, #865, #866, #868).
 #
+# 〔issue 967 退休，2026-11-06〕THIS FILE IS NOT READ. `BK_CONFIG`,
+# `--config` and `--no-config` are gone with the TOML layer; the numbers below
+# are now spelled as `BK_RISK_*` / `BK_MAX_ORDERBOOK_STALE_MS` keys in
+# `production-72h.env`. `scripts/soak-72h-check.mjs --preflight` locks the
+# record here to that env profile, so an edit in one place without the other
+# fails the gate. The original header follows.
+#
 # Point the kernel at this file with BK_CONFIG (see production-72h.env) or
 # `--config user_layer/configs/production-72h.toml`. The numbers match
 # `default.toml` on purpose: a normal repo-root boot and this profile enforce

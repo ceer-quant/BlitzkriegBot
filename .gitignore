@@ -1,6 +1,9 @@
 # Dependencies (root Node layer removed; Vue panel installs its own)
 node_modules/
 
+# Local git worktrees (scratch checkouts for issue reproduction; never versioned).
+worktrees/
+
 # Build output (Vue panel bundle lives in ui/webapp/webui/dist, also ignored)
 dist/
 

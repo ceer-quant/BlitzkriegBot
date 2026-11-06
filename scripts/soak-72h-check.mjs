@@ -6,7 +6,7 @@
  * the files a 72-hour run would source:
  *
  *   - DRY_RUN=true in production-72h.env and in .env.example
- *   - risk limits in production-72h.toml are the armed defaults, staleness is
+ *   - risk limits in production-72h.env are the armed defaults, staleness is
  *     3500 (not 0)
  *   - the strategy allowlist is a subset of the cost-adjusted report's `allow`
  *     (today: both empty)
@@ -151,8 +151,10 @@ function preflight() {
 
   if (env.DRY_RUN !== 'true') problems.push(`production-72h.env DRY_RUN=${env.DRY_RUN} (must be true)`);
   if (example.DRY_RUN !== 'true') problems.push(`.env.example DRY_RUN=${example.DRY_RUN} (must stay true)`);
-  if (env.BK_CONFIG !== 'user_layer/configs/production-72h.toml') {
-    problems.push(`BK_CONFIG=${env.BK_CONFIG}`);
+  // Issue #967 retired the TOML layer: a leftover `BK_CONFIG` is a pointer at
+  // an inert file, and the nine bounds it used to carry must now be env keys.
+  if (env.BK_CONFIG !== undefined) {
+    problems.push(`BK_CONFIG=${env.BK_CONFIG} (the TOML layer is retired; drop the key)`);
   }
   const stale = num(env.BK_MAX_ORDERBOOK_STALE_MS);
   const staleToml = num(toml.max_orderbook_stale_ms);
@@ -171,6 +173,12 @@ function preflight() {
   };
   for (const [k, v] of Object.entries(required)) {
     if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);
+  }
+  // The toml file is an inert record now, so the env profile is what arms the
+  // boot: every one of the nine must be spelled there with the same value.
+  for (const [k, v] of Object.entries(required)) {
+    const key = `BK_RISK_${k.toUpperCase()}`;
+    if (env[key] !== v) problems.push(`${key}=${env[key]} want ${v}`);
   }
   const daily = num(toml.max_daily_drawdown_usd);
   if (!(num(env.BK_MAX_DAILY_LOSS_PCT) > 0 && num(env.BK_MAX_DAILY_LOSS_PCT) <= 10)) {

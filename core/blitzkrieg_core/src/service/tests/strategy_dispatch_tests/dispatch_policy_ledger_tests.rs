@@ -191,59 +191,35 @@ fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
 
 // ── #380: the boot-time policy-path contract ────────────────────────────
 
-/// A scratch tree with the shipped policy file at
-/// `<root>/user_layer/configs/execution_policy.toml`, carrying ONE
-/// identifying rule (the backstop) so a loaded file is distinguishable
-/// from the neutral kernel by `execution_policy_loaded()` alone.
-fn policy_tree_with_backstop(root: &std::path::Path) -> std::path::PathBuf {
-    use std::sync::atomic::AtomicU64;
-    static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "bk380-boot-{}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        root.file_name().and_then(|s| s.to_str()).unwrap_or("t")
-    ));
-    std::fs::create_dir_all(dir.join("user_layer").join("configs")).expect("config tree");
-    let file = dir
-        .join("user_layer")
-        .join("configs")
-        .join("execution_policy.toml");
-    std::fs::write(
-        &file,
-        r#"
-version = 1
-
-[defaults]
-budget_ratio = 0.10
-min_budget_usd = 1.00
-max_budget_usd = 50.00
-min_equity_usd = 1.00
-max_positions_per_asset = 1
-
-[[defaults.rules]]
-name = "global_backstop"
-enabled = true
-priority = 100
-when = "open_positions >= 2"
-then = { action = "skip" }
-"#,
-    )
-    .expect("write policy fixture");
-    file
-}
-
 /// #380: an EXPLICIT policy path is honoured verbatim by the boot load —
 /// a file written anywhere the cwd's spelling names is loaded, with the
 /// file's own rule in force. (The install-root resolution itself is
 /// unit-tested in `execution_policy.rs`; this pins the SERVICE's half:
 /// the path the config carries is the path the boot actually reads.)
+///
+/// Issue #967 retired the TOML file layer: policy rules now arrive through
+/// `POLICY_*` env vars read from the `.env` file (the loader no longer
+/// consults `execution_policy.toml`). The test equivalent writes the
+/// backstop rule into `POLICY_RULES` in a temp `.env` and points
+/// `env_file_path` at it — the loader's single source is now the env
+/// layer, not a file.
 #[test]
 fn boot_loads_the_explicit_policy_path_verbatim() {
     let tree = std::env::temp_dir().join(format!("bk380-explicit-{}", std::process::id()));
-    let file = policy_tree_with_backstop(&tree);
+    let env_file = tree.join("config.env");
+    std::fs::create_dir_all(&tree).expect("config tree");
+    std::fs::write(
+        &env_file,
+        r#"POLICY_RULES=[{"name":"global_backstop","priority":100,"enabled":true,"when":"open_positions >= 2","then":{"action":"skip"}}]"#,
+    )
+    .expect("write env fixture");
     let cfg = CoreConfig {
-        execution_policy_path: Some(file.to_string_lossy().into_owned()),
+        execution_policy_path: Some(
+            tree.join("execution_policy.toml")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        env_file_path: Some(env_file.to_string_lossy().into_owned()),
         dry_seed_balance: dec!(100),
         trade_log_path: None,
         order_log_path: None,
@@ -253,14 +229,14 @@ fn boot_loads_the_explicit_policy_path_verbatim() {
     let c = Core::new(cfg);
     assert!(
         c.execution_policy_loaded(),
-        "the explicit file exists: the boot must load it"
+        "the env file carries POLICY_RULES: the boot must load it"
     );
-    // The loaded policy is the FILE's, not the neutral kernel: the
+    // The loaded policy is the ENV's, not the neutral kernel: the
     // backstop rule the fixture wrote is in force.
     let section = c
         .execution_policy_section_view("default")
-        .expect("the file's [defaults] section");
-    let rules = section.rules.expect("the file's backstop rule");
+        .expect("the env's [defaults] section");
+    let rules = section.rules.expect("the env's backstop rule");
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0]["name"], serde_json::json!("global_backstop"));
     let _ = std::fs::remove_dir_all(&tree);
@@ -381,6 +357,97 @@ fn policy_skip_refuses_the_entry_before_the_risk_gate() {
         c.engine_evaluate(now + 1_000),
         0,
         "policy skip removes the order"
+    );
+    assert!(c.list_orders().is_empty(), "nothing reached place()");
+    let stats = c.strategy_stats();
+    let s = strategy_entry(&stats, "dip");
+    assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+}
+
+/// #966 regression: `open_positions` counts LIVE positions GLOBALLY across
+/// all accounts. Two live positions on DIFFERENT accounts must trip the
+/// `global_backstop` (open_positions >= 2 → skip), so a 3rd entry is refused
+/// even though no single account individually holds 2 positions. The pre-fix
+/// per-account counting let this slip through.
+#[test]
+fn global_backstop_skips_when_positions_span_accounts() {
+    let mut policy = neutral_policy();
+    policy.defaults.rules = vec![crate::execution_policy::Rule {
+        name: "global_backstop".into(),
+        priority: 100,
+        enabled: true,
+        when: crate::execution_policy::When {
+            field: crate::execution_policy::ConditionField::OpenPositions,
+            op: crate::execution_policy::CompareOp::Ge,
+            value: crate::execution_policy::ConditionValue::Num(Decimal::from(2)),
+        },
+        then: crate::execution_policy::Action {
+            action: Some(crate::execution_policy::SkipAction::Skip),
+            budget_ratio: None,
+            min_budget_usd: None,
+            max_budget_usd: None,
+            cooldown_sec: None,
+        },
+        reason: Some("全局兜底：持仓数达上限".into()),
+    }];
+
+    let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy);
+    let now = 1_000_000i64;
+
+    // Seed one live position on "default" and one on "acct_b" — neither
+    // account individually holds 2, but globally there are 2 live positions.
+    c.positions_mut().open(
+        crate::position::OpenParams {
+            strategy: "dip".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "btc_up".into(),
+            condition_id: "cond".into(),
+            account_id: crate::model::default_account_id(),
+            venue: String::new(),
+            partner_token_id: "btc_down".into(),
+            entry_price: dec!(0.44),
+            expires_at_ms: now + 900_000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: 900,
+            round_slot: 1,
+        },
+        now,
+    );
+    c.positions_mut().open(
+        crate::position::OpenParams {
+            strategy: "dip".into(),
+            asset: "BTC".into(),
+            direction: crate::model::SignalDirection::Up,
+            token_id: "eth_up".into(),
+            condition_id: "cond_eth".into(),
+            account_id: crate::model::AccountId::from("acct_b"),
+            venue: String::new(),
+            partner_token_id: "eth_down".into(),
+            entry_price: dec!(0.44),
+            expires_at_ms: now + 900_000,
+            was_maker: false,
+            target_exit_price: None,
+            round_duration_sec: 900,
+            round_slot: 1,
+        },
+        now,
+    );
+    assert_eq!(
+        c.positions().open_positions().len(),
+        2,
+        "fixture premise: two live positions across two accounts"
+    );
+
+    // Feed the dip book so the "dip" strategy emits a candidate entry.
+    feed_btc_dip(&mut c, now);
+
+    // The global backstop must refuse the entry: open_positions == 2 >= 2.
+    assert_eq!(
+        c.engine_evaluate(now + 1_000),
+        0,
+        "global backstop skips the entry when positions span accounts"
     );
     assert!(c.list_orders().is_empty(), "nothing reached place()");
     let stats = c.strategy_stats();

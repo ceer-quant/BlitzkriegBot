@@ -217,12 +217,13 @@ function judge(baseline, actual) {
 /**
  * Replay argv.
  *
- * `--no-config` is pinned. The #272 baseline was recorded at factory posture
- * (risk limits off, commit 9ad51ea). A normal start may arm `default.toml`
- * (#864); those limits are real for that start and are covered by the config
- * and soak checks. This gate measures strategy economics, so it must not
- * inherit the armed file. Dropping the flag makes the recorded windows
- * incomparable. Do not widen TOLERANCE to hide that.
+ * Factory posture is what the #272 baseline recorded (risk limits off, commit
+ * 9ad51ea). Issue #967 retired the TOML layer, so `--no-config` no longer
+ * exists: the nine `BK_RISK_*` env keys are the only way a boot can arm the
+ * limits, and this gate runs with none of them set. What the pin used to buy is
+ * now structural — a replay cannot inherit `default.toml` because no boot reads
+ * it. Do not add an arming flag or BK_RISK_* to these windows; the recorded
+ * numbers would stop being comparable, and widening TOLERANCE would hide that.
  */
 function replayArgs({ corpus, report, extraFlags = [] }) {
   return [
@@ -230,7 +231,6 @@ function replayArgs({ corpus, report, extraFlags = [] }) {
     '--engine',
     '--no-discovery',
     '--no-strategy-state',
-    '--no-config',
     ...strategyArgs,
     '--no-trade-log', '--no-order-log', '--no-position-log', '--no-event-archive',
     '--round-sec', '900', '--min-round-age', '0', '--min-time-left', '0',
@@ -311,14 +311,15 @@ function selfTest() {
     report: 'report.json',
     extraFlags: ['--exit-stop-loss-pct', '1'],
   });
-  const noConfigAt = pinned.indexOf('--no-config');
   const armAt = pinned.indexOf('--exit-stop-loss-pct');
-  const pinOk = noConfigAt >= 0 && armAt > noConfigAt && !pinned.includes('--config');
+  // Issue #967: the retired TOML layer means no replay argv may select a config
+  // file — factory posture is structural now, not a pinned flag.
+  const pinOk = armAt > 0 && !pinned.includes('--config') && !pinned.includes('--no-config');
   if (!pinOk) {
     failed += 1;
-    console.error('  FAIL replay stays on --no-config, ahead of any arm flag');
+    console.error('FAIL replay carries no config flag and keeps arm flags after the pins');
   } else {
-    console.log('  ok   replay is pinned to --no-config (factory posture, #272 baseline)');
+    console.log('ok   replay carries no config flag (factory posture, #272 baseline)');
   }
   const total = cases.length + 1;
   if (failed > 0) {

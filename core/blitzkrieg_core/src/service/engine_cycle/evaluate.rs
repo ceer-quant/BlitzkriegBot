@@ -250,16 +250,13 @@ impl Core {
             String,
             Result<crate::execution_policy::PolicyOutput, crate::execution_policy::PolicyRefusal>,
         > = if self.execution_policy.is_some() {
-            // The open_positions fact counts LIVE positions only — an expired
-            // round's stuck position is settlement-dead (same rule as
-            // PositionManager::can_open) and must not trip the shipped
-            // `open_positions >= N` backstop.
+            // The open_positions fact counts LIVE positions GLOBALLY (all
+            // accounts) — an expired round's stuck position is settlement-dead
+            // (same rule as PositionManager::can_open) and must not trip the
+            // shipped `open_positions >= N` backstop. Counting per-account
+            // defeats the global_backstop rule when positions span accounts.
             let open = self.positions.open_positions();
-            let open_for = |acct: &str| {
-                open.iter()
-                    .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
-                    .count() as u32
-            };
+            let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
             tokens
                 .iter()
                 .map(|(_, req)| {
@@ -274,7 +271,7 @@ impl Core {
                             .ledger_of(&req.account_id)
                             .map(|l| l.balance())
                             .unwrap_or_default(),
-                        open_positions: open_for(req.account_id.as_str()),
+                        open_positions: live,
                         current_price: req.price,
                         time_left_sec: policy_time_left_sec,
                         symbol: req.asset.clone(),
@@ -294,6 +291,17 @@ impl Core {
         } else {
             HashMap::new()
         };
+        // Issue #966 (八连发 root cause ②): the verdict map above judged every
+        // intent against the CYCLE-BEGIN book — N same-cycle intents for one
+        // account each checked `open_positions` without the N-1 buys the
+        // same cycle was placing, so a 2-cap backstop admitted 3+ orders in
+        // one tick (hft-43/44/44 same-millisecond 11-05 22:45). The spend
+        // loop below ADDS this cycle's placed BUY count onto the fact the
+        // map computed, so intent k+1 judges `open + k placed`. The verdicts
+        // map itself is NOT re-run (a re-run would re-order the budget
+        // shrink against admission — the skip arm reads this reopened fact,
+        // nothing else moves).
+        let mut cycle_placed: HashMap<String, u32> = HashMap::new();
         // ── v0.3 Wave 0 (#329): the E25 arbitration delegation seam ──────────
         // E25 inserts its one-line per-intent delegation at the head of the
         // loop below: `process_intent` (arbitration/) runs BEFORE the E16
@@ -365,10 +373,61 @@ impl Core {
             // any gate). A Skip refuses here — the intent never reaches the
             // RiskGate, which is the only way a policy may touch an order: it
             // removes, never relaxes. A Place caps the ticket size.
-            match policy_verdicts
-                .get(&format!("{}:{}", req.account_id, req.token_id))
-                .map(|v| v.as_ref())
-            {
+            // Issue #966: when THIS cycle has already placed buys for the
+            // account, the verdict is re-judged with the cycle-honest count
+            // (live positions + already-placed buys) — the precomputed map
+            // judged against the cycle-begin book alone, which is how
+            // N same-millisecond intents all cleared a 2-cap backstop.
+            let already_placed = cycle_placed
+                .get(req.account_id.as_str())
+                .copied()
+                .unwrap_or(0);
+            let verdict: Option<
+                Result<
+                    crate::execution_policy::PolicyOutput,
+                    crate::execution_policy::PolicyRefusal,
+                >,
+            > = if already_placed > 0 {
+                match &self.execution_policy {
+                    Some(policy) => {
+                        let open = self.positions.open_positions();
+                        let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
+                        let facts = crate::execution_policy::PolicyInput {
+                            available_balance: self
+                                .accounts
+                                .ledger_of(&req.account_id)
+                                .map(|l| l.balance())
+                                .unwrap_or_default(),
+                            total_equity: self
+                                .accounts
+                                .ledger_of(&req.account_id)
+                                .map(|l| l.balance())
+                                .unwrap_or_default(),
+                            open_positions: live + already_placed,
+                            current_price: req.price,
+                            time_left_sec: policy_time_left_sec,
+                            symbol: req.asset.clone(),
+                            recent_pnl_1h: self
+                                .positions
+                                .recent_pnl_1h_for(req.account_id.as_str(), now_ms),
+                            consecutive_losses: self.breaker.consecutive_losses(&req.strategy),
+                        };
+                        Some(crate::execution_policy::evaluate(
+                            policy,
+                            req.account_id.as_str(),
+                            &facts,
+                        ))
+                    }
+                    None => policy_verdicts
+                        .get(&format!("{}:{}", req.account_id, req.token_id))
+                        .cloned(),
+                }
+            } else {
+                policy_verdicts
+                    .get(&format!("{}:{}", req.account_id, req.token_id))
+                    .cloned()
+            };
+            match verdict {
                 Some(Ok(crate::execution_policy::PolicyOutput::Skip { reason })) => {
                     tracing::info!(target: "strategy",
                         "entry rejected: strategy={name} cause=policy.skip reason={reason}");
@@ -412,7 +471,7 @@ impl Core {
                     // guard but overflows `Decimal::div` (a panic that kills
                     // the trading task). Refuse the entry instead — the
                     // `shares < ONE` arm below emits no order.
-                    let shares = match budget_to_shares(*budget_usd, req.price) {
+                    let shares = match budget_to_shares(budget_usd, req.price) {
                         Some(shares) => shares,
                         None => {
                             tracing::warn!(target: "strategy",
@@ -681,6 +740,15 @@ impl Core {
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }
+                    // Issue #966: the SAME cycle's next intents for this
+                    // account judge the reopened policy fact with this buy
+                    // counted — a 2-cap backstop cannot admit 3 orders in
+                    // one tick anymore (the 八连发 seam). A virtual-governed
+                    // leg's commitment is the leg's own quota, judged under
+                    // the same policy: it counts like the real money.
+                    *cycle_placed
+                        .entry(placed_account.as_str().to_string())
+                        .or_default() += 1;
                     placed += 1;
                 }
                 Err(err) => {
@@ -796,22 +864,29 @@ impl Core {
             .map(|e| e.last_time_left_sec())
             .unwrap_or(0);
         let mut placed = 0;
+        // #966 seam: per-account cycle-local placement tally so N same-millisecond
+        // intents from one account see each other's placements in `open_positions`
+        // (same-millisecond three-leg bypass root cause).
+        let mut cycle_placed: HashMap<String, u32> = HashMap::new();
         for (token, mut req) in tokens {
             let name = req.strategy.clone();
             // ── #363: the policy verdict for THIS intent. A Skip refuses here
             // — the intent never reaches the RiskGate. A Place caps the
             // ticket size. The shipped defaults never bite (see the comment
             // at the real cycle's verdict map).
+            let already_placed = cycle_placed
+                .get(req.account_id.as_str())
+                .copied()
+                .unwrap_or(0);
             let policy = self.execution_policy.clone();
             let policy_verdict = policy.map(|policy| {
                 // open_positions counts LIVE positions only (expired rounds
-                // are settlement-dead; see engine_evaluate's verdict map).
+                // open_positions counts LIVE positions GLOBALLY (all accounts)
+                // (expired rounds are settlement-dead; see engine_evaluate's
+                // verdict map). Counting per-account defeats the global_backstop
+                // rule when positions span accounts.
                 let open = self.positions.open_positions();
-                let open_for = |acct: &str| {
-                    open.iter()
-                        .filter(|p| p.account_id.as_str() == acct && p.expires_at_ms > now_ms)
-                        .count() as u32
-                };
+                let live = open.iter().filter(|p| p.expires_at_ms > now_ms).count() as u32;
                 let facts = crate::execution_policy::PolicyInput {
                     available_balance: self
                         .accounts
@@ -823,7 +898,7 @@ impl Core {
                         .ledger_of(&req.account_id)
                         .map(|l| l.balance())
                         .unwrap_or_default(),
-                    open_positions: open_for(req.account_id.as_str()),
+                    open_positions: live + already_placed,
                     current_price: req.price,
                     time_left_sec: policy_time_left_sec,
                     symbol: req.asset.clone(),
@@ -1098,6 +1173,9 @@ impl Core {
                     if let Some(engine) = self.engine.as_mut() {
                         engine.note_scoped_order_placed(placed_account.as_str(), &token);
                     }
+                    *cycle_placed
+                        .entry(placed_account.as_str().to_string())
+                        .or_default() += 1;
                     placed += 1;
                 }
                 Err(err) => {

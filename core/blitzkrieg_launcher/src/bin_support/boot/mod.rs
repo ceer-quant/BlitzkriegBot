@@ -99,6 +99,15 @@ pub(crate) struct Args {
     /// (calibration: the deadline amputated rounds that went on to pay); a
     /// non-zero value re-arms it.
     pub(crate) exit_force_sec: i64,
+    /// #966 runtime-persistence: the trailing-stop master switch, resolved
+    /// `BK_EXIT_TRAILING_ENABLED` > compiled default (false). The
+    /// `risk.setExit` hot path writes this key so the choice survives a
+    /// restart.
+    pub(crate) exit_trailing_enabled: bool,
+    /// #966 runtime-persistence: the strategy-exit maker-first switch,
+    /// resolved `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST` > compiled default
+    /// (false). Same persistence contract as `exit_trailing_enabled`.
+    pub(crate) exit_strategy_exit_maker_first: bool,
     pub(crate) feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,
@@ -420,15 +429,7 @@ fn default_lua_strategy_dir() -> Option<String> {
     Some("user_layer/strategies_lua".to_string())
 }
 
-/// Where the config file comes from, settled BEFORE argument parsing (the file
-/// has to be loaded to resolve the arguments against it).
-pub(crate) enum ConfigChoice {
-    /// No file: every setting comes from CLI/env/default.
-    Off,
-    Path(String),
-}
-
-/// #380: settle WHICH execution-policy file this run loads, and say so.
+/// #380: settle WHICH execution-policy source this run loads, and say so.
 ///
 /// The shipped default (`user_layer/configs/execution_policy.toml`) used to be
 /// interpreted relative to the process cwd, so the same binary with the same
@@ -526,52 +527,6 @@ impl EnvVars {
 
     fn num<T: FromStr>(&self, key: &str) -> Option<T> {
         self.text(key).and_then(|v| v.trim().parse::<T>().ok())
-    }
-}
-
-/// Pre-scan `argv` for `--config <path>` / `--config=<path>` / `--no-config`.
-///
-/// Two passes over `argv` are unavoidable — the file must be read before the
-/// flags it competes with can be resolved — so this is kept deliberately dumb:
-/// it looks for exactly those three spellings and hands everything else to the
-/// real parser.
-pub(crate) fn prescan_config(argv: &[String]) -> Option<ConfigChoice> {
-    let mut it = argv.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--config" => {
-                return Some(match it.next() {
-                    Some(p) if !p.trim().is_empty() => ConfigChoice::Path(p.clone()),
-                    _ => ConfigChoice::Off,
-                });
-            }
-            "--no-config" => return Some(ConfigChoice::Off),
-            other => {
-                if let Some(v) = other.strip_prefix("--config=") {
-                    return Some(if v.trim().is_empty() {
-                        ConfigChoice::Off
-                    } else {
-                        ConfigChoice::Path(v.to_string())
-                    });
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Resolve the config file: `--config` wins over `BK_CONFIG`, which wins over the
-/// repo's shipped default. `BK_CONFIG=none` (like `--no-config`) turns the file
-/// off entirely, which is what a harness wants when it must not inherit an
-/// operator's edits.
-pub(crate) fn config_choice(argv: &[String], env: &EnvVars) -> ConfigChoice {
-    if let Some(c) = prescan_config(argv) {
-        return c;
-    }
-    match env.text("BK_CONFIG") {
-        Some(v) if v.trim() == "none" => ConfigChoice::Off,
-        Some(v) if !v.trim().is_empty() => ConfigChoice::Path(v.trim().to_string()),
-        _ => ConfigChoice::Path(blitzkrieg_core::config::DEFAULT_CONFIG_PATH.to_string()),
     }
 }
 

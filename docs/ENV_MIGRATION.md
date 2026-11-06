@@ -18,10 +18,10 @@
 | `.env`（git-ignored） | **唯一可信配置源**（凭证 + 运行键） | **保留并加冕**；生产重写由主窗口在升级时执行 | 本文档 §3 逐键判定 |
 | `.env.example` | env 全集模板（随发布打包） | **保留，本 PR 补齐漂移**（§5） | `scripts/package-release.mjs:267` |
 | `user_layer/configs/default.toml` | 内核配置文件壳（出厂四键已于 #588 退役，现零显式键） | **退役为纯注释文档**（2026-10-28）：不再含任何有效配置行；引擎配置走 .env 的 BK_* 变量，exit/risk 保持编译默认。文件缺失内核照常启动（`FileConfig::load` 对 NotFound 回落编译缺省） | PR-4 完成：文档壳退役为注释-only；读取点保留（缺失容忍） |
-| `user_layer/configs/accounts.toml` | **账户簿持久态 + 账户合同**（`[[account]]`、status 姿态、strategies 启用集、rounds 族、`[cross_venue_arb]` 腿） | **保留，绝不迁 .env**：面板热写回（`account.venue.set` / `account.rounds.set` / `account.strategies.set`）以它为持久化目标——`.env` 是「人写、进程只读」的文件，进程写回的键放 `.env` 会制造第二个可信源。缺文件时内核以单一 `default` 账户照常启动（`core/blitzkrieg_core/src/account/mod.rs:334` `single_default`） | §6 处置提案 |
+| `user_layer/configs/accounts.toml` | **账户簿持久态 + 账户合同**（`[[account]]`、status 姿态、strategies 启用集、rounds 族、`[cross_venue_arb]` 腿） | **〔issue 967 退休，2026-11-06〕** 生产读/写面全部走 `ACCOUNT_*` env 键；`accounts.toml` 不再是配置源，其存在仅触发"已忽略"告警。`load_account_ledgers`/`from_str` 仅保留为测试夹具解析器。面板热写回（`account.venue.set` 等）upsert `.env`。缺文件 = 零配置单一 `default` 账户 | `core/blitzkrieg_core/src/account/config/mod.rs` |
 | `user_layer/configs/shadow_evolution.toml` | 进化开关与参数 | **〔issue 751 推翻本行判决，2026-10-28〕** 两开关迁 `.env`（`SHADOW_ENABLED`/`SHADOW_AUTO_EVOLVE`），面板翻转 upsert `.env`；toml 写回模块 `shadow_evolution/file.rs` 撤除，本文件降级为 env 键缺席时的兼容回退（读序仍 env > 本文件），由 `scripts/migrate-config-to-env.sh` 退役进备份 | `core/blitzkrieg_core/src/config.rs`（load 侧边文件）、`bin_support/boot/args.rs`（SHADOW_* 读点） |
 | `user_layer/configs/update.toml` | 更新检查出厂缺省（读序 CLI > `BLITZKRIEG_UPDATE_*` env > 此文件 > 内置） | **保留为出厂缺省面**；运行态在 `data/update/state.json`，env 面已存在 | `core/blitzkrieg_core/src/main.rs:1810-1835` |
-| `user_layer/configs/execution_policy.toml` | 执行策略合同（账户级 sizing/门禁），`BUDGET_RATIO[_<ID>]`/`MAX_BUDGET_USD[_<ID>]` env 在其上层 | **保留**：per-account 复杂结构用 toml 表达；env 只覆盖两个标量（已补进 `.env.example`）。缺文件 = 中性内核（文件头明示） | `core/blitzkrieg_core/src/execution_policy.rs:65` |
+| `user_layer/configs/execution_policy.toml` | 执行策略合同（账户级 sizing/门禁），`POLICY_*` env 在其上层 | **〔issue 967 退休，2026-11-06〕** 生产读/写面全部走 `POLICY_*` env 键；`execution_policy.toml` 内容永不被读取（loader 用固定 `version = 1` 骨架 + env 解析）。IPC 写面在 legacy 文件存在时拒绝写入，防止静默双源。缺文件 = env-only 中性内核 | `core/blitzkrieg_core/src/execution_policy/mod.rs` |
 | `extensions/binance_spot/config.toml` | 扩展结构声明（[meta] 与链接的 dylib 对账） | **保留为包合同** | `core/blitzkrieg_core/src/config.rs:566` |
 | `user_layer/strategies_lua/*/manifest.json` | **策略包合同**，不是配置：`api` 版本握手、`entry` 入口、`sha256` 完整性、`tunables` 可进化域声明（Lock 0 的依据）、`modes` 市场声明 | **保留为包合同**——它描述包的身份与能力，如同 Cargo.toml 之于 crate；env 无法承载逐包声明 | `core/blitzkrieg_core/src/strategy_engine/lua_loader.rs:4` |
 | `data/runtime/config.json` | 运行态投影（WebUI 写、内核读；现仅 `roundDurationSec` 白名单格） | **保留**：这是「面板点出来的持久意图」，与 `data/strategy-state.json` 同族；env 显式设置时它被压制（issue 499 语义） | `core/blitzkrieg_core/src/ipc/runtime_config.rs:1` |
@@ -40,11 +40,12 @@
   `BLITZKRIEG_ALERT_NOTIFY`、`UIKIT_MANAGE`、`UIKIT_WEB_TRACE`、
   `UIKIT_CORE_BIN/CWD/EXTRA_ARGS`、`HFT_ASSETS/ROUND_SEC/MIN_SHARES/MAX_SHARES`
   （`ui/ui_kit/src/gateway/supervisor.rs`）。全部已入 `.env.example`。
-- **内核 CLI 旗标**（`core/blitzkrieg_core/src/cli.rs`）：`--config/--no-config`、
+- **内核 CLI 旗标**（`core/blitzkrieg_core/src/cli.rs`）：
   `--assets/--round-sec/--min-round-age/--min-time-left`、`--mode`、`--exit-*`、
   `--max-*` 风险族、`--shadow-evolution/--se-*`、`--enable/disable-strategy`、
   `--strategy-dir/--lua-strategy-dir`、回放/回测族等。旗标是 env 之上的最高层，
-  不迁 env（一次性实验入口）。
+  不迁 env（一次性实验入口）。〔issue 967 退休，2026-11-06〕`--config` /
+  `--no-config` / `BK_CONFIG` 随 TOML 层一起删除，传入即未知参数拒绝（exit 2）。
 - **内核 env 读点**：`BK_*` 28 键经 `EnvVars::from_process`（`main.rs:612`，只拷
   `BK_` 前缀）+ `DRY_RUN`（`main.rs:2749`）+ `BLITZKRIEG_GITHUB_TOKEN`
   （`ipc/server.rs:1003`）+ `BLITZKRIEG_ALLOW_SHARED_DATA`（`main.rs:3330`）+
@@ -157,15 +158,20 @@ BLITZKRIEG_*    面板 / 网关 / 更新检查 / 启动脚本进程设置
 - **PR-1（#588，已完成）**：出厂四键退役，编译缺省同值零漂移；`default.toml`
   的 `[engine]` 清空。
 - **PR-2（本 PR，第一阶段）**：`.env.example` 零漂移对齐 + 死键清单 + 本判决文档。
-  **读序维持现状（env 优先、旧文件回退）**：CLI > env > toml > 编译缺省。这是
-  兼容期读序也是终态读序——toml 层保留为「写回型持久态 + 显式 act 面」，与
-  env 不构成双可信源（toml 里不再有 env 能覆盖的出厂引擎键）。
+  〔2026-11-06 运营者裁决推翻「维持现状」〕读序终态改为 **CLI > env > 编译缺省**：
+  risk/exit 的 toml 层已从生效链删除（#967 stage 1，`BK_RISK_*` / `BK_EXIT_*` 为唯一
+  有效源，`[risk]` / `[exit]` 段落写进文件也不生效）；其余兼容回退读点（
+  shadow_evolution.toml、update.toml、accounts.toml 回退）在 stage 2 清零。
 - **PR-3（生产重写，主窗口执行）**：按 §4 清单重写 live `.env`（删 4 死键），
   随下一次生产升级落地；升级前 `grep -o '^[A-Z_]*=' .env` 留档键名清单。
 - **PR-4（后续，可选）**：评估删除 `default.toml` 文档壳（内核已容忍缺失）；
   评估 `bug_report.yml` 等文档面残留。**不删除**：accounts.toml、
   shadow_evolution.toml、update.toml、execution_policy.toml、manifest.json、
   data/runtime/config.json（判决见 §1）。
+- **PR-5（#967，进行中）**：TOML 退场。stage 1 已落地 env 面（`BK_RISK_*` 九键 +
+  `BK_EXIT_*` 五键）与启动回显（`source ∈ {flag, env, default}`，出现 `toml`
+  即回归失败）；stage 2 删除剩余 legacy 读点，`execution_policy.toml` 的结构化
+  合同迁为 env/JSON 后再评估退役。
 
 ## 9. 「toml/json 可以删了吗」的直接回答
 

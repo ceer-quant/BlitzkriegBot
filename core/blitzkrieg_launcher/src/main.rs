@@ -159,10 +159,10 @@ mod bin_tests;
 // modules (`crate::position_db` / `crate::strategy_state`) so the bin and
 // any embedded reader share ONE name song.
 use bin_support::boot::{
-    ConfigChoice, EnvVars, builtin_registry, config_choice, daily_loss_path_for,
-    default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
-    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
-    round_duration_source_from, run_net_check,
+    EnvVars, builtin_registry, daily_loss_path_for, default_position_log_for,
+    default_strategy_state_for, parse_args, parse_strategy_limits, parse_virtual_limits,
+    resolve_event_archive, resolved_policy_path, risk_state_path_for, round_duration_source_from,
+    run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -214,29 +214,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let env = EnvVars::from_process();
-    let choice = config_choice(&argv, &env);
-    let file = match &choice {
-        ConfigChoice::Off => blitzkrieg_core::config::FileConfig::default(),
-        ConfigChoice::Path(p) => {
-            blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(p)))
-        }
-    };
-    for w in &file.warnings {
-        eprintln!("blitzkrieg-core: config warning: {w}");
-    }
-    // An unknown key is the exact failure mode this layer exists to prevent
-    // (KI-11), so it is loud — but never fatal.
-    for k in &file.unknown_keys {
-        eprintln!("blitzkrieg-core: config key not understood (ignored): {k}");
-    }
+    let args = parse_args(&argv, &env);
 
-    let args = parse_args(&file, &argv, &env);
-
-    // Say where the non-default settings came from. A declarative config layer is
-    // only auditable if the effective value and its origin are both observable.
-    if let Some(p) = &file.path {
-        eprintln!("blitzkrieg-core: config file {}", p.display());
-    }
     for line in &args.config_report {
         eprintln!("blitzkrieg-core: config {line}");
     }
@@ -264,13 +243,12 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.ntp_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
-    // E26 (§4): the systemic risk limits in force, resolved from the config
-    // file's [risk] section — this Epic's only wired input — and echoed
-    // unconditionally like every other budget above: the factory posture
-    // (all nine off, §4.1) must be visible in the boot log, not greppable.
-    // The set is then handed to the core through `RiskConfig`, the one
-    // hand-off `RiskGate::new` already makes.
-    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
+    // E26 (§4) / issue #967 (Phase-5): the systemic risk limits are resolved
+    // from the `.env` face ONLY (`BK_RISK_*`, folded into the process env by
+    // the launcher). The TOML `[risk]` section is retired as an effective
+    // source; a file that still carries one is inert. Echoed unconditionally:
+    // the factory posture (all nine off, §4.1) must be visible in the boot log.
+    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_env();
     // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
     // armed the budget. The resolver already picked CLI > env > [risk] > the
     // compiled default for the daily-loss breaker — the matrix must agree
@@ -288,8 +266,36 @@ async fn main() -> anyhow::Result<()> {
         };
         s
     };
-    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> =
-        file.risk.ladder.iter().map(|row| row.to_step()).collect();
+    // Issue #967 (Phase-5) A-item: the `blitzkrieg` wrapper folds `.env` into
+    // the process environment, so a bare `blitzkrieg-core` run sees none of the
+    // nine BK_RISK_* keys. If `.env` itself is missing or unreadable too, the
+    // silent factory posture would be invisible — name the file so the boot log
+    // answers "where did the limits go?".
+    let env_path = ".env";
+    let all_keys_absent = [
+        "BK_RISK_MAX_SINGLE_LOSS_USD",
+        "BK_RISK_MAX_DAILY_DRAWDOWN_USD",
+        "BK_RISK_MAX_POSITION_SIZE",
+        "BK_RISK_MAX_CONSECUTIVE_LOSSES",
+        "BK_RISK_COOLDOWN_MINUTES",
+        "BK_RISK_MAX_TOTAL_POSITION",
+        "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
+        "BK_RISK_MAX_CORRELATION_USD",
+        "BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
+    ]
+    .iter()
+    .all(|key| std::env::var(key).is_err());
+    if all_keys_absent && !std::path::Path::new(env_path).is_file() {
+        eprintln!(
+            "blitzkrieg-core: WARNING {env_path} is missing or unreadable; \
+             all nine BK_RISK_* limits are unset — running at factory \
+             (nine limits at factory off)"
+        );
+    }
+    // Issue #967 (Phase-5): the `[[risk.ladder]]` opt-in lived in TOML. The
+    // env face has no ladder array (by design — an array cannot be expressed
+    // as a scalar), so an explicit ladder is no longer sourced from the file.
+    let explicit_ladder: Vec<blitzkrieg_core::arbitration::LadderStep> = Vec::new();
     for line in systemic.report_lines() {
         eprintln!("blitzkrieg-core: {line}");
     }
@@ -696,6 +702,11 @@ async fn main() -> anyhow::Result<()> {
                 trailing_min_high_pct: args.exit_trailing_min_high_pct,
                 min_trail_pct: args.exit_min_trail_pct,
                 force_exit_sec: args.exit_force_sec,
+                // #966 runtime-persistence: these two booleans are read from
+                // `BK_EXIT_TRAILING_ENABLED` / `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST`
+                // in args.rs so a `risk.setExit` hot edit survives a restart.
+                trailing_enabled: args.exit_trailing_enabled,
+                strategy_exit_maker_first: args.exit_strategy_exit_maker_first,
                 ..Default::default()
             },
             // Issue #464: the operator's `[[risk.ladder]]` also drives the

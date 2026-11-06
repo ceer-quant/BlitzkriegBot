@@ -1,5 +1,11 @@
 # Opt-in live profile for a 100 USDC bankroll (issue #870).
 #
+# 〔issue 967 退休，2026-11-06〕THIS FILE IS NOT READ. `BK_CONFIG`,
+# `--config` and `--no-config` are gone with the TOML layer; the numbers below
+# are now spelled as `BK_RISK_*` / `BK_MAX_ORDERBOOK_STALE_MS` keys in
+# `production-live-100u.env`. `scripts/live-100u-preflight.mjs --config`
+# locks the record here to that env profile. The original header follows.
+#
 # This file is not the default. A normal boot still reads default.toml, and
 # `.env.example` keeps DRY_RUN=true. Point the kernel here only after
 # `scripts/live-100u-preflight.mjs` has passed, via production-live-100u.env

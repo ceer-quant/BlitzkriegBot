@@ -9,7 +9,7 @@
 //!    existing `RiskConfig` limits already follow, and the only posture this
 //!    codebase allows for new risk enforcement.
 //! 2. **Provenance is part of the value**: the `risk.limits` readout (§4.4)
-//!    never shows a bare number. "35" without "toml" is not an answer an
+//!    never shows a bare number. "35" without "env" is not an answer an
 //!    operator can act on — they would not know whether a restart, a flag, or
 //!    a stale file produced it. So every limit is a [`Bound`]: value + source,
 //!    in one type, all the way to the wire.
@@ -25,44 +25,35 @@ use serde::Serialize;
 pub enum LimitSource {
     /// The compiled-in default. For the nine new limits: 0 = off (§4.1).
     Default,
-    /// A `user_layer/configs/*.toml` section.
-    Toml,
-    /// An environment variable.
+    /// An environment variable (`.env` folded into the process environment).
     Env,
     /// A CLI flag — the strongest link of the existing chain.
     Flag,
 }
 
 impl LimitSource {
-    /// The source recorded when a limit is only ever set from the config
-    /// file's `[risk]` section (this Epic's only wired input; env/flag stay
-    /// variants of the vocabulary so a later wiring does not change the wire).
-    pub const FILE: LimitSource = LimitSource::Toml;
-
-    /// The provenance word the boot log spells (`toml`, `env`, `flag`,
-    /// `default`) — the same words the kernel's provenance report has always
-    /// used, kept as a method here so the wire's vocabulary never has to
-    /// reach into the config module for its spelling.
+    /// The provenance word the boot log spells (`env`, `flag`, `default`) —
+    /// the same words the kernel's provenance report has always used, kept as
+    /// a method here so the wire's vocabulary never has to reach into the
+    /// config module for its spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             LimitSource::Default => "default",
-            LimitSource::Toml => "toml",
             LimitSource::Env => "env",
             LimitSource::Flag => "flag",
         }
     }
 }
 
-/// The two vocabularies are the SAME four layers with two names for the
-/// strongest one (the config layer says `cli`, the wire says `flag`). The map
-/// is 1:1 by construction, so a resolved budget can name its true layer
-/// without a second spelling table drifting apart.
+/// The two vocabularies are the SAME layers with two names for the strongest
+/// one (the config layer says `cli`, the wire says `flag`). The map is 1:1 by
+/// construction, so a resolved budget can name its true layer without a
+/// second spelling table drifting apart.
 impl From<crate::config::Source> for LimitSource {
     fn from(s: crate::config::Source) -> Self {
         match s {
             crate::config::Source::Cli => LimitSource::Flag,
             crate::config::Source::Env => LimitSource::Env,
-            crate::config::Source::Toml => LimitSource::Toml,
             crate::config::Source::Default => LimitSource::Default,
         }
     }
@@ -184,30 +175,52 @@ pub struct SystemicRiskLimits {
 }
 
 impl SystemicRiskLimits {
-    /// Resolve the config-file face (all-optional `[risk]` keys) into the
-    /// effective set. This Epic's only wired input is the TOML layer, so a
-    /// present key is a `toml`-sourced `Bound` and an absent one stays the
-    /// factory `Bound::off()`; `env`/`flag` remain members of the source
-    /// vocabulary (§4.4) for a later wiring, not dead variants — the wire
-    /// contract names all four.
-    pub fn from_file(file: &crate::config::RiskFile) -> Self {
-        let one = |v: Option<Decimal>| {
-            v.map(|v| Bound::new(v, LimitSource::Toml))
-                .unwrap_or_default()
+    /// Phase-5 (issue #967): the env face is the ONLY effective source. `.env`
+    /// (folded into the process environment by the launcher) supplies the nine
+    /// `BK_RISK_*` keys; a missing key stays the factory `Bound::off()`. No
+    /// TOML layer is consulted — a `[risk]` section in a config file is inert.
+    ///
+    /// A key that is present but unparseable is surfaced as a `tracing::warn`
+    /// naming the key and its raw value; an absent key stays the silent
+    /// factory `Bound::off()` (§4.1). The boot layer emits a separate WARN
+    /// when `.env` itself is missing or unreadable and all nine keys are
+    /// absent, so an operator bypassing the `blitzkrieg` wrapper is not left
+    /// guessing why every limit stayed off.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// The pure lookup form of [`Self::from_env`] (tests drive it without
+    /// touching the process environment). `lookup` returns the raw string so a
+    /// bad value can be named in the warning.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let one = |key: &str| match lookup(key) {
+            Some(raw) => match raw.trim().parse::<Decimal>() {
+                Ok(v) => Bound::new(v, LimitSource::Env),
+                Err(_) => {
+                    tracing::warn!(
+                        key = %key,
+                        raw = %raw,
+                        "risk key value unparseable — limit stays off (factory default)"
+                    );
+                    Bound::off()
+                }
+            },
+            None => Bound::off(),
         };
         Self {
             account: AccountRiskLimits {
-                max_single_loss_usd: one(file.max_single_loss_usd),
-                max_daily_drawdown_usd: one(file.max_daily_drawdown_usd),
-                max_position_size: one(file.max_position_size),
-                max_consecutive_losses: one(file.max_consecutive_losses),
-                cooldown_minutes: one(file.cooldown_minutes),
+                max_single_loss_usd: one("BK_RISK_MAX_SINGLE_LOSS_USD"),
+                max_daily_drawdown_usd: one("BK_RISK_MAX_DAILY_DRAWDOWN_USD"),
+                max_position_size: one("BK_RISK_MAX_POSITION_SIZE"),
+                max_consecutive_losses: one("BK_RISK_MAX_CONSECUTIVE_LOSSES"),
+                cooldown_minutes: one("BK_RISK_COOLDOWN_MINUTES"),
             },
             global: GlobalRiskLimits {
-                max_total_position: one(file.max_total_position),
-                max_total_exposure_usd: one(file.max_total_exposure_usd),
-                max_correlation_usd: one(file.max_correlation_usd),
-                global_kill_switch_loss_usd: one(file.global_kill_switch_loss_usd),
+                max_total_position: one("BK_RISK_MAX_TOTAL_POSITION"),
+                max_total_exposure_usd: one("BK_RISK_MAX_TOTAL_EXPOSURE_USD"),
+                max_correlation_usd: one("BK_RISK_MAX_CORRELATION_USD"),
+                global_kill_switch_loss_usd: one("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD"),
             },
         }
     }
@@ -531,16 +544,59 @@ mod tests {
 
     #[test]
     fn zero_is_off_and_positive_is_on() {
-        assert!(!Bound::new(Decimal::ZERO, LimitSource::Toml).is_enabled());
-        assert!(Bound::new(dec!(0.01), LimitSource::Toml).is_enabled());
+        assert!(!Bound::new(Decimal::ZERO, LimitSource::Env).is_enabled());
+        assert!(Bound::new(dec!(0.01), LimitSource::Env).is_enabled());
         assert!(Bound::new(dec!(35), LimitSource::Flag).is_enabled());
+    }
+
+    /// Issue #967 (Phase-5): the env face is the only effective source; every
+    /// armed bound must name `env` and a missing key must stay at the factory
+    /// posture (no TOML fallback anywhere in the chain).
+    #[test]
+    fn env_lookup_arms_all_nine_and_names_env() {
+        let keys = std::collections::HashMap::from([
+            ("BK_RISK_MAX_SINGLE_LOSS_USD", dec!(0.5)),
+            ("BK_RISK_MAX_DAILY_DRAWDOWN_USD", dec!(5)),
+            ("BK_RISK_MAX_POSITION_SIZE", dec!(5)),
+            ("BK_RISK_MAX_CONSECUTIVE_LOSSES", dec!(4)),
+            ("BK_RISK_COOLDOWN_MINUTES", dec!(30)),
+            ("BK_RISK_MAX_TOTAL_POSITION", dec!(6)),
+            ("BK_RISK_MAX_TOTAL_EXPOSURE_USD", dec!(20)),
+            ("BK_RISK_MAX_CORRELATION_USD", dec!(12)),
+            ("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD", dec!(8)),
+        ]);
+        let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).map(|v| v.to_string()));
+        for (name, b) in [
+            ("max_single_loss_usd", &s.account.max_single_loss_usd),
+            ("max_daily_drawdown_usd", &s.account.max_daily_drawdown_usd),
+            ("max_position_size", &s.account.max_position_size),
+            ("max_consecutive_losses", &s.account.max_consecutive_losses),
+            ("cooldown_minutes", &s.account.cooldown_minutes),
+            ("max_total_position", &s.global.max_total_position),
+            ("max_total_exposure_usd", &s.global.max_total_exposure_usd),
+            ("max_correlation_usd", &s.global.max_correlation_usd),
+            (
+                "global_kill_switch_loss_usd",
+                &s.global.global_kill_switch_loss_usd,
+            ),
+        ] {
+            assert!(b.is_enabled(), "{name} must be armed by .env");
+            assert_eq!(b.source(), LimitSource::Env, "{name} provenance");
+        }
+        // No key → factory posture, never an env-sourced one.
+        let empty = SystemicRiskLimits::from_lookup(|_| None as Option<String>);
+        assert!(!empty.account.max_position_size.is_enabled());
+        assert_eq!(
+            empty.account.max_position_size.source(),
+            LimitSource::Default
+        );
     }
 
     #[test]
     fn bound_serializes_as_string_value_plus_source() {
-        let doc = serde_json::to_value(Bound::new(dec!(35), LimitSource::Toml)).unwrap();
+        let doc = serde_json::to_value(Bound::new(dec!(35), LimitSource::Env)).unwrap();
         assert_eq!(doc["value"], "35");
-        assert_eq!(doc["source"], "toml");
+        assert_eq!(doc["source"], "env");
         let doc = serde_json::to_value(Bound::off()).unwrap();
         assert_eq!(doc["value"], "0");
         assert_eq!(doc["source"], "default");
@@ -580,12 +636,12 @@ mod tests {
     #[test]
     fn report_lines_name_only_the_armed_limits_with_their_source() {
         let mut sys = SystemicRiskLimits::default();
-        sys.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Toml);
+        sys.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Env);
         sys.global.global_kill_switch_loss_usd = Bound::new(dec!(1000), LimitSource::Flag);
         let lines = sys.report_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
-            lines[0].contains("max_single_loss_usd=35 (toml)"),
+            lines[0].contains("max_single_loss_usd=35 (env)"),
             "{}",
             lines[0]
         );
@@ -699,7 +755,7 @@ mod tests {
     #[test]
     fn kill_switch_cap_refuses_new_entries_when_the_day_is_lost() {
         let mut limits = SystemicRiskLimits::default();
-        limits.global.global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Toml);
+        limits.global.global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Env);
         let facts = SystemicFacts {
             day_realized_usd: dec!(-50),
             ..Default::default()
@@ -726,7 +782,7 @@ mod tests {
     #[test]
     fn total_position_cap_refuses_when_the_table_is_full() {
         let mut limits = SystemicRiskLimits::default();
-        limits.global.max_total_position = Bound::new(dec!(2), LimitSource::Toml);
+        limits.global.max_total_position = Bound::new(dec!(2), LimitSource::Env);
         let facts = SystemicFacts {
             open_positions: 2,
             ..Default::default()
@@ -752,7 +808,7 @@ mod tests {
     #[test]
     fn total_exposure_cap_refuses_when_open_plus_incoming_over_commits() {
         let mut limits = SystemicRiskLimits::default();
-        limits.global.max_total_exposure_usd = Bound::new(dec!(100), LimitSource::Toml);
+        limits.global.max_total_exposure_usd = Bound::new(dec!(100), LimitSource::Env);
         let facts = SystemicFacts {
             open_exposure_usd: dec!(95),
             ..Default::default()
@@ -775,7 +831,7 @@ mod tests {
     #[test]
     fn correlation_cap_bounds_the_same_asset_commitment() {
         let mut limits = SystemicRiskLimits::default();
-        limits.global.max_correlation_usd = Bound::new(dec!(20), LimitSource::Toml);
+        limits.global.max_correlation_usd = Bound::new(dec!(20), LimitSource::Env);
         let facts = SystemicFacts {
             same_asset_exposure_usd: dec!(18),
             ..Default::default()
@@ -793,7 +849,7 @@ mod tests {
     #[test]
     fn position_size_cap_shrinks_to_whole_shares() {
         let mut limits = SystemicRiskLimits::default();
-        limits.account.max_position_size = Bound::new(dec!(7.5), LimitSource::Toml);
+        limits.account.max_position_size = Bound::new(dec!(7.5), LimitSource::Env);
         match judge_entry(
             &limits,
             &SystemicFacts::default(),
@@ -812,10 +868,10 @@ mod tests {
     #[test]
     fn single_loss_cap_shrinks_and_names_itself_when_tighter_than_size_cap() {
         let mut limits = SystemicRiskLimits::default();
-        limits.account.max_position_size = Bound::new(dec!(100), LimitSource::Toml);
+        limits.account.max_position_size = Bound::new(dec!(100), LimitSource::Env);
         // entry 0.50, stop 12% → per-share 0.06 → 583 shares fit the loss
         // cap; the size cap allows 100 → the loss cap does not bite.
-        limits.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Toml);
+        limits.account.max_single_loss_usd = Bound::new(dec!(35), LimitSource::Env);
         assert_eq!(
             judge_entry(
                 &limits,
@@ -827,7 +883,7 @@ mod tests {
             EntryJudgment::Pass
         );
         // A tighter loss cap bites: 6 × 0.06 = 0.36 <= 0.40 < 7 × 0.06.
-        limits.account.max_single_loss_usd = Bound::new(dec!(0.40), LimitSource::Toml);
+        limits.account.max_single_loss_usd = Bound::new(dec!(0.40), LimitSource::Env);
         match judge_entry(
             &limits,
             &SystemicFacts::default(),
@@ -846,7 +902,7 @@ mod tests {
     #[test]
     fn a_loss_cap_nothing_fits_refuses_instead_of_guessing() {
         let mut limits = SystemicRiskLimits::default();
-        limits.account.max_single_loss_usd = Bound::new(dec!(0.01), LimitSource::Toml);
+        limits.account.max_single_loss_usd = Bound::new(dec!(0.01), LimitSource::Env);
         // One share's worst case (0.06) alone over-commits the 0.01 cap.
         match judge_entry(
             &limits,
@@ -866,7 +922,7 @@ mod tests {
     #[test]
     fn a_size_cap_below_one_share_refuses() {
         let mut limits = SystemicRiskLimits::default();
-        limits.account.max_position_size = Bound::new(dec!(0.5), LimitSource::Toml);
+        limits.account.max_position_size = Bound::new(dec!(0.5), LimitSource::Env);
         match judge_entry(
             &limits,
             &SystemicFacts::default(),

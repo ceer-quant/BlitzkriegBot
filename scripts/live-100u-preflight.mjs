@@ -97,11 +97,11 @@ export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
   if (liveEnv.DRY_RUN !== 'false') {
     problems.push(`production-live-100u.env DRY_RUN=${liveEnv.DRY_RUN} (the opt-in file must say false, and only that file)`);
   }
-  if (example.BK_CONFIG === liveEnv.BK_CONFIG) {
-    problems.push('default config points at the live profile');
-  }
-  if (liveEnv.BK_CONFIG !== 'user_layer/configs/production-live-100u.toml') {
-    problems.push(`BK_CONFIG=${liveEnv.BK_CONFIG}`);
+  // Issue #967 retired the TOML layer: neither file may still point at one, and
+  // the nine bounds must arrive as env keys (an inert `.env` key arms nothing).
+  if (example.BK_CONFIG !== undefined) problems.push(`.env.example BK_CONFIG=${example.BK_CONFIG}`);
+  if (liveEnv.BK_CONFIG !== undefined) {
+    problems.push(`live BK_CONFIG=${liveEnv.BK_CONFIG} (the TOML layer is retired; drop the key)`);
   }
   if (num(liveEnv.BK_LIVE_BANKROLL_USD) !== 100) {
     problems.push(`bankroll ${liveEnv.BK_LIVE_BANKROLL_USD} (want 100)`);
@@ -138,6 +138,12 @@ export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
   };
   for (const [k, v] of Object.entries(required)) {
     if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);
+  }
+  // The toml file is an inert record now, so the live env is what arms the
+  // boot: every one of the nine must be spelled there with the same value.
+  for (const [k, v] of Object.entries(required)) {
+    const key = `BK_RISK_${k.toUpperCase()}`;
+    if (liveEnv[key] !== v) problems.push(`${key}=${liveEnv[key]} want ${v}`);
   }
   if (allow.length !== 0) problems.push(`allowlist is not empty: ${allow.join(',')}`);
   return { problems, pass: problems.length === 0 };

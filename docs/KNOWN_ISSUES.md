@@ -14,7 +14,7 @@
 
 ## 3. 系统风控以前默认全关
 
-issue #864。正常启动现在读 `user_layer/configs/default.toml` 的 `[risk]`。`--no-config` 仍是全关，给测试用。
+issue #864。issue #967 起风控只认 `BK_RISK_*` 九个环境变量（面板的 `risk.setSystemic` 会写回 `.env`）；`user_layer/configs/default.toml` 的 `[risk]` 段已失效，未设 env 即出厂全关。
 
 ## 4. 盘口新鲜度与自动解冻
 

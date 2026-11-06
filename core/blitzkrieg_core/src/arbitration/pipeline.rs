@@ -902,7 +902,7 @@ mod tests {
     fn an_armed_size_cap_shrinks_the_entry_to_a_modified_decision() {
         let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
         risk.config_mut().systemic.account.max_position_size =
-            Bound::new(dec!(7), LimitSource::Toml);
+            Bound::new(dec!(7), LimitSource::Env);
         let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
         let out = process_intent(
             &StrategyIntent::from_request(request(dec!(0.40), dec!(100))),
@@ -952,7 +952,7 @@ mod tests {
     fn an_armed_systemic_block_never_shrinks_a_close() {
         let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
         risk.config_mut().systemic.account.max_position_size =
-            Bound::new(dec!(7), LimitSource::Toml);
+            Bound::new(dec!(7), LimitSource::Env);
         let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
         let mut close = request(dec!(0.60), dec!(100));
         close.side = Side::Sell;
@@ -979,7 +979,7 @@ mod tests {
         risk.config_mut()
             .systemic
             .global
-            .global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Toml);
+            .global_kill_switch_loss_usd = Bound::new(dec!(50), LimitSource::Env);
         let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
         c.systemic_facts.day_realized_usd = dec!(-50);
         let out = process_intent(
@@ -1002,7 +1002,7 @@ mod tests {
     fn the_global_exposure_cap_refuses_an_entry_that_over_commits() {
         let (mut ledger, mut risk, breaker, exit_cfg, tokens) = setup();
         risk.config_mut().systemic.global.max_total_exposure_usd =
-            Bound::new(dec!(100), LimitSource::Toml);
+            Bound::new(dec!(100), LimitSource::Env);
         let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
         c.systemic_facts.open_exposure_usd = dec!(95);
         let out = process_intent(
