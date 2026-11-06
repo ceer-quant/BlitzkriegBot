@@ -546,6 +546,20 @@ pub use blitzkrieg_market_api::{
 };
 pub use modes::StrategyMode;
 
+// ── the frozen strategy capability model (issue #843, P1) ───────────────────
+// ONE declaration surface both runtimes speak: the C-ABI optional-symbol
+// names, the Lua manifest keys, the three-state verdict encodings, the
+// entry-gate exemption vocabulary, the `bk_*` entry-point names and the
+// host-created immutable capability grant. Names and a table only — no
+// behaviour — so the map cannot drift from either runtime again.
+pub mod capability;
+pub use capability::{
+    CapabilityGrantBuilder, DECLARATION_MAP, DEFAULT_GRANTED_SURFACES, DataSurface, DeclCap,
+    DeclRow, GATE_MOMENTUM_KEY, GATE_TIMING_FLOOR_KEY, GATE_TIMING_KEY, GateExemption,
+    LuaEntryPoint, MANIFEST_API_VERSION, STRATEGY_CAPABILITY_MODEL_VERSION,
+    StrategyCapabilityGrant, TrailingExitVerdict, host_grant,
+};
+
 /// Shell helpers the generated `__bk_export` module imports via `$crate::shell`.
 #[doc(hidden)]
 pub mod shell {

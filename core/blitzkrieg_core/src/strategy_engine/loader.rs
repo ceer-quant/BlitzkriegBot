@@ -725,9 +725,11 @@ pub struct LoadedForeign {
     /// not a mirror.
     pub entry_pair: Option<crate::signal::TradePairDecl>,
     /// Three-state trailing-stop verdict (#642), read through the OPTIONAL
-    /// `bk_strategy_trailing_exit` symbol. `None` = no symbol (or the -1
-    /// return) = follow the kernel-wide `risk.setExit` trailingEnabled value,
-    /// which is every existing library's behaviour byte-identically.
+    /// `bk_strategy_trailing_exit` symbol and decoded by the SHARED
+    /// capability model's `TrailingExitVerdict` (issue #843). `None` = no
+    /// symbol (or the -1 return) = follow the kernel-wide `risk.setExit`
+    /// trailingEnabled value, which is every existing library's behaviour
+    /// byte-identically.
     pub wants_trailing_exit: Option<bool>,
     /// E-VA atomic-batch declaration (#642), read through the OPTIONAL
     /// `bk_strategy_atomic_batch` symbol. `false` = no symbol (or the 0
@@ -1407,5 +1409,69 @@ not-a-hash target/release/ignored.dylib\n";
             .expect_err("world-writable must be refused");
         assert!(err.contains("world-writable"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #843 P1: the loader's OPTIONAL-symbol table and the shared capability
+    /// model's declaration map are the SAME surface. The map's C column was
+    /// pinned in strategy_api's own tests; here the LOADER proves it builds
+    /// against those exact constants (this file imports `BK_*_SYMBOL` from
+    /// strategy_api, so a map/loader drift compiles but must not pass).
+    #[cfg(feature = "strategy-loading")]
+    #[test]
+    fn capability_model_symbols_are_the_loader_symbols() {
+        use blitzkrieg_strategy_api::{BK_SETTLEMENT_HOLDS_SYMBOL, DECLARATION_MAP, DeclCap};
+        let by_name = |cap: DeclCap| {
+            DECLARATION_MAP
+                .iter()
+                .find(|r| r.cap == cap)
+                .map(|r| r.c_abi_symbol)
+                .expect("row present")
+        };
+        assert_eq!(by_name(DeclCap::Modes), Some(BK_DECLARE_MODES_SYMBOL));
+        assert_eq!(
+            by_name(DeclCap::GateExemptions),
+            Some(BK_GATE_EXEMPTIONS_SYMBOL)
+        );
+        assert_eq!(
+            by_name(DeclCap::EvolvableKnobs),
+            Some(BK_EVOLVABLE_KNOBS_SYMBOL)
+        );
+        assert_eq!(by_name(DeclCap::BindEvalCtx), Some(BK_BIND_EVAL_CTX_SYMBOL));
+        assert_eq!(by_name(DeclCap::ConfigView), Some(BK_CONFIG_VIEW_SYMBOL));
+        assert_eq!(
+            by_name(DeclCap::HoldsToSettlement),
+            Some(BK_SETTLEMENT_HOLDS_SYMBOL)
+        );
+        assert_eq!(by_name(DeclCap::OnKline), Some(BK_ON_KLINE_SYMBOL));
+        assert_eq!(by_name(DeclCap::EntryPair), Some(BK_ENTRY_PAIR_SYMBOL));
+        assert_eq!(
+            by_name(DeclCap::TrailingExit),
+            Some(BK_TRAILING_EXIT_SYMBOL)
+        );
+        assert_eq!(by_name(DeclCap::AtomicBatch), Some(BK_ATOMIC_BATCH_SYMBOL));
+    }
+
+    /// #843 P1: warnings between the shared verdict decoder and the loader's
+    /// probe path — how the encode/decode pair keeps out-of-range ABI ints
+    /// from widening an operator's policy (fail-closed across a reload too).
+    #[test]
+    fn trailing_verdict_decode_matches_the_loader_rule() {
+        use blitzkrieg_strategy_api::TrailingExitVerdict;
+        // The fixture's declared 1 → Trail; parity's absent symbol →
+        // FollowKernel. Same table the manifest gate uses for the boolean.
+        assert_eq!(
+            TrailingExitVerdict::from_abi_int(1).to_option_bool(),
+            Some(true)
+        );
+        assert_eq!(TrailingExitVerdict::from_abi_int(-1).to_option_bool(), None);
+        assert_eq!(
+            TrailingExitVerdict::from_abi_int(0).to_option_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            TrailingExitVerdict::from_abi_int(7).to_option_bool(),
+            None,
+            "an out-of-range int is a malformed declaration, never a trail"
+        );
     }
 }

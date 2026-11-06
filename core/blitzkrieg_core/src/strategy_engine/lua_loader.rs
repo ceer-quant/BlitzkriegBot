@@ -38,8 +38,8 @@ use blitzkrieg_lua_runtime::{
     FeeScheduleView, LuaStrategy, PairLegRow, PairViewRow, UnifiedEventView, UnifiedListingView,
 };
 use blitzkrieg_strategy_api::{
-    BookUpdate, FreshBook, HoldingView, MarketInfo, RoundContext, RoundInfo, SafeStrategy,
-    StrategyMode,
+    BookUpdate, FreshBook, HoldingView, MANIFEST_API_VERSION, MarketInfo, RoundContext, RoundInfo,
+    SafeStrategy, StrategyMode,
 };
 
 use crate::model::{OrderbookSnapshot, SignalDirection};
@@ -48,8 +48,28 @@ use crate::strategies::shadow_twin::ShadowFactory;
 use crate::strategies::{EngineStrategy, GateExemptions, StrategyCtx, StrategyExitIntent};
 use strategy_logic::params::{KnobSpec, StrategyParams};
 
-/// The one supported manifest API version (§6.4).
-const MANIFEST_API: &str = "1.0";
+/// The one supported manifest API version (§6.4). The constant lives in the
+/// capability model (`strategy_api::capability`, issue #843) — the manifest
+/// gate and the declared BlitzkriegStrategy API **1.0** name anchor on ONE
+/// value, so the two sides cannot drift.
+const MANIFEST_API: &str = MANIFEST_API_VERSION;
+
+/// Compile-time pin: the shared constant IS the gate. A spelling change in
+/// strategy_api reds this TEST instead of silently re-anchoring the manifest
+/// gate to a version nobody declared. (A const `&str` comparison is not
+/// stable yet; this is the runtime test's job.)
+#[cfg(test)]
+mod capability_pin {
+    /// The manifest gate marches with the shared model's version.
+    #[test]
+    fn manifest_api_anchors_on_the_shared_constant() {
+        assert_eq!(super::MANIFEST_API, manifest_api_value());
+    }
+
+    fn manifest_api_value() -> &'static str {
+        "1.0"
+    }
+}
 
 /// One `manifest.json`. `modes` is OPTIONAL (§7): absent = the strategy does
 /// not participate in the load-time compatibility handshake, exactly like a

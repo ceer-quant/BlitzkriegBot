@@ -229,7 +229,15 @@ impl BkState {
 /// The suggested entry points a Lua strategy MAY define (§6.5). `bk_evaluate`
 /// is the only REQUIRED one. The loader checks it (missing required →
 /// refuse); `LuaStrategy` calls the ones that exist and skips the rest.
-pub const ENTRY_POINTS: [&str; 4] = ["bk_evaluate", "bk_on_book", "bk_on_round", "bk_on_kline"];
+/// Derived from the shared capability model's [`LuaEntryPoint`] enum (issue
+/// #843) — the names live THERE, so the sandbox, the loader and the docs
+/// spell them identically and a fifth entry point is one variant.
+pub const ENTRY_POINTS: [&str; 4] = [
+    blitzkrieg_strategy_api::LuaEntryPoint::Evaluate.global_name(),
+    blitzkrieg_strategy_api::LuaEntryPoint::OnBook.global_name(),
+    blitzkrieg_strategy_api::LuaEntryPoint::OnRound.global_name(),
+    blitzkrieg_strategy_api::LuaEntryPoint::OnKline.global_name(),
+];
 
 /// snake_case wire name of an interval (the `bk.kline(sym, interval)` key
 /// spelling, §6.4 table). Delegates to the shared type's ONE mapping

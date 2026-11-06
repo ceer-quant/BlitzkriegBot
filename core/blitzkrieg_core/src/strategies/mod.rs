@@ -31,6 +31,8 @@ pub mod test_support;
 
 pub use shadow_twin::{EngineStrategyShadow, ShadowFactory, ShadowTickCtx, ShadowTickResult};
 
+use blitzkrieg_strategy_api::GateExemption;
+
 use crate::model::{CryptoMarket, OrderbookSnapshot};
 use crate::signal::TradeSignal;
 use rust_decimal::Decimal;
@@ -116,16 +118,18 @@ impl GateExemptions {
         }
     }
 
-    /// Gate names in a stable order, for logs / diagnostics.
+    /// Gate names in a stable order, for logs / diagnostics. Spelled by the
+    /// shared capability model's exemption table (issue #843) — the audit
+    /// line, the C-ABI JSON and the Lua manifest cannot drift.
     pub fn gates(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.timing {
-            out.push("timing");
-        }
-        if self.momentum {
-            out.push("momentum");
-        }
-        out
+        GateExemption::ALL
+            .into_iter()
+            .filter(|g| match g {
+                GateExemption::Timing => self.timing,
+                GateExemption::Momentum => self.momentum,
+            })
+            .map(GateExemption::audit_name)
+            .collect()
     }
 
     /// Parse the JSON form used across the C ABI
@@ -138,18 +142,26 @@ impl GateExemptions {
     /// reading, not the looser one. That is why this field could be added to the
     /// existing optional symbol without a `BK_ABI_VERSION` bump.
     pub fn from_json(v: &serde_json::Value) -> Self {
+        // Issue #843: the wire keys come from the shared capability model
+        // (`strategy_api::capability`), so the C-ABI payload, the Lua
+        // manifest and this record spell the SAME two words.
         let flag = |key: &str| v.get(key).and_then(|b| b.as_bool()).unwrap_or(false);
         Self {
-            timing: flag("timing"),
-            momentum: flag("momentum"),
-            timing_min_time_left_sec: v.get("timing_min_time_left_sec").and_then(|n| n.as_i64()),
+            timing: flag(blitzkrieg_strategy_api::GATE_TIMING_KEY),
+            momentum: flag(blitzkrieg_strategy_api::GATE_MOMENTUM_KEY),
+            timing_min_time_left_sec: v
+                .get(blitzkrieg_strategy_api::GATE_TIMING_FLOOR_KEY)
+                .and_then(|n| n.as_i64()),
         }
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        let mut v = serde_json::json!({ "timing": self.timing, "momentum": self.momentum });
+        let mut v = serde_json::json!({
+            blitzkrieg_strategy_api::GATE_TIMING_KEY: self.timing,
+            blitzkrieg_strategy_api::GATE_MOMENTUM_KEY: self.momentum,
+        });
         if let Some(n) = self.timing_min_time_left_sec {
-            v["timing_min_time_left_sec"] = serde_json::json!(n);
+            v[blitzkrieg_strategy_api::GATE_TIMING_FLOOR_KEY] = serde_json::json!(n);
         }
         v
     }
