@@ -1085,11 +1085,7 @@ impl Core {
         let Some(engine) = self.engine.as_mut() else {
             return Vec::new();
         };
-        let already: HashSet<String> = engine
-            .scope_sources()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let already: HashSet<String> = engine.scope_sources().into_iter().map(|(n, _)| n).collect();
         let mut loaded: Vec<String> = Vec::new();
         for pkg in crate::strategy_engine::lua_loader::discover_lua_packages(Path::new(dir)) {
             let name = match pkg.file_name().and_then(|n| n.to_str()) {

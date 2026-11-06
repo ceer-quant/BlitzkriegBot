@@ -665,12 +665,11 @@ impl Core {
         }
         // Plan-first validation: every NEW name in this request
         // (`requested − persisted`) must be REGISTERED in the engine (any
-        // scope). Already-persisted-but-unregistered names are warn-skipped
-        // instead of refusing the whole write — otherwise a stale name that
-        // can no longer be loaded (e.g. a Lua package refused at boot) poisons
-        // `account.strategies.set` forever and even removing it becomes
-        // impossible (issue #975). The assignable set is what `strategy.list`
-        // reports.
+        // scope). A new unregistered name is a typo and must fail — never
+        // silently inert (the doc contract: "a typo fails here").
+        // Already-persisted-but-unregistered names are warn-skipped: they sit
+        // in .env from an earlier boot, can't be loaded, and the operator must
+        // still be able to remove them without the whole write being refused.
         if self.engine.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -694,13 +693,32 @@ impl Core {
                 .expect("engine presence checked above")
                 .strategy_registered(name)
             {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.strategies.set: strategy `{name}` is not \
+                         registered — the assignable set is what \
+                         `strategy.list` reports"
+                    ),
+                ));
+            }
+        }
+        // Warn-skip stale names already persisted but no longer registered:
+        // they can't load, but the operator must still be able to drop them.
+        for name in &persisted {
+            if !requested.iter().any(|r| r == name)
+                && !self
+                    .engine
+                    .as_ref()
+                    .expect("engine presence checked above")
+                    .strategy_registered(name)
+            {
                 tracing::warn!(
                     strategy = name,
                     account = %id,
-                    "account.strategies.set: strategy `{name}` is not registered \
-                     but is already persisted for this account — warn-skipping \
-                     the name so it can still be removed; the assignable set \
-                     is what `strategy.list` reports",
+                    "account.strategies.set: strategy `{name}` is persisted \
+                     but not registered — warn-skipping, it can be removed \
+                     but will not run until re-registered",
                 );
             }
         }
