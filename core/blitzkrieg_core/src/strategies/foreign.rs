@@ -356,9 +356,12 @@ pub struct ForeignStrategy {
     /// attached by `adopt_eval_json` to entries without their own per-entry
     /// `pair`. None = no default.
     entry_pair: Option<crate::signal::TradePairDecl>,
-    /// OPTIONAL three-state trailing verdict (#642): None = follow the
-    /// kernel-wide value, Some(bool) = the strategy's own override.
-    wants_trailing_exit: Option<bool>,
+    /// OPTIONAL three-state trailing verdict (#642), carried in the SHARED
+    /// capability model's enum (issue #843) — `FollowKernel` = follow the
+    /// kernel-wide value, `Trail`/`Never` = the strategy's own override.
+    /// The `i32`→enum decode happens ONCE here through
+    /// [`blitzkrieg_strategy_api::TrailingExitVerdict::from_abi_int`].
+    wants_trailing_exit: blitzkrieg_strategy_api::TrailingExitVerdict,
     /// OPTIONAL atomic-batch declaration (#642). false = the per-order path.
     atomic_batch: bool,
 
@@ -420,15 +423,15 @@ impl ForeignStrategy {
             // Provisional None: reading it needs `&self` (the deallocator),
             // same shape as read_knobs below.
             entry_pair: None,
-            wants_trailing_exit: trailing_exit_fn.and_then(|f| {
-                // SAFETY: valid handle; the symbol is a pure integer read.
-                // Any value outside {-1, 0, 1} reads as -1 ("no declaration").
-                match unsafe { f(handle) } {
-                    1 => Some(true),
-                    0 => Some(false),
-                    _ => None,
-                }
-            }),
+            wants_trailing_exit: trailing_exit_fn
+                .map(|f| {
+                    // SAFETY: valid handle; the symbol is a pure integer read.
+                    // The verdict decodes through the shared capability model
+                    // (issue #843): any value outside {-1, 0, 1} is "no
+                    // declaration", so a garbage int can never read as a Trail.
+                    blitzkrieg_strategy_api::TrailingExitVerdict::from_abi_int(unsafe { f(handle) })
+                })
+                .unwrap_or(blitzkrieg_strategy_api::TrailingExitVerdict::FollowKernel),
             atomic_batch: atomic_batch_fn
                 .map(|f| -> bool {
                     // SAFETY: valid handle; a pure integer read.
@@ -698,11 +701,12 @@ impl EngineStrategy for ForeignStrategy {
     }
 
     /// #642: the three-state trailing verdict, read ONCE at load (a property
-    /// of the library build). Absent symbol = `None` = follow the kernel-wide
-    /// `risk.setExit` trailingEnabled value, bit-identically to every existing
-    /// library.
+    /// of the library build). Absent symbol = `FollowKernel` = follow the
+    /// kernel-wide `risk.setExit` trailingEnabled value, bit-identically to
+    /// every existing library. The shared enum converts to the trait's
+    /// `Option<bool>` in ONE place (`to_option_bool`).
     fn wants_trailing_exit(&self) -> Option<bool> {
-        self.wants_trailing_exit
+        self.wants_trailing_exit.to_option_bool()
     }
 
     /// #642: the E-VA atomic-batch declaration, read ONCE at load. Absent
@@ -1104,14 +1108,16 @@ impl ShadowFactory for ForeignShadowFactory {
             // the SAME declarations from its own handle — one instance per
             // declaration read keeps every handle's own deallocator in play.
             entry_pair: self.read_twin_entry_pair(handle),
-            wants_trailing_exit: self.lib.trailing_exit_fn.and_then(|f| {
-                // SAFETY: valid twin handle; a pure integer read.
-                match unsafe { f(handle) } {
-                    1 => Some(true),
-                    0 => Some(false),
-                    _ => None,
-                }
-            }),
+            wants_trailing_exit: self
+                .lib
+                .trailing_exit_fn
+                .map(|f| {
+                    // SAFETY: valid twin handle; a pure integer read. The shared
+                    // verdict decoder (issue #843) keeps the fail-closed
+                    // out-of-range rule alive on the twin path too.
+                    blitzkrieg_strategy_api::TrailingExitVerdict::from_abi_int(unsafe { f(handle) })
+                })
+                .unwrap_or(blitzkrieg_strategy_api::TrailingExitVerdict::FollowKernel),
             atomic_batch: self
                 .lib
                 .atomic_batch_fn
