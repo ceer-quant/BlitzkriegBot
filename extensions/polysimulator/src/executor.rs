@@ -560,52 +560,56 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
         if queries.is_empty() {
             continue;
         }
-        match client.updown_markets(None, None).await {
-            Ok(rows) => {
-                for query in &queries {
-                    match resolution_for(query, &rows) {
-                        Some(resolution) => {
-                            eprintln!(
-                                "polysimulator-extension: settlement {} payouts={:?}",
-                                resolution.condition_id, resolution.payouts
-                            );
-                            host.on_market_resolution(resolution).await;
-                        }
-                        // The list carries only rounds ending in the future;
-                        // an already-resolved condition rotates out within an
-                        // hour, so every query the list does not name falls
-                        // to the single-market verdict endpoint — the same
-                        // discipline the list path follows: unreadable or
-                        // not-yet-terminal answers NOTHING and never fabricates.
-                        None => match resolution_by_single_market(
-                            query,
-                            client.as_ref(),
-                            &outcome_polarity,
-                        )
-                        .await
-                        {
-                            Ok(Some(resolution)) => {
-                                eprintln!(
-                                    "polysimulator-extension: settlement (single-market verdict) {} payouts={:?}",
-                                    resolution.condition_id, resolution.payouts
-                                );
-                                host.on_market_resolution(resolution).await;
-                            }
-                            Ok(None) => {}
-                            Err(e) => eprintln!(
-                                "polysimulator-extension: settlement single-market query {} failed: {e}",
-                                query.condition_id
-                            ),
-                        },
-                    }
-                }
+        // The list carries only rounds ending in the future; an already-
+        // resolved condition rotates out within an hour, so every query the
+        // list does not name falls through to the single-market verdict
+        // endpoint. A failed list fetch must NOT short-circuit that fallback
+        // — previously an updown-list network error skipped every query and
+        // let them expire unverifiable (-99%). Now we treat an empty list as
+        // "no matches" and let each query try the single-market path.
+        let rows = match client.updown_markets(None, None).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!(
+                    "polysimulator-extension: settlement list fetch failed \
+                     ({e}); falling back to single-market verdict for {} \
+                     quer{}",
+                    queries.len(),
+                    if queries.len() == 1 { "y" } else { "ies" }
+                );
+                Vec::new()
             }
-            // Loud, but never fatal: a failed fetch must not stop trading,
-            // and the core alerts on its own once it has waited too long.
-            Err(e) => eprintln!(
-                "polysimulator-extension: settlement query ({}) fetch failed: {e}",
-                queries.len()
-            ),
+        };
+        for query in &queries {
+            match resolution_for(query, &rows) {
+                Some(resolution) => {
+                    eprintln!(
+                        "polysimulator-extension: settlement {} payouts={:?}",
+                        resolution.condition_id, resolution.payouts
+                    );
+                    host.on_market_resolution(resolution).await;
+                }
+                None => match resolution_by_single_market(
+                    query,
+                    client.as_ref(),
+                    &outcome_polarity,
+                )
+                .await
+                {
+                    Ok(Some(resolution)) => {
+                        eprintln!(
+                            "polysimulator-extension: settlement (single-market verdict) {} payouts={:?}",
+                            resolution.condition_id, resolution.payouts
+                        );
+                        host.on_market_resolution(resolution).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "polysimulator-extension: settlement single-market query {} failed: {e}",
+                        query.condition_id
+                    ),
+                },
+            }
         }
     }
 }

@@ -794,8 +794,18 @@ impl Core {
             // Fallback price: the last known mid; a zeroed feed recovers cost
             // via the entry price. Both are bookkeeping values — the venue's
             // real cash position is what the reconcile sweep reports.
+            //
+            // Floor at 50% of entry: an unverifiable expiry must NOT liquidate
+            // a position at the residual mid (0.001–0.02 for a binary option
+            // the market has written off) for a -99% loss. The venue never
+            // answered the settlement query, so the true outcome is unknown;
+            // capping the loss at 50% is a conservative safety net that stops
+            // one unanswered market from wiping out the account's equity. The
+            // reconcile sweep is the cash truth — this floor only bounds the
+            // bookkeeping PnL booked when the venue goes silent at expiry.
             let price = if pos.current_price > Decimal::ZERO {
-                pos.current_price
+                let floor = pos.entry_price / Decimal::TWO;
+                pos.current_price.max(floor)
             } else {
                 pos.entry_price
             };
