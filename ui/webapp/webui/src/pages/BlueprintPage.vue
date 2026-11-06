@@ -689,12 +689,12 @@ function exitSourceMode(): void {
       >{{ sourceManifest }}</pre>
     </Card>
 
-    <div class="grid grid-cols-[190px_minmax(0,1fr)_290px] gap-4">
+    <div class="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)_280px]">
       <!-- 左：8 种节点面板 -->
-      <div class="flex flex-col gap-3 self-start">
+      <div class="flex flex-col gap-3 self-start md:sticky md:top-24">
         <Card v-for="g in paletteGroups" :key="g.family" dense class="!card-pad-sm">
           <p class="label-micro mb-2">{{ g.label }}</p>
-          <div class="flex flex-col gap-1.5">
+          <div class="grid grid-cols-2 gap-1.5 sm:grid-cols-1">
             <button
               v-for="t in g.types"
               :key="t"
@@ -710,7 +710,7 @@ function exitSourceMode(): void {
       </div>
 
       <!-- 中：画布 -->
-      <Card dense class="relative h-[560px] overflow-hidden !p-0">
+      <Card dense class="relative h-[360px] overflow-hidden !p-0 md:h-[560px]">
         <div
           class="absolute inset-0"
           @drop="onDrop"

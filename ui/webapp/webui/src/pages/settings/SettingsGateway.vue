@@ -142,32 +142,32 @@ const netBadge = computed(() => {
 
       <div v-if="gateway" class="grid gap-x-6 gap-y-2 text-[12px] sm:grid-cols-2">
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">socket</span>
+          <span class="text-faint-fg shrink-0">socket</span>
           <span class="truncate text-right num" :title="gateway.socket">{{ gateway.socket }}</span>
         </div>
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">进程控制（--manage）</span>
+          <span class="text-faint-fg shrink-0">进程控制（--manage）</span>
           <Badge :variant="gateway.lifecycleEnabled ? 'up' : 'default'">
             {{ gateway.lifecycleEnabled ? '已开启' : '未开启（只读）' }}
           </Badge>
         </div>
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">内核归属</span>
+          <span class="text-faint-fg shrink-0">内核归属</span>
           <span>{{ gateway.managed ? '本网关启动（可停止）' : '外部进程（只接管读取）' }}</span>
         </div>
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">内核 PID</span>
+          <span class="text-faint-fg shrink-0">内核 PID</span>
           <span class="num">
             <template v-if="gateway.corePid != null"><RollingNumber :value="gateway.corePid" /></template>
             <template v-else>—</template>
           </span>
         </div>
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">崩溃自动重启次数</span>
+          <span class="text-faint-fg shrink-0">崩溃自动重启次数</span>
           <span class="num"><RollingNumber :value="gateway.restarts ?? 0" /></span>
         </div>
         <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-          <span class="text-faint-fg">已放弃重启</span>
+          <span class="text-faint-fg shrink-0">已放弃重启</span>
           <Badge :variant="gateway.restartGivenUp ? 'down' : 'default'">{{ gateway.restartGivenUp ? '是' : '否' }}</Badge>
         </div>
       </div>

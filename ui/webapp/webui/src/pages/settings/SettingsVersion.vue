@@ -181,31 +181,31 @@ onUnmounted(() => {
       <template v-else>
         <div class="mt-3 grid gap-x-6 gap-y-2 text-[12px] sm:grid-cols-2">
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">版本</span>
+            <span class="text-faint-fg shrink-0">版本</span>
             <span class="font-mono">{{ version.version }}</span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">修订号</span>
+            <span class="text-faint-fg shrink-0">修订号</span>
             <span class="font-mono">
               {{ revisionText(version.gitHash) }}
               <span v-if="version.gitDirty" class="text-primary">dirty</span>
-              <span v-else class="text-faint-fg">clean</span>
+              <span v-else class="text-faint-fg shrink-0">clean</span>
             </span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">构建时间</span>
+            <span class="text-faint-fg shrink-0">构建时间</span>
             <span class="font-mono">{{ version.buildDate }}</span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">目标平台</span>
+            <span class="text-faint-fg shrink-0">目标平台</span>
             <span class="font-mono">{{ version.target }}</span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">上次检查</span>
+            <span class="text-faint-fg shrink-0">上次检查</span>
             <span class="num">{{ version.lastCheckMs ? dateTime(version.lastCheckMs) : '—' }}</span>
           </div>
           <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
-            <span class="text-faint-fg">出网检查（更新检查）</span>
+            <span class="text-faint-fg shrink-0">出网检查（更新检查）</span>
             <!-- 排列顺序（2026-10 操作者指正，修正此前误读）：Badge 在前、
                  Switch 在后贴行右缘 —— 组件原样保留（Switch 还是 Switch、
                  Badge 还是 Badge），只对调这一行的控件顺序；语义/取值/写路径
@@ -270,7 +270,7 @@ onUnmounted(() => {
 
         <!-- issue 379：暂存状态行：phase 是内核自己的词，四相各自可分辨 -->
         <div v-if="stage" class="mt-2 flex items-center justify-between gap-3 border-b border-line pb-1.5 text-[12px]">
-          <span class="text-faint-fg">暂存（data/update/staging/）</span>
+          <span class="text-faint-fg shrink-0">暂存（data/update/staging/）</span>
           <span class="flex items-center gap-2">
             <Badge v-if="stageBadgeView" :variant="stageBadgeView.variant" dot>{{ stageBadgeView.text }}</Badge>
             <Badge v-else variant="default" dot>未暂存</Badge>

@@ -617,7 +617,8 @@ const cycleAgo = (ms: number): string => {
     <Card class="mt-3.5" dense>
       <CardHeader label="处理台账（只读：已采纳 / 已拒绝 / 已过期 / 被取代）" />
       <EmptyState v-if="!ledger.length" text="暂无处理记录" />
-      <table v-else class="w-full min-w-[820px] text-[12.5px]">
+      <div v-else class="-mx-2 overflow-x-auto">
+        <table class="w-full min-w-[820px] text-[12.5px]">
         <thead>
           <tr class="text-left">
             <th class="label-micro pb-1.5">提案</th>
@@ -647,6 +648,7 @@ const cycleAgo = (ms: number): string => {
           </tr>
         </tbody>
       </table>
+      </div>
       <p class="mt-2.5 text-[11px] leading-snug text-faint-fg">
         采纳记录持久化在 <span class="num">data/evolution/promotions.jsonl</span>，回滚只撤销最近一次采纳；
         提案全档在 <span class="num">data/evolution/proposals.jsonl</span>，超过 7 天未决自动过期。
