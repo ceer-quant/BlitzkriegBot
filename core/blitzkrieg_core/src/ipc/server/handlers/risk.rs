@@ -49,14 +49,17 @@ fn exit_env_key(field: &str) -> Option<&'static str> {
 /// process. A write failure is logged but does NOT fail the RPC: the in-memory
 /// apply already succeeded; the operator sees the change immediately and the
 /// log tells them persistence failed.
-fn persist_changes_to_env(env_path: Option<&std::path::Path>, changes: &[(&'static str, String)]) {
-    let Some(env_path) = env_path else { return };
+fn persist_changes_to_env(
+    env_path: Option<&std::path::Path>,
+    changes: &[(&'static str, String)],
+) -> bool {
+    let Some(env_path) = env_path else { return false };
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
         .filter_map(|(field, value)| Some((systemic_env_key(field)?.to_string(), value.clone())))
         .collect();
     if vars.is_empty() {
-        return;
+        return false;
     }
     if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
         tracing::warn!(
@@ -64,21 +67,23 @@ fn persist_changes_to_env(env_path: Option<&std::path::Path>, changes: &[(&'stat
              change is live for this process but will NOT survive a restart",
             env_path.display()
         );
+        return false;
     }
+    true
 }
 
 /// Same as [`persist_changes_to_env`] but for exit-discipline field names.
 fn persist_exit_changes_to_env(
     env_path: Option<&std::path::Path>,
     changes: &[(&'static str, String)],
-) {
-    let Some(env_path) = env_path else { return };
+) -> bool {
+    let Some(env_path) = env_path else { return false };
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
         .filter_map(|(field, value)| Some((exit_env_key(field)?.to_string(), value.clone())))
         .collect();
     if vars.is_empty() {
-        return;
+        return false;
     }
     if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
         tracing::warn!(
@@ -86,7 +91,21 @@ fn persist_exit_changes_to_env(
              change is live for this process but will NOT survive a restart",
             env_path.display()
         );
+        return false;
     }
+    true
+}
+
+/// Serialize an apply reply with `persisted` on top (issue #966). The panel
+/// shows "已持久化到 .env" only when this is true; an unwired env path (a
+/// backtester, or a test that does not wire one) leaves the in-memory edit live
+/// for this process only, and saying so is the honest answer.
+fn with_persisted(update: serde_json::Value, persisted: bool) -> Value {
+    let mut reply = update;
+    if let Value::Object(map) = &mut reply {
+        map.insert("persisted".into(), Value::Bool(persisted));
+    }
+    reply
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,8 +213,11 @@ pub(crate) async fn handle_risk(
                                 .iter()
                                 .map(|c| (c.field, c.to.clone()))
                                 .collect();
-                            persist_changes_to_env(env_path, &changes);
-                            Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                            let persisted = persist_changes_to_env(env_path, &changes);
+                            Ok(with_persisted(
+                                serde_json::to_value(update).unwrap_or(Value::Null),
+                                persisted,
+                            ))
                         }
                         Err(e) => Err(core_err(e)),
                     }
@@ -229,8 +251,11 @@ pub(crate) async fn handle_risk(
                             .iter()
                             .map(|c| (c.field, c.to.clone()))
                             .collect();
-                        persist_exit_changes_to_env(env_path, &changes);
-                        Ok(serde_json::to_value(update).unwrap_or(Value::Null))
+                        let persisted = persist_exit_changes_to_env(env_path, &changes);
+                        Ok(with_persisted(
+                            serde_json::to_value(update).unwrap_or(Value::Null),
+                            persisted,
+                        ))
                     }
                     Err(e) => Err(core_err(e)),
                 }
