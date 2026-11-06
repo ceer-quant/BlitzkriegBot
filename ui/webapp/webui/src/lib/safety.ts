@@ -109,6 +109,22 @@ export function freezeBanner(stats: EngineStats | null | undefined): SafetyBanne
 const stableIdentity = (message: string): string => message.replace(/\d[\d.,]*/g, 'N')
 
 /**
+ * Error codes that are NORMAL market outcomes, not failures the operator must
+ * act on. A fast-moving book routinely rejects a taker leg with
+ * `WOULD_CROSS` (no counter-party at/inside the limit, or not enough depth
+ * for the size) — surfacing every one as a cockpit warning is exactly the
+ * "机器人太敏感" complaint: these are not errors, they are the market saying
+ * "not right now". The refusal still lands in the order/trade log with its
+ * full detail; only the persistent warning banner is suppressed.
+ *
+ * Add codes here whose meaning is "the market did not fill this leg" rather
+ * than "something broke / you misconfigured something".
+ */
+const SUPPRESSED_BANNER_CODES = new Set([
+  'WOULD_CROSS',
+])
+
+/**
  * The kernel's last recorded error — the ONE slot every internal refusal path
  * writes (`Core::note_error`).
  *
@@ -117,6 +133,9 @@ const stableIdentity = (message: string): string => message.replace(/\d[\d.,]*/g
  * `<CODE>: <message>`) so a panel running against a core that predates the
  * structured key still shows something. Suppressed while frozen: the freeze
  * banner already carries the reason, and the freeze is the thing to act on.
+ *
+ * Market-normal refusals (`WOULD_CROSS` and friends) are NOT surfaced here —
+ * they belong in the order log, not as a persistent cockpit warning.
  */
 export function lastErrorBanner(
   stats: EngineStats | null | undefined,
@@ -125,6 +144,7 @@ export function lastErrorBanner(
   if (frozen) return null
   const structured = stats?.lastError
   if (structured) {
+    if (SUPPRESSED_BANNER_CODES.has(structured.code)) return null
     return {
       tone: 'warn',
       urgent: false,
@@ -137,7 +157,11 @@ export function lastErrorBanner(
   }
   const legacy = stats?.lastVenueError
   if (!legacy) return null
-  // No `code` field: an older core pre-rendered the code into this string.
+  // No `code` field: an older core pre-rendered the code into this string as
+  // `<CODE>: <message>`. Apply the same suppression so a legacy core does not
+  // re-introduce the noisy banner.
+  const legacyCode = legacy.message.match(/^([A-Z_]+):/)?.[1]
+  if (legacyCode && SUPPRESSED_BANNER_CODES.has(legacyCode)) return null
   return {
     tone: 'warn',
     urgent: false,

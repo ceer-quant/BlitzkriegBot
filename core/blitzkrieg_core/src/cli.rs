@@ -819,24 +819,12 @@ pub const FLAGS: &[FlagSpec] = &[
          request each) and print ONE JSON report; exit 1 when a probe failed. Read-only: \
          no socket, no ledger, no order, no credential.",
     ),
-    flag(
-        "--config",
-        "<path>",
-        "TOML config file (default `user_layer/configs/default.toml`; the `=` form \
-         `--config=<path>` is also accepted).",
-    ),
-    flag(
-        "--no-config",
-        "",
-        "Ignore the TOML config file entirely (same as `BK_CONFIG=none`).",
-    ),
 ];
 
 /// The flag form a value-taking flag must be written as today: a separate
-/// argument. Only `--config=<path>` accepts the `=` form, so `--mode=live` is an
-/// unknown argument — and this is the sentence that tells an operator why.
-const JOINED_VALUE_NOTE: &str = "note: a flag takes its value as a separate argument (`--mode live`); \
-                                 only --config=<path> accepts the `=value` form";
+/// argument. `--mode=live` is an unknown argument — and this is the sentence
+/// that tells an operator why.
+const JOINED_VALUE_NOTE: &str = "note: a flag takes its value as a separate argument (`--mode live`)";
 
 /// The full `--help` text, stdout-ready.
 pub fn help_text() -> String {
@@ -880,9 +868,9 @@ fn value_form(spec: &FlagSpec) -> String {
 ///
 /// The parser's own `match` is the authority (the flag list above is checked
 /// against it by a test); this is for callers that need the question answered
-/// without running the parser. `--config=<path>` is the one joined-value form.
+/// without running the parser.
 pub fn is_known_flag(token: &str) -> bool {
-    token.starts_with("--config=") || FLAGS.iter().any(|f| f.flag == token)
+    FLAGS.iter().any(|f| f.flag == token)
 }
 
 /// The known flag `token` most likely meant, or `None` when nothing is close.
@@ -989,7 +977,7 @@ pub fn classify_unknown_arg(token: &str, allow_unknown: bool) -> UnknownArg {
     if let Some(spec) = found {
         lines.push(format!("{prefix}did you mean {}?", spec.flag));
     }
-    if token.contains('=') && !token.starts_with("--config=") {
+    if token.contains('=') {
         lines.push(format!("{prefix}{JOINED_VALUE_NOTE}"));
     }
     match found.and_then(|spec| spec.risk.map(|risk| (spec, risk))) {
@@ -1265,9 +1253,9 @@ mod tests {
         }
     }
 
-    /// `--mode=live` is the one joined-value mistake worth its own sentence:
-    /// `--config=<path>` is the only flag that takes `=`, so this is a real
-    /// operator habit that lands on the unknown-argument path.
+    /// `--mode=live` is a joined-value mistake worth its own sentence: every
+    /// flag takes `=` as a separate argument, so this is a real operator habit
+    /// that lands on the unknown-argument path.
     #[test]
     fn a_joined_value_is_told_to_use_a_separate_argument() {
         let UnknownArg::Reject(msg) = classify_unknown_arg("--mode=live", false) else {
@@ -1384,12 +1372,13 @@ mod tests {
         }
     }
 
-    /// `is_known_flag` answers for the joined `--config=` form too, which the
-    /// table cannot hold as a literal.
+    /// Issue #967: the TOML config flags are retired, so `--config` must land
+    /// on the unknown-argument path instead of silently selecting a file.
     #[test]
-    fn the_config_joined_form_is_known() {
-        assert!(is_known_flag("--config"));
-        assert!(is_known_flag("--config=/tmp/x.toml"));
+    fn the_retired_config_flags_are_unknown() {
+        assert!(!is_known_flag("--config"));
+        assert!(!is_known_flag("--config=/tmp/x.toml"));
+        assert!(!is_known_flag("--no-config"));
         assert!(!is_known_flag("--config-file"));
         for spec in FLAGS {
             assert!(is_known_flag(spec.flag), "{} is not known", spec.flag);

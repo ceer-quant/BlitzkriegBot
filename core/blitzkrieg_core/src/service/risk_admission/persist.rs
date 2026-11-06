@@ -182,7 +182,10 @@ fn parse_source_cell(
 ) -> Option<crate::risk::limits::LimitSource> {
     match raw {
         "default" => Some(crate::risk::limits::LimitSource::Default),
-        "toml" => Some(crate::risk::limits::LimitSource::Toml),
+        // `toml` was a provenance word of the retired file layer (issue #967).
+        // A cell carrying it is not upgraded to another layer's name — the
+        // unknown branch below ignores it, and the bound comes from `.env`
+        // on this boot.
         "env" => Some(crate::risk::limits::LimitSource::Env),
         "flag" => Some(crate::risk::limits::LimitSource::Flag),
         other => {

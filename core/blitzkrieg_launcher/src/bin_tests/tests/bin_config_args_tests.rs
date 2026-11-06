@@ -85,37 +85,30 @@ fn an_exit_flag_overrides_the_ladder_and_is_reported() {
     }
 }
 
-/// The file is the second source, and the flag still wins — the same
-/// precedence every other file-settable knob follows.
+/// The env layer is the durable source of the ladder, and the flag still wins
+/// — the same precedence every other env-settable knob follows. The TOML
+/// `[exit]` section that used to sit between them is retired (issue #967).
 #[test]
-fn the_exit_section_of_the_config_file_is_read_and_outranked_by_the_flag() {
-    let file = file_with(
-        r#"
-            [exit]
-            stop_loss_pct = 9
-            min_trail_pct = "4.5"
-            "#,
-    );
-    let argv: Vec<String> = Vec::new();
-    let a = parse_args(&file, &argv, &EnvVars::default());
+fn the_exit_ladder_answers_to_env_and_the_flag_still_wins() {
+    let env = env_of(&[
+        ("BK_EXIT_STOP_LOSS_PCT", "9"),
+        ("BK_EXIT_MIN_TRAIL_PCT", "4.5"),
+    ]);
+    let a = parse_args(&[], &env);
     assert_eq!(a.exit_stop_loss_pct, dec!(9));
     assert_eq!(a.exit_min_trail_pct, dec!(4.5));
-    // The two the file does not mention keep the compiled value.
+    // The two the env does not set keep the compiled value.
     assert_eq!(a.exit_take_profit_pct, dec!(100));
     assert_eq!(a.exit_trailing_min_high_pct, dec!(15));
     assert!(
         a.config_report
             .iter()
-            .any(|l| l == "exit.stop_loss_pct=9 (toml)"),
+            .any(|l| l == "exit.stop_loss_pct=9 (env)"),
         "{:?}",
         a.config_report
     );
 
-    let a = parse_args(
-        &file,
-        &["--exit-stop-loss-pct".into(), "11".into()],
-        &EnvVars::default(),
-    );
+    let a = parse_args(&["--exit-stop-loss-pct".into(), "11".into()], &env);
     assert_eq!(a.exit_stop_loss_pct, dec!(11));
     assert!(
         a.config_report
@@ -246,7 +239,7 @@ fn the_update_switches_answer_to_the_env_in_both_directions() {
             ("BLITZKRIEG_UPDATE_CHECK", spelling),
             ("BLITZKRIEG_UPDATE_AUTO", spelling),
         ]);
-        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        let a = parse_args(&[], &env);
         assert_eq!(a.update_check_enabled, Some(true), "{spelling:?}");
         assert_eq!(a.update_auto, Some(true), "{spelling:?}");
         for line in [
@@ -269,7 +262,7 @@ fn the_update_switches_answer_to_the_env_in_both_directions() {
             ("BLITZKRIEG_UPDATE_CHECK", spelling),
             ("BLITZKRIEG_UPDATE_AUTO", spelling),
         ]);
-        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        let a = parse_args(&[], &env);
         assert_eq!(a.update_check_enabled, Some(false), "{spelling:?}");
         assert_eq!(a.update_auto, Some(false), "{spelling:?}");
         for line in [
@@ -286,7 +279,7 @@ fn the_update_switches_answer_to_the_env_in_both_directions() {
 
     // A spelling outside the vocabulary is "not configured", never a guess.
     let env = env_of(&[("BLITZKRIEG_UPDATE_CHECK", "yeah-nah")]);
-    let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+    let a = parse_args(&[], &env);
     assert_eq!(a.update_check_enabled, None, "an unknown word is silence");
     assert!(a.config_report.is_empty(), "{:?}", a.config_report);
 }
@@ -298,11 +291,10 @@ fn the_update_switches_answer_to_the_env_in_both_directions() {
 fn the_update_interval_answers_to_the_env_tier() {
     for (text, want) in [("0", Some(0)), ("3600", Some(3600)), (" 600 ", Some(600))] {
         let env = env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", text)]);
-        let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+        let a = parse_args(&[], &env);
         assert_eq!(a.update_interval_secs, want, "{text:?}");
     }
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &[],
         &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "3600")]),
     );
@@ -315,7 +307,6 @@ fn the_update_interval_answers_to_the_env_tier() {
     );
     // Unparsable text is "not configured", never a silent default.
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &[],
         &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "soon")]),
     );
@@ -331,7 +322,6 @@ fn the_update_cli_flag_outranks_the_env() {
         ("BLITZKRIEG_UPDATE_INTERVAL_SECS", "0"),
     ]);
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &["--update-check".into(), "true".into()],
         &env,
     );
@@ -348,7 +338,6 @@ fn the_update_cli_flag_outranks_the_env() {
         a.config_report
     );
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &["--update-interval-secs".into(), "60".into()],
         &env,
     );
@@ -466,12 +455,11 @@ fn a_max_daily_loss_flag_overrides_the_budget_and_is_reported() {
 
 #[test]
 fn the_daily_loss_budget_is_settable_from_the_environment() {
-    let args = ["--no-config".to_string()];
     let env = env_of(&[
         ("BK_MAX_DAILY_LOSS", "3.5"),
         ("BK_MAX_DAILY_LOSS_PCT", "10"),
     ]);
-    let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &args, &env);
+    let a = parse_args(&[], &env);
     assert_eq!(a.daily_loss_usd, dec!(3.5));
     assert_eq!(a.daily_loss_pct, dec!(10));
     assert!(
@@ -483,7 +471,6 @@ fn the_daily_loss_budget_is_settable_from_the_environment() {
     );
     // CLI outranks env, like every other setting in the chain.
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &["--max-daily-loss".into(), "9".into()],
         &env,
     );
@@ -658,11 +645,7 @@ fn the_equity_knobs_are_settable_by_flag_and_by_env() {
 
     // Same chain as every other knob: env supplies, CLI outranks.
     let env = env_of(&[("BK_SIZE_PCT", "7.5"), ("BK_MAX_ORDER_NOTIONAL_PCT", "15")]);
-    let b = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
-        &["--no-config".to_string()],
-        &env,
-    );
+    let b = parse_args(&[], &env);
     assert_eq!(b.size_pct, dec!(7.5));
     assert_eq!(b.max_order_notional_pct, dec!(15));
     assert!(
@@ -673,7 +656,6 @@ fn the_equity_knobs_are_settable_by_flag_and_by_env() {
         b.config_report
     );
     let c = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &["--size-pct".to_string(), "9".to_string()],
         &env,
     );
@@ -711,14 +693,12 @@ fn eight_segment_form_parses_the_legs_own_equity_pct() {
 /// flag; this pins the PARSER half.
 #[test]
 fn the_per_asset_position_cap_parses_and_defaults_to_none() {
-    let file = file_with("");
     let a = parse_args(
-        &file,
         &["--max-positions-per-asset".to_string(), "3".to_string()],
         &EnvVars::default(),
     );
     assert_eq!(a.max_positions_per_asset, Some(3));
-    let a = parse_args(&file, &[], &EnvVars::default());
+    let a = parse_args(&[], &EnvVars::default());
     assert_eq!(
         a.max_positions_per_asset, None,
         "absent flag = the execution-policy file decides"
@@ -726,17 +706,14 @@ fn the_per_asset_position_cap_parses_and_defaults_to_none() {
 }
 
 #[test]
-fn the_file_supplies_a_value_when_no_flag_does() {
-    let file = file_with(
-        r#"
-            [engine]
-            assets = ["DOGE"]
-            round_sec = 300
-            min_round_age_sec = 5
-            min_time_left_sec = 7
-            "#,
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
+fn the_env_supplies_a_value_when_no_flag_does() {
+    let env = env_of(&[
+        ("BK_ASSETS", "DOGE"),
+        ("BK_ROUND_SEC", "300"),
+        ("BK_MIN_ROUND_AGE_SEC", "5"),
+        ("BK_MIN_TIME_LEFT_SEC", "7"),
+    ]);
+    let a = parse_args(&[], &env);
     assert_eq!(a.round_sec, 300);
     assert_eq!(a.min_round_age, 5);
     assert_eq!(a.min_time_left, 7);
@@ -745,33 +722,23 @@ fn the_file_supplies_a_value_when_no_flag_does() {
     assert!(
         a.config_report
             .iter()
-            .any(|l| l == "engine.round_sec=300 (toml)")
+            .any(|l| l == "engine.round_sec=300 (env)")
     );
     assert!(
         a.config_report
             .iter()
-            .any(|l| l == "engine.min_time_left_sec=7 (toml)")
+            .any(|l| l == "engine.min_time_left_sec=7 (env)")
     );
 }
 
 #[test]
-fn a_flag_beats_the_file() {
-    let file = file_with(
-        r#"
-            [engine]
-            round_sec = 300
-            min_time_left_sec = 7
-            "#,
-    );
-    let a = parse_args(
-        &file,
-        &["--round-sec".into(), "60".into()],
-        &EnvVars::default(),
-    );
-    assert_eq!(a.round_sec, 60, "CLI outranks TOML");
+fn a_flag_beats_the_env() {
+    let env = env_of(&[("BK_ROUND_SEC", "300"), ("BK_MIN_TIME_LEFT_SEC", "7")]);
+    let a = parse_args(&["--round-sec".into(), "60".into()], &env);
+    assert_eq!(a.round_sec, 60, "CLI outranks env");
     assert_eq!(
         a.min_time_left, 7,
-        "and the untouched key still comes from TOML"
+        "and the untouched key still comes from env"
     );
     assert!(
         a.config_report
@@ -780,26 +747,15 @@ fn a_flag_beats_the_file() {
     );
 }
 
-// The UI card's persisted cell outranks the factory TOML: only an explicit
+// The UI card's persisted cell outranks the factory default: only an explicit
 // flag/env var suppresses it. #474's "旗标 > 格 > 默认" promise, kept.
 #[test]
-fn a_toml_round_sec_does_not_veto_the_persisted_cell() {
-    // TOML spoke → the cell still applies (the boot site tests
-    // `!= "cli_or_env"`, and "default" is what TOML resolves to here).
-    let file = file_with(
-        r#"
-            [engine]
-            round_sec = 300
-            "#,
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
+fn nothing_explicit_lets_the_persisted_cell_apply() {
+    // Nothing spoke → "default", so the cell still applies.
+    let a = parse_args(&[], &EnvVars::default());
     assert_eq!(round_duration_source_from(&a.config_report), "default");
     // A CLI flag spoke → the cell is suppressed.
-    let a = parse_args(
-        &file,
-        &["--round-sec".into(), "60".into()],
-        &EnvVars::default(),
-    );
+    let a = parse_args(&["--round-sec".into(), "60".into()], &EnvVars::default());
     assert_eq!(round_duration_source_from(&a.config_report), "cli_or_env");
     // The gate site and the judge share one spelling: a source the judge
     // emits as "cli_or_env" is exactly the one the gate refuses.
@@ -807,25 +763,21 @@ fn a_toml_round_sec_does_not_veto_the_persisted_cell() {
 }
 
 #[test]
-fn the_file_can_turn_shadow_evolution_on_and_the_flag_is_a_no_op() {
-    // The documented way to enable the feature: edit the file. Before KI-11
-    // this had no effect at all.
-    let file = file_with(
-        r#"
-            [shadow_evolution]
-            enabled = true
-            min_sample_count = 12
-            cooldown_minutes = 2
-            evaluation_window_minutes = 5
-            min_observation_minutes = 1
-            variant_count = 4
-            audit_dir = "data/evo-scratch"
-            "#,
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
+fn the_env_can_turn_shadow_evolution_on_and_names_its_origin() {
+    // The documented way to enable the feature: `.env` → env layer. The env
+    // face speaks SECONDS (the retired file's minutes are gone, issue #967).
+    let env = env_of(&[
+        ("BK_SHADOW_EVOLUTION", "true"),
+        ("BK_SE_MIN_SAMPLES", "12"),
+        ("BK_SE_COOLDOWN_SECS", "120"),
+        ("BK_SE_EVAL_WINDOW_SECS", "300"),
+        ("BK_SE_MIN_OBS_SECS", "60"),
+        ("BK_SE_VARIANT_COUNT", "4"),
+        ("BK_SE_AUDIT_DIR", "data/evo-scratch"),
+    ]);
+    let a = parse_args(&[], &env);
     assert!(a.shadow_evolution);
     assert_eq!(a.se_min_samples, Some(12));
-    // Minutes in the file, seconds in the kernel.
     assert_eq!(a.se_cooldown_secs, Some(120));
     assert_eq!(a.se_eval_window_secs, Some(300));
     assert_eq!(a.se_min_obs_secs, Some(60));
@@ -834,33 +786,8 @@ fn the_file_can_turn_shadow_evolution_on_and_the_flag_is_a_no_op() {
 }
 
 #[test]
-fn a_strategy_section_is_reported_as_dead_config_not_silently_ignored() {
-    // PR-B removed `[strategy] active`: strategies are never named in kernel
-    // config any more (they are auto-loaded from strategy_dir and enabled on
-    // load). An old file must not silently look like it did something.
-    let file = file_with(
-        r#"
-            [strategy]
-            active = ["spread_arb", "trend_follow"]
-            "#,
-    );
-    assert!(
-        file.unknown_keys.iter().any(|k| k == "strategy"),
-        "the dead section must be reported: {:?}",
-        file.unknown_keys
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
-    assert!(
-        a.enable_strategy.is_empty(),
-        "the kernel must not invent an enable list from the file: {:?}",
-        a.enable_strategy
-    );
-}
-
-#[test]
 fn strategy_selection_comes_from_cli_flags_only() {
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &[
             "--enable-strategy".into(),
             "alpha_strategy".into(),
@@ -875,89 +802,35 @@ fn strategy_selection_comes_from_cli_flags_only() {
 
 #[test]
 fn a_gradient_above_lock_1_is_refused_not_silently_applied() {
-    let file = file_with(
-        r#"
-            [shadow_evolution]
-            max_gradient = 0.25
-            "#,
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
+    let env = env_of(&[("BK_SE_MAX_GRADIENT", "0.25")]);
+    let a = parse_args(&[], &env);
     assert_eq!(
         a.se_max_gradient, None,
         "a request to widen a safety lock must not take effect"
     );
 
     // Tightening it is allowed.
-    let file = file_with(
-        r#"
-            [shadow_evolution]
-            max_gradient = 0.01
-            "#,
-    );
-    let a = parse_args(&file, &[], &EnvVars::default());
+    let env = env_of(&[("BK_SE_MAX_GRADIENT", "0.01")]);
+    let a = parse_args(&[], &env);
     assert_eq!(a.se_max_gradient, Some(dec!(0.01)));
 }
 
 #[test]
-fn a_broken_file_does_not_stop_startup() {
-    // The parse_args half: a FileConfig that failed to load is all-defaults,
-    // and the kernel still comes up on CLI + built-in values.
-    let a = args_from(&["--round-sec", "120"]);
-    assert_eq!(a.round_sec, 120);
-    assert_eq!(a.assets, vec!["BTC", "ETH", "SOL", "XRP"]);
-}
-
-#[test]
-fn prescan_finds_the_config_flag_in_every_documented_spelling() {
-    let v = |s: &[&str]| -> Vec<String> { s.iter().map(|x| x.to_string()).collect() };
-    match prescan_config(&v(&["--config", "a.toml"])) {
-        Some(ConfigChoice::Path(p)) => assert_eq!(p, "a.toml"),
-        _ => panic!("--config <path> must parse"),
-    }
-    match prescan_config(&v(&["--config=b.toml"])) {
-        Some(ConfigChoice::Path(p)) => assert_eq!(p, "b.toml"),
-        _ => panic!("--config=<path> must parse"),
-    }
-    assert!(matches!(
-        prescan_config(&v(&["--no-config"])),
-        Some(ConfigChoice::Off)
-    ));
-    // Bare `--config` with nothing usable after it means "no file", not "the
-    // next flag is my filename".
-    assert!(matches!(
-        prescan_config(&v(&["--config="])),
-        Some(ConfigChoice::Off)
-    ));
-    assert!(matches!(
-        prescan_config(&v(&["--config", ""])),
-        Some(ConfigChoice::Off)
-    ));
-    assert!(prescan_config(&v(&["--engine"])).is_none());
-}
-
-#[test]
-fn the_env_layer_sits_between_the_flag_and_the_file() {
-    let file = file_with(
-        r#"
-            [engine]
-            round_sec = 300
-            min_time_left_sec = 7
-            "#,
-    );
+fn the_env_layer_sits_between_the_flag_and_the_default() {
     let env = env_of(&[("BK_ROUND_SEC", "600"), ("BK_MIN_TIME_LEFT_SEC", "9")]);
 
     // CLI > env.
-    let a = parse_args(&file, &["--round-sec".into(), "60".into()], &env);
+    let a = parse_args(&["--round-sec".into(), "60".into()], &env);
     assert_eq!(a.round_sec, 60);
     assert!(
         a.config_report
             .iter()
             .any(|l| l == "engine.round_sec=60 (cli)")
     );
-    // env > TOML.
+    // env > default.
     assert_eq!(
         a.min_time_left, 9,
-        "the env var outranks the file for a key no flag named"
+        "the env var supplies the key no flag named"
     );
     assert!(
         a.config_report
@@ -974,7 +847,7 @@ fn the_env_layer_alone_can_supply_a_value() {
         ("BK_SHADOW_EVOLUTION", "true"),
         ("BK_SE_COOLDOWN_SECS", "45"),
     ]);
-    let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+    let a = parse_args(&[], &env);
     assert_eq!(a.min_round_age, 3);
     // Asset lists are normalised wherever they come from.
     assert_eq!(a.assets, vec!["BTC", "ETH"]);
@@ -982,32 +855,29 @@ fn the_env_layer_alone_can_supply_a_value() {
     assert_eq!(a.se_cooldown_secs, Some(45));
 }
 
-/// The factory-revival pin (issue 751). The migration writes the two
-/// evolution switches into `.env` as `SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`
-/// and retires `shadow_evolution.toml` — but the boot still reads that file
-/// as the compat fallback, so an old checkout (or a restored backup) can
-/// carry a toml that arms the evaluator. The `.env` single source must
-/// out-talk it in BOTH directions: a file saying ON under an env saying OFF
-/// boots OFF (no silent revival), and the report names the env tier.
+/// The factory-revival pin (issue 751), now purely env-level: the retired
+/// files cannot arm anything, and the env tier's spelling is recorded.
+/// `BK_SHADOW_EVOLUTION` outranks the legacy `SHADOW_ENABLED` alias.
 #[test]
-fn the_shadow_switches_answer_to_the_env_over_the_legacy_file() {
-    // The legacy file arms everything; `.env` (as read by the launcher into
-    // the env layer) says both switches stay off.
-    let file = file_with("[shadow_evolution]\nenabled = true\nauto_evolve = true\n");
-    let env = env_of(&[("SHADOW_ENABLED", "false"), ("SHADOW_AUTO_EVOLVE", "false")]);
-    let a = parse_args(&file, &[], &env);
+fn the_shadow_switches_answer_to_the_documented_env_keys() {
+    let env = env_of(&[
+        ("BK_SHADOW_EVOLUTION", "false"),
+        ("SHADOW_ENABLED", "true"),
+        ("SHADOW_AUTO_EVOLVE", "true"),
+    ]);
+    let a = parse_args(&[], &env);
     assert!(
         !a.shadow_evolution,
-        "SHADOW_ENABLED=false outranks the legacy file's enabled=true"
+        "BK_SHADOW_EVOLUTION=false must win over the legacy alias"
     );
     assert_eq!(
         a.se_auto_evolve,
-        Some(false),
-        "SHADOW_AUTO_EVOLVE=false outranks the legacy file's auto_evolve=true"
+        Some(true),
+        "SHADOW_AUTO_EVOLVE is the only key for the second switch"
     );
     for line in [
         "shadow_evolution.enabled=false (env)",
-        "shadow_evolution.auto_evolve=false (env)",
+        "shadow_evolution.auto_evolve=true (env)",
     ] {
         assert!(
             a.config_report.iter().any(|l| l == line),
@@ -1015,42 +885,6 @@ fn the_shadow_switches_answer_to_the_env_over_the_legacy_file() {
             a.config_report
         );
     }
-
-    // And the other direction: `.env` arming under a file that says OFF
-    // still boots ON (the file never vetoes the single source).
-    let file = file_with("[shadow_evolution]\nenabled = false\n");
-    let env = env_of(&[("SHADOW_ENABLED", "true")]);
-    let a = parse_args(&file, &[], &env);
-    assert!(
-        a.shadow_evolution,
-        "the env ON is not undone by the file's OFF"
-    );
-    assert!(
-        a.config_report
-            .iter()
-            .any(|l| l == "shadow_evolution.enabled=true (env)")
-    );
-}
-
-#[test]
-fn bk_config_none_turns_the_file_off() {
-    let env = env_of(&[("BK_CONFIG", "none")]);
-    assert!(matches!(config_choice(&[], &env), ConfigChoice::Off));
-    // Without the variable the shipped default is used.
-    assert!(matches!(
-        config_choice(&[], &EnvVars::default()),
-        ConfigChoice::Path(p) if p == blitzkrieg_core::config::DEFAULT_CONFIG_PATH
-    ));
-}
-
-#[test]
-fn a_config_path_that_does_not_exist_is_a_silent_no_op() {
-    let file = blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(
-        "/nonexistent/bk.toml",
-    )));
-    let a = parse_args(&file, &[], &EnvVars::default());
-    assert_eq!(a.round_sec, 900);
-    assert!(a.config_report.is_empty());
 }
 
 // ── #205: the orderbook freshness budget is a runtime knob ──────────────
@@ -1094,7 +928,7 @@ fn the_orderbook_staleness_budget_is_configurable_from_cli_and_env() {
     assert!(a.orderbook_stale_echo.join(" ").contains("12000 ms (cli)"));
 
     let env = env_of(&[("BK_MAX_ORDERBOOK_STALE_MS", "15000")]);
-    let a = parse_args(&blitzkrieg_core::config::FileConfig::default(), &[], &env);
+    let a = parse_args(&[], &env);
     assert_eq!(a.max_orderbook_stale_ms, 15_000);
     assert!(
         a.config_report
@@ -1103,22 +937,11 @@ fn the_orderbook_staleness_budget_is_configurable_from_cli_and_env() {
         "{:?}",
         a.config_report
     );
-    // #866: toml sits under env. An absent key stays at the compiled 8000 ms.
-    let file = file_with("[engine]\nmax_orderbook_stale_ms = 3500\n");
-    let a = parse_args(&file, &[], &EnvVars::default());
-    assert_eq!(a.max_orderbook_stale_ms, 3_500);
-    assert!(
-        a.config_report
-            .iter()
-            .any(|l| l == "engine.max_orderbook_stale_ms=3500 (toml)"),
-        "{:?}",
-        a.config_report
-    );
-    let a = parse_args(&file, &[], &env);
-    assert_eq!(a.max_orderbook_stale_ms, 15_000, "env outranks toml");
+    // An absent key stays at the compiled 8000 ms.
+    let a = parse_args(&[], &EnvVars::default());
+    assert_eq!(a.max_orderbook_stale_ms, 8_000);
     // CLI outranks env, like every other setting in the chain.
     let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
         &["--max-orderbook-stale-ms".into(), "9000".into()],
         &env,
     );

@@ -159,7 +159,7 @@ mod bin_tests;
 // modules (`crate::position_db` / `crate::strategy_state`) so the bin and
 // any embedded reader share ONE name song.
 use bin_support::boot::{
-    ConfigChoice, EnvVars, builtin_registry, config_choice, daily_loss_path_for,
+    EnvVars, builtin_registry, daily_loss_path_for,
     default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
     parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
     round_duration_source_from, run_net_check,
@@ -214,29 +214,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let env = EnvVars::from_process();
-    let choice = config_choice(&argv, &env);
-    let file = match &choice {
-        ConfigChoice::Off => blitzkrieg_core::config::FileConfig::default(),
-        ConfigChoice::Path(p) => {
-            blitzkrieg_core::config::FileConfig::load(Some(std::path::Path::new(p)))
-        }
-    };
-    for w in &file.warnings {
-        eprintln!("blitzkrieg-core: config warning: {w}");
-    }
-    // An unknown key is the exact failure mode this layer exists to prevent
-    // (KI-11), so it is loud — but never fatal.
-    for k in &file.unknown_keys {
-        eprintln!("blitzkrieg-core: config key not understood (ignored): {k}");
-    }
+    let args = parse_args(&argv, &env);
 
-    let args = parse_args(&file, &argv, &env);
-
-    // Say where the non-default settings came from. A declarative config layer is
-    // only auditable if the effective value and its origin are both observable.
-    if let Some(p) = &file.path {
-        eprintln!("blitzkrieg-core: config file {}", p.display());
-    }
     for line in &args.config_report {
         eprintln!("blitzkrieg-core: config {line}");
     }

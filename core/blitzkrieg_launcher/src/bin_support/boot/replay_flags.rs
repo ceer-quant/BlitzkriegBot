@@ -124,15 +124,11 @@ pub(super) fn parse_replay_and_noop_flags(
             )
         }
         "--dry-redeem-manual" => *dry_redeem_manual = true,
-        // Consumed by the pre-scan; named here so they are not reported as
-        // unknown flags.
-        "--config" => {
-            it.next();
-        }
-        "--no-config" => {}
-        other if other.starts_with("--config=") => {}
-        // Read by the pre-scan above, for the same reason (`argv` order must
-        // not change what it means) and named here for the same reason.
+        // Issue #967 retired the TOML file layer, including its flags. They are
+        // deliberately NOT named here: `--config` must land on the
+        // unknown-argument path so nobody can believe a file governs the run.
+        // Read by the parser, for the same reason (`argv` order must not change
+        // what it means) and named here for the same reason.
         blitzkrieg_core::cli::ALLOW_UNKNOWN_ARGS => {}
         _ => return false,
     }

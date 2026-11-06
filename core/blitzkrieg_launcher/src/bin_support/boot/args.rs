@@ -14,11 +14,7 @@ use super::{
     parse_backtest_knob, parse_exit_pct, split_assets, stale_budget_rejection,
 };
 
-pub(crate) fn parse_args(
-    file: &blitzkrieg_core::config::FileConfig,
-    argv: &[String],
-    env: &EnvVars,
-) -> Args {
+pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
     let mut socket = default_socket();
     let mut mode = Mode::Dry;
     let mut readonly = false;
@@ -758,13 +754,13 @@ pub(crate) fn parse_args(
         }
     }
 
-    // ── Resolve the file-settable settings: CLI > env > TOML > default ──────
+    // ── Resolve the env-settable settings: CLI > env > default ─────────────
     use blitzkrieg_core::config::{Sourced, pick};
     let mut report: Vec<String> = Vec::new();
 
     macro_rules! resolve {
-        ($label:literal, $cli:expr, $env:literal, $toml:expr, $default:expr) => {{
-            let s: Sourced<_> = pick($cli, env.num($env), $toml, $default);
+        ($label:literal, $cli:expr, $env:literal, $default:expr) => {{
+            let s: Sourced<_> = pick($cli, env.num($env), $default);
             if s.is_explicit() {
                 report.push(format!("{}={} ({})", $label, s.value, s.source.as_str()));
             }
@@ -773,8 +769,8 @@ pub(crate) fn parse_args(
     }
     // Same, for values that are not Display (the asset list).
     macro_rules! resolve_shown {
-        ($label:literal, $cli:expr, $env:expr, $toml:expr, $default:expr) => {{
-            let s = pick($cli, $env, $toml, $default);
+        ($label:literal, $cli:expr, $env:expr, $default:expr) => {{
+            let s = pick($cli, $env, $default);
             if s.is_explicit() {
                 report.push(format!("{}={:?} ({})", $label, s.value, s.source.as_str()));
             }
@@ -785,8 +781,8 @@ pub(crate) fn parse_args(
     // be wrapped one level so `pick` can tell "a layer supplied None" from
     // "no layer spoke" — resolving those two is the whole job of this layer.
     macro_rules! resolve_opt {
-        ($label:literal, $cli:expr, $env:expr, $toml:expr) => {{
-            let s = pick($cli.map(Some), $env.map(Some), $toml.map(Some), None);
+        ($label:literal, $cli:expr, $env:expr) => {{
+            let s = pick($cli.map(Some), $env.map(Some), None);
             if s.is_explicit() {
                 let shown = s
                     .value
@@ -803,93 +799,79 @@ pub(crate) fn parse_args(
         "engine.round_sec",
         round_sec,
         "BK_ROUND_SEC",
-        file.round_sec,
         DEFAULT_ROUND_SEC
     );
     let min_round_age = resolve!(
         "engine.min_round_age_sec",
         min_round_age,
         "BK_MIN_ROUND_AGE_SEC",
-        file.min_round_age_sec,
         DEFAULT_MIN_ROUND_AGE_SEC
     );
     let min_time_left = resolve!(
         "engine.min_time_left_sec",
         min_time_left,
         "BK_MIN_TIME_LEFT_SEC",
-        file.min_time_left_sec,
         DEFAULT_MIN_TIME_LEFT_SEC
     );
     let assets: Vec<String> = resolve_shown!(
         "engine.assets",
         assets_arg.as_deref().map(split_assets),
         env.text("BK_ASSETS").map(|v| split_assets(&v)),
-        file.assets.clone(),
         DEFAULT_ASSETS
             .iter()
             .map(|a| a.to_string())
             .collect::<Vec<_>>()
     );
 
-    // Shadow Evolution. The file speaks in MINUTES for the two windows; the
-    // kernel speaks in seconds, so the conversion happens exactly here and
-    // nowhere else.
+    // Shadow Evolution. All windows are env-native SECONDS now that the TOML
+    // file layer (which spoke in minutes) is retired (issue #967).
     let se_eval_window_secs = resolve_opt!(
         "shadow_evolution.evaluation_window_secs",
         env.num::<i64>("BK_SE_EVAL_WINDOW_SECS"),
-        None::<i64>,
-        file.shadow.evaluation_window_minutes.map(|m| m * 60)
+        None::<i64>
     );
     let se_min_obs_secs = resolve_opt!(
         "shadow_evolution.min_observation_secs",
         se_min_obs_secs,
-        None::<i64>,
-        file.shadow.min_observation_minutes.map(|m| m * 60)
+        env.num::<i64>("BK_SE_MIN_OBS_SECS")
     );
     let se_cooldown_secs = resolve_opt!(
         "shadow_evolution.cooldown_secs",
         se_cooldown_secs,
-        env.num::<i64>("BK_SE_COOLDOWN_SECS"),
-        file.shadow.cooldown_minutes.map(|m| m * 60)
+        env.num::<i64>("BK_SE_COOLDOWN_SECS")
     );
     let se_min_samples = resolve_opt!(
         "shadow_evolution.min_sample_count",
         se_min_samples,
-        env.num::<u32>("BK_SE_MIN_SAMPLES"),
-        file.shadow.min_sample_count
+        env.num::<u32>("BK_SE_MIN_SAMPLES")
     );
     let se_variant_count = resolve_opt!(
         "shadow_evolution.variant_count",
         None::<usize>,
-        env.num::<usize>("BK_SE_VARIANT_COUNT"),
-        file.shadow.variant_count
+        env.num::<usize>("BK_SE_VARIANT_COUNT")
     );
     let se_audit_dir = resolve_opt!(
         "shadow_evolution.audit_dir",
         None::<String>,
-        env.text("BK_SE_AUDIT_DIR"),
-        file.shadow.audit_dir.clone()
+        env.text("BK_SE_AUDIT_DIR")
     );
     let se_min_win_rate = resolve_opt!(
         "shadow_evolution.min_win_rate_improvement",
         None::<Decimal>,
-        env.num::<Decimal>("BK_SE_MIN_WIN_RATE"),
-        file.shadow.min_win_rate_improvement
+        env.num::<Decimal>("BK_SE_MIN_WIN_RATE")
     );
     let se_min_profit_factor = resolve_opt!(
         "shadow_evolution.min_profit_factor_improvement",
         None::<Decimal>,
-        env.num::<Decimal>("BK_SE_MIN_PROFIT_FACTOR"),
-        file.shadow.min_profit_factor_improvement
+        env.num::<Decimal>("BK_SE_MIN_PROFIT_FACTOR")
     );
-    // Lock 2 is a safety lock, not a tuning surface: a file may tighten the
-    // per-step gradient, never widen it. A value above the ceiling is refused
-    // outright rather than clamped — silently ignoring a request to loosen a
-    // safety lock is the kind of thing an operator must be told about.
+    // Lock 2 is a safety lock, not a tuning surface: an operator may tighten
+    // the per-step gradient, never widen it. A value above the ceiling is
+    // refused outright rather than clamped — silently ignoring a request to
+    // loosen a safety lock is the kind of thing an operator must be told about.
     let se_max_gradient = match pick(
         None::<Decimal>,
         env.num::<Decimal>("BK_SE_MAX_GRADIENT"),
-        file.shadow.max_gradient,
         blitzkrieg_core::config::MAX_GRADIENT_CEILING,
     ) {
         s if !s.is_explicit() => None,
@@ -913,8 +895,8 @@ pub(crate) fn parse_args(
             None
         }
     };
-    // E13 proposal workflow. The file speaks in MINUTES for the two clocks
-    // (same convention as the other windows); the kernel speaks in seconds.
+    // E13 proposal workflow. The env face speaks SECONDS (the TOML file's
+    // minute unit retired with the rest of the file layer, issue #967).
     let se_auto_evolve = resolve_opt!(
         "shadow_evolution.auto_evolve",
         se_auto_evolve,
@@ -924,8 +906,7 @@ pub(crate) fn parse_args(
                 "true" | "1" | "on" | "yes" => Some(true),
                 "false" | "0" | "off" | "no" => Some(false),
                 _ => None,
-            }),
-        file.shadow.auto_evolve
+            })
     );
     // VERSIONING.md §7 (as amended by issue 751): CLI > env > built-in default
     // (off). The update.toml file layer is retired — the switches answer to the
@@ -938,8 +919,7 @@ pub(crate) fn parse_args(
                 "true" | "1" | "on" | "yes" => Some(true),
                 "false" | "0" | "off" | "no" => Some(false),
                 _ => None,
-            }),
-        None::<bool>
+            })
     );
     let update_auto = resolve_opt!(
         "update.auto_update",
@@ -949,8 +929,7 @@ pub(crate) fn parse_args(
                 "true" | "1" | "on" | "yes" => Some(true),
                 "false" | "0" | "off" | "no" => Some(false),
                 _ => None,
-            }),
-        None::<bool>
+            })
     );
     // #379: the automatic-check clock. Same chain; 0 = scheduler off. A
     // persisted interval is NOT used here by design — the clock is
@@ -959,27 +938,23 @@ pub(crate) fn parse_args(
         "update.interval_secs",
         update_interval_secs,
         env.text("BLITZKRIEG_UPDATE_INTERVAL_SECS")
-            .and_then(|v| v.trim().parse::<i64>().ok()),
-        None::<i64>
+            .and_then(|v| v.trim().parse::<i64>().ok())
     )
     .filter(|s| *s >= 0);
     let se_cycle_secs = resolve_opt!(
         "shadow_evolution.evolution_cycle_secs",
         se_cycle_secs,
-        env.num::<i64>("BK_SE_CYCLE_SECS"),
-        file.shadow.evolution_cycle_minutes.map(|m| m * 60)
+        env.num::<i64>("BK_SE_CYCLE_SECS")
     );
     let se_ttl_secs = resolve_opt!(
         "shadow_evolution.proposal_ttl_secs",
         se_ttl_secs,
-        env.num::<i64>("BK_SE_TTL_SECS"),
-        file.shadow.proposal_ttl_minutes.map(|m| m * 60)
+        env.num::<i64>("BK_SE_TTL_SECS")
     );
     let se_deep_dims = resolve_opt!(
         "shadow_evolution.deep_dims",
         se_deep_dims,
-        env.num::<usize>("BK_SE_DEEP_DIMS"),
-        file.shadow.deep_dims
+        env.num::<usize>("BK_SE_DEEP_DIMS")
     );
 
     // ── #173: the daily-loss breaker's budget ───────────────────────────────
@@ -995,13 +970,11 @@ pub(crate) fn parse_args(
         // the rest of the TOML risk layer — this budget's durable face is now
         // `BK_MAX_DAILY_LOSS` (or `BK_RISK_MAX_DAILY_DRAWDOWN_USD` in the
         // systemic readout), never a file.
-        None,
         daily_loss_defaults.max_daily_loss_usd,
     );
     let daily_loss_pct = pick(
         max_daily_loss_pct,
         env.num::<Decimal>("BK_MAX_DAILY_LOSS_PCT"),
-        None,
         daily_loss_defaults.max_daily_loss_equity_pct,
     );
     if daily_loss_usd.is_explicit() {
@@ -1041,13 +1014,11 @@ pub(crate) fn parse_args(
     let size_pct = pick(
         size_pct,
         env.num::<Decimal>("BK_SIZE_PCT"),
-        None,
         Decimal::ZERO,
     );
     let notional_pct = pick(
         max_order_notional_pct,
         env.num::<Decimal>("BK_MAX_ORDER_NOTIONAL_PCT"),
-        None,
         Decimal::ZERO,
     );
     if size_pct.is_explicit() {
@@ -1109,9 +1080,6 @@ pub(crate) fn parse_args(
     let stale = pick(
         max_orderbook_stale_ms,
         env.num::<i64>("BK_MAX_ORDERBOOK_STALE_MS"),
-        // #866: the config file is a real layer. `--no-config` leaves this
-        // None, so the compiled 8000 ms stays the factory.
-        file.max_orderbook_stale_ms,
         blitzkrieg_core::engine::DEFAULT_MAX_ORDERBOOK_STALE_MS,
     );
     // Invalid values fail the boot loudly instead of falling back: a silently
@@ -1153,13 +1121,11 @@ pub(crate) fn parse_args(
     let ntp = pick(
         ntp_host,
         env.text("BK_NTP_HOST"),
-        None::<String>,
         blitzkrieg_core::probe::DEFAULT_NTP_HOST.to_string(),
     );
     let ntp_interval = pick(
         ntp_interval_secs,
         env.num::<i64>("BK_NTP_INTERVAL_SECS"),
-        None::<i64>,
         blitzkrieg_core::probe::DEFAULT_NTP_INTERVAL_SECS,
     );
     if ntp_interval.value < 0 {
@@ -1198,27 +1164,18 @@ pub(crate) fn parse_args(
 
     // ── E17/#264 + issue #967 (Phase-5): the engine-level exit ladder ───────
     // Effective chain: CLI > env(.env) > compiled default. The TOML `[exit]`
-    // section is retired as an effective source, so the toml slot of `pick`
-    // is always `None` — a file that still carries `[exit]` is inert.
-    // The defaults are read off `ExitConfig::default()` rather than re-typed, so
-    // "unchanged" is a property of the code, not of a comment.
+    // section (and the whole file layer) is retired. The defaults are read off
+    // `ExitConfig::default()` rather than re-typed, so "unchanged" is a
+    // property of the code, not of a comment.
     let exit_defaults = blitzkrieg_core::exit_policy::ExitConfig::default();
-    let env_dec = |key: &str| {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.trim().parse::<Decimal>().ok())
-    };
-    let env_int = |key: &str| {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.trim().parse::<i64>().ok())
-    };
+    let env_dec = |key: &str| env.num::<Decimal>(key);
+    let env_int = |key: &str| env.num::<i64>(key);
     let exit_knob = |report: &mut Vec<String>,
                      label: &str,
                      cli: Option<Decimal>,
                      env: Option<Decimal>,
                      default: Decimal| {
-        let s = pick(cli, env, None::<Decimal>, default);
+        let s = pick(cli, env, default);
         if s.is_explicit() {
             report.push(format!("{label}={} ({})", s.value, s.source.as_str()));
         }
@@ -1258,7 +1215,6 @@ pub(crate) fn parse_args(
         let s = pick(
             exit_force_sec,
             env_int("BK_EXIT_FORCE_EXIT_SEC"),
-            None::<i64>,
             exit_defaults.force_exit_sec,
         );
         if s.is_explicit() {
@@ -1281,7 +1237,6 @@ pub(crate) fn parse_args(
         None::<bool>,
         env.num::<bool>("BK_SHADOW_EVOLUTION")
             .or_else(|| env.num::<bool>("SHADOW_ENABLED")),
-        file.shadow.enabled,
         false,
     );
     let shadow_evolution_enabled = shadow_evolution_flag || se_engine.value;

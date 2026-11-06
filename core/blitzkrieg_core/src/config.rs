@@ -1,36 +1,29 @@
-//! File-based configuration (KI-11 / D-1).
+//! Effective-setting provenance for the kernel's startup chain.
 //!
-//! The kernel's settings used to come from CLI flags and code constants alone,
-//! which left `user_layer/configs/*.toml` as dead files: editing one changed
-//! nothing. This module makes those files a real source, with one rule:
+//! The TOML config layer is RETIRED (issue #967, phase 5): no file is an
+//! effective source any more. The kernel's settings come from, in order,
 //!
-//! **CLI > env > TOML > built-in default**
+//! **CLI > env (`.env` folded into the process environment) > built-in default**
 //!
 //! Resolution is a pure function ([`pick`]) so the precedence is testable
 //! without a process. Every effective value carries its [`Source`], and the
 //! binary logs the non-default ones at startup — "where did this number come
-//! from" is answerable from the log alone, which is the point of a declarative
-//! config layer.
+//! from" is answerable from the log alone.
 //!
-//! Failure policy: a missing file is not an error (defaults apply), and a
-//! malformed file is a WARNING, never fatal. A typo in a config file must not be
-//! able to stop a trading kernel from starting; it must be loud instead. Unknown
-//! keys are warned about one by one for the same reason — a silently ignored
-//! key is exactly the failure this module exists to end.
+//! A `source=toml` line in a boot log is a regression, not a configuration.
+
+use std::path::{Path, PathBuf};
 
 use rust_decimal::Decimal;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 /// Where an effective setting came from, highest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     /// Command-line flag.
     Cli,
-    /// `BK_*` environment variable.
+    /// `BK_*` / `SHADOW_*` environment variable (from the deployment env or
+    /// the `.env` file the launcher folds into it).
     Env,
-    /// A TOML config file.
-    Toml,
     /// The value compiled into the binary.
     Default,
 }
@@ -40,7 +33,6 @@ impl Source {
         match self {
             Source::Cli => "cli",
             Source::Env => "env",
-            Source::Toml => "toml",
             Source::Default => "default",
         }
     }
@@ -66,480 +58,26 @@ impl<T> Sourced<T> {
 
 /// Resolve one setting through the precedence chain. The single place the
 /// order is expressed; every caller goes through it.
-pub fn pick<T>(cli: Option<T>, env: Option<T>, toml: Option<T>, default: T) -> Sourced<T> {
+pub fn pick<T>(cli: Option<T>, env: Option<T>, default: T) -> Sourced<T> {
     if let Some(v) = cli {
         Sourced::new(v, Source::Cli)
     } else if let Some(v) = env {
         Sourced::new(v, Source::Env)
-    } else if let Some(v) = toml {
-        Sourced::new(v, Source::Toml)
     } else {
         Sourced::new(default, Source::Default)
     }
 }
 
-/// The default config file, relative to the core's working directory (the repo
-/// root for the production shell).
-pub const DEFAULT_CONFIG_PATH: &str = "user_layer/configs/default.toml";
-
-/// Sibling file holding the Shadow Evolution section. Looked up next to the main
-/// config so a self-contained config directory stays self-contained.
-pub const SHADOW_SECTION_FILE: &str = "shadow_evolution.toml";
-
-/// Shadow Evolution settings as written in the file. All optional: an absent key
-/// keeps its built-in default.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ShadowFile {
-    pub enabled: Option<bool>,
-    /// Rolling metrics window, in MINUTES (the file's unit).
-    pub evaluation_window_minutes: Option<i64>,
-    pub min_sample_count: Option<u32>,
-    pub min_win_rate_improvement: Option<Decimal>,
-    pub min_profit_factor_improvement: Option<Decimal>,
-    pub min_observation_minutes: Option<i64>,
-    pub cooldown_minutes: Option<i64>,
-    /// Per-step relative move ceiling (Lock 2). A file may TIGHTEN this, never
-    /// widen it — see [`crate::config::MAX_GRADIENT_CEILING`].
-    pub max_gradient: Option<Decimal>,
-    pub variant_count: Option<usize>,
-    pub audit_dir: Option<String>,
-    /// E13: start in the unattended mode (a qualifying variant applies itself,
-    /// still under every guard). Defaults to false — the operator decides.
-    pub auto_evolve: Option<bool>,
-    /// Minutes between DEEP evolution rounds (the file's unit; 72h = 4320).
-    pub evolution_cycle_minutes: Option<i64>,
-    /// Minutes an undecided proposal stays decidable (7 days = 10080).
-    pub proposal_ttl_minutes: Option<i64>,
-    /// Knobs one DEEP-cycle variant moves simultaneously (>= 1).
-    pub deep_dims: Option<usize>,
-}
-
-/// Lock 2's built-in ceiling (±5% per evolution step). A config file may lower
+/// Lock 2's built-in ceiling (±5% per evolution step). An operator may lower
 /// `max_gradient` but a value above this is rejected with a warning: the four
 /// safety locks are not configurable surfaces, and a setting that could widen
 /// one is not a tuning knob.
 pub const MAX_GRADIENT_CEILING: Decimal = rust_decimal_macros::dec!(0.05);
 
-/// The exit ladder as written in the file (E17/#264). All optional: an absent
-/// key keeps the compiled [`crate::exit_policy::ExitConfig`] value, so a file
-/// that never mentions `[exit]` is the shipped kernel.
-///
-/// Only the knobs an A/B sweep actually moves live here. The rest of the
-/// ladder stays compiled in on purpose: a static config file that could re-shape
-/// every stop and trail would be a second, silently divergent exit policy.
-/// `force_exit_sec` is the fifth (calibration): the shipped default is OFF —
-/// `0` disables the guillotine — and an A/B arm may turn a deadline back on.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ExitFile {
-    pub take_profit_pct: Option<Decimal>,
-    pub stop_loss_pct: Option<Decimal>,
-    pub trailing_min_high_pct: Option<Decimal>,
-    pub min_trail_pct: Option<Decimal>,
-    pub force_exit_sec: Option<i64>,
-}
-
-/// One `[[risk.ladder]]` row as written in the file (E26 §4.3). A mirror of
-/// the arbitration-face `LadderStep` rather than a re-export: that type lives
-/// in E25 territory without `PartialEq`, and the config layer owns its own
-/// equality for `FileConfig`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LadderFile {
-    pub at_pct: Decimal,
-    pub close_ratio: Decimal,
-    pub move_stop_to: Option<Decimal>,
-}
-
-impl LadderFile {
-    /// The arbitration step this row configures (§4.3: an explicit ladder
-    /// opts in and takes over the projection).
-    pub fn to_step(&self) -> crate::arbitration::LadderStep {
-        crate::arbitration::LadderStep {
-            at_pct: self.at_pct,
-            close_ratio: self.close_ratio,
-            move_stop_to: self.move_stop_to,
-        }
-    }
-}
-
-/// The `[risk]` section as written in the file (E26 §4.2). All optional: an
-/// absent key is "not configured" and resolves to the factory posture — every
-/// [`crate::risk::limits::Bound`] off (§4.1: silent until the operator speaks).
-/// `Option` keeps "never written" distinguishable from an explicit `0`; both
-/// enforce nothing, but only an explicit value has a non-default source to
-/// report on `risk.limits`.
-///
-/// The nine scalars are `Decimal` (not `i64`) on purpose: the wire contract
-/// (§4.4) renders every bound as a decimal string, and a count that later
-/// wants a fractional knob should not need a type change to get one.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RiskFile {
-    // ── account-level (§4.2, five) ──────────────────────────────────────────
-    pub max_single_loss_usd: Option<Decimal>,
-    pub max_daily_drawdown_usd: Option<Decimal>,
-    pub max_position_size: Option<Decimal>,
-    pub max_consecutive_losses: Option<Decimal>,
-    pub cooldown_minutes: Option<Decimal>,
-    // ── global-level (§4.2, four) ───────────────────────────────────────────
-    pub max_total_position: Option<Decimal>,
-    pub max_total_exposure_usd: Option<Decimal>,
-    pub max_correlation_usd: Option<Decimal>,
-    pub global_kill_switch_loss_usd: Option<Decimal>,
-    /// Explicit `[[risk.ladder]]` rows. Empty = no opt-in: the exit policy's
-    /// projection stays in charge (§4.3 default = shipped behavior).
-    pub ladder: Vec<LadderFile>,
-}
-
-/// Everything read from a config file. `warnings` is what the caller logs; it is
-/// never an error, so the file can be partly wrong and the kernel still starts.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct FileConfig {
-    /// The file that was read, if one existed.
-    pub path: Option<PathBuf>,
-    // ── [engine] ────────────────────────────────────────────────────────────
-    pub assets: Option<Vec<String>>,
-    pub round_sec: Option<i64>,
-    pub min_round_age_sec: Option<i64>,
-    pub min_time_left_sec: Option<i64>,
-    /// `#866`: how old a book may be before entries stop. `None` = the
-    /// compiled 8000 ms. `Some(0)` is the explicit "check off" spelling.
-    pub max_orderbook_stale_ms: Option<i64>,
-    // ── [exit] ──────────────────────────────────────────────────────────────
-    pub exit: ExitFile,
-    // ── [risk] (E26 §4) ─────────────────────────────────────────────────────
-    pub risk: RiskFile,
-    // ── [shadow_evolution] ──────────────────────────────────────────────────
-    pub shadow: ShadowFile,
-    pub warnings: Vec<String>,
-    /// Keys present in the file that nothing consumes. Reported, so the
-    /// "dead config" problem (KI-11) cannot come back unnoticed.
-    pub unknown_keys: Vec<String>,
-}
-
-impl FileConfig {
-    /// Load the main file plus its Shadow Evolution sibling.
-    ///
-    /// `path` = None means "no file requested" (pure defaults). A missing file,
-    /// an unreadable file, or a malformed one all resolve to defaults + a
-    /// warning.
-    pub fn load(path: Option<&Path>) -> Self {
-        let Some(path) = path else {
-            return Self::default();
-        };
-        let mut out = Self::load_one(path);
-        // The shadow file lives beside the main one; both are optional.
-        if let Some(dir) = path.parent() {
-            let shadow_path = dir.join(SHADOW_SECTION_FILE);
-            if shadow_path.exists() {
-                let shadow = Self::load_one(&shadow_path);
-                out.warnings.extend(shadow.warnings);
-                out.unknown_keys.extend(shadow.unknown_keys);
-                out.shadow = shadow.shadow;
-            }
-        }
-        out
-    }
-
-    fn load_one(path: &Path) -> Self {
-        let mut out = Self {
-            path: Some(path.to_path_buf()),
-            ..Self::default()
-        };
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                // A missing default file is the normal case for a checkout that
-                // never configured anything; do not cry wolf about it.
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    out.warnings.push(format!("{}: {e}", path.display()));
-                }
-                out.path = None;
-                return out;
-            }
-        };
-        let value: toml::Value = match toml::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                out.warnings
-                    .push(format!("{}: malformed TOML: {e}", path.display()));
-                out.path = None;
-                return out;
-            }
-        };
-        out.read(&value, path);
-        out
-    }
-
-    fn read(&mut self, value: &toml::Value, path: &Path) {
-        let Some(root) = value.as_table() else {
-            self.warnings
-                .push(format!("{}: not a TOML table", path.display()));
-            return;
-        };
-        let mut known_section = false;
-        for (section, table) in root {
-            let Some(table) = table.as_table() else {
-                self.unknown_keys.push(section.clone());
-                continue;
-            };
-            // A renamed or invented section is the classic silent typo, so it is
-            // reported once (its keys are not enumerated individually).
-            if !matches!(
-                section.as_str(),
-                "engine" | "exit" | "risk" | "shadow_evolution"
-            ) {
-                self.unknown_keys.push(section.clone());
-                continue;
-            }
-            known_section = true;
-            for (key, v) in table {
-                let full = format!("{section}.{key}");
-                let w = &mut self.warnings;
-                match (section.as_str(), key.as_str()) {
-                    ("engine", "assets") => got(&mut self.assets, str_array(v), &full, w),
-                    ("engine", "round_sec") => got(&mut self.round_sec, int(v), &full, w),
-                    ("engine", "min_round_age_sec") => {
-                        got(&mut self.min_round_age_sec, int(v), &full, w)
-                    }
-                    ("engine", "min_time_left_sec") => {
-                        got(&mut self.min_time_left_sec, int(v), &full, w)
-                    }
-                    // #866: the freshness budget's TOML face. CLI and
-                    // BK_MAX_ORDERBOOK_STALE_MS still outrank it. Absent =
-                    // compiled 8000 ms. 0 is legal and means the check is off.
-                    ("engine", "max_orderbook_stale_ms") => {
-                        got(&mut self.max_orderbook_stale_ms, int(v), &full, w)
-                    }
-                    // E17/#264: the engine-level exit ladder. Percentages, so the
-                    // quoted form is accepted exactly like the shadow section's
-                    // decimals.
-                    ("exit", "take_profit_pct") => {
-                        got(&mut self.exit.take_profit_pct, decimal(v), &full, w)
-                    }
-                    ("exit", "stop_loss_pct") => {
-                        got(&mut self.exit.stop_loss_pct, decimal(v), &full, w)
-                    }
-                    ("exit", "trailing_min_high_pct") => {
-                        got(&mut self.exit.trailing_min_high_pct, decimal(v), &full, w)
-                    }
-                    ("exit", "min_trail_pct") => {
-                        got(&mut self.exit.min_trail_pct, decimal(v), &full, w)
-                    }
-                    ("exit", "force_exit_sec") => {
-                        got(&mut self.exit.force_exit_sec, int(v), &full, w)
-                    }
-                    // E26 §4.2: the systemic risk limits. Decimals, same `got`
-                    // discipline: a wrongly-typed key is a warning, not a boot
-                    // failure — a typo must not stop a trading kernel.
-                    ("risk", "max_single_loss_usd") => {
-                        got(&mut self.risk.max_single_loss_usd, decimal(v), &full, w)
-                    }
-                    ("risk", "max_daily_drawdown_usd") => {
-                        got(&mut self.risk.max_daily_drawdown_usd, decimal(v), &full, w)
-                    }
-                    ("risk", "max_position_size") => {
-                        got(&mut self.risk.max_position_size, decimal(v), &full, w)
-                    }
-                    ("risk", "max_consecutive_losses") => {
-                        got(&mut self.risk.max_consecutive_losses, decimal(v), &full, w)
-                    }
-                    ("risk", "cooldown_minutes") => {
-                        got(&mut self.risk.cooldown_minutes, decimal(v), &full, w)
-                    }
-                    ("risk", "max_total_position") => {
-                        got(&mut self.risk.max_total_position, decimal(v), &full, w)
-                    }
-                    ("risk", "max_total_exposure_usd") => {
-                        got(&mut self.risk.max_total_exposure_usd, decimal(v), &full, w)
-                    }
-                    ("risk", "max_correlation_usd") => {
-                        got(&mut self.risk.max_correlation_usd, decimal(v), &full, w)
-                    }
-                    ("risk", "global_kill_switch_loss_usd") => got(
-                        &mut self.risk.global_kill_switch_loss_usd,
-                        decimal(v),
-                        &full,
-                        w,
-                    ),
-                    // E26 §4.3: an explicit `[[risk.ladder]]` opts in and takes
-                    // over the exit projection. One bad row warns and is left
-                    // out — a truncated ladder is louder than a silent one, and
-                    // the whole array must validate before it can take over.
-                    ("risk", "ladder") => {
-                        let rows = match v.as_array() {
-                            Some(rows) => rows,
-                            None => {
-                                w.push(format!("{full}: expected an array of tables; ignoring it"));
-                                continue;
-                            }
-                        };
-                        let mut file_rows = Vec::with_capacity(rows.len());
-                        let mut steps: Vec<crate::arbitration::LadderStep> =
-                            Vec::with_capacity(rows.len());
-                        for (i, row) in rows.iter().enumerate() {
-                            let Some(table) = row.as_table() else {
-                                w.push(format!("{full}[{i}]: expected a table; ignoring it"));
-                                continue;
-                            };
-                            let mut at_pct: Option<Decimal> = None;
-                            let mut close_ratio: Option<Decimal> = None;
-                            let mut move_stop_to: Option<Decimal> = None;
-                            for (key, val) in table {
-                                let fkey = format!("{full}[{i}].{key}");
-                                match key.as_str() {
-                                    "at_pct" => got(&mut at_pct, decimal(val), &fkey, w),
-                                    "close_ratio" => got(&mut close_ratio, decimal(val), &fkey, w),
-                                    "move_stop_to" => {
-                                        got(&mut move_stop_to, decimal(val), &fkey, w)
-                                    }
-                                    _ => self.unknown_keys.push(fkey),
-                                }
-                            }
-                            let (Some(at_pct), Some(close_ratio)) = (at_pct, close_ratio) else {
-                                w.push(format!(
-                                    "{full}[{i}]: needs at_pct and close_ratio; ignoring the row"
-                                ));
-                                continue;
-                            };
-                            let file_row = LadderFile {
-                                at_pct,
-                                close_ratio,
-                                move_stop_to,
-                            };
-                            steps.push(file_row.to_step());
-                            file_rows.push(file_row);
-                        }
-                        if let Err(what) = crate::risk::physics::validate_ladder(&steps) {
-                            w.push(what);
-                            continue;
-                        }
-                        self.risk.ladder = file_rows;
-                    }
-                    ("shadow_evolution", "enabled") => {
-                        got(&mut self.shadow.enabled, bool_(v), &full, w)
-                    }
-                    ("shadow_evolution", "evaluation_window_minutes") => {
-                        got(&mut self.shadow.evaluation_window_minutes, int(v), &full, w)
-                    }
-                    ("shadow_evolution", "min_sample_count") => {
-                        got(&mut self.shadow.min_sample_count, uint32(v), &full, w)
-                    }
-                    ("shadow_evolution", "min_win_rate_improvement") => got(
-                        &mut self.shadow.min_win_rate_improvement,
-                        decimal(v),
-                        &full,
-                        w,
-                    ),
-                    ("shadow_evolution", "min_profit_factor_improvement") => got(
-                        &mut self.shadow.min_profit_factor_improvement,
-                        decimal(v),
-                        &full,
-                        w,
-                    ),
-                    ("shadow_evolution", "min_observation_minutes") => {
-                        got(&mut self.shadow.min_observation_minutes, int(v), &full, w)
-                    }
-                    ("shadow_evolution", "cooldown_minutes") => {
-                        got(&mut self.shadow.cooldown_minutes, int(v), &full, w)
-                    }
-                    ("shadow_evolution", "max_gradient") => {
-                        got(&mut self.shadow.max_gradient, decimal(v), &full, w)
-                    }
-                    ("shadow_evolution", "variant_count") => {
-                        got(&mut self.shadow.variant_count, uint(v), &full, w)
-                    }
-                    ("shadow_evolution", "audit_dir") => {
-                        got(&mut self.shadow.audit_dir, string(v), &full, w)
-                    }
-                    ("shadow_evolution", "auto_evolve") => {
-                        got(&mut self.shadow.auto_evolve, bool_(v), &full, w)
-                    }
-                    ("shadow_evolution", "evolution_cycle_minutes") => {
-                        got(&mut self.shadow.evolution_cycle_minutes, int(v), &full, w)
-                    }
-                    ("shadow_evolution", "proposal_ttl_minutes") => {
-                        got(&mut self.shadow.proposal_ttl_minutes, int(v), &full, w)
-                    }
-                    ("shadow_evolution", "deep_dims") => {
-                        got(&mut self.shadow.deep_dims, uint(v), &full, w)
-                    }
-                    _ => self.unknown_keys.push(full),
-                }
-            }
-        }
-        // A retired / documentation-only file (all comments, no sections) is a
-        // legitimate empty table — not a typo, so it stays silent (issue: default.toml
-        // retirement). A file that carries sections but none we recognise still
-        // warns, so a typo'd section header cannot hide.
-        if !root.is_empty() && !known_section {
-            self.warnings
-                .push(format!("{}: no known sections", path.display()));
-        }
-    }
-}
-
-/// Record a parsed key, or a precise warning when the value had the wrong type.
-/// An unusable value leaves the key unset rather than guessing at it.
-fn got<T>(slot: &mut Option<T>, parsed: Result<T, String>, key: &str, warnings: &mut Vec<String>) {
-    match parsed {
-        Ok(v) => *slot = Some(v),
-        Err(what) => warnings.push(format!("{key}: expected {what}; ignoring the key")),
-    }
-}
-
-fn string(v: &toml::Value) -> Result<String, String> {
-    v.as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "a string".to_string())
-}
-
-fn bool_(v: &toml::Value) -> Result<bool, String> {
-    v.as_bool().ok_or_else(|| "a boolean".to_string())
-}
-
-fn int(v: &toml::Value) -> Result<i64, String> {
-    v.as_integer().ok_or_else(|| "an integer".to_string())
-}
-
-fn uint(v: &toml::Value) -> Result<usize, String> {
-    let n = int(v)?;
-    usize::try_from(n).map_err(|_| "a non-negative integer".to_string())
-}
-
-fn uint32(v: &toml::Value) -> Result<u32, String> {
-    let n = int(v)?;
-    u32::try_from(n).map_err(|_| "a non-negative integer".to_string())
-}
-
-fn decimal(v: &toml::Value) -> Result<Decimal, String> {
-    // Accept both a TOML float (0.05) and a quoted string ("0.05"): a float
-    // cannot express every decimal exactly, so the quoted form is the precise
-    // one and must keep working.
-    match v {
-        toml::Value::Float(f) => Decimal::try_from(*f).map_err(|_| "a decimal".to_string()),
-        toml::Value::Integer(i) => Ok(Decimal::from(*i)),
-        toml::Value::String(s) => Decimal::from_str(s.trim()).map_err(|_| "a decimal".to_string()),
-        _ => Err("a decimal (number or string)".to_string()),
-    }
-}
-
-fn str_array(v: &toml::Value) -> Result<Vec<String>, String> {
-    let arr = v
-        .as_array()
-        .ok_or_else(|| "an array of strings".to_string())?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let s = item
-            .as_str()
-            .ok_or_else(|| "an array of strings".to_string())?;
-        let s = s.trim();
-        if !s.is_empty() {
-            out.push(s.to_string());
-        }
-    }
-    Ok(out)
-}
-
 // ── Extension config (`extensions/<name>/config.toml`) ──────────────────────
+//
+// NOT an operator settings layer: an extension's own manifest, read by name at
+// load time and never competing with the kernel's `.env` chain.
 
 /// What an extension's config file declares about itself.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -696,16 +234,43 @@ impl ExtensionConfig {
     }
 }
 
+/// Record a parsed key, or a precise warning when the value had the wrong type.
+/// An unusable value leaves the key unset rather than guessing at it.
+fn got<T>(slot: &mut Option<T>, parsed: Result<T, String>, key: &str, warnings: &mut Vec<String>) {
+    match parsed {
+        Ok(v) => *slot = Some(v),
+        Err(what) => warnings.push(format!("{key}: expected {what}; ignoring the key")),
+    }
+}
+
+fn string(v: &toml::Value) -> Result<String, String> {
+    v.as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "a string".to_string())
+}
+
+fn bool_(v: &toml::Value) -> Result<bool, String> {
+    v.as_bool().ok_or_else(|| "a boolean".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
 
-    fn parsed(text: &str) -> FileConfig {
-        let v: toml::Value = toml::from_str(text).expect("test TOML");
-        let mut cfg = FileConfig::default();
-        cfg.read(&v, Path::new("test.toml"));
-        cfg
+    #[test]
+    fn precedence_is_cli_env_default() {
+        assert_eq!(pick(Some(1), Some(2), 3).source, Source::Cli);
+        assert_eq!(pick(None, Some(2), 3), Sourced::new(2, Source::Env));
+        assert_eq!(pick(None, None, 3), Sourced::new(3, Source::Default));
+    }
+
+    #[test]
+    fn the_toml_layer_is_gone() {
+        // Issue #967: the retired layer must not come back through the
+        // provenance vocabulary — `source=toml` is a regression on the wire.
+        assert_eq!(Source::Cli.as_str(), "cli");
+        assert_eq!(Source::Env.as_str(), "env");
+        assert_eq!(Source::Default.as_str(), "default");
     }
 
     /// Write `text` to a scratch file and load it the way the kernel does.
@@ -738,13 +303,10 @@ mod tests {
         assert_eq!(cfg.meta.name.as_deref(), Some("binance_spot"));
         assert_eq!(cfg.meta.extension_type.as_deref(), Some("market"));
         assert_eq!(cfg.meta.enabled, Some(false));
-        // meta matches the code, so nothing to report.
         assert!(
             cfg.check_against("binance_spot", "0.1.0", "market")
                 .is_empty()
         );
-        // [market]/[risk]/[dependencies] are declared and named as not acted on,
-        // rather than silently dropped.
         assert!(
             cfg.declared_only.iter().any(|d| d.key == "market.symbols"),
             "{:?}",
@@ -762,7 +324,6 @@ mod tests {
                 .iter()
                 .any(|d| d.key == "dependencies.blitzkrieg_core")
         );
-        // Every declared-only key names a reason.
         assert!(cfg.declared_only.iter().all(|d| !d.reason.is_empty()));
     }
 
@@ -782,7 +343,6 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("binance_futures")));
         assert!(problems.iter().any(|p| p.contains("9.9.9")));
         assert!(problems.iter().any(|p| p.contains("strategy")));
-        // Its `enabled = true` is a claim the kernel does not silently act on.
         assert_eq!(cfg.meta.enabled, Some(true));
     }
 
@@ -805,510 +365,5 @@ mod tests {
         assert!(cfg.path.is_none());
         assert!(cfg.warnings.is_empty());
         assert_eq!(cfg.meta, ExtensionMeta::default());
-    }
-
-    #[test]
-    fn precedence_is_cli_env_toml_default() {
-        // Every layer present: CLI wins.
-        let got = pick(Some(1), Some(2), Some(3), 0);
-        assert_eq!((got.value, got.source), (1, Source::Cli));
-        // No CLI: env wins over TOML.
-        let got = pick(None, Some(2), Some(3), 0);
-        assert_eq!((got.value, got.source), (2, Source::Env));
-        // No CLI/env: TOML wins over the default.
-        let got = pick(None::<i32>, None, Some(3), 0);
-        assert_eq!((got.value, got.source), (3, Source::Toml));
-        // Nothing given: the compiled default, flagged as such.
-        let got = pick(None::<i32>, None, None, 0);
-        assert_eq!((got.value, got.source), (0, Source::Default));
-        assert!(!got.is_explicit());
-        assert!(pick(Some(1), None, None, 0).is_explicit());
-    }
-
-    #[test]
-    fn reads_every_documented_key() {
-        let cfg = parsed(
-            r#"
-            [engine]
-            assets = ["BTC", "ETH"]
-            round_sec = 300
-            min_round_age_sec = 12
-            min_time_left_sec = 34
-
-            [exit]
-            take_profit_pct = 100
-            stop_loss_pct = "12"
-            trailing_min_high_pct = 15
-            min_trail_pct = 5
-
-            [shadow_evolution]
-            enabled = true
-            evaluation_window_minutes = 7
-            min_sample_count = 11
-            min_win_rate_improvement = 0.07
-            min_profit_factor_improvement = "0.21"
-            min_observation_minutes = 3
-            cooldown_minutes = 4
-            max_gradient = 0.01
-            variant_count = 5
-            audit_dir = "data/evolution"
-            auto_evolve = false
-            evolution_cycle_minutes = 4320
-            proposal_ttl_minutes = 10080
-            deep_dims = 2
-            "#,
-        );
-        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
-        assert!(cfg.unknown_keys.is_empty(), "{:?}", cfg.unknown_keys);
-        assert_eq!(
-            cfg.assets.as_deref(),
-            Some(&["BTC".to_string(), "ETH".to_string()][..])
-        );
-        assert_eq!(cfg.round_sec, Some(300));
-        assert_eq!(cfg.min_round_age_sec, Some(12));
-        assert_eq!(cfg.min_time_left_sec, Some(34));
-        // The exit ladder, in both the numeric and the quoted form.
-        assert_eq!(cfg.exit.take_profit_pct, Some(dec!(100)));
-        assert_eq!(cfg.exit.stop_loss_pct, Some(dec!(12)));
-        assert_eq!(cfg.exit.trailing_min_high_pct, Some(dec!(15)));
-        assert_eq!(cfg.exit.min_trail_pct, Some(dec!(5)));
-        let s = &cfg.shadow;
-        assert_eq!(s.enabled, Some(true));
-        assert_eq!(s.evaluation_window_minutes, Some(7));
-        assert_eq!(s.min_sample_count, Some(11));
-        assert_eq!(s.min_win_rate_improvement, Some(dec!(0.07)));
-        // The quoted form parses exactly, unlike a binary float.
-        assert_eq!(s.min_profit_factor_improvement, Some(dec!(0.21)));
-        assert_eq!(s.min_observation_minutes, Some(3));
-        assert_eq!(s.cooldown_minutes, Some(4));
-        assert_eq!(s.max_gradient, Some(dec!(0.01)));
-        assert_eq!(s.variant_count, Some(5));
-        assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
-        assert_eq!(s.auto_evolve, Some(false));
-        assert_eq!(s.evolution_cycle_minutes, Some(4320));
-        assert_eq!(s.proposal_ttl_minutes, Some(10080));
-        assert_eq!(s.deep_dims, Some(2));
-    }
-
-    #[test]
-    fn the_shipped_default_file_is_fully_understood() {
-        // The repo's own config must not contain a single unknown key: this test
-        // is what keeps the file and the parser from drifting apart.
-        //
-        // env single-source (2026-10-23 ruling): the factory [engine] keys
-        // (assets / round_sec / min_round_age / min_time_left) stay absent.
-        // An explicit round_sec here would suppress the round-duration UI
-        // card (issue 499). `[risk]` and `engine.max_orderbook_stale_ms` are
-        // the exception (#864, #866): a normal boot must enforce them. The
-        // compiled defaults the absent engine keys fall through to are
-        // asserted by the bin tests.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
-        let cfg = FileConfig::load(Some(&root.join("default.toml")));
-        assert!(cfg.path.is_some(), "default.toml must exist");
-        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
-        assert!(cfg.unknown_keys.is_empty(), "{:?}", cfg.unknown_keys);
-        // The factory keys are GONE: nothing here may shadow the .env surface
-        // or the round-duration card. If one comes back, the card goes dead
-        // again (issue 499) and .env stops being the single source.
-        assert_eq!(
-            cfg.assets, None,
-            "assets must come from the compiled default / BK_ASSETS"
-        );
-        assert_eq!(
-            cfg.round_sec, None,
-            "round_sec must come from the compiled default / BK_ROUND_SEC"
-        );
-        assert_eq!(
-            cfg.min_round_age_sec, None,
-            "min_round_age_sec must come from the compiled default / BK_MIN_ROUND_AGE_SEC"
-        );
-        assert_eq!(
-            cfg.min_time_left_sec, None,
-            "min_time_left_sec must come from the compiled default / BK_MIN_TIME_LEFT_SEC"
-        );
-        // #864 / #866: the shipped file arms the loss bounds and the freshness
-        // budget. `--no-config` is what keeps the factory (tested separately).
-        assert_eq!(cfg.max_orderbook_stale_ms, Some(3500));
-        assert_eq!(cfg.risk.max_single_loss_usd, Some(dec!(0.50)));
-        assert_eq!(cfg.risk.max_daily_drawdown_usd, Some(dec!(5)));
-        assert_eq!(cfg.risk.max_position_size, Some(dec!(5)));
-        assert_eq!(cfg.risk.max_consecutive_losses, Some(dec!(4)));
-        assert_eq!(cfg.risk.cooldown_minutes, Some(dec!(30)));
-        assert_eq!(cfg.risk.max_total_position, Some(dec!(6)));
-        assert_eq!(cfg.risk.max_total_exposure_usd, Some(dec!(20)));
-        assert_eq!(cfg.risk.max_correlation_usd, Some(dec!(12)));
-        assert_eq!(cfg.risk.global_kill_switch_loss_usd, Some(dec!(8)));
-        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
-        assert!(
-            sys.any_armed(),
-            "a normal boot must enforce systemic limits"
-        );
-        assert!(sys.account.max_single_loss_usd.is_enabled());
-        assert_eq!(
-            sys.account.max_daily_drawdown_usd.source(),
-            crate::risk::limits::LimitSource::Toml
-        );
-        // Loaded from the sibling file, not invented.
-        let s = &cfg.shadow;
-        // #269 reverses #249's choice: the shipped file leaves the evaluator OFF.
-        // #249 was right about the trap — a shipped value is only the FIRST
-        // startup's value, because a panel flip persists over it — but that cut
-        // both ways: with `true` shipped, a new machine, a fresh `data/` or a
-        // restored backup silently re-armed unattended auto-evolution. The fix is
-        // the conflict report (`switchConflicts` on `shadow_evolution.status`,
-        // plus a startup WARN), not a shipped `true`: with the two visible, the
-        // "nobody could see it being reset" objection no longer holds.
-        assert_eq!(s.enabled, Some(false));
-        // And the unattended mode is off with it: nothing is evaluated, so there
-        // is nothing for the kernel to apply on its own.
-        assert_eq!(s.auto_evolve, Some(false));
-        assert_eq!(s.evaluation_window_minutes, Some(30));
-        assert_eq!(s.min_sample_count, Some(30));
-        assert_eq!(s.min_win_rate_improvement, Some(dec!(0.05)));
-        assert_eq!(s.min_profit_factor_improvement, Some(dec!(0.10)));
-        assert_eq!(s.min_observation_minutes, Some(5));
-        assert_eq!(s.cooldown_minutes, Some(10));
-        assert_eq!(s.max_gradient, Some(dec!(0.05)));
-        assert_eq!(s.variant_count, Some(3));
-        assert_eq!(s.audit_dir.as_deref(), Some("data/evolution"));
-    }
-
-    /// #864 / #870: the 72-hour profile, the 100 USDC live profile, and the
-    /// shipped default enforce the same loss bounds and the same freshness
-    /// budget. Drift between the files would mean a "profile" and a normal
-    /// boot are different products.
-    #[test]
-    fn production_72h_matches_the_shipped_risk_and_staleness() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../user_layer/configs");
-        let shipped = FileConfig::load(Some(&root.join("default.toml")));
-        let profile = FileConfig::load(Some(&root.join("production-72h.toml")));
-        let live = FileConfig::load(Some(&root.join("production-live-100u.toml")));
-        assert!(profile.warnings.is_empty(), "{:?}", profile.warnings);
-        assert!(live.warnings.is_empty(), "{:?}", live.warnings);
-        assert!(
-            profile.unknown_keys.is_empty(),
-            "{:?}",
-            profile.unknown_keys
-        );
-        assert!(live.unknown_keys.is_empty(), "{:?}", live.unknown_keys);
-        assert_eq!(shipped.risk, profile.risk);
-        assert_eq!(shipped.risk, live.risk);
-        assert_eq!(
-            shipped.max_orderbook_stale_ms,
-            profile.max_orderbook_stale_ms
-        );
-        assert_eq!(shipped.max_orderbook_stale_ms, live.max_orderbook_stale_ms);
-        assert_eq!(profile.max_orderbook_stale_ms, Some(3500));
-        // Neither profile may smuggle an engine factory key back in.
-        assert_eq!(profile.round_sec, None);
-        assert_eq!(profile.assets, None);
-        assert_eq!(live.round_sec, None);
-        assert_eq!(live.assets, None);
-    }
-
-    #[test]
-    fn an_absent_exit_section_keeps_the_compiled_ladder() {
-        // The property #264 turns on: a file that never mentions `[exit]` (and a
-        // `--no-config` boot) must leave every exit knob unset, so the caller's
-        // chain falls through to `ExitConfig::default()` — the shipped ladder,
-        // unchanged. `min_trail_pct` is the one the ticket names explicitly.
-        let cfg = parsed(
-            r#"
-            [engine]
-            round_sec = 300
-            "#,
-        );
-        assert_eq!(cfg.exit, ExitFile::default());
-        assert_eq!(cfg.exit.min_trail_pct, None);
-        assert_eq!(cfg.exit.take_profit_pct, None);
-        assert_eq!(cfg.exit.stop_loss_pct, None);
-        assert_eq!(cfg.exit.trailing_min_high_pct, None);
-        // And the compiled defaults those Nones fall through to are the shipped
-        // numbers, not something this module invented.
-        let d = crate::exit_policy::ExitConfig::default();
-        assert_eq!(d.take_profit_pct, dec!(100));
-        assert_eq!(d.stop_loss_pct, dec!(12));
-        assert_eq!(d.trailing_min_high_pct, dec!(15));
-        assert_eq!(d.min_trail_pct, dec!(8));
-    }
-
-    #[test]
-    fn an_exit_key_of_the_wrong_type_warns_and_leaves_the_ladder_alone() {
-        let cfg = parsed(
-            r#"
-            [exit]
-            min_trail_pct = "not a number"
-            stop_loss_pct = 12
-            "#,
-        );
-        assert_eq!(cfg.exit.min_trail_pct, None, "a bad value is not guessed");
-        assert_eq!(cfg.exit.stop_loss_pct, Some(dec!(12)));
-        assert_eq!(cfg.unknown_keys, Vec::<String>::new());
-        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
-        assert!(cfg.warnings[0].starts_with("exit.min_trail_pct"));
-    }
-
-    #[test]
-    fn a_risk_section_parses_all_nine_limits() {
-        let cfg = parsed(
-            r#"
-            [risk]
-            max_single_loss_usd = "35"
-            max_daily_drawdown_usd = 100
-            max_position_size = "10"
-            max_consecutive_losses = 3
-            cooldown_minutes = 5
-            max_total_position = "40"
-            max_total_exposure_usd = 500
-            max_correlation_usd = "200"
-            global_kill_switch_loss_usd = 1000
-            "#,
-        );
-        let r = &cfg.risk;
-        assert_eq!(r.max_single_loss_usd, Some(dec!(35)));
-        assert_eq!(r.max_daily_drawdown_usd, Some(dec!(100)));
-        assert_eq!(r.max_position_size, Some(dec!(10)));
-        assert_eq!(r.max_consecutive_losses, Some(dec!(3)));
-        assert_eq!(r.cooldown_minutes, Some(dec!(5)));
-        assert_eq!(r.max_total_position, Some(dec!(40)));
-        assert_eq!(r.max_total_exposure_usd, Some(dec!(500)));
-        assert_eq!(r.max_correlation_usd, Some(dec!(200)));
-        assert_eq!(r.global_kill_switch_loss_usd, Some(dec!(1000)));
-        assert_eq!(cfg.unknown_keys, Vec::<String>::new());
-        assert_eq!(cfg.warnings, Vec::<String>::new());
-        // The file face resolves into the effective set: a present key becomes
-        // a toml-sourced Bound, and the resolution is where "where did this
-        // number come from" (§4.4) is answered.
-        let sys = crate::risk::limits::SystemicRiskLimits::from_file(r);
-        use crate::risk::limits::LimitSource;
-        assert_eq!(sys.account.max_single_loss_usd.value(), dec!(35));
-        assert_eq!(sys.account.max_single_loss_usd.source(), LimitSource::Toml);
-        assert!(sys.account.max_single_loss_usd.is_enabled());
-        assert_eq!(sys.global.max_correlation_usd.value(), dec!(200));
-        assert_eq!(sys.global.max_correlation_usd.source(), LimitSource::Toml);
-    }
-
-    #[test]
-    fn an_absent_risk_section_is_the_factory_posture_everything_off() {
-        // §4.1: a file that never mentions [risk] (and a --no-config boot)
-        // must leave every bound off with the default source — the kernel
-        // enforces nothing new and reports nothing invented.
-        let cfg = parsed(
-            r#"
-            [engine]
-            round_sec = 300
-            "#,
-        );
-        assert_eq!(cfg.risk, RiskFile::default());
-        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
-        let off = [
-            (
-                "account.max_single_loss_usd",
-                &sys.account.max_single_loss_usd,
-            ),
-            (
-                "account.max_daily_drawdown_usd",
-                &sys.account.max_daily_drawdown_usd,
-            ),
-            ("account.max_position_size", &sys.account.max_position_size),
-            (
-                "account.max_consecutive_losses",
-                &sys.account.max_consecutive_losses,
-            ),
-            ("account.cooldown_minutes", &sys.account.cooldown_minutes),
-            ("global.max_total_position", &sys.global.max_total_position),
-            (
-                "global.max_total_exposure_usd",
-                &sys.global.max_total_exposure_usd,
-            ),
-            (
-                "global.max_correlation_usd",
-                &sys.global.max_correlation_usd,
-            ),
-            (
-                "global.global_kill_switch_loss_usd",
-                &sys.global.global_kill_switch_loss_usd,
-            ),
-        ];
-        for (name, bound) in off {
-            assert!(!bound.is_enabled(), "{name} must be off at the factory");
-            assert_eq!(
-                bound.source(),
-                crate::risk::limits::LimitSource::Default,
-                "{name} must carry the default source"
-            );
-        }
-    }
-
-    #[test]
-    fn a_risk_key_of_the_wrong_type_warns_and_leaves_the_limit_off() {
-        let cfg = parsed(
-            r#"
-            [risk]
-            max_single_loss_usd = "not a number"
-            cooldown_minutes = 5
-            "#,
-        );
-        assert_eq!(
-            cfg.risk.max_single_loss_usd, None,
-            "a bad value is not guessed"
-        );
-        assert_eq!(cfg.risk.cooldown_minutes, Some(dec!(5)));
-        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
-        assert!(cfg.warnings[0].starts_with("risk.max_single_loss_usd"));
-        let sys = crate::risk::limits::SystemicRiskLimits::from_file(&cfg.risk);
-        assert!(!sys.account.max_single_loss_usd.is_enabled());
-        assert!(sys.account.cooldown_minutes.is_enabled());
-    }
-
-    #[test]
-    fn a_risk_ladder_parses_rows_and_maps_to_the_arbitration_step() {
-        let cfg = parsed(
-            r#"
-            [risk]
-            ladder = [
-                { at_pct = "3", close_ratio = "0.5" },
-                { at_pct = "6", close_ratio = "0.5", move_stop_to = "1" },
-            ]
-            "#,
-        );
-        assert_eq!(cfg.warnings, Vec::<String>::new());
-        assert_eq!(cfg.risk.ladder.len(), 2);
-        let steps: Vec<_> = cfg.risk.ladder.iter().map(|row| row.to_step()).collect();
-        crate::risk::physics::validate_ladder(&steps).expect("a parsed ladder validates");
-        assert_eq!(steps[0].at_pct, dec!(3));
-        assert_eq!(steps[0].close_ratio, dec!(0.5));
-        assert_eq!(steps[0].move_stop_to, None);
-        assert_eq!(steps[1].at_pct, dec!(6));
-        assert_eq!(steps[1].close_ratio, dec!(0.5));
-        assert_eq!(steps[1].move_stop_to, Some(dec!(1)));
-    }
-
-    #[test]
-    fn a_backwards_ladder_warns_and_is_not_adopted() {
-        // §4.3: an explicit ladder takes over the projection ONLY if the whole
-        // array validates. A ladder whose at_pct goes backwards is refused at
-        // parse time, so nothing partial or inconsistent can arm.
-        let cfg = parsed(
-            r#"
-            [risk]
-            ladder = [
-                { at_pct = "6", close_ratio = "0.5" },
-                { at_pct = "3", close_ratio = "0.5" },
-            ]
-            "#,
-        );
-        assert!(
-            cfg.risk.ladder.is_empty(),
-            "a ladder that fails validation must not take over"
-        );
-        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
-        assert!(
-            cfg.warnings[0].contains("risk.ladder"),
-            "{:?}",
-            cfg.warnings
-        );
-    }
-
-    #[test]
-    fn an_incomplete_ladder_row_is_dropped_with_a_warning() {
-        let cfg = parsed(
-            r#"
-            [risk]
-            ladder = [
-                { at_pct = "6" },
-                { at_pct = "3", close_ratio = "0.5", mystery = 1 },
-            ]
-            "#,
-        );
-        // Row 0 lacks close_ratio and is dropped; row 1 is complete but names
-        // an unknown key, which is reported one by one like everywhere else.
-        assert_eq!(cfg.risk.ladder.len(), 1);
-        assert_eq!(cfg.risk.ladder[0].at_pct, dec!(3));
-        assert_eq!(cfg.risk.ladder[0].close_ratio, dec!(0.5));
-        assert_eq!(cfg.warnings.len(), 1, "{:?}", cfg.warnings);
-        assert!(cfg.warnings[0].contains("needs at_pct and close_ratio"));
-        assert!(
-            cfg.unknown_keys
-                .iter()
-                .any(|k| k == "risk.ladder[1].mystery"),
-            "{:?}",
-            cfg.unknown_keys
-        );
-    }
-
-    #[test]
-    fn a_wrong_type_warns_precisely_and_leaves_the_key_unset() {
-        let cfg = parsed(
-            r#"
-            [engine]
-            round_sec = "five minutes"
-            assets = "BTC"
-            min_time_left_sec = 60
-            "#,
-        );
-        assert_eq!(cfg.round_sec, None, "a bad value must not be guessed");
-        assert_eq!(cfg.assets, None);
-        // The good key in the same file still lands.
-        assert_eq!(cfg.min_time_left_sec, Some(60));
-        assert_eq!(cfg.warnings.len(), 2, "{:?}", cfg.warnings);
-        assert!(
-            cfg.warnings
-                .iter()
-                .any(|w| w.starts_with("engine.round_sec"))
-        );
-        assert!(cfg.warnings.iter().any(|w| w.starts_with("engine.assets")));
-    }
-
-    #[test]
-    fn unknown_keys_are_reported_not_silently_ignored() {
-        let cfg = parsed(
-            r#"
-            [engine]
-            round_sec = 300
-            round_seconds = 300
-
-            [engine2]
-            x = 1
-            "#,
-        );
-        assert_eq!(cfg.round_sec, Some(300));
-        assert_eq!(
-            cfg.unknown_keys,
-            vec!["engine.round_seconds".to_string(), "engine2".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_missing_file_is_defaults_plus_an_explicit_none() {
-        let cfg = FileConfig::load(Some(Path::new("/nonexistent/bk-config.toml")));
-        assert!(cfg.path.is_none());
-        assert!(cfg.assets.is_none());
-        assert_eq!(cfg.shadow, ShadowFile::default());
-        // A missing file is not a warning: an unconfigured checkout is normal.
-        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
-        // And no path at all means no file, not an error.
-        assert!(FileConfig::load(None).path.is_none());
-    }
-
-    #[test]
-    fn a_malformed_file_warns_and_yields_defaults() {
-        let dir = std::env::temp_dir().join(format!("bk-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("broken.toml");
-        std::fs::write(&path, "[engine\nround_sec = ").unwrap();
-        let cfg = FileConfig::load(Some(&path));
-        assert!(cfg.path.is_none(), "a broken file is not a loaded config");
-        assert_eq!(cfg.round_sec, None);
-        assert_eq!(cfg.warnings.len(), 1);
-        assert!(cfg.warnings[0].contains("malformed TOML"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn max_gradient_ceiling_is_the_builtin_lock_1_value() {
-        // The constant exists so callers can compare against it rather than
-        // re-declaring 0.05 in two places.
-        assert_eq!(MAX_GRADIENT_CEILING, dec!(0.05));
     }
 }

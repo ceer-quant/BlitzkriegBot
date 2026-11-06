@@ -538,18 +538,10 @@ fn snapshot_single_flag_moves_exactly_its_own_lines() {
 #[test]
 fn snapshot_env_layer_is_visible_and_cli_outranks_it() {
     let env = env_of(&[("BK_ROUND_SEC", "300"), ("BK_SIZE_PCT", "7.5")]);
-    let base = snapshot(&parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
-        &["--no-config".to_string()],
-        &EnvVars::default(),
-    ));
+    let base = snapshot(&parse_args(&[], &EnvVars::default()));
     // env supplies: the value lines AND the report's (env) lines move, and
     // nothing else does.
-    let a = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
-        &["--no-config".to_string()],
-        &env,
-    );
+    let a = parse_args(&[], &env);
     let d = diff_keys(&base, &snapshot(&a));
     assert_eq!(
         changed_keys(&d),
@@ -573,12 +565,7 @@ fn snapshot_env_layer_is_visible_and_cli_outranks_it() {
     // CLI outranks env: the value flips to (cli) and the report names the
     // winner per knob — round_sec from cli, size_pct still from env.
     let c = parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
-        &[
-            "--no-config".to_string(),
-            "--round-sec".to_string(),
-            "60".to_string(),
-        ],
+        &["--round-sec".to_string(), "60".to_string()],
         &env,
     );
     let d = diff_keys(&base, &snapshot(&c));
@@ -599,57 +586,6 @@ fn snapshot_env_layer_is_visible_and_cli_outranks_it() {
             .starts_with("order sizing: per-entry budget 7.5% of cash equity (env;"),
         "the sizing echo must track size_pct from env: {:?}",
         moved(&d, "sizing_echo")
-    );
-}
-
-#[test]
-fn snapshot_toml_layer_is_visible_and_cli_outranks_it() {
-    let file = file_with(
-        r#"
-            [engine]
-            round_sec = 300
-            assets = ["DOGE"]
-            "#,
-    );
-    let base = snapshot(&parse_args(
-        &blitzkrieg_core::config::FileConfig::default(),
-        &[],
-        &EnvVars::default(),
-    ));
-    let a = parse_args(&file, &[], &EnvVars::default());
-    let d = diff_keys(&base, &snapshot(&a));
-    assert_eq!(
-        changed_keys(&d),
-        ["round_sec", "assets", "config_report"],
-        "the TOML layer must move ONLY the keys it owns"
-    );
-    assert_eq!(moved(&d, "round_sec"), ("900", "300"));
-    assert_eq!(
-        moved(&d, "assets"),
-        ("BTC; ETH; SOL; XRP", "DOGE"),
-        "the whole vector diffs as one line, not index churn"
-    );
-    assert_eq!(
-        moved(&d, "config_report").1,
-        "engine.round_sec=300 (toml); engine.assets=[\"DOGE\"] (toml)"
-    );
-
-    // CLI outranks TOML; the untouched TOML key (assets) stays.
-    let c = parse_args(
-        &file,
-        &["--round-sec".to_string(), "60".to_string()],
-        &EnvVars::default(),
-    );
-    let d = diff_keys(&base, &snapshot(&c));
-    assert_eq!(
-        changed_keys(&d),
-        ["round_sec", "assets", "config_report"],
-        "the CLI win must not disturb the TOML-owned key's footprint"
-    );
-    assert_eq!(moved(&d, "round_sec"), ("900", "60"));
-    assert_eq!(
-        moved(&d, "config_report").1,
-        "engine.round_sec=60 (cli); engine.assets=[\"DOGE\"] (toml)"
     );
 }
 
@@ -685,12 +621,11 @@ fn snapshot_echo_wording_tracks_the_value_across_layers() {
         "{got}"
     );
     assert!(got.contains("max_orderbook_stale_ms=0"), "{got}");
-    // 4) the shadow-evolution evaluator echoes ON when the file arms it:
-    let file = file_with("[shadow_evolution]\nenabled = true\n");
-    let a = parse_args(&file, &[], &EnvVars::default());
+    // 4) the shadow-evolution evaluator echoes ON when the env arms it:
+    let a = parse_args(&[], &env_of(&[("BK_SHADOW_EVOLUTION", "true")]));
     let got = snapshot(&a);
     assert!(
-        got.contains("shadow_evolution_echo[0]=shadow evolution: evaluator ON at startup (toml)"),
+        got.contains("shadow_evolution_echo[0]=shadow evolution: evaluator ON at startup (env)"),
         "{got}"
     );
     assert!(got.contains("shadow_evolution=true"), "{got}");

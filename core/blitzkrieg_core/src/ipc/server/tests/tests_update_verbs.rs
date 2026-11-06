@@ -53,9 +53,10 @@ async fn the_factory_risk_limits_readout_is_silent_and_provenanced() {
 }
 
 /// A configured limit crosses the wire as a STRING with its provenance —
-/// §4.4's rule that "35" without "toml" is not an answer an operator can
-/// act on. And the untouched siblings stay factory-silent in the same
-/// readout: one configured key must not leak posture onto the others.
+/// §4.4's rule that "35" without a layer name is not an answer an operator can
+/// act on. The retired file layer's `toml` word is NOT in the vocabulary
+/// (issue #967); `env` is. And the untouched siblings stay factory-silent in
+/// the same readout: one configured key must not leak posture onto the others.
 #[tokio::test]
 async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
     use crate::risk::limits::{AccountRiskLimits, Bound, LimitSource, SystemicRiskLimits};
@@ -65,7 +66,7 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
             max_order_notional: dec!(3),
             systemic: SystemicRiskLimits {
                 account: AccountRiskLimits {
-                    max_single_loss_usd: Bound::new(dec!(35), LimitSource::Toml),
+                    max_single_loss_usd: Bound::new(dec!(35), LimitSource::Env),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -90,7 +91,7 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
     .await;
     let single = &reply["result"]["account"]["limits"]["maxSingleLossUsd"];
     assert_eq!(single["value"], "35");
-    assert_eq!(single["source"], "toml");
+    assert_eq!(single["source"], "env");
     assert_eq!(
         reply["result"]["global"]["limits"]["maxTotalPosition"]["value"],
         "0"
