@@ -179,21 +179,34 @@ impl SystemicRiskLimits {
     /// (folded into the process environment by the launcher) supplies the nine
     /// `BK_RISK_*` keys; a missing key stays the factory `Bound::off()`. No
     /// TOML layer is consulted — a `[risk]` section in a config file is inert.
+    ///
+    /// A key that is present but unparseable is surfaced as a `tracing::warn`
+    /// naming the key and its raw value; an absent key stays the silent
+    /// factory `Bound::off()` (§4.1). The boot layer emits a separate WARN
+    /// when `.env` itself is missing or unreadable and all nine keys are
+    /// absent, so an operator bypassing the `blitzkrieg` wrapper is not left
+    /// guessing why every limit stayed off.
     pub fn from_env() -> Self {
-        Self::from_lookup(|key| {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.trim().parse::<Decimal>().ok())
-        })
+        Self::from_lookup(|key| std::env::var(key).ok())
     }
 
     /// The pure lookup form of [`Self::from_env`] (tests drive it without
-    /// touching the process environment).
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<Decimal>) -> Self {
-        let one = |key: &str| {
-            lookup(key)
-                .map(|v| Bound::new(v, LimitSource::Env))
-                .unwrap_or_default()
+    /// touching the process environment). `lookup` returns the raw string so a
+    /// bad value can be named in the warning.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let one = |key: &str| match lookup(key) {
+            Some(raw) => match raw.trim().parse::<Decimal>() {
+                Ok(v) => Bound::new(v, LimitSource::Env),
+                Err(_) => {
+                    tracing::warn!(
+                        key = %key,
+                        raw = %raw,
+                        "risk key value unparseable — limit stays off (factory default)"
+                    );
+                    Bound::off()
+                }
+            },
+            None => Bound::off(),
         };
         Self {
             account: AccountRiskLimits {
@@ -552,7 +565,7 @@ mod tests {
             ("BK_RISK_MAX_CORRELATION_USD", dec!(12)),
             ("BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD", dec!(8)),
         ]);
-        let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).copied());
+        let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).map(|v| v.to_string()));
         for (name, b) in [
             ("max_single_loss_usd", &s.account.max_single_loss_usd),
             ("max_daily_drawdown_usd", &s.account.max_daily_drawdown_usd),
@@ -571,7 +584,7 @@ mod tests {
             assert_eq!(b.source(), LimitSource::Env, "{name} provenance");
         }
         // No key → factory posture, never an env-sourced one.
-        let empty = SystemicRiskLimits::from_lookup(|_| None);
+        let empty = SystemicRiskLimits::from_lookup(|_| None as Option<String>);
         assert!(!empty.account.max_position_size.is_enabled());
         assert_eq!(
             empty.account.max_position_size.source(),
