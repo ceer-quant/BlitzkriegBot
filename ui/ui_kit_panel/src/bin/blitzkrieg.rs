@@ -21,6 +21,7 @@ use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 use blitzkrieg_ui_panel::{
     parse_args_from, run_panel, run_panel_with_dispatcher, stop_stack, PanelArgs, Tab,
 };
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -951,6 +952,27 @@ async fn run_update_subcommand(args: Vec<String>) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// #971 startup banner of the unified `blitzkrieg` launcher.
+///
+/// Printed once to stderr when a human is watching a live terminal — never
+/// under CI (`CI` set), never when stderr is piped/redirected, and never by
+/// `blitzkrieg core` (that path keeps its machine-only boot banner untouched).
+/// Brand names per the operator ruling: OME=Song, backtest=Stone, UI=PonyYiDan.
+/// The version comes from `version_string()` — the same stamp `--version`
+/// prints — so the banner cannot drift from the build identity the gates parse.
+/// No sleep, no fabricated delay: the line fires right after the core is up,
+/// and it never invents a number that wasn't measured.
+fn print_startup_banner(mode: &str, version: &str) {
+    let is_ci = std::env::var("CI").map(|v| !v.is_empty()).unwrap_or(false);
+    let human_tty = std::io::stderr().is_terminal();
+    if is_ci || !human_tty {
+        return;
+    }
+    eprintln!(
+        "blitzkrieg: BlitzkriegBot {version} — OME=Song · backtest=Stone · UI=PonyYiDan · mode={mode}"
+    );
+}
+
 /// Unified launcher: starts the core and the UI together in a single command.
 async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
     let cli = parse_cli_or_exit(args);
@@ -973,6 +995,7 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
 
     let lifecycle_enabled = !cli.no_lifecycle && !cli.attach;
     let cfg = build_supervisor_config(&cli, socket.clone());
+    let mode = cfg.mode.clone();
 
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, lifecycle_enabled)));
 
@@ -1024,9 +1047,13 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         match started {
             Ok(StartOutcome::Started { pid }) => {
                 println!("blitzkrieg: core spawned (PID {pid}) on {socket}");
+                // #971 startup banner — human-watched terminal only; CI/piped runs
+                // stay silent, and `blitzkrieg core` keeps its machine banner untouched.
+                print_startup_banner(&mode, &blitzkrieg_build_info::BUILD_INFO.version_string());
             }
             Ok(StartOutcome::Adopted) => {
                 println!("blitzkrieg: adopted existing core on {socket}");
+                print_startup_banner(&mode, &blitzkrieg_build_info::BUILD_INFO.version_string());
             }
             Err(e) => {
                 eprintln!("blitzkrieg: failed to start core: {e}");
