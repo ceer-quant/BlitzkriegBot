@@ -824,7 +824,8 @@ pub const FLAGS: &[FlagSpec] = &[
 /// The flag form a value-taking flag must be written as today: a separate
 /// argument. `--mode=live` is an unknown argument — and this is the sentence
 /// that tells an operator why.
-const JOINED_VALUE_NOTE: &str = "note: a flag takes its value as a separate argument (`--mode live`)";
+const JOINED_VALUE_NOTE: &str =
+    "note: a flag takes its value as a separate argument (`--mode live`)";
 
 /// The full `--help` text, stdout-ready.
 pub fn help_text() -> String {

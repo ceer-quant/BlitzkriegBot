@@ -106,7 +106,7 @@ use std::collections::{HashMap, HashSet};
 /// `docs/reports/data/mean-reversion-gate/defaultpick-gate-{on,off}-20260919T062940Z.json`
 /// and `.../holdout-gate-{on,off}-20260920T185554Z.json`. To regenerate any of
 /// them, concatenate the two `data/archive/events.*.jsonl` files covering that
-/// window and replay with `--engine --no-config --no-event-archive
+/// window and replay with `--engine --no-event-archive
 /// --no-strategy-state --no-trade-log`, `--enable-strategy mean_reversion` and
 /// every other strategy disabled; the OFF rows add the knob above.
 #[derive(Debug, Clone, PartialEq, Eq)]

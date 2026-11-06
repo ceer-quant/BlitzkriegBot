@@ -40,11 +40,12 @@
   `BLITZKRIEG_ALERT_NOTIFY`、`UIKIT_MANAGE`、`UIKIT_WEB_TRACE`、
   `UIKIT_CORE_BIN/CWD/EXTRA_ARGS`、`HFT_ASSETS/ROUND_SEC/MIN_SHARES/MAX_SHARES`
   （`ui/ui_kit/src/gateway/supervisor.rs`）。全部已入 `.env.example`。
-- **内核 CLI 旗标**（`core/blitzkrieg_core/src/cli.rs`）：`--config/--no-config`、
+- **内核 CLI 旗标**（`core/blitzkrieg_core/src/cli.rs`）：
   `--assets/--round-sec/--min-round-age/--min-time-left`、`--mode`、`--exit-*`、
   `--max-*` 风险族、`--shadow-evolution/--se-*`、`--enable/disable-strategy`、
   `--strategy-dir/--lua-strategy-dir`、回放/回测族等。旗标是 env 之上的最高层，
-  不迁 env（一次性实验入口）。
+  不迁 env（一次性实验入口）。〔issue 967 退休，2026-11-06〕`--config` /
+  `--no-config` / `BK_CONFIG` 随 TOML 层一起删除，传入即未知参数拒绝（exit 2）。
 - **内核 env 读点**：`BK_*` 28 键经 `EnvVars::from_process`（`main.rs:612`，只拷
   `BK_` 前缀）+ `DRY_RUN`（`main.rs:2749`）+ `BLITZKRIEG_GITHUB_TOKEN`
   （`ipc/server.rs:1003`）+ `BLITZKRIEG_ALLOW_SHARED_DATA`（`main.rs:3330`）+

@@ -115,7 +115,10 @@ function delegatedTail() {
 function parserFlags() {
   const src = bootModuleSource();
   const start = src.indexOf('let mut it = argv.iter().cloned();');
-  const end = src.indexOf('// ── Resolve the file-settable settings');
+  // Issue #967 retired the TOML layer, so the tail of the parse loop is the
+  // env-settable resolution now (it was `// ── Resolve the file-settable
+  // settings` before). The marker still delimits "where the flag arms end".
+  const end = src.indexOf('// ── Resolve the env-settable settings');
   if (start < 0 || end < 0 || end <= start) {
     check('parse-loop markers found in core/blitzkrieg_launcher/src/bin_support/boot', false,
       `the help/parser comparison cannot run (start=${start}, end=${end})`);
@@ -155,7 +158,7 @@ function helpFlags(help) {
 async function run(args, { cwd, graceMs = 5000, env = {} } = {}) {
   const child = spawn(BIN, args, {
     cwd,
-    env: { ...process.env, BK_CONFIG: 'none', ...env },
+    env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -241,7 +244,7 @@ summary(`- binary under test: \`${BIN}\``);
       `boot banner in stderr=${bootBanner(r)} wrote=${sandboxEntries(box).join(', ')}`);
   }
   const help = (await run(['--help'], { cwd: box.dir })).out;
-  for (const spelling of ['--readonly', '--max-order-notional', '--allow-unknown-args', '--mode', '--config']) {
+  for (const spelling of ['--readonly', '--max-order-notional', '--allow-unknown-args', '--mode', '--no-auto-exits']) {
     check(`--help names ${spelling}`, help.includes(spelling), 'the spelling is not in the list');
   }
   // One sentence each, not a bare name: every entry line is followed by an indented line.

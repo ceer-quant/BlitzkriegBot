@@ -1011,11 +1011,7 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
     // bound that is only in the source is not a bound anyone can verify against
     // the account it runs on. `size_pct` also changes ORDER SIZES, so the boot
     // log has to say whether the absolute path or the equity path is in force.
-    let size_pct = pick(
-        size_pct,
-        env.num::<Decimal>("BK_SIZE_PCT"),
-        Decimal::ZERO,
-    );
+    let size_pct = pick(size_pct, env.num::<Decimal>("BK_SIZE_PCT"), Decimal::ZERO);
     let notional_pct = pick(
         max_order_notional_pct,
         env.num::<Decimal>("BK_MAX_ORDER_NOTIONAL_PCT"),

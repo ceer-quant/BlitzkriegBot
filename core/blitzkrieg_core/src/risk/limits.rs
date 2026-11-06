@@ -573,7 +573,10 @@ mod tests {
         // No key → factory posture, never an env-sourced one.
         let empty = SystemicRiskLimits::from_lookup(|_| None);
         assert!(!empty.account.max_position_size.is_enabled());
-        assert_eq!(empty.account.max_position_size.source(), LimitSource::Default);
+        assert_eq!(
+            empty.account.max_position_size.source(),
+            LimitSource::Default
+        );
     }
 
     #[test]

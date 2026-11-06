@@ -159,10 +159,10 @@ mod bin_tests;
 // modules (`crate::position_db` / `crate::strategy_state`) so the bin and
 // any embedded reader share ONE name song.
 use bin_support::boot::{
-    EnvVars, builtin_registry, daily_loss_path_for,
-    default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
-    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
-    round_duration_source_from, run_net_check,
+    EnvVars, builtin_registry, daily_loss_path_for, default_position_log_for,
+    default_strategy_state_for, parse_args, parse_strategy_limits, parse_virtual_limits,
+    resolve_event_archive, resolved_policy_path, risk_state_path_for, round_duration_source_from,
+    run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -248,8 +248,7 @@ async fn main() -> anyhow::Result<()> {
     // the launcher). The TOML `[risk]` section is retired as an effective
     // source; a file that still carries one is inert. Echoed unconditionally:
     // the factory posture (all nine off, §4.1) must be visible in the boot log.
-    let systemic =
-        blitzkrieg_core::risk::limits::SystemicRiskLimits::from_env();
+    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_env();
     // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
     // armed the budget. The resolver already picked CLI > env > [risk] > the
     // compiled default for the daily-loss breaker — the matrix must agree

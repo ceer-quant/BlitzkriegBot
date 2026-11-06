@@ -564,10 +564,7 @@ fn snapshot_env_layer_is_visible_and_cli_outranks_it() {
 
     // CLI outranks env: the value flips to (cli) and the report names the
     // winner per knob — round_sec from cli, size_pct still from env.
-    let c = parse_args(
-        &["--round-sec".to_string(), "60".to_string()],
-        &env,
-    );
+    let c = parse_args(&["--round-sec".to_string(), "60".to_string()], &env);
     let d = diff_keys(&base, &snapshot(&c));
     assert_eq!(
         changed_keys(&d),

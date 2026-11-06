@@ -294,10 +294,7 @@ fn the_update_interval_answers_to_the_env_tier() {
         let a = parse_args(&[], &env);
         assert_eq!(a.update_interval_secs, want, "{text:?}");
     }
-    let a = parse_args(
-        &[],
-        &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "3600")]),
-    );
+    let a = parse_args(&[], &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "3600")]));
     assert!(
         a.config_report
             .iter()
@@ -306,10 +303,7 @@ fn the_update_interval_answers_to_the_env_tier() {
         a.config_report
     );
     // Unparsable text is "not configured", never a silent default.
-    let a = parse_args(
-        &[],
-        &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "soon")]),
-    );
+    let a = parse_args(&[], &env_of(&[("BLITZKRIEG_UPDATE_INTERVAL_SECS", "soon")]));
     assert_eq!(a.update_interval_secs, None);
 }
 
@@ -321,10 +315,7 @@ fn the_update_cli_flag_outranks_the_env() {
         ("BLITZKRIEG_UPDATE_CHECK", "false"),
         ("BLITZKRIEG_UPDATE_INTERVAL_SECS", "0"),
     ]);
-    let a = parse_args(
-        &["--update-check".into(), "true".into()],
-        &env,
-    );
+    let a = parse_args(&["--update-check".into(), "true".into()], &env);
     assert_eq!(
         a.update_check_enabled,
         Some(true),
@@ -337,10 +328,7 @@ fn the_update_cli_flag_outranks_the_env() {
         "{:?}",
         a.config_report
     );
-    let a = parse_args(
-        &["--update-interval-secs".into(), "60".into()],
-        &env,
-    );
+    let a = parse_args(&["--update-interval-secs".into(), "60".into()], &env);
     assert_eq!(a.update_interval_secs, Some(60), "CLI > env");
 }
 
@@ -470,10 +458,7 @@ fn the_daily_loss_budget_is_settable_from_the_environment() {
         a.config_report
     );
     // CLI outranks env, like every other setting in the chain.
-    let a = parse_args(
-        &["--max-daily-loss".into(), "9".into()],
-        &env,
-    );
+    let a = parse_args(&["--max-daily-loss".into(), "9".into()], &env);
     assert_eq!(a.daily_loss_usd, dec!(9));
 }
 
@@ -655,10 +640,7 @@ fn the_equity_knobs_are_settable_by_flag_and_by_env() {
         "{:?}",
         b.config_report
     );
-    let c = parse_args(
-        &["--size-pct".to_string(), "9".to_string()],
-        &env,
-    );
+    let c = parse_args(&["--size-pct".to_string(), "9".to_string()], &env);
     assert_eq!(c.size_pct, dec!(9), "CLI must outrank the environment");
     assert_eq!(
         c.max_order_notional_pct,
@@ -941,10 +923,7 @@ fn the_orderbook_staleness_budget_is_configurable_from_cli_and_env() {
     let a = parse_args(&[], &EnvVars::default());
     assert_eq!(a.max_orderbook_stale_ms, 8_000);
     // CLI outranks env, like every other setting in the chain.
-    let a = parse_args(
-        &["--max-orderbook-stale-ms".into(), "9000".into()],
-        &env,
-    );
+    let a = parse_args(&["--max-orderbook-stale-ms".into(), "9000".into()], &env);
     assert_eq!(a.max_orderbook_stale_ms, 9_000);
 }
 

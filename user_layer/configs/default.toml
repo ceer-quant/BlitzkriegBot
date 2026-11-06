@@ -1,17 +1,14 @@
 # User-layer runtime configuration. Parameters only; no credentials here.
 # Credentials are read by the kernel process from its own environment.
 #
-# THIS FILE IS READ BY THE KERNEL on a normal boot (KI-11 / D-1). Editing a
-# value here changes runtime behaviour. Precedence, highest first:
-#
-#     command-line flag  >  BK_* environment variable  >  this file  >  built-in default
-#
-# Turn the file off entirely with `--no-config` or `BK_CONFIG=none` (that boot
-# keeps the compiled factory: systemic limits off, orderbook staleness 8000 ms).
-# Point at a different file with `--config <path>` or `BK_CONFIG=<path>`. The
-# sibling `shadow_evolution.toml` in this directory is read with this file.
-# The 72-hour profile is `production-72h.toml` plus `production-72h.env`
-# (issues #864, #866). It does not set DRY_RUN.
+# 〔issue 967 退休，2026-11-06〕THIS FILE IS NOT READ. The kernel's only
+# persistent configuration is `.env` (process env `BK_*`), resolved
+# flag > env > built-in default. The values below are kept as the documented
+# history of what the file used to arm; editing them changes nothing at boot.
+# `--config`, `--no-config`, `BK_CONFIG` and this whole TOML layer are gone —
+# a boot that still carries the file runs the compiled factory (systemic limits
+# off, orderbook staleness 8000 ms). The 72-hour profile is
+# `production-72h.env` (issue #865); `production-72h.toml` is inert too.
 #
 # ── env single-source for the ENGINE FACTORY keys (2026-10-23) ──────────────
 # assets / round_sec / min_round_age_sec / min_time_left_sec stay ABSENT on
@@ -72,11 +69,10 @@ max_orderbook_stale_ms = 3500
 # min_trail_pct = 8
 
 # ── Systemic risk limits (E26 / DEV_V0_3 §4, issue #864) ────────────────────
-# A normal boot loads the numbers below. `--no-config` / `BK_CONFIG=none` is
-# the factory posture (every bound 0 = off, byte-identical for the gates that
-# pass `--no-config`). These are NOT hot keys: a change takes effect at the
-# next kernel START. The startup log names each armed limit and its source
-# (`risk.systemic: max_single_loss_usd=0.50 (toml)`).
+# 〔issue 967 退休〕NOT loaded. The armed numbers live as `BK_RISK_*` env keys
+# (see `.env.example`); an unset key is the factory posture (bound 0 = off).
+# Not hot keys: a change takes effect at the next kernel START, and the startup
+# log names each armed limit and its source (`risk.systemic: max_single_loss_usd=0.50 (env)`).
 #
 # The daily-drawdown slot is the SAME budget as the #173 daily-loss breaker
 # (one counter). The compiled relative cap stays 20% of the day's opening
