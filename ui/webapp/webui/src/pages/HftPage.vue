@@ -925,7 +925,7 @@ const journalOpen = ref(false)
           <div class="label-micro mt-1">剩余时间</div>
         </div>
 
-        <div class="ml-auto flex items-center gap-2">
+        <div class="ml-auto flex flex-wrap items-center justify-end gap-2">
           <!-- 轮次时间周期切换（2026-10-24 操作者指令：入口从设置 · 通用 挪到
                倒计时卡 —— 盯盘时切周期不离开监视语境；与设置卡共享
                lib/round-duration.ts 同一份读数与写路径）。next_session 语义

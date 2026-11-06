@@ -44,7 +44,7 @@ const toneClass = {
         <template v-else>{{ props.value }}</template>
       </slot>
     </div>
-    <div v-if="props.sub || $slots.sub" class="mt-2 text-[11.5px] text-faint-fg truncate">
+    <div v-if="props.sub || $slots.sub" class="mt-2 text-[11.5px] leading-snug break-words text-faint-fg">
       <slot name="sub">{{ props.sub }}</slot>
     </div>
     <slot />
