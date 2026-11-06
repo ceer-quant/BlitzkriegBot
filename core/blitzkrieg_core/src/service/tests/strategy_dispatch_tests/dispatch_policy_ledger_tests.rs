@@ -191,59 +191,32 @@ fn policy_core(mut c: Core, policy: crate::execution_policy::Policy) -> Core {
 
 // ── #380: the boot-time policy-path contract ────────────────────────────
 
-/// A scratch tree with the shipped policy file at
-/// `<root>/user_layer/configs/execution_policy.toml`, carrying ONE
-/// identifying rule (the backstop) so a loaded file is distinguishable
-/// from the neutral kernel by `execution_policy_loaded()` alone.
-fn policy_tree_with_backstop(root: &std::path::Path) -> std::path::PathBuf {
-    use std::sync::atomic::AtomicU64;
-    static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "bk380-boot-{}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        root.file_name().and_then(|s| s.to_str()).unwrap_or("t")
-    ));
-    std::fs::create_dir_all(dir.join("user_layer").join("configs")).expect("config tree");
-    let file = dir
-        .join("user_layer")
-        .join("configs")
-        .join("execution_policy.toml");
-    std::fs::write(
-        &file,
-        r#"
-version = 1
-
-[defaults]
-budget_ratio = 0.10
-min_budget_usd = 1.00
-max_budget_usd = 50.00
-min_equity_usd = 1.00
-max_positions_per_asset = 1
-
-[[defaults.rules]]
-name = "global_backstop"
-enabled = true
-priority = 100
-when = "open_positions >= 2"
-then = { action = "skip" }
-"#,
-    )
-    .expect("write policy fixture");
-    file
-}
 
 /// #380: an EXPLICIT policy path is honoured verbatim by the boot load —
 /// a file written anywhere the cwd's spelling names is loaded, with the
 /// file's own rule in force. (The install-root resolution itself is
 /// unit-tested in `execution_policy.rs`; this pins the SERVICE's half:
 /// the path the config carries is the path the boot actually reads.)
+///
+/// Issue #967 retired the TOML file layer: policy rules now arrive through
+/// `POLICY_*` env vars read from the `.env` file (the loader no longer
+/// consults `execution_policy.toml`). The test equivalent writes the
+/// backstop rule into `POLICY_RULES` in a temp `.env` and points
+/// `env_file_path` at it — the loader's single source is now the env
+/// layer, not a file.
 #[test]
 fn boot_loads_the_explicit_policy_path_verbatim() {
     let tree = std::env::temp_dir().join(format!("bk380-explicit-{}", std::process::id()));
-    let file = policy_tree_with_backstop(&tree);
+    let env_file = tree.join("config.env");
+    std::fs::create_dir_all(&tree).expect("config tree");
+    std::fs::write(
+        &env_file,
+        r#"POLICY_RULES=[{"name":"global_backstop","priority":100,"enabled":true,"when":"open_positions >= 2","then":{"action":"skip"}}]"#,
+    )
+    .expect("write env fixture");
     let cfg = CoreConfig {
-        execution_policy_path: Some(file.to_string_lossy().into_owned()),
+        execution_policy_path: Some(tree.join("execution_policy.toml").to_string_lossy().into_owned()),
+        env_file_path: Some(env_file.to_string_lossy().into_owned()),
         dry_seed_balance: dec!(100),
         trade_log_path: None,
         order_log_path: None,
@@ -253,14 +226,14 @@ fn boot_loads_the_explicit_policy_path_verbatim() {
     let c = Core::new(cfg);
     assert!(
         c.execution_policy_loaded(),
-        "the explicit file exists: the boot must load it"
+        "the env file carries POLICY_RULES: the boot must load it"
     );
-    // The loaded policy is the FILE's, not the neutral kernel: the
+    // The loaded policy is the ENV's, not the neutral kernel: the
     // backstop rule the fixture wrote is in force.
     let section = c
         .execution_policy_section_view("default")
-        .expect("the file's [defaults] section");
-    let rules = section.rules.expect("the file's backstop rule");
+        .expect("the env's [defaults] section");
+    let rules = section.rules.expect("the env's backstop rule");
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0]["name"], serde_json::json!("global_backstop"));
     let _ = std::fs::remove_dir_all(&tree);

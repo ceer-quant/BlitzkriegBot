@@ -1041,7 +1041,7 @@ mod tests {
         const TAIL: &str =
             include_str!("../../blitzkrieg_launcher/src/bin_support/boot/replay_flags.rs");
         const START: &str = "let mut it = argv.iter().cloned();";
-        const END: &str = "// ── Resolve the file-settable settings";
+        const END: &str = "// ── Resolve the env-settable settings";
         let start = SRC
             .find(START)
             .unwrap_or_else(|| panic!("parse loop marker not found in main.rs: {START}"));
