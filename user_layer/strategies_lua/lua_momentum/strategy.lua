@@ -298,6 +298,55 @@ local DEFAULT_ARM = { m = 20, s = 0 }
 local DEFAULT_GIVE = { m = 15, s = 0 }
 local DEFAULT_FEE = { m = 7, s = 2 } -- 0.07, the published crypto taker rate
 
+-- ── time-weighted tightening (2026-11-06 operator rule) ────────────────────
+-- Binary pricing converges to {0, 1} as the round drains; a band sized for
+-- the full 900s is mispriced late. Each band tightens LINEARLY from its base
+-- value at round start to the `*_tight_pct` value as time_left → 0: the same
+-- time-weighting that makes a benjamin cost more with every lost second.
+-- `*_tight_pct` = 0 keeps the old flat band exactly (incl. disabled bands).
+--
+-- The fractional part is exact integer math on the same {m, s} shape — no
+-- floats anywhere near a dollar.
+
+local DEC_THOUSAND = { m = 1000, s = 0 }
+local round_duration_cache = nil
+
+--- `a / b` truncated to 9 decimal places (nil on zero/negative denominator).
+local function dec_div(a, b)
+    if b == nil or b.m <= 0 then
+        return nil
+    end
+    -- q·10^-9 approximates a.m·10^-a.s / b.m·10^-b.s = (a.m/b.m)·10^(b.s−a.s)
+    local q = (a.m * 1000000000) // b.m
+    return { m = q, s = 9 - a.s + b.s }
+end
+
+--- Band tightener: base at round start → tight as time_left → 0, linear.
+--- Fraction = (duration − time_left) / duration with duration = the largest
+--- time_left seen this round (a fresh round's first evaluate sees the full
+--- clock; before that, the base band stands). No division by zero: the
+--- fraction's denominator is the seeded duration itself.
+local function tighten(base_pct, tight_pct, round)
+    if tight_pct == nil or tight_pct.m <= 0 or round_duration_cache == nil then
+        return base_pct
+    end
+    if dec_cmp(base_pct, tight_pct) <= 0 then
+        return base_pct -- tight must be tighter; a wrong config stays flat
+    end
+    local dur = { m = round_duration_cache, s = 0 }
+    local left = { m = round.time_left_sec, s = 0 }
+    local frac = dec_div(dec_sub(dur, left), dur) -- elapsed 0..1
+    if frac == nil then
+        return base_pct
+    end
+    local delta = dec_mul(dec_sub(base_pct, tight_pct), frac)
+    local v = dec_sub(base_pct, delta)
+    if dec_cmp(v, tight_pct) < 0 then
+        return tight_pct
+    end
+    return v
+end
+
 local function fee_per_share(p, rate, exponent)
     local one_minus = dec_sub({ m = 1, s = 0 }, p)
     if p.m <= 0 or one_minus.m <= 0 then
@@ -503,7 +552,19 @@ local function consider_exit(out, row, round)
     local peak = peak_proceeds[token]
     local params = bk.params()
 
-    local tp = dec_param(params, "take_profit_pct", DEFAULT_TP)
+    -- Duration seed: the largest time_left seen this round IS the round
+    -- length (a healthy adapter's first evaluate sees the full clock; a
+    -- late-registered strategy keeps the partial clock it has seen, which
+    -- only makes the bands marginally tighter — fail toward tightening).
+    if round_duration_cache == nil or round.time_left_sec > round_duration_cache then
+        round_duration_cache = round.time_left_sec
+    end
+
+    -- Time-weighted bands (2026-11-06): each band slides from its base
+    -- toward `*_tight_pct` as the round drains; *_tight_pct=0 keeps the
+    -- flat band exactly (default — no behavior change without an opt-in).
+    local tp = tighten(dec_param(params, "take_profit_pct", DEFAULT_TP),
+        dec_param(params, "take_profit_pct_tight", DEC_0), round)
     if tp.m > 0 and net_reaches(proceeds, entry, tp) then
         -- #935: TP-class exits are the maker-first candidates — the gate
         -- (strategyExitMakerFirst) converts the advisory only when it's on,
@@ -521,8 +582,10 @@ local function consider_exit(out, row, round)
         return
     end
 
-    local arm = dec_param(params, "trail_arm_pct", DEFAULT_ARM)
-    local give = dec_param(params, "trail_giveback_pct", DEFAULT_GIVE)
+    local arm = tighten(dec_param(params, "trail_arm_pct", DEFAULT_ARM),
+        dec_param(params, "trail_arm_pct_tight", DEC_0), round)
+    local give = tighten(dec_param(params, "trail_giveback_pct", DEFAULT_GIVE),
+        dec_param(params, "trail_giveback_pct_tight", DEC_0), round)
     if arm.m > 0 and give.m > 0 and peak ~= nil
         and net_reaches(peak, entry, arm)
         and gave_back(peak, proceeds, entry, give) then
@@ -552,7 +615,9 @@ function bk_on_round(round)
     -- Per-token momentum state stays: a premise may carry across rounds for
     -- the same token id. Peak proceeds are position state and are dropped
     -- when the holding disappears (`forget_unheld`). The entry budget does
-    -- not carry: a new slot is a new round.
+    -- not carry: a new slot is a new round. The duration cache resets too —
+    -- the first fresh evaluate of the round re-seeds it.
+    round_duration_cache = nil
     if round ~= nil and round.slot ~= nil then
         roll_round(round.slot)
     end
