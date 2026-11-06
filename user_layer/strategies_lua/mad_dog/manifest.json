@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "a75df0244a8df7f98ef6c91901390ba1bf6b914a6b189bbc40ff110916a2e0c9",
+  "sha256": "cdbc2b2b389dfda4cfdac747e60bbebc23db38dee0867d16fdd08d418b63f6d6",
   "author": "BlitzkriegBot",
   "description": "FROZEN pending issue #847 positioning verdict — the spot waterfall veto is fixed (exact-rational) and the thesis-death exit is wired (a held leg more than thesis_break_pct under its entry anchor emits ONE kernel-priced exit), but the structural flaw stands: the extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill / 0.65%) and the post-breakdown edge is zero (0/1,928 settlements) — deferred to issue #915. Do not enable without repositioning. Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
   "tunables": {
@@ -92,6 +92,12 @@
     "thesis_break_pct": {
       "type": "decimal",
       "default": "30",
+      "min": "1",
+      "max": "90"
+    },
+    "maker_tp_gain_pct": {
+      "type": "decimal",
+      "default": "5",
       "min": "1",
       "max": "90"
     }

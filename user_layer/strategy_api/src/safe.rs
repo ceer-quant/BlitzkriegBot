@@ -168,6 +168,15 @@ pub struct Exit {
     /// `strategy_exit_maker_first` gate is on; protective reasons (stop_loss /
     /// time_exit) stay taker regardless (#915).
     pub use_maker: bool,
+    /// #915 convergence: the strategy MAY attach its own maker-TP limit — the
+    /// price a post-only SELL should rest at (an exact decimal string, e.g.
+    /// `1.05 × entry` for mad_dog's maker-TP). POST-ONLY-SAFE by contract: in
+    /// the profit-side path the kernel only honours it when the price straddles
+    /// no resting level (strictly above the fresh best bid, at or under the
+    /// best ask) or falls back to its own pricing; every other reason class
+    /// keeps the historic `strategy_signal_sell_bid` taker path. `None` =
+    /// never touched the wire (the pre-#915 shape, byte-identical).
+    pub price: Option<String>,
 }
 
 /// A trend break (the kernel cancels the token's resting bids). `broken_price`

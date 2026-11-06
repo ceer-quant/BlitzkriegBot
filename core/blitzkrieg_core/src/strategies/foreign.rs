@@ -1222,6 +1222,13 @@ fn adopt_eval_json(
                     .get("use_maker")
                     .and_then(|m| m.as_bool())
                     .unwrap_or(false);
+                // #915: the optional maker-TP limit rides the same opt-in
+                // shape — an absent/malformed key stays `None` (the historic
+                // price-less row); a malformed string is dropped at the same
+                // warn level by never reaching a price parse downstream (the
+                // kernel's `Decimal::from_str_exact` refusal degrades to the
+                // fallback pricing, always).
+                let exit_price = e.get("price").and_then(|p| p.as_str()).map(str::to_string);
                 exit_intents.push(StrategyExitIntent {
                     token_id: token.to_string(),
                     reason,
@@ -1229,6 +1236,7 @@ fn adopt_eval_json(
                     // account — the same second slice key the held view uses).
                     account_id: scope.to_string(),
                     use_maker,
+                    exit_price,
                 });
             }
         }
