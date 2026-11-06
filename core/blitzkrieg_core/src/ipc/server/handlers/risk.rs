@@ -15,10 +15,10 @@ use crate::schema::*;
 /// the wire without an env key must not crash the write).
 fn systemic_env_key(field: &str) -> Option<&'static str> {
     Some(match field {
-        "maxSingleLossUsd" => "BK_RISK_SINGLE_LOSS_USD",
-        "maxDailyDrawdownUsd" => "BK_RISK_DAILY_DRAWDOWN_USD",
-        "maxPositionSize" => "BK_RISK_POSITION_SIZE",
-        "maxConsecutiveLosses" => "BK_RISK_CONSECUTIVE_LOSSES",
+        "maxSingleLossUsd" => "BK_RISK_MAX_SINGLE_LOSS_USD",
+        "maxDailyDrawdownUsd" => "BK_RISK_MAX_DAILY_DRAWDOWN_USD",
+        "maxPositionSize" => "BK_RISK_MAX_POSITION_SIZE",
+        "maxConsecutiveLosses" => "BK_RISK_MAX_CONSECUTIVE_LOSSES",
         "cooldownMinutes" => "BK_RISK_COOLDOWN_MINUTES",
         "maxTotalPosition" => "BK_RISK_MAX_TOTAL_POSITION",
         "maxTotalExposureUsd" => "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
@@ -49,10 +49,7 @@ fn exit_env_key(field: &str) -> Option<&'static str> {
 /// process. A write failure is logged but does NOT fail the RPC: the in-memory
 /// apply already succeeded; the operator sees the change immediately and the
 /// log tells them persistence failed.
-fn persist_changes_to_env(
-    env_path: Option<&std::path::Path>,
-    changes: &[(&'static str, String)],
-) {
+fn persist_changes_to_env(env_path: Option<&std::path::Path>, changes: &[(&'static str, String)]) {
     let Some(env_path) = env_path else { return };
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
@@ -190,12 +187,7 @@ pub(crate) async fn handle_risk(
                             // restart re-arms the same values. The in-memory
                             // apply already succeeded; a persistence failure is
                             // logged but does not fail the RPC.
-                            let env_file = core
-                                .lock()
-                                .await
-                                .config()
-                                .env_file_path
-                                .clone();
+                            let env_file = core.lock().await.config().env_file_path.clone();
                             let env_path = env_file.as_deref().map(std::path::Path::new);
                             let changes: Vec<(&'static str, String)> = update
                                 .applied
@@ -230,12 +222,7 @@ pub(crate) async fn handle_risk(
                 match core.lock().await.apply_exit_set(&p, &actor, now_ms()) {
                     Ok(update) => {
                         // #966: persist the exit-discipline changes to `.env`.
-                        let env_file = core
-                            .lock()
-                            .await
-                            .config()
-                            .env_file_path
-                            .clone();
+                        let env_file = core.lock().await.config().env_file_path.clone();
                         let env_path = env_file.as_deref().map(std::path::Path::new);
                         let changes: Vec<(&'static str, String)> = update
                             .applied
