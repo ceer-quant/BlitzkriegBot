@@ -1,41 +1,47 @@
 name: CI
 
-# Runs on every PR and on pushes to the long-lived branches.
-# Six independent gates, matching the repository governance plan:
-#   rust-check     — the Rust trading core builds, tests, lints and holds the
-#                    release binary / tracked-tree size budget (E10-d).
-#   panel-check    — the browser panel: Vue checks, then the `ui:webapp` gate
-#                    against a live gateway over a real socket, plus the
-#                    lifecycle / read-only / crash-recovery acceptance gates
-#                    and the order/ledger parity gates.
-#   core-gates     — the specialized acceptance gates (E2/E4/E5/E9/P-1...),
-#                    promoted from manual-only to CI (KI-9).
-#   exit-economics — #272: the frozen-corpus ECONOMIC gate — the same hours must
-#                    keep paying what they paid. Its own job because it is the
-#                    only gate that needs a strategy built into the directory the
-#                    kernel dlopens from by default (see the job's own note).
-#   release-bundle — assembles the actual deliverable and holds it under 500 MB
-#                    (E10-e). The deliverable is the *union* of what the jobs
-#                    above build piecemeal, so only a job building the union can
-#                    measure it.
-#   secret-scan    — no credential ever enters the tree (dependency-free).
-# The Node/TS verification layer was removed (production is 100% Rust); all gate
-# drivers are bare-Node stdlib scripts under scripts/. A final `notify` job
-# reports the aggregate result to WeChat when configured.
+# Runs on every PR and on pushes to the long-lived branches (#844 scope 3:
+# path-aware CI under a NEVER-filtered required summary).
+#
+# Shape (#844): one always-run cheap planner decides what changed; the heavy
+# lanes condition on it; a `summary` job ALWAYS runs and reports every lane
+# explicitly — a lane this run did not need reports `skipped` and the summary
+# resolves those to success, so "paths filters my required check away" is
+# structurally impossible HERE. The summary IS the merge-blocking check
+# ("ci-summary"); the corpus of `needs:` unions below equals the old nine-job
+# matrix, so required-check status (currently advisory on this repo) survives
+# lane pruning by DESIGN rather than by luck.
+#
+# Lane map (the planner emits a lowercase lane key into `outputs.lanes`):
+#   docs         — markdown/screenshots only: link + secret policy, no build.
+#   contract     — bk_contract/market_api changed: every downstream lane runs.
+#   plugin       — extensions/*: contract gates + that plugin's pieces.
+#   ui           — ui/webapp + ui crates: contract gates + panel/tauri lanes.
+#   strategy     — user_layer/*: contract gates + strategy/parity gates.
+#   core         — core/risk/ledger/manifests/lockfile/workflows/scripts:
+#                  the full matrix (this is the default + every safety lane).
+# Lanes are a SUPERSET ladder (docs ⊂ everything): the planner ORs its lane
+# bits so e.g. a contract change also lights plugin/ui/strategy/core.
+#
+# The heavy jobs are the SAME steps as before 844 (rust-check, panel-check,
+# core-gates, exit-economics, release-bundle keep their names and step text —
+# the contract/UI/strategy suites live INSIDE them as steps), only their
+# `if:` now consults the planner. secret-scan keeps running always (never
+# filtered: a credential lands in whatever file changed). ops-gates keeps
+# running always (it is minutes of bash, touches no build and its gates
+# defend ops that path-pruning has no business silencing).
+#
+# Gates kept from pre-844 (unchanged names for any dashboards):
+#   rust-check     — Rust core build/test/lint + size budget (E10-d) [+ core lane]
+#   default-feature-tests / panel-check / core-gates / exit-economics /
+#   release-bundle / secret-scan / ops-gates + notify (wechat)
+# New in 844:
+#   planner        — always-run cheap change classifier + the guard pair
+#   summary        — always-run, explicitly reports per-lane status
 on:
   push:
     branches: [main, develop, 'release/**']
-    # Prose and documentation screenshots skip the whole
-    # suite. Executable files under docs/ still trigger CI. Mixed changes (any code,
-    # script, workflow or config file) still run everything — the ignore
-    # list only fires when EVERY changed file matches.
-    paths-ignore:
-      - '**.md'
-      - 'assets/screenshots/**'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'assets/screenshots/**'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -45,9 +51,72 @@ permissions:
   contents: read
 
 jobs:
+  # ── the always-run cheap planner + guard pair (#844 scope 1) ────────────────
+  planner:
+    name: planner & dependency-direction guard
+    runs-on: ubuntu-latest
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      breakdown: ${{ steps.plan.outputs.breakdown }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain (metadata only — no build)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Guard #844 — dependency direction & DTO ownership (manifests only)
+        # R1 core→plugin/UI/strategy-impl, R2 plugin/UI/strategy→core,
+        # R3 single-owner wire DTOs (name-level, module-tree-walked),
+        # R4 no cycles — over `cargo metadata --no-deps` (no build). The
+        # negative teeth run FIRST (§A.4): a guard that cannot go red is
+        # not a guard.
+        run: |
+          node scripts/dep-direction-check.mjs --self-test
+          node scripts/dep-direction-check.mjs
+          sh scripts/dep-direction-check-teeth.sh
+      - name: Guard #840 — workspace dependency-graph freeze (byte-exact)
+        run: |
+          node scripts/contract-tree-check.mjs --self-test
+          node scripts/contract-tree-check.mjs
+      - name: Classify changed files into lanes
+        id: plan
+        env:
+          # In Actions' checkout the repo's own remote is named `origin`
+          # regardless of the developer's local name (`ceer`).
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.ref_name }}
+          # push events reuse the merge-base trick too: compare against the
+          # previous SHA so a fast-forward merge does not re-classify everything.
+          BEFORE: ${{ github.event.before }}
+        run: |
+          node scripts/ci-lane-planner.mjs "$BASE" > lanes.json
+          cat lanes.json
+          echo "lanes=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("lanes.json","utf8")).lanes)')" >> "$GITHUB_OUTPUT"
+          echo "breakdown=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("lanes.json","utf8")).breakdown)')" >> "$GITHUB_OUTPUT"
+
+  # ── cheap always-on policy lanes ─────────────────────────────────────────────
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Dependency-free secret scan (blocking)
+        run: bash scripts/secret-scan.sh
+      # Advisory, defence-in-depth: official gitleaks against the same config.
+      # Non-blocking so a scanner-version hiccup cannot gate a legitimate PR;
+      # GitHub native Push Protection (bootstrap-repo.sh) is the hard stop.
+      - name: gitleaks (advisory)
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ghcr.io/gitleaks/gitleaks:latest detect --config /repo/.gitleaks.toml --redact --verbose
+
+  # ── the full matrix (core/risk/ledger/manifests/lockfile lane) ───────────────
   rust-check:
     name: rust-check
     runs-on: ubuntu-latest
+    needs: planner
+    # core lane (or full-override) runs the matrix; docs-only and light lanes skip.
+    if: ${{ needs.planner.outputs.lanes != 'docs' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -154,6 +223,8 @@ jobs:
     # with `#![cfg(feature = "test-support")]` and are compiled out here.
     name: default-feature-tests
     runs-on: ubuntu-latest
+    needs: planner
+    if: ${{ needs.planner.outputs.lanes != 'docs' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -189,6 +260,12 @@ jobs:
   panel-check:
     name: panel-check
     runs-on: ubuntu-latest
+    needs: planner
+    # UI lane always; contract lane fans out to it (#844 scope 3); core/router
+    # lanes too (they compile the panel bins). The deep gate battery below the
+    # UI build additionally asks for ui or core lanes — plugin/strategy lanes
+    # skip panel-check and let core-gates carry their suites.
+    if: ${{ needs.planner.outputs.lanes != 'docs' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -386,6 +463,11 @@ jobs:
   core-gates:
     name: core-gates
     runs-on: ubuntu-latest
+    needs: planner
+    # The plugin/strategy/UI/contract lanes all need core-gates: its step
+    # battery carries each lane's suite over the real binaries (#844 scope 3).
+    # Only the docs lane skips it.
+    if: ${{ needs.planner.outputs.lanes != 'docs' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -459,8 +541,8 @@ jobs:
         run: |
           node scripts/capacity-check.mjs
           node scripts/equity-drawdown-check.mjs --self-test
-      # #202: what ONE order may commit, as a share of the live account. The
-      # kernel had no such bound: `--max-order-notional` is an absolute number,
+      # #202: what ONE order may commit, as a share of the live account. The kernel
+      # had no such bound: `--max-order-notional` is an absolute number,
       # so the supervisor's 6.00 USD default is 125% of the 4.8 USDC book and the
       # fixed 10-share lot spends 83% of it. `risk-sizing-check` runs a dry core
       # on the stated balance, reads the bound the kernel itself reports
@@ -702,6 +784,8 @@ jobs:
   exit-economics:
     name: exit-economics
     runs-on: ubuntu-latest
+    needs: planner
+    if: ${{ needs.planner.outputs.lanes != 'docs' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -747,6 +831,12 @@ jobs:
   release-bundle:
     name: release-bundle
     runs-on: ubuntu-latest
+    needs: planner
+    # The release bundle measures the shipped union; only lanes that ship
+    # binaries assemble it. The docs lane and the light code lanes skip the
+    # 500 MB measure (a merge-weight number from a partial lane would be a
+    # lie); summary still surfaces the skip explicitly.
+    if: ${{ needs.planner.outputs.lanes == 'core' }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -772,27 +862,12 @@ jobs:
       - name: Deliverable ≤ 500 MB
         run: node scripts/package-release.mjs
 
-  secret-scan:
-    name: secret-scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Dependency-free secret scan (blocking)
-        run: bash scripts/secret-scan.sh
-      # Advisory, defence-in-depth: official gitleaks against the same config.
-      # Non-blocking so a scanner-version hiccup cannot gate a legitimate PR;
-      # GitHub native Push Protection (bootstrap-repo.sh) is the hard stop.
-      - name: gitleaks (advisory)
-        continue-on-error: true
-        run: |
-          docker run --rm -v "$PWD:/repo" -w /repo \
-            ghcr.io/gitleaks/gitleaks:latest detect --config /repo/.gitleaks.toml --redact --verbose
-
   # The ops scripts are macOS-only by construction (BSD `ps`, launchctl,
   # osascript), so a Linux runner cannot judge them — it would either fail on
   # the platform or, worse, pass on semantics the deployment host does not
   # have. This is the one job on a macOS runner, and it installs nothing and
-  # compiles nothing: pure bash + node, about a minute.
+  # compiles nothing: pure bash + node, about a minute. ALWAYS runs (#844):
+  # path-pruning has no business silencing the ops guards.
   ops-gates:
     name: ops-gates (macOS)
     runs-on: macos-latest
@@ -841,9 +916,84 @@ jobs:
       - name: Stack watchdog self-test (#211)
         run: bash scripts/stack-watchdog.sh --self-test
 
+  # ── #844 scope 3: the required summary. ALWAYS runs, never filtered. ────────
+  #
+  # No use of path filters can make a required check disappear, because the
+  # required check IS this job: it runs on every push/PR regardless of what
+  # changed, and it reports EVERY lane's status explicitly in its own result:
+  #   - failing lane  → summary fails (blocks the merge);
+  #   - green lane    → summary says so;
+  #   - skipped lane  → resolved to success EXPLICITLY (the lane was computed
+  #     unnecessary for this change set by the planner; the report line names
+  #     the lane and the reason, so "skipped because green" can never go
+  #     unnoticed — the acceptance's docs-only fixture proves exactly this).
+  summary:
+    name: ci-summary (required, always-run)
+    needs:
+      [
+        planner,
+        rust-check,
+        default-feature-tests,
+        panel-check,
+        core-gates,
+        exit-economics,
+        release-bundle,
+        secret-scan,
+        ops-gates,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Per-lane status report and verdict
+        env:
+          LANES: ${{ needs.planner.outputs.lanes }}
+          BREAKDOWN: ${{ needs.planner.outputs.breakdown }}
+          R_RUST: ${{ needs.rust-check.result }}
+          R_DEFAULT: ${{ needs.default-feature-tests.result }}
+          R_PANEL: ${{ needs.panel-check.result }}
+          R_CORE: ${{ needs.core-gates.result }}
+          R_EXIT: ${{ needs.exit-economics.result }}
+          R_BUNDLE: ${{ needs.release-bundle.result }}
+          R_SECRET: ${{ needs.secret-scan.result }}
+          R_OPS: ${{ needs.ops-gates.result }}
+          R_PLANNER: ${{ needs.planner.result }}
+        run: |
+          node -e '
+            const syms = {
+              R_PLANNER: process.env.R_PLANNER,
+              R_RUST: process.env.R_RUST,
+              R_DEFAULT: process.env.R_DEFAULT,
+              R_PANEL: process.env.R_PANEL,
+              R_CORE: process.env.R_CORE,
+              R_EXIT: process.env.R_EXIT,
+              R_BUNDLE: process.env.R_BUNDLE,
+              R_SECRET: process.env.R_SECRET,
+              R_OPS: process.env.R_OPS,
+            };
+            // a lane the planner did not schedule comes back "skipped";
+            // resolve it to success EXPLICITLY and say so in the report.
+            const resolved = {};
+            const skipped = [];
+            const failed = [];
+            for (const [k, v] of Object.entries(syms)) {
+              if (v === "skipped") { resolved[k] = "success (skipped: lane not scheduled for this change set)"; skipped.push(k); }
+              else if (v === "failure") { failed.push(k); resolved[k] = v; }
+              else resolved[k] = v;
+            }
+            const cols = Object.entries(resolved).map(([k, v]) => `${k}=${v}`).join(" ");
+            console.log(`lane matrix: ${cols}`);
+            console.log(`planner lanes: ${process.env.LANES}`);
+            console.log(`breakdown: ${process.env.BREAKDOWN}`);
+            if (skipped.length) console.log(`explicitly-resolved-skips: ${skipped.join(",")}`);
+            process.exit(failed.length ? 1 : 0);
+          '
+
+  # The final aggregate reporter — keeps the WeChat orientation pre-844. Now
+  # keyed off the summary verdict (plus the always-on lanes) so a lane cannot
+  # silently vanish from the tally.
   notify:
     name: notify (wechat)
-    needs: [rust-check, panel-check, core-gates, exit-economics, release-bundle, secret-scan, ops-gates]
+    needs: [summary, secret-scan, ops-gates]
     if: always()
     runs-on: ubuntu-latest
     # Secret lifted to job env so the step `if` can test it (secret-context
@@ -860,9 +1010,9 @@ jobs:
           # one can show ❌ beside six green results with nothing naming the job
           # that failed — `release-bundle` was missing from this line until
           # `exit-economics` was added to it.
-          RESULT: ${{ needs.rust-check.result }}/${{ needs.panel-check.result }}/${{ needs.core-gates.result }}/${{ needs.exit-economics.result }}/${{ needs.release-bundle.result }}/${{ needs.secret-scan.result }}/${{ needs.ops-gates.result }}
+          RESULT: ${{ needs.summary.result }}/${{ needs.secret-scan.result }}/${{ needs.ops-gates.result }}
         run: |
           icon="✅"; [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] && icon="❌"
           curl -sS -X POST "$WECHAT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(rust/panel/core/exit/bundle/secret/ops): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
+            -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$icon CI ${{ github.repository }}\\n> 分支: ${{ github.ref_name }}\\n> 触发: ${{ github.event_name }} by ${{ github.actor }}\\n> 结果(summary/secret/ops): $RESULT\\n> [查看运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})\"}}"
