@@ -577,9 +577,10 @@ local function consider_exit(out, row, round)
     if sl.m > 0 then
         -- net_reaches(proceeds, entry, sl) means (proceeds-entry)/entry >= sl%
         -- 我们要反向：(proceeds-entry)/entry <= -sl% → proceeds <= entry*(1-sl/100)
-        -- 用 dec_mul: entry * (100 - sl) / 100
-        local floor_entry = dec_mul(entry, { m = 100 - sl.m, s = 0 })
-        floor_entry = dec_mul(floor_entry, { m = 1, s = -2 }) -- /100
+        -- 用 dec_mul: entry * (100 - sl)/100 —— 直接乘缩放后的 0.xx，不能
+        -- 用负 scale（dec_mul 只累加 s，s=-2 会被当成 ×100，阈值变 2450
+        -- 导致每次 evaluate 都立即触发止损）。
+        local floor_entry = dec_mul(entry, { m = 100 - sl.m, s = 2 })
         if dec_cmp(proceeds, floor_entry) <= 0 then
             -- 净亏损达到 -sl%，立即市价止损。use_maker=false → 立即 taker 成交。
             out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
