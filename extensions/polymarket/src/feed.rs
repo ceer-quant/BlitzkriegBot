@@ -828,70 +828,84 @@ mod tests {
             let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
             let srv_requests = Arc::clone(&requests);
             let srv_status = Arc::clone(&status);
+            // Signal so `start()` does not return until the accept loop is actually
+            // accepting: on a current_thread runtime, a `tokio::spawn`ed task does
+            // not run until the spawning task yields, so without this the client
+            // would connect before the server is listening and hang forever.
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+            let srv_ready = ready_tx;
 
             tokio::spawn(async move {
+                let _ = srv_ready.send(());
                 loop {
                     let accepted = tokio::select! {
                         a = listener.accept() => a,
                         _ = &mut stop_rx => break,
                     };
-                    let Ok((mut tcp, _)) = accepted else { break };
-                    let reqs = Arc::clone(&srv_requests);
-                    let status = Arc::clone(&srv_status);
-                    tokio::spawn(async move {
-                        // Headers first, then exactly `Content-Length` body bytes:
-                        // the body follows the headers on the same connection and
-                        // is not guaranteed to arrive in the same read.
-                        let mut buf: Vec<u8> = Vec::new();
-                        let mut tmp = [0u8; 4096];
-                        let body = loop {
-                            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
-                                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-                                let len = content_length(&head);
-                                if buf.len() >= pos + 4 + len {
-                                    break buf[pos + 4..pos + 4 + len].to_vec();
-                                }
-                            }
-                            match tcp.read(&mut tmp).await {
-                                Ok(0) | Err(_) => break Vec::new(),
-                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                            }
-                        };
-                        let ids: Vec<String> =
-                            serde_json::from_slice::<Vec<serde_json::Value>>(&body)
-                                .map(|v| {
-                                    v.iter()
-                                        .filter_map(|e| {
-                                            e.get("token_id")
-                                                .and_then(|t| t.as_str())
-                                                .map(str::to_string)
+                    match accepted {
+                        Ok((tcp, _peer)) => {
+                            let reqs = Arc::clone(&srv_requests);
+                            let status = Arc::clone(&srv_status);
+                            tokio::spawn(async move {
+                                let mut tcp = tcp;
+                                // Headers first, then exactly `Content-Length` body bytes:
+                                // the body follows the headers on the same connection and
+                                // is not guaranteed to arrive in the same read.
+                                let mut buf: Vec<u8> = Vec::new();
+                                let mut tmp = [0u8; 4096];
+                                let body = loop {
+                                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                                        let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                                        let len = content_length(&head);
+                                        if buf.len() >= pos + 4 + len {
+                                            break buf[pos + 4..pos + 4 + len].to_vec();
+                                        }
+                                    }
+                                    match tcp.read(&mut tmp).await {
+                                        Ok(0) | Err(_) => break Vec::new(),
+                                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                                    }
+                                };
+                                let ids: Vec<String> =
+                                    serde_json::from_slice::<Vec<serde_json::Value>>(&body)
+                                        .map(|v| {
+                                            v.iter()
+                                                .filter_map(|e| {
+                                                    e.get("token_id")
+                                                        .and_then(|t| t.as_str())
+                                                        .map(str::to_string)
+                                                })
+                                                .collect()
                                         })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                        reqs.lock()
-                            .await
-                            .push((std::time::Instant::now(), ids.clone()));
+                                        .unwrap_or_default();
+                                reqs.lock()
+                                    .await
+                                    .push((std::time::Instant::now(), ids.clone()));
 
-                        let code = status.load(Ordering::SeqCst);
-                        let (reason, payload) = if code == 200 {
-                            ("200 OK", books_json(&ids))
-                        } else {
-                            (
-                                "429 Too Many Requests",
-                                String::from("{\"error\":\"rate limited\"}"),
-                            )
-                        };
-                        let resp = format!(
-                            "HTTP/1.1 {reason}\r\nContent-Type: application/json\r\n\
-                             Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                            payload.len()
-                        );
-                        let _ = tcp.write_all(resp.as_bytes()).await;
-                        let _ = tcp.flush().await;
-                    });
+                                let code = status.load(Ordering::SeqCst);
+                                let (reason, payload) = if code == 200 {
+                                    ("200 OK", books_json(&ids))
+                                } else {
+                                    (
+                                        "429 Too Many Requests",
+                                        String::from("{\"error\":\"rate limited\"}"),
+                                    )
+                                };
+                                let resp = format!(
+                                    "HTTP/1.1 {reason}\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                    payload.len()
+                                );
+                                let _ = tcp.write_all(resp.as_bytes()).await;
+                                let _ = tcp.flush().await;
+                            });
+                        }
+                        Err(_) => break,
+                    }
                 }
             });
+
+            let _ = ready_rx.await;
 
             Self {
                 url: format!("http://{addr}"),
@@ -941,6 +955,10 @@ mod tests {
             srv.url.clone(),
             250,
         ));
+        // Give the current_thread runtime a tick so the FakeClob accept loop
+        // reaches listener.accept() before the client connects; without it the
+        // connect hangs (no task yields between spawn and first poll).
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         // 第一条 book 事件必须是整批 Books（两 token 一条事件、同一时间戳）。
         let ev = tokio::time::timeout(Duration::from_secs(5), ev_rx.recv())
@@ -1030,6 +1048,7 @@ mod tests {
             srv.url.clone(),
             250,
         ));
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         let first = srv.wait_for_requests(1).await;
         assert_eq!(
@@ -1102,6 +1121,7 @@ mod tests {
             srv.url.clone(),
             MIN_POLL_MS,
         ));
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         // Wait for each poll to actually land before judging it. "It must keep
         // trying" is thus observed, not budgeted: if the poller stops after one

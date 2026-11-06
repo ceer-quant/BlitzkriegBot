@@ -506,6 +506,9 @@ async fn handle_line(
         method::STRATEGY_PARAMS_SET => {
             handlers::strategy::handle_strategy(method, core, peer, params).await
         }
+        method::STRATEGY_PACKAGES_RELOAD => {
+            handlers::strategy::handle_strategy(method, core, peer, params).await
+        }
         method::UNIFIED_LIST => handlers::unified::handle_unified(method, core, params).await,
         method::UNIFIED_CANDIDATES => handlers::unified::handle_unified(method, core, params).await,
         method::UNIFIED_CONFIRM => handlers::unified::handle_unified(method, core, params).await,

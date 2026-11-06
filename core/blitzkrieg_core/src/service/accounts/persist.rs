@@ -663,16 +663,30 @@ impl Core {
                 requested.push(name.to_string());
             }
         }
-        // Plan-first validation: every requested name must be REGISTERED in
-        // the engine (any scope). The registered set is the loadable set —
-        // the default scope hosts every loaded package.
+        // Plan-first validation: every NEW name in this request
+        // (`requested − persisted`) must be REGISTERED in the engine (any
+        // scope). A new unregistered name is a typo and must fail — never
+        // silently inert (the doc contract: "a typo fails here").
+        // Already-persisted-but-unregistered names are warn-skipped: they sit
+        // in .env from an earlier boot, can't be loaded, and the operator must
+        // still be able to remove them without the whole write being refused.
         if self.engine.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.strategies.set: no strategy engine attached".to_string(),
             ));
         }
-        for name in &requested {
+        let persisted: Vec<String> = self
+            .accounts
+            .account(id)
+            .map(|a| a.strategies.clone())
+            .unwrap_or_default();
+        let new_names: Vec<&str> = requested
+            .iter()
+            .filter(|name| !persisted.iter().any(|p| p == *name))
+            .map(|s| s.as_str())
+            .collect();
+        for name in &new_names {
             if !self
                 .engine
                 .as_ref()
@@ -687,6 +701,25 @@ impl Core {
                          `strategy.list` reports"
                     ),
                 ));
+            }
+        }
+        // Warn-skip stale names already persisted but no longer registered:
+        // they can't load, but the operator must still be able to drop them.
+        for name in &persisted {
+            if !requested.iter().any(|r| r == name)
+                && !self
+                    .engine
+                    .as_ref()
+                    .expect("engine presence checked above")
+                    .strategy_registered(name)
+            {
+                tracing::warn!(
+                    strategy = name,
+                    account = %id,
+                    "account.strategies.set: strategy `{name}` is persisted \
+                     but not registered — warn-skipping, it can be removed \
+                     but will not run until re-registered",
+                );
             }
         }
         // Positions THIS account holds, by strategy — the exits-only safety

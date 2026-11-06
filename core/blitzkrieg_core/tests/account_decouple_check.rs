@@ -1174,3 +1174,141 @@ fn the_factory_accounts_shape_binds_venues_and_never_pins_strategies() {
         "no account ships a pinned set"
     );
 }
+
+// ── issue #975 钉子测试：account.strategies.set 的三分支语义 ─────────────────────
+// 回归守卫：新增未注册名必须 Err（绝不可静默落盘）；已注册新增可 Ok；
+// 新增与已注册混合时，任何一个未注册新名拒绝整次写入。
+// persist-but-unregistered（已落盘但已卸载的策略名）走 warn-skip，允许被移除；
+// 该分支在本夹具中不易构造（所有已注册名在进程内始终可见），以代码
+// 审计 + 该钉子的 Err/Ok 分支作为回归覆盖。
+
+/// 新增一个从未注册的策略名 → 整次写入被拒，不落盘。
+#[test]
+fn strategies_set_rejects_new_unregistered_name() {
+    let path = accounts_toml_path("nail-new-unregistered", None);
+    let mut c = decouple_core(Some(&path), None, false);
+    let now = NOW;
+
+    let err = c
+        .set_account_strategies_persisting(
+            &paper_id(),
+            vec!["no_such_strategy_zzz".to_string()],
+            "nail",
+            "new unregistered must be refused",
+            now,
+        )
+        .unwrap_err();
+    assert!(
+        err.message.contains("is not registered"),
+        "unregistered new name must be refused by name: {}",
+        err.message
+    );
+    // 不落盘：paper 的策略集保持为空
+    assert!(
+        c.accounts_mut()
+            .account(&paper_id())
+            .map(|a| a.strategies.is_empty())
+            .unwrap_or(false),
+        "refused write must leave the account's set untouched"
+    );
+}
+
+/// 新增一个已注册策略名 → 写入成功。
+#[test]
+fn strategies_set_accepts_new_registered_name() {
+    let path = accounts_toml_path("nail-new-registered", None);
+    let mut c = decouple_core(Some(&path), None, false);
+    let now = NOW;
+
+    c.set_account_strategies_persisting(
+        &paper_id(),
+        vec!["cross_venue_arb".to_string()],
+        "nail",
+        "new registered name accepted",
+        now,
+    )
+    .expect("registered new name is accepted");
+    assert_eq!(
+        c.accounts_mut()
+            .account(&paper_id())
+            .map(|a| a.strategies.clone())
+            .unwrap_or_default(),
+        vec!["cross_venue_arb".to_string()],
+        "registered name lands in the account's set"
+    );
+}
+
+/// 新增集里既有已注册名又有未注册名 → 未注册的那一条拒绝整次写入。
+#[test]
+fn strategies_set_mixed_rejects_whole_write() {
+    let path = accounts_toml_path("nail-mixed", None);
+    let mut c = decouple_core(Some(&path), None, false);
+    let now = NOW;
+
+    let err = c
+        .set_account_strategies_persisting(
+            &paper_id(),
+            vec![
+                "cross_venue_arb".to_string(),
+                "no_such_strategy_zzz".to_string(),
+            ],
+            "nail",
+            "mixed set: unregistered new name fails whole write",
+            now,
+        )
+        .unwrap_err();
+    assert!(
+        err.message.contains("is not registered"),
+        "mixed write with an unregistered new name must fail: {}",
+        err.message
+    );
+    // 不落盘：paper 的策略集仍为空
+    assert!(
+        c.accounts_mut()
+            .account(&paper_id())
+            .map(|a| a.strategies.is_empty())
+            .unwrap_or(false),
+        "rejected mixed write must not persist anything"
+    );
+}
+
+/// 移除一个已注册策略名（置空） → 写入成功，键被移除。
+#[test]
+fn strategies_set_removing_registered_name_is_ok() {
+    let path = accounts_toml_path("nail-remove", None);
+    let mut c = decouple_core(Some(&path), None, false);
+    let now = NOW;
+
+    c.set_account_strategies_persisting(
+        &paper_id(),
+        vec!["cross_venue_arb".to_string()],
+        "nail",
+        "first assign cross_venue_arb",
+        now,
+    )
+    .expect("assign lands");
+    assert_eq!(
+        c.accounts_mut()
+            .account(&paper_id())
+            .map(|a| a.strategies.clone())
+            .unwrap_or_default(),
+        vec!["cross_venue_arb".to_string()],
+    );
+
+    // 置空：移除已注册的名，必须成功（跨账户/已注册名不触发 warn-skip 的拒绝路径）
+    c.set_account_strategies_persisting(
+        &paper_id(),
+        vec![],
+        "nail",
+        "remove the only registered strategy",
+        now + 1_000,
+    )
+    .expect("removing a registered name is accepted");
+    assert!(
+        c.accounts_mut()
+            .account(&paper_id())
+            .map(|a| a.strategies.is_empty())
+            .unwrap_or(false),
+        "removal empties the account's set"
+    );
+}
