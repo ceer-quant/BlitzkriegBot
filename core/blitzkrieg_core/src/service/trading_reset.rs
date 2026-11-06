@@ -191,9 +191,9 @@ impl Core {
     ///   改判。同上：matrix 照写、本会话的 `PositionConfig::max_daily_loss_usd`
     ///   不动。
     ///
-    /// Atomic：patch 先全量校验（非负）再落笔，被拒的 patch 不留半点痕迹。
-    /// 不持久化 —— 重启后 `from_file` 重走启动层，与 `risk.setLimits` 的
-    /// 「热≠永久」同一句真话。
+    /// Atomic：patch 先全量校验（非负）再落笔，被拒的 patch 不留
+    /// 半点痕迹。Issue #966：九项 `RISK_*` 冻结键随 patch upsert 进
+    /// `.env`（唯一持久化家），`persisted` 真实反映 env 写入。
     pub fn apply_systemic_limits(
         &mut self,
         patch: &crate::schema::SetSystemicLimitsParams,
@@ -360,10 +360,16 @@ impl Core {
             );
         }
 
-        // #861: same durable ride as `risk.setLimits` — the nine bounds
-        // recover across a restart (provenance `flag`, exactly as written
-        // above).
-        let persisted = self.risk_state_record_systemic(&changes);
+        // #861: bounds recover across restart (provenance `flag`).
+        // Issue #966: frozen RISK_* keys upsert into `.env`; `persisted` truthful.
+        let state_file_persisted = self.risk_state_record_systemic(&changes);
+        let env_path = self
+            .config
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new);
+        let persisted =
+            super::env_persist::systemic_env_persisted(env_path, &changes, state_file_persisted);
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -410,8 +416,8 @@ impl Core {
     /// 止损，`takeProfitPct: 0` 语义同样荒谬 —— 负数/零不是操作员想要的
     /// 「关闭」，是笔误）。强平接受 `0`、拒绝负数。
     ///
-    /// 不持久化 —— 重启后回到启动 flag/env/TOML 的解析结果，与
-    /// `risk.setSystemic` 的「热≠永久」同一句真话。
+    /// Issue #966：五项 `EXIT_*` 冻结键随 patch upsert 进 `.env`（唯一
+    /// 持久化家；无第二份 exit 单元），`persisted` 真实反映 env 写入。
     pub fn apply_exit_set(
         &mut self,
         patch: &crate::schema::SetExitParams,
@@ -579,12 +585,20 @@ impl Core {
                  floors are absolute and unaffected)"
             );
         }
+        // Issue #966: `risk.setExit` had no durable side; now the five frozen
+        // EXIT_* keys upsert into `.env`; the reply reports THAT write.
+        let env_path = self
+            .config
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new);
+        let persisted = super::env_persist::exit_env_persisted(env_path, &changes);
         Ok(ExitSetUpdate {
             applied: changes,
             at_ms: now_ms,
             actor: actor.to_string(),
             reason: patch.reason.clone(),
-            persisted: false,
+            persisted,
             note: EXIT_SET_UPDATE_NOTE,
         })
     }

@@ -214,6 +214,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let env = EnvVars::from_process();
+    // Issue #966: the operator `.env` is the single persistent home for the
+    // hot risk/exit family — BEFORE anything reads config, the legacy
+    // `BK_RISK_*`/`BK_EXIT_*` rows move onto the frozen `RISK_*`/`EXIT_*`
+    // keys (the frozen vocabulary is the only one the file carries after
+    // this pass) and the shell layer resolves over the migrated file.
+    let migration = blitzkrieg_core::service::migrate_legacy_keys(std::path::Path::new(".env"))
+        .unwrap_or_else(|e| {
+            eprintln!("blitzkrieg-core: .env migration failed: {e}");
+            Vec::new()
+        });
+    for (to, from) in &migration {
+        eprintln!("blitzkrieg-core: .env legacy key {from} moved onto {to}");
+    }
+    let env = EnvVars::from_launch(&env, Some(std::path::Path::new(".env")));
     let choice = config_choice(&argv, &env);
     let file = match &choice {
         ConfigChoice::Off => blitzkrieg_core::config::FileConfig::default(),
@@ -265,12 +279,16 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("blitzkrieg-core: {line}");
     }
     // E26 (§4): the systemic risk limits in force, resolved from the config
-    // file's [risk] section — this Epic's only wired input — and echoed
-    // unconditionally like every other budget above: the factory posture
-    // (all nine off, §4.1) must be visible in the boot log, not greppable.
-    // The set is then handed to the core through `RiskConfig`, the one
-    // hand-off `RiskGate::new` already makes.
-    let systemic = blitzkrieg_core::risk::limits::SystemicRiskLimits::from_file(&file.risk);
+    // file's [risk] section — with issue #966's env layer BETWEEN TOML and
+    // the factory posture (CLI flags still win via the daily-loss override
+    // right below) — and echoed unconditionally like every other budget
+    // above: the factory posture (all nine off, §4.1) must be visible in the
+    // boot log, not greppable. The set is then handed to the core through
+    // `RiskConfig`, the one hand-off `RiskGate::new` already makes.
+    let systemic =
+        blitzkrieg_core::risk::limits::SystemicRiskLimits::from_layers(&file.risk, |k| {
+            env.lookup(k)
+        });
     // E26 (§4.4): the drawdown bound on the readout names the TRUE layer that
     // armed the budget. The resolver already picked CLI > env > [risk] > the
     // compiled default for the daily-loss breaker — the matrix must agree

@@ -457,6 +457,77 @@ fn the_zero_mid_fallback_recovers_cost_via_the_entry_price() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 兜底价的下限保护（PR #969）：当最后已知 mid 远低于入场价（市场已放弃
+/// 该二元期权，mid 跌到 0.01）时，fallback 价不随 mid 跌到 0.01，而是
+/// 封顶在入场价的 `BK_SETTLEMENT_FALLBACK_FLOOR_PCT`（默认 50% = 0.20）。
+/// 防止一笔未验证结算 wiping 账户权益。
+///
+/// 同一个测试函数内顺序验证默认 floor 和 env 覆盖（floor=0 禁用），避免
+/// 并行测试对进程级 env var 的竞态。
+#[test]
+fn the_residual_mid_fallback_is_floored_at_entry_percent() {
+    let entry = dec!(0.40);
+
+    // ── Part 1: default floor = 50% ──────────────────────────────────────
+    unsafe { std::env::remove_var("BK_SETTLEMENT_FALLBACK_FLOOR_PCT") };
+    {
+        let dir = scratch("residual-mid-floor-default");
+        let mut c = fallback_core(&dir, false);
+        let p = open_expiring_position(&mut c);
+        let mut dead = p.clone();
+        dead.current_price = dec!(0.01);
+        dead.prev_price = dec!(0.01);
+        c.positions.restore_open(vec![dead], None);
+        assert_eq!(c.positions().open_positions()[0].current_price, dec!(0.01));
+
+        let sent = EXPIRES_MS + 100;
+        c.tick(sent).unwrap();
+        stage_unanswered_query(&mut c, "cond", "tok", sent);
+        let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+        c.tick(bound + 1_000).unwrap();
+
+        assert!(c.positions().open_positions().is_empty());
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(
+            closed.exit_reason,
+            crate::model::ExitReason::UnverifiableExpiry
+        );
+        assert_eq!(
+            closed.exit_price,
+            entry / dec!(2),
+            "default 50% floor: 0.40 × 0.5 = 0.20, not the raw 0.01"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Part 2: BK_SETTLEMENT_FALLBACK_FLOOR_PCT=0 disables the floor ────
+    unsafe { std::env::set_var("BK_SETTLEMENT_FALLBACK_FLOOR_PCT", "0") };
+    {
+        let dir = scratch("residual-mid-floor-zero");
+        let mut c = fallback_core(&dir, false);
+        let p = open_expiring_position(&mut c);
+        let mut dead = p.clone();
+        dead.current_price = dec!(0.01);
+        dead.prev_price = dec!(0.01);
+        c.positions.restore_open(vec![dead], None);
+
+        let sent = EXPIRES_MS + 100;
+        c.tick(sent).unwrap();
+        stage_unanswered_query(&mut c, "cond", "tok", sent);
+        let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+        c.tick(bound + 1_000).unwrap();
+
+        let closed = &c.positions().closed_positions()[0];
+        assert_eq!(
+            closed.exit_price,
+            dec!(0.01),
+            "floor_pct=0 restores the raw mid as the fallback price"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    unsafe { std::env::remove_var("BK_SETTLEMENT_FALLBACK_FLOOR_PCT") };
+}
+
 /// OpenParams 构造的补充面：test-seam 开出的旧快照（entered > expires +
 /// EXPIRY_TRUST_MS）不进 watch（track_markets 拒收），因此兜底也永远不碰它
 /// —— 那条路是 #175 的发明防护，本修复不越它半步。

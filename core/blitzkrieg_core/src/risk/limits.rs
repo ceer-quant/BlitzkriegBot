@@ -212,6 +212,73 @@ impl SystemicRiskLimits {
         }
     }
 
+    /// Issue #966's read face: the same resolution with an ENV layer between
+    /// TOML and the factory posture — `CLI > env(.env) > TOML [risk] >
+    /// default`. `env` maps a frozen `RISK_*` key to its decimal value; the
+    /// pre-#966 `BK_RISK_*` spelling answers for the same field when no
+    /// frozen key is present (the migration is disk-side; the read layer
+    /// keeps boot #1 honest). A present key that does not parse as
+    /// non-negative decimal is a WARN + skip — a hand-edited `.env` must not
+    /// silently arm a nonsense cap, the boot value stands (the same
+    /// fail-closed posture the risk-state file's parser holds).
+    pub fn from_layers(
+        file: &crate::config::RiskFile,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        use rust_decimal::Decimal as D;
+        // (frozen key, legacy fallback, which bound it feeds) — index order
+        // mirrors the field order of the two matrices.
+        const FIELDS: [(&str, &str, u8); 9] = [
+            ("RISK_MAX_SINGLE_LOSS_USD", "BK_RISK_MAX_SINGLE_LOSS_USD", 0),
+            (
+                "RISK_MAX_DAILY_DRAWDOWN_USD",
+                "BK_RISK_MAX_DAILY_DRAWDOWN_USD",
+                1,
+            ),
+            ("RISK_MAX_POSITION_SIZE", "BK_RISK_MAX_POSITION_SIZE", 2),
+            (
+                "RISK_MAX_CONSECUTIVE_LOSSES",
+                "BK_RISK_MAX_CONSECUTIVE_LOSSES",
+                3,
+            ),
+            ("RISK_COOLDOWN_MINUTES", "BK_RISK_COOLDOWN_MINUTES", 4),
+            ("RISK_MAX_TOTAL_POSITION", "BK_RISK_MAX_TOTAL_POSITION", 5),
+            (
+                "RISK_MAX_TOTAL_EXPOSURE_USD",
+                "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
+                6,
+            ),
+            ("RISK_MAX_CORRELATION_USD", "BK_RISK_MAX_CORRELATION_USD", 7),
+            (
+                "RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
+                "BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
+                8,
+            ),
+        ];
+        let mut sys = Self::from_file(file);
+        let parse = |raw: &str| raw.trim().parse::<D>().ok().filter(|v| *v >= D::ZERO);
+        for (frozen, legacy, idx) in FIELDS {
+            let hit = env(frozen)
+                .and_then(|v| parse(&v).map(|v| (v, LimitSource::Env)))
+                .or_else(|| env(legacy).and_then(|v| parse(&v).map(|v| (v, LimitSource::Env))));
+            let Some((v, source)) = hit else { continue };
+            let bound = Bound::new(v, source);
+            match idx {
+                0 => sys.account.max_single_loss_usd = bound,
+                1 => sys.account.max_daily_drawdown_usd = bound,
+                2 => sys.account.max_position_size = bound,
+                3 => sys.account.max_consecutive_losses = bound,
+                4 => sys.account.cooldown_minutes = bound,
+                5 => sys.global.max_total_position = bound,
+                6 => sys.global.max_total_exposure_usd = bound,
+                7 => sys.global.max_correlation_usd = bound,
+                8 => sys.global.global_kill_switch_loss_usd = bound,
+                _ => unreachable!("index bound to the FIELDS table"),
+            }
+        }
+        sys
+    }
+
     /// The boot-log face (§4 provenance): one line per ARMED limit, naming its
     /// source the way the kernel's provenance report has always spelled values.
     /// A factory kernel prints the single "at factory" line — the silent
@@ -861,6 +928,101 @@ mod tests {
             } => assert!(detail.contains("max_single_loss_usd"), "{detail}"),
             other => panic!("expected account rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn env_layer_shadows_toml_and_names_itself() {
+        // Issue #966 priority: env over [risk] TOML over factory.
+        let file = crate::config::RiskFile {
+            max_single_loss_usd: Some(dec!(0.10)),
+            max_total_position: Some(dec!(3)),
+            max_total_exposure_usd: Some(dec!(20)),
+            ..Default::default()
+        };
+        let map = std::collections::BTreeMap::from([
+            ("RISK_MAX_SINGLE_LOSS_USD".to_string(), "0.50".to_string()),
+            ("RISK_MAX_TOTAL_POSITION".to_string(), "6".to_string()),
+        ]);
+        let env = |k: &str| map.get(k).cloned();
+
+        let nullmap: std::collections::BTreeMap<String, String> = Default::default();
+        let nullenv = |k: &str| nullmap.get(k).cloned();
+
+        // Env only: the two carried keys resolved env, the third key (TOML
+        // but not env) keeps toml.
+        let sys = SystemicRiskLimits::from_layers(&file, env);
+        let single = &sys.account.max_single_loss_usd;
+        assert_eq!(single.value(), dec!(0.50));
+        assert_eq!(single.source(), LimitSource::Env);
+        let total = &sys.global.max_total_position;
+        assert_eq!(total.value(), dec!(6));
+        assert_eq!(total.source(), LimitSource::Env);
+        let exposure = &sys.global.max_total_exposure_usd;
+        assert!(exposure.is_enabled());
+        assert_eq!(exposure.source(), LimitSource::Toml);
+        let exposure_val = exposure.value();
+        let empty = SystemicRiskLimits::from_layers(
+            &crate::config::RiskFile {
+                max_total_exposure_usd: Some(exposure_val),
+                ..Default::default()
+            },
+            nullenv,
+        );
+        assert!(
+            empty.global.max_total_exposure_usd.source() == LimitSource::Toml,
+            "no env involved at all: toml stands"
+        );
+    }
+
+    #[test]
+    fn env_layer_legacy_bk_keys_answer_for_the_same_field() {
+        // The migration is disk-side; boot #1 in a not-yet-migrated file
+        // still sees the operator's values under the BK_ spelling.
+        let map = std::collections::BTreeMap::from([
+            ("BK_RISK_MAX_POSITION_SIZE".to_string(), "5".to_string()),
+            ("BK_RISK_COOLDOWN_MINUTES".to_string(), "30".to_string()),
+        ]);
+        let env = |k: &str| map.get(k).cloned();
+        let sys = SystemicRiskLimits::from_layers(&Default::default(), env);
+        let size = &sys.account.max_position_size;
+        assert_eq!(size.value(), dec!(5));
+        assert_eq!(size.source(), LimitSource::Env);
+        let cd = &sys.account.cooldown_minutes;
+        assert_eq!(cd.value(), dec!(30));
+        // Frozen spelling beats legacy when both appear.
+        let map = std::collections::BTreeMap::from([
+            ("BK_RISK_MAX_POSITION_SIZE".to_string(), "5".to_string()),
+            ("RISK_MAX_POSITION_SIZE".to_string(), "12".to_string()),
+        ]);
+        let env = |k: &str| map.get(k).cloned();
+        let sys = SystemicRiskLimits::from_layers(&Default::default(), env);
+        assert_eq!(sys.account.max_position_size.value(), dec!(12));
+    }
+
+    #[test]
+    fn env_layer_malformed_and_negative_values_are_skipped() {
+        // Fail-closed: a hand-edited .env must not arm a nonsense cap. The
+        // TOML'd value stands untouched; the garbage key warns and skips.
+        let file = crate::config::RiskFile {
+            max_position_size: Some(dec!(3)),
+            ..Default::default()
+        };
+        let map = std::collections::BTreeMap::from([
+            (
+                "RISK_MAX_POSITION_SIZE".to_string(),
+                "not-a-number".to_string(),
+            ),
+            ("RISK_COOLDOWN_MINUTES".to_string(), "-3".to_string()),
+        ]);
+        let env = |k: &str| map.get(k).cloned();
+        let sys = SystemicRiskLimits::from_layers(&file, env);
+        let size = &sys.account.max_position_size;
+        assert_eq!((size.value(), size.source()), (dec!(3), LimitSource::Toml));
+        let cd = &sys.account.cooldown_minutes;
+        assert_eq!(
+            (cd.value(), cd.source()),
+            (Decimal::ZERO, LimitSource::Default)
+        );
     }
 
     #[test]

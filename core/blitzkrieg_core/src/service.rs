@@ -19,6 +19,12 @@ mod accounts;
 mod assembly;
 mod config;
 mod engine_cycle;
+// Issue #966: the `.env` half of hot risk/exit persistence (its own module —
+// trading_reset.rs has no line budget left; the two writers call it
+// one-line-at-tail). The launch-side migration half is surfaced for the
+// launcher composition root (the one place that owns the ≤1500-line budget).
+pub(crate) mod env_persist;
+pub use env_persist::migrate_legacy_keys;
 mod helpers;
 mod risk_admission;
 mod settlement_orders;

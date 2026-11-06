@@ -520,8 +520,45 @@ impl EnvVars {
         Self { vars }
     }
 
+    /// The launch shell's own layer (issue #966): the `<cwd>/.env` the panel
+    /// launcher exports at startup — process env first (the exported values
+    /// win, the same precedence the panel's loader documents), file lines
+    /// second. Only the two hot-config families the issue freezes ride here +
+    /// the legacy `BK_RISK_*`/`BK_EXIT_*` spellings the migration is about to
+    /// move; an uninvolved kernel (replay/backtest) passes a None file and
+    /// keeps the plain process view. Called from main.rs AFTER
+    /// `migrate_legacy_keys` has moved the file's legacy rows onto the frozen
+    /// keys, so what this returns is the post-migration truth.
+    pub(crate) fn from_launch(process: &EnvVars, env_path: Option<&std::path::Path>) -> Self {
+        let mut vars = process.vars.clone();
+        if let Some(path) = env_path
+            && let Ok(text) = std::fs::read_to_string(path)
+        {
+            for (k, v) in text
+                .lines()
+                .filter_map(blitzkrieg_core::env_file::parse_line)
+            {
+                // Freeze the hot-config families regardless of namespace, and
+                // the legacy BK_ risk rows too (read-layer compatibility while
+                // the disk migration walks fixed steps).
+                if k.starts_with("RISK_")
+                    || k.starts_with("EXIT_")
+                    || k.starts_with("BK_RISK_")
+                    || k.starts_with("BK_EXIT_")
+                {
+                    vars.entry(k).or_insert(v);
+                }
+            }
+        }
+        Self { vars }
+    }
+
     fn text(&self, key: &str) -> Option<String> {
         self.vars.get(key).cloned()
+    }
+
+    pub(crate) fn lookup(&self, key: &str) -> Option<String> {
+        self.text(key)
     }
 
     fn num<T: FromStr>(&self, key: &str) -> Option<T> {

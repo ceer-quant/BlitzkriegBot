@@ -1194,19 +1194,23 @@ pub(crate) fn parse_args(
         )
     }];
 
-    // ── E17/#264: the engine-level exit ladder ──────────────────────────────
-    // Same chain as every other file-settable knob (CLI > TOML > compiled
-    // default). No env layer: `--spread-arb-*`, the sibling this pipeline
-    // mirrors, has none either, and the durable layer for a ladder is the file.
-    // The defaults are read off `ExitConfig::default()` rather than re-typed, so
-    // "unchanged" is a property of the code, not of a comment.
+    // ── E17/#264 + issue #966: the engine-level exit ladder ─────────────────
+    // The chain is CLI > env(.env) > TOML > compiled default. The env tier
+    // carried NOTHING here before #966 (`--spread-arb-*`, the sibling this
+    // pipeline mirrors, still has none, and the ladder's own durable layer
+    // stays the file); the panel's hot-write face lands the frozen EXIT_*
+    // keys into the same `.env` this layer now reads, so a panel edit
+    // survives the restart. The defaults are read off `ExitConfig::default()`
+    // rather than re-typed, so "unchanged" is a property of the code, not of
+    // a comment.
     let exit_defaults = blitzkrieg_core::exit_policy::ExitConfig::default();
     let exit_knob = |report: &mut Vec<String>,
                      label: &str,
+                     env_key: &str,
                      cli: Option<Decimal>,
                      toml: Option<Decimal>,
                      default: Decimal| {
-        let s = pick(cli, None::<Decimal>, toml, default);
+        let s = pick(cli, env.num::<Decimal>(env_key), toml, default);
         if s.is_explicit() {
             report.push(format!("{label}={} ({})", s.value, s.source.as_str()));
         }
@@ -1215,6 +1219,7 @@ pub(crate) fn parse_args(
     let exit_take_profit_pct = exit_knob(
         &mut report,
         "exit.take_profit_pct",
+        "EXIT_TAKE_PROFIT_PCT",
         exit_take_profit_pct,
         file.exit.take_profit_pct,
         exit_defaults.take_profit_pct,
@@ -1222,6 +1227,7 @@ pub(crate) fn parse_args(
     let exit_stop_loss_pct = exit_knob(
         &mut report,
         "exit.stop_loss_pct",
+        "EXIT_STOP_LOSS_PCT",
         exit_stop_loss_pct,
         file.exit.stop_loss_pct,
         exit_defaults.stop_loss_pct,
@@ -1229,6 +1235,7 @@ pub(crate) fn parse_args(
     let exit_trailing_min_high_pct = exit_knob(
         &mut report,
         "exit.trailing_min_high_pct",
+        "EXIT_TRAILING_MIN_HIGH_PCT",
         exit_trailing_min_high_pct,
         file.exit.trailing_min_high_pct,
         exit_defaults.trailing_min_high_pct,
@@ -1236,16 +1243,18 @@ pub(crate) fn parse_args(
     let exit_min_trail_pct = exit_knob(
         &mut report,
         "exit.min_trail_pct",
+        "EXIT_MIN_TRAIL_PCT",
         exit_min_trail_pct,
         file.exit.min_trail_pct,
         exit_defaults.min_trail_pct,
     );
     // force_exit_sec is an INT knob (seconds), so the Decimal-typed `exit_knob`
-    // closure above does not fit; the chain is the same CLI > TOML > default.
+    // closure above does not fit; the chain is the same CLI > env > TOML >
+    // default.
     let exit_force_sec = {
         let s = pick(
             exit_force_sec,
-            None::<i64>,
+            env.num::<i64>("EXIT_FORCE_EXIT_SEC"),
             file.exit.force_exit_sec,
             exit_defaults.force_exit_sec,
         );

@@ -41,11 +41,10 @@ async function loadRisk(): Promise<void> {
   }
 }
 
-/** 来源词表：出厂/配置文件/环境变量/命令行或热改，与内核 LimitSource 一致。 */
+/** 来源词表：出厂/环境变量/命令行或热改，与内核 LimitSource 一致（去 TOML 后只允许 flag/env/default）。 */
 function sourceLabel(s: RiskBound['source']): string {
   switch (s) {
     case 'default': return '出厂'
-    case 'toml': return '配置文件'
     case 'env': return '环境变量'
     case 'flag': return '命令行/热改'
     default: return String(s)
@@ -329,8 +328,8 @@ onMounted(() => void loadRisk())
     </CardHeader>
 
     <p class="text-[11.5px] leading-snug text-muted-fg">
-      内核正在执行的系统性限额（risk.limits）——每个数字都带着它从哪来（出厂 / 配置文件 /
-      环境变量 / 热改）。没来源的数字不是能据以行动的答案；0 = 关闭，不是伪装成保护措施的零。
+      内核正在执行的系统性限额（risk.limits）——每个数字都带着它从哪来（出厂 / 环境变量 /
+      热改）。没来源的数字不是能据以行动的答案；0 = 关闭，不是伪装成保护措施的零。
       改动保存进内核内存并逐字段落审计，重启后回到启动配置的解析结果。
     </p>
 
@@ -428,7 +427,7 @@ onMounted(() => void loadRisk())
       <p v-if="riskMsg" class="mt-2 text-[11px] leading-snug text-gold-400">{{ riskMsg }}</p>
       <div v-if="riskReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted ? '已持久化' : '未持久化，重启回到启动配置' }}）
+          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted || riskReceipt.persistence === 'env' ? '已持久化到 .env' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in riskReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }} → {{ c.to === '0' ? '关闭' : c.to }}
@@ -437,7 +436,7 @@ onMounted(() => void loadRisk())
       </div>
       <div v-if="exitReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          退出纪律已写入 {{ exitReceipt.applied.length }} 项（未持久化，重启回到启动配置）
+          退出纪律已写入 {{ exitReceipt.applied.length }} 项（{{ exitReceipt.persisted || exitReceipt.persistence === 'env' ? '已持久化到 .env' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in exitReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ changeText(c) }}
