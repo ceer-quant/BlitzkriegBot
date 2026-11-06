@@ -53,7 +53,9 @@ fn persist_changes_to_env(
     env_path: Option<&std::path::Path>,
     changes: &[(&'static str, String)],
 ) -> bool {
-    let Some(env_path) = env_path else { return false };
+    let Some(env_path) = env_path else {
+        return false;
+    };
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
         .filter_map(|(field, value)| Some((systemic_env_key(field)?.to_string(), value.clone())))
@@ -77,7 +79,9 @@ fn persist_exit_changes_to_env(
     env_path: Option<&std::path::Path>,
     changes: &[(&'static str, String)],
 ) -> bool {
-    let Some(env_path) = env_path else { return false };
+    let Some(env_path) = env_path else {
+        return false;
+    };
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
         .filter_map(|(field, value)| Some((exit_env_key(field)?.to_string(), value.clone())))

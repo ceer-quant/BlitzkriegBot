@@ -187,6 +187,102 @@ fn portfolio_notional_cap_bounds_total_open_exposure() {
     assert_eq!(c2.engine_stats()["strategyLimitRejected"], 0);
 }
 
+/// #966: same-cycle concurrent entries see each other through `cycle_placed`.
+/// Three same-account Buy intents in one cycle under `open_positions >= 2 →
+/// skip`: the first two place (cycle-placed count 0, then 1), the third is
+/// refused (count 2 → open_for + already_placed = 0 + 2 ≥ 2). This pins the
+/// 11-05 same-millisecond three-leg bypass fix for both the real cycle and
+/// the replay fast path.
+#[test]
+fn cycle_placed_backstop_stops_at_two_same_cycle() {
+    let dir = std::env::temp_dir().join(format!("bk-cycle-backstop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Issue #967: the policy file is retired, so the backstop arrives the only
+    // way a boot accepts it — the `POLICY_RULES` key in `.env` (see
+    // `.env.example`; the string `when` form is the readable one the issue's
+    // default file used).
+    std::fs::write(
+        dir.join(".env"),
+        "POLICY_RULES=[{\"name\":\"max_two\",\"priority\":100,\"enabled\":true,\
+         \"when\":\"open_positions >= 2\",\"then\":{\"action\":\"skip\"}}]\n",
+    )
+    .unwrap();
+
+    let mut c = Core::new(CoreConfig {
+        env_file_path: Some(dir.join(".env").to_string_lossy().into_owned()),
+        risk: RiskConfig {
+            max_order_notional: dec!(100),
+            ..Default::default()
+        },
+        dry_seed_balance: dec!(1000),
+        engine_enabled: true,
+        round_duration_sec: 900,
+        auto_exits_enabled: false,
+        assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+        positions: crate::position::PositionConfig {
+            max_positions: 5,
+            exit: crate::exit_policy::ExitConfig {
+                min_time_left_sec: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let cfg = c.config().engine_config();
+    let mut eng = Engine::new(cfg.clone());
+    crate::strategies::test_support::host(&mut eng, cfg.trend, cfg.spread_arb);
+    eng.register_user_strategy(
+        Box::new(TargetDip {
+            name: "dip".into(),
+            buy_below: dec!(0.45),
+            assets: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+            gates: crate::strategies::GateExemptions::none(),
+            scope: blitzkrieg_market_api::DEFAULT_ACCOUNT_ID.to_string(),
+        }),
+        "test".into(),
+    )
+    .unwrap();
+    assert!(eng.set_strategy_enabled("dip", true));
+    c.enable_engine(eng);
+
+    let now = 1_000_000i64;
+    c.engine_on_data(
+        DataEvent::RoundMarkets {
+            markets: three_markets(now),
+            now_ms: now,
+        },
+        now,
+    );
+    for asset in ["BTC", "ETH", "SOL"] {
+        let token = format!("{}_up", asset.to_lowercase());
+        c.engine_on_data(
+            DataEvent::Book {
+                token_id: token,
+                bids: vec![(dec!(0.43), dec!(100))],
+                asks: vec![(dec!(0.45), dec!(100))],
+                now_ms: now + 1_000,
+            },
+            now + 1_000,
+        );
+    }
+    // 3 same-account intents in one cycle: 2 place, the 3rd is refused by the
+    // cycle-placed backstop (open_for=0 + already_placed=2 → 2 >= 2 → skip).
+    let placed = c.engine_evaluate(now + 2_000);
+    assert_eq!(
+        placed, 2,
+        "backstop must allow exactly 2 of 3 same-cycle entries"
+    );
+    assert_eq!(
+        c.ome().live_orders().len(),
+        2,
+        "exactly two orders reach the OME"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── E-VA: strategy-level virtual accounts ───────────────────────────────
 //
 // Test 1 (strategy isolation): A's big entry must NOT consume B's
