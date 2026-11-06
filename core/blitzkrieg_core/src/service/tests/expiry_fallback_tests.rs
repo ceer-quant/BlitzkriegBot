@@ -488,7 +488,10 @@ fn the_residual_mid_fallback_is_floored_at_entry_percent() {
 
         assert!(c.positions().open_positions().is_empty());
         let closed = &c.positions().closed_positions()[0];
-        assert_eq!(closed.exit_reason, crate::model::ExitReason::UnverifiableExpiry);
+        assert_eq!(
+            closed.exit_reason,
+            crate::model::ExitReason::UnverifiableExpiry
+        );
         assert_eq!(
             closed.exit_price,
             entry / dec!(2),

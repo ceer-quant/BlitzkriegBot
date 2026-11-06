@@ -589,26 +589,24 @@ pub(crate) async fn executor_loop(host: Arc<dyn MarketHost>, client: Arc<PolySim
                     );
                     host.on_market_resolution(resolution).await;
                 }
-                None => match resolution_by_single_market(
-                    query,
-                    client.as_ref(),
-                    &outcome_polarity,
-                )
-                .await
-                {
-                    Ok(Some(resolution)) => {
-                        eprintln!(
-                            "polysimulator-extension: settlement (single-market verdict) {} payouts={:?}",
-                            resolution.condition_id, resolution.payouts
-                        );
-                        host.on_market_resolution(resolution).await;
+                None => {
+                    match resolution_by_single_market(query, client.as_ref(), &outcome_polarity)
+                        .await
+                    {
+                        Ok(Some(resolution)) => {
+                            eprintln!(
+                                "polysimulator-extension: settlement (single-market verdict) {} payouts={:?}",
+                                resolution.condition_id, resolution.payouts
+                            );
+                            host.on_market_resolution(resolution).await;
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!(
+                            "polysimulator-extension: settlement single-market query {} failed: {e}",
+                            query.condition_id
+                        ),
                     }
-                    Ok(None) => {}
-                    Err(e) => eprintln!(
-                        "polysimulator-extension: settlement single-market query {} failed: {e}",
-                        query.condition_id
-                    ),
-                },
+                }
             }
         }
     }

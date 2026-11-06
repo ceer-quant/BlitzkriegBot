@@ -819,9 +819,7 @@ impl Core {
                 if floor_pct == 0 {
                     pos.current_price
                 } else {
-                    let floor = pos.entry_price
-                        * Decimal::from(floor_pct)
-                        / Decimal::from(100);
+                    let floor = pos.entry_price * Decimal::from(floor_pct) / Decimal::from(100);
                     pos.current_price.max(floor)
                 }
             } else {
