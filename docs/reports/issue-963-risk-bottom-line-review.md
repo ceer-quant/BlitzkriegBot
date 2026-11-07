@@ -9,7 +9,8 @@
 ## 1. place_gated 门链清单（逐门：触发条件 / 拦截后行为 / 代码位置）
 
 入口：`Core::place` / `place_outcome` / `place_escalated` 全部汇入 `place_inner` → `place_gated`
-（`core/blitzkrieg_core/src/service/risk_admission/admission.rs:301`）。任何一门拒绝即短路返回
+（`core/blitzkrieg_core/src/service/risk_admission/admission.rs:301`）。出场提交管线在
+`service/risk_admission/exit_jobs.rs`（#963 为过 #780 行数闸门从 exits.rs 整体切出，纯代码运动）。任何一门拒绝即短路返回
 `Err`，`place_inner` 统一记入 `note_error`（admission.rs:59-62）——拒绝不会落在无痕迹路径。
 
 | # | 门 | 触发条件 | 拦截后行为 | 代码位置 |
@@ -40,8 +41,8 @@
 ### 2.1 提交顺序（同 pass 内出场先于入场）
 
 维护循环（`ipc/server/session.rs:604-623`）每个 beat：**先** `c.tick(now)`（其内部
-`run_exit_checks`，`service/risk_admission/exits.rs:483`，提交出场 SELL；随后才是
-`run_expiry_sweep`/`run_escalation_sweep`，exits.rs:513/529），**后** `c.engine_evaluate(now)`
+`run_exit_checks`，`service/risk_admission/exits.rs:484`，提交出场 SELL；随后才是
+`run_expiry_sweep`/`run_escalation_sweep`，exits.rs:514/530），**后** `c.engine_evaluate(now)`
 （提交入场）。同一维护节拍内出场单先于入场单到达 OME。
 
 ### 2.2 策略平仓意图的同期提交（#963 修复 ②）
@@ -50,7 +51,7 @@
 intent 只 extend 进 `strategy_exits`，等**下一个**维护节拍的 `run_exit_checks` 才提交——同周期的
 入场在本周期就已 place，出场信号永远输掉同期竞争（延迟一个维护间隔）。修复后（#963）：
 live 内核（`!replay_sched()`）在引擎借用结束、入场循环之前调用
-`submit_strategy_exits_now`（exits.rs:1249，evaluate.rs:196-203）——**同周期出场先提交、先成交**；
+`submit_strategy_exits_now`（exit_jobs.rs:57，evaluate.rs:196-203）——**同周期出场先提交、先成交**；
 replay 保持原延迟路径（#390 调度形状输出锁定），merge 意图仍走 tick 路径（是结算工作，不是流动性竞争）。
 
 ### 2.3 taker 出场与 #351 250ms 延迟
@@ -69,7 +70,7 @@ TP 类 maker-first 出场（`maker_first_exit_enabled` 出厂 true）修复前�
 （service/config.rs:1023）。#935 的文档写着 "escalating on the OME's maker_timeout_ms clock,
 like every maker"，代码从未兑现。修复：出场 maker 以 `MakerThenTaker` 提交、挂
 `ExitConfig::exit_maker_timeout_ms`（出厂 **250ms**，0=沿用入场默认，负=纯 maker 不升级，
-exit_policy.rs:170-178/317；提交点 exits.rs:1522-1536）。
+exit_policy.rs:170-178/317；提交点 exit_jobs.rs:330-343）。
 
 ### 2.5 入场抢占出场流动性的路径排查
 
@@ -78,7 +79,7 @@ exit_policy.rs:170-178/317；提交点 exits.rs:1522-1536）。
 - 现金维度：出场是 SELL，不预留现金；入场预留不挤占出场。
 - 同周期竞争：出场先提交（§2.1/2.2）；in-flight 队列 FIFO（admission.rs:989-991 `std::mem::take`），
   出场腿先匹配。
-- 残量场景：出场 SELL 未成交而入场腿成交扩大持仓 → E31-b 残量兜底补平（exits.rs:1290-1352）。
+- 残量场景：出场 SELL 未成交而入场腿成交扩大持仓 → E31-b 残量兜底补平（exits.rs:1102-1165）。
 
 **结论**：修复后不存在树内的"入场抢占出场"路径；250ms 延迟下的出场优先级由
 提交顺序（先出场）+ 专属升级时钟（250ms deadline）+ FIFO 匹配三重保证。
@@ -94,7 +95,7 @@ exit_policy.rs:170-178/317；提交点 exits.rs:1522-1536）。
 | 数学 | `loss_per_share(entry, bound_stop)`（risk/limits.rs:282）；`single_loss_verdict` 整股地板（limits.rs:291-310）：`Within` / `Reduce{approved}` / `Refuse` |
 | 生效点 1 | 提交门 `place_gated` BUY 系统性块（admission.rs:371-411），`judge_entry` 缩量/拒绝 |
 | 生效点 2 | 仲裁管线 Gate 2（arbitration/pipeline.rs:285-320）——策略意图的更早一道 |
-| 生效点 3 | 升级守卫 `escalation_guard`（exits.rs:561-627）——追单（升级腿）同判；**#963：close-intent 腿豁免系统性块**（帽约束新敞口，永不困出场，#174 原则） |
+| 生效点 3 | 升级守卫 `escalation_guard`（exits.rs:561-627，系统性块 close-aware 在 exits.rs:585）——追单（升级腿）同判；**#963：close-intent 腿豁免系统性块**（帽约束新敞口，永不困出场，#174 原则） |
 | bound_stop | `effective_stop_pct`（exit_policy.rs:387-406）：动态紧缩坡道，300s 起、10% 地板。**#963：提交门 sizing 用坡道最宽端（base，出厂 12%）**——修复前传 `time_left=0` 取最紧地板 10%，而 fresh 仓的实际止损就是 12% 基宽，单笔帽被低估 1.2×（12/10） |
 | 网格分辨率 | **#963：`loss_per_share` 按 venue 0.01 tick 取可成交最劣**（limits.rs:270-289）：止损以"挂盘最优 bid（≤止损位的 0.01 tick）"成交，止损位落在 tick 之间时每股多亏一 tick（0.30 仓、12% 止损位 0.264 实际成交 0.26 = 13.33%）。帽按 tick 精确最劣 sizing 后，不变式 `approved × loss_per_share ≤ cap` 在网格上成立 |
 
