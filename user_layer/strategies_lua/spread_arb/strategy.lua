@@ -36,6 +36,24 @@
 -- signs). No stop-loss logic anywhere — the exit discipline belongs to the
 -- kernel (the「止损不归你管」seal).
 
+-- ── thesis death declaration (#961 convergence, form B) ─────────────────────
+-- THESIS DEATH DECLARATION (#961)
+--   entry thesis : the confirmed uptrend's dip to trend support is a buyable
+--                  dislocation — buy the dip while the trend still stands
+--   death cond 1 : 盘口瞬时反转 — stdlib default: the held token's own bid
+--                  reversed >= thesis_death_reversal_pct (25 flat, sliding to
+--                  thesis_death_reversal_pct_tight as the round drains) off
+--                  entry_price — the dislocation was not a dip but a trend
+--                  break
+--   death cond 2 : 论点依赖字段消失/超时 — stdlib default: the held token's
+--                  book vanished or its quote is older than
+--                  thesis_death_stale_ms (the trend thesis needs a live quote)
+--   death cond 3 : 轮次时间加权越界 — stdlib default (tight = 0: off)
+--   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
+-- Form B (docs/thesis_death.md §1): the package adopts the stdlib default
+-- predicate verbatim; all three bands are manifest tunables (hot-adjustable).
+BK_THESIS_DEATH_ENABLE = true
+
 -- ── exact decimal helpers ───────────────────────────────────────────────────
 -- A decimal is `{ m = mantissa, s = scale }` meaning m / 10^s. Mantissas stay
 -- far inside 64-bit integers (prices ≤ 1.0 with ≤ 10 decimals).

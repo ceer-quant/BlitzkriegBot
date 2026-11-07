@@ -1,11 +1,11 @@
 {
   "name": "mad_dog",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "cdbc2b2b389dfda4cfdac747e60bbebc23db38dee0867d16fdd08d418b63f6d6",
+  "sha256": "11b058fc02397a38f1fb392b5719628b660ff9cdd7e1704dcc1c66da525f4380",
   "author": "BlitzkriegBot",
-  "description": "FROZEN pending issue #847 positioning verdict — the spot waterfall veto is fixed (exact-rational) and the thesis-death exit is wired (a held leg more than thesis_break_pct under its entry anchor emits ONE kernel-priced exit), but the structural flaw stands: the extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill / 0.65%) and the post-breakdown edge is zero (0/1,928 settlements) — deferred to issue #915. Do not enable without repositioning. Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "description": "FROZEN pending issue #847 positioning verdict — the spot waterfall veto is fixed (exact-rational) and the thesis-death exit is wired (a held leg more than thesis_break_pct under its entry anchor emits ONE kernel-priced exit), but the structural flaw stands: the extreme-0.02 resting bid is pure adverse selection (153 episodes / 1 fill / 0.65%) and the post-breakdown edge is zero (0/1,928 settlements) — deferred to issue #915. Do not enable without repositioning. Panic-wick catcher for 15-minute binary rounds: after one direction holds (mid >= 0.55 by a 20s hold or a 60s rolling mean), a fast wick below 0.35 arms a resting maker bid 0.02 under the wick low; the underlying-asset momentum gate reads engine-side sec1 spot bars. Signal-only: the kernel adjudicates, sizes and gates every intent. Thesis death (issue 961 convergence, form A): the #847 fix-2 verdict moved from the exits table to the declared hook bk_thesis_death — SAME trigger (a held leg's fresh mid more than thesis_break_pct, default 30, under the latched entry anchor, the first suggestion's resting price) — enforced by the runtime as an unconditional same-tick full-taker close (exit_reason thesis_death_exit, never a maker, superseding any exit row this table emitted); the maker-TP graduation (maker_tp_gain_pct) stays an exits row (take-profit is the profit side, not a death).",
   "tunables": {
     "dominant_min_price": {
       "type": "decimal",

@@ -6,8 +6,9 @@ Issue #961（Exit-First 基石，运营者哲学 2026-11-06）：入场方向近
 `exit_reason = thesis_death_exit`，禁止扛单。
 
 本文是「论点死亡」的**定义模板**：新策略包接入时必须按下表逐项填写，缺省视为不合规
-（`scripts/thesis-death-check.mjs` 在 CI 默认检查）。存量包在 legacy 名单里豁免，
-但任何新包（或一次改变入场论点的改版）都必须声明。
+（`scripts/thesis-death-check.mjs` 在 CI 默认检查）。存量包经 #961 收敛后要么已声明、
+要么在 gate 的豁免表里带一句书面理由（不再是裸 grandfather），但任何新包（或一次改变
+入场论点的改版）都必须声明。
 
 ---
 
@@ -38,7 +39,8 @@ end
 BK_THESIS_DEATH_ENABLE = true
 ```
 
-两种都未声明 = 该包没有论点死亡条件（存量包 grandfather；新包 CI 红）。
+两种都未声明 = 该包没有论点死亡条件（#961 收敛后：存量包要么已声明、要么带理由豁免；
+新包 CI 红）。
 
 ## 2. 「论点死亡」定义模板（新策略必填）
 

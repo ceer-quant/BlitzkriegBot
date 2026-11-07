@@ -39,6 +39,26 @@
 --     dedups per token, and hold-to-settlement has no reason to average in.
 --   * No spot data → no trigger → no entries: fail-closed by construction.
 
+-- ── thesis death declaration (#961 convergence, form B) ─────────────────────
+-- THESIS DEATH DECLARATION (#961)
+--   entry thesis : spot momentum CONFIRMS the round's leading side inside the
+--                  40-70% progress window — buy the leader and collect at
+--                  settlement
+--   death cond 1 : 盘口瞬时反转 — stdlib default: the held token's own bid
+--                  reversed >= thesis_death_reversal_pct (25 flat, sliding to
+--                  thesis_death_reversal_pct_tight as the round drains) off
+--                  entry_price — the momentum that confirmed the leader has
+--                  visibly flipped against it
+--   death cond 2 : 论点依赖字段消失/超时 — stdlib default: the held token's
+--                  book vanished or its quote is older than
+--                  thesis_death_stale_ms (the confirm thesis needs a live
+--                  two-sided market naming the leader)
+--   death cond 3 : 轮次时间加权越界 — stdlib default (tight = 0: off)
+--   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
+-- Form B (docs/thesis_death.md §1): the package adopts the stdlib default
+-- predicate verbatim; all three bands are manifest tunables (hot-adjustable).
+BK_THESIS_DEATH_ENABLE = true
+
 -- ── exact decimal helpers (flash_arb's, unchanged semantics) ────────────────
 
 -- BEGIN common/decimal.lua

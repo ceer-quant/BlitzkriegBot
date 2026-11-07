@@ -9,19 +9,20 @@
 -- this file computes no stop-loss, monitors no stop-loss, expresses no
 -- stop-loss, and sends no size. Entries cross as { token, price, reason }
 -- suggestions — the kernel adjudicates, sizes (shares omitted → kernel
--- budget), funds-gates and posts them post_only. The ONE exit row this
--- strategy emits is the thesis-death verdict (issue #847 fix 2, the
--- smart_money_reverse shape): once a leg is HELD, a mid more than
--- `thesis_break_pct` under the entry anchor emits ONE { token, reason }
--- THESIS row into `exits` — no price (the kernel prices and executes it,
--- the exits wire gives no price field). This is not a stop: the anchor is
--- the entry's own resting price, the threshold is the thesis's death, and
--- #847's autopsy (probe2: MFE +45.8% rode bare to −11.59%) is exactly the
--- round this verdict exists for. The kernel's exit ladder and systemic
--- breakers stay the real survival layer. The remaining non-entry row is a
--- `break` when the panic leg ENDS by recovery (mid back above the broken
--- level), which cancels the now-stale resting bid — the mirror image of
--- spread_arb's cancel-on-break.
+-- budget), funds-gates and posts them post_only. The thesis-death verdict
+-- (issue #847 fix 2, the smart_money_reverse shape) is DECLARED through the
+-- unified hook (issue #961 convergence): once a leg is HELD, a mid more than
+-- `thesis_break_pct` under the entry anchor is thesis death, and the RUNTIME
+-- (not this table) closes it the same tick — an unconditional full-taker
+-- sweep, exit_reason=thesis_death_exit, never a maker (禁止扛单). This is
+-- not a stop: the anchor is the entry's own resting price, the threshold is
+-- the thesis's death, and #847's autopsy (probe2: MFE +45.8% rode bare to
+-- −11.59%) is exactly the round this verdict exists for. The kernel's exit
+-- ladder and systemic breakers stay the real survival layer. The exits rows
+-- this table still emits: the maker-TP graduation (a bid `maker_tp_gain_pct`
+-- above the anchor rests a post-only SELL) and a `break` when the panic leg
+-- ENDS by recovery (mid back above the broken level), which cancels the
+-- now-stale resting bid — the mirror image of spread_arb's cancel-on-break.
 --
 -- Data notes, stated because they change what the gates can see:
 --   * Prices run on SCALED INTEGERS (the §6.5 decimal-STRING wire rule, same
@@ -290,8 +291,10 @@ local function read_config()
     max_abs_obi = dec_param(p, "max_abs_obi", { m = 5, s = 1 }),
     min_available_usd = dec_param(p, "min_available_usd", { m = 100, s = 2 }),
     wick_offset = dec_param(p, "wick_offset", { m = 2, s = 2 }),
-    -- thesis-death exit (issue #847 fix 2): a held leg whose mid falls more
-    -- than this under the entry anchor emits ONE kernel-priced exit verdict.
+    -- thesis-death exit (issue #847 fix 2, declared through the #961 hook):
+    -- a held leg whose fresh mid falls more than this under the entry anchor
+    -- is thesis death; the declared hook `bk_thesis_death` fires and the
+    -- runtime injects the kernel-priced full-taker close.
     thesis_break_pct = dec_param(p, "thesis_break_pct", { m = 30, s = 0 }),
     -- maker-TP graduation (#915): a held leg whose fresh best bid reaches
     -- this percentage ABOVE the entry anchor emits ONE { use_maker, price }
@@ -522,10 +525,62 @@ function bk_on_round(round)
   tracker_reset_if_new_round(round.slot)
 end
 
+-- ── thesis death declaration (#961 convergence, form A) ─────────────────────
+-- THESIS DEATH DECLARATION (#961)
+--   entry thesis : after one direction has held the round, a FAST panic wick
+--                  below the broken level is a liquidity vacuum — buy the
+--                  panic-sold dominant side with a resting maker bid, never
+--                  chase
+--   death cond 1 : 盘口瞬时反转（替换标准库默认为论点自有条件）— the held
+--                  leg's fresh mid more than `thesis_break_pct` under the
+--                  latched entry anchor: the panic the entry bought did not
+--                  hold, the dominant side is still being sold
+--   death cond 2 : 论点依赖字段消失/超时 — not adopted: the panic-buyer
+--                  thesis prices its exit off the last fresh mid it saw and
+--                  the kernel ladder owns the no-quote case (a vanished book
+--                  is an outage, not a verdict); replacing the stdlib stale
+--                  condition is the documented form-A right
+--   death cond 3 : 轮次时间加权越界 — not adopted for the same reason (the
+--                  wick thesis has no time-weighted band; `thesis_break_pct`
+--                  is already hot)
+--   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
+-- The predicate is the #847 fix-2 watch moved verbatim out of `exits`:
+-- SAME trigger (fresh mid under the anchor line), SAME per-round latch
+-- (one verdict per held token per round, shared with the graduation arm
+-- through `st.exited`), SAME close (unpriced, kernel-priced full taker —
+-- the hook's use_maker=false row). The anchor stays THIS package's tracker
+-- state: the first suggestion's resting price latches per token, and a
+-- later re-arm must not move a held leg's reference — `h.entry_price` (the
+-- actual fill) cannot express that latch.
+function bk_thesis_death(h)
+  local cfg = read_config()
+  local st = tracker.tokens[h.token_id]
+  if st == nil or st.anchor == nil or st.exited then
+    return false
+  end
+  local book = bk.book(h.token_id)
+  if book == nil or book.fresh ~= true then
+    return false
+  end
+  local mid = dec_parse(book.mid)
+  if mid == nil or mid.m <= 0 then
+    return false
+  end
+  -- mid < anchor * (1 - pct/100)  ⟺  mid * 100 < anchor * (100 - pct).
+  local lhs = dec_mul(mid, DEC_100)
+  local rhs = dec_mul(st.anchor, dec_sub(DEC_100, cfg.thesis_break_pct))
+  if dec_cmp(lhs, rhs) < 0 then
+    st.exited = true
+    return true
+  end
+  return false
+end
+
 --- The suggestion surface. Entries are resting maker bids 0.02 under the
---- armed episode's extreme; ONE exit row fires per held token (the
---- thesis-death verdict, kernel-priced); breaks cancel the stale bid of a
---- panic leg that ended by recovery.
+--- armed episode's extreme; the held leg's thesis death is the declared
+--- hook's verdict (bk_thesis_death above — the runtime closes it); the ONE
+--- exit row this table still emits is the maker-TP graduation; breaks cancel
+--- the stale bid of a panic leg that ended by recovery.
 function bk_evaluate()
   local cfg = read_config()
   local entries, exits, breaks = {}, {}, {}
@@ -544,26 +599,23 @@ function bk_evaluate()
     end
   end
 
-  -- The thesis-death watch (never time-gated): a HELD leg (host-pushed via
-  -- bk.holdings()) whose fresh mid falls more than thesis_break_pct under
-  -- its latched anchor emits ONE exit verdict per round; the kernel prices
-  -- and executes it (the exits wire carries no price). The watch reads the
-  -- anchor, not the episode: a fill unarms the wick phase, but the held
-  -- position's thesis verdict must still fire (issue #847 fix 2 — probe2
-  -- rode MFE +45.8% bare to −11.59% for want of exactly this row).
-  -- mid < anchor * (1 - pct/100)  ⟺  mid * 100 < anchor * (100 - pct).
-  --
-  -- The maker-TP graduation watch (#915 convergence): the same HELD leg
-  -- whose fresh best BID has reached `maker_tp_gain_pct` ABOVE the anchor
-  -- emits ONE { token, reason, use_maker, price } row — a post-only SELL
-  -- resting one tick above the bid (the wire rule: the venue refuses a
-  -- crossing post-only order, so the rest must be strictly inside the
-  -- spread). This is the counterfactual's maker-TP finding: the taker-TP
+  -- The maker-TP graduation watch (#915 convergence): a HELD leg (host-pushed
+  -- via bk.holdings()) whose fresh best BID has reached `maker_tp_gain_pct`
+  -- ABOVE the anchor emits ONE { token, reason, use_maker, price } row — a
+  -- post-only SELL resting one tick above the bid (the wire rule: the venue
+  -- refuses a crossing post-only order, so the rest must be strictly inside
+  -- the spread). This is the counterfactual's maker-TP finding: the taker-TP
   -- trigger (`bid − fee >= 1.05 × entry`) guarantees the bid has CROSSED
   -- 1.05 × entry first, so a rest there fills 6/6 with zero fee + rebate —
   -- and it does not depend on the strategy's signal channel (the hft-2
-  -- field-side gain). Latched with the death verdict: at most ONE exit row
-  -- per held token per round, whichever watch fires first.
+  -- field-side gain). Latched: at most ONE graduation row per held token per
+  -- round. The THESIS-DEATH half of this watch moved to the declared hook
+  -- `bk_thesis_death` above (#961 convergence — SAME trigger, SAME
+  -- kernel-priced full-taker close, and the runtime enforces it even when
+  -- this evaluate errors). Death and graduation are mutually exclusive by
+  -- construction (death needs the mid UNDER the anchor line, graduation
+  -- needs the bid OVER it), and a forced death supersedes any row this
+  -- table emitted — 论点死亡是出场，不是挂单.
   -- bid >= (100 + gain)/100 * anchor  ⟺  bid * 100 >= anchor * (100 + gain).
   local held = {}
   local holdings = bk.holdings()
@@ -579,45 +631,32 @@ function bk_evaluate()
       if book and book.fresh == true then
         local mid = dec_parse(book.mid)
         local bid = book.best_bid and dec_parse(book.best_bid) or nil
-        if mid and mid.m > 0 then
-          local lhs = dec_mul(mid, DEC_100)
-          local rhs = dec_mul(st.anchor, dec_sub(DEC_100, cfg.thesis_break_pct))
-          if dec_cmp(lhs, rhs) < 0 then
-            st.exited = true
-            exits[#exits + 1] = {
-              token = tok,
-              reason = string.format(
-                "thesis_reversed: mid %s is more than %s%% under entry anchor %s",
-                dec_fmt(mid), dec_fmt(cfg.thesis_break_pct), dec_fmt(st.anchor)
-              ),
-            }
-          elseif bid and bid.m > 0 then
-            -- Graduation side: the death did NOT fire; the bid may have.
-            -- bid * 100 >= anchor * (100 + maker_tp_gain_pct) (exact, integer)
-            -- — the counterfactual's 1.05 × entry line for the default 5.
-            local b_lhs = dec_mul(bid, DEC_100)
-            local line = dec_add(DEC_100, cfg.maker_tp_gain_pct)
-            local b_rhs = dec_mul(st.anchor, line)
-            if dec_cmp(b_lhs, b_rhs) >= 0 then
-              -- Resting price: one tick above the bid, on the venue's 0.01
-              -- grid, capped at 0.99. A price at/over 0.99 (or the capped
-              -- one no longer above the bid) has no legal inside rest —
-              -- do not emit (the round's natural ceiling does the close).
-              local rest = dec_round2(dec_add(bid, DEC_001))
-              local cap = { m = 99, s = 2 }
-              if dec_cmp(rest, cap) > 0 then rest = cap end
-              if dec_cmp(rest, bid) > 0 then
-                st.exited = true
-                exits[#exits + 1] = {
-                  token = tok,
-                  reason = string.format(
-                    "take_profit: bid %s reached %s%% over entry anchor %s (maker rest %s)",
-                    dec_fmt(bid), dec_fmt(cfg.maker_tp_gain_pct), dec_fmt(st.anchor), dec_fmt(rest)
-                  ),
-                  use_maker = true,
-                  price = dec_fmt(rest),
-                }
-              end
+        if mid and mid.m > 0 and bid and bid.m > 0 then
+          -- Graduation side: bid * 100 >= anchor * (100 + maker_tp_gain_pct)
+          -- (exact, integer) — the counterfactual's 1.05 × entry line for
+          -- the default 5.
+          local b_lhs = dec_mul(bid, DEC_100)
+          local line = dec_add(DEC_100, cfg.maker_tp_gain_pct)
+          local b_rhs = dec_mul(st.anchor, line)
+          if dec_cmp(b_lhs, b_rhs) >= 0 then
+            -- Resting price: one tick above the bid, on the venue's 0.01
+            -- grid, capped at 0.99. A price at/over 0.99 (or the capped
+            -- one no longer above the bid) has no legal inside rest —
+            -- do not emit (the round's natural ceiling does the close).
+            local rest = dec_round2(dec_add(bid, DEC_001))
+            local cap = { m = 99, s = 2 }
+            if dec_cmp(rest, cap) > 0 then rest = cap end
+            if dec_cmp(rest, bid) > 0 then
+              st.exited = true
+              exits[#exits + 1] = {
+                token = tok,
+                reason = string.format(
+                  "take_profit: bid %s reached %s%% over entry anchor %s (maker rest %s)",
+                  dec_fmt(bid), dec_fmt(cfg.maker_tp_gain_pct), dec_fmt(st.anchor), dec_fmt(rest)
+                ),
+                use_maker = true,
+                price = dec_fmt(rest),
+              }
             end
           end
         end
