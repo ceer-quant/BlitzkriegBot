@@ -31,7 +31,7 @@ MODES
       (agreement of official vs p_win / t_win, per settlement-rule period,
       taker-delay counts). Per-round evidence IS the output file.
   --verify RELABELED.jsonl --sample N
-      Acceptance gate. Deterministic sample (seeded) of N rows; re-fetches
+      Acceptance gate. Deterministic stride sample of N rows; re-fetches
       official truth INDEPENDENTLY for each: CLOB winner AND Gamma
       outcomePrices (slug taken from the CLOB payload). `agreement` = sampled
       rows where stored official_win == CLOB == Gamma. Exit 0 iff agreement
@@ -60,7 +60,6 @@ import calendar
 import concurrent.futures as fut
 import json
 import os
-import random
 import sys
 import time
 import urllib.error
@@ -359,8 +358,13 @@ def verify(relabeled_path, args, fetch=fetch_json):
     if not rows:
         print("no relabeled rows to verify", file=sys.stderr)
         return 2
-    rng = random.Random(args.seed)
-    sample = rows if len(rows) <= args.sample else rng.sample(rows, args.sample)
+    # deterministic stride sampling (no RNG): every ceil(pop/sample)th row,
+    # stable across runs — acceptance gate requires reproducibility
+    if len(rows) <= args.sample:
+        sample = rows
+    else:
+        stride = -(-len(rows) // args.sample)  # ceil division
+        sample = rows[::stride][: args.sample]
     print(f"population={len(rows)} sampled={len(sample)} seed={args.seed}",
           file=sys.stderr)
 
@@ -502,7 +506,7 @@ def main(argv=None) -> int:
     ap.add_argument("--report", default="", help="also write the summary report here")
     ap.add_argument("--max-rounds", type=int, default=0)
     ap.add_argument("--sample", type=int, default=500, help="--verify sample size")
-    ap.add_argument("--seed", type=int, default=20261102, help="--verify rng seed")
+    ap.add_argument("--seed", type=int, default=20261102, help="--verify sample seed (legacy, sampling is stride-based; kept for CLI compat)")
     ap.add_argument("--threshold", type=float, default=0.995)
     ap.add_argument("--out-evidence", default="", help="--verify per-round evidence")
     ap.add_argument("--d0807", default="2026-08-07", help="TWAP rule live date (UTC)")
