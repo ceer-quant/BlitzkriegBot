@@ -459,6 +459,13 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
         super::risk_admission::exit_reason_from_strategy_tag("time_exit"),
         ExitReason::TimeExit
     );
+    // #961: the runtime-injected thesis-death tag lands on its own variant —
+    // the audit trail a forced close needs (the blanket `strategy_signal`
+    // would hide which closes a dead thesis bought).
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("thesis_death_exit"),
+        ExitReason::ThesisDeathExit
+    );
     // Unknown tags fall back — no invented categories.
     assert_eq!(
         super::risk_admission::exit_reason_from_strategy_tag("momentum_flip"),
@@ -495,6 +502,95 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
     assert!(c.positions().open_positions().is_empty());
     let closed = &c.positions().closed_positions()[0];
     assert_eq!(closed.exit_reason, ExitReason::TakeProfit);
+}
+
+/// #961: the forced thesis-death close — the runtime's `thesis_death_exit`
+/// tag stamps its own ledger variant, closes the position THE SAME TICK and
+/// leaves no residual anywhere (no open row, no pending exit-reason entry).
+#[test]
+fn thesis_death_exit_closes_same_tick_with_no_residual() {
+    let mut c = core();
+    open_position(&mut c, "tok", 1_000);
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.30), dec!(500))],
+        vec![(dec!(0.34), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "thesis_death_exit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: false,
+            exit_price: None,
+        });
+    c.tick(2_000).unwrap();
+    // 持仓归零，无残留：one sweep, no open row, no pending reason.
+    assert!(
+        c.positions().open_positions().is_empty(),
+        "a thesis-death close must empty the position book the same tick"
+    );
+    let closed = &c.positions().closed_positions()[0];
+    assert_eq!(closed.exit_reason, ExitReason::ThesisDeathExit);
+    assert!(
+        c.exit_reason_ledger.exit_reasons.is_empty(),
+        "the close must retire its pending exit reason (a residual entry is an orphaned in-flight close)"
+    );
+    // The wire label is the audit trail (serde snake_case, the trade record's
+    // exitReason spelling).
+    assert_eq!(
+        serde_json::to_string(&ExitReason::ThesisDeathExit).unwrap(),
+        "\"thesis_death_exit\""
+    );
+}
+
+/// #961: a thesis-death close can NEVER rest as a maker — even with the
+/// operator's maker-first gate ON and the advisory declared, the tag is not
+/// profit-side, so the close sweeps the touch instead of resting across it.
+#[test]
+fn thesis_death_exit_refuses_the_maker_first_gate() {
+    assert!(!super::risk_admission::reason_is_profit_side(
+        ExitReason::ThesisDeathExit
+    ));
+    let mut c = core();
+    let mut exit = c.config().positions.exit.clone();
+    exit.strategy_exit_maker_first = true;
+    let mut cfg2 = cfg();
+    let mut pos_exit = cfg2.positions.clone();
+    pos_exit.exit = exit;
+    cfg2.positions = pos_exit;
+    c = Core::new(cfg2);
+    c.set_balance(dec!(1000));
+    open_position(&mut c, "tok", 1_000);
+    // Even an IN-PROFIT death (proceeds above entry) must not rest: a dead
+    // thesis is an exit, not a quote.
+    c.book_snapshot(
+        "tok",
+        vec![(dec!(0.44), dec!(500))],
+        vec![(dec!(0.48), dec!(500))],
+        2_000,
+    );
+    c.strategy_exits
+        .push(crate::strategies::StrategyExitIntent {
+            token_id: "tok".into(),
+            reason: "thesis_death_exit".into(),
+            account_id: crate::model::default_account_id().to_string(),
+            use_maker: true,
+            exit_price: None,
+        });
+    c.tick(2_000).unwrap();
+    assert!(
+        c.positions().open_positions().is_empty(),
+        "a thesis-death close sweeps the touch even behind the maker-first gate"
+    );
+    assert!(
+        !c.ome()
+            .live_orders()
+            .iter()
+            .any(|o| o.side == Side::Sell && o.mode == FillPolicy::Maker),
+        "the death tag must never convert to a resting maker"
+    );
 }
 
 /// #935 fix 2: the maker advisory converts ONLY when reason is profit-side

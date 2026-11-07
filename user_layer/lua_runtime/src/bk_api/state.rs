@@ -157,6 +157,14 @@ pub struct BkState {
     /// 不到配对簿时按「无登记」处理，绝不视为错误。最终一致读数（允许滞
     /// 后一拍，RFC 568 附注 2）。
     pub pair_views: Vec<PairViewRow>,
+    /// #961: the largest `time_left_sec` seen in the CURRENT round — the
+    /// round-duration seed the default thesis-death predicate's time-weighted
+    /// band divides by (`note_round` resets it on a slot change and re-seeds
+    /// on every wider clock, the same convention lua_momentum's `tighten()`
+    /// uses Lua-side). 0 = no clock fact yet → the time-weighted condition
+    /// stays flat at the base band (fail toward the weaker check, never a
+    /// division by zero).
+    pub round_duration_max_sec: i64,
 }
 
 /// RFC 568 阶段一：one pair-book row as the `bk.arb.pairs()` wire row —
@@ -216,6 +224,22 @@ impl BkState {
         self.now_ms = now_ms;
     }
 
+    /// Refresh the round row AND the #961 round-duration seed. A new slot
+    /// wipes the seed (a new round is a new clock); a wider `time_left_sec`
+    /// re-seeds it, so the first evaluate of a round pins the full duration —
+    /// the identical convention lua_momentum's `tighten()` uses Lua-side
+    /// ("the largest time_left seen this round IS the round length").
+    pub fn note_round(&mut self, slot: i64, time_left_sec: i64, now_ms: i64) {
+        if self.round.map(|(s, _, _)| s) != Some(slot) {
+            self.round_duration_max_sec = 0;
+        }
+        if time_left_sec > self.round_duration_max_sec {
+            self.round_duration_max_sec = time_left_sec;
+        }
+        self.round = Some((slot, time_left_sec, now_ms));
+        self.now_ms = now_ms;
+    }
+
     /// Overwrite the book of one symbol and stamp its freshness.
     pub fn put_book(&mut self, update: BookUpdate, fresh: Option<bool>) {
         let symbol = update.symbol.clone();
@@ -232,11 +256,12 @@ impl BkState {
 /// Derived from the shared capability model's [`LuaEntryPoint`] enum (issue
 /// #843) — the names live THERE, so the sandbox, the loader and the docs
 /// spell them identically and a fifth entry point is one variant.
-pub const ENTRY_POINTS: [&str; 4] = [
+pub const ENTRY_POINTS: [&str; 5] = [
     blitzkrieg_strategy_api::LuaEntryPoint::Evaluate.global_name(),
     blitzkrieg_strategy_api::LuaEntryPoint::OnBook.global_name(),
     blitzkrieg_strategy_api::LuaEntryPoint::OnRound.global_name(),
     blitzkrieg_strategy_api::LuaEntryPoint::OnKline.global_name(),
+    blitzkrieg_strategy_api::LuaEntryPoint::ThesisDeath.global_name(),
 ];
 
 /// snake_case wire name of an interval (the `bk.kline(sym, interval)` key
@@ -313,4 +338,127 @@ pub fn kline_to_lua(lua: &Lua, k: &Kline) -> mlua::Result<Table> {
     t.raw_set("trade_count", k.trade_count)?;
     t.raw_set("is_closed", k.is_closed)?;
     Ok(t)
+}
+
+// ── #961: the stdlib default "thesis death" predicate ───────────────────────
+
+/// One holding as the `bk.holdings()` wire row (decimal STRINGS). The ONE
+/// renderer for the row shape: the `bk.holdings()` closure and the #961
+/// `bk_thesis_death(holding)` / `bk.thesis_death_default(holding)` callbacks
+/// hand strategies the identical table, so a predicate tested against one
+/// surface reads the other unchanged.
+pub fn holding_to_lua(lua: &Lua, h: &HoldingView) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("strategy", h.strategy.as_str())?;
+    t.raw_set("condition_id", h.condition_id.as_str())?;
+    t.raw_set("token_id", h.token_id.as_str())?;
+    t.raw_set("direction", h.direction.as_str())?;
+    t.raw_set("shares", h.shares.as_str())?;
+    t.raw_set("entry_price", h.entry_price.as_str())?;
+    t.raw_set("round_slot", h.round_slot)?;
+    Ok(t)
+}
+
+/// The market/round facts one default thesis-death verdict judges — a plain
+/// bundle (the verdict itself stays a pure function over it, so
+/// `bk_api/tests.rs` can pin every branch without a Lua VM).
+pub struct ThesisDeathFacts<'a> {
+    pub entry_price: Decimal,
+    pub best_bid: Option<Decimal>,
+    pub best_ask: Option<Decimal>,
+    pub book_ts_ms: i64,
+    pub now_ms: i64,
+    pub params: &'a std::collections::HashMap<String, String>,
+    /// `(slot, time_left_sec, now_ms)` of the live round, if any.
+    pub round: Option<(i64, i64, i64)>,
+    /// The largest `time_left_sec` seen this round (the duration seed,
+    /// `BkState::note_round`).
+    pub round_duration_max_sec: i64,
+}
+
+/// The stdlib default thesis-death verdict: `Some(cause)` = the entry thesis
+/// of a held position is DEAD this tick, `None` = alive. Pure over its inputs.
+///
+/// The three declared reverse conditions (issue #961), in audit order:
+///
+/// 1. `stale` (论点依赖字段消失/超时): the held token's BOOK is gone, carries
+///    no price on either side, or its quote is older than `stale_ms`. The
+///    thesis depends on a live two-sided market naming prices; when the
+///    market stops quoting, the thesis has nothing left to stand on.
+/// 2. `reversal` (盘口瞬时反转): the adverse move of the held token's own
+///    price off `entry_price` reached the flat band `reversal_pct`. A long
+///    position (either leg) loses when ITS OWN token's bid falls — for a
+///    `down` holding the held token's falling bid IS the market moving
+///    against the down thesis, so one formula covers both directions
+///    ("bid/ask 与持仓方向背离" reads through the held leg's own book).
+/// 3. `time_weighted` (轮次时间加权越界): with `reversal_pct_tight` > 0 the
+///    death band tightens LINEARLY from `reversal_pct` at round start to
+///    `reversal_pct_tight` as the round drains (the same time-weighting
+///    lua_momentum's `tighten()` applies to its exit bands — binary pricing
+///    converges to {0,1}, so a band sized for the full round is mispriced
+///    late). Fires when the adverse move crosses the TIGHTENED band.
+///
+/// Fail direction: a corrupt/zero `entry_price` cannot judge a reversal, so
+/// conditions 2/3 answer alive (never a forced close on degenerate data);
+/// condition 1 still applies (a vanished market kills any thesis). Params
+/// that do not parse fall back to the documented defaults — a hot-param typo
+/// loosens the guard to its shipped shape, it never disables the check.
+pub fn thesis_death_default(f: &ThesisDeathFacts<'_>) -> Option<&'static str> {
+    const DEFAULT_STALE_MS: i64 = 30_000;
+    let pct = |name: &str, fallback: Decimal| -> Decimal {
+        f.params
+            .get(name)
+            .and_then(|s| Decimal::from_str_exact(s.trim()).ok())
+            .filter(|d| *d >= Decimal::ZERO)
+            .unwrap_or(fallback)
+    };
+    // Shipped stdlib defaults: a 25% flat reversal band, the time-weighted
+    // tightening OFF (opt-in), a 30s quoting timeout. A package narrows these
+    // through its own manifest tunables (they land in the initial params bag).
+    let reversal_pct = pct("thesis_death_reversal_pct", Decimal::new(25, 0));
+    let tight_pct = pct("thesis_death_reversal_pct_tight", Decimal::ZERO);
+    let stale_ms = f
+        .params
+        .get("thesis_death_stale_ms")
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+        .unwrap_or(DEFAULT_STALE_MS);
+
+    // Condition 1 — fields vanished / timed out. A stale quote past the
+    // timeout is a thesis with no living evidence, even before any price
+    // judgement; `0` disables the timeout (book-gone / price-gone still fire).
+    let quoted = f.best_bid.or(f.best_ask);
+    if quoted.is_none() || (stale_ms > 0 && f.now_ms - f.book_ts_ms > stale_ms) {
+        return Some("stale");
+    }
+
+    // Conditions 2/3 — the reversal bands, judged on the sellable price (the
+    // bid when the book has one, else the only side quoted). entry <= 0
+    // cannot name an adverse move: alive, per the fail direction above.
+    if f.entry_price <= Decimal::ZERO {
+        return None;
+    }
+    let price = f.best_bid.or(f.best_ask)?;
+    if price >= f.entry_price {
+        return None; // not underwater: no adverse move to judge
+    }
+    let adverse_pct = (f.entry_price - price) / f.entry_price * Decimal::from(100);
+    if adverse_pct >= reversal_pct {
+        return Some("reversal");
+    }
+    // Condition 3 — the time-weighted band. Needs both ends (tight < base) a
+    // duration seed and a live round; anything else stays flat (= condition 2
+    // already judged it). The fraction clamps to [0,1] so a clock glitch can
+    // never widen the band past its base.
+    if tight_pct <= Decimal::ZERO || tight_pct >= reversal_pct || f.round_duration_max_sec <= 0 {
+        return None;
+    }
+    let (_, time_left_sec, _) = f.round?;
+    let elapsed = (f.round_duration_max_sec - time_left_sec).clamp(0, f.round_duration_max_sec);
+    let frac = Decimal::from(elapsed) / Decimal::from(f.round_duration_max_sec);
+    let band = reversal_pct - (reversal_pct - tight_pct) * frac;
+    if adverse_pct >= band {
+        return Some("time_weighted");
+    }
+    None
 }

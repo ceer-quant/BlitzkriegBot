@@ -382,16 +382,28 @@ pub enum LuaEntryPoint {
     OnRound,
     /// `bk_on_kline` — CLOSED bars only (§6.6 / §10.4).
     OnKline,
+    /// `bk_thesis_death` — the strategy's own "my entry thesis is dead"
+    /// predicate, consulted once per held position each evaluation cycle
+    /// (#961). Truthy = the thesis is dead; the RUNTIME (never the strategy)
+    /// then injects the unconditional full-taker exit intent tagged
+    /// `thesis_death_exit` for that position, so a package cannot suppress or
+    /// de-scope its own death. A package may instead declare the global
+    /// `BK_THESIS_DEATH_ENABLE = true` to run the stdlib default predicate
+    /// (`bk.thesis_death_default`) over every holding. Neither declared = the
+    /// package declares no death conditions, which
+    /// `scripts/thesis-death-check.mjs` reports (mandatory for new packages).
+    ThesisDeath,
 }
 
 impl LuaEntryPoint {
     /// Every entry point, with the REQUIRED one first (the loader's check
     /// order). Kept as data so a fifth entry point is one variant + one row.
-    pub const ALL: [LuaEntryPoint; 4] = [
+    pub const ALL: [LuaEntryPoint; 5] = [
         LuaEntryPoint::Evaluate,
         LuaEntryPoint::OnBook,
         LuaEntryPoint::OnRound,
         LuaEntryPoint::OnKline,
+        LuaEntryPoint::ThesisDeath,
     ];
 
     /// The global name the sandbox looks the function up under.
@@ -401,6 +413,7 @@ impl LuaEntryPoint {
             LuaEntryPoint::OnBook => "bk_on_book",
             LuaEntryPoint::OnRound => "bk_on_round",
             LuaEntryPoint::OnKline => "bk_on_kline",
+            LuaEntryPoint::ThesisDeath => "bk_thesis_death",
         }
     }
 }
@@ -906,7 +919,13 @@ mod tests {
         let names: Vec<&str> = LuaEntryPoint::ALL.iter().map(|e| e.global_name()).collect();
         assert_eq!(
             names,
-            vec!["bk_evaluate", "bk_on_book", "bk_on_round", "bk_on_kline"]
+            vec![
+                "bk_evaluate",
+                "bk_on_book",
+                "bk_on_round",
+                "bk_on_kline",
+                "bk_thesis_death",
+            ]
         );
     }
 

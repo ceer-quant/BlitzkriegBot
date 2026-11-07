@@ -19,11 +19,13 @@ use std::sync::{Arc, Mutex};
 
 use blitzkrieg_strategy_api::{
     BookUpdate, Break, Entry, EntryPairDecl, Exit, FreshBook, HoldingView, Intents, Kline,
-    ParamBag, RoundContext, RoundInfo, SafeStrategy, StrategyMode,
+    LuaEntryPoint, ParamBag, RoundContext, RoundInfo, SafeStrategy, StrategyMode,
 };
 use mlua::Value;
 
-use crate::bk_api::{BkState, book_to_lua, install_bk, interval_name, kline_to_lua, round_to_lua};
+use crate::bk_api::{
+    BkState, book_to_lua, holding_to_lua, install_bk, interval_name, kline_to_lua, round_to_lua,
+};
 use crate::sandbox::LuaSandbox;
 
 /// Observable sandbox health: what `strategy.list` diagnostics surface and
@@ -147,6 +149,95 @@ impl LuaStrategy {
     fn optional_entry(&self, name: &str) -> Option<mlua::Function> {
         self.sandbox.global_function(name).ok().flatten()
     }
+
+    /// #961: the FORCED thesis-death scan — the enforcement half of the
+    /// `thesis_death_exit` standard-library hook (the declaration half is the
+    /// optional `bk_thesis_death(holding)` entry point or the
+    /// `BK_THESIS_DEATH_ENABLE = true` global opting into the stdlib default
+    /// `bk.thesis_death_default`).
+    ///
+    /// Contract, per evaluation cycle:
+    ///   * every held position is consulted; a truthy verdict declares the
+    ///     position's ENTRY THESIS dead;
+    ///   * a dead thesis is closed THIS TICK, unconditionally, as a full
+    ///     TAKER sweep: the runtime injects the exit intent itself, tagged
+    ///     `thesis_death_exit` (the kernel maps it to `ExitReason::
+    ///     ThesisDeathExit`; the profit-side maker-first gate refuses the
+    ///     tag, so a death can never rest as a maker);
+    ///   * the injection SUPERSEDES the strategy's own exit rows for that
+    ///     token — a dead thesis must not ride a resting maker sell that may
+    ///     never fill (禁止扛单);
+    ///   * the scan runs even when `bk_evaluate` errored: a buggy strategy
+    ///     must not lose its way out;
+    ///   * a deterministic Lua error inside one predicate is the strategy's
+    ///     own bug (recorded in health, host keeps calling) and skips only
+    ///     THAT position — one bad row never disables the scan for the rest;
+    ///   * a package that declares NEITHER form has no death conditions: the
+    ///     scan is a no-op for it (grandfathered; `scripts/
+    ///     thesis-death-check.mjs` reports the gap, and new packages must
+    ///     declare per the template in `docs/thesis_death.md`).
+    fn force_thesis_death_exits(&mut self, intents: &mut Intents) {
+        let holdings: Vec<HoldingView> = match self.state.lock() {
+            Ok(st) => st.holdings.clone(),
+            Err(_) => return,
+        };
+        if holdings.is_empty() {
+            return;
+        }
+        // Declaration lookup, once per cycle: the package's own predicate
+        // wins; the boolean global opts into the stdlib default; neither
+        // declared = nothing to enforce.
+        let predicate = self.optional_entry(LuaEntryPoint::ThesisDeath.global_name());
+        let default_enabled = if predicate.is_some() {
+            false
+        } else {
+            matches!(
+                self.sandbox
+                    .lua()
+                    .globals()
+                    .raw_get::<Value>("BK_THESIS_DEATH_ENABLE"),
+                Ok(Value::Boolean(true))
+            )
+        };
+        if predicate.is_none() && !default_enabled {
+            return;
+        }
+        for h in &holdings {
+            let verdict = if let Some(f) = &predicate {
+                self.sandbox.invoke("bk_thesis_death", |lua| {
+                    let t = holding_to_lua(lua, h)?;
+                    f.call::<Value>((t,))
+                })
+            } else {
+                self.sandbox.invoke("bk.thesis_death_default", |lua| {
+                    let bk: mlua::Table = lua.globals().raw_get("bk")?;
+                    let f: mlua::Function = bk.raw_get("thesis_death_default")?;
+                    let t = holding_to_lua(lua, h)?;
+                    f.call::<Value>((t,))
+                })
+            };
+            match verdict {
+                // Truthy (true, or any non-false value a predicate returns) =
+                // the thesis is dead. `nil`/`false` = alive.
+                Ok(v) if v != Value::Nil && v != Value::Boolean(false) => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    self.note_err(e.message(), e.is_poison());
+                    continue;
+                }
+            }
+            let token = h.token_id.clone();
+            // Supersede the strategy's own rows for this token: a forced
+            // death is a TAKER sweep this tick, never a resting maker.
+            intents.exits.retain(|x| x.token != token);
+            intents.exits.push(Exit {
+                token,
+                reason: "thesis_death_exit".into(),
+                use_maker: false,
+                price: None,
+            });
+        }
+    }
 }
 
 impl SafeStrategy for LuaStrategy {
@@ -203,8 +294,9 @@ impl SafeStrategy for LuaStrategy {
 
     fn on_round(&mut self, round: RoundInfo) {
         if let Ok(mut st) = self.state.lock() {
-            st.set_now(round.now_ms);
-            st.round = Some((round.slot, round.time_left_sec, round.now_ms));
+            // note_round (not a bare set): the #961 round-duration seed rides
+            // the same update (slot change wipes it, a wider clock re-seeds).
+            st.note_round(round.slot, round.time_left_sec, round.now_ms);
         }
         let Some(f) = self.optional_entry("bk_on_round") else {
             return;
@@ -247,30 +339,39 @@ impl SafeStrategy for LuaStrategy {
                 Ok(st) => st,
                 Err(_) => return Intents::none(),
             };
-            st.set_now(ctx.round.now_ms);
-            st.round = Some((ctx.round.slot, ctx.round.time_left_sec, ctx.round.now_ms));
+            // note_round (not a bare set): the #961 round-duration seed rides
+            // the same update (slot change wipes it, a wider clock re-seeds).
+            st.note_round(ctx.round.slot, ctx.round.time_left_sec, ctx.round.now_ms);
             st.markets = ctx.markets.clone();
         }
-        let Some(f) = self.optional_entry("bk_evaluate") else {
-            // Checked at build; unreachable unless the strategy overwrote the
-            // global — which only harms itself.
-            self.note_err("bk_evaluate is not defined", false);
-            return Intents::none();
-        };
-        match self.sandbox.invoke("bk_evaluate", |_| f.call::<Value>(())) {
-            Ok(v) => {
-                self.note_ok();
-                let (intents, parse_err) = parse_intents(&v, self.name());
-                if let Some(err) = parse_err {
-                    self.note_err(&err, false);
-                }
-                intents
-            }
-            Err(e) => {
-                self.note_err(e.message(), e.is_poison());
+        let mut intents = match self.optional_entry("bk_evaluate") {
+            None => {
+                // Checked at build; unreachable unless the strategy overwrote
+                // the global — which only harms itself.
+                self.note_err("bk_evaluate is not defined", false);
                 Intents::none()
             }
-        }
+            Some(f) => match self.sandbox.invoke("bk_evaluate", |_| f.call::<Value>(())) {
+                Ok(v) => {
+                    self.note_ok();
+                    let (intents, parse_err) = parse_intents(&v, self.name());
+                    if let Some(err) = parse_err {
+                        self.note_err(&err, false);
+                    }
+                    intents
+                }
+                Err(e) => {
+                    self.note_err(e.message(), e.is_poison());
+                    Intents::none()
+                }
+            },
+        };
+        // #961: the forced thesis-death scan runs AFTER `bk_evaluate` — and
+        // also when it errored: a buggy evaluate must not buy a position a
+        // way to hold. The scan is the enforcement half of the hook; the
+        // strategy can never suppress its own death.
+        self.force_thesis_death_exits(&mut intents);
+        intents
     }
 
     fn on_params(&mut self, params: &ParamBag) -> bool {
@@ -408,6 +509,246 @@ mod tests {
 
     fn strategy(code: &str) -> LuaStrategy {
         LuaStrategy::build("t".into(), "0.1.0".into(), Vec::new(), code).expect("strategy builds")
+    }
+
+    /// A two-sided book row for the #961 fixtures (`ts` = the book's stamp,
+    /// judged against the round clock the evaluate call pushes).
+    fn book_update(symbol: &str, best_bid: &str, ts: i64) -> BookUpdate {
+        BookUpdate {
+            symbol: symbol.into(),
+            asset: "BTC".into(),
+            best_bid: Some(best_bid.into()),
+            best_ask: Some("0.99".into()),
+            mid: None,
+            bid_depth: None,
+            ask_depth: None,
+            obi: None,
+            spread: None,
+            spread_pct: None,
+            timestamp_ms: ts,
+            bid_levels: 1,
+            ask_levels: 1,
+            bid_ladder: vec![],
+            ask_ladder: vec![],
+        }
+    }
+
+    fn holding(token: &str, entry: &str) -> HoldingView {
+        HoldingView {
+            strategy: "t".into(),
+            condition_id: "cond".into(),
+            token_id: token.into(),
+            direction: "up".into(),
+            shares: "10".into(),
+            entry_price: entry.into(),
+            round_slot: 1,
+        }
+    }
+
+    fn eval_ctx(now_ms: i64, time_left_sec: i64) -> RoundContext {
+        RoundContext {
+            round: RoundInfo {
+                slot: 1,
+                time_left_sec,
+                now_ms,
+            },
+            markets: vec![],
+        }
+    }
+
+    // ── #961: the forced thesis-death exit ──────────────────────────────────
+
+    /// Acceptance 1 (default-predicate form): a declared `BK_THESIS_DEATH_ENABLE`
+    /// plus the stdlib default predicate — the held token's own bid 40% under
+    /// entry crosses the shipped 25% reversal band → the SAME evaluate emits
+    /// the unconditional taker exit intent tagged `thesis_death_exit`.
+    #[test]
+    fn thesis_death_default_fires_on_a_book_reversal() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return {} end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.30", 2_000),
+            fresh: true,
+        }]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        let x = &intents.exits[0];
+        assert_eq!(x.token, "0xup");
+        assert_eq!(x.reason, "thesis_death_exit");
+        assert!(!x.use_maker, "a forced death is a full TAKER close");
+        assert_eq!(x.price, None, "the kernel prices it off the live bid");
+        assert!(s.health.lock().expect("health").last_error.is_none());
+    }
+
+    /// A thesis still alive (an adverse move inside the band) emits nothing.
+    #[test]
+    fn alive_thesis_emits_no_exit() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return {} end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.45", 2_000),
+            fresh: true,
+        }]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert!(intents.exits.is_empty(), "{intents:?}");
+    }
+
+    /// Condition 1 (论点依赖字段消失): no book at all for the held token —
+    /// the thesis has nothing left to stand on, death, same tick.
+    #[test]
+    fn vanished_book_kills_the_thesis() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return {} end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        // No on_eval_books push: the token's quoting fields are gone.
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        assert_eq!(intents.exits[0].reason, "thesis_death_exit");
+    }
+
+    /// Condition 3 (轮次时间加权越界): the death band tightens linearly as
+    /// the round drains — an adverse move the FLAT band forgives crosses the
+    /// TIGHTENED band late in the round.
+    #[test]
+    fn time_weighted_band_crosses_where_the_flat_band_forgives() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return {} end",
+        );
+        {
+            let state = s.state();
+            let mut st = state.lock().expect("state");
+            st.params
+                .insert("thesis_death_reversal_pct_tight".into(), "10".into());
+        }
+        // Seed the round duration: the first round push sees the full clock.
+        s.on_round(RoundInfo {
+            slot: 1,
+            time_left_sec: 900,
+            now_ms: 1_000,
+        });
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.44", 2_000),
+            fresh: true,
+        }]);
+        // 810s elapsed of 900 → frac 0.9 → band 25 − 15·0.9 = 11.5%.
+        // Adverse 12%: inside the flat 25% band, past the tightened one.
+        let intents = s.evaluate(&eval_ctx(2_000, 90));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        assert_eq!(intents.exits[0].reason, "thesis_death_exit");
+    }
+
+    /// The predicate-declaration form: the package defines
+    /// `bk_thesis_death(h)` itself and receives the same `bk.holdings()` row
+    /// shape; only the positions it declares dead are forced out.
+    #[test]
+    fn declared_predicate_form_decides_per_holding() {
+        let mut s = strategy(
+            "function bk_thesis_death(h) return h.token_id == '0xup' and h.entry_price == '0.50' end \
+             function bk_evaluate() return {} end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50"), holding("0xdown", "0.50")]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        assert_eq!(intents.exits[0].token, "0xup");
+        assert_eq!(intents.exits[0].reason, "thesis_death_exit");
+    }
+
+    /// The injection SUPERSEDES the strategy's own exit rows for a dead
+    /// token: a forced death must not ride a resting maker sell that may
+    /// never fill (禁止扛单). Exactly one row leaves, and it is the taker.
+    #[test]
+    fn thesis_death_supersedes_the_strategy_own_exit_rows() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() \
+               return { exits = { { token = '0xup', reason = 'take_profit', use_maker = true } } } \
+             end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.30", 2_000),
+            fresh: true,
+        }]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        let x = &intents.exits[0];
+        assert_eq!(x.reason, "thesis_death_exit");
+        assert!(!x.use_maker, "the maker-first advisory is overridden");
+    }
+
+    /// The scan runs even when `bk_evaluate` errored: a buggy strategy must
+    /// not lose its way out. The deterministic Lua error is still recorded.
+    #[test]
+    fn thesis_death_scan_survives_a_buggy_evaluate() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return nil + 1 end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.30", 2_000),
+            fresh: true,
+        }]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        assert_eq!(intents.exits[0].reason, "thesis_death_exit");
+        let h = s.health.lock().expect("health");
+        assert!(h.last_error.is_some(), "the evaluate bug is still recorded");
+    }
+
+    /// A package that declares NEITHER form has no death conditions: the
+    /// scan is a no-op (grandfathered; the CI check reports the gap).
+    #[test]
+    fn undeclared_thesis_death_is_a_no_op() {
+        let mut s = strategy("function bk_evaluate() return {} end");
+        s.on_holdings(&[holding("0xup", "0.50")]);
+        s.on_eval_books(&[blitzkrieg_strategy_api::FreshBook {
+            book: book_update("0xup", "0.30", 2_000),
+            fresh: true,
+        }]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert!(intents.exits.is_empty(), "{intents:?}");
+    }
+
+    /// A predicate that ERRORS on one row skips only that row — one bad
+    /// holding never disables the forced scan for the rest.
+    #[test]
+    fn predicate_error_skips_only_that_row() {
+        let mut s = strategy(
+            "function bk_thesis_death(h) \
+               if h.token_id == '0xup' then return nil + 1 end \
+               return h.token_id == '0xdn' \
+             end \
+             function bk_evaluate() return {} end",
+        );
+        s.on_holdings(&[holding("0xup", "0.50"), holding("0xdn", "0.50")]);
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert_eq!(intents.exits.len(), 1, "{intents:?}");
+        assert_eq!(intents.exits[0].token, "0xdn");
+        let h = s.health.lock().expect("health");
+        assert!(h.last_error.is_some(), "the predicate bug is recorded");
+    }
+
+    /// No holdings → no scan, no calls (the empty-book no-op stays free).
+    #[test]
+    fn no_holdings_no_scan() {
+        let mut s = strategy(
+            "BK_THESIS_DEATH_ENABLE = true \
+             function bk_evaluate() return {} end",
+        );
+        let intents = s.evaluate(&eval_ctx(2_000, 600));
+        assert!(intents.exits.is_empty());
+        assert!(s.health.lock().expect("health").last_error.is_none());
     }
 
     /// The required entry point is enforced at build; the optional ones are

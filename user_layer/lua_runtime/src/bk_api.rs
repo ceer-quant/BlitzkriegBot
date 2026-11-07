@@ -21,6 +21,7 @@
 //! | `bk.fees()`       | the active taker-fee schedule (`name/rate/exponent`) or nil |
 //! | `bk.unified_events()` | confirmed cross-venue mappings (#427) or empty array   |
 //! | `bk.arb.pairs()`  | RFC 568: THIS strategy's pair-book views (owner-filtered, eventually consistent) or empty array |
+//! | `bk.thesis_death_default(h)` | #961: the stdlib default "entry thesis is dead" verdict for one `bk.holdings()` row (boolean) |
 //!
 //! Prices and sizes cross as exact decimal STRINGS (the `safe.rs` boundary
 //! rule): a float would let a resting price drift by a tick. `bk.kline`
