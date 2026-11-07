@@ -43,6 +43,24 @@
 --     not a plugin capability. Declaring it would refuse this strategy at
 --     enable time for a bit the seam does not carry.
 
+-- ── thesis death declaration (#961 convergence, form B) ─────────────────────
+-- THESIS DEATH DECLARATION (#961)
+--   entry thesis : the venue's queue still prices the OLD probability for a
+--                  breath after a spot move — join the move-implied side
+--                  before the venue reprices
+--   death cond 1 : 盘口瞬时反转 — stdlib default: the held token's own bid
+--                  reversed >= thesis_death_reversal_pct (25 flat, sliding to
+--                  thesis_death_reversal_pct_tight as the round drains) off
+--                  entry_price — the venue has repriced AGAINST the lag
+--   death cond 2 : 论点依赖字段消失/超时 — stdlib default: the held token's
+--                  book vanished or its quote is older than
+--                  thesis_death_stale_ms (the lag premise needs a live quote)
+--   death cond 3 : 轮次时间加权越界 — stdlib default (tight = 0: off)
+--   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
+-- Form B (docs/thesis_death.md §1): the package adopts the stdlib default
+-- predicate verbatim; all three bands are manifest tunables (hot-adjustable).
+BK_THESIS_DEATH_ENABLE = true
+
 -- ── exact decimal helpers (spread_arb's, unchanged semantics) ───────────────
 
 -- BEGIN common/decimal.lua

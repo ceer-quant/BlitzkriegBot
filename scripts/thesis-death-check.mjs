@@ -12,9 +12,12 @@
  * 扛单 the issue bans: the runtime can only enforce a death the package
  * declared.
  *
- * Legacy packages (shipped before #961) are grandfathered by the LEGACY list
- * below — an entry there is a debt marker, not a licence: a package that
- * re-shapes its entry thesis must declare and leave the list.
+ * Legacy packages (shipped before #961) went through the #961 debt
+ * convergence: every one of them now either DECLARES (judged by the
+ * predicate scan below, listed nowhere) or carries a written, per-package
+ * EXEMPTION reason in the map below. A bare grandfather entry no longer
+ * exists — and a package that re-shapes its entry thesis must still declare
+ * and leave the exemption map.
  *
  * Reverse acceptance (--teeth): the gate must go RED on the defect it guards.
  * It runs against a THROWAWAY sandbox under BK_LUA_THESIS_DEATH_TEETH_DIR
@@ -42,25 +45,47 @@ const TEMPLATE_ANCHOR = 'THESIS DEATH DECLARATION';
 const TEETH = process.argv.includes('--teeth');
 const TEETH_DIR = process.env.BK_LUA_THESIS_DEATH_TEETH_DIR;
 
-// #961 grandfather list — packages shipped BEFORE the thesis-death hook.
-// Debt markers: prune an entry the moment the package declares (a stale
-// marker on a now-declaring package is harmless; a DECLARING package is
-// already judged by the predicate scan below).
-const LEGACY = new Set([
-  'cross_venue_arb',
-  'flash_arb',
-  'hot_side_momentum',
-  'kline_probe',
-  'mad_dog',
-  'maker_pair',
-  'market_maker',
-  'oracle_ruler',
-  'pair_discount_arb',
-  'postonly_pair',
-  'single_leg_pair',
-  'smart_money_reverse',
-  'spread_arb',
-  'whale_follow',
+// #961 legacy convergence — the reasoned exemption map. Every pre-#961
+// package that does NOT declare its thesis death lives here WITH a one-line
+// reason (no bare grandfather entries survive the convergence): hedged-pair
+// collectors whose thesis is locked at entry, pure market making, probes,
+// and packages whose death condition is already self-declared outside the
+// hook. A DECLARING package must NOT be listed (the predicate scan judges
+// it); a stale entry is harmless but untidy. New packages declare per the
+// docs/thesis_death.md template — they never land here.
+const EXEMPT = new Map([
+  [
+    'cross_venue_arb',
+    '完整双腿跨所对冲（两 venue 各持一腿、等份额，价值入场锁定 $1）：论点是折价本身，没有方向侧可死；spread_close_pct 回落平仓 + 未持有腿补发循环就是出场机制，单腿自身 bid 反转不构成论点死亡',
+  ],
+  [
+    'pair_discount_arb',
+    '完整 UP+DOWN 对（MERGE 收集，利润入场锁定）：持有形态是对冲对而非方向仓；裸腿由 top-up 循环主动修复（max_top_up_cost 是敞口界），单腿 bid 反转不是论点死亡',
+  ],
+  [
+    'postonly_pair',
+    'maker 配对循环（双腿 post-only + pairing/top-up loop）：同 pair_discount_arb 的对冲对形态，论点是配对折价，无方向侧可死',
+  ],
+  [
+    'maker_pair',
+    'both-or-nothing maker 对（等份额对冲持有到结算，零 exits）：完整对价值恒 $1；单腿裸露被「一腿失格即弃整单」的入场纪律排除，无论点可死',
+  ],
+  [
+    'market_maker',
+    '纯做市：论点是波动付价差、非结算结果；take-profit 带 + kernel 阶梯 + merge 已是出场机制，反转带会在正常库存震荡上误触发（0.30 买入回落至 0.225 是库存噪音，不是论点死亡）',
+  ],
+  [
+    'oracle_ruler',
+    '校准探针：无条件挂单测量执行层，故意无门可甩（booked exit_reason 由 oracle-ruler-check.mjs 断言）；没有可死的策略论点',
+  ],
+  [
+    'kline_probe',
+    '抛弃式回放二分探针（bisect 1，flash_arb latch 原样复刻）：仅诊断触发链，非生产策略，无独立论点',
+  ],
+  [
+    'smart_money_reverse',
+    '自有 thesis_reversed 判决已声明死亡条件（thesis_break_pct 对 rebound_anchor，#847 fix 2 形态）：钩子平移以 mad_dog 同形先例为准，留待专项收敛',
+  ],
 ]);
 
 const checks = [];
@@ -88,8 +113,8 @@ function scanDir(luaDir, rootLabel) {
     const d = declares(pkg);
     if (d.ok) {
       check(`${rootLabel}/${e.name} declares thesis death (${d.why})`, true);
-    } else if (LEGACY.has(e.name) && rootLabel === 'strategies_lua') {
-      check(`${rootLabel}/${e.name} legacy (grandfathered, #961 debt marker)`, true);
+    } else if (EXEMPT.has(e.name) && rootLabel === 'strategies_lua') {
+      check(`${rootLabel}/${e.name} exempt (#961 convergence): ${EXEMPT.get(e.name)}`, true);
     } else {
       check(`${rootLabel}/${e.name} declares thesis death`, false, d.why);
       red++;

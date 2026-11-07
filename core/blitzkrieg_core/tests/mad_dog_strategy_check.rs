@@ -1035,11 +1035,14 @@ fn spot_max_scale_tiny_move_still_passes() {
 // The exits-wire regression: the package used to return `exits = {}` at both
 // return sites (the seal), so a filled resting bid's only survival was the
 // kernel ladder — probe2 rode MFE +45.8% bare to −11.59% for want of a
-// strategy-owned exit. The wire: the suggestion anchors `st.anchor` at the
-// resting price it is issued at; a HELD token (host-pushed via
-// bk.holdings()) whose fresh mid falls more than `thesis_break_pct` under
-// that anchor emits ONE { token, reason } row — no price (the exits wire
-// carries none; the kernel prices it), never time-gated, latched per round.
+// strategy-owned exit. The wire (#961 convergence): the suggestion anchors
+// `st.anchor` at the resting price it is issued at; a HELD token (host-pushed
+// via bk.holdings()) whose fresh mid falls more than `thesis_break_pct` under
+// that anchor is the declared hook's verdict — `bk_thesis_death` returns true
+// and the RUNTIME injects the close this tick: one { token,
+// reason: thesis_death_exit, use_maker: false } row, no price (the kernel
+// prices it), never time-gated, latched per round (same `st.exited` latch the
+// exits-table verdict used).
 
 /// A held position on the UP leg, shaped exactly the way the host's flat
 /// book carries one. Piping it through `StrategyCtx::with_positions` is the
@@ -1062,8 +1065,10 @@ fn held_up(shares: &str) -> HeldPosition {
 
 /// The full happy path: dominance + wick arms the suggestion at 0.26, the
 /// position fills, the mid collapses past the thesis death (0.26 −30% of
-/// the anchor = 0.182, so a mid of 0.18 is under it) and the held token
-/// emits EXACTLY ONE kernel-priced verdict, whose reason names the shape.
+/// the anchor = 0.182, so a mid of 0.18 is under it) and the declared hook
+/// (`bk_thesis_death`, enforced by the runtime) emits EXACTLY ONE
+/// kernel-priced `thesis_death_exit` verdict — the same-tick full-taker
+/// close the #961 convergence promises.
 #[test]
 fn held_leg_past_the_thesis_death_emits_one_exit() {
     let mut a = adapter();
@@ -1091,9 +1096,13 @@ fn held_leg_past_the_thesis_death_emits_one_exit() {
 
     let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
     assert_eq!(exits.len(), 1, "the exit wire must carry the verdict");
+    assert_eq!(
+        exits[0].reason, "thesis_death_exit",
+        "#961 convergence: the verdict is the runtime's forced tag now, not a ladder stop"
+    );
     assert!(
-        exits[0].reason.starts_with("thesis_reversed"),
-        "the verdict's reason is the thesis-death shape, not a ladder stop"
+        !exits[0].use_maker,
+        "a forced thesis death is a full TAKER close, never a resting maker"
     );
 
     // The verdict resolves to the RIGHT token (a held leg, by name).
@@ -1178,8 +1187,11 @@ fn thesis_exit_is_latched_and_the_calm_leg_sells_nothing() {
 // price = the resting limit a bid + 1 tick above the touch (a crossing
 // post-only sell is refused flat, so the rest must be strictly inside the
 // spread). Latched with the thesis-death verdict: at most ONE exit row per
-// held token per round. With the shipped defaults the graduation line of
-// the 0.26 anchor sits at 0.26 × 1.05 = 0.273.
+// held token per round (the graduation keeps its `st.exited` latch; the
+// death verdict is the declared hook's now, and the two triggers are
+// mutually exclusive — death needs the mid UNDER the anchor line,
+// graduation needs the bid OVER it). With the shipped defaults the
+// graduation line of the 0.26 anchor sits at 0.26 × 1.05 = 0.273.
 
 /// Held leg, fresh bid ABOVE the graduation line → ONE maker-TP row whose
 /// price rests one tick above that bid (never at/under it), reason class
@@ -1275,7 +1287,10 @@ fn bid_below_the_graduation_line_sells_nothing() {
     let _ = a.find_candidates(&ctx(&markets, 600, SPOT_NOW + 2_000, &fresh).with_positions(&held));
     let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
     assert_eq!(exits.len(), 1, "the death verdict survives alongside");
-    assert!(exits[0].reason.starts_with("thesis_reversed"));
+    assert_eq!(
+        exits[0].reason, "thesis_death_exit",
+        "#961 convergence: the death is the declared hook's forced tag"
+    );
     assert_eq!(
         exits[0].exit_price.as_deref(),
         None,

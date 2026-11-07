@@ -1,11 +1,11 @@
 {
   "name": "flash_arb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "484f38c021653b0bb9d283c38db17b74acbf5da11dadd33677964c0ff923d9c7",
+  "sha256": "23a24226b96bfd8972f5150ab99757b9cccc3621f7c90073cac10f5cbcb7ec27",
   "author": "BlitzkriegBot",
-  "description": "Spot-to-venue lag catcher for 15-minute binary rounds: when the Binance spot price of the round's asset moves >= 0.25% inside 2s, buy the side the move implied as a post_only maker at the current ask, while that price is still <= 0.55 and within 1.5s of the trigger. Signal-only: the kernel adjudicates, sizes and gates every intent.",
+  "description": "Spot-to-venue lag catcher for 15-minute binary rounds: when the Binance spot price of the round's asset moves >= 0.25% inside 2s, buy the side the move implied as a post_only maker at the current ask, while that price is still <= 0.55 and within 1.5s of the trigger. Signal-only: the kernel adjudicates, sizes and gates every intent. Thesis death (issue 961 convergence, form B): declares BK_THESIS_DEATH_ENABLE = true — the stdlib default predicate (the held token's own bid reversed >= thesis_death_reversal_pct, default 25, sliding linearly to thesis_death_reversal_pct_tight, default 0 = off, as the round drains; or its quoting fields vanished/stale past thesis_death_stale_ms, default 30000) — enforced by the runtime as an unconditional same-tick full-taker close (exit_reason thesis_death_exit).",
   "tunables": {
     "mom_window_sec": {
       "type": "int",
@@ -54,6 +54,24 @@
       "default": "1.00",
       "min": "0",
       "max": "1000"
+    },
+    "thesis_death_reversal_pct": {
+      "type": "decimal",
+      "default": "25",
+      "min": "0",
+      "max": "100"
+    },
+    "thesis_death_reversal_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "100"
+    },
+    "thesis_death_stale_ms": {
+      "type": "int",
+      "default": "30000",
+      "min": "0",
+      "max": "300000"
     }
   },
   "modes": [
