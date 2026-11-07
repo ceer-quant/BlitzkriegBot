@@ -162,6 +162,20 @@ pub struct ExitConfig {
     /// regardless of this switch or the advisory (#915: a resting stop does
     /// not protect a crashing leg — 0/2).
     pub strategy_exit_maker_first: bool,
+    /// #963: how long a maker-mode EXIT rests before it stops waiting on the
+    /// maker queue and crosses as a taker — the exit's OWN escalation clock.
+    ///
+    /// The entry side has had one all along (`entry_maker_timeout_ms`, 5 s):
+    /// an entry that cannot fill retries as a taker, while a maker exit
+    /// (#936's maker-first TP, `maker_first_exit_enabled = true` shipped)
+    /// rested FOREVER — the one order the operator most wants filled had no
+    /// deadline at all. Three-valued, the same convention
+    /// [`crate::service::escalation_delay_ms`] spells for entries: `0` = the
+    /// entry default (`default_maker_timeout_ms`, the pre-#963 shape),
+    /// a positive value is the clock itself (the shipped 250 ms), a NEGATIVE
+    /// value is the operator's off switch (a pure-maker exit that rests until
+    /// it fills or its round ends).
+    pub exit_maker_timeout_ms: i64,
     /// F6: a book older than this (sec, measured against the tick's `now_ms`)
     /// must not price an exit — a stale quote is not an executable one.
     /// Snapshots with `timestamp <= 0` (synthetic tests, legacy records) are
@@ -297,6 +311,10 @@ impl Default for ExitConfig {
             maker_exits_for_tp_only: false,
             maker_first_exit_enabled: true,
             strategy_exit_maker_first: false,
+            // #963: the shipped exit-escalation clock. 250 ms is the same
+            // order as the #351 fill model's live latency dial — an exit that
+            // has not filled within one round-trip stops queueing and crosses.
+            exit_maker_timeout_ms: 250,
             max_book_age_sec: BOOK_TRUST_SEC,
         }
     }

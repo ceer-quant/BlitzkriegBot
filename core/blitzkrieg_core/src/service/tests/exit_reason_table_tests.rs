@@ -541,7 +541,7 @@ fn the_maker_advisory_converts_only_profit_side_exits_behind_the_gate() {
         c.ome
             .live_orders()
             .iter()
-            .all(|o| o.side == Side::Sell && o.mode != FillPolicy::Maker),
+            .all(|o| o.side == Side::Sell && o.mode != FillPolicy::MakerThenTaker),
         "the default gate-off posture stays the taker sweep"
     );
 }
@@ -590,7 +590,10 @@ fn gate_on_profit_side_advisory_rests_a_maker_close() {
         .filter(|o| o.side == Side::Sell)
         .collect();
     let rested = rested.first().expect("the maker close must be live");
-    assert_eq!(rested.mode, FillPolicy::Maker);
+    // #963: the close rests as MakerThenTaker — it still RESTS first
+    // (the escalation fires only at `exit_maker_timeout_ms`), but under the
+    // exit's own clock instead of resting as a pure Maker forever.
+    assert_eq!(rested.mode, FillPolicy::MakerThenTaker);
     assert_eq!(rested.price, dec!(0.41));
 }
 
@@ -641,7 +644,7 @@ fn the_pnl_guard_bars_maker_first_on_an_underwater_close() {
         !c.ome()
             .live_orders()
             .iter()
-            .any(|o| o.side == Side::Sell && o.mode == FillPolicy::Maker),
+            .any(|o| o.side == Side::Sell && o.mode == FillPolicy::MakerThenTaker),
         "the pnl guard must degrade the maker-first advisory to taker on an underwater close"
     );
     // The ledger still stamps the close with the strategy's own tag (the
@@ -697,7 +700,10 @@ fn the_pnl_guard_lets_a_profit_side_close_still_rest_as_maker() {
         .filter(|o| o.side == Side::Sell)
         .collect();
     let rested = rested.first().expect("the maker close must be live");
-    assert_eq!(rested.mode, FillPolicy::Maker);
+    // #963: the close rests as MakerThenTaker — it still RESTS first
+    // (the escalation fires only at `exit_maker_timeout_ms`), but under the
+    // exit's own clock instead of resting as a pure Maker forever.
+    assert_eq!(rested.mode, FillPolicy::MakerThenTaker);
     assert_eq!(rested.price, dec!(0.45));
 }
 
@@ -750,7 +756,10 @@ fn the_strategy_quoted_maker_tp_limit_is_rested_as_quoted() {
         .filter(|o| o.side == Side::Sell)
         .collect();
     let rested = rested.first().expect("the quoted close must be live");
-    assert_eq!(rested.mode, FillPolicy::Maker);
+    // #963: the close rests as MakerThenTaker — it still RESTS first
+    // (the escalation fires only at `exit_maker_timeout_ms`), but under the
+    // exit's own clock instead of resting as a pure Maker forever.
+    assert_eq!(rested.mode, FillPolicy::MakerThenTaker);
     // The strategy's own number, on the grid, exactly as the wire carried it.
     assert_eq!(rested.price, dec!(0.44));
 }
@@ -795,7 +804,10 @@ fn an_unsafe_strategy_quote_falls_back_to_kernel_pricing() {
         .filter(|o| o.side == Side::Sell)
         .collect();
     let rested = rested.first().expect("the fallback close must be live");
-    assert_eq!(rested.mode, FillPolicy::Maker);
+    // #963: the close rests as MakerThenTaker — it still RESTS first
+    // (the escalation fires only at `exit_maker_timeout_ms`), but under the
+    // exit's own clock instead of resting as a pure Maker forever.
+    assert_eq!(rested.mode, FillPolicy::MakerThenTaker);
     // Kernel pricing took over: bid + one tick.
     assert_eq!(rested.price, dec!(0.43));
 }

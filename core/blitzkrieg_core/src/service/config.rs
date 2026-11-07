@@ -1235,7 +1235,9 @@ pub(super) type FlattenTarget = (
 
 /// One due `maker_then_taker` order selected by `Core::tick`, in the order its
 /// destructuring loop consumes: id, side, remaining, token, condition,
-/// strategy, asset, direction, round slot, maker timeout, account id.
+/// strategy, asset, direction, round slot, maker timeout, account id, and
+/// (#963) whether the maker was a CLOSE — the escalated taker keeps the
+/// close-intent status under its `exit-escalated:` key.
 pub(super) type EscalationTarget = (
     String,
     Side,
@@ -1248,6 +1250,7 @@ pub(super) type EscalationTarget = (
     i64,
     i64,
     AccountId,
+    bool,
 );
 
 /// Append-only journal of the OME's applied-fill idempotency table (issue #178).

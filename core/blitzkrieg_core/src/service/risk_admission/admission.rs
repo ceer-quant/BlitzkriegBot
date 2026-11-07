@@ -377,6 +377,16 @@ impl Core {
                 // a hold-to-settlement strategy's ladder walks the wide
                 // containment width, so the cap judges on that number too
                 // (the same doctrine the PHYSICS projection binds).
+                //
+                // issue #963: the ordinary path sizes against the WIDEST stop
+                // the ramp ever produces (`time_left >= start` → the base —
+                // what a fresh position's stop actually IS,
+                // `decide_exit_verdict`), not the tightest. Passing 0 here
+                // used to size against the 10% floor while the ladder
+                // enforced the 12% base for the position's first minutes — a
+                // 1.2× hole in the one hard limit the operator names. The
+                // ramp only TIGHTENS with time held, so the base is the
+                // always-safe worst case for any entry instant.
                 let holder = self
                     .engine
                     .as_ref()
@@ -386,7 +396,7 @@ impl Core {
                 } else {
                     crate::exit_policy::effective_stop_pct(
                         self.config.positions.exit.stop_loss_pct,
-                        0,
+                        i64::MAX,
                         &self.config.positions.exit,
                     )
                 };

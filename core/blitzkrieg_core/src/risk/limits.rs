@@ -269,8 +269,20 @@ pub enum SingleLossVerdict {
 /// The stop percent is the BOUND stop (`effective_stop_pct`), so the number is
 /// the same one the exit walker will enforce — the cap is computed against the
 /// discipline that will actually fire, never a flatter assumption.
+///
+/// issue #963: the bound is measured at the venue's own resolution. A stop
+/// fills at the best RESTING bid — a 0.01 tick AT or below the stop level,
+/// never inside a tick — so a stop level that lands between ticks realizes
+/// one tick more per share than the continuous number. Sizing against the
+/// continuous figure approved sizes whose grid-realized worst case breached
+/// the cap (entry 0.30, stop 12%: the level 0.264 fills at the 0.26 bid —
+/// 13.33% per share, not 12%). The floor below is the tick-exact worst case
+/// the ladder can actually book; the invariant `approved * loss_per_share
+/// <= cap` now holds on the grid, not just on paper.
 pub fn loss_per_share(entry_price: Decimal, stop_pct: Decimal) -> Decimal {
-    entry_price * stop_pct / Decimal::from(100)
+    let stop_price = entry_price * (Decimal::ONE - stop_pct / Decimal::from(100));
+    let fillable = (stop_price * Decimal::from(100)).floor() / Decimal::from(100);
+    entry_price - fillable
 }
 
 /// Judge one entry against `max_single_loss_usd` (§4.2). Whole-share only:

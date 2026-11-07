@@ -574,11 +574,21 @@ impl Core {
         }
         // 2. The systemic per-account limits (issue #983: no global caps).
         //    Armed bounds judge this entry exactly as the pipeline would judge
-        //    a fresh strategy entry.
+        //    a fresh strategy entry — ENTRIES only: a close-intent leg (the
+        //    maker→taker escalation of a resting exit, #963) is the way OUT of
+        //    a position, and the sizing caps bound NEW exposure, never the way
+        //    out (#174 — the same doctrine `check_with_equity` applies to the
+        //    kill switch above). A max_position_size < 1 or a single-loss cap
+        //    smaller than one share's stop must never trap an exit.
         let limits = self.risk.systemic_snapshot();
-        if limits.any_armed() {
+        if limits.any_armed() && !is_close_intent(&req.internal_key) {
             // Same doctrine as the pipeline gate: a holder's bound stop is
             // the wide containment width the walker will actually enforce.
+            // #963: the ordinary path sizes against the WIDEST stop the ramp
+            // ever produces (the base — a fresh position's stop IS the base,
+            // and the ramp only tightens with time held), not the tightest:
+            // passing 0 sized against the 10% floor while the ladder
+            // enforced the 12% base — a 1.2× hole in the single-loss cap.
             let holder = self
                 .engine
                 .as_ref()
@@ -588,10 +598,7 @@ impl Core {
             } else {
                 crate::exit_policy::effective_stop_pct(
                     self.config.positions.exit.stop_loss_pct,
-                    // Time left is unknown on this path; 0 = the bound stop at
-                    // its tightest (no time-adjustment relief), the
-                    // conservative read.
-                    0,
+                    i64::MAX,
                     &self.config.positions.exit,
                 )
             };
@@ -652,6 +659,12 @@ impl Core {
                     o.escalate_at_ms.unwrap_or(now_ms) - o.submitted_at_ms,
                     // E28 (§9.2): the taker leg spends from the maker's account.
                     o.account_id.clone(),
+                    // #963: whether the maker was a CLOSE — the escalated
+                    // taker must keep the close-intent status (the kill
+                    // switch, the family gate and the escalation guard all
+                    // hatch closes), which the plain `{id}:escalated` key of
+                    // an entry leg does not carry.
+                    is_close_intent(&o.internal_key),
                 )
             })
             .collect();
@@ -675,6 +688,7 @@ impl Core {
             slot,
             timeout,
             account_id,
+            close_leg,
         ) in due
         {
             if remaining <= Decimal::ZERO {
@@ -705,6 +719,16 @@ impl Core {
                 &token,
                 &format!("{id}:escalated"),
             );
+            // #963: a CLOSE leg's chase keeps the close-intent status under
+            // the dedicated `exit-escalated:` prefix — the plain
+            // `{id}:escalated` key of an entry leg would strip every close
+            // hatch (kill switch, family gate, the guard's systemic
+            // exemption) from the one order that must never be trapped.
+            let escalated_key = if close_leg {
+                format!("exit-escalated:{id}")
+            } else {
+                format!("{id}:escalated")
+            };
             let mut req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -712,7 +736,7 @@ impl Core {
                 mode: FillPolicy::Taker,
                 price: worst,
                 size: remaining,
-                internal_key: format!("{id}:escalated"),
+                internal_key: escalated_key,
                 strategy,
                 asset,
                 direction,
@@ -979,32 +1003,6 @@ impl Core {
         }
         let intents = sell_intents;
 
-        // A unit of closing work resolved against a concrete open position.
-        #[derive(Clone)]
-        struct ExitJob {
-            position_id: String,
-            token: String,
-            condition_id: String,
-            price: Decimal,
-            reason: ExitReason,
-            use_maker: bool,
-            /// #915: the strategy's own maker-TP limit (validated against the
-            /// live book in the submission loop before it is used). `None` =
-            /// the kernel's own maker pricing (`maker_exit_price`).
-            exit_price: Option<Decimal>,
-            internal_key: String,
-            strategy: String,
-            asset: String,
-            direction: String,
-            /// E28 (§9.2): the account the closing SELL spends from — the
-            /// position's own book, so an exit can never debit another account.
-            account_id: AccountId,
-            /// Issue #464: shares to sell (`None` = the whole sellable
-            /// position, every path's historical behavior). A ladder step's
-            /// tranche rides here from the `ExitRequest`.
-            close_shares: Option<Decimal>,
-        }
-
         let mut jobs: Vec<ExitJob> = Vec::new();
         let mut has_job: HashSet<String> = HashSet::new();
 
@@ -1111,6 +1109,167 @@ impl Core {
             }
         }
 
+        // Strategy-signal exits: the SAME intent resolution the live engine
+        // cycle uses for its same-cycle submission (#963
+        // `exit_jobs_from_strategy_intents`), deduped against this cycle's
+        // ladder jobs through `has_job`.
+        jobs.extend(self.exit_jobs_from_strategy_intents(intents, &mut has_job, now_ms));
+
+        // E31-b residual backstop: a working exit can be outgrown by its
+        // position (a late entry fill lands while the sell is resting), and
+        // once the sell completes the residual has NO working sell and the
+        // exit policy may stay silent (e.g. the profit target already passed).
+        // Any position with a sell that filled after the position opened and
+        // no live sell now gets an explicit re-close of the remainder.
+        // Fast path: a holder never places a working sell on these tokens,
+        // so between dirty cycles there is no residual to re-close — the
+        // scan is skipped with the ladder (still runs on the non-fast path
+        // and whenever any non-holder strategy is registered).
+        // Issue #390 (replay scheduling): the scan's inputs move only when an
+        // ORDER event lands (a sell fills, a late entry fills) or when the
+        // ladder actually ran (its verdicts can place/complete sells) —
+        // gating it to those ticks reproduces the every-tick scan: a quiet
+        // tick re-reads the same (live sells, filled-since, open positions)
+        // and would emit nothing. `fast_orders_dirty` is the #388 order-set
+        // wake, maintained on both replay paths.
+        let residual_scan = if self.config.backtest_fast {
+            true
+        } else if self.config.replay_scheduling {
+            self.fast_path.fast_orders_dirty || now_ms >= self.fast_path.fast_next_exit_deadline_ms
+        } else {
+            true
+        };
+        if self.config.auto_exits_enabled && !all_hold && residual_scan {
+            // Issue #464: a ladder tranche's SELL is a PARTIAL exit — while it
+            // works, the position has shares left on purpose. The residual
+            // backstop below re-closes exactly such remainders, so a ladder
+            // book would be re-flattened wholesale one tick after every
+            // step. A position whose token has a working or recently filled
+            // ladder SELL stays out of this scan until the ladder's own next
+            // step (or stop) takes it the rest of the way. No-ladder runs
+            // never carry tranches, so their scan is untouched.
+            let ladder_tranche_tokens: HashSet<String> = jobs
+                .iter()
+                .filter(|j| j.close_shares.is_some())
+                .map(|j| j.token.clone())
+                .collect();
+            for pos in self.positions.open_positions().to_vec() {
+                if !has_job.insert(pos.id.clone()) {
+                    continue;
+                }
+                if ladder_tranche_tokens.contains(&pos.token_id) {
+                    continue;
+                }
+                let has_live_sell = self
+                    .ome
+                    .live_for(&pos.token_id, Side::Sell)
+                    .into_iter()
+                    .any(|o| o.status.is_live());
+                if has_live_sell {
+                    continue;
+                }
+                let closed_here = self
+                    .ome
+                    .has_filled_sell_since(&pos.token_id, pos.entered_at_ms);
+                if !closed_here {
+                    continue;
+                }
+                let price = if pos.current_price > Decimal::ZERO {
+                    pos.current_price
+                } else {
+                    Decimal::new(1, 2)
+                };
+                jobs.push(ExitJob {
+                    position_id: pos.id.clone(),
+                    token: pos.token_id.clone(),
+                    condition_id: pos.condition_id.clone(),
+                    price,
+                    reason: ExitReason::ForceExit,
+                    use_maker: false,
+                    exit_price: None,
+                    internal_key: exit_intent_key("exit-residual", &pos, ""),
+                    strategy: pos.strategy.clone(),
+                    asset: pos.asset.clone(),
+                    direction: pos.direction.as_str().to_string(),
+                    // E28 (§9.2): the residual re-close spends from the
+                    // position's own account.
+                    account_id: pos.account_id.clone(),
+                    close_shares: None,
+                });
+            }
+        }
+
+        self.submit_exit_jobs(jobs, now_ms);
+        Ok(())
+    }
+}
+
+/// A unit of closing work resolved against a concrete open position.
+///
+/// #963: hoisted from `run_exit_checks`'s local scope so the strategy-signal
+/// half of the exit pipeline (`exit_jobs_from_strategy_intents` +
+/// `submit_exit_jobs`) can also serve the engine cycle's same-cycle intent
+/// submission — an exit signal born in `engine_evaluate` must not wait behind
+/// the entries that same cycle places.
+#[derive(Clone)]
+pub(crate) struct ExitJob {
+    position_id: String,
+    token: String,
+    condition_id: String,
+    price: Decimal,
+    reason: ExitReason,
+    use_maker: bool,
+    /// #915: the strategy's own maker-TP limit (validated against the
+    /// live book in the submission loop before it is used). `None` =
+    /// the kernel's own maker pricing (`maker_exit_price`).
+    exit_price: Option<Decimal>,
+    internal_key: String,
+    strategy: String,
+    asset: String,
+    direction: String,
+    /// E28 (§9.2): the account the closing SELL spends from — the
+    /// position's own book, so an exit can never debit another account.
+    account_id: AccountId,
+    /// Issue #464: shares to sell (`None` = the whole sellable
+    /// position, every path's historical behavior). A ladder step's
+    /// tranche rides here from the `ExitRequest`.
+    close_shares: Option<Decimal>,
+}
+
+impl Core {
+    /// #963: submit strategy-signal close intents IMMEDIATELY, before this
+    /// cycle's entries are placed. The live engine cycle drains exit intents
+    /// from the strategies in the same call that places their entries; the
+    /// deferred path (extend `strategy_exits`, consume next tick's
+    /// `run_exit_checks`) let the entry win the same-cycle race every time —
+    /// the exit signal waited a full maintenance interval behind the very
+    /// orders it races for liquidity. Replays keep the deferred path (the
+    /// #390 scheduling shape is output-pinned); merge intents stay deferred
+    /// too (a pair collection is settlement work, not a liquidity race).
+    pub(crate) fn submit_strategy_exits_now(
+        &mut self,
+        intents: Vec<crate::strategies::StrategyExitIntent>,
+        now_ms: i64,
+    ) {
+        let (merge_intents, sell_intents): (Vec<_>, Vec<_>) =
+            intents.into_iter().partition(|i| i.reason == "merge");
+        self.strategy_exits.extend(merge_intents);
+        let mut has_job: HashSet<String> = HashSet::new();
+        let jobs = self.exit_jobs_from_strategy_intents(sell_intents, &mut has_job, now_ms);
+        self.submit_exit_jobs(jobs, now_ms);
+    }
+
+    /// Resolve strategy-signal close intents into [`ExitJob`]s: the intent half
+    /// of `run_exit_checks` (position resolution, the fresh-bid pricing gate,
+    /// the maker-first advisory gates, reason mapping). Verbatim from the loop
+    /// it replaces (pure code motion, #963).
+    pub(crate) fn exit_jobs_from_strategy_intents(
+        &mut self,
+        intents: Vec<crate::strategies::StrategyExitIntent>,
+        has_job: &mut HashSet<String>,
+        now_ms: i64,
+    ) -> Vec<ExitJob> {
+        let mut jobs: Vec<ExitJob> = Vec::new();
         // Strategy-signal exits: resolve the token to a live position and price
         // off its latest valuation, exactly like a manual flatten. The intent's
         // OWN account is the first key (账户↔venue 解耦: two scopes can hold
@@ -1237,90 +1396,13 @@ impl Core {
             });
         }
 
-        // E31-b residual backstop: a working exit can be outgrown by its
-        // position (a late entry fill lands while the sell is resting), and
-        // once the sell completes the residual has NO working sell and the
-        // exit policy may stay silent (e.g. the profit target already passed).
-        // Any position with a sell that filled after the position opened and
-        // no live sell now gets an explicit re-close of the remainder.
-        // Fast path: a holder never places a working sell on these tokens,
-        // so between dirty cycles there is no residual to re-close — the
-        // scan is skipped with the ladder (still runs on the non-fast path
-        // and whenever any non-holder strategy is registered).
-        // Issue #390 (replay scheduling): the scan's inputs move only when an
-        // ORDER event lands (a sell fills, a late entry fills) or when the
-        // ladder actually ran (its verdicts can place/complete sells) —
-        // gating it to those ticks reproduces the every-tick scan: a quiet
-        // tick re-reads the same (live sells, filled-since, open positions)
-        // and would emit nothing. `fast_orders_dirty` is the #388 order-set
-        // wake, maintained on both replay paths.
-        let residual_scan = if self.config.backtest_fast {
-            true
-        } else if self.config.replay_scheduling {
-            self.fast_path.fast_orders_dirty || now_ms >= self.fast_path.fast_next_exit_deadline_ms
-        } else {
-            true
-        };
-        if self.config.auto_exits_enabled && !all_hold && residual_scan {
-            // Issue #464: a ladder tranche's SELL is a PARTIAL exit — while it
-            // works, the position has shares left on purpose. The residual
-            // backstop below re-closes exactly such remainders, so a ladder
-            // book would be re-flattened wholesale one tick after every
-            // step. A position whose token has a working or recently filled
-            // ladder SELL stays out of this scan until the ladder's own next
-            // step (or stop) takes it the rest of the way. No-ladder runs
-            // never carry tranches, so their scan is untouched.
-            let ladder_tranche_tokens: HashSet<String> = jobs
-                .iter()
-                .filter(|j| j.close_shares.is_some())
-                .map(|j| j.token.clone())
-                .collect();
-            for pos in self.positions.open_positions().to_vec() {
-                if !has_job.insert(pos.id.clone()) {
-                    continue;
-                }
-                if ladder_tranche_tokens.contains(&pos.token_id) {
-                    continue;
-                }
-                let has_live_sell = self
-                    .ome
-                    .live_for(&pos.token_id, Side::Sell)
-                    .into_iter()
-                    .any(|o| o.status.is_live());
-                if has_live_sell {
-                    continue;
-                }
-                let closed_here = self
-                    .ome
-                    .has_filled_sell_since(&pos.token_id, pos.entered_at_ms);
-                if !closed_here {
-                    continue;
-                }
-                let price = if pos.current_price > Decimal::ZERO {
-                    pos.current_price
-                } else {
-                    Decimal::new(1, 2)
-                };
-                jobs.push(ExitJob {
-                    position_id: pos.id.clone(),
-                    token: pos.token_id.clone(),
-                    condition_id: pos.condition_id.clone(),
-                    price,
-                    reason: ExitReason::ForceExit,
-                    use_maker: false,
-                    exit_price: None,
-                    internal_key: exit_intent_key("exit-residual", &pos, ""),
-                    strategy: pos.strategy.clone(),
-                    asset: pos.asset.clone(),
-                    direction: pos.direction.as_str().to_string(),
-                    // E28 (§9.2): the residual re-close spends from the
-                    // position's own account.
-                    account_id: pos.account_id.clone(),
-                    close_shares: None,
-                });
-            }
-        }
+        jobs
+    }
 
+    /// Submit resolved [`ExitJob`]s: the submission half of `run_exit_checks`
+    /// (live-sell dedup, reject backoff, sizing, maker/taker pricing, place).
+    /// Verbatim from the loop it replaces (pure code motion, #963).
+    pub(crate) fn submit_exit_jobs(&mut self, jobs: Vec<ExitJob>, now_ms: i64) {
         for job in jobs {
             let already_live = self
                 .ome
@@ -1351,8 +1433,16 @@ impl Core {
                 };
                 size
             };
+            // #963: a maker-first exit rests as `MakerThenTaker` under the
+            // exit's OWN escalation clock (`exit_maker_timeout_ms`, shipped
+            // 250 ms) — it used to rest as a pure `Maker` and NEVER escalate,
+            // while entries waited at most the 5 s entry default. The exit
+            // the operator most wants filled had no deadline at all. A
+            // negative timeout keeps the pure-maker posture (the operator's
+            // off switch); `0` falls back to the entry default, the pre-#963
+            // shape. Stops and every other taker sweep are unchanged.
             let mode = if job.use_maker {
-                FillPolicy::Maker
+                FillPolicy::MakerThenTaker
             } else {
                 FillPolicy::Taker
             };
@@ -1433,10 +1523,17 @@ impl Core {
             // Record the intended exit reason so a full sell fill closes with it
             // (bounded and cleaned up by the close: issue #190).
             self.note_exit_reason(&job.token, job.reason);
-            if let Err(e) = self.place(order, 0, now_ms) {
+            // #963: the exit's own maker→taker clock rides here — a taker
+            // job ignores it (nothing to escalate), a maker job arms its
+            // escalation at `exit_maker_timeout_ms` instead of resting
+            // forever.
+            if let Err(e) = self.place(
+                order,
+                self.config.positions.exit.exit_maker_timeout_ms,
+                now_ms,
+            ) {
                 self.emit_error(e);
             }
         }
-        Ok(())
     }
 }

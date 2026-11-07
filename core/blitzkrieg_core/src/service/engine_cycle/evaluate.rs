@@ -157,7 +157,18 @@ impl Core {
         }
         // Close intents produced by strategies this cycle join the SAME exit
         // submission path as policy exits (handled in run_exit_checks).
-        self.strategy_exits.extend(engine.drain_strategy_exits());
+        //
+        // issue #963: on a LIVE kernel those intents submit THIS cycle,
+        // before the entry loop below places anything — an exit signal must
+        // not wait a full maintenance interval behind the very entries it
+        // races for liquidity (the maintenance pass's exit checks run before
+        // the engine cycle, so the deferred path always lost the same-cycle
+        // race). The submission itself happens right after the engine borrow
+        // ends, ahead of `arb_precheck_filter` and the placement loop.
+        // Replays keep the deferred path: the #390 scheduling shape pins the
+        // exit pass to the tick, and the merged pass's output must stay
+        // byte-identical.
+        let drained_exits = engine.drain_strategy_exits();
         engine.tally_blocked();
         // E2-b: an honoured gate exemption is always logged (and counted), so an
         // opt-out is auditable rather than a silent hole in the entry gates.
@@ -180,6 +191,15 @@ impl Core {
             .into_iter()
             .map(|o| (o.token_id.clone(), o))
             .collect();
+        // issue #963 (see the drain above): the live kernel submits this
+        // cycle's strategy close intents HERE — ahead of every entry this
+        // loop is about to place. The engine borrow ended above, so the exit
+        // submission can take the core lock; ordering is the whole point.
+        if replay_sched {
+            self.strategy_exits.extend(drained_exits);
+        } else {
+            self.submit_strategy_exits_now(drained_exits, now_ms);
+        }
         // ── RFC 568 阶段一（补钉 5 的消费侧）：A≠B 校验的拒绝回执 →
         // APPLICATION 错误事件（点名字段 pair.key）。订单路径照旧 —— 校验
         // 拒的是「声明」，不是腿（裸腿由 arb_precheck 的整组语义与内核去重

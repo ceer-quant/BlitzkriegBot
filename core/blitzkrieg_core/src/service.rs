@@ -1292,6 +1292,7 @@ mod tests {
     mod order_state_machine_462_tests;
     mod pair_entry_maker_tests;
     mod postonly_entry_maker_tests;
+    mod risk_bottom_line_963_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;
     mod settlement_service_tests;
