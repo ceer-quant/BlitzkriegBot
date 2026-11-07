@@ -9,7 +9,10 @@
 //!
 //! Backtest path: [`ReplaySource`] ([`DataSource`]) reads that same archive back
 //! in timestamp order and feeds it to the backtester, so both sides speak one
-//! format and one event taxonomy.
+//! format and one event taxonomy. The read side ([`DataSource`], [`TimedEvent`],
+//! [`SourceStats`], [`ReplaySource`], [`SegmentSource`], `open_replay*`) is
+//! canonically owned by the `blitzkrieg_data_model` leaf since #840 PR3 and
+//! re-exported here; this module owns only the live writer.
 //!
 //! Archive format — JSONL, one event per line, Decimals as strings (exact, unlike
 //! the f64-number convention used on the IPC wire):
@@ -50,56 +53,28 @@
 //! decision clock.
 
 use crate::engine::DataEvent;
-use serde_json::Value;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-// #648 C: `event_at_ms` / `event_to_json` / `event_from_json` moved verbatim
-// to `blitzkrieg_data_model` (the leaf the offline `tools/onchain_pull` crate
-// also compiles against, with the replay readers those tests drive); these
-// re-exports keep every `crate::data_source::event_*` spelling in the kernel
-// compiling unchanged. The archive WRITER below stays kernel-side: recording
-// is a live-core concern (locks, rotation, disk guards); reading a stream is
-// the leaf's contract, duplicated here verbatim because the kernel's
-// ReplaySource pairs with EventArchive's segment naming and lock semantics.
+// #648 C / #840 PR3 (replay 家址): the whole read side of the stream contract
+// moved verbatim to `blitzkrieg_data_model` — the leaf the offline
+// `tools/onchain_pull` crate also compiles against. Canonical home:
+//
+// * `blitzkrieg_data_model::replay` — [`DataSource`], [`TimedEvent`],
+//   [`SourceStats`], [`ReplaySource`], [`SegmentSource`], [`open_replay`],
+//   [`open_replay_all`] and the JSONL codec (`event_at_ms` / `event_to_json` /
+//   `event_from_json`): the data/replay contract leaf, ONE definition;
+// * THIS module — only the live writer side ([`EventArchive`], [`DataSink`],
+//   segment naming, disk guards): recording is a live-core concern, reading a
+//   stream is the leaf's contract.
+//
+// The re-exports below keep every `crate::data_source::…` spelling in the
+// kernel compiling unchanged; there is no second definition anywhere.
+pub use blitzkrieg_data_model::{
+    DataSource, ReplaySource, SegmentSource, SourceStats, TimedEvent, open_replay, open_replay_all,
+};
 pub use blitzkrieg_data_model::{event_at_ms, event_from_json, event_to_json};
-
-/// One market-data event plus the timestamp it must be replayed at.
-#[derive(Debug, Clone)]
-pub struct TimedEvent {
-    pub at_ms: i64,
-    pub event: DataEvent,
-}
-
-/// Counters a source reports into a backtest report (zeros when a source has no
-/// parser, e.g. an in-memory list).
-#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceStats {
-    pub events: u64,
-    /// Lines that could not be parsed (skipped, not fatal).
-    pub malformed_lines: u64,
-    /// Events whose timestamp went backwards relative to the previous event.
-    pub out_of_order_events: u64,
-    /// #354 (5.2): Spot ticks the source parsed — the corpus-completeness
-    /// anchor for the spot-driven strategies. A corpus that lost its spot rows
-    /// reports a count far below the builder's tally instead of replaying
-    /// "successfully" blind.
-    pub spot_events: u64,
-}
-
-/// Pull side: a timestamp-ordered supply of market-data events.
-pub trait DataSource {
-    /// Next event, or `None` when the source is exhausted.
-    fn next_event(&mut self) -> Option<TimedEvent>;
-    /// Human-readable provenance for logs/reports (path, counts, …).
-    fn describe(&self) -> String;
-    /// Parser/stream counters for the report.
-    fn stats(&self) -> SourceStats {
-        SourceStats::default()
-    }
-}
 
 /// Push side: where market-data events are recorded (live → archive).
 pub trait DataSink {
@@ -369,60 +344,6 @@ fn stamped_event(at: i64, ev: &DataEvent) -> DataEvent {
     out
 }
 
-/// Does `name` match the exact shape `next_segment_path` produces —
-/// `{stem}.{UTC-stamp|ms}[-NNNN].jsonl`? The old prefix-only rule
-/// (`{stem}.` + any tail) swallowed sibling datasets like
-/// `<stem>.trades.jsonl` (#352: the onchain raw-fills side file) as
-/// phantom replay segments, so every raw line was counted malformed.
-fn is_rotated_segment(stem: &str, name: &str) -> bool {
-    let Some(body) = name
-        .strip_prefix(&format!("{stem}."))
-        .and_then(|b| b.strip_suffix(".jsonl"))
-    else {
-        return false;
-    };
-    let body = match body.rsplit_once('-') {
-        // Trailing `-NNNN` is the rotate-clobber disambiguator.
-        Some((base, seq)) if !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()) => base,
-        _ => body,
-    };
-    // The timestamp itself is a fixed-width UTC stamp (`YYYYMMDDTHHMMSSZ`:
-    // digits with one `T` at index 8 and a trailing `Z`) or the numeric
-    // fallback (venue ms). Anything else is a different dataset, not a
-    // segment of this one.
-    if !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    body.len() == 16
-        && body.as_bytes()[8] == b'T'
-        && body.ends_with('Z')
-        && body
-            .char_indices()
-            .all(|(i, c)| c.is_ascii_digit() || i == 8 || i == 15)
-}
-
-/// Sort key for an archive segment name: rotated segments first (in write order),
-/// the live path last (it is the segment still being written). Within the rotated
-/// group, `base` is the timestamp in the name — a fixed-width UTC stamp, or the
-/// numeric fallback — so comparing it as text still matches chronological order.
-fn segment_sort_key(stem: &str, name: &str, live: Option<&str>) -> (u8, String, u32) {
-    if live == Some(name) {
-        return (1, String::new(), 0);
-    }
-    let body = name
-        .strip_prefix(&format!("{stem}."))
-        .unwrap_or(name)
-        .strip_suffix(".jsonl")
-        .unwrap_or(name);
-    match body.rsplit_once('-') {
-        // `20250914T120000Z-0002` → ("20250914T120000Z", 2)
-        Some((base, seq)) if !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()) => {
-            (0, base.to_string(), seq.parse().unwrap_or(0))
-        }
-        _ => (0, body.to_string(), 0),
-    }
-}
-
 /// A writable sink used to park the file handle while a segment is renamed. It
 /// is never written to (only swapped out again on the next open), so a temp path
 /// is fine and keeps the rename off any shared state.
@@ -623,272 +544,6 @@ impl DataSink for EventArchive {
             }
         )
     }
-}
-
-// ── replay reader (disk → backtest) ─────────────────────────────────────────
-
-/// Streams an [`EventArchive`] back in file order (which the live writer produced
-/// in timestamp order).
-///
-/// Malformed lines are skipped and counted (one warn per run, not per line) so a
-/// single corrupt tail cannot abort a long replay. Out-of-order timestamps are
-/// counted and surfaced: the backtester clamps them to the current clock.
-pub struct ReplaySource {
-    path: PathBuf,
-    reader: BufReader<File>,
-    buf: String,
-    line_no: u64,
-    events: u64,
-    skipped: u64,
-    out_of_order: u64,
-    /// #354 (5.2): Spot ticks parsed — the completeness counter.
-    spots: u64,
-    last_at_ms: Option<i64>,
-    warned: bool,
-}
-
-impl ReplaySource {
-    pub fn open(path: &Path) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            reader: BufReader::new(file),
-            buf: String::new(),
-            line_no: 0,
-            events: 0,
-            skipped: 0,
-            out_of_order: 0,
-            spots: 0,
-            last_at_ms: None,
-            warned: false,
-        })
-    }
-
-    pub fn skipped_lines(&self) -> u64 {
-        self.skipped
-    }
-    pub fn out_of_order_events(&self) -> u64 {
-        self.out_of_order
-    }
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl DataSource for ReplaySource {
-    fn next_event(&mut self) -> Option<TimedEvent> {
-        loop {
-            self.buf.clear();
-            match self.reader.read_line(&mut self.buf) {
-                Ok(0) => return None,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, path = %self.path.display(), "replay source: read failed");
-                    return None;
-                }
-            }
-            self.line_no += 1;
-            let line = self.buf.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let value: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.skipped += 1;
-                    if !self.warned {
-                        tracing::warn!(line = self.line_no, error = %e, "replay source: skipping malformed lines");
-                        self.warned = true;
-                    }
-                    continue;
-                }
-            };
-            let event = match event_from_json(&value) {
-                Ok(ev) => ev,
-                Err(e) => {
-                    self.skipped += 1;
-                    if !self.warned {
-                        tracing::warn!(line = self.line_no, error = %e, "replay source: skipping malformed lines");
-                        self.warned = true;
-                    }
-                    continue;
-                }
-            };
-            if matches!(event, DataEvent::Spot { .. }) {
-                self.spots += 1;
-            }
-            let at_ms = event_at_ms(&event);
-            if let Some(prev) = self.last_at_ms
-                && at_ms < prev
-            {
-                self.out_of_order += 1;
-            }
-            self.last_at_ms = Some(at_ms.max(self.last_at_ms.unwrap_or(at_ms)));
-            self.events += 1;
-            return Some(TimedEvent { at_ms, event });
-        }
-    }
-
-    fn describe(&self) -> String {
-        // Streaming counters come from `stats()` after the run: a label printed
-        // before the first read must not claim the archive is empty.
-        format!("replay {}", self.path.display())
-    }
-
-    fn stats(&self) -> SourceStats {
-        SourceStats {
-            events: self.events,
-            malformed_lines: self.skipped,
-            out_of_order_events: self.out_of_order,
-            spot_events: self.spots,
-        }
-    }
-}
-
-/// Convenience: open a replay source, mapping the io error to a message.
-pub fn open_replay(path: &str) -> Result<ReplaySource, String> {
-    ReplaySource::open(Path::new(path)).map_err(|e| format!("cannot open archive {path}: {e}"))
-}
-
-/// A 24/7 capture rotates, so a replay must be able to read a whole directory of
-/// segments in time order rather than one file. Segments are the archive plus its
-/// rotated siblings (`events.jsonl` + `events.<UTC>.jsonl`); ordering is by the
-/// UTC stamp in the name, which is also the order they were written in.
-pub struct SegmentSource {
-    sources: Vec<ReplaySource>,
-    current: usize,
-    events: u64,
-    skipped: u64,
-    out_of_order: u64,
-    /// #354 (5.2): Spot ticks folded in from exhausted segments.
-    spots: u64,
-    last_at_ms: Option<i64>,
-    label: String,
-}
-
-impl SegmentSource {
-    /// Open every `.jsonl` segment that belongs to `path` (the archive itself plus
-    /// its UTC-stamped siblings), in write order. Returns an error when nothing
-    /// matched, so a typo in the path is still reported.
-    pub fn open_dir(path: &Path) -> Result<Self, String> {
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "events".into());
-        let live = path.file_name().map(|s| s.to_string_lossy().to_string());
-
-        let mut names: Vec<String> = Vec::new();
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("cannot read archive dir {}: {e}", dir.display()))?;
-        for e in entries.flatten() {
-            let Some(name) = e.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if !name.ends_with(".jsonl") {
-                continue;
-            }
-            // Belongs to this archive when it is the archive itself, or a rotated
-            // sibling in the exact shape the writer produces (`stem.<stamp>[-N].jsonl`).
-            // A loose prefix rule would swallow sibling datasets like the #352
-            // onchain `<stem>.trades.jsonl` and count every raw line malformed.
-            let is_mine = Some(&name) == live.as_ref() || is_rotated_segment(&stem, &name);
-            if is_mine {
-                names.push(name);
-            }
-        }
-        if names.is_empty() {
-            return Err(format!(
-                "no archive segments matching {} in {}",
-                path.display(),
-                dir.display()
-            ));
-        }
-        // Order by write time, derived from the name, not by raw bytes: a rotated
-        // segment is `stem.<stamp>[-<seq>].jsonl` and the live path is `stem.jsonl`.
-        // Raw lexicographic order would put `-0002` before `.jsonl` and the live
-        // path in the middle — replay would then mix different instants together.
-        names.sort_by(|a, b| {
-            segment_sort_key(&stem, a, live.as_deref()).cmp(&segment_sort_key(
-                &stem,
-                b,
-                live.as_deref(),
-            ))
-        });
-
-        let mut sources = Vec::with_capacity(names.len());
-        for name in &names {
-            let p = dir.join(name);
-            sources.push(
-                ReplaySource::open(&p)
-                    .map_err(|e| format!("cannot open segment {}: {e}", p.display()))?,
-            );
-        }
-        let label = format!("{} ({} segment(s))", path.display(), sources.len());
-        Ok(Self {
-            sources,
-            current: 0,
-            events: 0,
-            skipped: 0,
-            out_of_order: 0,
-            spots: 0,
-            last_at_ms: None,
-            label,
-        })
-    }
-
-    pub fn segments(&self) -> usize {
-        self.sources.len()
-    }
-}
-
-impl DataSource for SegmentSource {
-    fn next_event(&mut self) -> Option<TimedEvent> {
-        loop {
-            let src = self.sources.get_mut(self.current)?;
-            if let Some(te) = src.next_event() {
-                // Carry the counters and the cross-segment clock clamp forward, so
-                // a boundary that goes backwards is still reported like any other
-                // out-of-order arrival.
-                let at_ms = te.at_ms;
-                if let Some(prev) = self.last_at_ms
-                    && at_ms < prev
-                {
-                    self.out_of_order += 1;
-                }
-                self.last_at_ms = Some(at_ms.max(self.last_at_ms.unwrap_or(at_ms)));
-                self.events += 1;
-                return Some(te);
-            }
-            // Exhausted: fold in this segment's parse counters and move on.
-            self.skipped += src.skipped_lines();
-            self.spots += src.stats().spot_events;
-            self.current += 1;
-        }
-    }
-
-    fn describe(&self) -> String {
-        format!("replay {}", self.label)
-    }
-
-    fn stats(&self) -> SourceStats {
-        SourceStats {
-            events: self.events,
-            malformed_lines: self.skipped,
-            out_of_order_events: self.out_of_order,
-            spot_events: self.spots,
-        }
-    }
-}
-
-/// Open a replay that covers an archive and (when present) its rotated segments.
-/// A single-file archive and a directory of segments both work; the returned
-/// source reports aggregate counters either way.
-pub fn open_replay_all(path: &str) -> Result<SegmentSource, String> {
-    SegmentSource::open_dir(Path::new(path))
 }
 
 #[cfg(test)]
