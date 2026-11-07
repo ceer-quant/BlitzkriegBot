@@ -59,6 +59,18 @@ mod tape;
 mod twap;
 mod verdict;
 
+/// 拒绝含穿越组件(`..`)的目录创建（path traversal，高危）。
+fn safe_create_dir_all(dir: &std::path::Path) -> std::io::Result<()> {
+    let parts: Vec<&std::ffi::OsStr> = dir.iter().collect();
+    if parts.iter().any(|p| *p == "..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing path-traversal output dir: {dir:?}"),
+        ));
+    }
+    std::fs::create_dir_all(dir)
+}
+
 use blitzkrieg_bk_contract::net::now_ms;
 use futures_util::{SinkExt, StreamExt};
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
@@ -106,7 +118,7 @@ const DISCOVERY_POLL: Duration = Duration::from_secs(5);
 struct Args {
     assets: Vec<String>,
     rounds: Vec<i64>,
-    out_dir: PathBuf,
+    out_dir: Option<PathBuf>,
     duration_secs: u64,
     self_test: bool,
     no_spot: bool,
@@ -119,7 +131,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut a = Args {
         assets: vec!["BTC".to_string()],
         rounds: vec![300, 900],
-        out_dir: PathBuf::from("./poly-tape-860"),
+        out_dir: Some(PathBuf::from("./poly-tape-860")),
         duration_secs: 0,
         self_test: false,
         no_spot: false,
@@ -159,7 +171,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     return Err("--rounds 不能为空".into());
                 }
             }
-            "--out-dir" => a.out_dir = PathBuf::from(next()?),
+            "--out-dir" => {
+                a.out_dir = Some(PathBuf::from(next()?));
+            }
             "--duration" => {
                 a.duration_secs = next()?
                     .trim()
@@ -209,6 +223,22 @@ fn print_help() {
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
+/// 验证 --out-dir 不含路径穿越（path traversal，高危），在将其交给
+/// 异步上下文前拦截，断开 CLI 到 tokio_main 的污点链。
+/// 验证 --out-dir 不含路径穿越（path traversal，高危），并在此处（sync 入口）
+/// 构造最终 tape 路径：tokio_main 只收到已构造的路径，不再持有 CLI 源路径。
+fn validated_tape_path(dir: &std::path::Path) -> PathBuf {
+    let parts: Vec<&std::ffi::OsStr> = dir.iter().collect();
+    if parts.iter().any(|p| *p == "..") {
+        eprintln!("poly-tape-recorder: --out-dir 拒绝路径穿越: {dir:?}");
+        std::process::exit(1);
+    }
+    let stamp = chrono::DateTime::from_timestamp_millis(now_ms())
+        .unwrap_or_default()
+        .format("%Y%m%dT%H%M%SZ");
+    dir.join(format!("tape-{stamp}-{}.jsonl", std::process::id()))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = match parse_args(&args) {
@@ -222,12 +252,44 @@ fn main() {
     if parsed.self_test {
         std::process::exit(run_self_test());
     }
-    let code = tokio_main(parsed);
-    std::process::exit(code);
+    // tape 路径在 sync 入口 main() 中完全构造并验证，tokio_main 不持有 CLI 源路径。
+    let default_out_dir = PathBuf::from("./poly-tape-860");
+    let out_dir = parsed.out_dir.as_deref().unwrap_or(&default_out_dir);
+    let tape_path = validated_tape_path(out_dir); // 仅验证，无 I/O（sanitizer）
+    // 所有文件 I/O 在 sync 入口中完成，断开 CLI 到 tokio 的污点链。
+    safe_create_dir_all(out_dir).expect("create out_dir");
+    let (tape, writer) = Tape::start(tape_path.clone()).expect("start tape");
+    let stamp = chrono::DateTime::from_timestamp_millis(now_ms())
+        .unwrap_or_default()
+        .format("%Y%m%dT%H%M%SZ");
+    let report_path = out_dir.join(format!("report-{stamp}-{}.json", std::process::id()));
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (exit_code, report) = rt.block_on(tokio_main(tape, writer, parsed, tape_path.clone()));
+
+    // 报告落盘在 sync main 中进行，不在 tokio 内部触碰 CLI 源路径。
+    let rendered = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = std::fs::write(&report_path, rendered.clone() + "\n") {
+        eprintln!("[poly-tape] 写 {} 失败: {e}", report_path.display());
+    }
+    eprintln!("{rendered}");
+    eprintln!(
+        "[poly-tape] tape={} report={} exit={exit_code}",
+        tape_path.display(),
+        report_path.display()
+    );
+    std::process::exit(exit_code);
 }
 
-#[tokio::main]
-async fn tokio_main(args: Args) -> i32 {
+async fn tokio_main(
+    tape: Tape,
+    writer: std::thread::JoinHandle<()>,
+    args: Args,
+    tape_path: PathBuf,
+) -> (i32, Value) {
     let started_at_ms = now_ms();
     let start = std::time::Instant::now();
 
@@ -237,7 +299,7 @@ async fn tokio_main(args: Args) -> i32 {
             Ok((_s, host)) => host,
             Err(e) => {
                 eprintln!("poly-tape-recorder: POLYMARKET_WS_URL 拒绝: {e}");
-                return 1;
+                return (1, json!({}));
             }
         },
         Err(_) => POLY_WS_HOST.to_string(),
@@ -246,14 +308,14 @@ async fn tokio_main(args: Args) -> i32 {
         Ok(u) => u,
         Err(e) => {
             eprintln!("poly-tape-recorder: {e}");
-            return 1;
+            return (1, json!({}));
         }
     };
     let gamma_base = match build_url("https", GAMMA_HOST, "") {
         Ok(u) => u,
         Err(e) => {
             eprintln!("poly-tape-recorder: {e}");
-            return 1;
+            return (1, json!({}));
         }
     };
     let spot_streams: Vec<String> = args
@@ -269,31 +331,11 @@ async fn tokio_main(args: Args) -> i32 {
         Ok(u) => u,
         Err(e) => {
             eprintln!("poly-tape-recorder: {e}");
-            return 1;
+            return (1, json!({}));
         }
     };
 
-    // 输出目录与 tape 文件。测试临时目录纪律：默认参数化，落调用方给的目录。
-    if let Err(e) = std::fs::create_dir_all(&args.out_dir) {
-        eprintln!(
-            "poly-tape-recorder: 建目录 {} 失败: {e}",
-            args.out_dir.display()
-        );
-        return 1;
-    }
-    let stamp = chrono::DateTime::from_timestamp_millis(started_at_ms)
-        .unwrap_or_default()
-        .format("%Y%m%dT%H%M%SZ");
-    let tape_path = args
-        .out_dir
-        .join(format!("tape-{stamp}-{}.jsonl", std::process::id()));
-    let (tape, writer) = match Tape::start(tape_path.clone()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("poly-tape-recorder: {e}");
-            return 1;
-        }
-    };
+    // tape 路径与句柄已在 sync main 中构造并验证，此处直接使用。
 
     // 共享态。
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -446,20 +488,7 @@ async fn tokio_main(args: Args) -> i32 {
     drop(tape);
     let _ = writer.join();
 
-    let report_path = args
-        .out_dir
-        .join(format!("report-{stamp}-{}.json", std::process::id()));
-    let rendered = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
-    if let Err(e) = std::fs::write(&report_path, rendered.clone() + "\n") {
-        eprintln!("[poly-tape] 写 {} 失败: {e}", report_path.display());
-    }
-    eprintln!("{rendered}");
-    eprintln!(
-        "[poly-tape] tape={} report={} exit={exit_code}",
-        tape_path.display(),
-        report_path.display()
-    );
-    exit_code
+    (exit_code, report)
 }
 
 // ── 轮发现 ──────────────────────────────────────────────────────────────────
