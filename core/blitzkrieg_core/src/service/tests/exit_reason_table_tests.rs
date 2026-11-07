@@ -535,8 +535,7 @@ fn thesis_death_exit_closes_same_tick_with_no_residual() {
     assert_eq!(closed.exit_reason, ExitReason::ThesisDeathExit);
     assert!(
         c.exit_reason_ledger.exit_reasons.is_empty(),
-        "the close must retire its pending exit reason: {:?}",
-        c.exit_reason_ledger.exit_reasons
+        "the close must retire its pending exit reason (a residual entry is an orphaned in-flight close)"
     );
     // The wire label is the audit trail (serde snake_case, the trade record's
     // exitReason spelling).
