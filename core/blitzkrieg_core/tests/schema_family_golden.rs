@@ -464,3 +464,42 @@ fn family_22_intent_audit_tail_params() {
     let bare: IntentAuditTailParams = serde_json::from_str(r#"{}"#).expect("parse");
     assert!(bare.limit.is_none() && bare.decision.is_none());
 }
+
+// ── 23. unverified-exposure — UnverifiedExposureReport (Serialize; issue 991,
+// additive) ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn family_23_unverified_exposure_report() {
+    use blitzkrieg_core::position::{UnverifiedExposureEntry, UnverifiedExposureReport};
+    let v = UnverifiedExposureReport {
+        entries: vec![UnverifiedExposureEntry {
+            position_id: "hft-7".into(),
+            condition_id: "cond".into(),
+            token_id: "tok".into(),
+            account_id: AccountId("default".into()),
+            strategy: "spread_arb".into(),
+            shares: d("5"),
+            cost_usd: d("2"),
+            fallback_price: d("0.40"),
+            original_fallback_price: Some(d("0.40")),
+            // Issue 991: "reconciled" = venue cash arrived, price still the
+            // estimate. serde(default) keeps pre-991 UI payloads loadable.
+            source: "reconciled".into(),
+            net_pnl_usd: d("-2"),
+            exited_at_ms: 1_758_888_010_000,
+            percentage_of_total_cost: d("12.5"),
+        }],
+        total_positions: 1,
+        total_shares: d("5"),
+        total_cost_usd: d("2"),
+        total_percentage_of_closed_cost: d("12.5"),
+    };
+    // The aggregates predate issue 991 and carry Decimal's default (string)
+    // serde — their shape is FROZEN as-is (additive-only discipline). The
+    // entry-level decimals ride crate::decimal (number-or-string). `source`
+    // is issue 991's additive field, serde(default).
+    assert_eq!(
+        wire(&v),
+        r#"{"entries":[{"positionId":"hft-7","conditionId":"cond","tokenId":"tok","accountId":"default","strategy":"spread_arb","shares":5.0,"costUsd":2.0,"fallbackPrice":0.4,"originalFallbackPrice":0.4,"source":"reconciled","netPnlUsd":-2.0,"exitedAtMs":1758888010000,"percentageOfTotalCost":12.5}],"totalPositions":1,"totalShares":"5","totalCostUsd":"2","totalPercentageOfClosedCost":"12.5"}"#
+    );
+}

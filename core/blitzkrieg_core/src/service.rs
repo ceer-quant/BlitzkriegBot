@@ -1002,9 +1002,10 @@ impl Core {
         self.positions.unverified_exposure_report()
     }
 
-    /// #987: reconcile backfill — flip fallback-closed positions on `condition_id`
-    /// from `source == "fallback"` to `"venue"`, preserving the original fallback
-    /// price for audit. Returns the number of rows flipped.
+    /// #987, issue 991: reconcile backfill — mark fallback-closed positions on
+    /// `condition_id` `source == "reconciled"` when venue cash truth arrives,
+    /// keeping the fallback exit price (issue 991: a price that was estimated
+    /// is never re-labeled `venue`). Returns the number of rows marked.
     pub fn backfill_fallback_to_venue(&mut self, condition_id: &str) -> usize {
         self.positions.backfill_fallback_to_venue(condition_id)
     }

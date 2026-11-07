@@ -231,6 +231,12 @@ pub mod method {
     /// Closed-trade history (Node-compatible records) for the UI.
     pub const TRADES_HISTORY: &str = "trades.history";
     pub const TRADES_SUMMARY: &str = "trades.summary";
+    /// Issue 991: the UNVERIFIED EXPOSURE report — every closed position whose
+    /// exit price is still a bookkeeping estimate (`source == "fallback"` or
+    /// `"reconciled"`; a `venue` close never appears). Read-only, empty params.
+    /// Separate from realized PnL by construction; the UI display is the
+    /// panel's lane, this is only the query surface.
+    pub const POSITIONS_UNVERIFIED_EXPOSURE: &str = "positions.unverified_exposure";
     /// Manually trigger a reconciliation sweep with a caller-supplied snapshot
     /// (live venue snapshot is gathered internally in live mode; this method is
     /// mainly for tests/ops).

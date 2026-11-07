@@ -472,6 +472,9 @@ async fn handle_line(
         method::POSITION_FORCE_CLOSE => {
             handlers::position::handle_position(method, core, peer, params).await
         }
+        method::POSITIONS_UNVERIFIED_EXPOSURE => {
+            handlers::position::handle_position(method, core, peer, params).await
+        }
         method::BOOK_SNAPSHOT => {
             handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
         }

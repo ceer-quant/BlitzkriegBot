@@ -208,3 +208,95 @@ async fn an_omitted_id_keeps_the_historical_flatten_all() {
     assert_eq!(reply["result"]["closed"], serde_json::json!(1), "{reply}");
     assert!(open_positions(&core, &registry, &peer).await.is_empty());
 }
+
+/// Issue 991: `positions.unverified_exposure` answers the unverified exposure
+/// report over IPC. The row in the report is a REAL fallback close (the core's
+/// own audited force-close path) — no mock data. A `venue` close never appears
+/// in the report; the aggregates ride Decimal's default (string) serde, the
+/// entry decimals the number-or-string wire rule.
+#[tokio::test]
+async fn unverified_exposure_query_reports_real_fallback_rows() {
+    use blitzkrieg_market_api::net::now_ms;
+    // A private audit path: the force-close gate refuses an unaudited close.
+    let dir = std::env::temp_dir().join(format!("bk-unverified-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = CoreConfig {
+        manual_ops_audit_path: Some(
+            dir.join("audit/manual-ops.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ..Default::default()
+    };
+    let mut c = Core::new(cfg.clone());
+    c.set_balance(cfg.dry_seed_balance);
+    let core = Arc::new(AsyncMutex::new(c));
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    let peer = PeerAuth::SameUid { uid: own_uid() };
+
+    // Empty book: the frozen envelope with an empty list — never `null`,
+    // never METHOD_NOT_FOUND.
+    let empty = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"positions.unverified_exposure","params":{}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(empty.get("error").is_none(), "the query answers: {empty}");
+    assert_eq!(empty["result"]["report"]["entries"], serde_json::json!([]));
+    assert_eq!(
+        empty["result"]["report"]["totalPositions"],
+        serde_json::json!(0)
+    );
+
+    // One real fallback row: open a position on the wire, close it through the
+    // core's audited force-close (source == "fallback"), then query again.
+    open_position(&core, &registry, &peer, "tok", "BTC", "unverified-1").await;
+    let views = open_positions(&core, &registry, &peer).await;
+    let id = views[0]["id"]
+        .as_str()
+        .expect("position view carries id")
+        .to_string();
+    let closed = {
+        let mut c = core.lock().await;
+        // The position's round ends within the next 900 s, so a timestamp
+        // ~3 h out is genuinely past expiry (gate 2 passes).
+        c.force_close_expired_position(&id, "uid:op", now_ms() + 10_800_000)
+            .expect("expired + audited = closed")
+    };
+    assert_eq!(closed.source, "fallback", "precondition: a fallback row");
+
+    let reply = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":2,"method":"positions.unverified_exposure","params":{}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "the query answers: {reply}");
+    assert_eq!(
+        reply["result"]["report"]["totalPositions"],
+        serde_json::json!(1),
+        "the fallback row is on the report: {reply}"
+    );
+    assert_eq!(
+        reply["result"]["report"]["entries"][0]["positionId"],
+        serde_json::json!(id),
+        "the entry names the real closed position: {reply}"
+    );
+    assert_eq!(
+        reply["result"]["report"]["entries"][0]["source"],
+        serde_json::json!("fallback"),
+        "the entry carries its provenance: {reply}"
+    );
+    assert!(
+        reply["result"]["report"]["entries"][0]["netPnlUsd"].is_number()
+            || reply["result"]["report"]["entries"][0]["netPnlUsd"].is_string(),
+        "entry decimals ride the number-or-string wire rule: {reply}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

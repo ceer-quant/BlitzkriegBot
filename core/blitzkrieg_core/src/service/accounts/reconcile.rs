@@ -378,11 +378,16 @@ impl Core {
         // on the venue): fold them into the position book so the position
         // cannot haunt the exit rules forever.
         self.apply_external_fills(&report.unknown_fills, snap.now_ms);
-        // #987: reconcile backfill — venue cash truth has caught up for any
-        // token showing a venue fill. Flip fallback-closed positions on those
-        // tokens from `source == "fallback"` to `"venue"`, preserving the
-        // original fallback price in `original_fallback_price` for audit. No
-        // silent overwrite: the fallback price is kept, never discarded.
+        // #987, issue 991: reconcile backfill — venue cash truth has caught up for any
+        // token showing a venue fill. Mark fallback-closed positions on those
+        // tokens `source == "reconciled"`, keeping the fallback exit price
+        // unchanged: the venue's real fill prices stay in this report
+        // (`VenueTrade.price` / `FilledGap` deltas) and are NOT copied onto the
+        // closed row — the fill's price, size and account need not match the
+        // row's unsold remainder, and the close's cash ledgers (expiry-fallback
+        // credit, day budget, per-strategy accounting, breaker) cannot be
+        // replayed here. A reconciled row stays on the unverified exposure
+        // report, flagged.
         let venue_tokens: HashSet<&str> = report
             .unknown_fills
             .iter()
@@ -402,7 +407,7 @@ impl Core {
             if flipped > 0 {
                 tracing::info!(
                     flipped,
-                    "reconcile backfill: venue cash truth confirmed {} fallback-closed position(s); source flipped to venue, original fallback price preserved for audit",
+                    "reconcile backfill: venue cash truth confirmed {} fallback-closed position(s); source marked reconciled, fallback exit price kept (issue 991: estimated prices are never re-labeled venue)",
                     flipped
                 );
             }

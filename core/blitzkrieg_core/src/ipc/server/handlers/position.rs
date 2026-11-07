@@ -64,6 +64,18 @@ pub(crate) async fn handle_position(
         }
         // Routed here only from `handle_line`'s dispatch, which sends exactly
         // this family's verbs; `&str` matching needs the exhaustive arm.
+        // Issue 991: the unverified exposure report over IPC — every closed
+        // position whose exit price is still a bookkeeping estimate
+        // (`fallback` / `reconciled`), plus aggregates. Read-only; the
+        // `UnverifiedExposureReport` type is the schema (serde camelCase,
+        // decimal-as-number-or-string, the same wire rules every view wears).
+        method::POSITIONS_UNVERIFIED_EXPOSURE => {
+            let report = core.lock().await.unverified_exposure_report();
+            Ok(serde_json::json!({
+                "version": crate::schema::PROTOCOL_VERSION,
+                "report": serde_json::to_value(report).unwrap_or(Value::Null),
+            }))
+        }
         _ => unreachable!("family handler called with a verb of another family"),
     }
 }
