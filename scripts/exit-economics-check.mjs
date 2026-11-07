@@ -379,6 +379,22 @@ const TEETH_ARMS = [
     label: 'loss side unreachable (no stop, ride to resolution)',
     flags: ['--exit-stop-loss-pct', '100'],
   },
+  {
+    // #961 convergence: with the declared thesis death active, the strategy
+    // carries its OWN loss-side protection — arm 2's "ride to resolution" no
+    // longer degrades where the death band cuts the bleed first (measured,
+    // range-20260920T2300Z: −11.08 → −3.47 net). The unprotected shape is now
+    // the PRE-#961 one: no kernel stop AND no declared death. This arm turns
+    // the package's death bands off through the knob grammar (reversal at
+    // 100% = unreachable, stale timeout off) under the same no-stop kernel,
+    // restoring the shape this gate was built to catch. Tolerances unchanged.
+    label: 'pre-#961 shape (no stop, no declared death)',
+    flags: [
+      '--exit-stop-loss-pct', '100',
+      '--backtest-knob', 'spread_arb:thesis_death_reversal_pct=100',
+      '--backtest-knob', 'spread_arb:thesis_death_stale_ms=0',
+    ],
+  },
 ];
 
 async function main() {
