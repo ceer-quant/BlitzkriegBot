@@ -3,7 +3,7 @@
 - 日期：2026-11-02
 - 问题：#865
 - 语料：`docs/reports/data/mean-reversion-gate/` 四个一小时窗口（sha256 与 `scripts/lib/frozen-corpus.mjs` 一致）
-- 策略版本：pair_discount_arb 1.3.0，single_leg_pair 1.1.0
+- 策略版本：pair_discount_arb 1.3.0，single_leg_pair 1.2.0
 - 脚本：`node scripts/cost-adjusted-edge.mjs --check`
 
 ## 结论
@@ -15,10 +15,10 @@
 | 策略 | 版本 | 判定 |
 | --- | --- | --- |
 | `pair_discount_arb` | 1.3.0 | NO-GO |
-| `single_leg_pair` | 1.1.0 | NO-GO |
+| `single_leg_pair` | 1.2.0 | NO-GO |
 | `lua_momentum` | 0.5.0 | NO-GO |
-| `spread_arb` | 1.0.0 | NO-GO |
-| `mad_dog` | 1.0.0 | NO-GO |
+| `spread_arb` | 1.1.0 | NO-GO |
+| `mad_dog` | 1.1.0 | NO-GO |
 | `market_maker` | 1.1.0 | NO-GO |
 
 ## 每个二元轮的合并盈亏（1 手，合并拿回 $1）
