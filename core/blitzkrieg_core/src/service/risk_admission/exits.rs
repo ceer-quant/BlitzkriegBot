@@ -1,3 +1,4 @@
+use super::exit_jobs::ExitJob;
 use super::*;
 
 /// The limit a strategy-signal SELL may be priced from: the book's best bid,
@@ -579,11 +580,21 @@ impl Core {
         }
         // 2. The systemic per-account limits (issue #983: no global caps).
         //    Armed bounds judge this entry exactly as the pipeline would judge
-        //    a fresh strategy entry.
+        //    a fresh strategy entry — ENTRIES only: a close-intent leg (the
+        //    maker→taker escalation of a resting exit, #963) is the way OUT of
+        //    a position, and the sizing caps bound NEW exposure, never the way
+        //    out (#174 — the same doctrine `check_with_equity` applies to the
+        //    kill switch above). A max_position_size < 1 or a single-loss cap
+        //    smaller than one share's stop must never trap an exit.
         let limits = self.risk.systemic_snapshot();
-        if limits.any_armed() {
+        if limits.any_armed() && !is_close_intent(&req.internal_key) {
             // Same doctrine as the pipeline gate: a holder's bound stop is
             // the wide containment width the walker will actually enforce.
+            // #963: the ordinary path sizes against the WIDEST stop the ramp
+            // ever produces (the base — a fresh position's stop IS the base,
+            // and the ramp only tightens with time held), not the tightest:
+            // passing 0 sized against the 10% floor while the ladder
+            // enforced the 12% base — a 1.2× hole in the single-loss cap.
             let holder = self
                 .engine
                 .as_ref()
@@ -593,10 +604,7 @@ impl Core {
             } else {
                 crate::exit_policy::effective_stop_pct(
                     self.config.positions.exit.stop_loss_pct,
-                    // Time left is unknown on this path; 0 = the bound stop at
-                    // its tightest (no time-adjustment relief), the
-                    // conservative read.
-                    0,
+                    i64::MAX,
                     &self.config.positions.exit,
                 )
             };
@@ -657,6 +665,12 @@ impl Core {
                     o.escalate_at_ms.unwrap_or(now_ms) - o.submitted_at_ms,
                     // E28 (§9.2): the taker leg spends from the maker's account.
                     o.account_id.clone(),
+                    // #963: whether the maker was a CLOSE — the escalated
+                    // taker must keep the close-intent status (the kill
+                    // switch, the family gate and the escalation guard all
+                    // hatch closes), which the plain `{id}:escalated` key of
+                    // an entry leg does not carry.
+                    is_close_intent(&o.internal_key),
                 )
             })
             .collect();
@@ -680,6 +694,7 @@ impl Core {
             slot,
             timeout,
             account_id,
+            close_leg,
         ) in due
         {
             if remaining <= Decimal::ZERO {
@@ -710,6 +725,16 @@ impl Core {
                 &token,
                 &format!("{id}:escalated"),
             );
+            // #963: a CLOSE leg's chase keeps the close-intent status under
+            // the dedicated `exit-escalated:` prefix — the plain
+            // `{id}:escalated` key of an entry leg would strip every close
+            // hatch (kill switch, family gate, the guard's systemic
+            // exemption) from the one order that must never be trapped.
+            let escalated_key = if close_leg {
+                format!("exit-escalated:{id}")
+            } else {
+                format!("{id}:escalated")
+            };
             let mut req = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -717,7 +742,7 @@ impl Core {
                 mode: FillPolicy::Taker,
                 price: worst,
                 size: remaining,
-                internal_key: format!("{id}:escalated"),
+                internal_key: escalated_key,
                 strategy,
                 asset,
                 direction,
@@ -984,32 +1009,6 @@ impl Core {
         }
         let intents = sell_intents;
 
-        // A unit of closing work resolved against a concrete open position.
-        #[derive(Clone)]
-        struct ExitJob {
-            position_id: String,
-            token: String,
-            condition_id: String,
-            price: Decimal,
-            reason: ExitReason,
-            use_maker: bool,
-            /// #915: the strategy's own maker-TP limit (validated against the
-            /// live book in the submission loop before it is used). `None` =
-            /// the kernel's own maker pricing (`maker_exit_price`).
-            exit_price: Option<Decimal>,
-            internal_key: String,
-            strategy: String,
-            asset: String,
-            direction: String,
-            /// E28 (§9.2): the account the closing SELL spends from — the
-            /// position's own book, so an exit can never debit another account.
-            account_id: AccountId,
-            /// Issue #464: shares to sell (`None` = the whole sellable
-            /// position, every path's historical behavior). A ladder step's
-            /// tranche rides here from the `ExitRequest`.
-            close_shares: Option<Decimal>,
-        }
-
         let mut jobs: Vec<ExitJob> = Vec::new();
         let mut has_job: HashSet<String> = HashSet::new();
 
@@ -1116,131 +1115,11 @@ impl Core {
             }
         }
 
-        // Strategy-signal exits: resolve the token to a live position and price
-        // off its latest valuation, exactly like a manual flatten. The intent's
-        // OWN account is the first key (账户↔venue 解耦: two scopes can hold
-        // the same token; the close must land on the intending scope's row),
-        // and the job's internal key carries the account segment so two
-        // accounts' exit ladders never collide in the place-cooldown/dedup
-        // map. A legacy intent (no account — the pre-fanout shape) resolves
-        // to `default`, the same row it always hit.
-        for intent in intents {
-            // #915: the strategy MAY ride its own maker-TP limit
-            // (`exit_price`) on the intent. It is honoured ONLY when the same
-            // maker-first gate stack accepts the close as a maker — a price
-            // advisory can never convert a taker exit into a maker one.
-            let strategy_exit_price = intent
-                .exit_price
-                .as_deref()
-                .and_then(|s| Decimal::from_str_exact(s).ok());
-            let intent_account = AccountId::from(intent.account_id.as_str());
-            let Some(pos) = self
-                .positions
-                .open_positions()
-                .iter()
-                .find(|p| p.token_id == intent.token_id && p.account_id == intent_account)
-                .cloned()
-            else {
-                continue;
-            };
-            if !has_job.insert(pos.id.clone()) {
-                continue; // an automated/policy exit already closes it this cycle
-            }
-            // Best bid only. A missing or stale bid must not fall through to
-            // the mid or to `current_price` (a display mark). The strategy
-            // already judged the exit off this same bid; selling a different
-            // number would book a profit nobody was offering.
-            let Some(price) = strategy_signal_sell_bid(
-                self.books.get(&pos.token_id),
-                now_ms,
-                self.config.positions.exit.max_book_age_sec,
-            ) else {
-                tracing::info!(
-                    token = %pos.token_id,
-                    strategy = %pos.strategy,
-                    "strategy exit withheld: no fresh best bid (will not sell the mid)"
-                );
-                continue;
-            };
-            let tag: String = intent
-                .reason
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .take(32)
-                .collect();
-            // #935 fix 1: the strategy's own reason is what the ledger records
-            // when this close fills. Only tags that map to a real `ExitReason`
-            // variant pass through; an unknown tag keeps the historic blanket
-            // `StrategySignal` stamp (old files are never rewritten either
-            // way, so history stays stable).
-            let reason = exit_reason_from_strategy_tag(&intent.reason);
-            // #935 fix 2: a TP-class close may rest as a maker (the advisory
-            // rides the intent; the gate + the driver's own `use_maker` have
-            // to agree). Stops and time outs never convert — #915's
-            // counterfactual showed a resting stop does not protect a
-            // crashing leg (0/2), so `use_maker` on those reasons is ignored
-            // no matter what the strategy declared.
-            // #939: the depth-loss half. `reason_is_profit_side` passes a
-            // `trailing_stop` tag from the ROUND side of the ledger, but the
-            // trailing math itself anchors nothing at entry (`gave_back`
-            // constrains peak−cur only; manifest knobs like arm=0/give=500
-            // fire it below the entry too) — gate on the position's own
-            // holders' PnL mark instead: a close the kernel is ALREADY below
-            // its entry on is a loss to be escaped, not a profit to bank.
-            // Resting it above the bid would repeat #915's "stop resting,
-            // 0/2 filled" (the maker-first maker never crosses a falling
-            // touch until `maker_timeout_ms` escalates it), so when the
-            // position is underwater the advisory degrades to the taker
-            // sweep right here.
-            let pnl_pct = position_pnl_pct(&pos);
-            let use_maker = intent.use_maker
-                && reason_is_profit_side(reason)
-                && self.config.positions.exit.strategy_exit_maker_first
-                // #939 labor-core kernel PnL guard: proceeds at-or-above entry only.
-                && pnl_pct >= Decimal::ZERO;
-            if intent.use_maker && !use_maker {
-                tracing::debug!(
-                    token = %pos.token_id,
-                    strategy = %pos.strategy,
-                    reason = %intent.reason,
-                    pnl_pct = %pnl_pct,
-                    "maker-first exit advisory not applied (reason class, kernel gate, or underwater)"
-                );
-            }
-            // #915: the intent's own price is candidate material ONLY in the
-            // maker path. Taker closes always price off the fresh best bid
-            // (the #180 rule — the kernel sells at what a buyer offers, never
-            // at a number a strategy quoted); a `Some` price on a taker
-            // conversion is advisory-only and silently unused, matching how
-            // `use_maker` degrades.
-            let exit_price = if use_maker { strategy_exit_price } else { None };
-            jobs.push(ExitJob {
-                position_id: pos.id.clone(),
-                token: pos.token_id.clone(),
-                condition_id: pos.condition_id.clone(),
-                price,
-                reason,
-                use_maker,
-                // #915: the strategy's own post-only limit rides the job —
-                // the submission loop validates it against the live book
-                // before using it.
-                exit_price,
-                internal_key: exit_intent_key("exit-strategy", &pos, &tag),
-                strategy: pos.strategy.clone(),
-                asset: pos.asset.clone(),
-                direction: pos.direction.as_str().to_string(),
-                // E28 (§9.2): the strategy-signal exit spends from the
-                // position's own account.
-                account_id: pos.account_id.clone(),
-                close_shares: None,
-            });
-        }
+        // Strategy-signal exits: the SAME intent resolution the live engine
+        // cycle uses for its same-cycle submission (#963
+        // `exit_jobs_from_strategy_intents`), deduped against this cycle's
+        // ladder jobs through `has_job`.
+        jobs.extend(self.exit_jobs_from_strategy_intents(intents, &mut has_job, now_ms));
 
         // E31-b residual backstop: a working exit can be outgrown by its
         // position (a late entry fill lands while the sell is resting), and
@@ -1326,122 +1205,7 @@ impl Core {
             }
         }
 
-        for job in jobs {
-            let already_live = self
-                .ome
-                .live_for(&job.token, Side::Sell)
-                .into_iter()
-                .any(|o| o.status.is_live());
-            if already_live {
-                continue;
-            }
-            // The venue already refused this exit a moment ago: let the
-            // backoff run instead of re-POSTing every tick (the 380+-rejection
-            // storm this guards against). Silent skip — the rejection was
-            // already accounted for when it happened.
-            if self.placement_blocked(&job.internal_key, now_ms) {
-                continue;
-            }
-            // #464: a ladder tranche sells exactly its floor-to-grid size
-            // (never more than the position still holds); `None` sells the
-            // whole sellable position — every no-ladder path, unchanged.
-            let size = if let Some(tranche) = job.close_shares {
-                let Some(whole) = self.positions.sell_shares(&job.position_id) else {
-                    continue;
-                };
-                tranche.min(whole)
-            } else {
-                let Some(size) = self.positions.sell_shares(&job.position_id) else {
-                    continue;
-                };
-                size
-            };
-            let mode = if job.use_maker {
-                FillPolicy::Maker
-            } else {
-                FillPolicy::Taker
-            };
-            // A FOK sell must fill in FULL at or above its limit; priced at
-            // the touch it dies on the first thin tick (thin books race the
-            // quote). Selling LOWER only widens the marketable range — the
-            // venue still fills at the bid or better, so the slip is a floor
-            // for where we agree to sell, not a price we pay.
-            //
-            // #496: a resting (maker) sell priced AT the bid is a crossing
-            // post-only order — the venue refuses it every time, so a live TP
-            // exit could never rest (the rejection storm #163 only backs off;
-            // dry's close-intent exemption masked it). The resting sell goes
-            // one tick ABOVE the bid, clamped to stay strictly inside the
-            // ask (a price at/above the ask would cross the other side and
-            // be refused too). No bid or no book: there is nothing to rest
-            // against, so the job's judged price stands and the venue's own
-            // refusal (or the dry book aging) reports it.
-            //
-            // #915: a strategy-quoted maker limit (`exit_price`) is honoured
-            // only when it is post-only-safe against the LIVE book — strictly
-            // above the best bid (resting, never crossing) and at or below
-            // the best ask (never crossing the other side). Anything else
-            // (no book, no bid,<=bid,>=ask) falls back to the kernel's own
-            // maker pricing: the advisory can choose where to rest among the
-            // legal grid points, it cannot widen what the kernel pays for.
-            let price = if mode == FillPolicy::Taker {
-                marketable_exit_price(job.price, self.config.exit_taker_slip_ticks)
-            } else {
-                match job.exit_price {
-                    Some(quoted) => {
-                        // #915: live book only. A quote is post-only-safe
-                        // when it rests STRICTLY above the best bid (never
-                        // crossing) at or under a LIVE best ask (never
-                        // crossing the other side) — otherwise the kernel's
-                        // own maker pricing takes over. The 0.99 / 0.01
-                        // clamp is the same cell the path's other legs use.
-                        let safe = self
-                            .books
-                            .get(&job.token)
-                            .map(|b| {
-                                b.best_bid()
-                                    .zip(b.best_ask().filter(|a| *a > Decimal::ZERO))
-                                    .is_some_and(|(bid, ask)| quoted > bid && quoted <= ask)
-                            })
-                            .unwrap_or(false);
-                        let price = if safe {
-                            quoted
-                        } else {
-                            tracing::debug!(
-                                token = %job.token,
-                                quoted = %quoted,
-                                "strategy maker-TP limit not post-only-safe — kernel pricing takes over"
-                            );
-                            self.maker_exit_price(&job.token, job.price)
-                        };
-                        price.min(Decimal::new(99, 2)).max(Decimal::new(1, 2))
-                    }
-                    None => self.maker_exit_price(&job.token, job.price),
-                }
-            };
-            let order = OrderRequest {
-                token_id: job.token.clone(),
-                condition_id: job.condition_id,
-                side: Side::Sell,
-                mode,
-                price,
-                size,
-                internal_key: job.internal_key,
-                strategy: job.strategy,
-                asset: job.asset,
-                direction: job.direction,
-                round_slot: 0,
-                // E28 (§9.2): the closing SELL spends from the position's own
-                // account (carried on the job from the position).
-                account_id: job.account_id,
-            };
-            // Record the intended exit reason so a full sell fill closes with it
-            // (bounded and cleaned up by the close: issue #190).
-            self.note_exit_reason(&job.token, job.reason);
-            if let Err(e) = self.place(order, 0, now_ms) {
-                self.emit_error(e);
-            }
-        }
+        self.submit_exit_jobs(jobs, now_ms);
         Ok(())
     }
 }

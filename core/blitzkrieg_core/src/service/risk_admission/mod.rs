@@ -25,6 +25,7 @@ use super::parse_direction;
 use super::{EXIT_REPORT_BEAT_MS, marketable_exit_price};
 
 mod admission;
+mod exit_jobs;
 mod exits;
 mod freeze;
 mod persist;

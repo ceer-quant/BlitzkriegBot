@@ -20,6 +20,13 @@ pub fn is_close_intent(internal_key: &str) -> bool {
         || internal_key.starts_with("exit-strategy:")
         || internal_key.starts_with("flatten:")
         || internal_key.starts_with("exit-residual:")
+        // #963: the maker→taker ESCALATION of a resting close (the exit
+        // sweep mints `exit-escalated:{order}` for a close leg's chase). The
+        // escalated taker must keep every close hatch its maker had — the
+        // kill switch and the family gate never trap the way OUT (#174), so
+        // a re-keyed leg must not lose the close-intent status the original
+        // exit key carried.
+        || internal_key.starts_with("exit-escalated:")
 }
 
 /// True when this request only REDUCES exposure. The kernel cannot see the

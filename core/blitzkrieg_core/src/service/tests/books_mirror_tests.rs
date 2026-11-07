@@ -107,9 +107,11 @@ fn tp_maker_exit_rests_one_tick_above_the_bid_not_at_the_touch() {
         .filter(|o| o.side == crate::model::Side::Sell && o.status.is_live())
         .collect();
     assert_eq!(sells.len(), 1, "one live exit SELL: {:?}", sells);
+    // #963: maker-first now rests as MakerThenTaker under the exit's own
+    // escalation clock — it still RESTS first, it just has a deadline.
     assert_eq!(
         sells[0].mode,
-        crate::model::FillPolicy::Maker,
+        crate::model::FillPolicy::MakerThenTaker,
         "TP exits are maker-first"
     );
     assert_eq!(

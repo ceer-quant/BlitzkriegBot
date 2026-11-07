@@ -48,6 +48,7 @@ pub mod engine;
 /// signals; THIS module decides whether an entry may place and with what
 /// budget, per account, under the operator's `execution_policy.toml`.
 pub mod execution_policy;
+pub mod exit_fees;
 pub mod exit_policy;
 pub mod extension;
 /// #426: cross-venue hedge execution — the atomic two-leg state machine,
