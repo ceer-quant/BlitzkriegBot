@@ -10,6 +10,40 @@
 //!   Rust → Node  notification: { jsonrpc:"2.0", method:"core.event", params: Event }
 //!
 //! Node never sends a private key; the core loads credentials itself.
+//!
+//! # Canonical ownership (#840 PR2.5 终审, freeze wave)
+//!
+//! This module IS the canonical owner of the JSON-RPC wire schema — one
+//! definition of every params/view/Event type, consumed in-kernel through the
+//! single `use crate::schema::*` seam (`ipc::server` and the service
+//! producers) and by the UI only as JSON over the socket. It deliberately does
+//! NOT move to `blitzkrieg-bk-contract` in the freeze wave:
+//!
+//! 1. **The event stream carries kernel domain payloads.** `Event`'s shadow
+//!    evolution variants embed `shadow_evolution::EvolutionProposal`, whose
+//!    `from_params`/`to_params` are `strategy_logic::params::StrategyParams` —
+//!    an internal implementation crate the contract leaf is red-lined against
+//!    depending on. Moving the schema would either drag a strategy-domain
+//!    crate into `bk_contract` or fork `Event` into two definitions (the one
+//!    thing the freeze forbids).
+//! 2. **The other kernel couplings are the wire's substance, not accidents:**
+//!    `OrderRequest`/`TrackedOrder`/`Fill`/`Mode` (the order lifecycle the OME
+//!    owns), `AccountStatus`, `JournalKind`, the risk-limit views — these are
+//!    the readouts of core state machines #839 explicitly keeps in core.
+//!    Moving their definitions to a leaf would relocate kernel state types
+//!    behind the market-plugin boundary without a consumer that needs them
+//!    there (the UI speaks JSON, not Rust).
+//! 3. **The wire is frozen where the type is.** The 22-family golden
+//!    (`tests/schema_family_golden.rs`) pins every family's serde shape
+//!    byte-exactly, and the freeze commit puts the whole surface under
+//!    `[CONTRACT-BREAKING]` discipline — same enforcement a move would buy,
+//!    without the churn.
+//!
+//! Retirement path: when the evolution payloads get wire-local decoupling (or
+//! a second compiled consumer of the schema appears), the pure-DTO majority
+//! moves to `bk_contract::schema` and this module becomes a `pub use` shim —
+//! reviewed at the 0.5.0 contract review at the latest. Until then: single
+//! definition, golden-locked, change = `[CONTRACT-BREAKING]`.
 
 use crate::account::AccountStatus;
 use crate::kline::{Kline, KlineInterval};
