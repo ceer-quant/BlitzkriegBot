@@ -180,6 +180,62 @@ fn a_legacy_systemic_section_is_ignored_with_a_loud_warning() {
     assert_eq!(single.source(), LimitSource::Default);
 }
 
+/// (a3) The #965 leftover, closed loop with the (a2) warning: after the
+/// one-shot migration (`scripts/migrate-riskstate-systemic.mjs` — the shape
+/// below is exactly what it leaves behind) the file carries NO `systemic`
+/// map, so `load_risk_state_file`'s retirement predicate
+/// (`raw.get("systemic").is_some()`) can never fire, and everything the file
+/// legitimately held (entry caps, kill switch, freeze book) still restores.
+/// The loader itself is untouched — this pins the migration's OUTPUT against
+/// the SAME boot path the (a2) legacy shape goes through.
+#[test]
+fn a_migrated_file_loads_clean_without_the_retirement_warning() {
+    let root = TempRoot::new("migrated-systemic");
+    let path = root.file();
+
+    // The migration script's rewrite: the envelope minus `systemic`, the
+    // struct's field order, serde's skip-empty rules, pretty two-space.
+    std::fs::write(
+        &path,
+        r#"{
+  "savedAtMs": 1762000000000,
+  "limits": {
+    "maxOrderNotional": "250"
+  },
+  "kill": {
+    "reason": "operator pause"
+  },
+  "accountFreezes": {
+    "default": "manual hold"
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    // The #990 warning predicate, verbatim from `load_risk_state_file`: it
+    // reads the RAW doc for a `systemic` member. The migrated file has none —
+    // the loud warning can never fire on it again.
+    let raw = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(&path).expect("the migrated file exists"),
+    )
+    .expect("the migrated file is a JSON object");
+    assert!(
+        raw.get("systemic").is_none(),
+        "the migration must remove the retired map, not leave an empty one: {raw}"
+    );
+
+    // The same boot path the legacy shape takes: the load is Ok (not Corrupt),
+    // the entry cap restores, the kill switch and the freeze book re-land —
+    // the migration retired the cells, not the posture.
+    assert!(matches!(load_risk_state_file(&path), RiskStateLoad::Ok(_)));
+    let c = core_with(&path, &["default"]);
+    assert_eq!(c.risk.config().max_order_notional, dec!(250));
+    let single = &c.risk.config().systemic.account.max_single_loss_usd;
+    assert_eq!(single.value(), Decimal::ZERO);
+    assert_eq!(single.source(), LimitSource::Default);
+}
+
 /// (b) A file that exists but does not parse is fail-CLOSED: nothing is
 /// restored (the boot-resolved caps stand), every account boots frozen, the
 /// corruption is a loud error — and the boot's own persist re-lands a VALID

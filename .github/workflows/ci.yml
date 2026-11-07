@@ -904,6 +904,17 @@ jobs:
           for f in $(git ls-files | grep -i 'plist'); do
             plutil -lint "$f" || exit 1
           done
+      # #965 leftover: the one-shot risk-state systemic → BK_RISK_* .env
+      # migration (PR #990 left the loud retirement warning as the trigger).
+      # The self-test pins the key map (the five per-account bounds migrate,
+      # the four #983-retired globals are dropped), the dry-run default, the
+      # pre-write backup, the idempotent re-run, the fail-closed corrupt arm,
+      # and the closed loop: the migrated file can no longer trip the #990
+      # load warning (its predicate is `raw.get("systemic").is_some()`).
+      - name: Risk-state systemic migration self-test (#965)
+        run: |
+          node --check scripts/migrate-riskstate-systemic.mjs
+          node scripts/migrate-riskstate-systemic.mjs --self-test
       # #252's propagation path. An upgrade that ships the four binaries and
       # leaves the configs, the strategy cdylibs and the panel bundle behind is a
       # deploy that reports success and then runs the previous build, so this is
