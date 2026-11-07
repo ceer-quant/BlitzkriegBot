@@ -5,6 +5,81 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-08 (内容定稿；tag 待 #842 合并后落)
+
+0.4.1 → 0.4.2 的 ~100 条提交，六大主线：**微内核化与契约冻结**（0.4.2 epic
+收官）、**双账本绝对独立**、**风控现金真相**、**策略出场栈一代目**
+（thesis_death + maker-first + 时间加权带）、**config 单源 .env**、
+**回测坐标系制度**。
+
+### Added
+
+- **微内核化（#839 epic）**：契约冻结 commit `e7f8bbd2` —— canonical 契约
+  crate `blitzkrieg-bk-contract`（leaf，依赖白名单 serde/serde_json/
+  rust_decimal）承载全部 market contract（PR1 #952）；replay 家址归
+  data_model、schema 所有权裁决、22 族 wire golden 锁定 118 项 JSON-RPC
+  形状（冻结波 #997）；core 停链 concrete plugins，组合根外移 launcher
+  （#841/#958）；统一 capability model——strategy_api / lua_manifest /
+  core 同常量同枚举（#843）；依赖方向守卫 + lane-planned CI（#844）。
+  此后契约 diff 需 `[CONTRACT-BREAKING]` 标题 + 下游全适配。
+- **双账本绝对独立（#941）**：live/dry journal 拆双文件，冻结跟随账本
+  模式；per-mode 持仓快照与策略状态默认路径（#953）；dry→live 零继承
+  （A/B/E 测试钉死）；#942 id 重发修复。
+- **策略出场栈**：`thesis_death_exit` 落内核 + Lua 标准库
+  `bk.thesis_death_default`（逻辑死亡当 tick 无条件平仓，#961/#992）；
+  LEGACY 14 包收敛——6 接入 8 有理由豁免（#994）；exit wire 加
+  `price` 字段——策略报价 maker-TP（profit-side 门 + PnL 守门
+  #939/#946/#957）；出场升级钟 250ms maker→taker + 同期出场优先于入场
+  （#963）；lua_momentum 0.4.0 时间加权止盈带 + 0.2.1 退出族 + 0.3.0
+  双腿&0.15 地板。
+- **回测坐标系制度**：mine 档钉 0 tick 滑点 + 报告头标注坐标系（#879）；
+  `--backtest-knob` 按 tunable 声明类型解析、支持 string（#916）；
+  l2-delay 命名预设（真实 L2+150ms 延迟回放，#862）；A/B 出场对照实验
+  框架 `ab-exit-964.mjs`（三臂预声明 + 双跑 sha256 确定性 + arm-starved
+  结构化归因，#964/#996）；cost-adjusted-edge `--dig` 候选池（挖掘宽、
+  采用严，#892）。
+- **现金真相**：fallback 平仓 `source=fallback` 标注 + 未核实敞口报表
+  与已实现 PnL 分列（#987/#988）；风控只跟随账户——删除全局限额段
+  （#983）；到期兜底亏损 cap 50% + single-market verdict fallback
+  （#969/#956/#960）；拒单理由落 orders 行（#930）。
+- **config 单源**：risk/exit 归一化 .env（BK_RISK_*/BK_EXIT_*，TOML 层
+  断链，#967/#968）；设置持久化 env-only 模型 + 一次性迁移脚本
+  （#965/#990/#993）；三 factory tomls 退役（#920）；重启不再全面冻结
+  （#928）；风控状态持久化（#861）。
+- **多账户**：account.strategies.set 解锁未注册策略 + 策略包 reload RPC
+  （#975/#978）；默认开关持久化闸换轴（#926）；冻结按账户可见——红色
+  横幅+解锁卡+倒计时暂停（#943）；持仓页撤单恒空转修复（#981/#985）。
+- **新策略包**：maker_pair 双腿齐挂或全弃（#871）；postonly_pair
+  pairing LOOP（#948）；whale_follow taker 包（#851）；
+  smart_money_reverse 证据门反向包+逐位证伪回放（#846）；
+  pair_discount_arb v1.3 under-ask（#850）。
+- **polysim 写实**：确认窗延迟成交 + maker/taker 角色判定 + 官方 taker
+  费率入账（#876）；账本播种并入持仓计价对齐网站权益（#877）；CASH
+  通道播种（#909）；平台流动性激励 REWARD 归账（#910）。
+- **运营工具**：PolyBolt TWAP/WS 落盘录制器（#860）；官方 TWAP 结算
+  真值重建（#859）；corpus label→token 修复工具进仓（#890/#891）；
+  证据窗观察簿+周报归账（#854/#947）；poll lag 记录（#888）。
+- **品牌与 UI**：启动横幅 OME=Song / backtest=Stone / UI=PonyYiDan
+  （#971）；webUI 移动端+i18n 适配（#936/#973）+ 移动端溢出修复
+  （#977）；webUI/TUI parity wave 1（#836）；TradingOS 重定位文档
+  （#951）。
+- **门禁**：文件体积棘轮扩 ui/ 与 webui（#826/#833）；72h dry-run 限额
+  +扣费证据门（#869）；live tick 默认 10ms、回放默认 0ms（#887）。
+
+### Fixed
+
+- polysim discovery 翻页漏记（#878）；predictfun discovery 去重门
+  （#899）；pair 裸腿补齐重报豁免（#848）；cancel 竞态幂等成功
+  （#885）；positions.exit 参数解析失败不再静默全平（#894/#895）；
+  lua_momentum stop_loss floor scaling（#976）；TradeThrough 严格穿透
+  深度 + fill-model preset 非 replay 拒绝（#919）。
+
+### Removed
+
+- 全局风控限额段（SystemicRiskLimits.global，#983）；三个工厂 toml
+  （accounts/execution_policy/update，#920）；core 内 concrete plugin
+  链接（#958）；market_api 孤儿 unified 副本 −755 行（#997）。
+
 ## [0.4.1] - 2026-10-25
 
 0.4.0 → 0.4.1 的 ~110 条提交，按主题归并。六大主线：**多账户体系**（账户簿
