@@ -515,8 +515,7 @@ fn the_residual_mid_fallback_books_at_raw_mid_no_floor() {
 
         let closed = &c.positions().closed_positions()[0];
         assert_eq!(
-            closed.exit_price,
-            entry,
+            closed.exit_price, entry,
             "zero feed falls back to entry price (cost recovery)"
         );
         let _ = std::fs::remove_dir_all(&dir);
