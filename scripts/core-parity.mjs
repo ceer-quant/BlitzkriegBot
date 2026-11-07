@@ -171,8 +171,12 @@ try {
   // fee at their own prices, the crossed one is a *maker* fill and is free.
   // Balance 100 - 6.5 - fee(0.4) - fee(0.5) at the kernel's own quoted rates.
   const bal = await rpc.balance(c);
+  // The kernel books Decimal; this sum is Number float (93.3285 arrived as
+  // 93.32849999999999 once the fee crossed to the official curve, #995).
+  // Compare at the ledger's money scale instead of `===`.
   const expectedFinal = 100 - 6.5 - feeUsdFor(fee04, 5) - feeUsdFor(fee05, 5);
-  check('final balance reflects 3 fills, net of taker fees', bal.balance === expectedFinal && bal.reserved === 0,
+  check('final balance reflects 3 fills, net of taker fees',
+    Math.abs(bal.balance - expectedFinal) < 1e-6 && bal.reserved === 0,
     `${JSON.stringify(bal)} != ${expectedFinal}`);
 
   // FILL events: taker + crossed maker + escalated taker = 3.

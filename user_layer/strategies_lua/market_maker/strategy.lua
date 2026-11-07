@@ -347,9 +347,9 @@ local function read_config()
     -- the honest default. Raise it to pad for schedule drift (a replay may
     -- run --fee-model with a different schedule than the live default).
     -- The curve itself: fee_usd_per_share = rate * (p*(1-p))^exponent — the
-    -- kernel's ONE fee schedule (core exit_policy.rs FeeSchedule; shipped
-    -- default legacy_quadratic 0.125*(p*(1-p))^2, Polymarket's published
-    -- crypto curve 0.07*p*(1-p)) — read LIVE per evaluation via bk.fees(),
+    -- kernel's ONE fee schedule (core exit_policy.rs FeeSchedule; the
+    -- shipped default IS the published crypto curve 0.07*p*(1-p), #995) —
+    -- read LIVE per evaluation via bk.fees(),
     -- never restated as constants here.
     exit_fee_margin_pct = fee_margin,
   }

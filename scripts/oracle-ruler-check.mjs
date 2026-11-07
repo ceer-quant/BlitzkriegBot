@@ -175,7 +175,7 @@ function reconcile(arm, rep) {
   // per-share net and which fee regime it matches (arm's own fee model).
   // Settlement arms accept BOTH payout semantics: +1.00 (sound) or 0.00
   // (the dry resolver zeroed a bid-less/undermarked winner — see settleDual).
-  const model = arm.feeModel ?? 'legacy_quadratic';
+  const model = arm.feeModel ?? 'official';
   const perShare = net / shares;
   let makerCF, takerCF, regime;
   if (arm.settleDual) {
@@ -315,7 +315,7 @@ for (const arm of ARMS) {
     continue;
   }
   const rep = r.report;
-  const model = arm.feeModel ?? 'legacy_quadratic';
+  const model = arm.feeModel ?? 'official';
   const sched = SCHEDULES[model];
   check(
     `${arm.name} fee schedule`,

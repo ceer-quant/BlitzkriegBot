@@ -1,6 +1,6 @@
-//! The taker-fee schedule (#182, #203), split verbatim out of `exit_policy`
-//! (issue #963: the file-size ratchet #780). The module is re-exported from
-//! [`crate::exit_policy`], so every external path —
+//! The taker-fee schedule (#182, #203, default per #995), split verbatim out of
+//! `exit_policy` (issue #963: the file-size ratchet #780). The module is
+//! re-exported from [`crate::exit_policy`], so every external path —
 //! `crate::exit_policy::fee_schedule()` and friends — is byte-identical.
 //!
 //! The fee is one number with two jobs: it is the accounting basis every gate
@@ -112,10 +112,17 @@ pub fn legacy_quadratic_schedule() -> FeeSchedule {
     }
 }
 
-/// Polymarket's published crypto taker schedule, `0.07 * p * (1-p)` USD per
-/// share. Primary source (quoted in `scripts/lib/fee-model.mjs`, which is what
-/// the gates read): Polymarket docs, fees page — `fee = C * feeRate * p * (1-p)`
-/// with `feeRate = 0.07` for the Crypto category, maker side 0.
+/// The schedule the deployment line charges: `0.07 * p * (1-p)` USD per share
+/// — Polymarket's published crypto taker schedule. #995 made it the live
+/// default: the venue receipts this repo's adapters parse carry NO fee amount
+/// (polymarket `TradeMessage` exposes only `fee_rate_bps`, a market config
+/// rate the venue reports as 0 — see polysimulator's #876 note), so the fee is
+/// booked from a model, and a model-default has to err HIGH. Between the two
+/// curves this is the conservative one: `official/legacy = 0.56/(p(1-p)) ≥
+/// 2.24` at every price in (0,1) — the squared legacy curve is never the
+/// larger fee, so "default = the higher curve" and "default = official" are
+/// the same sentence. `legacy_quadratic` stays for replay reproduction of old
+/// corpora via `--fee-model legacy_quadratic`.
 pub fn official_schedule() -> FeeSchedule {
     FeeSchedule {
         name: "official",
@@ -163,21 +170,22 @@ pub fn pinned_fee_parameters(name: &str) -> Option<(Decimal, u32)> {
     }
 }
 
-/// The schedule in force. Defaults to the shipped one; only a replay changes it.
+/// The schedule in force. Defaults to `official` (#995: the conservative
+/// default — see [`official_schedule`]); only a replay changes it.
 static ACTIVE_FEE_SCHEDULE: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
 
 /// The taker-fee schedule the kernel is charging right now.
 pub fn fee_schedule() -> FeeSchedule {
     *ACTIVE_FEE_SCHEDULE
         .get()
-        .unwrap_or(&legacy_quadratic_schedule_ref())
+        .unwrap_or(&official_schedule_ref())
 }
 
-/// `OnceLock<FeeSchedule>` needs a `'static` reference; `legacy_quadratic_schedule()`
+/// `OnceLock<FeeSchedule>` needs a `'static` reference; `official_schedule()`
 /// builds a fresh value, so the default is memoised here instead.
-fn legacy_quadratic_schedule_ref() -> FeeSchedule {
+fn official_schedule_ref() -> FeeSchedule {
     static DEFAULT: std::sync::OnceLock<FeeSchedule> = std::sync::OnceLock::new();
-    *DEFAULT.get_or_init(legacy_quadratic_schedule)
+    *DEFAULT.get_or_init(official_schedule)
 }
 
 /// Install a schedule for this process. Refuses a second call: set-once is the

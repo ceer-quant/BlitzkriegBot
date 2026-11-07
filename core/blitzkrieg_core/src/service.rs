@@ -1114,8 +1114,7 @@ impl Core {
     /// without installing a schedule: the process-wide schedule is set-once, so a
     /// test cannot put a second one in place.
     fn may_charge(&self, schedule: crate::exit_policy::FeeSchedule) -> bool {
-        self.config.fee_schedule_replay
-            || schedule == crate::exit_policy::legacy_quadratic_schedule()
+        self.config.fee_schedule_replay || schedule == crate::exit_policy::official_schedule()
     }
 
     // ── Pending-close exit reasons (issue #190) ─────────────────────────────

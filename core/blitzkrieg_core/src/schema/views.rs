@@ -1112,6 +1112,12 @@ pub struct AccountJournalRow {
     #[serde(with = "crate::decimal")]
     pub balance_after: Decimal,
     pub r#ref: String,
+    /// #995: fee provenance on fee-carrying rows — `model` when the fee is
+    /// the kernel schedule's number, unconfirmed by any venue receipt.
+    /// Additive optional field (serde default; empty on old rows) — the
+    /// contract freeze's allowed shape.
+    #[serde(default)]
+    pub fee_source: String,
 }
 
 /// `account.journal` result: the newest `limit` rows, oldest → newest.

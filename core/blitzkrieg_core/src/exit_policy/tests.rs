@@ -20,14 +20,62 @@ fn book(bid: f64, ask: f64) -> OrderbookSnapshot {
     }
 }
 
-/// The shipped default must stay the shipped default. If a change flips it,
-/// this is the test that says so before a replay is needed (#203).
+/// The live default must stay the CONSERVATIVE default (#995): `official`,
+/// the published curve — it is ≥ `legacy_quadratic` at every price in (0,1),
+/// so a model-charged fee can never under-charge the venue's published rate.
+/// If a change flips it, this is the test that says so before a replay is
+/// needed; `legacy_quadratic` stays available for replay reproduction
+/// (`--fee-model legacy_quadratic`).
 #[test]
 fn default_fee_schedule_is_the_shipped_one() {
     let s = fee_schedule();
-    assert_eq!(s.name, "legacy_quadratic");
-    assert_eq!(s.rate, dec!(0.125));
-    assert_eq!(s.exponent, 2);
+    assert_eq!(s.name, "official");
+    assert_eq!(s.rate, dec!(0.07));
+    assert_eq!(s.exponent, 1);
+}
+
+/// #995 acceptance 3 — the direction proof behind the default, as arithmetic
+/// the test itself performs: `official/legacy = 0.56/(p(1-p))`, whose MINIMUM
+/// over (0,1) is 2.24 at p=0.5 (where p(1-p) peaks at 0.25). `official` is
+/// therefore never the smaller fee; there is no crossover regime, so the
+/// conservative default needs no max() variant. The anchors at the issue's
+/// table prices:
+#[test]
+fn official_is_never_cheaper_than_legacy_conservative_default_direction() {
+    let official = official_schedule();
+    let legacy = legacy_quadratic_schedule();
+    // The issue's p∈{0.1,0.5,0.9} table, per share:
+    //   p=0.1: legacy 0.125·0.09² = 0.0010125 | official 0.07·0.09 = 0.0063  (6.22x)
+    //   p=0.5: legacy 0.125·0.25² = 0.0078125 | official 0.07·0.25 = 0.0175  (2.24x)
+    //   p=0.9: legacy 0.125·0.09² = 0.0010125 | official 0.07·0.09 = 0.0063  (6.22x)
+    for (p, ratio) in [
+        (dec!(0.1), dec!(6.2222)),
+        (dec!(0.5), dec!(2.24)),
+        (dec!(0.9), dec!(6.2222)),
+    ] {
+        let o = official.fee_per_share(p);
+        let l = legacy.fee_per_share(p);
+        assert!(
+            o > l,
+            "official must exceed legacy at p={p}: {o} vs {l} — if this flips, \
+             the conservative default has to be re-chosen (max() variant)"
+        );
+        assert_eq!(
+            (o / l).round_dp(4),
+            ratio,
+            "the anchor ratio at p={p} pins the arithmetic"
+        );
+    }
+    // …and the general claim across the whole domain, not just the anchors.
+    let step = dec!(0.01);
+    let mut p = step;
+    while p < Decimal::ONE {
+        assert!(
+            official.fee_per_share(p) >= legacy.fee_per_share(p),
+            "official < legacy at p={p}: the default would under-charge"
+        );
+        p += step;
+    }
 }
 
 /// The holder view: the protective stop comes out FLAT at the wide
@@ -66,13 +114,19 @@ fn holder_view_flattens_the_stop_at_the_wide_width() {
     assert_eq!(cfg.stop_min_pct, dec!(10));
 }
 
-/// The legacy curve as charged: `0.125*(p*(1-p))^2` per share, quoted as a
-/// percentage of price (p=0.40 -> $0.0072/share, 1.8% of price).
+/// The curves as charged, quoted as a percentage of price. #995: the ACTIVE
+/// schedule is `official` (4.2% at p=0.40, 3.5% at p=0.50); the legacy anchor
+/// values stay pinned on the schedule object itself.
 #[test]
 fn legacy_schedule_prices_as_documented() {
-    assert_eq!(taker_fee_pct(dec!(0.4)), dec!(1.8));
-    assert_eq!(taker_fee_pct(dec!(0.5)), dec!(1.5625));
+    assert_eq!(taker_fee_pct(dec!(0.4)), dec!(4.2));
+    assert_eq!(taker_fee_pct(dec!(0.5)), dec!(3.5));
     assert_eq!(taker_fee_pct(dec!(0)), Decimal::ZERO);
+    assert_eq!(
+        legacy_quadratic_schedule().fee_pct(dec!(0.4)),
+        dec!(1.8),
+        "legacy stays 1.8% @0.40 for replay reproduction"
+    );
 }
 
 /// #203's decision rests on this ratio: the published crypto schedule is
@@ -634,8 +688,13 @@ fn legacy_schedule_fee_is_unchanged() {
     let legacy = legacy_quadratic_schedule();
     // p=0.50: 0.125 * (0.25)^2 = 0.0078125 USD/share → /0.50 = 1.5625%.
     assert_eq!(legacy.fee_pct(dec!(0.50)), dec!(1.5625));
-    // The process default is this curve, so the charge path agrees.
-    assert_eq!(taker_fee_pct(dec!(0.50)), legacy.fee_pct(dec!(0.50)));
+    // The process default is `official` now (#995); the legacy curve is the
+    // replay-only alternative and the charge path must NOT price it.
+    assert_eq!(
+        taker_fee_pct(dec!(0.50)),
+        official_schedule().fee_pct(dec!(0.50))
+    );
+    assert_ne!(taker_fee_pct(dec!(0.50)), legacy.fee_pct(dec!(0.50)));
     assert_eq!(legacy.fee_pct(dec!(0)), Decimal::ZERO);
     assert_eq!(legacy.fee_pct(dec!(-1)), Decimal::ZERO);
     // At and above a full dollar nothing is charged (#234, item 3): `p == 1`

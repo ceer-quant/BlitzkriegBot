@@ -130,9 +130,9 @@ fn taker_fills_immediately_and_spends() {
         .unwrap();
     assert_eq!(st, OrderStatus::Filled);
     assert_eq!(c.ome().get(&id).unwrap().filled_size, dec!(5));
-    // 10 - 0.4*5 = 8, minus the taker entry fee (1.8% of 2 = 0.036);
+    // 10 - 0.4*5 = 8, minus the taker entry fee (4.2% of 2 = 0.084, official #995);
     // reservation fully consumed.
-    assert_eq!(c.ledger().balance(), Decimal::new(7964, 3));
+    assert_eq!(c.ledger().balance(), Decimal::new(7916, 3));
     assert_eq!(c.ledger().reserved(), dec!(0));
 }
 
@@ -312,8 +312,8 @@ fn maker_then_taker_escalates_after_timeout() {
     assert_eq!(filled[0].price, dec!(0.50));
     assert_eq!(filled[0].avg_fill_price, Some(dec!(0.50)));
     // 10 - 0.5*5 = 7.5, minus the taker entry fee
-    // (0.125 × (0.5·0.5)² × 5 = 0.0390625 — the E17 schedule, price-dependent).
-    assert_eq!(c.ledger().balance(), dec!(7.4609375));
+    // (0.07 × 0.25 × 5 = 0.0875 — the official E17 schedule, price-dependent).
+    assert_eq!(c.ledger().balance(), dec!(7.4125));
 }
 
 /// `--entry-maker-timeout-ms -1`: the entry is a pure maker. The book DOES

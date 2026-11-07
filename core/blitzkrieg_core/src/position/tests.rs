@@ -186,9 +186,10 @@ fn pos_book_ts(pm: &PositionManager, id: &str) -> i64 {
 
 /// The close path prices the unsold remainder itself, so it must charge it
 /// the ACTIVE schedule's taker fee rather than a curve restated at that call
-/// site. 0.1 unsold share written off at 0.60 taker: the shipped legacy
-/// curve charges 1.2% of the $0.06 notional = $0.00072, where the published
-/// crypto curve (2.8% of price) would charge $0.00168 — $0.00096 more.
+/// site. 0.1 unsold share written off at 0.60 taker: the active `official`
+/// curve (#995) charges 2.8% of the $0.06 notional = $0.00168, where the
+/// replay-only legacy curve (1.2% of price) would charge $0.00072 — the
+/// conservative default books the HIGHER dust fee.
 ///
 /// Both curves are priced through `dust_fee_for` — the expression the close
 /// path itself runs (#234, item 5) — so the delta below is the close path's
@@ -201,7 +202,7 @@ fn pos_book_ts(pm: &PositionManager, id: &str) -> i64 {
 fn close_dust_fee_follows_the_active_schedule() {
     assert_eq!(
         crate::exit_policy::fee_schedule().name,
-        "legacy_quadratic",
+        "official",
         "no schedule is installed in tests, so the shipped default is active"
     );
     let mut pm = PositionManager::new(PositionConfig::default());
@@ -213,7 +214,7 @@ fn close_dust_fee_follows_the_active_schedule() {
     );
     // Sell 9.90 of 10 shares (sub-grid remainder stays) as a taker; that
     // fill's own fee is charged by the caller, as production does.
-    let exit_fee = (dec!(1.2) / Decimal::ONE_HUNDRED) * dec!(0.6) * dec!(9.9);
+    let exit_fee = (dec!(2.8) / Decimal::ONE_HUNDRED) * dec!(0.6) * dec!(9.9);
     pm.apply_exit_fill(
         &p.id,
         dec!(9.9),
@@ -227,9 +228,9 @@ fn close_dust_fee_follows_the_active_schedule() {
         .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000, "venue")
         .unwrap();
     // gross = 5.94 (the 9.90 sold) + 0.06 (dust) − 4.00 (maker cost) = 2.00
-    // fees  = 0.07128 (1.2% of the taker fill's 5.94) + 0.00072 (legacy
-    //         dust) = 0.072
-    assert_eq!(closed.net_pnl_usd, dec!(1.928));
+    // fees  = 0.16632 (2.8% of the taker fill's 5.94) + 0.00168 (official
+    //         dust) = 0.168
+    assert_eq!(closed.net_pnl_usd, dec!(1.832));
 
     let dust_notional = dec!(0.6) * dec!(0.1);
     let legacy_dust = dust_fee_for(
@@ -287,7 +288,7 @@ fn open_and_close_pnl_is_net_of_fees() {
         )
         .unwrap();
     assert!(c.net_pnl_usd < dec!(2.0));
-    assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
+    assert!(c.net_pnl_usd > dec!(1.8)); // official fee at 0.6 is 2.8% of 5.94 ≈ 0.166
     assert!(c.was_maker_entry);
     assert!(!c.was_maker_exit);
     assert_eq!(pm.daily_pnl_for("default"), c.net_pnl_usd);

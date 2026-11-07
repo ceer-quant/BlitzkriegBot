@@ -163,16 +163,25 @@ const strategyArgs = [
 // stop-loss: the money moves because the EXITS moved, measured on the same
 // HEAD core (removing the declaration reproduced the (2) rows bit for bit).
 // Tolerances UNCHANGED.
+//
+// (4) RE-RECORDED 2026-11-08, at `2bc6a598`: #995 flipped the live default
+// taker fee to the conservative `official` curve (0.07*p*(1-p)); the old
+// legacy default under-charged the published rate at every price. The money
+// moves because the FEES moved — feesUsd roughly doubles per window — and in
+// range-20260919T1600Z spread_arb's fee-reading entries also shift (17
+// closes stay, wins 7 → 5, the #203 behavior dependency). Measured on the
+// HEAD core at that hash, same corpora, same flags; the four rows are the
+// gate's own run reproduced. Tolerances UNCHANGED.
 // ---------------------------------------------------------------------------
 const BASELINE = Object.freeze({
-  recorded: '2026-10-24',
-  commit: '9ad51ea',
+  recorded: '2026-11-08',
+  commit: '2bc6a598',
   issue: 'https://github.com/ceer-quant/BlitzkriegBot/issues/272',
   windows: {
-    'trend-20260919T1000Z': { closed: 13, wins: 4, winRatePct: 30.77, netPnlUsd: -4.8871 },
-    'range-20260919T1600Z': { closed: 17, wins: 7, winRatePct: 41.18, netPnlUsd: -4.7336 },
-    'trend-20260920T2100Z': { closed: 9, wins: 3, winRatePct: 33.33, netPnlUsd: -2.8141 },
-    'range-20260920T2300Z': { closed: 13, wins: 0, winRatePct: 0, netPnlUsd: -11.0845 },
+    'trend-20260919T1000Z': { closed: 13, wins: 4, winRatePct: 30.77, netPnlUsd: -7.0155 },
+    'range-20260919T1600Z': { closed: 17, wins: 5, winRatePct: 29.41, netPnlUsd: -7.8109 },
+    'trend-20260920T2100Z': { closed: 9, wins: 3, winRatePct: 33.33, netPnlUsd: -4.5383 },
+    'range-20260920T2300Z': { closed: 13, wins: 0, winRatePct: 0, netPnlUsd: -13.4830 },
   },
 });
 

@@ -69,6 +69,16 @@ pub struct JournalEntry {
     /// the seed family, `venue` for a realign. Free text — never parsed.
     #[serde(rename = "ref")]
     pub ref_: String,
+    /// #995: where a fee-carrying row's fee number came from — `model` when
+    /// the fee was computed from the kernel's fee schedule and NO venue
+    /// receipt confirmed it (the adapters' fill receipts carry no fee amount:
+    /// polymarket's `TradeMessage` exposes only `fee_rate_bps`, a market
+    /// config rate the venue reports as 0). Empty on every non-fee row and on
+    /// rows written before the field existed (serde default — no migration).
+    /// Reconciliation lists `model` rows separately instead of reading them
+    /// as venue-verified cash.
+    #[serde(default)]
+    pub fee_source: String,
 }
 
 /// In-memory journal window per account. The FILE is the durable record; this
@@ -155,6 +165,19 @@ impl Ledger {
     /// zero-floor clamp, so `Σ amounts == balance` stays exact even where a
     /// fill costs more than the book holds.
     fn apply(&mut self, kind: JournalKind, requested: Decimal, ref_: &str) -> Decimal {
+        self.apply_tagged(kind, requested, ref_, "")
+    }
+
+    /// [`Self::apply`] with a fee-provenance tag: `fee_source = "model"` marks
+    /// the row's fee as a fee-SCHEDULE computation no venue receipt confirmed
+    /// (#995). Non-fee callers go through `apply`, which tags empty.
+    fn apply_tagged(
+        &mut self,
+        kind: JournalKind,
+        requested: Decimal,
+        ref_: &str,
+        fee_source: &str,
+    ) -> Decimal {
         let new_balance = (self.balance + requested).max(Decimal::ZERO);
         let amount = new_balance - self.balance;
         self.balance = new_balance;
@@ -165,6 +188,7 @@ impl Ledger {
                 amount,
                 balance_after: self.balance,
                 ref_: ref_.to_string(),
+                fee_source: fee_source.to_string(),
             };
             if let Some(path) = self.journal_path.clone() {
                 crate::jsonl::append(&path, &entry);
@@ -378,14 +402,57 @@ impl Ledger {
     /// records use. One journal row (kind = `SellFill`): the venue pays the
     /// notional and takes its fee in the same cash event, so the row's
     /// `amount` is the net.
+    ///
+    /// #995: the fee is the KERNEL SCHEDULE's number, not a venue receipt's —
+    /// the row is tagged `fee_source = "model"` so reconciliation can list
+    /// model-charged fees separately.
     pub fn settle_sell_fill(&mut self, proceeds: Decimal, fee_usd: Decimal) {
-        self.apply(JournalKind::SellFill, proceeds - fee_usd, "sell");
+        self.apply_tagged(JournalKind::SellFill, proceeds - fee_usd, "sell", "model");
     }
 
     /// Charge an entry-side cash fee (buy fills pay it on top of the cost).
     /// kind = `Fee`.
+    ///
+    /// #995: the fee is the KERNEL SCHEDULE's number, not a venue receipt's —
+    /// the row is tagged `fee_source = "model"` so reconciliation can list
+    /// model-charged fees separately.
     pub fn charge_fee(&mut self, fee_usd: Decimal) {
-        self.apply(JournalKind::Fee, -fee_usd, "entry fee");
+        self.apply_tagged(JournalKind::Fee, -fee_usd, "entry fee", "model");
+    }
+
+    /// #995 acceptance 4 — settle a SELL fill whose fee comes from the VENUE
+    /// RECEIPT. Two rows, arithmetic that never double-counts: the fill's own
+    /// row nets the MODEL fee (`fee_source = "model"`, exactly as
+    /// [`Self::settle_sell_fill`] books it), then a correction row moves the
+    /// receipt-vs-model difference (`fee_source = "receipt"`, the venue's
+    /// verdict on the model's number). Net cash = `proceeds − receipt_fee` —
+    /// the receipt's truth — and the difference stands alone in the journal
+    /// for reconciliation to list. Equal fees append the fill row only.
+    ///
+    /// No current adapter produces receipt fees (the receipts carry no fee
+    /// amount — see [`JournalEntry::fee_source`]); this is the shared choke
+    /// point a wired receipt books through, so the reconciliation semantics
+    /// are fixed before the first receipt arrives.
+    pub fn settle_sell_fill_from_receipt(
+        &mut self,
+        proceeds: Decimal,
+        receipt_fee_usd: Decimal,
+        model_fee_usd: Decimal,
+    ) {
+        self.apply_tagged(
+            JournalKind::SellFill,
+            proceeds - model_fee_usd,
+            "sell",
+            "model",
+        );
+        if receipt_fee_usd != model_fee_usd {
+            self.apply_tagged(
+                JournalKind::Fee,
+                -(receipt_fee_usd - model_fee_usd),
+                "receipt fee correction (venue receipt vs model)",
+                "receipt",
+            );
+        }
     }
 
     /// Credit collateral redeemed on-chain (issue #175): the payout of a settled
@@ -491,6 +558,7 @@ impl Ledger {
             amount: target,
             balance_after: target,
             ref_: "reset".to_string(),
+            fee_source: String::new(),
         };
         if let Some(path) = self.journal_path.clone() {
             match serde_json::to_vec(&entry) {
@@ -615,6 +683,100 @@ mod tests {
         // Entry fee also comes out of cash.
         l.charge_fee(dec!(2));
         assert_eq!(l.balance(), dec!(17));
+    }
+
+    /// #995 acceptance 2 — a fee charged WITHOUT a venue receipt is labeled
+    /// `fee_source = "model"` on its journal row, so reconciliation can list
+    /// model-charged fees separately instead of reading them as venue-verified
+    /// cash. Non-fee rows stay unlabeled.
+    #[test]
+    fn model_fees_are_labeled_fee_source_model() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(10));
+        l.charge_fee(dec!(2));
+        l.settle_sell_fill(dec!(5), dec!(1));
+        l.settle_buy_fill("o1", dec!(3), dec!(3));
+        let rows = l.journal_snapshot();
+        let by_kind = |kind: JournalKind| {
+            rows.iter()
+                .rev()
+                .find(|r| r.kind == kind)
+                .expect("the row was just appended")
+        };
+        assert_eq!(by_kind(JournalKind::Fee).fee_source, "model");
+        assert_eq!(by_kind(JournalKind::SellFill).fee_source, "model");
+        assert_eq!(
+            by_kind(JournalKind::BuyFill).fee_source,
+            "",
+            "a fill row itself is not a fee row"
+        );
+        // A venue-confirmed cash move (realign) is unlabeled too.
+        l.set_balance(dec!(42));
+        assert_eq!(
+            l.journal_snapshot().last().unwrap().fee_source,
+            "",
+            "venue truth needs no model label"
+        );
+    }
+
+    /// #995 wire compat — a journal row written before `feeSource` existed
+    /// (no such key on the line) deserializes with an EMPTY label; the fee row
+    /// written now round-trips through the same struct. No migration.
+    #[test]
+    fn journal_rows_without_fee_source_read_as_unlabeled() {
+        let old: JournalEntry = serde_json::from_str(
+            r#"{"atMs":1,"kind":"fee","amount":"-0.084","balanceAfter":"9.916","ref":"entry fee"}"#,
+        )
+        .expect("a pre-#995 row parses");
+        assert_eq!(old.fee_source, "", "missing key reads as unlabeled");
+        let fresh = JournalEntry {
+            fee_source: "model".to_string(),
+            ..old.clone()
+        };
+        let wire = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(wire["feeSource"], serde_json::json!("model"));
+        let back: JournalEntry = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, fresh);
+    }
+
+    /// #995 acceptance 4, ledger half — a venue receipt fee ≠ the model fee:
+    /// the net cash books the RECEIPT's truth (`proceeds − receipt_fee`), the
+    /// fill row keeps its `model` label, and the difference stands alone as a
+    /// `fee_source = "receipt"` correction row for reconciliation. The model
+    /// label never rides a receipt-confirmed number.
+    #[test]
+    fn a_receipt_fee_books_as_venue_truth_not_model() {
+        let mut l = Ledger::new();
+        l.set_balance(dec!(10));
+        // Venue receipt says 0.20; the model said 0.168. Net = 5 − 0.20.
+        l.settle_sell_fill_from_receipt(dec!(5), dec!(0.20), dec!(0.168));
+        let rows = l.journal_snapshot();
+        let (fill_row, corr_row) = (rows[rows.len() - 2].clone(), rows[rows.len() - 1].clone());
+        assert_eq!(
+            corr_row.fee_source, "receipt",
+            "the difference is venue truth"
+        );
+        assert_eq!(corr_row.amount, dec!(-0.032), "receipt 0.20 − model 0.168");
+        assert_eq!(fill_row.fee_source, "model", "the model fee is labeled");
+        assert_eq!(
+            fill_row.amount,
+            dec!(4.832),
+            "proceeds net of the MODEL fee"
+        );
+        // Net cash: 10 + 5 − 0.20 = 14.80 — the receipt's number, exactly.
+        assert_eq!(l.balance(), dec!(14.8));
+        // Equal fees: no phantom correction row on top of the fill row.
+        let mut l2 = Ledger::new();
+        l2.set_balance(dec!(10));
+        l2.settle_sell_fill_from_receipt(dec!(5), dec!(0.168), dec!(0.168));
+        let rows2 = l2.journal_snapshot();
+        assert_eq!(rows2.last().unwrap().fee_source, "model");
+        assert_eq!(
+            rows2.get(rows2.len() - 2).map(|r| r.fee_source.as_str()),
+            Some(""),
+            "no receipt-correction row precedes the fill"
+        );
+        assert_eq!(l2.balance(), dec!(14.832));
     }
 
     /// MERGE (task 2.2): one complete UP+DOWN pair merges into $1.00 of

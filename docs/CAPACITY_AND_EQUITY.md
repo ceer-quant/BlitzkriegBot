@@ -282,7 +282,7 @@ p=0.5 上与 legacy 的 `0.125*(p(1-p))^2` 同价，别的价格上都不同）�
 | `legacy_quadratic` | `0.125 × (p(1-p))²` | rate=0.125 exp=2 | **只有历史**：自收费起就是这条曲线，没有任何外部发布声明它（`#203`） |
 | `official` | `0.07 × p × (1-p)` | rate=0.07 exp=1 | Polymarket 官方费用页：`fee = C × feeRate × p × (1-p)`，Crypto `feeRate = 0.07`、maker 0（2026-09-21 读取） |
 
-现役（默认）是 `legacy_quadratic`。同一价格上两者的差：
+pre-#995 的默认是 `legacy_quadratic`；#995 起现役默认为 `official`（见 §3c 裁决更新）。同一价格上两者的差：
 
 | p | legacy /股 | 占价 | official /股 | 占价 | 倍率 |
 | --- | --- | --- | --- | --- | --- |
@@ -368,7 +368,7 @@ sha256 钉死，见 `scripts/lib/frozen-corpus.mjs`），结果：
   `scripts/lib/fee-model.mjs`（`TAKER_FEE_MODELS.official.source`）与
   `core/blitzkrieg_core/src/exit_policy.rs::official_schedule()` 的 `source` 字段里。
   代码里的 0.07 最早来自 PR #168（`PolymarketCrypto`），当时就保留了 legacy 为默认。
-- `legacy_quadratic`（**现役默认**）：`0.125 × (p(1-p))²` **没有任何发布**，它是仓库的
+- `legacy_quadratic`（pre-#995 默认，现为 replay 复现用）：`0.125 × (p(1-p))²` **没有任何发布**，它是仓库的
   历史值（自收费起就是它，磁盘上每一份 trade log 都是它生成的）。`#203` 的发现是：在
   实际成交价段上它比已发布的 Crypto 费率**便宜 2.3x–5.3x**，所以它是「折扣」，不是
   「费」。把它当成本基准只在**这个偏差被写明**的前提下安全——本节的表就是这个写明。
@@ -376,6 +376,18 @@ sha256 钉死，见 `scripts/lib/frozen-corpus.mjs`），结果：
   所以「某个默认值没有出处」这件事以后不会再无声发生。
 
 ### 3c. 决策：**不切**（保持 `legacy_quadratic`），以及这个决策的守卫
+
+> ⚠️ **2026-11-07 裁决更新（#995）：默认已切到 `official`，本节的 hold 决策被推翻。**
+> 现金真相优先于经济敏感度：venue 回单不带费用字段（polymarket `TradeMessage` 只有
+> `fee_rate_bps`——市场配置费率，venue 自己报 0；见 `#876`、polysimulator 注释），记账
+> 费用只能来自模型，而模型默认必须**宁可多记不可少记**。两条曲线上
+> `official/legacy = 0.56/(p(1-p))`，在 (0,1) 全域最小值 2.24（p=0.5）——legacy 在任何
+> 价格都不会比 official 贵，所以「保守默认」与「official」是同一句话；p∈{0.1,0.5,0.9}
+> 差异表与算术见 PR #995。`legacy_quadratic` 保留为 replay 复现旧语料用
+> （`--fee-model legacy_quadratic`）。模型来源费用在账本行上标注 `fee_source=model`
+> （`JournalEntry.feeSource`，serde default，契约冻结允许的加字段）；#203 的经济顾虑
+> （策略期望值随费率变号）成立但不再是否决项——权益曲线难看是成本真实化的代价，
+> 不是回归。敏感度数字（§3a）保留为记录。
 
 **该不该切：不该切（hold）。** 判据是可执行的、双向的
 （`scripts/fee-model-sensitivity-check.mjs::verdictProblems`）：
