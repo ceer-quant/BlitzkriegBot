@@ -643,6 +643,9 @@ jobs:
           node scripts/lua-sandbox-check.mjs --teeth
           node scripts/no-venue-branch-check.mjs --teeth
           node scripts/lua-decimal-check.mjs --teeth
+          # #961 Exit-First: every package declares its thesis-death
+          # conditions (template + declaration scan; legacy list grandfathered).
+          node scripts/thesis-death-check.mjs --teeth
       - name: v0.3 gates — the real verdicts [E24..E30]
         run: |
           node scripts/intent-audit-check.mjs
@@ -656,6 +659,8 @@ jobs:
           node scripts/lua-sandbox-check.mjs
           node scripts/no-venue-branch-check.mjs
           node scripts/lua-decimal-check.mjs
+          # #961 Exit-First: the real verdict over the shipped packages.
+          node scripts/thesis-death-check.mjs
       # #780: the file-size ratchet — no `.rs` file over 1500 lines in the
       # trading-repo scope (core/, tools/, user_layer/, extensions/; `ui/` is a
       # different owner and out of scope). The split campaigns (#699 family,

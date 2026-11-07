@@ -194,7 +194,9 @@ fn bk_surface_tolerates_empty_state() {
 #[test]
 fn entry_points_and_interval_names_are_stable() {
     assert_eq!(ENTRY_POINTS[0], "bk_evaluate");
-    assert_eq!(ENTRY_POINTS.len(), 4);
+    assert_eq!(ENTRY_POINTS.len(), 5);
+    // #961: the thesis-death predicate is the fifth suggested entry point.
+    assert_eq!(ENTRY_POINTS[4], "bk_thesis_death");
     assert_eq!(interval_name(KlineInterval::Min1), "min1");
     assert_eq!(interval_name(KlineInterval::Hour4), "hour4");
 }
@@ -601,4 +603,325 @@ fn vwap_for_size_rust_unit_contract() {
         vwap_for_size(&huge, d("10000000000000")).is_none(),
         "overflow = None (loud upstream), never a wrapped price"
     );
+}
+
+// ── #961: the stdlib default thesis-death predicate ─────────────────────
+
+use super::state::{ThesisDeathFacts, thesis_death_default};
+
+fn d(s: &str) -> Decimal {
+    Decimal::from_str_exact(s).expect("decimal literal")
+}
+
+fn death_params(extra: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    for (k, v) in extra {
+        m.insert((*k).into(), (*v).into());
+    }
+    m
+}
+
+/// One verdict call: entry price, quoted sides, book/now clocks, params bag,
+/// the live round row and the duration seed — bundled into [`ThesisDeathFacts`]
+/// (the test shim is the same shape, so the too-many-arguments lint is a
+/// mirror of the call-shape the surface has, accepted here).
+#[allow(clippy::too_many_arguments)]
+fn verdict(
+    entry: &str,
+    bid: Option<&str>,
+    ask: Option<&str>,
+    ts: i64,
+    now: i64,
+    p: &std::collections::HashMap<String, String>,
+    round: Option<(i64, i64, i64)>,
+    dur: i64,
+) -> Option<&'static str> {
+    thesis_death_default(&ThesisDeathFacts {
+        entry_price: d(entry),
+        best_bid: bid.map(d),
+        best_ask: ask.map(d),
+        book_ts_ms: ts,
+        now_ms: now,
+        params: p,
+        round,
+        round_duration_max_sec: dur,
+    })
+}
+
+/// The shipped defaults: a 25% flat reversal band, tightening off, 30s
+/// quoting timeout. Entry 0.50: bid 0.30 (40% under) is dead, bid 0.45 (10%
+/// under) is alive, a stale quote is dead regardless of its level.
+#[test]
+fn thesis_death_default_judges_the_shipped_bands() {
+    let p = death_params(&[]);
+    let alive = |bid: &str, ts: i64| {
+        verdict(
+            "0.50",
+            Some(bid),
+            Some("0.99"),
+            ts,
+            10_000,
+            &p,
+            Some((1, 600, 10_000)),
+            900,
+        )
+    };
+    assert_eq!(alive("0.45", 10_000), None, "10% under entry = alive");
+    assert_eq!(alive("0.30", 10_000), Some("reversal"), "40% = dead");
+    // Ask-only book (bid side vanished): judged on the only quoted side.
+    assert_eq!(
+        verdict(
+            "0.50",
+            None,
+            Some("0.30"),
+            10_000,
+            10_000,
+            &p,
+            Some((1, 600, 10_000)),
+            900
+        ),
+        Some("reversal")
+    );
+    // Not underwater: no adverse move to judge, alive.
+    assert_eq!(alive("0.60", 10_000), None);
+}
+
+/// Condition 1: a vanished book, a one-sided-with-no-price book and a quote
+/// past the 30s timeout are all dead (`stale`), whatever the price said.
+#[test]
+fn thesis_death_default_fires_stale_on_vanished_or_timed_out_fields() {
+    let p = death_params(&[]);
+    // No book at all.
+    assert_eq!(
+        verdict(
+            "0.50",
+            None,
+            None,
+            0,
+            10_000,
+            &p,
+            Some((1, 600, 10_000)),
+            900
+        ),
+        Some("stale")
+    );
+    // Book present but both price fields gone.
+    assert_eq!(
+        verdict(
+            "0.50",
+            None,
+            None,
+            10_000,
+            10_000,
+            &p,
+            Some((1, 600, 10_000)),
+            900
+        ),
+        Some("stale")
+    );
+    // A fresh price that would be alive, quoted 31s ago: timeout kills it.
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.60"),
+            Some("0.99"),
+            10_000 - 31_000,
+            10_000,
+            &p,
+            Some((1, 600, 10_000)),
+            900
+        ),
+        Some("stale")
+    );
+    // `thesis_death_stale_ms = 0` disables the timeout (fields present).
+    let p0 = death_params(&[("thesis_death_stale_ms", "0")]);
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.60"),
+            Some("0.99"),
+            0,
+            10_000,
+            &p0,
+            Some((1, 600, 10_000)),
+            900
+        ),
+        None
+    );
+}
+
+/// Condition 3: the band tightens linearly base→tight over the round; the
+/// fraction clamps to [0,1]; a corrupt/loose config stays flat (never wider
+/// than the base); no duration seed → flat (condition 2 judged it already).
+#[test]
+fn thesis_death_default_time_weighted_band() {
+    // Entry 0.50, bid 0.44 → adverse 12%. Flat 25% forgives; the tightened
+    // band at 90% elapsed with tight=10 is 11.5% → dead (`time_weighted`).
+    let p = death_params(&[("thesis_death_reversal_pct_tight", "10")]);
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.44"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &p,
+            Some((1, 90, 10_000)),
+            900
+        ),
+        Some("time_weighted")
+    );
+    // Early in the round (10% elapsed → band 23.5%) the same move is alive.
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.44"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &p,
+            Some((1, 810, 10_000)),
+            900
+        ),
+        None
+    );
+    // Round fully drained (time_left 0 of the 90s seed) clamps to frac 1:
+    // the band sits at its tight end (10%), so the 12% move is dead.
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.44"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &p,
+            Some((1, 0, 10_000)),
+            90
+        ),
+        Some("time_weighted")
+    );
+    // tight >= base (a wrong config can only stay flat, never widen).
+    let pw = death_params(&[("thesis_death_reversal_pct_tight", "30")]);
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.44"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &pw,
+            Some((1, 0, 10_000)),
+            900
+        ),
+        None
+    );
+    // No duration seed → no time-weighted check (flat band already judged).
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.44"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &p,
+            Some((1, 0, 10_000)),
+            0
+        ),
+        None
+    );
+    // Unparseable hot params fall back to the shipped defaults (a typo
+    // loosens the guard to its shipped shape, never disables it).
+    let pbad = death_params(&[
+        ("thesis_death_reversal_pct", "abc"),
+        ("thesis_death_reversal_pct_tight", "-5"),
+    ]);
+    assert_eq!(
+        verdict(
+            "0.50",
+            Some("0.30"),
+            Some("0.99"),
+            10_000,
+            10_000,
+            &pbad,
+            Some((1, 0, 10_000)),
+            900
+        ),
+        Some("reversal")
+    );
+    // Degenerate entry (cannot name an adverse move): alive, fail toward
+    // not force-closing on corrupt data.
+    let zero = verdict(
+        "0.50",
+        Some("0.44"),
+        Some("0.99"),
+        10_000,
+        10_000,
+        &p,
+        Some((1, 600, 10_000)),
+        900,
+    );
+    assert_eq!(zero, None, "12% adverse under a 20% tightened band = alive");
+    assert_eq!(
+        thesis_death_default(&ThesisDeathFacts {
+            entry_price: Decimal::ZERO,
+            best_bid: Some(d("0.30")),
+            best_ask: Some(d("0.99")),
+            book_ts_ms: 10_000,
+            now_ms: 10_000,
+            params: &p,
+            round: Some((1, 600, 10_000)),
+            round_duration_max_sec: 900,
+        }),
+        None,
+        "entry 0 cannot name an adverse move: alive"
+    );
+}
+
+/// The `bk.thesis_death_default` surface: one `bk.holdings()` row in, a
+/// boolean out; the verdict matches the pure function's. A malformed row is
+/// a LOUD error (a deterministic strategy bug), never a silent true/false.
+#[test]
+fn bk_thesis_death_default_surface() {
+    let (sb, st) = with_state();
+    sb.load(
+        "function fail(msg) error(msg, 0) end \
+         function probe(h) return bk.thesis_death_default(h) end \
+         function probe_bad() return bk.thesis_death_default({ token_id = '0xup' }) end",
+        "probe",
+    )
+    .expect("load");
+    {
+        let mut s = st.lock().expect("lock");
+        s.note_round(1, 600, 10_000);
+        s.round_duration_max_sec = 900;
+        s.put_book(book("0xup"), Some(true));
+    }
+    // bid 0.55 / entry 0.50: not underwater → alive → false.
+    let f: mlua::Function = sb.lua().globals().get("probe").expect("probe");
+    let row = holding_to_lua(
+        sb.lua(),
+        &blitzkrieg_strategy_api::HoldingView {
+            strategy: "t".into(),
+            condition_id: "cond".into(),
+            token_id: "0xup".into(),
+            direction: "up".into(),
+            shares: "10".into(),
+            entry_price: "0.50".into(),
+            round_slot: 1,
+        },
+    )
+    .expect("row");
+    assert!(!f.call::<bool>(row.clone()).expect("alive call"));
+    // Reversal: crash the book to 0.30 → dead → true.
+    {
+        let mut s = st.lock().expect("lock");
+        let mut b = book("0xup");
+        b.best_bid = Some("0.30".into());
+        s.put_book(b, Some(true));
+    }
+    assert!(f.call::<bool>(row).expect("dead call"));
+    // Missing entry_price: loud, deterministic.
+    let bad: mlua::Function = sb.lua().globals().get("probe_bad").expect("probe_bad");
+    let err = bad.call::<Value>(()).expect_err("loud");
+    assert!(err.to_string().contains("entry_price"), "got: {err}");
 }

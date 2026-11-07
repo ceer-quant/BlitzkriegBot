@@ -468,13 +468,10 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                 }
                 let arr = lua.create_table()?;
                 for (i, h) in st.holdings.iter().enumerate() {
-                    let t = lua.create_table()?;
-                    t.raw_set("condition_id", h.condition_id.as_str())?;
-                    t.raw_set("token_id", h.token_id.as_str())?;
-                    t.raw_set("direction", h.direction.as_str())?;
-                    t.raw_set("shares", h.shares.as_str())?;
-                    t.raw_set("entry_price", h.entry_price.as_str())?;
-                    t.raw_set("round_slot", h.round_slot)?;
+                    // One shared renderer (#961): the same row shape the
+                    // thesis-death callbacks receive, so a predicate tested
+                    // against bk.holdings() reads them unchanged.
+                    let t = holding_to_lua(lua, h)?;
                     arr.raw_set(i as i64 + 1, t)?;
                 }
                 let arr = guard_readonly(lua, &arr)?;
@@ -734,6 +731,69 @@ pub fn install_bk(lua: &Lua, state: Arc<Mutex<BkState>>) -> mlua::Result<()> {
                     Ok(Value::Table(t))
                 },
             )?,
+        )?;
+    }
+
+    // -- bk.thesis_death_default(holding) (#961) ------------------------------
+    // The stdlib DEFAULT "my entry thesis is dead" verdict for one held
+    // position — the read half of the forced `thesis_death_exit` (the write
+    // half lives in LuaStrategy::evaluate, which injects the unconditional
+    // full-taker exit intent when a package's declared predicate or THIS
+    // default answers true; the strategy can never suppress it). `h` is one
+    // `bk.holdings()` row verbatim. Fail-loud on a malformed row (missing
+    // token_id / unparseable entry_price is a deterministic strategy bug);
+    // missing/stale/reversed MARKET data is never an error — it is exactly
+    // what the predicate judges. See `state::thesis_death_default` for the
+    // three declared reverse conditions and their hot params.
+    {
+        let st = Arc::clone(&state);
+        bk.raw_set(
+            "thesis_death_default",
+            lua.create_function(move |_, h: Table| {
+                let token: String = h
+                    .raw_get("token_id")
+                    .map_err(|_| {
+                        mlua::Error::runtime(
+                            "bk.thesis_death_default: holding row must carry token_id (pass one bk.holdings() row)",
+                        )
+                    })?;
+                let entry_s: String = h
+                    .raw_get("entry_price")
+                    .map_err(|_| {
+                        mlua::Error::runtime(format!(
+                            "bk.thesis_death_default: holding row {token} must carry entry_price"
+                        ))
+                    })?;
+                let entry = Decimal::from_str_exact(entry_s.trim()).map_err(|_| {
+                    mlua::Error::runtime(format!(
+                        "bk.thesis_death_default: holding row {token} entry_price '{entry_s}' is not a decimal string"
+                    ))
+                })?;
+                let st = st.lock().expect("bk state mutex");
+                let (bid, ask, ts) = match st.books.get(&token) {
+                    Some(u) => (
+                        u.best_bid
+                            .as_deref()
+                            .and_then(|s| Decimal::from_str_exact(s.trim()).ok()),
+                        u.best_ask
+                            .as_deref()
+                            .and_then(|s| Decimal::from_str_exact(s.trim()).ok()),
+                        u.timestamp_ms,
+                    ),
+                    None => (None, None, 0),
+                };
+                let facts = ThesisDeathFacts {
+                    entry_price: entry,
+                    best_bid: bid,
+                    best_ask: ask,
+                    book_ts_ms: ts,
+                    now_ms: st.now_ms,
+                    params: &st.params,
+                    round: st.round,
+                    round_duration_max_sec: st.round_duration_max_sec,
+                };
+                Ok(thesis_death_default(&facts).is_some())
+            })?,
         )?;
     }
 

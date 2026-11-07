@@ -379,6 +379,19 @@ pub enum ExitReason {
     /// wire label `unverifiable_expiry` on the trade record is the audit trail
     /// (`settlement` would read as a verified verdict, which never happened).
     UnverifiableExpiry,
+    /// #961: the strategy's declared ENTRY THESIS died and the runtime forced
+    /// the close this tick — unconditional, full-size, always taker. This is a
+    /// LEDGER LABEL, not a risk rule: the kernel's exit ladder, holder-stop and
+    /// place_gated paths are untouched (the close still rides the ordinary
+    /// strategy-signal channel, priced off the fresh best bid and risk-checked
+    /// like any other sell). "Thesis death" is whatever the strategy DECLARED
+    /// it to be — the Lua runtime only ever emits the intent when the
+    /// strategy's own `bk_thesis_death` predicate (or its opted-in stdlib
+    /// default) answers true; the kernel never invents one. Wire label
+    /// `thesis_death_exit` on the trade record is the audit trail
+    /// (`strategy_signal` would hide which closes were forced by a dead
+    /// thesis, which is exactly the reading an Exit-First audit wants).
+    ThesisDeathExit,
 }
 
 /// A binary UP/DOWN market for one asset in the current round.

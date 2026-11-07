@@ -37,6 +37,11 @@ pub(crate) fn exit_reason_from_strategy_tag(reason: &str) -> ExitReason {
         "take_profit" | "take_profit_price" => ExitReason::TakeProfit,
         "trailing_stop" => ExitReason::TrailingStop,
         "time_exit" => ExitReason::TimeExit,
+        // #961: the Lua runtime emits this tag ONLY for a forced thesis-death
+        // close (the strategy's own exits table cannot mint it — the runtime
+        // injects the row itself when the declared death predicate fires), so
+        // the ledger label is as authoritative as `settlement`.
+        "thesis_death_exit" => ExitReason::ThesisDeathExit,
         _ => ExitReason::StrategySignal,
     }
 }
