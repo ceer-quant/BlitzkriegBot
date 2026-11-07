@@ -77,6 +77,29 @@ ALLOWED_HOSTS = frozenset({
 })
 
 
+def safe_write_path(path: str) -> str:
+    """拒绝含穿越组件(`..`)的输出路径，否则原样返回。
+
+    该工具只落盘到调用方显式指定的文件；不允许通过 `../` 向上
+    穿越写入仓库树之外的任意文件（path traversal，高危）。
+    """
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError(f"refusing path-traversal output path: {path!r}")
+    return path
+
+
+def safe_open(path: str, mode: str = "r"):
+    """以给定模式打开文件；写入/追加/读写模式前先做路径穿越校验。
+
+    所有落盘入口统一走此函数，避免直接接收未校验的调用方路径
+    （path traversal，高危）。
+    """
+    if any(c in mode for c in "wax+"):
+        path = safe_write_path(path)
+    return open(path, mode)
+
+
 def validate_url(url):
     """Re-validate an already-built URL against the allowlist."""
     u = urllib.parse.urlsplit(url)
@@ -245,8 +268,9 @@ def print_report(rows, stats, title):
 
 
 def write_report_file(path, rows, args, unresolved=0, errors=0):
+    path = safe_write_path(path)
     stats = aggregate(rows)
-    with open(path, "w") as fh:
+    with safe_open(path, "w") as fh:
         fh.write("sources: clob.polymarket.com/markets/<cid>"
                  " (market_resolved winner) + gamma-api /events?slug=\n")
         fh.write(f"periods: {args.d0807} = Chainlink-TWAP settlement live;"
@@ -293,7 +317,8 @@ def relabel(paths, out_path, args, fetch=fetch_json):
 
     d0807, d0814 = iso_utc_ms(args.d0807), iso_utc_ms(args.d0814)
     unresolved = errors = 0
-    with open(out_path, "w") as out:
+    out_path = safe_write_path(out_path)
+    with safe_open(out_path, "w") as out:
         for path, lineno, r in rows:
             tr = truth.get(r["cond"], {})
             win = tr.get("winner")
@@ -369,7 +394,8 @@ def verify(relabeled_path, args, fetch=fetch_json):
     for m in mismatches[:50]:
         print("MISMATCH", json.dumps(m))
     if args.out_evidence:
-        with open(args.out_evidence, "w") as fh:
+        out_evidence = safe_write_path(args.out_evidence)
+        with safe_open(out_evidence, "w") as fh:
             for r in sample:
                 fh.write(json.dumps({
                     "cond": r["cond"], "asset": r.get("asset"),
@@ -419,9 +445,9 @@ def apply_corpus(path, args, fetch=fetch_json):
           file=sys.stderr)
     truth = fetch_many(res_cids, fetch, workers=args.workers)
 
-    tmp = path + ".tmp"
+    tmp = safe_write_path(path + ".tmp")
     nlines = rewritten = unresolved = 0
-    with open(tmp, "w") as out:
+    with safe_open(tmp, "w") as out:
         for raw in open(path):
             nlines += 1
             try:

@@ -31,6 +31,21 @@ import argparse
 import json
 import sys
 
+
+def safe_write_path(path: str) -> str:
+    """拒绝含穿越组件(`..`)的输出路径（path traversal，高危）。"""
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError(f"refusing path-traversal output path: {path!r}")
+    return path
+
+
+def safe_open(path: str, mode: str = "r"):
+    if any(c in mode for c in "wax+"):
+        path = safe_write_path(path)
+    return open(path, mode)
+
+
 TOKENED_KINDS = {"book", "books"}
 
 
@@ -58,7 +73,7 @@ def filter_corpus(src, out, venue):
     dropped_rounds = 0
     dropped_books = 0
     dropped_resolutions = 0
-    with open(out, "w") as w:
+    with safe_open(out, "w") as w:
         for raw in open(src):
             lines += 1
             try:
@@ -153,7 +168,7 @@ def self_test():
         {"at": 4, "k": "resolution", "c": "KX1", "p": [["T3", "1"], ["T4", "0"]]},
         {"at": 5, "k": "spot", "asset": "BTC", "price": "1", "now_ms": 5},
     ]
-    with open(src, "w") as f:
+    with safe_open(src, "w") as f:
         for r in rows:
             f.write(json.dumps(r, separators=(",", ":")) + "\n")
     assert filter_corpus(src, out, "polymarket") == 0

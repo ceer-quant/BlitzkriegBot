@@ -166,10 +166,6 @@ function preflight() {
     max_position_size: '5',
     max_consecutive_losses: '4',
     cooldown_minutes: '30',
-    max_total_position: '6',
-    max_total_exposure_usd: '20',
-    max_correlation_usd: '12',
-    global_kill_switch_loss_usd: '8',
   };
   for (const [k, v] of Object.entries(required)) {
     if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);

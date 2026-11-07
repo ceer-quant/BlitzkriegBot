@@ -47,6 +47,21 @@ WHAT THIS CONVERTER ADDS
 import argparse, json, os, sys
 from decimal import Decimal
 
+
+def safe_write_path(path: str) -> str:
+    """拒绝含穿越组件(`..`)的输出路径（path traversal，高危）。"""
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError(f"refusing path-traversal output path: {path!r}")
+    return path
+
+
+def safe_open(path: str, mode: str = "r"):
+    if any(c in mode for c in "wax+"):
+        path = safe_write_path(path)
+    return open(path, mode)
+
+
 ARCHIVE = "/Volumes/Hard Disk/BlitzkriegBot/data/archive"
 FAMILIES = (300, 900, 3600, 14400)
 
@@ -163,7 +178,7 @@ def main() -> int:
     out_rows.sort(key=lambda x: x[0])
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-    with open(args.out, "w") as fh:
+    with safe_open(args.out, "w") as fh:
         for _, o in out_rows:
             fh.write(json.dumps(o) + "\n")
 
@@ -183,7 +198,7 @@ def main() -> int:
                    for m, w, p0, p1, om, em in kept],
     }
     if args.meta:
-        with open(args.meta, "w") as fh:
+        with safe_open(args.meta, "w") as fh:
             json.dump(meta, fh, indent=1)
     print(json.dumps({k: v for k, v in meta.items() if k != "rounds"}, indent=1))
     return 0
