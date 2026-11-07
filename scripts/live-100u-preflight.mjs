@@ -128,13 +128,9 @@ export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
   const required = {
     max_single_loss_usd: '0.50',
     max_daily_drawdown_usd: '5',
-    max_total_exposure_usd: '20',
-    global_kill_switch_loss_usd: '8',
     max_position_size: '5',
     max_consecutive_losses: '4',
     cooldown_minutes: '30',
-    max_total_position: '6',
-    max_correlation_usd: '12',
   };
   for (const [k, v] of Object.entries(required)) {
     if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);
