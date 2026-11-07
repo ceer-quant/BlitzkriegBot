@@ -1,0 +1,424 @@
+{
+  "generatedAtMs": 1794071896200,
+  "issue": 964,
+  "script": "scripts/ab-exit-964.mjs",
+  "profiles": [
+    "realistic"
+  ],
+  "arms": [
+    "A",
+    "B",
+    "C"
+  ],
+  "seed": 962,
+  "seedBalance": "1000",
+  "maxOrderNotional": "12",
+  "minShares": "1",
+  "maxShares": "1",
+  "maxPositions": "10",
+  "minRounds": 200,
+  "tickMs": "50",
+  "coverage": {
+    "ok": true,
+    "detail": "23 窗 × 207..208 轮（共 4766；验收线 ≥200 轮/臂）"
+  },
+  "verdict": {
+    "usable": true,
+    "gates": {
+      "coverage": true,
+      "coverageDetail": "23 窗 × 207..208 轮（共 4766；验收线 ≥200 轮/臂）",
+      "determinism": {
+        "A": "match",
+        "B": "match",
+        "C": "match"
+      },
+      "contamination": {
+        "A": false,
+        "B": false,
+        "C": false
+      }
+    },
+    "bVsA": [
+      {
+        "key": "winRatePct",
+        "label": "胜率 %",
+        "dir": "higher",
+        "a": null,
+        "b": 42.18000737735153,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "payoff",
+        "label": "盈亏比",
+        "dir": "higher",
+        "a": null,
+        "b": 0.8185349445478146,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "expectancyUsd",
+        "label": "期望 USD/笔",
+        "dir": "higher",
+        "a": null,
+        "b": -0.04718404993544816,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "netPnlUsd",
+        "label": "净 PnL USD",
+        "dir": "higher",
+        "a": 0,
+        "b": -255.83191874999994,
+        "delta": -255.83191874999994,
+        "verdict": "n/a"
+      },
+      {
+        "key": "maxDrawdownUsd",
+        "label": "最大回撤 USD",
+        "dir": "lower",
+        "a": 0,
+        "b": 37.28817875,
+        "delta": 37.28817875,
+        "verdict": "n/a"
+      },
+      {
+        "key": "worstTradeUsd",
+        "label": "单笔最大亏损 USD",
+        "dir": "higher",
+        "a": null,
+        "b": -0.5209265,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "tailLoss.p99",
+        "label": "尾亏 P99 USD",
+        "dir": "higher",
+        "a": null,
+        "b": 0.40304775499999995,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "feesUsd",
+        "label": "费用 USD",
+        "dir": "lower",
+        "a": 0,
+        "b": 173.51691875,
+        "delta": 173.51691875,
+        "verdict": "n/a"
+      },
+      {
+        "key": "settlementRatePct",
+        "label": "到期结算率 %",
+        "dir": "info",
+        "a": null,
+        "b": 0,
+        "delta": null,
+        "verdict": "info"
+      },
+      {
+        "key": "avgHoldSecFloor",
+        "label": "持仓下界 s",
+        "dir": "info",
+        "a": null,
+        "b": 0,
+        "delta": null,
+        "verdict": "info"
+      },
+      {
+        "key": "closed",
+        "label": "平仓笔数",
+        "dir": "info",
+        "a": 0,
+        "b": 5422,
+        "delta": 5422,
+        "verdict": "info"
+      }
+    ],
+    "bVsC": [
+      {
+        "key": "winRatePct",
+        "label": "胜率 %",
+        "dir": "higher",
+        "a": 50.24315331456361,
+        "b": 42.18000737735153,
+        "delta": -8.063145937212077,
+        "verdict": "worse"
+      },
+      {
+        "key": "payoff",
+        "label": "盈亏比",
+        "dir": "higher",
+        "a": 0.8822592170814765,
+        "b": 0.8185349445478146,
+        "delta": -0.06372427253366186,
+        "verdict": "worse"
+      },
+      {
+        "key": "expectancyUsd",
+        "label": "期望 USD/笔",
+        "dir": "higher",
+        "a": -0.02517610501727668,
+        "b": -0.04718404993544816,
+        "delta": -0.02200794491817148,
+        "verdict": "worse"
+      },
+      {
+        "key": "netPnlUsd",
+        "label": "净 PnL USD",
+        "dir": "higher",
+        "a": -98.36304230249999,
+        "b": -255.83191874999994,
+        "delta": -157.46887644749995,
+        "verdict": "worse"
+      },
+      {
+        "key": "maxDrawdownUsd",
+        "label": "最大回撤 USD",
+        "dir": "lower",
+        "a": 20.3891188475,
+        "b": 37.28817875,
+        "delta": 16.8990599025,
+        "verdict": "worse"
+      },
+      {
+        "key": "worstTradeUsd",
+        "label": "单笔最大亏损 USD",
+        "dir": "higher",
+        "a": -0.7828485,
+        "b": -0.5209265,
+        "delta": 0.261922,
+        "verdict": "better"
+      },
+      {
+        "key": "tailLoss.p99",
+        "label": "尾亏 P99 USD",
+        "dir": "higher",
+        "a": 0.66130356,
+        "b": 0.40304775499999995,
+        "delta": -0.25825580500000006,
+        "verdict": "worse"
+      },
+      {
+        "key": "feesUsd",
+        "label": "费用 USD",
+        "dir": "lower",
+        "a": 79.28754230249999,
+        "b": 173.51691875,
+        "delta": 94.22937644750002,
+        "verdict": "worse"
+      },
+      {
+        "key": "settlementRatePct",
+        "label": "到期结算率 %",
+        "dir": "info",
+        "a": 30.202201177373944,
+        "b": 0,
+        "delta": -30.202201177373944,
+        "verdict": "info"
+      },
+      {
+        "key": "avgHoldSecFloor",
+        "label": "持仓下界 s",
+        "dir": "info",
+        "a": 271.81981059636547,
+        "b": 0,
+        "delta": -271.81981059636547,
+        "verdict": "info"
+      },
+      {
+        "key": "closed",
+        "label": "平仓笔数",
+        "dir": "info",
+        "a": 3907,
+        "b": 5422,
+        "delta": 1515,
+        "verdict": "info"
+      }
+    ],
+    "cVsA": [
+      {
+        "key": "winRatePct",
+        "label": "胜率 %",
+        "dir": "higher",
+        "a": null,
+        "b": 50.24315331456361,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "payoff",
+        "label": "盈亏比",
+        "dir": "higher",
+        "a": null,
+        "b": 0.8822592170814765,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "expectancyUsd",
+        "label": "期望 USD/笔",
+        "dir": "higher",
+        "a": null,
+        "b": -0.02517610501727668,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "netPnlUsd",
+        "label": "净 PnL USD",
+        "dir": "higher",
+        "a": 0,
+        "b": -98.36304230249999,
+        "delta": -98.36304230249999,
+        "verdict": "n/a"
+      },
+      {
+        "key": "maxDrawdownUsd",
+        "label": "最大回撤 USD",
+        "dir": "lower",
+        "a": 0,
+        "b": 20.3891188475,
+        "delta": 20.3891188475,
+        "verdict": "n/a"
+      },
+      {
+        "key": "worstTradeUsd",
+        "label": "单笔最大亏损 USD",
+        "dir": "higher",
+        "a": null,
+        "b": -0.7828485,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "tailLoss.p99",
+        "label": "尾亏 P99 USD",
+        "dir": "higher",
+        "a": null,
+        "b": 0.66130356,
+        "delta": null,
+        "verdict": "n/a"
+      },
+      {
+        "key": "feesUsd",
+        "label": "费用 USD",
+        "dir": "lower",
+        "a": 0,
+        "b": 79.28754230249999,
+        "delta": 79.28754230249999,
+        "verdict": "n/a"
+      },
+      {
+        "key": "settlementRatePct",
+        "label": "到期结算率 %",
+        "dir": "info",
+        "a": null,
+        "b": 30.202201177373944,
+        "delta": null,
+        "verdict": "info"
+      },
+      {
+        "key": "avgHoldSecFloor",
+        "label": "持仓下界 s",
+        "dir": "info",
+        "a": null,
+        "b": 271.81981059636547,
+        "delta": null,
+        "verdict": "info"
+      },
+      {
+        "key": "closed",
+        "label": "平仓笔数",
+        "dir": "info",
+        "a": 0,
+        "b": 3907,
+        "delta": 3907,
+        "verdict": "info"
+      }
+    ],
+    "bBetterOn": 0,
+    "minBetter": 2,
+    "conclusion": "arm-starved",
+    "starved": true,
+    "starvedDetail": {
+      "A": {
+        "closed": 0,
+        "ordersPlaced": 115,
+        "ordersRejected": 125,
+        "rejectionCauses": {
+          "venue.WouldCross": 115,
+          "killswitch.other": 10
+        },
+        "accountFreezes": {
+          "default": "5 consecutive venue rejections on account default; last: post-only order would cross: buy 1 @ 0.665 (the venue refuses this POST; a MakerThenTaker entry escalates to taker on the same book)"
+        }
+      }
+    }
+  },
+  "corpus": {
+    "corpus": "/Volumes/Hard Disk/BlitzkriegBot/data/onchain/3725d52f3c252e8374999cc8617292ea2608ad88_1785888000_1790812799-15m-act-4bf06519abf5.jsonl",
+    "sha256": "2787348f07c3f26504092e93217ddd0cf619e3e7927917ead9d2109737e305c1"
+  },
+  "windowsPlanned": 23,
+  "aggregatesSummary": {
+    "A": {
+      "closed": 0,
+      "winRatePct": null,
+      "payoff": null,
+      "netPnlUsd": 0,
+      "feesUsd": 0,
+      "determinism": "match",
+      "entry": {
+        "ordersPlaced": 115,
+        "ordersRejected": 125,
+        "rejectionCauses": {
+          "venue.WouldCross": 115,
+          "killswitch.other": 10
+        },
+        "accountFreezes": {
+          "default": "5 consecutive venue rejections on account default; last: post-only order would cross: buy 1 @ 0.665 (the venue refuses this POST; a MakerThenTaker entry escalates to taker on the same book)"
+        }
+      }
+    },
+    "B": {
+      "closed": 5422,
+      "winRatePct": 42.18000737735153,
+      "payoff": 0.8185349445478146,
+      "netPnlUsd": -255.83191874999994,
+      "feesUsd": 173.51691875,
+      "determinism": "match",
+      "entry": {
+        "ordersPlaced": 5422,
+        "ordersRejected": 800,
+        "rejectionCauses": {
+          "risk:breaker": 780,
+          "positions.lossCooldown": 20
+        },
+        "accountFreezes": {}
+      }
+    },
+    "C": {
+      "closed": 3907,
+      "winRatePct": 50.24315331456361,
+      "payoff": 0.8822592170814765,
+      "netPnlUsd": -98.36304230249999,
+      "feesUsd": 79.28754230249999,
+      "determinism": "match",
+      "entry": {
+        "ordersPlaced": 3910,
+        "ordersRejected": 130002,
+        "rejectionCauses": {
+          "positions.exitCooldown": 38347,
+          "positions.lossCooldown": 54487,
+          "risk:breaker": 37168
+        },
+        "accountFreezes": {}
+      }
+    }
+  }
+}
