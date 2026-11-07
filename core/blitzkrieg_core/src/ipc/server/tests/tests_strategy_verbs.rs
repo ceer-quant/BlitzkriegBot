@@ -181,3 +181,39 @@ async fn replay_shaped_core_keeps_the_engine_only_toggle() {
         "the engine flag moved — the persistent state is what stays home here"
     );
 }
+
+/// issue 984: strategy.reload / strategy.packages.reload 改变活分发表，
+/// 必须登记进 READONLY_REFUSED —— 只读内核拒绝二者，且拒绝发生在
+/// handler 之前（同 strategy.params.set）。
+#[tokio::test]
+async fn strategy_reload_and_packages_reload_are_refused_in_read_only_mode() {
+    let cfg = CoreConfig::default();
+    let mut c = Core::new(cfg);
+    c.config_mut().mode = Mode::ReadOnly;
+    let core = Arc::new(AsyncMutex::new(c));
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    let peer = PeerAuth::SameUid { uid: own_uid() };
+
+    for method in ["strategy.reload", "strategy.packages.reload"] {
+        let reply = rpc(
+            &core,
+            &registry,
+            &peer,
+            format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{}}}}"#),
+        )
+        .await;
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(Failure::APPLICATION),
+            "read-only must refuse {method}: {reply}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only mode"),
+            "read-only message must name the mode: {}",
+            reply["error"]["message"]
+        );
+    }
+}
