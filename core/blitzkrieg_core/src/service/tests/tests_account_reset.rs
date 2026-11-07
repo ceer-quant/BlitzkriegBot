@@ -559,6 +559,7 @@ fn seed_closed_trade(c: &mut Core, account: &str, id: &str, net: Decimal) {
             crate::model::ExitReason::TakeProfit,
             false,
             1,
+            "venue",
         )
         .expect("the held position closes");
     c.on_position_closed(&closed, 1);

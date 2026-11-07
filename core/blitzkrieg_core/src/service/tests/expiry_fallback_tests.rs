@@ -564,3 +564,214 @@ fn an_untrackable_position_is_outside_the_fallback() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #987: a fallback close carries `source == "fallback"` and records the
+/// original fallback price in `original_fallback_price`. The trade record
+/// (TradeDb) mirrors both fields.
+#[test]
+fn fallback_close_carries_source_fallback() {
+    let dir = scratch("source-fallback");
+    let mut c = fallback_core(&dir, true);
+    let p = open_expiring_position(&mut c);
+    let closed = c
+        .force_close_expired_position(&p.id, "uid:op", EXPIRES_MS + 1_000)
+        .expect("expired + audited = closed");
+    assert_eq!(closed.source, "fallback", "fallback close must be labeled");
+    assert_eq!(
+        closed.original_fallback_price,
+        Some(dec!(0.40)),
+        "original fallback price preserved for audit"
+    );
+    // The trade record mirrors the closed position's provenance.
+    let rec = &c.positions().closed_positions()[0];
+    assert_eq!(rec.source, "fallback");
+    assert_eq!(rec.original_fallback_price, Some(dec!(0.40)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #987: reconcile backfill flips fallback-closed positions to `source ==
+/// "venue"` when venue cash truth arrives, while PRESERVING the original
+/// fallback price in `original_fallback_price` for audit. No silent overwrite.
+#[test]
+fn reconcile_backfill_flips_fallback_to_venue() {
+    let dir = scratch("reconcile-backfill");
+    let mut c = fallback_core(&dir, false);
+    let _p = open_expiring_position(&mut c);
+
+    // First close via the fallback sweep (zero venue answers past the silence bound).
+    let sent = EXPIRES_MS + 100;
+    c.tick(sent).unwrap();
+    stage_unanswered_query(&mut c, "cond", "tok", sent);
+    let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+    c.tick(bound + 1_000).unwrap();
+    assert!(c.positions().open_positions().is_empty());
+    let closed_before = &c.positions().closed_positions()[0];
+    assert_eq!(
+        closed_before.source, "fallback",
+        "precondition: source is fallback"
+    );
+    let fallback_price = closed_before.exit_price;
+
+    // Venue cash truth arrives: a SELL fill on the same token via reconcile.
+    let snap = crate::reconcile::VenueSnapshot {
+        open_order_ids: vec![],
+        trades: vec![crate::reconcile::VenueTrade {
+            venue_order_id: "ven:1".into(),
+            trade_id: "tr:1".into(),
+            token_id: "tok".into(),
+            side: crate::model::Side::Sell,
+            size: dec!(5),
+            price: dec!(0.40),
+            ts_ms: bound + 2_000,
+            tx_hash: None,
+            maker: None,
+        }],
+        now_ms: bound + 2_000,
+    };
+    let report = c.reconcile(snap).expect("reconcile succeeds");
+    // The backfill should have flipped the fallback row.
+    assert!(
+        !report
+            .actions
+            .iter()
+            .any(|a| matches!(a, crate::reconcile::ReconcileAction::FilledGap { .. })),
+        "no gap fill expected for an already-closed position"
+    );
+    let closed_after = &c.positions().closed_positions()[0];
+    assert_eq!(
+        closed_after.source, "venue",
+        "reconcile backfill flips source to venue"
+    );
+    assert_eq!(
+        closed_after.original_fallback_price,
+        Some(fallback_price),
+        "original fallback price preserved for audit, not discarded"
+    );
+    assert_eq!(
+        closed_after.exit_price, fallback_price,
+        "exit price unchanged by the backfill (no silent overwrite)"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #987: the unverified exposure report lists only `source == "fallback"`
+/// closes, excludes venue closes, and never merges into realized PnL.
+#[test]
+fn unverified_exposure_report_lists_only_fallback_closes() {
+    let dir = scratch("exposure-report");
+    let mut c = fallback_core(&dir, true);
+
+    // One fallback close: over-expiry, zero venue answers.
+    let _p1 = open_expiring_position(&mut c);
+    let sent = EXPIRES_MS + 100;
+    c.tick(sent).unwrap();
+    stage_unanswered_query(&mut c, "cond", "tok", sent);
+    let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+    c.tick(bound + 1_000).unwrap();
+    assert!(c.positions().open_positions().is_empty());
+    let fallback_cost = c.positions().closed_positions()[0].cost_usd;
+
+    // One venue close: force-close via the settlement path would be "fallback",
+    // so instead simulate a venue close directly through the book's close() with
+    // source="venue". Use a second condition/token so the fallback row isn't
+    // flipped by reconcile.
+    c.book_snapshot("tok2", vec![], vec![(dec!(0.50), dec!(100))], bound + 3_000);
+    let (_id, status) = c
+        .place(
+            OrderRequest {
+                token_id: "tok2".into(),
+                condition_id: "cond2".into(),
+                side: Side::Buy,
+                mode: FillPolicy::Taker,
+                price: dec!(0.50),
+                size: dec!(3),
+                internal_key: "k2".into(),
+                strategy: "spread_arb".into(),
+                asset: "ETH".into(),
+                direction: "up".into(),
+                round_slot: 1,
+                account_id: crate::model::default_account_id(),
+            },
+            0,
+            1,
+        )
+        .unwrap();
+    assert_eq!(status, crate::model::OrderStatus::Filled);
+    let p2 = c.positions().open_positions()[0].clone();
+    // Close it as a venue close (exit path).
+    let closed2 = c
+        .positions
+        .close(
+            &p2.id,
+            dec!(0.50),
+            crate::model::ExitReason::TakeProfit,
+            true,
+            bound + 4_000,
+            "venue",
+        )
+        .expect("venue close lands");
+    assert_eq!(closed2.source, "venue");
+
+    // Report: only the fallback row.
+    let report = c.unverified_exposure_report();
+    assert_eq!(
+        report.total_positions, 1,
+        "only one fallback-closed position"
+    );
+    assert_eq!(
+        report.entries[0].cost_usd, fallback_cost,
+        "report carries the fallback position's cost"
+    );
+    assert_eq!(
+        report.total_cost_usd, fallback_cost,
+        "total cost is just the fallback position's cost"
+    );
+    assert!(
+        report.total_percentage_of_closed_cost > Decimal::ZERO,
+        "unverified share of closed cost is nonzero"
+    );
+    assert_eq!(
+        report.entries[0].net_pnl_usd,
+        c.positions().closed_positions()[0].net_pnl_usd,
+        "report mirrors the closed row's net pnl"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #987: zero-feed fallback is cost recovery (entry price), NOT profit — the
+/// books must never look better than reality when the venue never answered.
+#[test]
+fn zero_feed_fallback_is_cost_recovery_not_profit() {
+    let dir = scratch("zero-feed-no-profit");
+    let mut c = fallback_core(&dir, false);
+    let p = open_expiring_position(&mut c);
+    // A dead feed: current_price = 0.
+    let mut dead = p.clone();
+    dead.current_price = dec!(0);
+    dead.prev_price = dec!(0);
+    c.positions.restore_open(vec![dead], None);
+
+    let sent = EXPIRES_MS + 100;
+    c.tick(sent).unwrap();
+    stage_unanswered_query(&mut c, "cond", "tok", sent);
+    let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+    c.tick(bound + 1_000).unwrap();
+
+    let closed = &c.positions().closed_positions()[0];
+    assert_eq!(
+        closed.exit_price,
+        dec!(0.40),
+        "zero feed falls back to entry price = cost recovery"
+    );
+    // net_pnl at cost recovery is ~0 (minus fees), never a positive payout.
+    assert!(
+        closed.net_pnl_usd <= Decimal::ZERO,
+        "cost recovery never books profit: net={}",
+        closed.net_pnl_usd
+    );
+    assert_eq!(
+        closed.source, "fallback",
+        "zero-feed close is labeled fallback, never venue"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -456,6 +456,8 @@ async fn execution_policy_preview_replays_history_through_evaluate() {
             exit_role: OrderRole::Taker,
             dust_shares: Decimal::ZERO,
             venue: String::new(),
+            source: String::new(),
+            original_fallback_price: None,
         };
         c.positions_mut()
             .push_closed_for_test(mk("BTC", dec!(0.40)));

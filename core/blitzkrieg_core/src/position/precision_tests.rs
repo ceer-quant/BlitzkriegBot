@@ -108,6 +108,7 @@ fn partial_entry_and_exit_flows_reconcile_exactly() {
                 ExitReason::Manual,
                 false,
                 10,
+                "venue",
             )
             .unwrap();
 
@@ -162,7 +163,7 @@ fn sub_grid_dust_is_written_off_not_left_open() {
     )
     .unwrap();
     let closed = pm
-        .close(&pos.id, dec!(0.60), ExitReason::Manual, true, 10)
+        .close(&pos.id, dec!(0.60), ExitReason::Manual, true, 10, "venue")
         .unwrap();
     assert_eq!(closed.dust_shares, dec!(0.001));
     // The dust is priced at the exit, so gross covers all 10 shares.

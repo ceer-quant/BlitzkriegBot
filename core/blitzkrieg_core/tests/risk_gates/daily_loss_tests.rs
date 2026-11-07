@@ -35,7 +35,7 @@ fn realize(
     now: i64,
 ) -> Decimal {
     let id = position(pm, tok, entry, shares, now);
-    pm.close(&id, exit, ExitReason::StopLoss, false, now + 1_000)
+    pm.close(&id, exit, ExitReason::StopLoss, false, now + 1_000, "venue")
         .expect("the position is open")
         .net_pnl_usd
 }

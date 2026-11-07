@@ -378,6 +378,35 @@ impl Core {
         // on the venue): fold them into the position book so the position
         // cannot haunt the exit rules forever.
         self.apply_external_fills(&report.unknown_fills, snap.now_ms);
+        // #987: reconcile backfill — venue cash truth has caught up for any
+        // token showing a venue fill. Flip fallback-closed positions on those
+        // tokens from `source == "fallback"` to `"venue"`, preserving the
+        // original fallback price in `original_fallback_price` for audit. No
+        // silent overwrite: the fallback price is kept, never discarded.
+        let venue_tokens: HashSet<&str> = report
+            .unknown_fills
+            .iter()
+            .filter(|t| t.side == Side::Sell)
+            .map(|t| t.token_id.as_str())
+            .chain(report.actions.iter().filter_map(|a| match a {
+                crate::reconcile::ReconcileAction::FilledGap { delta, .. } => {
+                    Some(delta.token_id.as_str())
+                }
+                _ => None,
+            }))
+            .collect();
+        if !venue_tokens.is_empty() {
+            let flipped = self
+                .positions
+                .backfill_fallback_to_venue_tokens(&venue_tokens);
+            if flipped > 0 {
+                tracing::info!(
+                    flipped,
+                    "reconcile backfill: venue cash truth confirmed {} fallback-closed position(s); source flipped to venue, original fallback price preserved for audit",
+                    flipped
+                );
+            }
+        }
         // A terminal status the sweep just stamped (filled-without-gap,
         // vanished→cancelled, ghost→force-closed) must reach orders.jsonl the
         // same way every other status change does — otherwise a restart
@@ -568,6 +597,7 @@ impl Core {
                     ExitReason::Manual,
                     t.maker == Some(true),
                     now_ms,
+                    "venue",
                 ) {
                     self.persist_positions();
                     self.on_position_closed(&closed, now_ms);

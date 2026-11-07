@@ -624,6 +624,8 @@ fn the_close_credential_journal_survives_a_restart() {
             dust_shares: rust_decimal::Decimal::ZERO,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            source: String::new(),
+            original_fallback_price: None,
         },
         streak_before: 2,
         account_streak_before: 1,

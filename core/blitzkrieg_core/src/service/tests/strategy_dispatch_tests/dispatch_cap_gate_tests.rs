@@ -1010,6 +1010,7 @@ fn arb_totals_ride_every_account_slice_of_the_arb_row_only() {
                 crate::model::ExitReason::TakeProfit,
                 false,
                 1,
+                "venue",
             )
             .expect("the leg closes through the production close path");
         net_sum += closed.net_pnl_usd;

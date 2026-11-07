@@ -994,6 +994,21 @@ impl Core {
         n
     }
 
+    /// #987: the unverified exposure report — positions closed via the fallback
+    /// path whose exit price was a bookkeeping value (last known mid, else entry
+    /// price) that no venue verdict ever confirmed. Separate from realized PnL;
+    /// never merged into it.
+    pub fn unverified_exposure_report(&self) -> crate::position::UnverifiedExposureReport {
+        self.positions.unverified_exposure_report()
+    }
+
+    /// #987: reconcile backfill — flip fallback-closed positions on `condition_id`
+    /// from `source == "fallback"` to `"venue"`, preserving the original fallback
+    /// price for audit. Returns the number of rows flipped.
+    pub fn backfill_fallback_to_venue(&mut self, condition_id: &str) -> usize {
+        self.positions.backfill_fallback_to_venue(condition_id)
+    }
+
     /// Persist the current OPEN position set (best effort). Positions are few and
     /// short-lived, so the whole set is rewritten on every change rather than
     /// appended (a close needs no tombstone).

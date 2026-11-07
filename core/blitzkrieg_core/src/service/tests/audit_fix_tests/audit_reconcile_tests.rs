@@ -622,6 +622,7 @@ fn a_polysimulator_executed_polymarket_token_stamps_execution_identity_end_to_en
             crate::model::ExitReason::Manual,
             true,
             now + 5,
+            "venue",
         )
         .expect("the full-size close lands");
     assert_eq!(

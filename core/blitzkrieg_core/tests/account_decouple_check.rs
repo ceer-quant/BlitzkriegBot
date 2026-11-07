@@ -1077,6 +1077,7 @@ fn account_removal_is_delete_all_but_the_last_account() {
                 blitzkrieg_core::model::ExitReason::Manual,
                 false,
                 now,
+                "venue",
             )
             .expect("the probe position closes");
     }

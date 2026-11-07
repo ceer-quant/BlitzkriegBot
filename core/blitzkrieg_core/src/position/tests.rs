@@ -224,7 +224,7 @@ fn close_dust_fee_follows_the_active_schedule() {
     )
     .unwrap();
     let closed = pm
-        .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000)
+        .close(&p.id, dec!(0.60), ExitReason::Manual, false, 1000, "venue")
         .unwrap();
     // gross = 5.94 (the 9.90 sold) + 0.06 (dust) − 4.00 (maker cost) = 2.00
     // fees  = 0.07128 (1.2% of the taker fill's 5.94) + 0.00072 (legacy
@@ -277,7 +277,14 @@ fn open_and_close_pnl_is_net_of_fees() {
     assert_eq!(p.cost_usd, dec!(4));
     assert_eq!(p.entry_fee_pct, Decimal::ZERO);
     let c = pm
-        .close(&p.id, dec!(0.6), ExitReason::TakeProfit, false, 1000)
+        .close(
+            &p.id,
+            dec!(0.6),
+            ExitReason::TakeProfit,
+            false,
+            1000,
+            "venue",
+        )
         .unwrap();
     assert!(c.net_pnl_usd < dec!(2.0));
     assert!(c.net_pnl_usd > dec!(1.9)); // fee is small around 0.6
@@ -559,8 +566,15 @@ fn loss_sets_asset_cooldown() {
         OrderRole::Maker,
         0,
     );
-    pm.close(&p.id, dec!(0.3), ExitReason::StopLoss, false, 10_000)
-        .unwrap();
+    pm.close(
+        &p.id,
+        dec!(0.3),
+        ExitReason::StopLoss,
+        false,
+        10_000,
+        "venue",
+    )
+    .unwrap();
     // Immediately after a loss, re-entry is blocked by asset/loss cooldown.
     assert!(
         pm.can_open("default", Some("BTC"), Some(SignalDirection::Down), 11_000)
@@ -594,8 +608,15 @@ fn daily_loss_limit_blocks_new_positions() {
         OrderRole::Maker,
         0,
     );
-    pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
-        .unwrap();
+    pm.close(
+        &p.id,
+        dec!(0.05),
+        ExitReason::StopLoss,
+        false,
+        1000,
+        "venue",
+    )
+    .unwrap();
     assert!(pm.daily_pnl_for("default") < dec!(-1));
     assert!(
         pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
@@ -622,8 +643,15 @@ fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
         OrderRole::Maker,
         0,
     );
-    pm.close(&p.id, dec!(0.05), ExitReason::StopLoss, false, 1000)
-        .unwrap();
+    pm.close(
+        &p.id,
+        dec!(0.05),
+        ExitReason::StopLoss,
+        false,
+        1000,
+        "venue",
+    )
+    .unwrap();
     assert!(pm.daily_loss_tripped_for("default"));
     assert!(
         pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
@@ -641,8 +669,15 @@ fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
         "a sibling's tripped budget must not freeze poly's entries"
     );
     // poly 自己也亏穿：只冻 poly。
-    pm.close(&q.id, dec!(0.05), ExitReason::StopLoss, false, 4000)
-        .unwrap();
+    pm.close(
+        &q.id,
+        dec!(0.05),
+        ExitReason::StopLoss,
+        false,
+        4000,
+        "venue",
+    )
+    .unwrap();
     assert!(pm.daily_loss_tripped_for("poly"));
     assert!(
         pm.can_open("poly", Some("ETH"), Some(SignalDirection::Up), 5000)
@@ -721,7 +756,7 @@ fn daily_loss_breaker_trips_on_unrealized_loss() {
     let mut pm = PositionManager::new(cfg);
     // realized leg: 20 shares 0.40 → 0.10 (taker out) ≈ −6, inside the cap.
     let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
-    pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
+    pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000, "venue")
         .unwrap();
     let realized = pm.daily_pnl_for("default");
     assert!(realized < Decimal::ZERO && realized > dec!(-10));
@@ -762,7 +797,7 @@ fn realized_only_config_ignores_unrealized_loss() {
     };
     let mut pm = PositionManager::new(cfg);
     let eth = enter_marked(&mut pm, dec!(0.40), dec!(20), dec!(0.40));
-    pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000)
+    pm.close(&eth, dec!(0.10), ExitReason::StopLoss, false, 1000, "venue")
         .unwrap();
     let realized = pm.daily_pnl_for("default");
     assert!(realized + dec!(-20) <= dec!(-10));
