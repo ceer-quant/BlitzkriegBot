@@ -1,0 +1,104 @@
+{
+  "name": "coin_flip_exit_lab",
+  "version": "0.1.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "a2b25b6288a2bf3586ff58ea3bf9d13f83457b89e775bfce4f0878b70a43a8a1",
+  "author": "BlitzkriegBot",
+  "description": "Issue #962 Exit-First 实验台 (LAB ONLY — replay/research, NEVER a live default config; do not add to user_layer/configs/*). The operator's philosophy under test: entry direction is a COIN FLIP — a deterministic hash of (coin_seed, round_slot, condition_id) picks UP or DOWN, stripping entry alpha to zero so the EXIT mechanism's expectancy contribution is measured alone. Every full round-market in the replayed window gets exactly one flip and at most one POSITION (taker-style: the entry re-quotes at the token's own best ask every evaluate until the fill is observed — the MakerThenTaker escalation is a FOK at the order's own limit against the book at the escalation tick, so a one-shot at-the-ask quote dies on any up-tick; the fill happens at the price the book actually shows, and the engine cycle runs escalations before the same-tick evaluate so the re-quote guard can never double-enter — manifest entry_maker=false, replay escalates at --entry-maker-timeout-ms 1). No price floor, no signal, no os.time, no math.random state: the flip is a pure FNV-1a-64 + splitmix64-finalizer integer hash, so the same seed over the same corpus reproduces the same flips byte-for-byte (acceptance: two replays, identical trades_sha256, plus a JS re-implementation of the hash cross-checking every realized side). The exit stack under measurement (all tunables, grid-run not cherry-picked): hard_stop_loss_pct — the single-trade max-loss hard stop, judged on net proceeds (fresh best bid minus the exit_fee_rate taker model, the same haircut lua_momentum prices exits with); the time-weighted tightening take-profit band take_profit_pct -> take_profit_pct_tight sliding linearly with the round clock (lua_momentum v0.4.0's tighten(), same algorithm); the trailing stop trail_arm_pct arming on peak net gain and trail_giveback_pct banking the giveback (optional *_tight variants share the same band tightener); exit_time_left_sec — the declared deadline that beats the kernel's expiry gate so no position rides past the measured window; and thesis death (#961): bk_thesis_death(h) is declared Form-A and delegates to the bk.thesis_death_default stdlib (book/quote vanished or stale past thesis_death_stale_ms; the held token's own bid retraced >= thesis_death_reversal_pct off entry; that band time-weighted into thesis_death_reversal_pct_tight) — the runtime injects the unconditional full-taker thesis_death_exit the same tick, superseding this table. The declared thesis (docs/thesis_death.md template, also in the package README): the entry HAS no premise — 'after a random entry the exit mechanism does the harvesting' — so the only death a flip can suffer is the stdlib's three reverse conditions. The kernel-side environment stays untouched and identical across arms: holds_to_settlement=true keeps the ladder on the wide 50% holder containment + the +100% backstop for BOTH the dynamic stack and the rigid control. The control arm (fixed rigid exit) is this same package with the stack's defaults zeroed (hard 0, tp 0, trail 0, death bands inert at reversal=100/stale=0) leaving only exit_time_left_sec — same seed, same flips, same window, same capital.",
+  "trailing_exit": false,
+  "holds_to_settlement": true,
+  "entry_maker": false,
+  "tunables": {
+    "coin_seed": {
+      "type": "int",
+      "default": "962",
+      "min": "0",
+      "max": "999999999"
+    },
+    "round_min_seen_time_left": {
+      "type": "int",
+      "default": "885",
+      "min": "0",
+      "max": "900"
+    },
+    "entry_cutoff_sec": {
+      "type": "int",
+      "default": "90",
+      "min": "0",
+      "max": "900"
+    },
+    "hard_stop_loss_pct": {
+      "type": "decimal",
+      "default": "20",
+      "min": "0",
+      "max": "100"
+    },
+    "take_profit_pct": {
+      "type": "decimal",
+      "default": "30",
+      "min": "0",
+      "max": "500"
+    },
+    "take_profit_pct_tight": {
+      "type": "decimal",
+      "default": "5",
+      "min": "0",
+      "max": "500"
+    },
+    "trail_arm_pct": {
+      "type": "decimal",
+      "default": "25",
+      "min": "0",
+      "max": "500"
+    },
+    "trail_arm_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "500"
+    },
+    "trail_giveback_pct": {
+      "type": "decimal",
+      "default": "10",
+      "min": "0",
+      "max": "500"
+    },
+    "trail_giveback_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "500"
+    },
+    "exit_time_left_sec": {
+      "type": "int",
+      "default": "45",
+      "min": "0",
+      "max": "900"
+    },
+    "exit_fee_rate": {
+      "type": "decimal",
+      "default": "0.07",
+      "min": "0",
+      "max": "1"
+    },
+    "thesis_death_reversal_pct": {
+      "type": "decimal",
+      "default": "25",
+      "min": "0",
+      "max": "100"
+    },
+    "thesis_death_reversal_pct_tight": {
+      "type": "decimal",
+      "default": "0",
+      "min": "0",
+      "max": "100"
+    },
+    "thesis_death_stale_ms": {
+      "type": "int",
+      "default": "30000",
+      "min": "0",
+      "max": "900000"
+    }
+  }
+}
