@@ -96,14 +96,21 @@ fn persist_exit_changes_to_env(
     true
 }
 
-/// Serialize an apply reply with `persisted` on top (issue #966). The panel
-/// shows "已持久化到 .env" only when this is true; an unwired env path (a
-/// backtester, or a test that does not wire one) leaves the in-memory edit live
-/// for this process only, and saying so is the honest answer.
+/// Serialize an apply reply with `persisted` + `persistence` on top (issue
+/// #966, receipt contract completed in #965). The panel shows "已持久化到
+/// .env" only when `persisted` is true; an unwired env path (a backtester, or
+/// a test that does not wire one) leaves the in-memory edit live for this
+/// process only, and saying so is the honest answer. `persistence` spells the
+/// carrier in words — `"env"` when the upsert landed, `"none"` when it did
+/// not — so a receipt never just says "已保存" without WHERE it went.
 fn with_persisted(update: serde_json::Value, persisted: bool) -> Value {
     let mut reply = update;
     if let Value::Object(map) = &mut reply {
         map.insert("persisted".into(), Value::Bool(persisted));
+        map.insert(
+            "persistence".into(),
+            Value::String(if persisted { "env" } else { "none" }.to_string()),
+        );
     }
     reply
 }

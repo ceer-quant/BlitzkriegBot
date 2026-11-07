@@ -482,11 +482,13 @@ pub(crate) fn resolved_policy_path(
                     .filter_map(|p| p.parent())
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>();
+                // Issue #967: the TOML layer is retired — the policy arms from
+                // the POLICY_* keys in .env only. The warning names that sole
+                // source; the bootstrap in main.rs generates the template file.
                 eprintln!(
-                    "blitzkrieg-core: WARNING — execution policy file not found; running the \
-                     NEUTRAL policy (code defaults, no rules). Searched: {}. Ship \
-                     user_layer/configs/execution_policy.toml beside the executable or pass \
-                     --execution-policy <path>.",
+                    "blitzkrieg-core: WARNING — execution policy file not found; the policy \
+                     arms from POLICY_* keys in .env only (issue #967 retired the TOML \
+                     layer). Searched: {}.",
                     if dirs.is_empty() {
                         "(no directories could be probed)".to_string()
                     } else {
@@ -967,5 +969,165 @@ pub(crate) fn round_duration_source_from(report: &[String]) -> &'static str {
         "cli_or_env"
     } else {
         "default"
+    }
+}
+
+// ── Issue #965: the missing-policy-file bootstrap ───────────────────────────
+
+/// What [`bootstrap_policy_template`] did about the missing policy file.
+#[derive(Debug)]
+pub(crate) enum PolicyTemplateBootstrap {
+    /// The file is there (nothing to do).
+    Present,
+    /// A template was generated at this path — the boot echo names where.
+    Generated(std::path::PathBuf),
+    /// Generation was skipped ON PURPOSE, with the reason the echo spells
+    /// out. Nothing was written.
+    Skipped {
+        path: std::path::PathBuf,
+        why: &'static str,
+    },
+    /// The template could not be written — the boot echo carries the reason
+    /// (it names the path) and the kernel continues on the neutral policy.
+    Failed(String),
+}
+
+/// Issue #965: when the DEFAULT-resolved policy path has no file, generate
+/// the shape-reference template there and say so loudly — never a silent
+/// neutral kernel. The loader is env-only (issue #967): the template arms
+/// nothing; the `POLICY_*` keys in `.env` do.
+///
+/// One deliberate skip: a path inside the BUILD TREE (`target/…`). The #380
+/// fallback resolves against the exe root, and for a dev run that is
+/// `target/debug` — a machine-generated directory a clean checkout does not
+/// even have. A template generated there would (a) turn the build tree into
+/// a fake repository root for the #188 strategy anchor (`user_layer/`
+/// present → `repo_root_of` anchors `target/debug`, and the dev-run binary
+/// would scan IT for strategy libraries) and (b) pollute every clean
+/// checkout's build dir. The boot echo still fires; a real deployment (a
+/// bundle root, no `target` component) gets the template.
+pub(crate) fn bootstrap_policy_template(
+    resolved: &blitzkrieg_core::execution_policy::ResolvedDefaultPath,
+) -> PolicyTemplateBootstrap {
+    let path = &resolved.path;
+    if path.is_file() {
+        return PolicyTemplateBootstrap::Present;
+    }
+    let in_build_tree = path.is_absolute()
+        && path
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"));
+    if in_build_tree {
+        return PolicyTemplateBootstrap::Skipped {
+            path: path.clone(),
+            why: "the default path is inside the build tree (machine-generated); \
+                  the policy arms from POLICY_* keys in .env only (issue #967)",
+        };
+    }
+    if !path.is_absolute() {
+        return PolicyTemplateBootstrap::Skipped {
+            path: path.clone(),
+            why: "the default path could not be anchored to an executable \
+                  directory; the policy arms from POLICY_* keys in .env only \
+                  (issue #967)",
+        };
+    }
+    match blitzkrieg_core::execution_policy::read_or_bootstrap(path) {
+        Ok(_) => PolicyTemplateBootstrap::Generated(path.clone()),
+        Err(reason) => PolicyTemplateBootstrap::Failed(reason),
+    }
+}
+
+#[cfg(test)]
+mod policy_bootstrap_tests {
+    use super::*;
+
+    fn resolved(
+        path: std::path::PathBuf,
+    ) -> blitzkrieg_core::execution_policy::ResolvedDefaultPath {
+        blitzkrieg_core::execution_policy::ResolvedDefaultPath {
+            path,
+            source: blitzkrieg_core::execution_policy::DefaultPathSource::Fallback,
+            base_dir: None,
+            searched: vec![],
+        }
+    }
+
+    #[test]
+    fn generates_the_template_for_a_missing_default_path() {
+        let root = std::env::temp_dir().join(format!(
+            "bk-boot-bootstrap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("user_layer/configs/execution_policy.toml");
+        match bootstrap_policy_template(&resolved(path.clone())) {
+            PolicyTemplateBootstrap::Generated(p) => assert_eq!(p, path),
+            other => panic!("expected Generated, got {other:?}"),
+        }
+        assert!(path.is_file(), "the template landed");
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("INERT"),
+            "the generated template says it is not a source"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn never_generates_inside_the_build_tree() {
+        // The dev-run shape: target/debug/… under a scratch root. The path
+        // carries a `target` component → skipped WITHOUT touching the disk —
+        // a `user_layer/` inside the build tree would turn it into a fake
+        // #188 repo root for the strategy anchor.
+        let root = std::env::temp_dir().join(format!(
+            "bk-boot-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("target/debug/user_layer/configs/execution_policy.toml");
+        match bootstrap_policy_template(&resolved(path.clone())) {
+            PolicyTemplateBootstrap::Skipped { path: p, why } => {
+                assert_eq!(p, path);
+                assert!(why.contains("build tree"), "{why}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert!(!path.exists(), "nothing was written under target/");
+        assert!(!root.join("target").exists(), "the build tree stays clean");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_existing_file_is_left_alone() {
+        let root = std::env::temp_dir().join(format!(
+            "bk-boot-present-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("user_layer/configs/execution_policy.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "version = 1\n").unwrap();
+        match bootstrap_policy_template(&resolved(path.clone())) {
+            PolicyTemplateBootstrap::Present => {}
+            other => panic!("expected Present, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "version = 1\n",
+            "an existing file is never rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

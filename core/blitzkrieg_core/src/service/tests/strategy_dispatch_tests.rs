@@ -487,5 +487,6 @@ fn strategy_entry<'a>(stats: &'a [serde_json::Value], name: &str) -> &'a serde_j
 // child modules.
 mod dispatch_boot_enablement_tests;
 mod dispatch_cap_gate_tests;
+mod dispatch_chaos_gate_tests;
 mod dispatch_cycle_sizing_tests;
 mod dispatch_policy_ledger_tests;

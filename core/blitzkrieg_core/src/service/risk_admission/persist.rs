@@ -8,20 +8,28 @@
 //!
 //! - the hot ENTRY caps `risk.setLimits` wrote (`maxOrderNotional`,
 //!   `maxOrderNotionalPct`, `maxOpenNotionalUsd`, `minShares`, `maxShares`);
-//! - the nine systemic bounds `risk.setSystemic` wrote (provenance travels
-//!   with the value, §4.4 — the file records the source each bound carried);
 //! - the GLOBAL kill switch (`killed` + the reason an operator must see);
 //! - the freeze book: every account freeze with its reason, plus the
 //!   `auto_frozen` stamps that separate kernel circumstantial freezes from
 //!   operator verdicts (#685: a manual freeze has no stamp and therefore
 //!   never self-lifts, across restarts too).
 //!
+//! NOT here any more: the systemic bounds `risk.setSystemic` wrote. Their
+//! durable carrier is the `.env` file since issue #966 — the write face
+//! upserts every changed bound as its `BK_RISK_*` key, and the boot re-arms
+//! them through `SystemicRiskLimits::from_env` with the honest `env`
+//! provenance (issue #965 reconciliation: one carrier, CLI > env(.env) >
+//! default). The file cells this file used to carry stamped every restored
+//! bound `flag` — a lie about where the value now comes from — and a stale
+//! cell would silently shadow a later hand edit of `.env`. A legacy file's
+//! `systemic` map is ignored with a loud warning (see [`load_risk_state_file`]).
+//!
 //! Tiering (deliberate, documented in the PR): the file records only what the
 //! RUNTIME writes hot — a field the operator never touched at runtime stays
-//! governed by the boot chain (flag > env > TOML > default). A hot value
-//! restored at boot OVERRIDES the boot-resolved value for that one field: the
-//! operator's last deliberate act outranks yesterday's flags, and #861's
-//! acceptance is "kill -9 演练后 caps 恢复".
+//! governed by the boot chain (flag > env > default). A hot value restored at
+//! boot OVERRIDES the boot-resolved value for that one field: the operator's
+//! last deliberate act outranks yesterday's flags, and #861's acceptance is
+//! "kill -9 演练后 caps 恢复".
 //!
 //! A file that EXISTS but does not parse is fail-CLOSED, never fail-open: no
 //! restore (the boot-resolved caps stand), and the corrupt-boot freeze
@@ -35,16 +43,6 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// One systemic bound as the file carries it: the value (decimal string,
-/// "0" = off) and the provenance word it had when written (`Bound`'s wire
-/// shape — value + source in one cell, §4.4).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SystemicBoundCell {
-    pub value: String,
-    pub source: String,
-}
-
 /// The global kill switch, present only while it is engaged (an absent cell
 /// is "not killed" — the same absent-means-quiet posture the round-duration
 /// cell uses).
@@ -55,9 +53,8 @@ pub(crate) struct KillCell {
 }
 
 /// The persisted envelope. Every map is keyed the way the kernel already
-/// names things: limits/systemic by their wire (camelCase) field name — the
-/// same spelling the `risk.setLimits`/`risk.setSystemic` audit rows carry —
-/// freezes by account id.
+/// names things: limits by their wire (camelCase) field name — the same
+/// spelling the `risk.setLimits` audit rows carry — freezes by account id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct RiskStateFile {
@@ -69,9 +66,6 @@ pub(crate) struct RiskStateFile {
     /// boot-governed.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) limits: BTreeMap<String, String>,
-    /// `risk.setSystemic` hot bounds: wire field name → value + source.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) systemic: BTreeMap<String, SystemicBoundCell>,
     /// The global kill switch, engaged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kill: Option<KillCell>,
@@ -112,6 +106,20 @@ pub(crate) fn load_risk_state_file(path: &Path) -> RiskStateLoad {
     let Some(text) = std::fs::read_to_string(path).ok() else {
         return RiskStateLoad::Missing;
     };
+    // Issue #965 reconciliation: files written before the systemic bounds
+    // moved to `.env` carry a `systemic` map this envelope no longer holds.
+    // serde would drop it silently — the bounds' honest carrier is `.env` and
+    // a silent drop reads as "nothing was ever set", so name the retirement
+    // in the log instead.
+    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text)
+        && raw.get("systemic").is_some()
+    {
+        tracing::warn!(
+            path = %path.display(),
+            "risk-state file carries retired systemic cells — ignored; the bounds' \
+             durable carrier is .env (BK_RISK_* keys, issue #966/#965)"
+        );
+    }
     match serde_json::from_str::<RiskStateFile>(&text) {
         Ok(file) => RiskStateLoad::Ok(file),
         Err(e) => RiskStateLoad::Corrupt(e.to_string()),
@@ -172,38 +180,13 @@ fn parse_decimal_cell(field: &str, raw: &str, path: &Path) -> Option<Decimal> {
     }
 }
 
-/// Parse a provenance word back into a [`LimitSource`]. An unknown word is
-/// refused (the cell is ignored): a hand-edited file must not be able to
-/// smuggle a bound in under a source the kernel never wrote.
-fn parse_source_cell(
-    field: &str,
-    raw: &str,
-    path: &Path,
-) -> Option<crate::risk::limits::LimitSource> {
-    match raw {
-        "default" => Some(crate::risk::limits::LimitSource::Default),
-        // `toml` was a provenance word of the retired file layer (issue #967).
-        // A cell carrying it is not upgraded to another layer's name — the
-        // unknown branch below ignores it, and the bound comes from `.env`
-        // on this boot.
-        "env" => Some(crate::risk::limits::LimitSource::Env),
-        "flag" => Some(crate::risk::limits::LimitSource::Flag),
-        other => {
-            tracing::warn!(
-                path = %path.display(),
-                field,
-                source = %other,
-                "risk-state file holds an unknown provenance word — the bound is ignored"
-            );
-            None
-        }
-    }
-}
-
-/// Apply the restored ENTRY caps and systemic bounds onto the boot config,
-/// BEFORE it moves into the core (the gate the boot builds then carries the
-/// restored values). Called only for a file that parsed. Only fields the
-/// runtime actually wrote are applied — everything else keeps the boot chain.
+/// Apply the restored ENTRY caps onto the boot config, BEFORE it moves into
+/// the core (the gate the boot builds then carries the restored values).
+/// Called only for a file that parsed. Only fields the runtime actually
+/// wrote are applied — everything else keeps the boot chain. The systemic
+/// bounds are NOT restored from here any more (issue #965): their durable
+/// carrier is `.env`, and every boot-armed bound names `env` straight from
+/// `SystemicRiskLimits::from_env` — no file cell is consulted.
 pub(crate) fn apply_restored_limits(config: &mut CoreConfig, file: &RiskStateFile, path: &Path) {
     for (field, raw) in &file.limits {
         let Some(v) = parse_decimal_cell(field, raw, path) else {
@@ -220,46 +203,6 @@ pub(crate) fn apply_restored_limits(config: &mut CoreConfig, file: &RiskStateFil
                 field = %other,
                 "risk-state file holds an unknown limits field — ignored"
             ),
-        }
-    }
-    let set_bound = |field: &str, bound: &mut crate::risk::limits::Bound| {
-        let Some(cell) = file.systemic.get(field) else {
-            return;
-        };
-        let Some(v) = parse_decimal_cell(field, &cell.value, path) else {
-            return;
-        };
-        let Some(source) = parse_source_cell(field, &cell.source, path) else {
-            return;
-        };
-        *bound = crate::risk::limits::Bound::new(v, source);
-    };
-    let matrix = &mut config.risk.systemic;
-    set_bound("maxSingleLossUsd", &mut matrix.account.max_single_loss_usd);
-    set_bound(
-        "maxDailyDrawdownUsd",
-        &mut matrix.account.max_daily_drawdown_usd,
-    );
-    set_bound("maxPositionSize", &mut matrix.account.max_position_size);
-    set_bound(
-        "maxConsecutiveLosses",
-        &mut matrix.account.max_consecutive_losses,
-    );
-    set_bound("cooldownMinutes", &mut matrix.account.cooldown_minutes);
-    for field in file.systemic.keys() {
-        if !matches!(
-            field.as_str(),
-            "maxSingleLossUsd"
-                | "maxDailyDrawdownUsd"
-                | "maxPositionSize"
-                | "maxConsecutiveLosses"
-                | "cooldownMinutes"
-        ) {
-            tracing::warn!(
-                path = %path.display(),
-                field = %field,
-                "risk-state file holds an unknown systemic field — ignored"
-            );
         }
     }
 }
@@ -289,28 +232,6 @@ impl Core {
             cell.file
                 .limits
                 .insert(c.field.to_string(), c.to.to_string());
-        }
-        cell.file.saved_at_ms = now_ms();
-        cell.save()
-    }
-
-    /// Record a `risk.setSystemic` hot write (each changed bound → value +
-    /// the `flag` provenance the write path itself stamps) and persist.
-    pub(crate) fn risk_state_record_systemic(
-        &mut self,
-        changes: &[crate::schema::SystemicLimitChange],
-    ) -> bool {
-        let Some(cell) = &mut self.risk_state else {
-            return false;
-        };
-        for c in changes {
-            cell.file.systemic.insert(
-                c.field.to_string(),
-                SystemicBoundCell {
-                    value: c.to.clone(),
-                    source: crate::risk::limits::LimitSource::Flag.as_str().to_string(),
-                },
-            );
         }
         cell.file.saved_at_ms = now_ms();
         cell.save()

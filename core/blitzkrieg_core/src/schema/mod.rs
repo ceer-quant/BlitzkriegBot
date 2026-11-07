@@ -123,17 +123,20 @@ pub mod method {
     /// [`crate::risk::hot_reload_refusal`].
     pub const RISK_SET_LIMITS: &str = "risk.setLimits";
     /// 生效风控可编辑（用户裁决：单笔最大亏损、当日最大回撤等设置选项必须
-    /// 都可以被编辑）：九项系统性限额的运行时写路径。六项热生效（每笔入场
-    /// 现场判读、只约束新敞口、不携带计数器）；回撤预算与连亏熔断两项按
-    /// 「下次会话」语义落盘态生效 —— 不是热旋钮（HOT_RELOAD_REFUSED 记名
-    /// 拒绝的理由仍然成立），回执里逐项注明生效时机。
+    /// 都可以被编辑）：五项账户级限额的运行时写路径（issue #983：风控只
+    /// 跟随账户，无全局限额）。两项热生效（每笔入场现场判读、只约束新
+    /// 敞口、不携带计数器）；回撤预算与连亏熔断对按「下次会话」语义落盘
+    /// 态生效 —— 不是热旋钮（HOT_RELOAD_REFUSED 记名拒绝的理由仍然成立），
+    /// 回执里逐项注明生效时机。持久化：写路径把改动的 `BK_RISK_*` 键
+    /// upsert 进 `.env`（issue #966/#965），重启后以 source=env 重新武装。
     pub const RISK_SET_SYSTEMIC: &str = "risk.setSystemic";
     /// 退出纪律可编辑（用户裁决：Gate 4 绑定的止损/止盈/强平必须可以改）：
-    /// 三项退出纪律的运行时写路径。**live** —— 对下一笔入场立即生效（Gate 4
+    /// 退出纪律的运行时写路径。**live** —— 对下一笔入场立即生效（Gate 4
     /// 每次入场现场从活配置绑定）；已开仓位的退出扫描按 `PositionManager`
     /// 的活配置判读，同样立即跟随新值 —— 回执逐项写明，不静默。
-    /// 未持久化：重启回到启动 flag/env/TOML 的解析结果（与 risk.setSystemic
-    /// 同一句真话）。
+    /// 持久化：写路径把改动的 `BK_EXIT_*` 键 upsert 进 `.env`
+    /// （issue #966/#965），重启后按启动链（CLI > env > default）重新解析
+    /// 出同样的值。
     pub const RISK_SET_EXIT: &str = "risk.setExit";
     /// 轮次时间周期的运行时读数（UI 设置卡）：当前生效秒数、来源（cli/env/
     /// runtime/toml/default）、可切换的白名单档位与「下次会话生效」的回执
@@ -944,11 +947,13 @@ pub struct RiskLimitUpdate {
 pub const RISK_LIMIT_UPDATE_NOTE: &str = "hot-applied; persisted to the risk-state file when the kernel has one, \
      in-memory only otherwise";
 
-// ── 生效风控可编辑 — risk.setSystemic（九项系统性限额的运行时写路径）─────────
+// ── 生效风控可编辑 — risk.setSystemic（五项账户级限额的运行时写路径）─────────
 
-/// `risk.setSystemic` params: the nine systemic limits, every field optional
-/// (only the named fields change). Values are USD / shares / counts / minutes
-/// on the decimal-STRING wire (the readout's convention); `0` = off.
+/// `risk.setSystemic` params: the five per-account systemic limits (issue
+/// #983: risk control follows the account's capital — no global caps), every
+/// field optional (only the named fields change). Values are USD / shares /
+/// counts / minutes on the decimal-STRING wire (the readout's convention);
+/// `0` = off.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SetSystemicLimitsParams {
@@ -988,11 +993,11 @@ impl SetSystemicLimitsParams {
 }
 
 /// One field's resolution inside a `risk.setSystemic` reply: old value, new
-/// value, and WHEN it takes effect. The three effect classes are real, not
-/// documentation: six bounds are judged per entry LIVE; the drawdown budget
-/// and the breaker pair arm at the NEXT KERNEL SESSION (a live change would
-/// either rewrite what the day already spent or retroactively judge a running
-/// streak).
+/// value, and WHEN it takes effect. The effect classes are real, not
+/// documentation: the sizing bounds (single loss, position size) are judged
+/// per entry LIVE; the drawdown budget and the breaker pair arm at the NEXT
+/// KERNEL SESSION (a live change would either rewrite what the day already
+/// spent or retroactively judge a running streak).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemicLimitChange {
@@ -1008,11 +1013,13 @@ pub struct SystemicLimitChange {
 }
 
 /// `risk.setSystemic` result: the audited change list, in the
-/// `RiskLimitUpdate` shape. `persisted` is `true` when the kernel has a
-/// risk-state file and the write landed there — the nine bounds recover
-/// across a restart (#861); `false` for cores without one (backtester, most
-/// tests), where a hot edit lives exactly as long as this process. The note
-/// says so in the same breath as the drawdown/breaker "next session" rows.
+/// `RiskLimitUpdate` shape. `persisted` is `true` when the IPC write face
+/// upserted the changed `BK_RISK_*` keys into the kernel's `.env` (issue
+/// #966/#965 — the bounds' durable carrier; the boot re-arms them with
+/// source=env) and `false` otherwise (no env file wired — backtester, most
+/// tests — or the upsert failed, which is logged with the path). The panel
+/// also receives `persistence: "env" | "none"` beside it, spelled by the
+/// write face.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemicLimitUpdate {
@@ -1026,8 +1033,9 @@ pub struct SystemicLimitUpdate {
 }
 
 /// [`SystemicLimitUpdate::note`] — one spelling, used by the reply and the log.
-pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "six bounds live, drawdown + breaker pair arm next session; persisted to \
-     the risk-state file when the kernel has one, in-memory only otherwise";
+pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "single-loss + position-size live, drawdown budget + breaker pair arm \
+     next session; persisted to .env (BK_RISK_*) when the kernel has an env \
+     file, in-memory only otherwise";
 
 // ── 退出纪律可编辑 — risk.setExit（止损/止盈/强平的运行时写路径）────────────
 
@@ -1104,9 +1112,13 @@ pub struct ExitSetChange {
 }
 
 /// `risk.setExit` result: the audited change list, in the
-/// `SystemicLimitUpdate` shape. `persisted` is ALWAYS false — the exit triple
-/// is a boot-time resolution (flags/env/TOML); a hot edit lives exactly as
-/// long as this process, and the note says so.
+/// `SystemicLimitUpdate` shape. `persisted` is `true` when the IPC write face
+/// upserted the changed `BK_EXIT_*` keys into the kernel's `.env` (issue
+/// #966/#965 — the restart re-resolves the same values through the boot
+/// chain) and `false` otherwise (no env file wired — backtester, most tests —
+/// or the upsert failed, which is logged with the path). The panel also
+/// receives `persistence: "env" | "none"` beside it, spelled by the write
+/// face.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitSetUpdate {
@@ -1121,7 +1133,8 @@ pub struct ExitSetUpdate {
 
 /// [`ExitSetUpdate::note`] — one spelling, used by the reply and the log.
 pub const EXIT_SET_UPDATE_NOTE: &str = "live for every new entry (Gate 4 binds per intent) and for the exit \
-     sweep of already-open positions; a restart re-applies the startup flags/env/TOML (in-memory, not persisted)";
+     sweep of already-open positions; persisted to .env (BK_EXIT_*) when the \
+     kernel has an env file, in-memory only otherwise";
 
 // ── 策略 tunables 编辑 — strategy.params.get / strategy.params.set (issue 481) ──
 
