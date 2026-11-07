@@ -107,18 +107,10 @@ function shortId(id: string): string {
 }
 
 /**
- * 活跃持仓（Trae 1077/1098）：当前持仓只读 positions.jsonl（exitRole=pending 或 status=open），
- * 过滤掉任何已平仓/非 pending 的历史 close 记录。
+ * issue 981: props.positions 只来自内核 open_positions()，PositionView 不含
+ * closed/exitRole/status 字段，旧三分支过滤恒为空转。直接用全量 positions。
  */
-const activePositions = computed(() =>
-  props.positions.filter((p) => {
-    const raw = p as any
-    if (raw.closed === true) return false
-    if (typeof raw.exitRole === 'string' && raw.exitRole !== '' && raw.exitRole !== 'pending') return false
-    if (typeof raw.status === 'string' && raw.status !== '' && raw.status !== 'pending' && raw.status !== 'open') return false
-    return true
-  }),
-)
+const activePositions = computed(() => props.positions)
 </script>
 
 <template>

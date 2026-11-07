@@ -48,7 +48,7 @@ import {  snapshotApi,
   type EvolutionDoc,
 } from './snapshot.ts'
 import { auditApi, type CommandDoc, type GateTraceView, type DecisionView, type IntentAuditRecordView, type IntentAuditTailDoc } from './audit.ts'
-import { riskApi, type LimitSource, type RiskBound, type AccountRiskLimitsView, type GlobalRiskLimitsView, type RiskExitView, type RiskLimitsDoc, type RiskSetSystemicBody, type SystemicLimitChange, type SystemicLimitUpdateDoc, type RiskSetExitBody, type ExitSetChange, type ExitSetUpdateDoc } from './risk.ts'
+import { riskApi, type LimitSource, type RiskBound, type AccountRiskLimitsView, type RiskExitView, type RiskLimitsDoc, type RiskSetSystemicBody, type SystemicLimitChange, type SystemicLimitUpdateDoc, type RiskSetExitBody, type ExitSetChange, type ExitSetUpdateDoc } from './risk.ts'
 import { strategyApi, type TunableViewDoc, type StrategyParamsReadoutDoc, type StrategyParamsSetBody, type StrategyParamChangeDoc, type StrategyParamsSetUpdateDoc } from './strategy.ts'
 import { unifiedApi, type UnifiedVenueRow, type UnifiedEventRow, type UnifiedListDoc, type UnifiedCandidateListing, type UnifiedCandidateRow, type UnifiedCandidatesDoc, type UnifiedConfirmDoc, type UnifiedRevokeDoc } from './unified.ts'
 import { ordersApi, type OrderRow, type ForceCloseOrderBody, type ForceClosePositionBody, type ForceClosePositionResultDoc } from './orders.ts'
@@ -73,7 +73,7 @@ export type {
   EvolutionMetricsRow, EvolutionState, EvolutionDecisionReason,
   EvolutionProposalRow, EvolutionStatusRow, EvolutionDoc,
   GateTraceView, DecisionView, IntentAuditRecordView, IntentAuditTailDoc,
-  LimitSource, RiskBound, AccountRiskLimitsView, GlobalRiskLimitsView,
+  LimitSource, RiskBound, AccountRiskLimitsView,
   RiskExitView, RiskLimitsDoc, RiskSetSystemicBody, SystemicLimitChange,
   SystemicLimitUpdateDoc, RiskSetExitBody, ExitSetChange, ExitSetUpdateDoc,
   TunableViewDoc, StrategyParamsReadoutDoc, StrategyParamsSetBody,
