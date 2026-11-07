@@ -77,10 +77,12 @@ fn core_with(path: &Path, ids: &[&str]) -> crate::service::Core {
     crate::service::Core::with_account_book(cfg(path), book(ids))
 }
 
-/// (a) The #854 finding, fixed: a hot `risk.setLimits` / `risk.setSystemic`
-/// write lands in the risk-state file, and a rebuilt core (the kill -9
-/// drill) judges orders by the SAME caps. Provenance travels with the
-/// systemic bound (`flag` — exactly what the write stamped).
+/// (a) The #854 finding, fixed: a hot `risk.setLimits` write lands in the
+/// risk-state file, and a rebuilt core (the kill -9 drill) judges orders by
+/// the SAME caps. The SYSTEMIC bounds are NOT on this file any more (issue
+/// #965): their durable carrier is `.env` (BK_RISK_* keys, the IPC write
+/// face's upsert — round-trip proven in the ipc tests), and the apply here
+/// reports the honest `persisted: false` for that carrier-less core.
 #[test]
 fn hot_limits_and_systemic_bounds_recover_across_a_rebuild() {
     let root = TempRoot::new("roundtrip");
@@ -109,28 +111,73 @@ fn hot_limits_and_systemic_bounds_recover_across_a_rebuild() {
         .apply_systemic_limits(&spatch, "op", 1_100)
         .expect("systemic apply");
     assert!(
-        sreply.persisted,
-        "the systemic write lands in the same file"
+        !sreply.persisted,
+        "the apply writes nothing durable itself — .env is the systemic carrier (issue #965)"
     );
+    // The in-memory matrix DOES carry the operator's intent for this session.
+    let single = &c.risk.config().systemic.account.max_single_loss_usd;
+    assert_eq!(single.value(), dec!(75));
     drop(c);
 
     let c2 = core_with(&path, &["default"]);
     assert_eq!(c2.risk.config().max_order_notional, dec!(250));
     assert_eq!(c2.risk.config().max_open_notional_usd, dec!(4000));
     assert_eq!(c2.config.min_shares, dec!(2));
-    let single = &c2.risk.config().systemic.account.max_single_loss_usd;
-    assert_eq!(single.value(), dec!(75));
-    assert_eq!(single.source(), LimitSource::Flag);
-    let drawdown = &c2.risk.config().systemic.account.max_daily_drawdown_usd;
-    assert_eq!(drawdown.value(), dec!(300));
+    // The systemic bounds do NOT come back through this file — a
+    // carrier-less core re-resolves them through the boot chain (env). The
+    // .env round-trip is the ipc test's to prove.
+    let restored = &c2.risk.config().systemic.account.max_single_loss_usd;
+    assert_eq!(
+        restored.value(),
+        Decimal::ZERO,
+        "no systemic cell on this file: the bound re-resolves at boot, not from a flag-stamped cell"
+    );
+    assert_eq!(restored.source(), LimitSource::Default);
     // The file is the wire format the PR documents: camelCase field names,
-    // decimal-string values.
+    // decimal-string values — and NO systemic section.
     let text = std::fs::read_to_string(&path).expect("the file exists");
     assert!(
         text.contains("\"maxOrderNotional\": \"250\""),
         "camelCase decimal-string cell expected, got: {text}"
     );
-    assert!(text.contains("\"maxSingleLossUsd\""));
+    assert!(
+        !text.contains("maxSingleLossUsd"),
+        "systemic cells are retired from this file (issue #965): {text}"
+    );
+}
+
+/// (a2) Issue #965 migration: a risk-state file written before the systemic
+/// bounds moved to `.env` still parses (the envelope ignores the retired
+/// `systemic` map) and the entry caps it carries still restore — with a loud
+/// warning naming the retirement, never a silent drop that reads as
+/// "nothing was ever set".
+#[test]
+fn a_legacy_systemic_section_is_ignored_with_a_loud_warning() {
+    let root = TempRoot::new("legacy-systemic");
+    let path = root.file();
+
+    // A hand-shaped pre-#965 file: entry caps + flag-stamped systemic cells.
+    std::fs::write(
+        &path,
+        r#"{
+  "savedAtMs": 1000,
+  "limits": { "maxOrderNotional": "250" },
+  "systemic": {
+    "maxSingleLossUsd": { "value": "75", "source": "flag" }
+  }
+}"#,
+    )
+    .unwrap();
+
+    // The file PARSES (the retired section does not corrupt it), and the
+    // entry cap restores.
+    let c = core_with(&path, &["default"]);
+    assert_eq!(c.risk.config().max_order_notional, dec!(250));
+    // The systemic bound is NOT resurrected from the flag-stamped cell —
+    // the boot chain (env here) is the only arming path left.
+    let single = &c.risk.config().systemic.account.max_single_loss_usd;
+    assert_eq!(single.value(), Decimal::ZERO);
+    assert_eq!(single.source(), LimitSource::Default);
 }
 
 /// (b) A file that exists but does not parse is fail-CLOSED: nothing is

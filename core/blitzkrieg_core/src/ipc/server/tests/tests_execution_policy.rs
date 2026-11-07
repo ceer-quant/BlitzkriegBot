@@ -47,3 +47,88 @@ async fn policy_journals_are_private_per_fixture() {
     let _ = std::fs::remove_dir_all(path_a.parent().unwrap());
     let _ = std::fs::remove_dir_all(path_b.parent().unwrap());
 }
+
+/// Issue #965: the KERNEL's own bootstrap template is not a legacy operator
+/// file. A fresh deployment bootstraps the template at the default path; the
+/// first real `execution_policy.set` must go THROUGH (the template is inert,
+/// the .env write is the real face) and sweep the template, so no dead toml
+/// lingers beside the env keys that are now the single source.
+#[tokio::test]
+async fn a_set_sweeps_the_kernel_generated_template_and_writes_the_env() {
+    let (core, registry, peer, env_path) = policy_fixture().await;
+    let toml_path = {
+        let c = core.lock().await;
+        std::path::PathBuf::from(c.config().execution_policy_path.clone().unwrap())
+    };
+    std::fs::write(&toml_path, crate::execution_policy::BOOTSTRAP_TEMPLATE)
+        .expect("seed the kernel-generated template");
+
+    let v = rpc(&core, &registry, &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.set","params":{"accountId":"acct-t","budgetRatio":"0.05","maxBudgetUsd":"20"}}"#.into())
+        .await;
+    assert!(
+        v.get("error").is_none(),
+        "the kernel's own template must not block the write: {v}"
+    );
+    assert!(
+        !toml_path.exists(),
+        "the template is swept on the first real save"
+    );
+    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
+        .expect("the env file")
+        .lines()
+        .filter_map(crate::env_file::parse_line)
+        .collect();
+    assert_eq!(
+        on_file
+            .get("POLICY_BUDGET_RATIO_ACCT_T")
+            .map(String::as_str),
+        Some("0.05"),
+        "the section landed in the env the loader reads: {on_file:?}"
+    );
+    let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
+}
+
+/// Issue #965's guard half: an EDITED file at the policy path is the
+/// operator's own — the write still refuses (one source, issue #751), the
+/// file stays untouched, and nothing lands in the env.
+#[tokio::test]
+async fn a_set_still_refuses_an_operator_edited_policy_file() {
+    let (core, registry, peer, env_path) = policy_fixture().await;
+    let toml_path = {
+        let c = core.lock().await;
+        std::path::PathBuf::from(c.config().execution_policy_path.clone().unwrap())
+    };
+    std::fs::write(
+        &toml_path,
+        "version = 1\n\n[defaults]\nbudget_ratio = 0.9\n",
+    )
+    .expect("seed an operator-edited file");
+
+    let v = rpc(&core, &registry, &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"execution_policy.set","params":{"accountId":"acct-o","budgetRatio":"0.05"}}"#.into())
+        .await;
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refusing the policy write"),
+        "an operator file blocks the env write by name: {v}"
+    );
+    assert!(
+        toml_path.exists(),
+        "a refused write never touches the operator's file"
+    );
+    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
+        .expect("the env file")
+        .lines()
+        .filter_map(crate::env_file::parse_line)
+        .collect();
+    assert!(
+        !on_file
+            .keys()
+            .any(|k| k.starts_with("POLICY_BUDGET_RATIO_ACCT_O")),
+        "nothing landed in the env under the refusal: {on_file:?}"
+    );
+    let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
+}

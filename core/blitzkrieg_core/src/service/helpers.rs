@@ -402,6 +402,12 @@ pub(super) fn classify_rejection(err: &crate::model::CoreError) -> String {
         "risk.perOrderCap".to_string()
     } else if msg.contains("outside") && msg.contains("price band") {
         "risk.priceBand".to_string()
+    } else if msg.contains("max_single_loss_usd") || msg.contains("max_position_size") {
+        // Issue #965: the systemic caps' Gate-2 refusal carries the bound's
+        // own name in its detail (`judge_entry`'s wording) — bucket it under
+        // the same family the per-order cap uses, so a chaos run's "why"
+        // answer names the cap that bit instead of an other.other shrug.
+        "risk.accountLimit".to_string()
     } else {
         format!("{}.{}", code_label(err.code), "other")
     }

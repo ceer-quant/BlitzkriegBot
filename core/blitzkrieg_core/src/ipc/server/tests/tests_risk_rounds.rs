@@ -142,6 +142,11 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     let audit = &applied["result"];
     assert_eq!(audit["persisted"], serde_json::json!(false));
     assert_eq!(
+        audit["persistence"],
+        serde_json::json!("none"),
+        "the receipt names the carrier: no env file wired → none: {audit}"
+    );
+    assert_eq!(
         audit["actor"],
         serde_json::json!(format!("uid:{}", own_uid())),
         "who did it must be on the record: {audit}"
@@ -246,6 +251,102 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     );
 }
 
+/// 生效风控的持久化回路（issue #965 验收一）：面板保存 → `BK_RISK_*` 键
+/// 落进内核 `.env`（回执 `persisted=true` + `persistence=env`）→ 「重启」
+/// （新解析走启动链的同一 seam `SystemicRiskLimits::from_lookup`，键位拼写
+/// 就是写路径写下的那些）→ 限额仍武装、来源诚实标注 env。持久化载体与回
+/// 读一致 —— 一条载体链，没有第二个 flag 标注的影子载体（issue #965 把
+/// risk-state 文件里的 systemic 格退役了）。
+#[tokio::test]
+async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
+    use rust_decimal_macros::dec;
+    let dir = std::env::temp_dir().join(format!("bk-risk-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let env_path = dir.join(".env");
+
+    let cfg = CoreConfig {
+        risk: crate::risk::RiskConfig {
+            max_order_notional: dec!(3),
+            ..Default::default()
+        },
+        dry_seed_balance: dec!(100),
+        env_file_path: Some(env_path.to_string_lossy().into_owned()),
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+        ..Default::default()
+    };
+    let mut c = Core::new(cfg.clone());
+    c.set_balance(cfg.dry_seed_balance);
+    cfg.install_engine(&mut c).expect("engine install");
+    let core = Arc::new(AsyncMutex::new(c));
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    let peer = PeerAuth::SameUid { uid: own_uid() };
+
+    let applied = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxPositionSize":2,"maxSingleLossUsd":"0.75","reason":"persist me"}}"#.to_string(),
+    )
+    .await;
+    assert!(
+        applied.get("error").is_none(),
+        "the patch must land: {applied}"
+    );
+    let audit = &applied["result"];
+    assert_eq!(
+        audit["persisted"],
+        serde_json::json!(true),
+        "the env file is wired, so the write must land: {audit}"
+    );
+    assert_eq!(
+        audit["persistence"],
+        serde_json::json!("env"),
+        "the receipt names the carrier: {audit}"
+    );
+
+    // The `.env` the write face produced: exactly the two keys, exactly the
+    // spellings the boot chain reads — one map, no second carrier.
+    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
+        .expect("the .env exists")
+        .lines()
+        .filter_map(crate::env_file::parse_line)
+        .collect();
+    assert_eq!(
+        on_file.get("BK_RISK_MAX_POSITION_SIZE").map(String::as_str),
+        Some("2"),
+        "{on_file:?}"
+    );
+    assert_eq!(
+        on_file
+            .get("BK_RISK_MAX_SINGLE_LOSS_USD")
+            .map(String::as_str),
+        Some("0.75"),
+        "{on_file:?}"
+    );
+
+    // 「重启」：the boot chain resolves the bounds from EXACTLY these keys
+    // (`from_lookup` is `from_env`'s pure seam; the launcher folds .env into
+    // the process environment, `from_env` reads it back).
+    let limits =
+        crate::risk::limits::SystemicRiskLimits::from_lookup(|key| on_file.get(key).cloned());
+    let pos = &limits.account.max_position_size;
+    assert_eq!(pos.value(), dec!(2));
+    assert_eq!(
+        pos.source(),
+        crate::risk::limits::LimitSource::Env,
+        "provenance is env — the persisted bound names its real layer"
+    );
+    let single = &limits.account.max_single_loss_usd;
+    assert_eq!(single.value(), dec!(0.75));
+    assert_eq!(single.source(), crate::risk::limits::LimitSource::Env);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 退出纪律可编辑（`risk.setExit`）：写路径的 wire 合同 —— patch 落进
 /// Gate 4 绑定的活配置（readout 立即读回新值）、回执逐项带 old→new 与
 /// effect=live、空 patch 拒绝、非法值拒绝且原子（同行 ride-along 的合法
@@ -274,6 +375,11 @@ async fn risk_set_exit_writes_the_triple_and_names_each_change() {
     );
     let audit = &applied["result"];
     assert_eq!(audit["persisted"], serde_json::json!(false));
+    assert_eq!(
+        audit["persistence"],
+        serde_json::json!("none"),
+        "the receipt names the carrier: no env file wired → none: {audit}"
+    );
     assert_eq!(
         audit["actor"],
         serde_json::json!(format!("uid:{}", own_uid())),

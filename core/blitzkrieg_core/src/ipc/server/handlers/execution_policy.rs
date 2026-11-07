@@ -337,12 +337,43 @@ fn policy_section_write(
         );
     };
     if std::path::Path::new(path).exists() {
-        return Err(format!(
-            "refusing the policy write: the legacy {path} still exists — run \
-             scripts/migrate-config-to-env.sh first (issue 751: one source; \
-             the loader reads POLICY_* env over this file, so a write here \
-             would be dead data)"
-        ));
+        // Issue #965: the KERNEL's own bootstrap template is not a legacy
+        // operator file — it is the shape reference the boot generates at the
+        // default path, and it is inert (the loader reads POLICY_* env only,
+        // issue #967). The first real save sweeps it, so no dead toml lingers
+        // beside the .env that is now the single source. An EDITED file is the
+        // operator's own: the refusal stands until the migrate script (or a
+        // hand removal) moves it out of the way.
+        let is_kernel_template = std::fs::read_to_string(path)
+            .map(|text| text == crate::execution_policy::BOOTSTRAP_TEMPLATE)
+            .unwrap_or(false);
+        if is_kernel_template {
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    tracing::info!(
+                        path = %path,
+                        "swept the auto-generated execution_policy.toml template — \
+                         the .env write supersedes it"
+                    );
+                }
+                Err(e) => {
+                    // The template is inert, so a failed sweep must not block
+                    // the operator's write — warn and carry on.
+                    tracing::warn!(
+                        path = %path,
+                        error = %e,
+                        "could not sweep the auto-generated execution_policy.toml \
+                         template — proceeding with the .env write (the file is inert)"
+                    );
+                }
+            }
+        } else {
+            return Err(format!(
+                "refusing the policy write: the legacy {path} still exists — run \
+                 scripts/migrate-config-to-env.sh first (issue 751/#967: one source; \
+                 the loader reads POLICY_* env only, so this file is dead data)"
+            ));
+        }
     }
     // The section's whole env footprint, spelled by the loader's own rule
     // (`execution_policy::section_env_state`) — one spelling for the write

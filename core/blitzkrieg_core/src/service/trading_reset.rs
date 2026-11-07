@@ -183,7 +183,7 @@ impl Core {
     ///   `cooldown_minutes`。连亏计数器已在跑（`record_with` 的 breaker 带着
     ///   出生时的阈值对过一辈子），热改会追溯改判在案连亏 ——
     ///   `HOT_RELOAD_REFUSED` 的理由对这两项仍然成立。读数照写（操作员的
-    ///   意图进入 matrix，重启后 `from_file` 的解析与它一致），但本会话的
+    ///   意图进入 matrix，重启后 `from_env` 的解析与它一致），但本会话的
     ///   熔断行为不变，回执里逐项注明。
     /// - **next_session（一项）**—— `max_daily_drawdown_usd`。它与日亏熔断
     ///   是同一个预算；当日已发生的已实现亏损账本不能被中途改动的帽追溯
@@ -191,8 +191,12 @@ impl Core {
     ///   不动。
     ///
     /// Atomic：patch 先全量校验（非负）再落笔，被拒的 patch 不留半点痕迹。
-    /// 不持久化 —— 重启后 `from_file` 重走启动层，与 `risk.setLimits` 的
-    /// 「热≠永久」同一句真话。
+    /// 持久化的载体是 `.env`（issue #966/#965）：IPC 写路径
+    /// （`handlers/risk.rs`）在每个改动落进 matrix 后，把 `BK_RISK_*` 键
+    /// upsert 进 `.env`；重启后 `SystemicRiskLimits::from_env` 以
+    /// `source=env` 重新武装 —— 一条载体链：CLI > env(.env) > default。
+    /// 这里只做内存矩阵热写，所以回执里的 `persisted` 恒为 false，写路径
+    /// 会用 `.env` 的真实落盘结果覆写它（并给出 persistence=env|none）。
     pub fn apply_systemic_limits(
         &mut self,
         patch: &crate::schema::SetSystemicLimitsParams,
@@ -204,7 +208,7 @@ impl Core {
         if patch.is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "risk.setSystemic needs at least one of the nine systemic fields; \
+                "risk.setSystemic needs at least one of the five per-account systemic fields; \
                  read the current values with risk.limits"
                     .to_string(),
             ));
@@ -315,10 +319,13 @@ impl Core {
             );
         }
 
-        // #861: same durable ride as `risk.setLimits` — the per-account bounds
-        // recover across a restart (provenance `flag`, exactly as written
-        // above).
-        let persisted = self.risk_state_record_systemic(&changes);
+        // Issue #966/#965: the systemic bounds' durable carrier is `.env` —
+        // the IPC write face upserts the changed `BK_RISK_*` keys after this
+        // apply returns and reports the outcome in the reply the panel sees
+        // (`persisted` + `persistence=env|none`). The apply itself writes
+        // nothing durable, so the field here is the honest `false` (a direct
+        // caller sees exactly what this call did: an in-memory hot write).
+        let persisted = false;
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -365,8 +372,10 @@ impl Core {
     /// 止损，`takeProfitPct: 0` 语义同样荒谬 —— 负数/零不是操作员想要的
     /// 「关闭」，是笔误）。强平接受 `0`、拒绝负数。
     ///
-    /// 不持久化 —— 重启后回到启动 flag/env/TOML 的解析结果，与
-    /// `risk.setSystemic` 的「热≠永久」同一句真话。
+    /// 持久化的载体是 `.env`（issue #966/#965）：IPC 写路径把改动的
+    /// `BK_EXIT_*` 键 upsert 进 `.env`，重启后启动链（CLI > env > default）
+    /// 重新解析出同样的值。这里只做内存热写，回执里的 `persisted` 由写路径
+    /// 用真实落盘结果覆写（并给出 persistence=env|none）。
     pub fn apply_exit_set(
         &mut self,
         patch: &crate::schema::SetExitParams,
