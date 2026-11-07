@@ -132,7 +132,7 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxTotalPosition":1,"maxDailyDrawdownUsd":50,"reason":"live arm"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxPositionSize":1,"maxDailyDrawdownUsd":50,"reason":"live arm"}}"#.to_string(),
     )
     .await;
     assert!(
@@ -155,9 +155,9 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
             .map(|c| c["effect"].as_str().expect("effect").to_string())
     };
     assert_eq!(
-        effect_of("maxTotalPosition").as_deref(),
+        effect_of("maxPositionSize").as_deref(),
         Some("live"),
-        "the position-count cap is a live bound: {audit}"
+        "the size cap is a live bound: {audit}"
     );
     assert_eq!(
         effect_of("maxDailyDrawdownUsd").as_deref(),
@@ -173,7 +173,7 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
             .map(|c| c["from"].as_str().expect("from").to_string())
     };
     assert_eq!(
-        from_of("maxTotalPosition").as_deref(),
+        from_of("maxPositionSize").as_deref(),
         Some("0"),
         "the old value (0 = off) is on the record: {audit}"
     );
@@ -188,11 +188,11 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     .await;
     assert!(read.get("error").is_none(), "readout must answer: {read}");
     assert_eq!(
-        read["result"]["global"]["limits"]["maxTotalPosition"]["value"],
+        read["result"]["account"]["limits"]["maxPositionSize"]["value"],
         serde_json::json!("1")
     );
     assert_eq!(
-        read["result"]["global"]["limits"]["maxTotalPosition"]["source"],
+        read["result"]["account"]["limits"]["maxPositionSize"]["source"],
         serde_json::json!("flag")
     );
     assert_eq!(
@@ -222,7 +222,7 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":4,"method":"risk.setSystemic","params":{"maxTotalExposureUsd":"-5","maxCorrelationUsd":10}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"risk.setSystemic","params":{"maxSingleLossUsd":"-5","maxConsecutiveLosses":10}}"#.to_string(),
     )
     .await;
     assert!(
@@ -240,7 +240,7 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     )
     .await;
     assert_eq!(
-        read2["result"]["global"]["limits"]["maxCorrelationUsd"]["value"],
+        read2["result"]["account"]["limits"]["maxConsecutiveLosses"]["value"],
         serde_json::json!("0"),
         "a refused patch leaves no trace: {read2}"
     );

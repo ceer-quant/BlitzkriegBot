@@ -371,6 +371,8 @@ async fn handle_line(
         method::DISPLAY_ACCOUNT_SET,
         method::SYSTEM_RESET_TRADING,
         method::STRATEGY_PARAMS_SET,
+        method::STRATEGY_RELOAD,
+        method::STRATEGY_PACKAGES_RELOAD,
         method::UNIFIED_CONFIRM,
         method::UNIFIED_REVOKE,
         method::ARB_CONFIG_SET,

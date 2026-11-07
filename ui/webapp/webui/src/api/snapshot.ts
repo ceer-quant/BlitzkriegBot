@@ -251,10 +251,6 @@ export interface Position {
    * unattributed and the panel shows it regardless of the active account.
    */
   accountId?: string
-  /** 持仓生命周期状态：已关闭（历史平仓）/ 进行中（活跃持仓） */
-  status?: string
-  exitRole?: string
-  closed?: boolean
 }
 
 export interface TradeRow {

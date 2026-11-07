@@ -37,15 +37,6 @@ async fn the_factory_risk_limits_readout_is_silent_and_provenanced() {
         assert_eq!(r["account"]["limits"][key]["value"], "0", "{key}");
         assert_eq!(r["account"]["limits"][key]["source"], "default", "{key}");
     }
-    for key in [
-        "maxTotalPosition",
-        "maxTotalExposureUsd",
-        "maxCorrelationUsd",
-        "globalKillSwitchLossUsd",
-    ] {
-        assert_eq!(r["global"]["limits"][key]["value"], "0", "{key}");
-        assert_eq!(r["global"]["limits"][key]["source"], "default", "{key}");
-    }
     assert_eq!(r["exit"]["stopLossPct"].as_f64(), Some(12.0));
     assert_eq!(r["exit"]["takeProfitPct"].as_f64(), Some(100.0));
     // Calibrated default: the guillotine ships OFF (`0` disables the rule).
@@ -69,7 +60,6 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
                     max_single_loss_usd: Bound::new(dec!(35), LimitSource::Env),
                     ..Default::default()
                 },
-                ..Default::default()
             },
             ..Default::default()
         },
@@ -92,14 +82,10 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
     let single = &reply["result"]["account"]["limits"]["maxSingleLossUsd"];
     assert_eq!(single["value"], "35");
     assert_eq!(single["source"], "env");
-    assert_eq!(
-        reply["result"]["global"]["limits"]["maxTotalPosition"]["value"],
-        "0"
-    );
-    assert_eq!(
-        reply["result"]["global"]["limits"]["maxTotalPosition"]["source"],
-        "default"
-    );
+    // An untouched sibling stays factory-silent in the same readout.
+    let sibling = &reply["result"]["account"]["limits"]["maxPositionSize"];
+    assert_eq!(sibling["value"], "0");
+    assert_eq!(sibling["source"], "default");
 }
 
 /// A2's wire shape: with the switch off, `system.update.check` answers a

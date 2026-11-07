@@ -36,6 +36,20 @@ import os
 import sys
 
 
+def safe_write_path(path: str) -> str:
+    """拒绝含穿越组件(`..`)的输出路径（path traversal，高危）。"""
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError(f"refusing path-traversal output path: {path!r}")
+    return path
+
+
+def safe_open(path: str, mode: str = "r"):
+    if any(c in mode for c in "wax+"):
+        path = safe_write_path(path)
+    return open(path, mode)
+
+
 def read_rows(path):
     """Yield (raw_line, obj_or_None) for every line (original tool counted
     every line, JSON or not)."""
@@ -82,9 +96,9 @@ def check(path):
 
 def apply_fix(path):
     tokens = collect_tokens(path)
-    tmp = path + ".tmp"
+    tmp = safe_write_path(path + ".tmp")
     nlines = rewritten = missing = 0
-    with open(tmp, "w") as out:
+    with safe_open(tmp, "w") as out:
         for raw, o in read_rows(path):
             nlines += 1
             if (o and o.get("k") == "resolution" and res_is_label(o)):

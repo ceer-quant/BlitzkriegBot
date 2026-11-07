@@ -246,16 +246,6 @@ pub(crate) fn apply_restored_limits(config: &mut CoreConfig, file: &RiskStateFil
         &mut matrix.account.max_consecutive_losses,
     );
     set_bound("cooldownMinutes", &mut matrix.account.cooldown_minutes);
-    set_bound("maxTotalPosition", &mut matrix.global.max_total_position);
-    set_bound(
-        "maxTotalExposureUsd",
-        &mut matrix.global.max_total_exposure_usd,
-    );
-    set_bound("maxCorrelationUsd", &mut matrix.global.max_correlation_usd);
-    set_bound(
-        "globalKillSwitchLossUsd",
-        &mut matrix.global.global_kill_switch_loss_usd,
-    );
     for field in file.systemic.keys() {
         if !matches!(
             field.as_str(),
@@ -264,10 +254,6 @@ pub(crate) fn apply_restored_limits(config: &mut CoreConfig, file: &RiskStateFil
                 | "maxPositionSize"
                 | "maxConsecutiveLosses"
                 | "cooldownMinutes"
-                | "maxTotalPosition"
-                | "maxTotalExposureUsd"
-                | "maxCorrelationUsd"
-                | "globalKillSwitchLossUsd"
         ) {
             tracing::warn!(
                 path = %path.display(),

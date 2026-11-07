@@ -315,15 +315,10 @@ const roundTileTitle = computed(() => {
 // (same filter as 行情页; unattributed rows from a pre-E28 core stay visible).
 // issue 561（裁决 1）后余额瓦片同样是账户自有读数（account.list 行）——
 // 上方「余额瓦片故意不按账户过滤」的旧口径随进程级换源一并废除。
-// Trae 1077/1098: 当前持仓只读活跃持仓，过滤已关闭或非 pending 记录
+// issue 981: snap.positions 只来自 open_positions()，无 closed/exitRole/status
+// 字段，旧过滤恒空转，直接取按账户过滤后的结果。
 const positions = computed(() =>
-  filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows.filter((p) => {
-    const raw = p as any
-    if (raw.closed === true) return false
-    if (typeof raw.exitRole === 'string' && raw.exitRole !== '' && raw.exitRole !== 'pending') return false
-    if (typeof raw.status === 'string' && raw.status !== '' && raw.status !== 'pending' && raw.status !== 'open') return false
-    return true
-  }),
+  filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
 )
 const engine = computed(() => snap.value?.stats ?? {})
 

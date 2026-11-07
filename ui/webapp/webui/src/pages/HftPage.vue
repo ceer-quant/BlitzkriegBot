@@ -775,19 +775,14 @@ const tradeStats = computed(() => {
 const tab = ref<'positions' | 'orders' | 'history'>('positions')
 // E28 (§9.5) + issue 561: positions follow the display account — same filter
 // discipline as the history rows (unattributed rows from a pre-E28 core stay
-// visible).
-// Trae 1077/1098: 当前持仓只读活跃持仓（exitRole=pending 或 status=open），过滤历史 close 记录
+// issue 981: snap.positions 只来自内核 open_positions()（全是活跃持仓），
+// PositionView 不含 closed/exitRole/status 字段，此前的三分支过滤恒为空转。
+// 直接用按场地/账户过滤后的结果即可。
 const positions = computed(() =>
   filterByVenue(
     filterByAccount(snap.value?.positions ?? [], store.activeAccount).rows,
     activeVenue.value,
-  ).rows.filter((p) => {
-    const raw = p as any
-    if (raw.closed === true) return false
-    if (typeof raw.exitRole === 'string' && raw.exitRole !== '' && raw.exitRole !== 'pending') return false
-    if (typeof raw.status === 'string' && raw.status !== '' && raw.status !== 'pending' && raw.status !== 'open') return false
-    return true
-  }),
+  ).rows,
 )
 
 // ── issue 456: 挂单簿 + 强平 ────────────────────────────────────────────────

@@ -20,10 +20,6 @@ fn systemic_env_key(field: &str) -> Option<&'static str> {
         "maxPositionSize" => "BK_RISK_MAX_POSITION_SIZE",
         "maxConsecutiveLosses" => "BK_RISK_MAX_CONSECUTIVE_LOSSES",
         "cooldownMinutes" => "BK_RISK_COOLDOWN_MINUTES",
-        "maxTotalPosition" => "BK_RISK_MAX_TOTAL_POSITION",
-        "maxTotalExposureUsd" => "BK_RISK_MAX_TOTAL_EXPOSURE_USD",
-        "maxCorrelationUsd" => "BK_RISK_MAX_CORRELATION_USD",
-        "globalKillSwitchLossUsd" => "BK_RISK_GLOBAL_KILL_SWITCH_LOSS_USD",
         _ => return None,
     })
 }

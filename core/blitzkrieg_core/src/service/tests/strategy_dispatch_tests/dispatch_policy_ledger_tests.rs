@@ -364,13 +364,14 @@ fn policy_skip_refuses_the_entry_before_the_risk_gate() {
     assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
 }
 
-/// #966 regression: `open_positions` counts LIVE positions GLOBALLY across
-/// all accounts. Two live positions on DIFFERENT accounts must trip the
-/// `global_backstop` (open_positions >= 2 → skip), so a 3rd entry is refused
-/// even though no single account individually holds 2 positions. The pre-fix
-/// per-account counting let this slip through.
+/// #983 regression: `open_positions` counts LIVE positions PER-ACCOUNT (risk
+/// control follows the account's capital, NOT a global pool). Two live
+/// positions on DIFFERENT accounts must NOT trip the backstop
+/// (open_positions >= 2 → skip): each account individually holds 1 < 2, so
+/// neither account's entry is refused by the other's open book. The same
+/// backstop DOES refuse when the request's OWN account already holds 2.
 #[test]
-fn global_backstop_skips_when_positions_span_accounts() {
+fn per_account_backstop_only_counts_own_account() {
     let mut policy = neutral_policy();
     policy.defaults.rules = vec![crate::execution_policy::Rule {
         name: "global_backstop".into(),
@@ -390,69 +391,108 @@ fn global_backstop_skips_when_positions_span_accounts() {
         },
         reason: Some("全局兜底：持仓数达上限".into()),
     }];
-
-    let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy);
     let now = 1_000_000i64;
 
-    // Seed one live position on "default" and one on "acct_b" — neither
-    // account individually holds 2, but globally there are 2 live positions.
-    c.positions_mut().open(
-        crate::position::OpenParams {
-            strategy: "dip".into(),
-            asset: "BTC".into(),
-            direction: crate::model::SignalDirection::Up,
-            token_id: "btc_up".into(),
-            condition_id: "cond".into(),
-            account_id: crate::model::default_account_id(),
-            venue: String::new(),
-            partner_token_id: "btc_down".into(),
-            entry_price: dec!(0.44),
-            expires_at_ms: now + 900_000,
-            was_maker: false,
-            target_exit_price: None,
-            round_duration_sec: 900,
-            round_slot: 1,
-        },
-        now,
-    );
-    c.positions_mut().open(
-        crate::position::OpenParams {
-            strategy: "dip".into(),
-            asset: "BTC".into(),
-            direction: crate::model::SignalDirection::Up,
-            token_id: "eth_up".into(),
-            condition_id: "cond_eth".into(),
-            account_id: crate::model::AccountId::from("acct_b"),
-            venue: String::new(),
-            partner_token_id: "eth_down".into(),
-            entry_price: dec!(0.44),
-            expires_at_ms: now + 900_000,
-            was_maker: false,
-            target_exit_price: None,
-            round_duration_sec: 900,
-            round_slot: 1,
-        },
-        now,
-    );
-    assert_eq!(
-        c.positions().open_positions().len(),
-        2,
-        "fixture premise: two live positions across two accounts"
-    );
+    // ── Case 1: positions span two accounts — must NOT trip the backstop ──
+    {
+        let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy.clone());
+        // One live position on "default" (asset ETH, so the per-asset cap does
+        // not block the dip strategy's BTC entry), one on "acct_b": each
+        // account has 1.
+        c.positions_mut().open(
+            crate::position::OpenParams {
+                strategy: "dip".into(),
+                asset: "ETH".into(),
+                direction: crate::model::SignalDirection::Up,
+                token_id: "eth_up".into(),
+                condition_id: "cond_eth".into(),
+                account_id: crate::model::default_account_id(),
+                venue: String::new(),
+                partner_token_id: "eth_down".into(),
+                entry_price: dec!(0.44),
+                expires_at_ms: now + 900_000,
+                was_maker: false,
+                target_exit_price: None,
+                round_duration_sec: 900,
+                round_slot: 1,
+            },
+            now,
+        );
+        c.positions_mut().open(
+            crate::position::OpenParams {
+                strategy: "dip".into(),
+                asset: "BTC".into(),
+                direction: crate::model::SignalDirection::Up,
+                token_id: "btc_up_b".into(),
+                condition_id: "cond_b".into(),
+                account_id: crate::model::AccountId::from("acct_b"),
+                venue: String::new(),
+                partner_token_id: "btc_down_b".into(),
+                entry_price: dec!(0.44),
+                expires_at_ms: now + 900_000,
+                was_maker: false,
+                target_exit_price: None,
+                round_duration_sec: 900,
+                round_slot: 1,
+            },
+            now,
+        );
+        assert_eq!(c.positions().open_positions().len(), 2);
 
-    // Feed the dip book so the "dip" strategy emits a candidate entry.
-    feed_btc_dip(&mut c, now);
+        feed_btc_dip(&mut c, now);
+        // The "default" account holds only 1 of its own positions — acct_b's
+        // position is NOT counted — so open_positions == 1 < 2 and the entry
+        // is ADMITTED.
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            1,
+            "per-account backstop admits the entry — the other account's position does not count"
+        );
+        assert_eq!(c.list_orders().len(), 1, "one order reached place()");
+    }
 
-    // The global backstop must refuse the entry: open_positions == 2 >= 2.
-    assert_eq!(
-        c.engine_evaluate(now + 1_000),
-        0,
-        "global backstop skips the entry when positions span accounts"
-    );
-    assert!(c.list_orders().is_empty(), "nothing reached place()");
-    let stats = c.strategy_stats();
-    let s = strategy_entry(&stats, "dip");
-    assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+    // ── Case 2: the request's OWN account holds 2 — MUST trip the backstop ──
+    {
+        let mut c = policy_core(equity_core(dec!(100), Decimal::ZERO), policy.clone());
+        // Two live positions on "default", on NON-BTC assets so the per-asset
+        // cap (max_positions_per_asset = 1) does not block the dip's BTC entry
+        // before the policy backstop is consulted.
+        for asset in ["ETH", "SOL"] {
+            c.positions_mut().open(
+                crate::position::OpenParams {
+                    strategy: "dip".into(),
+                    asset: asset.into(),
+                    direction: crate::model::SignalDirection::Up,
+                    token_id: format!("{asset}_up"),
+                    condition_id: format!("cond_{asset}"),
+                    account_id: crate::model::default_account_id(),
+                    venue: String::new(),
+                    partner_token_id: format!("{asset}_down"),
+                    entry_price: dec!(0.44),
+                    expires_at_ms: now + 900_000,
+                    was_maker: false,
+                    target_exit_price: None,
+                    round_duration_sec: 900,
+                    round_slot: 1,
+                },
+                now,
+            );
+        }
+        assert_eq!(c.positions().open_positions().len(), 2);
+
+        feed_btc_dip(&mut c, now);
+        // The "default" account itself holds 2 live positions — open_positions
+        // == 2 >= 2 — so the backstop refuses.
+        assert_eq!(
+            c.engine_evaluate(now + 1_000),
+            0,
+            "per-account backstop refuses when the account itself holds 2 live positions"
+        );
+        assert!(c.list_orders().is_empty(), "nothing reached place()");
+        let stats = c.strategy_stats();
+        let s = strategy_entry(&stats, "dip");
+        assert_eq!(s["rejectionCauses"]["policy.skip"], 1, "{s}");
+    }
 }
 
 /// The negative half of "规则不能绕过 RiskEngine": with the policy

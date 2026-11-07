@@ -648,7 +648,7 @@ fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
         pm.can_open("poly", Some("ETH"), Some(SignalDirection::Up), 5000)
             .is_err()
     );
-    // 系统性事实（global_kill_switch 读数）= 两账户之和。
+    // 全账户日盈亏合计 = 两账户之和。
     assert_eq!(
         pm.daily_pnl_total(),
         pm.daily_pnl_for("default") + pm.daily_pnl_for("poly")

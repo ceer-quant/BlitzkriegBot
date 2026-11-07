@@ -7,60 +7,6 @@ impl Core {
     /// Portfolio-level exposure cap (E16/#98): the sum of open notional across
     /// ALL strategies plus the incoming entry stays under
     /// `risk.max_open_notional_usd` (0 = disabled).
-    /// #461 Fix 3: the systemic aggregates the nine limits judge, with
-    /// RESTING exposure counted. Positions carry their cost basis (cash
-    /// committed); live BUY orders carry their remaining notional (cash
-    /// PROMISED — a resting bid fills at any moment and the exposure cap
-    /// must not discover the commitment only after it became a position).
-    /// SELL orders commit nothing new (they release inventory), so only the
-    /// buy side counts.
-    pub(crate) fn systemic_facts(
-        &self,
-        asset: &str,
-        now_ms: i64,
-    ) -> crate::risk::limits::SystemicFacts {
-        // The systemic COUNT judges live positions only (expired rounds are
-        // settlement-dead — same rule as PositionManager::can_open); the
-        // exposure sums keep every position: their cost basis is cash
-        // actually committed until the venue settles.
-        crate::risk::limits::SystemicFacts {
-            open_positions: self
-                .positions
-                .open_positions()
-                .iter()
-                .filter(|p| p.expires_at_ms > now_ms)
-                .count(),
-            open_exposure_usd: self
-                .positions
-                .open_positions()
-                .iter()
-                .map(|p| p.cost_usd)
-                .chain(
-                    self.ome
-                        .live_orders()
-                        .iter()
-                        .filter(|o| o.side == Side::Buy)
-                        .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
-                )
-                .sum(),
-            same_asset_exposure_usd: self
-                .positions
-                .open_positions()
-                .iter()
-                .filter(|p| p.asset == asset)
-                .map(|p| p.cost_usd)
-                .chain(
-                    self.ome
-                        .live_orders()
-                        .iter()
-                        .filter(|o| o.side == Side::Buy && o.asset == asset)
-                        .map(|o| (o.price * (o.size - o.filled_size)).max(Decimal::ZERO)),
-                )
-                .sum(),
-            day_realized_usd: self.positions.daily_pnl_total(),
-        }
-    }
-
     /// #461 Fix 2: the worst per-share basis ALREADY PAID on the counterpart
     /// leg of this condition (None when no counterpart is held). One UP share
     /// plus one DOWN share redeems exactly $1.00, so the pair economics are

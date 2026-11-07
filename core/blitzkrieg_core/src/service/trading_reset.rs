@@ -170,16 +170,15 @@ impl Core {
         })
     }
 
-    /// 生效风控可编辑（`risk.setSystemic`）：九项系统性限额的运行时写路径，
+    /// 生效风控可编辑（`risk.setSystemic`）：五项账户级限额的运行时写路径，
     /// 仿 [`Self::apply_risk_limits`] 的 plan-first + 审计姿态。
+    /// issue #983：风控只跟随账户，无全局限额。
     ///
     /// 三个生效档位都是真实的，不是文档话术：
     ///
-    /// - **live（六项）**—— `max_single_loss_usd` / `max_position_size` /
-    ///   `max_total_position` / `max_total_exposure_usd` / `max_correlation_usd`
-    ///   / `global_kill_switch_loss_usd`。入场流水线每笔现场
-    ///   `systemic_snapshot()` 判读，只约束新敞口（平仓从不走这条路），不携带
-    ///   计数器 —— 写进内存后下一笔入场立即按新值裁决。
+    /// - **live（两项）**—— `max_single_loss_usd` / `max_position_size`。
+    ///   入场流水线每笔现场 `systemic_snapshot()` 判读，只约束新敞口（平仓从不
+    ///   走这条路），不携带计数器 —— 写进内存后下一笔入场立即按新值裁决。
     /// - **next_session（两项）**—— `max_consecutive_losses` /
     ///   `cooldown_minutes`。连亏计数器已在跑（`record_with` 的 breaker 带着
     ///   出生时的阈值对过一辈子），热改会追溯改判在案连亏 ——
@@ -265,30 +264,6 @@ impl Core {
             patch.cooldown_minutes,
             "next_session",
         )?;
-        plan(
-            "maxTotalPosition",
-            &matrix.global.max_total_position,
-            patch.max_total_position,
-            "live",
-        )?;
-        plan(
-            "maxTotalExposureUsd",
-            &matrix.global.max_total_exposure_usd,
-            patch.max_total_exposure_usd,
-            "live",
-        )?;
-        plan(
-            "maxCorrelationUsd",
-            &matrix.global.max_correlation_usd,
-            patch.max_correlation_usd,
-            "live",
-        )?;
-        plan(
-            "globalKillSwitchLossUsd",
-            &matrix.global.global_kill_switch_loss_usd,
-            patch.global_kill_switch_loss_usd,
-            "live",
-        )?;
 
         if changes.is_empty() {
             return Err(CoreError::new(
@@ -338,29 +313,9 @@ impl Core {
                 patch.cooldown_minutes,
                 flag,
             );
-            set(
-                &mut matrix.global.max_total_position,
-                patch.max_total_position,
-                flag,
-            );
-            set(
-                &mut matrix.global.max_total_exposure_usd,
-                patch.max_total_exposure_usd,
-                flag,
-            );
-            set(
-                &mut matrix.global.max_correlation_usd,
-                patch.max_correlation_usd,
-                flag,
-            );
-            set(
-                &mut matrix.global.global_kill_switch_loss_usd,
-                patch.global_kill_switch_loss_usd,
-                flag,
-            );
         }
 
-        // #861: same durable ride as `risk.setLimits` — the nine bounds
+        // #861: same durable ride as `risk.setLimits` — the per-account bounds
         // recover across a restart (provenance `flag`, exactly as written
         // above).
         let persisted = self.risk_state_record_systemic(&changes);
