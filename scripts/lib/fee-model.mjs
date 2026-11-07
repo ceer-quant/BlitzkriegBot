@@ -76,8 +76,13 @@ export const FEE_MODEL_FLAG = '--fee-model';
  * The model the kernel is REQUIRED to report. Change this in the same change
  * that changes the kernel's default — never on its own: the point of the pin is
  * that a kernel-side default flip without a gate-side decision fails the gates.
+ *
+ * #995 flipped the pin to `official`: venue receipts carry no fee amount, so
+ * the booked fee is a model, and between the two curves `official` is the
+ * conservative one — official/legacy = 0.56/(p(1-p)) >= 2.24 at every price in
+ * (0,1), so the legacy default systematically UNDER-charged (57% at p=0.60).
  */
-export const PINNED_DEFAULT_MODEL = 'legacy_quadratic';
+export const PINNED_DEFAULT_MODEL = 'official';
 
 /**
  * Where the kernel declares the model and charges it. ONE place since #203: the

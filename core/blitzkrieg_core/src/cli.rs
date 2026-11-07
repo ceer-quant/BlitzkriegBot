@@ -695,7 +695,8 @@ pub const FLAGS: &[FlagSpec] = &[
         "--fee-model",
         "<legacy_quadratic|official>",
         "Replay-only: which taker-fee schedule the replay charges (asking for it \
-         without --backtest is refused).",
+         without --backtest is refused). The live default is `official` (#995); \
+         `legacy_quadratic` reproduces pre-#995 corpora.",
     ),
     flag(
         "--maker-rebate",

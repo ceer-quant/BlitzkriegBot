@@ -53,7 +53,7 @@ local state = {
   now = T0, slot = 1, time_left = 300,
   params = {},
   books = {},
-  fees = { name = "legacy_quadratic", rate = "0.125", exponent = 2 },
+  fees = { name = "official", rate = "0.07", exponent = 1 },
 }
 
 local bk = {}
@@ -98,7 +98,7 @@ local function reset()
   state.time_left = 300
   state.params = {}
   state.books = {}
-  state.fees = { name = "legacy_quadratic", rate = "0.125", exponent = 2 }
+  state.fees = { name = "official", rate = "0.07", exponent = 1 }
   state.asset = "BTC"
   state.markets = nil
   -- the kernel calls on_round at every round switch — the stub emulates it

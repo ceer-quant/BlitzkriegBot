@@ -99,34 +99,35 @@ fn model_matches_reports_a_changed_exponent_and_an_unknown_name() {
 }
 
 /// The production entry point reads the schedule in force and agrees with the
-/// pinned numbers — the anchor #224's裁决 rests on: legacy @0.50 = 1.5625%.
+/// pinned numbers — #995's anchor: official @0.50 = 3.5% of price.
 #[test]
 fn the_shipped_quote_matches_the_pin_and_the_anchor() {
     let quote = fee_quote(None);
-    assert_eq!(quote.model, "legacy_quadratic");
-    assert_eq!(quote.rate, dec!(0.125));
-    assert_eq!(quote.exponent, 2);
+    assert_eq!(quote.model, "official");
+    assert_eq!(quote.rate, dec!(0.07));
+    assert_eq!(quote.exponent, 1);
     assert_eq!(quote.price, dec!(0.5));
-    assert_eq!(quote.fee_per_share, dec!(0.0078125));
-    assert_eq!(quote.fee_pct_of_price, dec!(1.5625));
+    assert_eq!(quote.fee_per_share, dec!(0.0175));
+    assert_eq!(quote.fee_pct_of_price, dec!(3.5));
     assert!(quote.model_matches);
     // The public helper the quote is built from spells the charge the same way.
     assert_eq!(charged_fee_per_share(dec!(0.5)), quote.fee_per_share);
     // A counterfactual curve is checked against the pin FOR ITS OWN NAME, so a
-    // replay's official schedule matches here — `model_matches` answers "does
-    // this curve price what this repository says that curve prices", not "is
-    // this the shipped default". Which schedule is the default is a separate
-    // assertion (`exit_policy::tests::default_fee_schedule_is_the_shipped_one`,
-    // and PINNED_DEFAULT_MODEL on the gate side); confusing the two would make
+    // replay's legacy_quadratic schedule matches here — `model_matches`
+    // answers "does this curve price what this repository says that curve
+    // prices", not "is this the shipped default". Which schedule is the
+    // default is a separate assertion
+    // (`exit_policy::tests::default_fee_schedule_is_the_shipped_one`, and
+    // PINNED_DEFAULT_MODEL on the gate side); confusing the two would make
     // this flag unable to answer either question.
-    let official = fee_quote_at(official_schedule(), Some(dec!(0.5)));
-    assert!(official.model_matches);
+    let legacy = fee_quote_at(legacy_quadratic_schedule(), Some(dec!(0.5)));
+    assert!(legacy.model_matches);
     assert_eq!(
-        official.fee_pct_of_price,
-        dec!(3.5),
-        "official @0.50 = 3.5% of price (#224 anchor)"
+        legacy.fee_pct_of_price,
+        dec!(1.5625),
+        "legacy @0.50 = 1.5625% of price (#224 anchor)"
     );
-    assert_eq!(official.fee_per_share, dec!(0.0175));
+    assert_eq!(legacy.fee_per_share, dec!(0.0078125));
 }
 
 /// #234, item 4 — the live charge sites' invariant: only a core that declared
@@ -136,25 +137,25 @@ fn the_shipped_quote_matches_the_pin_and_the_anchor() {
 #[test]
 fn only_a_replay_may_charge_a_counterfactual_schedule() {
     let live = core_with(false);
-    assert!(live.may_charge(legacy_quadratic_schedule()));
+    assert!(live.may_charge(official_schedule()));
     assert!(
-        !live.may_charge(official_schedule()),
+        !live.may_charge(legacy_quadratic_schedule()),
         "a live core must refuse the counterfactual schedule"
     );
     let repriced = FeeSchedule {
-        rate: dec!(0.07),
-        ..legacy_quadratic_schedule()
+        rate: dec!(0.125),
+        ..official_schedule()
     };
     assert!(
         !live.may_charge(repriced),
-        "a repriced legacy curve keeps the name and is still not the shipped one"
+        "a repriced official curve keeps the name and is still not the shipped one"
     );
     let replay = core_with(true);
-    assert!(replay.may_charge(official_schedule()));
+    assert!(replay.may_charge(legacy_quadratic_schedule()));
 
     // The guard does not obstruct the shipped deployment: the live charge
     // sites still price the schedule in force (this call is the assert's
     // happy path, and would panic if the default config tripped it).
-    assert_eq!(live.live_taker_fee_pct(dec!(0.5)), dec!(1.5625));
-    assert_eq!(replay.live_taker_fee_pct(dec!(0.5)), dec!(1.5625));
+    assert_eq!(live.live_taker_fee_pct(dec!(0.5)), dec!(3.5));
+    assert_eq!(replay.live_taker_fee_pct(dec!(0.5)), dec!(3.5));
 }

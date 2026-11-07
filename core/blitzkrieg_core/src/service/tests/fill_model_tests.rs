@@ -199,8 +199,8 @@ fn an_inflight_taker_does_not_fill_at_decision_time() {
     c.tick(1_150).unwrap();
     assert_eq!(c.ome().get(&id).unwrap().status, OrderStatus::Filled);
     assert_eq!(c.positions().open_positions()[0].entry_price, dec!(0.40));
-    // Taker entry: 4.00 notional + the 1.8% taker fee (0.072).
-    assert_eq!(c.ledger().balance(), dec!(1000) - dec!(4) - dec!(0.072));
+    // Taker entry: 4.00 notional + the 4.2% official taker fee (0.168, #995).
+    assert_eq!(c.ledger().balance(), dec!(1000) - dec!(4) - dec!(0.168));
     assert_eq!(c.ledger().reserved(), Decimal::ZERO);
 }
 

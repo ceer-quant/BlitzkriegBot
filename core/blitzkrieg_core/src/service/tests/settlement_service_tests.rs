@@ -65,7 +65,7 @@ fn entry_order(price: Decimal, size: Decimal) -> OrderRequest {
     }
 }
 
-/// Open a 5-share position at 0.40 (taker: cost 2.00 + 0.036 fee) on a market
+/// Open a 5-share position at 0.40 (taker: cost 2.00 + 0.084 fee) on a market
 /// that expires at t=2000ms, and take the audit anchor with it open.
 pub(super) fn open_and_anchor(c: &mut Core, balance: Decimal) {
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
@@ -83,7 +83,7 @@ pub(super) fn open_and_anchor(c: &mut Core, balance: Decimal) {
     );
     let anchor = c.run_accounting_audit(1_999);
     assert!(anchor.ok, "anchor audit: {}", anchor.summary());
-    assert_eq!(c.ledger().balance(), balance - dec!(2.036));
+    assert_eq!(c.ledger().balance(), balance - dec!(2.084));
 }
 
 /// The resolution the venue would report: the held token pays 1.00/share.
@@ -189,8 +189,8 @@ fn archive_verdict_markets_are_settled_by_the_stream_not_the_dry_ladder() {
     assert_eq!(closed.exit_price, Decimal::ONE);
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(2.964),
-        "payout 5 − cost 2 − entry fee 0.036: the chain's verdict, not a dry guess"
+        dec!(2.916),
+        "payout 5 − cost 2 − entry fee 0.084: the chain's verdict, not a dry guess"
     );
 
     // Provenance: the settlement journal carries the stream as the source.
@@ -296,8 +296,8 @@ fn a_decisive_partner_bid_settles_held_leg_as_the_loser() {
     );
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(-2.036),
-        "cost 2 + fee 0.036, fully realized: the loss is on the books"
+        dec!(-2.084),
+        "cost 2 + fee 0.084, fully realized: the loss is on the books"
     );
 
     // Provenance: this is a DRY synthesis naming the partner the winner —
@@ -401,12 +401,12 @@ fn settlement_keeps_the_accounting_identity_true() {
     assert_eq!(closed.exit_price, Decimal::ONE);
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(2.964),
-        "payout 5 − cost 2 − entry fee 0.036"
+        dec!(2.916),
+        "payout 5 − cost 2 − entry fee 0.084"
     );
     let record = serde_json::to_value(crate::trade_db::TradeRecord::from_closed(closed)).unwrap();
     assert_eq!(record["exitReason"], "settlement");
-    assert_eq!(record["netPnlUsd"], serde_json::json!(2.964));
+    assert_eq!(record["netPnlUsd"], serde_json::json!(2.916));
 
     // Cash did NOT move: the payout is an account receivable (the wallet
     // holds conditional tokens, not USDC, until the redeem is mined).
@@ -422,7 +422,7 @@ fn settlement_keeps_the_accounting_identity_true() {
     );
 
     // The audit is green with the receivable on the books: `total` explains
-    // the settlement exactly (Δrealized 2.964 + Δspent 2.036 = 5.0).
+    // the settlement exactly (Δrealized 2.916 + Δspent 2.084 = 5.0).
     let report = c.run_accounting_audit(2_002);
     assert!(report.ok, "audit after settlement: {}", report.summary());
 
@@ -482,7 +482,7 @@ fn a_redelivered_resolution_does_not_settle_twice() {
     assert_eq!(c.positions().closed_positions().len(), 1, "one close only");
     let trades = c.trade_summary(None);
     assert_eq!(trades["totalTrades"], serde_json::json!(1));
-    assert_eq!(trades["totalNetPnl"], serde_json::json!(2.964));
+    assert_eq!(trades["totalNetPnl"], serde_json::json!(2.916));
     let stats = settlement_json(&c);
     assert_eq!(
         stats["receivableUsd"],
@@ -506,7 +506,7 @@ fn a_redelivered_resolution_does_not_settle_twice() {
         2_006,
     );
     c.on_market_resolution(winning_resolution(), 2_007);
-    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036) + dec!(5));
+    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.084) + dec!(5));
     assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -591,7 +591,7 @@ fn a_failed_redemption_is_loud_and_retried() {
     );
     assert_eq!(
         c.ledger().balance(),
-        balance_before + dec!(5) - dec!(0.8) - dec!(0.0144)
+        balance_before + dec!(5) - dec!(0.8) - dec!(0.0336)
     );
     // A duplicate confirmation for an already-redeemed claim credits nothing.
     c.on_redemption_result(
@@ -607,7 +607,7 @@ fn a_failed_redemption_is_loud_and_retried() {
     );
     assert_eq!(
         c.ledger().balance(),
-        balance_before + dec!(5) - dec!(0.8) - dec!(0.0144)
+        balance_before + dec!(5) - dec!(0.8) - dec!(0.0336)
     );
     assert!(c.run_accounting_audit(retry_at + 3).ok, "audit stays green");
 
@@ -679,7 +679,7 @@ fn a_losing_position_settles_to_zero_without_a_claim() {
     assert_eq!(closed.exit_reason, ExitReason::Settlement);
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(-2.036),
+        dec!(-2.084),
         "cost + entry fee, nothing back"
     );
     let stats = settlement_json(&c);
@@ -693,7 +693,7 @@ fn a_losing_position_settles_to_zero_without_a_claim() {
     assert!(report.ok, "audit after a loss: {}", report.summary());
     // Total cash is short by exactly the loss: the money is accounted for,
     // not held hostage by a position nobody can convert.
-    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036));
+    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.084));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -880,7 +880,7 @@ fn dry_mode_settles_on_its_own_tick_without_a_chain() {
 fn a_bidless_winner_settles_at_one_not_zero() {
     let dir = scratch("bidless-winner");
     let mut c = settling_core(&dir, dec!(10));
-    // Entry at 0.40 (taker: cost 2.00 + 0.036 fee) on the expiring market.
+    // Entry at 0.40 (taker: cost 2.00 + 0.084 fee) on the expiring market.
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
     let (_id, status) = c.place(entry_order(dec!(0.40), dec!(5)), 0, 1).unwrap();
     assert_eq!(status, OrderStatus::Filled);
@@ -903,11 +903,11 @@ fn a_bidless_winner_settles_at_one_not_zero() {
     );
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(2.964),
-        "payout 5 − cost 2 − entry fee 0.036"
+        dec!(2.916),
+        "payout 5 − cost 2 − entry fee 0.084"
     );
     // The simulated redemption confirmed: the payout is cash.
-    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.036) + dec!(5));
+    assert_eq!(c.ledger().balance(), dec!(10) - dec!(2.084) + dec!(5));
     assert!(c.run_accounting_audit(2_002).ok);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -984,8 +984,8 @@ fn an_uma_invalid_half_payout_books_and_redeems_as_half() {
     assert_eq!(closed.exit_price, dec!(0.5));
     assert_eq!(
         closed.net_pnl_usd,
-        dec!(0.464),
-        "payout 2.5 − cost 2 − entry fee 0.036"
+        dec!(0.416),
+        "payout 2.5 − cost 2 − entry fee 0.084"
     );
 
     // The half is held as a receivable until the redeem confirms.
@@ -1391,7 +1391,7 @@ fn an_interrupted_settlement_recovers_once_on_restart() {
     }
 
     // Restart: the position log still holds it, and the settlement stands.
-    let mut c = settling_core(&dir, balance - dec!(2.036));
+    let mut c = settling_core(&dir, balance - dec!(2.084));
     assert_eq!(c.restore_positions(), 1);
     assert!(
         c.positions().open_positions().is_empty(),
@@ -1404,7 +1404,7 @@ fn an_interrupted_settlement_recovers_once_on_restart() {
     assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
     assert_eq!(
         c.trade_summary(None)["totalNetPnl"],
-        serde_json::json!(2.964)
+        serde_json::json!(2.916)
     );
     let stats = settlement_json(&c);
     assert_eq!(stats["receivableUsd"], serde_json::json!(5.0));
@@ -1412,7 +1412,7 @@ fn an_interrupted_settlement_recovers_once_on_restart() {
     assert!(report.ok, "audit after recovery: {}", report.summary());
 
     // A second restart must not close or record it again.
-    let mut c = settling_core(&dir, balance - dec!(2.036));
+    let mut c = settling_core(&dir, balance - dec!(2.084));
     assert_eq!(c.restore_positions(), 0, "the position log is empty now");
     assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
     assert_eq!(settlement_json(&c)["receivableUsd"], serde_json::json!(5.0));

@@ -838,6 +838,7 @@ pub(crate) async fn handle_account(
                             amount: e.amount,
                             balance_after: e.balance_after,
                             r#ref: e.ref_,
+                            fee_source: e.fee_source,
                         })
                         .collect();
                     Ok::<_, CoreError>(
