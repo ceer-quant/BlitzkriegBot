@@ -514,6 +514,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
                     crate::model::ExitReason::Manual,
                     false,
                     now_ms(),
+                    "venue",
                 )
                 .expect("the probe position closes");
         }

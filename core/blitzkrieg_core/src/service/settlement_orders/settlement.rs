@@ -161,6 +161,7 @@ impl Core {
                 SETTLEMENT_EXIT_REASON,
                 true,
                 now_ms,
+                "venue",
             );
             match closed {
                 Some(closed) => {
@@ -222,6 +223,11 @@ impl Core {
             ));
             return; // keep the market watched: a later resolution may price it
         }
+        // #987: a venue resolution is venue cash truth for this condition. Flip
+        // any fallback-closed positions on it to `source == "venue"`, preserving
+        // the original fallback price for audit. Positions already settled via
+        // this resolution carry `source == "venue"` from `close()` itself.
+        self.backfill_fallback_to_venue(&resolution.condition_id);
         self.settlement.forget_market(&resolution.condition_id);
     }
 
@@ -802,9 +808,14 @@ impl Core {
             } else {
                 pos.entry_price
             };
-            let closed =
-                self.positions
-                    .close(&pos.id, price, UNVERIFIED_EXPIRY_EXIT_REASON, true, now_ms);
+            let closed = self.positions.close(
+                &pos.id,
+                price,
+                UNVERIFIED_EXPIRY_EXIT_REASON,
+                true,
+                now_ms,
+                "fallback",
+            );
             if let Some(closed) = closed {
                 // The position left the open book, so the audit identity's
                 // spent/received folds shrink by its flows. The settlement path
@@ -976,6 +987,7 @@ impl Core {
                 UNVERIFIED_EXPIRY_EXIT_REASON,
                 true,
                 now_ms,
+                "fallback",
             )
             .ok_or_else(|| {
                 // Lost a race with another closer: refuse without writing
@@ -1062,6 +1074,7 @@ impl Core {
                 SETTLEMENT_EXIT_REASON,
                 true,
                 at_ms,
+                "venue",
             );
             if let Some(closed) = closed {
                 // The trade record was lost with the crash: write it now, once,

@@ -107,6 +107,8 @@ fn closed_trade(id: &str) -> crate::trade_db::TradeRecord {
         dust_shares: Decimal::ZERO,
         account_id: crate::model::default_account_id(),
         venue: String::new(),
+        source: String::new(),
+        original_fallback_price: None,
     })
 }
 

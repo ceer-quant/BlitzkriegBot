@@ -82,6 +82,18 @@ pub struct TradeRecord {
     /// field existed reads as undeclared (serde default — no migration).
     #[serde(default)]
     pub venue: String,
+    /// Provenance of the close: `venue` when the fill price came from a
+    /// venue-backed verdict (settlement or reconcile backfill), `fallback`
+    /// when the close price is a bookkeeping value with no venue answer
+    /// (unverifiable expiry). Never fabricated, never merged into realized
+    /// PnL as if it were a venue verdict — see issue #987.
+    #[serde(default)]
+    pub source: String,
+    /// #987: when a fallback close is later overwritten by a venue verdict
+    /// (reconcile backfill), this holds the ORIGINAL fallback exit price so
+    /// auditors can see what was booked before the venue's truth arrived.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub original_fallback_price: Option<Decimal>,
 }
 
 impl TradeRecord {
@@ -125,6 +137,8 @@ impl TradeRecord {
             high_pnl_pct: c.high_pnl_pct,
             low_pnl_pct: c.low_pnl_pct,
             venue: c.venue.clone(),
+            source: c.source.clone(),
+            original_fallback_price: c.original_fallback_price,
         }
     }
 }
@@ -469,6 +483,8 @@ mod tests {
             dust_shares: Decimal::ZERO,
             account_id: crate::model::default_account_id(),
             venue: String::new(),
+            source: String::new(),
+            original_fallback_price: None,
         }
     }
 

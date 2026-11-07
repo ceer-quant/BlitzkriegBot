@@ -1046,8 +1046,9 @@ impl Core {
                                         d.account_id.as_str(),
                                     ),
                                 );
-                                if let Some(closed) =
-                                    self.positions.close(&id, px, reason, was_maker, now_ms)
+                                if let Some(closed) = self
+                                    .positions
+                                    .close(&id, px, reason, was_maker, now_ms, "venue")
                                 {
                                     if let Some(restored) = pre_exit {
                                         self.push_close_credential(

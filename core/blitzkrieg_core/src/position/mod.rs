@@ -785,6 +785,23 @@ pub struct ClosedPosition {
     /// #427: the venue the trade's market listed on — carried from the
     /// position, pure DATA for the panels' Venue column.
     pub venue: String,
+    /// #987: provenance of the close's price — `venue` when the exit price came
+    /// from a venue verdict (settlement/reconcile), `fallback` when it is an
+    /// unverifiable-expiry bookkeeping value (last known mid, else entry price)
+    /// that no venue verdict ever confirmed. `fallback` rows are never settled
+    /// claims and are reported separately as "unverified exposure"; a later
+    /// reconcile that matches venue cash flips `source` back to `venue` while
+    /// preserving the original fallback price for audit. Empty on snapshots
+    /// written before the field existed.
+    #[serde(default)]
+    pub source: String,
+    /// #987: when a fallback close is later overwritten by a venue verdict
+    /// (reconcile backfill), this holds the ORIGINAL fallback exit price so
+    /// auditors can see what was booked before the venue's truth arrived. Set
+    /// only on fallback closes; `None` on venue closes and on rows written
+    /// before the field existed.
+    #[serde(default, with = "crate::decimal::opt")]
+    pub original_fallback_price: Option<Decimal>,
 }
 
 /// The result of one MERGE (task 2.2): complete UP+DOWN share-pairs of one
@@ -1093,6 +1110,105 @@ impl PositionManager {
         )
     }
 
+    /// #987: separate report of UNVERIFIED EXPOSURE — positions closed via the
+    /// fallback path (`source == "fallback"`) whose exit price was a bookkeeping
+    /// value (last known mid, else entry price) that NO venue verdict ever
+    /// confirmed. These rows are NOT realized PnL: the venue's truth follows the
+    /// reconcile sweep, and this report exists so the books never look better
+    /// than reality while venue cash is still outstanding.
+    ///
+    /// Returns one entry per fallback-closed position plus aggregates
+    /// (quantity, cost, fallback booking price, percentage of total closed
+    /// cost). `percentage` is this position's `cost_usd` as a share of the
+    /// SUM of `cost_usd` across ALL closed positions (venue + fallback) — the
+    /// operator can see at a glance how much exposure sits unverified.
+    pub fn unverified_exposure_report(&self) -> UnverifiedExposureReport {
+        let total_closed_cost: Decimal = self.closed.iter().map(|c| c.cost_usd).sum();
+        let mut entries: Vec<UnverifiedExposureEntry> = Vec::new();
+        let mut total_fallback_cost = Decimal::ZERO;
+        for c in &self.closed {
+            if c.source != "fallback" {
+                continue;
+            }
+            total_fallback_cost += c.cost_usd;
+            entries.push(UnverifiedExposureEntry {
+                position_id: c.id.clone(),
+                condition_id: c.condition_id.clone(),
+                token_id: c.token_id.clone(),
+                account_id: c.account_id.clone(),
+                strategy: c.strategy.clone(),
+                shares: c.shares,
+                cost_usd: c.cost_usd,
+                fallback_price: c.exit_price,
+                original_fallback_price: c.original_fallback_price,
+                net_pnl_usd: c.net_pnl_usd,
+                exited_at_ms: c.exited_at_ms,
+                percentage_of_total_cost: if total_closed_cost > Decimal::ZERO {
+                    (c.cost_usd / total_closed_cost) * Decimal::ONE_HUNDRED
+                } else {
+                    Decimal::ZERO
+                },
+            });
+        }
+        entries.sort_by_key(|b| std::cmp::Reverse(b.cost_usd));
+        let total_positions = entries.len();
+        let total_shares = entries.iter().map(|e| e.shares).sum();
+        let total_cost_usd = total_fallback_cost;
+        let total_percentage_of_closed_cost = if total_closed_cost > Decimal::ZERO {
+            (total_fallback_cost / total_closed_cost) * Decimal::ONE_HUNDRED
+        } else {
+            Decimal::ZERO
+        };
+        UnverifiedExposureReport {
+            entries,
+            total_positions,
+            total_shares,
+            total_cost_usd,
+            total_percentage_of_closed_cost,
+        }
+    }
+
+    /// #987: reconcile backfill — flip a fallback-closed position's `source`
+    /// from `"fallback"` to `"venue"` when the venue's cash truth has caught up
+    /// (reconcile or settlement confirmed the position), while PRESERVING the
+    /// original fallback price in `original_fallback_price` for audit.
+    ///
+    /// Returns the number of rows flipped. A position that was never fallback
+    /// closed (already `venue`) is left untouched; an unknown condition_id is a
+    /// no-op. Idempotent: flipping an already-`venue` row is a no-op.
+    pub fn backfill_fallback_to_venue(&mut self, condition_id: &str) -> usize {
+        let mut flipped = 0usize;
+        for c in &mut self.closed {
+            if c.condition_id != condition_id || c.source != "fallback" {
+                continue;
+            }
+            c.original_fallback_price = Some(c.exit_price);
+            c.source = "venue".to_string();
+            flipped += 1;
+        }
+        flipped
+    }
+
+    /// #987: token-scoped variant of [`Self::backfill_fallback_to_venue`] —
+    /// flips every fallback-closed position whose `token_id` is in `tokens`.
+    /// Used by reconcile: a venue fill on a token is venue cash truth for the
+    /// condition that token belongs to.
+    pub fn backfill_fallback_to_venue_tokens(
+        &mut self,
+        tokens: &std::collections::HashSet<&str>,
+    ) -> usize {
+        let mut flipped = 0usize;
+        for c in &mut self.closed {
+            if c.source != "fallback" || !tokens.contains(c.token_id.as_str()) {
+                continue;
+            }
+            c.original_fallback_price = Some(c.exit_price);
+            c.source = "venue".to_string();
+            flipped += 1;
+        }
+        flipped
+    }
+
     /// Test seam: land one CLOSED row directly in the book, bypassing
     /// open→fill→close. The #364 preview replay needs historical facts
     /// without a full fill simulation; the production path always arrives
@@ -1112,6 +1228,54 @@ impl PositionManager {
     pub fn next_id_for_test(&self) -> u64 {
         self.next_id
     }
+}
+
+/// #987: one entry in the unverified exposure report — a position closed via
+/// the fallback path whose exit price was a bookkeeping value, not a venue
+/// verdict.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnverifiedExposureEntry {
+    pub position_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub account_id: crate::model::AccountId,
+    pub strategy: String,
+    /// Quantity of un-sold shares at close (dust or held remainder).
+    #[serde(with = "crate::decimal")]
+    pub shares: rust_decimal::Decimal,
+    /// Entry cost basis in USD (bookkeeping value, not venue cash).
+    #[serde(with = "crate::decimal")]
+    pub cost_usd: rust_decimal::Decimal,
+    /// The fallback booking price — last known mid, else entry price.
+    #[serde(with = "crate::decimal")]
+    pub fallback_price: rust_decimal::Decimal,
+    /// Original fallback price preserved when a later venue verdict flips
+    /// `source` back to `"venue"`; `None` while still unverified.
+    #[serde(with = "crate::decimal::opt", default)]
+    pub original_fallback_price: Option<rust_decimal::Decimal>,
+    /// Bookkeeping net PnL — NOT realized until the venue confirms.
+    #[serde(with = "crate::decimal")]
+    pub net_pnl_usd: rust_decimal::Decimal,
+    pub exited_at_ms: i64,
+    /// `cost_usd` as a percentage of the SUM of `cost_usd` across ALL closed
+    /// positions (venue + fallback).
+    #[serde(with = "crate::decimal")]
+    pub percentage_of_total_cost: rust_decimal::Decimal,
+}
+
+/// #987: the unverified exposure report — separate from realized PnL, never
+/// merged into it. All entries carry `source == "fallback"`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnverifiedExposureReport {
+    pub entries: Vec<UnverifiedExposureEntry>,
+    pub total_positions: usize,
+    pub total_shares: rust_decimal::Decimal,
+    pub total_cost_usd: rust_decimal::Decimal,
+    /// Sum of all entries' `cost_usd` as a percentage of the SUM of `cost_usd`
+    /// across ALL closed positions — how much of the book sits unverified.
+    pub total_percentage_of_closed_cost: rust_decimal::Decimal,
 }
 
 // SignalDirection::as_str lives on the shared type (strategy_logic::model) —

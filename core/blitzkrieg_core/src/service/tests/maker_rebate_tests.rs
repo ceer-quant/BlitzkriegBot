@@ -369,6 +369,7 @@ fn a_pre_rebate_snapshot_loads_with_the_default_zero() {
             crate::model::ExitReason::Manual,
             true,
             2_000,
+            "venue",
         )
         .unwrap();
     assert_eq!(closed.maker_rebate_usd, dec!(0.012));

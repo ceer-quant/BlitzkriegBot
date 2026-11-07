@@ -23,6 +23,7 @@ impl PositionManager {
         reason: ExitReason,
         was_maker: bool,
         now_ms: i64,
+        source: &str,
     ) -> Option<ClosedPosition> {
         let idx = self.open.iter().position(|p| p.id == position_id)?;
         let mut pos = self.open.remove(idx);
@@ -136,6 +137,17 @@ impl PositionManager {
             account_id: pos.account_id,
             // #427: the settled trade carries the position's venue.
             venue: pos.venue,
+            // #987: provenance of the exit price — `venue` for a venue-backed
+            // verdict (settlement/reconcile/exit), `fallback` for an
+            // unverifiable-expiry bookkeeping close. A fallback close carries
+            // its own exit price as the original fallback price (audit trail);
+            // a venue close carries none.
+            source: source.to_string(),
+            original_fallback_price: if source == "fallback" {
+                Some(exit_price)
+            } else {
+                None
+            },
         };
         self.closed.push(closed.clone());
         if self.closed.len() > 5000 {
@@ -211,9 +223,14 @@ impl PositionManager {
             if remaining == Some(Decimal::ZERO) {
                 // The merge consumed the whole leg: record the close. The fee
                 // is zero and the exit notionals already sit in `flows`.
-                if let Some(c) =
-                    self.close(&leg.id, merge_leg_price, ExitReason::Merge, true, now_ms)
-                {
+                if let Some(c) = self.close(
+                    &leg.id,
+                    merge_leg_price,
+                    ExitReason::Merge,
+                    true,
+                    now_ms,
+                    "venue",
+                ) {
                     closed.push(c);
                 }
             }
