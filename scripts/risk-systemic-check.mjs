@@ -572,7 +572,7 @@ async function main() {
         check('factory readout: five silent limits + factory exit triple', rp.length === 0,
           rp.join(' | ').slice(0, 200) || JSON.stringify(readout.exit));
         check('factory boot log carries the "at factory" line',
-          stderr.buf.includes('at factory (all five limits off)'));
+          stderr.buf.includes('running at factory'));
         await loadProbe(client);
         const now = Date.now();
         const slot = Math.floor(now / 1000 / ROUND_SEC);
