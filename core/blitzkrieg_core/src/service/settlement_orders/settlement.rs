@@ -133,6 +133,12 @@ impl Core {
             )
         });
         if market_positions.is_empty() {
+            // Issue 991: no OPEN position to settle, but a fallback-closed row
+            // on this condition may still be sitting unverified. The venue
+            // verdict IS cash truth for it — mark it `reconciled` BEFORE the
+            // watch is forgotten, or the mark would only ever fire when a
+            // fallback row and an open position coexisted on the same market.
+            self.backfill_fallback_to_venue(&resolution.condition_id);
             self.settlement.forget_market(&resolution.condition_id);
             return;
         }
@@ -223,10 +229,14 @@ impl Core {
             ));
             return; // keep the market watched: a later resolution may price it
         }
-        // #987: a venue resolution is venue cash truth for this condition. Flip
-        // any fallback-closed positions on it to `source == "venue"`, preserving
-        // the original fallback price for audit. Positions already settled via
-        // this resolution carry `source == "venue"` from `close()` itself.
+        // #987, issue 991: a venue resolution is venue cash truth for this condition.
+        // Mark any fallback-closed positions on it `source == "reconciled"`,
+        // keeping their fallback exit price (issue 991: the verdict's
+        // `payout_per_share` prices the SETTLEMENT claim for tokens still held;
+        // it is not copied onto a row whose shares were already written off at
+        // the fallback price — that row stays on the unverified exposure
+        // report, flagged). Positions settled via this resolution carry
+        // `source == "venue"` from `close()` itself.
         self.backfill_fallback_to_venue(&resolution.condition_id);
         self.settlement.forget_market(&resolution.condition_id);
     }

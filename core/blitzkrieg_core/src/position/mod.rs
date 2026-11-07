@@ -785,21 +785,24 @@ pub struct ClosedPosition {
     /// #427: the venue the trade's market listed on — carried from the
     /// position, pure DATA for the panels' Venue column.
     pub venue: String,
-    /// #987: provenance of the close's price — `venue` when the exit price came
-    /// from a venue verdict (settlement/reconcile), `fallback` when it is an
-    /// unverifiable-expiry bookkeeping value (last known mid, else entry price)
-    /// that no venue verdict ever confirmed. `fallback` rows are never settled
-    /// claims and are reported separately as "unverified exposure"; a later
-    /// reconcile that matches venue cash flips `source` back to `venue` while
-    /// preserving the original fallback price for audit. Empty on snapshots
-    /// written before the field existed.
+    /// #987, issue 991: provenance of the close's price — `venue` when the
+    /// exit price came from a venue verdict (settlement/reconcile), `fallback`
+    /// when it is an unverifiable-expiry bookkeeping value (last known mid,
+    /// else entry price) that no venue verdict ever confirmed, and
+    /// `reconciled` when a later reconcile matched venue cash but the row's
+    /// exit price REMAINS the fallback estimate (issue 991: a price that was
+    /// estimated is never re-labeled `venue`). `fallback` and `reconciled`
+    /// rows are never settled claims and are reported separately as "unverified
+    /// exposure". Empty on snapshots written before the field existed.
     #[serde(default)]
     pub source: String,
-    /// #987: when a fallback close is later overwritten by a venue verdict
-    /// (reconcile backfill), this holds the ORIGINAL fallback exit price so
-    /// auditors can see what was booked before the venue's truth arrived. Set
-    /// only on fallback closes; `None` on venue closes and on rows written
-    /// before the field existed.
+    /// #987: the ORIGINAL fallback exit price of a `source == "fallback"`
+    /// close, so auditors can see what was booked before any venue word
+    /// arrived. Set only on fallback closes; `None` on venue closes and on
+    /// rows written before the field existed. Issue 991: a `reconciled` row
+    /// keeps BOTH this and `exit_price` at the fallback value — the venue's
+    /// real fill prices live in the reconcile report, never copied over the
+    /// row (no invented price, no cash-ledger divergence).
     #[serde(default, with = "crate::decimal::opt")]
     pub original_fallback_price: Option<Decimal>,
 }
@@ -1110,24 +1113,30 @@ impl PositionManager {
         )
     }
 
-    /// #987: separate report of UNVERIFIED EXPOSURE — positions closed via the
-    /// fallback path (`source == "fallback"`) whose exit price was a bookkeeping
-    /// value (last known mid, else entry price) that NO venue verdict ever
-    /// confirmed. These rows are NOT realized PnL: the venue's truth follows the
-    /// reconcile sweep, and this report exists so the books never look better
-    /// than reality while venue cash is still outstanding.
+    /// #987, issue 991: separate report of UNVERIFIED EXPOSURE — positions
+    /// closed via the fallback path whose exit price was a bookkeeping value
+    /// (last known mid, else entry price) that NO venue verdict ever confirmed.
+    /// These rows are NOT realized PnL: the venue's truth follows the reconcile
+    /// sweep, and this report exists so the books never look better than
+    /// reality while venue cash is still outstanding.
     ///
-    /// Returns one entry per fallback-closed position plus aggregates
-    /// (quantity, cost, fallback booking price, percentage of total closed
-    /// cost). `percentage` is this position's `cost_usd` as a share of the
-    /// SUM of `cost_usd` across ALL closed positions (venue + fallback) — the
-    /// operator can see at a glance how much exposure sits unverified.
+    /// Includes BOTH `"fallback"` rows (no venue word at all yet) AND
+    /// `"reconciled"` rows (venue cash truth arrived, the exit price is still
+    /// the fallback estimate — issue 991's three-state rule: a price that was
+    /// estimated is never re-labeled `venue`, so it stays on the unverified
+    /// list, flagged). `"venue"` rows never appear: their price IS the venue's.
+    ///
+    /// Returns one entry per unverified position plus aggregates (quantity,
+    /// cost, fallback booking price, percentage of total closed cost).
+    /// `percentage` is this position's `cost_usd` as a share of the SUM of
+    /// `cost_usd` across ALL closed positions (venue + fallback + reconciled) —
+    /// the operator can see at a glance how much exposure sits unverified.
     pub fn unverified_exposure_report(&self) -> UnverifiedExposureReport {
         let total_closed_cost: Decimal = self.closed.iter().map(|c| c.cost_usd).sum();
         let mut entries: Vec<UnverifiedExposureEntry> = Vec::new();
         let mut total_fallback_cost = Decimal::ZERO;
         for c in &self.closed {
-            if c.source != "fallback" {
+            if c.source != "fallback" && c.source != "reconciled" {
                 continue;
             }
             total_fallback_cost += c.cost_usd;
@@ -1142,6 +1151,7 @@ impl PositionManager {
                 fallback_price: c.exit_price,
                 original_fallback_price: c.original_fallback_price,
                 net_pnl_usd: c.net_pnl_usd,
+                source: c.source.clone(),
                 exited_at_ms: c.exited_at_ms,
                 percentage_of_total_cost: if total_closed_cost > Decimal::ZERO {
                     (c.cost_usd / total_closed_cost) * Decimal::ONE_HUNDRED
@@ -1168,31 +1178,47 @@ impl PositionManager {
         }
     }
 
-    /// #987: reconcile backfill — flip a fallback-closed position's `source`
-    /// from `"fallback"` to `"venue"` when the venue's cash truth has caught up
-    /// (reconcile or settlement confirmed the position), while PRESERVING the
-    /// original fallback price in `original_fallback_price` for audit.
+    /// #987, issue 991: reconcile backfill — mark a fallback-closed position's
+    /// `source` as `"reconciled"` when venue cash truth has caught up (a
+    /// reconcile fill on its token, or the market's resolution), PRESERVING the
+    /// fallback booking price unchanged in `exit_price` AND in
+    /// `original_fallback_price`.
     ///
-    /// Returns the number of rows flipped. A position that was never fallback
-    /// closed (already `venue`) is left untouched; an unknown condition_id is a
-    /// no-op. Idempotent: flipping an already-`venue` row is a no-op.
+    /// Three states (issue 991 F1): `"venue"` means ONLY "the exit price IS a
+    /// venue price" (a settlement close, a real exit fill); `"reconciled"`
+    /// means "venue cash truth arrived, this row's exit price is still the
+    /// fallback estimate". The venue's real fill/verdict prices live in the
+    /// reconcile report (`VenueTrade.price`, `FilledGap` deltas) — rewriting
+    /// THIS row's price from them would be a guess (the fill's price, size and
+    /// account need not match the closed row's unsold remainder) and the cash
+    /// ledgers the close touched (expiry-fallback credit, day budget,
+    /// per-strategy accounting, consecutive-loss breaker) cannot be replayed
+    /// after the fact. So the label never outruns the price: an estimated price
+    /// is never re-labeled `venue`, and the unverified exposure report keeps
+    /// listing the row, flagged `reconciled`.
+    ///
+    /// Returns the number of rows marked. A row that was never fallback closed
+    /// (`venue`, or already `reconciled`) is left untouched; an unknown
+    /// condition_id is a no-op. Idempotent.
     pub fn backfill_fallback_to_venue(&mut self, condition_id: &str) -> usize {
         let mut flipped = 0usize;
         for c in &mut self.closed {
             if c.condition_id != condition_id || c.source != "fallback" {
                 continue;
             }
-            c.original_fallback_price = Some(c.exit_price);
-            c.source = "venue".to_string();
+            // `original_fallback_price` was already set at close time (every
+            // `source == "fallback"` row carries its own price); the venue's
+            // price is deliberately NOT copied over it (issue 991).
+            c.source = "reconciled".to_string();
             flipped += 1;
         }
         flipped
     }
 
-    /// #987: token-scoped variant of [`Self::backfill_fallback_to_venue`] —
-    /// flips every fallback-closed position whose `token_id` is in `tokens`.
-    /// Used by reconcile: a venue fill on a token is venue cash truth for the
-    /// condition that token belongs to.
+    /// #987, issue 991: token-scoped variant of [`Self::backfill_fallback_to_venue`]
+    /// — marks every fallback-closed position whose `token_id` is in `tokens`
+    /// as `"reconciled"`. Used by reconcile: a venue fill on a token is venue
+    /// cash truth for the condition that token belongs to.
     pub fn backfill_fallback_to_venue_tokens(
         &mut self,
         tokens: &std::collections::HashSet<&str>,
@@ -1202,8 +1228,7 @@ impl PositionManager {
             if c.source != "fallback" || !tokens.contains(c.token_id.as_str()) {
                 continue;
             }
-            c.original_fallback_price = Some(c.exit_price);
-            c.source = "venue".to_string();
+            c.source = "reconciled".to_string();
             flipped += 1;
         }
         flipped
@@ -1254,6 +1279,12 @@ pub struct UnverifiedExposureEntry {
     /// `source` back to `"venue"`; `None` while still unverified.
     #[serde(with = "crate::decimal::opt", default)]
     pub original_fallback_price: Option<rust_decimal::Decimal>,
+    /// Issue 991: `"fallback"` = no venue word yet; `"reconciled"` = venue
+    /// cash truth arrived, the price is STILL the fallback estimate. A
+    /// `"reconciled"` row keeps its estimated exit price (never re-labeled
+    /// `venue`) — that is exactly why it stays on this report, flagged.
+    #[serde(default)]
+    pub source: String,
     /// Bookkeeping net PnL — NOT realized until the venue confirms.
     #[serde(with = "crate::decimal")]
     pub net_pnl_usd: rust_decimal::Decimal,
@@ -1264,8 +1295,11 @@ pub struct UnverifiedExposureEntry {
     pub percentage_of_total_cost: rust_decimal::Decimal,
 }
 
-/// #987: the unverified exposure report — separate from realized PnL, never
-/// merged into it. All entries carry `source == "fallback"`.
+/// #987, issue 991: the unverified exposure report — separate from realized
+/// PnL, never merged into it. Every entry's price is an estimate: entries carry
+/// `source == "fallback"` (no venue word yet) or `"reconciled"` (venue cash
+/// truth arrived, price still the fallback estimate). `"venue"` rows never
+/// appear.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnverifiedExposureReport {

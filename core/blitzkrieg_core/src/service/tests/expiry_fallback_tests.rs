@@ -567,7 +567,8 @@ fn an_untrackable_position_is_outside_the_fallback() {
 
 /// #987: a fallback close carries `source == "fallback"` and records the
 /// original fallback price in `original_fallback_price`. The trade record
-/// (TradeDb) mirrors both fields.
+/// (TradeDb) mirrors both fields. Issue 991: `venue` closes carry NEITHER —
+/// provenance and price stay in lockstep.
 #[test]
 fn fallback_close_carries_source_fallback() {
     let dir = scratch("source-fallback");
@@ -589,9 +590,13 @@ fn fallback_close_carries_source_fallback() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// #987: reconcile backfill flips fallback-closed positions to `source ==
-/// "venue"` when venue cash truth arrives, while PRESERVING the original
-/// fallback price in `original_fallback_price` for audit. No silent overwrite.
+/// #987, issue 991: reconcile backfill marks fallback-closed positions
+/// `source == "reconciled"` when venue cash truth arrives, while the row's
+/// exit price and `original_fallback_price` KEEP the fallback value — issue
+/// 991's acceptance shape: the venue fill price (0.55) is deliberately
+/// DIFFERENT from the fallback price (0.40) so the two are provably
+/// distinguishable after the backfill, and an estimated price is never
+/// re-labeled `venue`.
 #[test]
 fn reconcile_backfill_flips_fallback_to_venue() {
     let dir = scratch("reconcile-backfill");
@@ -611,8 +616,22 @@ fn reconcile_backfill_flips_fallback_to_venue() {
         "precondition: source is fallback"
     );
     let fallback_price = closed_before.exit_price;
+    assert_eq!(
+        fallback_price,
+        dec!(0.40),
+        "fixture: the fallback priced the unsold remainder at the entry price"
+    );
+    assert_eq!(
+        closed_before.original_fallback_price,
+        Some(fallback_price),
+        "precondition: the fallback row carries its own price for audit"
+    );
 
-    // Venue cash truth arrives: a SELL fill on the same token via reconcile.
+    // Venue cash truth arrives: a SELL fill on the same token via reconcile,
+    // at a price that is NOT the fallback price (issue 991: the old fixture
+    // used 0.40 == the fallback price, masking the label/price gap).
+    let venue_price = dec!(0.55);
+    assert_ne!(venue_price, fallback_price, "fixture must not mask the gap");
     let snap = crate::reconcile::VenueSnapshot {
         open_order_ids: vec![],
         trades: vec![crate::reconcile::VenueTrade {
@@ -621,7 +640,7 @@ fn reconcile_backfill_flips_fallback_to_venue() {
             token_id: "tok".into(),
             side: crate::model::Side::Sell,
             size: dec!(5),
-            price: dec!(0.40),
+            price: venue_price,
             ts_ms: bound + 2_000,
             tx_hash: None,
             maker: None,
@@ -629,7 +648,7 @@ fn reconcile_backfill_flips_fallback_to_venue() {
         now_ms: bound + 2_000,
     };
     let report = c.reconcile(snap).expect("reconcile succeeds");
-    // The backfill should have flipped the fallback row.
+    // The backfill should have marked the fallback row.
     assert!(
         !report
             .actions
@@ -639,23 +658,96 @@ fn reconcile_backfill_flips_fallback_to_venue() {
     );
     let closed_after = &c.positions().closed_positions()[0];
     assert_eq!(
-        closed_after.source, "venue",
-        "reconcile backfill flips source to venue"
+        closed_after.source, "reconciled",
+        "reconcile backfill marks the row reconciled (issue 991: never `venue` while the price is still the estimate)"
     );
     assert_eq!(
         closed_after.original_fallback_price,
         Some(fallback_price),
-        "original fallback price preserved for audit, not discarded"
+        "original fallback price preserved for audit, not overwritten"
     );
     assert_eq!(
         closed_after.exit_price, fallback_price,
-        "exit price unchanged by the backfill (no silent overwrite)"
+        "exit price unchanged: the venue's 0.55 fill must NOT be copied onto the row (no invented price)"
     );
+    assert_ne!(
+        closed_after.exit_price, venue_price,
+        "acceptance: fallback price and venue price stay distinguishable"
+    );
+    // The row is still on the unverified exposure report, flagged reconciled.
+    let exposure = c.unverified_exposure_report();
+    assert_eq!(exposure.total_positions, 1, "still unverified exposure");
+    assert_eq!(exposure.entries[0].source, "reconciled");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// #987: the unverified exposure report lists only `source == "fallback"`
-/// closes, excludes venue closes, and never merges into realized PnL.
+/// Issue 991, acceptance: the `on_market_resolution` path backfills too — even
+/// when NO open position remains (the empty-book early return used to skip the
+/// backfill entirely, so a fallback row whose market later resolved stayed
+/// `fallback` forever). The verdict's `payout_per_share` (1.00) is NOT copied
+/// onto the row: the row's unsold remainder was already written off at the
+/// fallback price and the settlement claim belongs to tokens still held; the
+/// row is marked `reconciled` with its price untouched.
+#[test]
+fn market_resolution_backfills_a_fallback_row_with_no_open_position() {
+    let dir = scratch("resolution-backfill");
+    let mut c = fallback_core(&dir, false);
+    let _p = open_expiring_position(&mut c);
+
+    // Fallback close first (zero venue answers past the silence bound).
+    let sent = EXPIRES_MS + 100;
+    c.tick(sent).unwrap();
+    stage_unanswered_query(&mut c, "cond", "tok", sent);
+    let bound = sent + super::EXPIRY_FALLBACK_AFTER_MS;
+    c.tick(bound + 1_000).unwrap();
+    let closed_before = &c.positions().closed_positions()[0];
+    assert_eq!(closed_before.source, "fallback", "precondition");
+    let fallback_price = closed_before.exit_price;
+
+    // The market's resolution arrives AFTER the fallback closed everything:
+    // the open book is empty for this condition (the early-return branch).
+    let resolution = blitzkrieg_market_api::MarketResolution {
+        condition_id: "cond".into(),
+        resolved: true,
+        payouts: vec![("tok".to_string(), Decimal::ONE)],
+        neg_risk: false,
+        source: "test".into(),
+    };
+    c.on_market_resolution(resolution, bound + 3_000);
+
+    let closed_after = &c.positions().closed_positions()[0];
+    assert_eq!(
+        closed_after.source, "reconciled",
+        "the resolution marks the fallback row reconciled even with an empty open book"
+    );
+    assert_eq!(
+        closed_after.exit_price, fallback_price,
+        "the verdict's payout price is NOT copied onto the already-written-off row"
+    );
+    assert_eq!(
+        closed_after.original_fallback_price,
+        Some(fallback_price),
+        "the fallback price stays in the audit field"
+    );
+    // Idempotent: a re-delivered resolution cannot double-mark or change it.
+    let resolution2 = blitzkrieg_market_api::MarketResolution {
+        condition_id: "cond".into(),
+        resolved: true,
+        payouts: vec![("tok".to_string(), Decimal::ONE)],
+        neg_risk: false,
+        source: "test".into(),
+    };
+    c.on_market_resolution(resolution2, bound + 4_000);
+    let closed_final = &c.positions().closed_positions()[0];
+    assert_eq!(closed_final.source, "reconciled", "still reconciled");
+    assert_eq!(closed_final.exit_price, fallback_price, "price still kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #987, issue 991: the unverified exposure report lists fallback-closed (and,
+/// once backfilled, reconciled) rows only — a `venue` close never appears, and
+/// never merges into realized PnL. The fixture has no reconcile, so the entry
+/// stays plain `"fallback"`.
 #[test]
 fn unverified_exposure_report_lists_only_fallback_closes() {
     let dir = scratch("exposure-report");
@@ -717,6 +809,10 @@ fn unverified_exposure_report_lists_only_fallback_closes() {
     assert_eq!(
         report.total_positions, 1,
         "only one fallback-closed position"
+    );
+    assert_eq!(
+        report.entries[0].source, "fallback",
+        "with no reconcile the entry carries its plain fallback provenance"
     );
     assert_eq!(
         report.entries[0].cost_usd, fallback_cost,
