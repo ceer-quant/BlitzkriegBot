@@ -119,8 +119,6 @@ export function judgeReadout(r, posture = 'factory') {
   const nine = [
     'maxSingleLossUsd', 'maxDailyDrawdownUsd', 'maxPositionSize',
     'maxConsecutiveLosses', 'cooldownMinutes',
-    'maxTotalPosition', 'maxTotalExposureUsd', 'maxCorrelationUsd',
-    'globalKillSwitchLossUsd',
   ];
   for (const key of nine) {
     const b = al[key] ?? gl[key];
@@ -421,12 +419,7 @@ function armedReadoutFixture() {
       maxConsecutiveLosses: { value: '2', source: 'env' },
       cooldownMinutes: { value: '0.05', source: 'env' },
     } },
-    global: { limits: {
-      maxTotalPosition: { value: '0', source: 'default' },
-      maxTotalExposureUsd: { value: '0', source: 'default' },
-      maxCorrelationUsd: { value: '0', source: 'default' },
-      globalKillSwitchLossUsd: { value: '0', source: 'default' },
-    } },
+    global: { limits: {} },
     exit: { stopLossPct: 20, takeProfitPct: 100, forceExitSec: 0 },
   };
 }
@@ -439,10 +432,7 @@ function factoryReadoutFixture() {
       maxSingleLossUsd: zero, maxDailyDrawdownUsd: zero, maxPositionSize: zero,
       maxConsecutiveLosses: zero, cooldownMinutes: zero,
     } },
-    global: { limits: {
-      maxTotalPosition: zero, maxTotalExposureUsd: zero,
-      maxCorrelationUsd: zero, globalKillSwitchLossUsd: zero,
-    } },
+    global: { limits: {} },
     exit: { stopLossPct: 12, takeProfitPct: 100, forceExitSec: 0 },
   };
 }
@@ -579,10 +569,10 @@ async function main() {
         checkCoreProvenance(CORE, check);
         const readout = await client.request('risk.limits');
         const rp = judgeReadout(readout);
-        check('factory readout: nine silent limits + factory exit triple', rp.length === 0,
+        check('factory readout: five silent limits + factory exit triple', rp.length === 0,
           rp.join(' | ').slice(0, 200) || JSON.stringify(readout.exit));
         check('factory boot log carries the "at factory" line',
-          stderr.buf.includes('at factory (all nine limits off)'));
+          stderr.buf.includes('at factory (all five limits off)'));
         await loadProbe(client);
         const now = Date.now();
         const slot = Math.floor(now / 1000 / ROUND_SEC);
