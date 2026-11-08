@@ -5,17 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [Unreleased]
 
-- **#1003 thesis_death 误杀按包关闭**：A/B 实测（`scripts/ab-thesis-death-1003.mjs`，
-  15m-act 语料，official 费档）证明 spread_arb 的形态 B 声明被 stdlib 默认判据
-  （单腿 bid 回撤 25% 带）误杀——death 臂净利 −568.971 vs nodeath −495.867
-  （Δ −$73.10，误杀率 309/764 = 40.45%），single_leg_pair −6.735 vs −6.665
-  （误杀 121/238 = 50.84%）；「净利不劣于基线」验收锚被证伪，两包按 issue 处置
-  **按包关闭**（撤销声明 + manifest 去掉 thesis_death_* tunables + 版本 +1 重签 +
-  gate EXEMPT 书面理由；非全局删钩子，新包仍须声明）。关闭后 Δ ≡ 0、0 笔强制平仓，
-  出场面回到内核 trailing/stop 阶梯 + 结算。豁免正规出口与四步程序落在
-  `docs/thesis_death.md` §0，报告 `docs/reports/strategies/THESIS-DEATH-MISFIRE-1003.md`。
-
-## [0.4.2] - 2026-11-08 (内容定稿；tag 待 #842 合并后落)
+## [0.4.2] - 2026-11-08
 
 0.4.1 → 0.4.2 的 ~100 条提交，六大主线：**微内核化与契约冻结**（0.4.2 epic
 收官）、**双账本绝对独立**、**风控现金真相**、**策略出场栈一代目**
@@ -37,7 +27,13 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   （A/B/E 测试钉死）；#942 id 重发修复。
 - **策略出场栈**：`thesis_death_exit` 落内核 + Lua 标准库
   `bk.thesis_death_default`（逻辑死亡当 tick 无条件平仓，#961/#992）；
-  LEGACY 14 包收敛——6 接入 8 有理由豁免（#994）；exit wire 加
+  LEGACY 14 包收敛——6 接入 8 有理由豁免（#994）；#1003 误杀按包关闭：
+  spread_arb / single_leg_pair 形态 B 声明撤销——A/B 实测 death 臂
+  净利不劣于基线的验收锚被证伪（spread_arb 误杀 40.45%、
+  single_leg_pair 50.84%），manifest 去 thesis_death_* tunables + 版本
+  +1 重签 + gate EXEMPT 书面理由，非全局删钩子，新包仍须声明；
+  豁免出口落 `docs/thesis_death.md` §0，报告
+  THESIS-DEATH-MISFIRE-1003.md（#1009）；exit wire 加
   `price` 字段——策略报价 maker-TP（profit-side 门 + PnL 守门
   #939/#946/#957）；出场升级钟 250ms maker→taker + 同期出场优先于入场
   （#963）；lua_momentum 0.4.0 时间加权止盈带 + 0.2.1 退出族 + 0.3.0
@@ -46,10 +42,15 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   `--backtest-knob` 按 tunable 声明类型解析、支持 string（#916）；
   l2-delay 命名预设（真实 L2+150ms 延迟回放，#862）；A/B 出场对照实验
   框架 `ab-exit-964.mjs`（三臂预声明 + 双跑 sha256 确定性 + arm-starved
-  结构化归因，#964/#996）；cost-adjusted-edge `--dig` 候选池（挖掘宽、
-  采用严，#892）。
+  结构化归因，#964/#996）；真实语料 A/B 首跑归档——A 臂锁价语料
+  结构性饥饿、B/C 净值差确认 #962 归因，23 窗×3 臂×双跑字节级一致
+  （#1001）；报告数字可追溯——arm-starved 锁价统计改语料实算、空跑
+  确定性判 UNJUDGEABLE 不再充数 PASS（#1008）；cost-adjusted-edge
+  `--dig` 候选池（挖掘宽、采用严，#892）。
 - **现金真相**：fallback 平仓 `source=fallback` 标注 + 未核实敞口报表
-  与已实现 PnL 分列（#987/#988）；风控只跟随账户——删除全局限额段
+  与已实现 PnL 分列（#987/#988）；reconcile 真价回填改三态
+  `source=reconciled`——venue 真价进 reconcile 报告而不冒充平仓价，
+  未核实敞口 IPC 查询（#1000）；风控只跟随账户——删除全局限额段
   （#983）；到期兜底亏损 cap 50% + single-market verdict fallback
   （#969/#956/#960）；拒单理由落 orders 行（#930）。
 - **config 单源**：risk/exit 归一化 .env（BK_RISK_*/BK_EXIT_*，TOML 层
@@ -74,7 +75,12 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   （#977）；webUI/TUI parity wave 1（#836）；TradingOS 重定位文档
   （#951）。
 - **门禁**：文件体积棘轮扩 ui/ 与 webui（#826/#833）；72h dry-run 限额
-  +扣费证据门（#869）；live tick 默认 10ms、回放默认 0ms（#887）。
+  +扣费证据门（#869）；live tick 默认 10ms、回放默认 0ms（#887）；
+  E24 止损门两刀——先 lab_only 豁免 + 止损语义诚实命名（#1006），
+  后按运营裁定改「已声明止损」三档 none/declared/lab_only，
+  declared 档仅放行整 RHS 是 dec_param(声明 knob) 的绑定、硬编码
+  止损算式任何档位都红（#1007）；corpus verify 抽样去随机化——
+  种子随机改确定性步进，Mimosa 低危清零（#1005）。
 
 ### Fixed
 

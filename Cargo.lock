@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-bk-contract"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "rust_decimal",
  "serde",
@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-build-info"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-build-support",
 ]
@@ -1187,7 +1187,7 @@ version = "0.1.0"
 
 [[package]]
 name = "blitzkrieg-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-data-model"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-market-api",
  "rust_decimal",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-kalshi"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-launcher"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "blitzkrieg-core",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-lua-runtime"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-strategy-api",
  "mlua",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-market-api"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-bk-contract",
  "rust_decimal",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-onchain-pull"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-data-model",
  "futures-util",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-polysimulator"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-bk-contract",
  "mime",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-predictfun"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "alloy",
  "anyhow",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-strategy-api"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-market-api",
  "rust_decimal",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-ui-kit"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "blitzkrieg-ui-panel"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-build-info",
  "blitzkrieg-ui-kit",
@@ -3778,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "parity-logic"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde_json",
 ]
@@ -4117,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "polymarket-extension"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "alloy",
  "anyhow",
@@ -5425,7 +5425,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strategy-logic"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blitzkrieg-market-api",
  "rust_decimal",
