@@ -516,6 +516,18 @@ impl Core {
         if risk_state_corrupt {
             core.freeze_all_accounts_corrupt_boot();
         }
+        // File-first boot derivation (operator ruling 2026-11-08): the
+        // cockpit working copies (exit discipline + systemic limits) are
+        // derived from the `.env` FILE directly — the launcher's process-env
+        // snapshot is no longer consulted for these keys, so a file edit made
+        // after the launcher started is what a (re)booted core runs. A read
+        // failure warns and keeps the snapshot-resolved values (last known
+        // good).
+        if let Err(e) = core.refresh_cockpit_from_env_file() {
+            tracing::warn!(
+                "cockpit boot derivation from the env file failed ({e}); the                  launcher-snapshot values stand for this boot"
+            );
+        }
         core
     }
 

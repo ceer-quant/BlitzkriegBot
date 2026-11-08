@@ -126,6 +126,24 @@ pub fn parse_line(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
+/// Read every managed `KEY=value` pair from the `.env` at `path` — the read
+/// half of the single-source contract (operator ruling 2026-11-08: the FILE
+/// is the authoritative state for the cockpit families; the kernel's
+/// in-memory config is a read-only cache derived from it). Returns an empty
+/// map for a missing file (a caller that has no env file simply has no file
+/// layer) and skips comments/blanks/malformed lines via [`parse_line`].
+/// No value is ever logged or echoed by this module.
+pub fn read_env_vars(path: &Path) -> std::io::Result<std::collections::BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut vars = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        if let Some((k, v)) = parse_line(line) {
+            vars.insert(k, v);
+        }
+    }
+    Ok(vars)
+}
+
 /// The key of one `.env` line — the same shape judgment as the launcher's
 /// parser (`export ` prefix allowed, identifier-shaped key, first `=` splits).
 /// `None` for comments, blanks, and malformed lines (they are never managed).

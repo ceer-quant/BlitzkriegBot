@@ -43,6 +43,10 @@ pub mod data_source;
 pub mod env_file;
 /// .env file watcher for hot reload.
 pub use blitzkrieg_market_api::decimal;
+/// The cockpit families' single source of truth (operator ruling
+/// 2026-11-08): the `.env` file is authoritative for the exit discipline and
+/// per-account systemic limits; the in-memory config is a read-only cache.
+pub mod cockpit;
 pub mod engine;
 /// #363: the account-isolated execution policy rule engine. Strategy emits
 /// signals; THIS module decides whether an entry may place and with what

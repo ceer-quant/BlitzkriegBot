@@ -108,6 +108,8 @@
 | `risk.resume` | `{}` | `{ "killed": false }` |
 | `risk.setLimits` | `{ maxOrderNotional?, maxOrderNotionalPct?, maxOpenNotionalUsd?, minShares?, maxShares?, reason? }` | `{ applied: [{field, from, to}], atMs, actor, reason?, persisted: false, note }` |
 
+> **文件=唯一真值（操作员裁决 2026-11-08）**：`risk.setExit` / `risk.setSystemic` 的写入**先落 `.env` 文件再派生内核缓存**——落盘失败即整体拒绝（内存不再出现文件没有的值）；`risk.limits` 的 cockpit 段在**每次查询时从文件现读**；外部手改 `.env` 由 2s mtime watcher 热跟随（审计行 `cockpit config re-derived from the env file (external edit)`）；boot 直接从文件派生。内存态只是文件的只读缓存，面板读的永远是文件。
+
 `risk.setLimits` 是**受限热加载**（Issue #191）：只改**开仓限额**——每笔名义上限
 （`maxOrderNotional` / `maxOrderNotionalPct`）、组合开仓上限（`maxOpenNotionalUsd`）与开仓股数区间
 （`minShares` / `maxShares`）。白名单之外的一切都要**重启**才生效，且是**明确拒绝**（`-32602`，
@@ -138,8 +140,8 @@
 
 | method | params | result |
 |:---|:---|:---|
-| `risk.setSystemic` | `{ maxSingleLossUsd?, maxDailyDrawdownUsd?, maxPositionSize?, maxConsecutiveLosses?, cooldownMinutes?, maxTotalPosition?, maxTotalExposureUsd?, maxCorrelationUsd?, globalKillSwitchLossUsd?, reason? }` —— 九项系统性限额，全部可选（只改点名的字段），金额/股数走 decimal-STRING（`"0"` = off） | `SystemicLimitUpdate`：`{ applied: [{field, from, to, effect}], atMs, actor, reason?, persisted: false, note }` —— `effect` ∈ `live`（六项限额，逐笔入场现场判读）/ `next_session`（回撤预算 + 连亏/冷静期对，启动才武装）；`persisted` 恒 `false`（热写只活本进程）。空 patch（不点任何字段）拒绝 |
-| `risk.setExit` | `{ stopLossPct?, takeProfitPct?, forceExitSec?, trailingEnabled?, reason? }` —— Gate 4 逐笔绑定的退出三项 + trailing 总开关。百分比走 decimal-STRING 且必须 > 0（≤0 拒绝）；`forceExitSec: 0` = **关闭强平**（合法的出厂开关位，负值拒绝） | `ExitSetUpdate`：`{ applied: [{field, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 三项对**新入场**立即生效（Gate 4 每意图现场绑定），退出扫描读同一活配置，已开仓位同步跟随；`persisted` 恒 `false`，重启回落启动 flag/env/TOML |
+| `risk.setSystemic` | `{ maxSingleLossUsd?, maxDailyDrawdownUsd?, maxPositionSize?, maxConsecutiveLosses?, cooldownMinutes?, maxTotalPosition?, maxTotalExposureUsd?, maxCorrelationUsd?, globalKillSwitchLossUsd?, reason? }` —— 九项系统性限额，全部可选（只改点名的字段），金额/股数走 decimal-STRING（`"0"` = off） | `SystemicLimitUpdate`：`{ applied: [{field, from, to, effect}], atMs, actor, reason?, persisted: false, note }` —— `effect` ∈ `live`（六项限额，逐笔入场现场判读）/ `next_session`（回撤预算 + 连亏/冷静期对，启动才武装）；`persisted` = `true`（文件先落：`.env` 是唯一真值，落盘失败整体拒绝；无 env 层的测试/回测核如实报 `false`）。空 patch（不点任何字段）拒绝 |
+| `risk.setExit` | `{ stopLossPct?, takeProfitPct?, forceExitSec?, trailingEnabled?, reason? }` —— Gate 4 逐笔绑定的退出三项 + trailing 总开关。百分比走 decimal-STRING 且必须 > 0（≤0 拒绝）；`forceExitSec: 0` = **关闭强平**（合法的出厂开关位，负值拒绝） | `ExitSetUpdate`：`{ applied: [{field, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 三项对**新入场**立即生效（Gate 4 每意图现场绑定），退出扫描读同一活配置，已开仓位同步跟随；`persisted` = `true`（文件先落 + 缓存从文件重派生；无 env 层如实报 `false`），重启回落启动 flag/env/TOML |
 | `risk.limits` | `{}` | `{ version, account: {id, limits}, global: {limits}, exit: {stopLossPct, takeProfitPct, forceExitSec, trailingEnabled} }` —— 生效矩阵 + 来源披露（E26 §4.4）。**取 Core 锁**逐次从活 risk config 组装（`risk.setLimits`/`risk.setSystemic` 热写矩阵，boot 冻结快照会答出已不在生效的值），非只读锁免 |
 
 #### 2.5.2 轮次时间周期 / 行情插件 / 凭据：设置卡三对读写（next_session 族，2026-10-26 补册）

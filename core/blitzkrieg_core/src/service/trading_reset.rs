@@ -319,13 +319,24 @@ impl Core {
             );
         }
 
-        // Issue #966/#965: the systemic bounds' durable carrier is `.env` —
-        // the IPC write face upserts the changed `BK_RISK_*` keys after this
-        // apply returns and reports the outcome in the reply the panel sees
-        // (`persisted` + `persistence=env|none`). The apply itself writes
-        // nothing durable, so the field here is the honest `false` (a direct
-        // caller sees exactly what this call did: an in-memory hot write).
-        let persisted = false;
+        // File-first (operator ruling 2026-11-08 — same posture as the exit
+        // discipline): the `.env` file is the single source of truth for the
+        // cockpit families, so the BK_RISK_* keys land there BEFORE the
+        // working copy moves, and a persist failure refuses the whole apply.
+        // (The old order — memory hot-write, then a best-effort persist in
+        // the IPC face — is the divergence the ruling bans.)
+        let persisted: bool = if self.cockpit_env_path().is_some() {
+            self.persist_cockpit_changes(
+                changes
+                    .iter()
+                    .map(|c| (c.field, c.to.clone()))
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )?;
+            true
+        } else {
+            false
+        };
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -481,12 +492,46 @@ impl Core {
             ));
         }
 
-        // Write phase: BOTH copies. `config.positions.exit` is what Gate 4
-        // binds per new intent; `PositionManager.config.exit` is what the exit
-        // sweep (stop/take/force judgement, the dynamic-stop ramp) reads every
-        // tick. set_config keeps everything else (budgets, cooldowns) as-is —
-        // only the exit triple's two fields move.
-        {
+        // File-first (operator ruling 2026-11-08: the `.env` file is the
+        // single source of truth for the cockpit families). With a file: the
+        // keys land there BEFORE the working copy moves, and the cache is
+        // re-derived FROM the file — a persist failure refuses the whole
+        // apply, because memory may never hold a value the file does not
+        // have. (The old best-effort posture — memory applied, persistence
+        // logged — is precisely the divergence the ruling bans.) Without a
+        // file (backtester, unwired tests): the direct memory write is the
+        // whole story, honestly reported as `persisted: false`.
+        let exit_persisted: bool = if self.cockpit_env_path().is_some() {
+            let vars: std::collections::BTreeMap<String, String> = changes
+                .iter()
+                .filter_map(|c| {
+                    crate::cockpit::env_key_for_field(c.field)
+                        .map(|k| (k.to_string(), c.to.clone()))
+                })
+                .collect();
+            let path = self.cockpit_env_path().expect("checked above");
+            if let Err(e) = crate::env_file::upsert_env_vars(path, &vars) {
+                return Err(CoreError::new(
+                    CoreErrorCode::Internal,
+                    format!(
+                        "exit discipline NOT applied: the .env persist failed ({e}) — \
+                         the file is the source of truth, so a write that cannot land \
+                         there changes nothing (fix the file and retry)"
+                    ),
+                ));
+            }
+            self.refresh_cockpit_from_env_file().map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::Internal,
+                    format!(
+                        "exit discipline written to the file but the re-derive failed ({e}); \
+                             the file stands, the cache keeps its last known good values"
+                    ),
+                )
+            })?;
+            true
+        } else {
+            // Memory-only posture: the patch moves the working copy directly.
             let mut exit = self.config.positions.exit.clone();
             if let Some(v) = patch.stop_loss_pct {
                 exit.stop_loss_pct = v;
@@ -507,7 +552,8 @@ impl Core {
             let mut positions = self.config.positions.clone();
             positions.exit = exit;
             self.positions.set_config(positions);
-        }
+            false
+        };
 
         for c in &changes {
             tracing::info!(
@@ -548,7 +594,10 @@ impl Core {
             at_ms: now_ms,
             actor: actor.to_string(),
             reason: patch.reason.clone(),
-            persisted: false,
+            // The file IS the source of truth now: an apply that reached here
+            // always landed in the file first (no env file = the memory-only
+            // posture of a backtest/test core, honestly reported as before).
+            persisted: exit_persisted,
             note: EXIT_SET_UPDATE_NOTE,
         })
     }

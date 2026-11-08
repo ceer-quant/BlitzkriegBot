@@ -125,13 +125,21 @@ pub(crate) async fn handle_risk(
     match method {
         method::RISK_LIMITS => {
             let c = core.lock().await;
-            Ok(
-                serde_json::to_value(crate::schema::RiskLimitsResult::snapshot(
-                    &c.risk_config().systemic,
-                    &c.config().positions.exit,
-                ))
-                .unwrap_or(Value::Null),
-            )
+            // File-sourced (operator ruling 2026-11-08): the cockpit sections
+            // of the readout come from the `.env` file at QUERY time — the
+            // panel reads the file (through the kernel), never a cache that
+            // can diverge from it (the 2026-11-08 panel-ON/file-OFF class).
+            let file = c
+                .cockpit_env_path()
+                .and_then(|p| crate::env_file::read_env_vars(p).ok());
+            let mut doc = crate::schema::RiskLimitsResult::snapshot(
+                &c.risk_config().systemic,
+                &c.config().positions.exit,
+            );
+            if let Some(vars) = &file {
+                crate::cockpit::overlay_risk_limits(vars, &mut doc.exit, &mut doc.account);
+            }
+            Ok(serde_json::to_value(doc).unwrap_or(Value::Null))
         }
         method::RISK_KILL => {
             let reason = params
