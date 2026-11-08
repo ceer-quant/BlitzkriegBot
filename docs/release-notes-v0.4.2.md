@@ -20,7 +20,7 @@
 - **双账本绝对独立**（#941）：live/dry journal 拆双文件，dry→live 零继承（A/B/E 测试钉死）
 - **pending receivable 裁决落地**（#991/#1002）：unverifiable-expiry 平仓的估计现金不再混入可支用 cash——单 flag `BK_UNVERIFIED_EXPIRY_POLICY=cash|receivable` 双完整模型，复用 settlement receivable 池，reconcile 时按场地真值 redemption + 双行校正；48h 冻结上限 + 琥珀横幅；day budget/连损断路器基数只算可支用现金
 - venue-price 回填三态 `source=reconciled`：标签不再跑在现金前面；`positions.unverified_exposure` IPC（golden 族 23）
-- 官方费率模型 `0.07·p(1−p)` 入账 + `fee_source` 双行校正模式；到期兜底亏损 cap 50% 已取缔——残值 mid 如实记账，未卖掉的单不洗成假账
+- 官方费率模型 `0.07·p(1−p)` 入账 + `fee_source` 双行校正模式；残值 mid 如实记账，未卖掉的单不洗成假账
 
 ## 🎯 三、策略出场栈一代目
 
