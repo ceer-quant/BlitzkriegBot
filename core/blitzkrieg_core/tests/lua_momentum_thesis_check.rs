@@ -1,26 +1,31 @@
-//! lua_momentum thesis-death acceptance checks (#961) — the REAL package
-//! (`user_layer/strategies_lua/lua_momentum`) driven through the engine
-//! adapter, exactly the surface the kernel runs. The mad_dog check
-//! (`mad_dog_strategy_check.rs`) is the harness precedent; this file pins the
-//! Exit-First contract on the package that declares it:
+//! lua_momentum thesis-death acceptance checks (#961 → operator ruling
+//! 2026-11-08) — the REAL package (`user_layer/strategies_lua/lua_momentum`)
+//! driven through the engine adapter, exactly the surface the kernel runs.
+//! The mad_dog check (`mad_dog_strategy_check.rs`) is the harness precedent.
 //!
-//!   acceptance 1 — a reverse condition (the held token's own bid reversed
-//!                  past the death band) makes the SAME evaluate emit ONE
-//!                  exit intent tagged `thesis_death_exit`, taker, unpriced
-//!                  (the kernel prices it);
-//!   acceptance 2 — after the death close, the package proposes NO further
-//!                  entry on that condition in the same round (命中后不再
-//!                  加仓/续持: the death is a same-tick close and the entry
-//!                  budget refuses the re-entry);
-//!   flip        — a premise flip in PROFIT is still a death: the momentum
-//!                  that armed the entry pointing the other way kills the
-//!                  thesis even above water;
-//!   alive       — a sub-band, sub-threshold drift emits nothing.
+//! The ruling: thesis death is OPT-IN by declaration, and this package
+//! declares NONE. The #961 hook measured live as a misfire on a momentum
+//! scalper — the premise flip fires on ordinary book chop and the 12%→6%
+//! reversal band is one tick on 0.15-0.50 binary tokens, so positions died
+//! 0-24s after entry (measured ~20% WR window vs the 72% cumulative
+//! baseline; every close a small certain `thesis_death_exit` loss while the
+//! trailing/TP/settlement winners never got to run). The strategy's OWN
+//! exits — take-profit band, trailing stop, stop_loss_pct=50 last resort,
+//! hold to settlement — are the risk managers. The exemption reason lives
+//! in `scripts/thesis-death-check.mjs`.
 //!
-//! The exit intents here flow through `StrategyCtx::with_positions` → the
-//! loader's on_holdings push → `bk.holdings()` — the same seam the kernel
-//! drives, and the forced scan is the runtime's (a strategy cannot suppress
-//! it; the strategy's own exits table never carries `thesis_death_exit`).
+//! What this file pins now:
+//!
+//!   no-enforcement — a held position driven past the OLD death band emits
+//!                    NO forced `thesis_death_exit`: the runtime's forced
+//!                    scan is a no-op for an undeclaring package;
+//!   own-exits-live — the package's own exits table still answers on the
+//!                    same seam (a strategy-tagged exit, priced by the
+//!                    kernel), i.e. removing the hook did not mute the
+//!                    package;
+//!   declaration    — the package source carries no declaration and the
+//!                    manifest carries no death tunables (the params bag
+//!                    the loader hands the sandbox is clean).
 
 use std::path::PathBuf;
 
@@ -117,80 +122,17 @@ fn held_down(entry: &str) -> Vec<HeldPosition> {
     }]
 }
 
-/// Acceptance 1, full episode: arm → fill → the knife keeps falling past the
-/// death band (12% off the 0.46 entry: a 0.40 bid is 13% under) → the SAME
-/// evaluate emits EXACTLY ONE `thesis_death_exit` exit intent, taker,
-/// unpriced — and proposes no new entry while held.
+/// No enforcement: the package declares NO thesis death, so a held position
+/// driven straight through the OLD 12% death band (0.46 entry → 0.40 bid,
+/// −13%) emits NO forced `thesis_death_exit`. The premise flip arm is silent
+/// too (the mid move re-arms the same down premise). The position rides on
+/// its own exits — that is the ruling.
 #[test]
-fn reversal_past_the_death_band_exits_same_tick() {
-    let mut a = adapter();
-    let entry_price = arm_and_suggest(&mut a);
-    assert_eq!(
-        entry_price,
-        dec!(0.46),
-        "the bid rests at the leg's own best_bid"
-    );
-
-    // Sub-threshold drift while held (confirmed clears, direction stays):
-    // 1% adverse — alive, nothing emitted.
-    let held = held_down("0.46");
-    let drift_ts = NOW + 2_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.455), dec!(0.475), drift_ts),
-        drift_ts,
-    );
-    let drift = token_book(DOWN, dec!(0.455), dec!(0.475), drift_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| drift.clone());
-    let _ = a.find_candidates(&ctx(&[market()], 600, drift_ts, &fresh).with_positions(&held));
-    assert!(
-        a.take_exit_intents().is_empty(),
-        "a sub-band drift is not a thesis death"
-    );
-
-    // The knife continues: bid 0.40 = 13.04% under the 0.46 entry — past the
-    // 12% death band (mid move also re-arms the same down premise, so the
-    // flip arm is silent; the BAND is what kills here).
-    let death_ts = NOW + 3_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.40), dec!(0.42), death_ts),
-        death_ts,
-    );
-    let death = token_book(DOWN, dec!(0.40), dec!(0.42), death_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| death.clone());
-    let cands = a.find_candidates(&ctx(&[market()], 600, death_ts, &fresh).with_positions(&held));
-    assert!(
-        cands.is_empty(),
-        "a held leg is never re-entered: {cands:?}"
-    );
-    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
-    assert_eq!(
-        exits.len(),
-        1,
-        "the death must be ONE forced verdict: {exits:?}"
-    );
-    assert_eq!(exits[0].token_id, DOWN);
-    assert_eq!(exits[0].reason, "thesis_death_exit");
-    assert!(!exits[0].use_maker, "a forced death is a full TAKER close");
-    assert_eq!(
-        exits[0].exit_price, None,
-        "the kernel prices it off the live bid"
-    );
-}
-
-/// Acceptance 2: after the death close resolves (the holding is gone), the
-/// package proposes NO further entry on the same condition in the same round
-/// — 命中后不再出现加仓/续持 tick (the entry budget counts the closed
-/// attempt against max_entries_per_round, and the forced close went through
-/// the held→flat seam exactly like a strategy-signal one).
-#[test]
-fn no_reentry_on_the_condition_after_the_death_close() {
+fn no_forced_death_past_the_old_band_for_an_undeclaring_package() {
     let mut a = adapter();
     let _entry = arm_and_suggest(&mut a);
-
-    // Fill + immediate death in the same round (the crash never paused).
     let held = held_down("0.46");
+
     let death_ts = NOW + 2_000;
     a.on_book(
         DOWN,
@@ -201,116 +143,39 @@ fn no_reentry_on_the_condition_after_the_death_close() {
     let fresh = move |t: &str| (t == DOWN).then(|| death.clone());
     let _ = a.find_candidates(&ctx(&[market()], 600, death_ts, &fresh).with_positions(&held));
     let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
-    assert_eq!(exits.len(), 1, "{exits:?}");
-    assert_eq!(exits[0].reason, "thesis_death_exit");
-
-    // The close filled: the position is gone. The next evaluate of the SAME
-    // round must not re-enter the condition it just buried.
-    let flat: Vec<HeldPosition> = vec![];
-    let after_ts = NOW + 3_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.39), dec!(0.41), after_ts),
-        after_ts,
-    );
-    let after = token_book(DOWN, dec!(0.39), dec!(0.41), after_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| after.clone());
-    let cands = a.find_candidates(&ctx(&[market()], 590, after_ts, &fresh).with_positions(&flat));
     assert!(
-        cands.is_empty(),
-        "no re-entry on a condition its thesis died in this round: {cands:?}"
+        exits.iter().all(|e| e.reason != "thesis_death_exit"),
+        "an undeclaring package must never emit the forced death: {exits:?}"
     );
-    assert!(a.take_exit_intents().is_empty());
 }
 
-/// The premise flip is a death even IN PROFIT: the momentum that armed the
-/// entry now points the other way (an opposite >= threshold move re-armed
-/// the token "up" while the position entered under "down"). The reversal
-/// band is silent (the bid is ABOVE entry) — the flip alone must force the
-/// taker verdict.
+/// The package's own exits stay live on the same seam: the strategy-tagged
+/// exit path still answers (here, the trailing/TP stack's exit table route —
+/// a strategy intent, not a runtime injection). Removing the hook must not
+/// have muted the package.
 #[test]
-fn premise_flip_in_profit_is_still_a_death() {
-    let mut a = adapter();
-    let _entry = arm_and_suggest(&mut a);
-
-    // Hold through a sub-threshold wobble (4.3% adverse, under the band).
-    let held = held_down("0.46");
-    let wobble_ts = NOW + 2_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.44), dec!(0.46), wobble_ts),
-        wobble_ts,
-    );
-    let wobble = token_book(DOWN, dec!(0.44), dec!(0.46), wobble_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| wobble.clone());
-    let _ = a.find_candidates(&ctx(&[market()], 600, wobble_ts, &fresh).with_positions(&held));
+fn the_package_source_declares_nothing_and_the_params_bag_is_clean() {
+    let dir = package_dir();
+    let src = std::fs::read_to_string(dir.join("strategy.lua")).expect("strategy.lua");
     assert!(
-        a.take_exit_intents().is_empty(),
-        "a wobble inside every band is alive"
+        !src.contains("function bk_thesis_death"),
+        "the package must not declare the hook predicate (operator ruling 2026-11-08)"
     );
-
-    // The opposite move: mid 0.45 → 0.50 (+11%, >= threshold) re-arms the
-    // token "up". The bid 0.49 is ABOVE the 0.46 entry — in profit — yet the
-    // thesis that bought the crash is dead.
-    let flip_ts = NOW + 3_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.49), dec!(0.51), flip_ts),
-        flip_ts,
-    );
-    let flip = token_book(DOWN, dec!(0.49), dec!(0.51), flip_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| flip.clone());
-    let _ = a.find_candidates(&ctx(&[market()], 600, flip_ts, &fresh).with_positions(&held));
-    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
-    assert_eq!(
-        exits.len(),
-        1,
-        "a flipped premise must force the exit: {exits:?}"
-    );
-    assert_eq!(exits[0].reason, "thesis_death_exit");
-    assert_eq!(exits[0].token_id, DOWN);
-    assert!(!exits[0].use_maker);
-}
-
-/// The package declares the hook through the REAL path (a `bk_thesis_death`
-/// predicate calling the stdlib default), so the forced scan fires with the
-/// manifest's own bands (12/6/30000) — not the stdlib defaults. A death by
-/// the manifest's tighter band proves the tunables flowed.
-#[test]
-fn the_manifest_bands_flow_through_the_real_package() {
-    let mut a = adapter();
-    let _entry = arm_and_suggest(&mut a);
-    let held = held_down("0.46");
-    // 9% adverse: under lua_momentum's 12% band, over the stdlib default
-    // check's sub-band path — with the DEFAULT stdlib bands (25%) this would
-    // also be alive, so assert the tighter manifest band is what governs by
-    // going one tick deeper (13% = past 12, under 25) and requiring the exit.
-    let death_ts = NOW + 2_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.425), dec!(0.445), death_ts),
-        death_ts,
-    );
-    let nine = token_book(DOWN, dec!(0.425), dec!(0.445), death_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| nine.clone());
-    let _ = a.find_candidates(&ctx(&[market()], 600, death_ts, &fresh).with_positions(&held));
     assert!(
-        a.take_exit_intents().is_empty(),
-        "7.6% adverse (0.425 bid) is inside the 12% manifest band — alive"
+        !src.contains("BK_THESIS_DEATH_ENABLE = true"),
+        "the package must not opt into the stdlib default"
     );
-    let death2_ts = NOW + 3_000;
-    a.on_book(
-        DOWN,
-        &token_book(DOWN, dec!(0.40), dec!(0.42), death2_ts),
-        death2_ts,
+    let manifest = std::fs::read_to_string(dir.join("manifest.json")).expect("manifest.json");
+    assert!(
+        !manifest.contains("thesis_death_"),
+        "the death tunables left the manifest with the hook"
     );
-    let death = token_book(DOWN, dec!(0.40), dec!(0.42), death2_ts);
-    let fresh = move |t: &str| (t == DOWN).then(|| death.clone());
-    let _ = a.find_candidates(&ctx(&[market()], 600, death2_ts, &fresh).with_positions(&held));
-    let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
-    assert_eq!(exits.len(), 1, "{exits:?}");
-    assert_eq!(
-        exits[0].reason, "thesis_death_exit",
-        "13% crosses the manifest's 12%"
+    // And the loader still hands the sandbox a params bag — without the
+    // death knobs (the adapter loads the real package; the tunables it got
+    // are the manifest's own list).
+    let loaded = load_lua_package(&dir).expect("package loads");
+    assert!(
+        !loaded.tunables.contains_key("thesis_death_reversal_pct"),
+        "no death band reaches the sandbox params"
     );
 }

@@ -55,11 +55,9 @@
 --     freshness gate, §6.6) — a stale book is not a price;
 --   * check `bk.round().time_left_sec` — an entry inside the force-exit
 --     window would be exited on the next tick;
---   * DECLARE your thesis death (#961): define `bk_thesis_death(h)` (or set
---     `BK_THESIS_DEATH_ENABLE = true` for the stdlib default). A hit makes
---     the RUNTIME inject the unconditional full-taker close this tick —
---     exit_reason `thesis_death_exit` — superseding your own exits table
---     for that token. 禁止扛单: a dead thesis never rides.
+--   * thesis death (#961) is OPT-IN by declaration and this package
+--     deliberately declares none (operator ruling 2026-11-08, see the
+--     block near the exits table below).
 
 -- BEGIN common/decimal.lua
 -- common/decimal.lua — the ONE exact-decimal helper block for every Lua
@@ -637,35 +635,17 @@ local function consider_exit(out, row, round)
     end
 end
 
--- ── thesis death (#961) ─────────────────────────────────────────────────────
--- 论点死亡声明 (Exit-First): the strategy MUST declare when its entry thesis
--- has died, and the RUNTIME enforces the close — a hit injects the
--- unconditional full-taker exit (exit_reason `thesis_death_exit`) this same
--- tick, superseding whatever this exits table wanted (禁止扛单). This
--- package's entry thesis: "the momentum premise that armed this leg still
--- points the way I entered". The thesis is DEAD when:
---   1. premise flip — the momentum re-armed the token the OTHER way while
---      holding (classify() flipped direction[tok] away from the anchor
---      recorded at entry); the knife thesis is actively reversed, not noise;
---   2. the stdlib default says so (bk.thesis_death_default) — the held
---      token's own book reversed past the band off entry
---      (thesis_death_reversal_pct, sliding linearly to
---      thesis_death_reversal_pct_tight as the round drains — the same
---      time-weighting tighten() applies to the exit bands), or its quoting
---      fields vanished / timed out (thesis_death_stale_ms). One formula
---      covers both directions: a long position (either leg) dies when ITS
---      OWN token's bid falls past the band — for a down holding that falling
---      bid IS the market moving against the down thesis.
-function bk_thesis_death(h)
-    local tok = h.token_id
-    if armed_dir[tok] ~= nil and direction[tok] ~= nil and direction[tok] ~= armed_dir[tok] then
-        return true
-    end
-    if bk.thesis_death_default(h) then
-        return true
-    end
-    return false
-end
+-- ── thesis death: NOT declared (operator ruling 2026-11-08) ───────────────
+-- This package deliberately declares NO thesis death (no bk_thesis_death,
+-- no BK_THESIS_DEATH_ENABLE): the #961 hook measured live as a misfire on a
+-- momentum scalper — the premise flip fires on ordinary book chop and the
+-- 12%→6% reversal band is one tick on 0.15-0.50 binary tokens, so positions
+-- died 0-24s after entry (churn: every close a small certain loss, the
+-- trailing/TP/settlement winners never got to run; measured ~20% WR window
+-- vs the 72% cumulative baseline). The strategy's OWN exits — take_profit
+-- band, trailing stop, stop_loss_pct=50 last resort, hold to settlement —
+-- are the risk managers. Declaration is opt-in by ruling; this package is
+-- exempted with the measured reason in scripts/thesis-death-check.mjs.
 
 -- ── suggested entry points (§6.5) ───────────────────────────────────────────
 
