@@ -1,0 +1,1 @@
+{"entries":[{"positionId":"hft-7","conditionId":"cond","tokenId":"tok","accountId":"default","strategy":"spread_arb","shares":5.0,"costUsd":2.0,"fallbackPrice":0.4,"originalFallbackPrice":0.4,"source":"reconciled","netPnlUsd":-2.0,"exitedAtMs":1758888010000,"percentageOfTotalCost":12.5}],"totalPositions":1,"totalShares":"5","totalCostUsd":"2","totalPercentageOfClosedCost":"12.5"}
