@@ -237,13 +237,13 @@ const trades = computed(() => {
  * 成交折叠与账本口径是否劈叉（>半分钱）：只决定「手续费/曲线」这些成交类
  * 展示要不要挂「成交口径」标注——钱数（headline）恒走账本，永不参与拼接。
  */
-const foldDiverges = computed(() => {
-  const b = balance.value
-  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
-  if (!b || seedNum === null) return false
-  const ledgerNet = (Number(b.balance) || 0) - seedNum
-  return Math.abs(trades.value.net - ledgerNet) > 0.005
-})
+	const foldDiverges = computed(() => {
+	  const b = balance.value
+	  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+	  if (!b || seedNum === null) return false
+	  const ledgerNet = (Number(b.balance) || 0) - seedNum
+	  return Math.abs(recon.value.net - ledgerNet) > 0.005
+	})
 
 /**
  * The tile label tracks what the figure above it actually is. When the equity is
@@ -644,7 +644,7 @@ const needsStrategyHint = computed(() => {
       <StatTile
         label="已平仓交易"
         :value="num(trades.count)"
-        :tone="trades.net >= 0 ? 'up' : 'down'"
+        :tone="recon.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
           扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
@@ -686,7 +686,7 @@ const needsStrategyHint = computed(() => {
         -->
         <CardHeader :label="foldDiverges ? '累计净利（成交口径）' : '权益曲线'">
           <template #title>
-            <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
+            <span class="stat-num text-[15px]" :class="recon.net >= 0 ? 'text-up' : 'text-down'">
               <RollingNumber :value="signedMoney(recon.net)" />
             </span>
           </template>
