@@ -1,9 +1,16 @@
 /**
- * Issue #842 lane C, gate B4 — the webUI side of the shared-fixture contract:
+ * Issue #842 lane B+A3b — the webUI side of the shared-fixture contract:
  * the mock server's golden family fixtures (`ui/ui_kit/tests/fixtures/mock/`)
  * are the ONE artifact both the TUI-side Rust contract tests and the webUI
  * check scripts read. This script pins the webUI's TS wire types to those
  * same bytes — a schema drift anywhere fails BOTH suites.
+ *
+ * This is the A3b validator of docs/rust-core/ISSUE-842-ACCEPTANCE.md: the
+ * TS surface is not hand-copied and trusted — it is checked against the
+ * frozen golden bytes on every run. (The alternative A3b path — generating
+ * TS from schema — is deliberately not taken: the surface is small, the
+ * gateway speaks HTTP rather than raw JSON-RPC, and a checker needs no
+ * generator toolchain in the CI lane.)
  *
  * What is asserted (per family, on the families the web UI actually consumes):
  *   1. the fixture file exists and is valid JSON;
@@ -11,7 +18,13 @@
  *      frozen golden bytes speak (a key dropped from a TS interface = the
  *      panel silently stops rendering that field — this check makes that a
  *      red gate, not a silent drift);
- *   3. family 23 (issue #991's additive unverified-exposure family) carries
+ *   3. the FULL frozen-schema sweep: all 23 families × every key must be
+ *      either declared somewhere in webui src or explicitly listed in the
+ *      per-family not-consumed allowlist below (each entry with a reason);
+ *   4. the allowlist itself cannot rot: an exempted key that disappears
+ *      from its family fixture (kernel rename) goes stale → red → forces
+ *      re-judgment instead of exempting a ghost forever;
+ *   5. family 23 (issue #991's additive unverified-exposure family) carries
  *      the `source` field the panel's banner reads.
  *
  * The TS types are read as source text and checked for the member names —
@@ -21,7 +34,7 @@
  *   cd ui/webapp/webui && npm run check:wire
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -60,22 +73,61 @@ function* keys(v) {
   }
 }
 
-/** Does the TS source under src/ declare this identifier? The account row
- * the pages render lives in stores/panel.ts (PanelAccountRow); the wire
- * docs live in src/api/*. */
-const declares = (name) => {
-  const files = ['unified.ts', 'orders.ts', 'accounts.ts', 'risk.ts', 'snapshot.ts',
-    'core.ts', 'market.ts', 'audit.ts']
-  for (const f of files) {
-    try {
-      if (readFileSync(join(API, f), 'utf8').includes(name)) return true
-    } catch { /* file may not exist */ }
+/** Does the TS source under src/ declare this identifier? The declared wire
+ * surface = every file in src/api/*.ts (each domain module owns its slice)
+ * plus stores/panel.ts (PanelAccountRow, the rendered account row). */
+const declaredSurface = () => {
+  let text = ''
+  let entries
+  try { entries = readdirSync(API, { withFileTypes: true }) } catch { entries = [] }
+  for (const e of entries) {
+    if (e.isFile() && e.name.endsWith('.ts')) {
+      text += readFileSync(join(API, e.name), 'utf8') + '\n'
+    }
   }
   try {
-    return readFileSync(join(WEBUI, 'src', 'stores', 'panel.ts'), 'utf8').includes(name)
-  } catch {
-    return false
-  }
+    text += readFileSync(join(WEBUI, 'src', 'stores', 'panel.ts'), 'utf8')
+  } catch { /* optional */ }
+  return text
+}
+
+const declares = (name) => declaredSurface().includes(name)
+
+/**
+ * Full-sweep allowlist (A3b): families whose keys the webUI does NOT consume
+ * today, with the judgment recorded inline so the exemption is reviewable.
+ * A stale entry (key renamed/removed kernel-side) fails check #4 below, so
+ * this list can only shrink honestly — it cannot accrete dead exemptions.
+ *
+ * family 01 — transport envelope: the gateway (ui_kit web routes) speaks
+ *   HTTP; the webUI never parses raw JSON-RPC envelopes, `jsonrpc` stays a
+ *   TUI-side concern (ipc_client decodes it via bk_contract).
+ * family 04 — kline.subscribe params: the webUI reads kline.history rows;
+ *   the subscribe request is composed by the TUI/feed side.
+ * family 05 — orders.place params: the webUI places orders through gateway
+ *   POST bodies; `internalKey`/`makerTimeoutMs` are kernel-side idempotency
+ *   and maker-window knobs the browser never supplies.
+ * family 14 — core.feeQuote result: the fee model readout is consumed by
+ *   backtest/exit tooling, not rendered by any web page today.
+ * family 16 — orders.reconcile params: kernel-side reconciliation input
+ *   (openOrderIds/venueOrderId/tradeId); the webUI never composes it.
+ * family 18 — dayRealizedUsd: read-only wire fact no page renders today
+ *   (updatedAtMs IS declared in accounts.ts, so it needs no exemption).
+ * family 23 — positions.unverified_exposure report rows: the report method
+ *   exists on the wire (#991) but the UI presentation is a separate ticket
+ *   (INTERFACES §2.2: "UI 展示另单"); until that page exists no TS type
+ *   mirrors these rows.
+ */
+const NOT_CONSUMED = {
+  1: ['jsonrpc'],
+  4: ['symbols'],
+  5: ['internalKey', 'makerTimeoutMs'],
+  14: ['feePerShare', 'feePctOfPrice', 'makerFeePerShare', 'modelMatches', 'exponent'],
+  16: ['openOrderIds', 'venueOrderId', 'tradeId'],
+  18: ['dayRealizedUsd'],
+  23: ['costUsd', 'fallbackPrice', 'originalFallbackPrice', 'exitedAtMs',
+    'percentageOfTotalCost', 'totalPositions', 'totalShares', 'totalCostUsd',
+    'totalPercentageOfClosedCost'],
 }
 
 console.log('B4 — shared fixture directory is readable from the web side')
@@ -83,19 +135,22 @@ check('the shared mock fixture directory exists with all 23 families', () => {
   for (let n = 1; n <= 23; n++) fixture(n)
 })
 
-console.log('\nB4 — family 18 (AccountView): every key the pages render is still declared')
-check('PanelAccountRow covers the family-18 wire keys the UI consumes', () => {
-  const { json } = fixture(18)
-  // The panel's row type (stores/panel.ts) renders a subset by design —
-  // `dayRealizedUsd`/`updatedAtMs` are read-only wire facts no page renders
-  // today. Everything ELSE the golden bytes carry must exist in the TS
-  // surface, or a panel field has silently stopped rendering.
-  const notRendered = new Set(['dayRealizedUsd', 'updatedAtMs'])
-  const missing = [...keys(json)].filter(
-    (k) => !notRendered.has(k) && !declares(k),
-  )
-  assert.deepEqual(missing, [], `TS types lost: ${missing.join(', ')}`)
-})
+console.log('\nA3b — full 23-family sweep: every golden key is declared or exempted with a reason')
+const allTs = declaredSurface()
+
+for (let n = 1; n <= 23; n++) {
+  check(`family ${String(n).padStart(2, '0')}: keys declared or exempted`, () => {
+    const { json } = fixture(n)
+    const present = [...new Set([...keys(json)])]
+    const exempted = NOT_CONSUMED[n] ?? []
+    const missing = present.filter((k) => !exempted.includes(k) && !allTs.includes(k))
+    assert.deepEqual(missing, [], `TS types lost (add to TS or to NOT_CONSUMED with a reason): ${missing.join(', ')}`)
+    // Allowlist rot gate: an exempted key the fixture no longer carries is a
+    // stale judgment (kernel renamed/removed it) — re-judge, don't carry it.
+    const stale = exempted.filter((k) => !present.includes(k))
+    assert.deepEqual(stale, [], `stale NOT_CONSUMED entries for family ${n} (fixture no longer has them): ${stale.join(', ')}`)
+  })
+}
 
 console.log('\nB4 — family 23 (#991 unverified exposure) carries the additive surface')
 check('the exposure report row carries source + fallback price', () => {
@@ -106,12 +161,5 @@ check('the exposure report row carries source + fallback price', () => {
   assert.equal(typeof row.netPnlUsd, 'number')
 })
 
-console.log('\nB4 — family 03 (RiskLimitsResult) keys survive in the web UI types')
-check('risk view fields are still declared', () => {
-  const { json } = fixture(3)
-  const missing = [...keys(json)].filter((k) => !declares(k))
-  assert.deepEqual(missing, [], `TS types lost: ${missing.join(', ')}`)
-})
-
-console.log(failures === 0 ? '\nRESULT: PASS' : `\nRESULT: FAIL (${failures})`)
+console.log(`\nRESULT: ${failures === 0 ? 'PASS' : `FAIL (${failures})`}`)
 process.exit(failures === 0 ? 0 : 1)
