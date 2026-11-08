@@ -12,6 +12,35 @@ Issue #961（Exit-First 基石，运营者哲学 2026-11-06）：入场方向近
 
 ---
 
+## 0. 按包关闭（#1003，实测撤销声明的正规出口）
+
+#1003（P1，2026-11-08）实测证明：一个已声明的包，其论点形状可能被 stdlib 默认判据
+**误杀**——默认判据按**单腿自身 bid 相对入场价的回撤**判死（§3 条件 2），这只对
+「论点 = 该腿自身方向路径」的包成立。对论点是 **spread**、**赔率带**或**对冲对形态**
+的包，带内逆向波动是入场定价本来要扛的方差，强制同 tick taker 平仓把会自然恢复的
+仓位 realize 成损失。
+
+按包关闭的正规程序（不是裸 grandfather，也不是全局删钩子——「每个新 Lua 包必须有
+thesis_death」仍是硬约束）：
+
+1. **先测后关**：用 `scripts/ab-thesis-death-1003.mjs`（death 臂 = 出厂包，
+   nodeath 臂 = 仅关死亡判据的 staged 副本，唯一差异 = 判据开关）在同语料同资金
+   下出数。关闭线 = **death 臂净利 < nodeath 臂净利**（净利不劣于基线是 #961 的
+   验收锚，被证伪即关闭）。
+2. **写书面理由**：`scripts/thesis-death-check.mjs` 的 `EXEMPT` 表加一项
+   （误杀率、两臂净利差、为什么默认判据与该包论点矛盾），包内 `strategy.lua`
+   的声明块改成撤销注释，manifest `description` 同步（版本 +1，sha256 重签）。
+3. **撤干净 tunables**：包 manifest 里不再需要的 `thesis_death_*` tunables 一并
+   删除（`--backtest-knob` 拒绝未声明旋钮，残留 = 幻旋钮）。
+4. **改入场论点须重新声明**：豁免只对「当前论点形状」成立。
+
+已关闭的包：`spread_arb`（#1003：death 臂净利 −568.971 vs nodeath −495.867，
+official 费档 Δ −$73.10；legacy 费档 Δ −$62.64 同向；误杀 309/764 = 40.45%）、
+`single_leg_pair`（#1003：误杀 121/238 = 50.84%；official 费档下 death 臂不再
+优于 nodeath，Δ −$0.07）。证据：`docs/reports/strategies/THESIS-DEATH-MISFIRE-1003.md`。
+
+---
+
 ## 1. 声明形态（二选一，谓词优先）
 
 ### 形态 A：声明谓词（推荐，可表达策略自己的论点）

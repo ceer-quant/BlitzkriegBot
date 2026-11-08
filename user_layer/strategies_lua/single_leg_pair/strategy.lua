@@ -87,26 +87,41 @@
 --   * Round rollover retires every latch: conditions do not survive their
 --     round.
 
--- ── thesis death declaration (#961 convergence, form B) ─────────────────────
--- THESIS DEATH DECLARATION (#961)
+-- ── thesis death: PER-PACKAGE CLOSED (#961 → #1003 exemption) ────────────────
+-- #961 convergence shipped form B (the stdlib-default opt-in). Issue #1003's
+-- measured A/B (death arm vs nodeath arm, same corpus, same capital, the death
+-- hook the ONLY difference) withdrew the "death arm slightly better" reading:
+-- under the official fee schedule the measured direction is death-NEGATIVE
+-- (Δ −$0.07, workbuddy W5 re-test on kernel 31d4850e; the pre-#998 legacy-fee
+-- reading +$0.66 was 0.066% of principal — fee magnitude, and it flipped
+-- sign). The misfire rate is the headline: 121 of 238 death-closed tokens
+-- (50.84%) would have finished net-positive under their natural exits.
+--
+-- WHY the default predicate misfires here: this package's thesis is the odds
+-- BAND, not the path — it buys a NAKED leg inside [0.55, 0.88] and delegates
+-- survival to the kernel (「止损不归你管」: settlement or the kernel's
+-- force-exit; the package expresses no exits of its own). A 25% adverse move
+-- inside that band is exactly the variance the band's EV was priced to carry
+-- (binary legs oscillate hard before settling), so the forced same-tick
+-- taker close realizes noise as losses — half the closed tokens were
+-- actually going to finish positive. The per-leg reversal criterion is a
+-- stop-loss wearing a thesis-death label, and a strategy-side stop is what
+-- this package's charter forbids. The hook is therefore disabled FOR THIS
+-- PACKAGE ONLY with this written reason (docs/thesis_death.md §6 exemption
+-- table); the global hook and every other package's declaration are
+-- untouched. A package that re-shapes its entry thesis must re-declare per
+-- the template.
+--
+-- THESIS DEATH DECLARATION (#961) — REVOKED 2026-11-08, issue #1003
 --   entry thesis : the single leg the book actually offers sits in the fat
 --                  odds band (min/max_entry_price, the 0.60-0.90 EV+ zone) —
 --                  buy it and hold the NAKED directional position, survival
 --                  delegated to the kernel
---   death cond 1 : 盘口瞬时反转 — stdlib default: the held token's own bid
---                  reversed >= thesis_death_reversal_pct (25 flat, sliding to
---                  thesis_death_reversal_pct_tight as the round drains) off
---                  entry_price — the odds the entry paid for have visibly
---                  collapsed
---   death cond 2 : 论点依赖字段消失/超时 — stdlib default: the held token's
---                  book vanished or its quote is older than
---                  thesis_death_stale_ms (the odds-band thesis needs a live
---                  quote naming the price)
---   death cond 3 : 轮次时间加权越界 — stdlib default (tight = 0: off)
---   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
--- Form B (docs/thesis_death.md §1): the package adopts the stdlib default
--- predicate verbatim; all three bands are manifest tunables (hot-adjustable).
-BK_THESIS_DEATH_ENABLE = true
+--   revocation   : the stdlib default's per-leg reversal band contradicts
+--                  this thesis's own survival delegation — it closes at
+--                  band-crossing variance the EV pricing deliberately rides
+--                  out (misfire 50.84%, death arm not better). The kernel
+--                  stays the ONLY exit surface, as the charter requires.
 
 -- ── exact decimal helpers (pair_discount_arb's, unchanged semantics) ────────
 

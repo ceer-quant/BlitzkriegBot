@@ -378,6 +378,21 @@ function selfTest() {
  * arm. "One arm degrades all four" was the stronger claim and it is no longer
  * available. A window NO arm can move is the real failure, and there is none — if
  * a future edit produces one, this mode goes red and names it.
+ *
+ * On the arm that was here and is not (removed 2026-11-08, #1003): a third arm
+ * ("pre-#961 shape") ran `--exit-stop-loss-pct 100` plus the knob-grammar
+ * disable of spread_arb's declared thesis death
+ * (`spread_arb:thesis_death_reversal_pct=100`, `thesis_death_stale_ms=0`). It
+ * existed because, WITH the declaration active, arm 2's ride-to-resolution no
+ * longer degraded window 4 (the death band cut the bleed first; measured then:
+ * −11.08 → −3.47). #1003 measured that very declaration as a mis-kill on this
+ * package (death arm net −568.971 vs nodeath −495.867 on the 15m-act corpus)
+ * and closed it per-package — the declaration is gone, so arm 2 IS the
+ * pre-#961 shape again and once more degrades window 4 on its own (measured at
+ * the fix commit: −16.6611 vs baseline −13.4830, caught by net). The arm is
+ * also mechanically dead: `--backtest-knob` refuses knobs a package no longer
+ * declares, so its replays boot-refuse and catch nothing. Removed rather than
+ * repointed — the shape it demonstrated is arm 2's shape now.
  */
 const TEETH_ARMS = [
   {
@@ -387,22 +402,6 @@ const TEETH_ARMS = [
   {
     label: 'loss side unreachable (no stop, ride to resolution)',
     flags: ['--exit-stop-loss-pct', '100'],
-  },
-  {
-    // #961 convergence: with the declared thesis death active, the strategy
-    // carries its OWN loss-side protection — arm 2's "ride to resolution" no
-    // longer degrades where the death band cuts the bleed first (measured,
-    // range-20260920T2300Z: −11.08 → −3.47 net). The unprotected shape is now
-    // the PRE-#961 one: no kernel stop AND no declared death. This arm turns
-    // the package's death bands off through the knob grammar (reversal at
-    // 100% = unreachable, stale timeout off) under the same no-stop kernel,
-    // restoring the shape this gate was built to catch. Tolerances unchanged.
-    label: 'pre-#961 shape (no stop, no declared death)',
-    flags: [
-      '--exit-stop-loss-pct', '100',
-      '--backtest-knob', 'spread_arb:thesis_death_reversal_pct=100',
-      '--backtest-knob', 'spread_arb:thesis_death_stale_ms=0',
-    ],
   },
 ];
 
