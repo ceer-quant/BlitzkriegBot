@@ -687,7 +687,7 @@ const needsStrategyHint = computed(() => {
         <CardHeader :label="foldDiverges ? '累计净利（成交口径）' : '权益曲线'">
           <template #title>
             <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber :value="signedMoney(trades.net)" />
+              <RollingNumber :value="signedMoney(recon.net)" />
             </span>
           </template>
           <template #action>
