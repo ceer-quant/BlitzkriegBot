@@ -626,6 +626,7 @@ fn the_close_credential_journal_survives_a_restart() {
             venue: String::new(),
             source: String::new(),
             original_fallback_price: None,
+            price_source: String::new(),
         },
         streak_before: 2,
         account_streak_before: 1,

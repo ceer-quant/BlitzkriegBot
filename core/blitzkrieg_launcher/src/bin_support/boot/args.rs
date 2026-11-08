@@ -1109,54 +1109,16 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         )
     }];
 
-    // ── 任务二 1-3: the NTP clock-offset probe ──────────────────────────────
-    // CLI > env > default. The empty string is the documented "off" spelling:
-    // `probe::should_spawn_ntp` refuses it, so a configured-off probe spawns
-    // ZERO network tasks (the replay-safe posture). An explicit --ntp-host ""
-    // and an absent host are pinned apart by the snapshot test.
-    let ntp = pick(
-        ntp_host,
-        env.text("BK_NTP_HOST"),
-        blitzkrieg_core::probe::DEFAULT_NTP_HOST.to_string(),
-    );
-    let ntp_interval = pick(
-        ntp_interval_secs,
-        env.num::<i64>("BK_NTP_INTERVAL_SECS"),
-        blitzkrieg_core::probe::DEFAULT_NTP_INTERVAL_SECS,
-    );
-    if ntp_interval.value < 0 {
-        // Parse arms already refuse a negative CLI value; a negative from the
-        // env layer lands here (same fail-loud posture, never a silent default).
-        eprintln!(
-            "blitzkrieg-core: BK_NTP_INTERVAL_SECS={} is negative — the NTP probe \
-             interval cannot be negative (0 = off)",
-            ntp_interval.value
-        );
-        std::process::exit(2);
-    }
-    let ntp_echo = vec![if blitzkrieg_core::probe::should_spawn_ntp(&ntp.value)
-        && ntp_interval.value > 0
-    {
-        format!(
-            "environment probes: NTP clock-offset probe ON — every {} s against \
-             {} ({}/{}); |offset| >= 50 ms warns, >= 100 ms flags probe.ntp.skewRed",
-            ntp_interval.value,
-            ntp.value,
-            ntp.source.as_str(),
-            ntp_interval.source.as_str()
-        )
-    } else {
-        format!(
-            "environment probes: NTP clock-offset probe OFF (host={}, interval={}s) — \
-             zero network tasks spawned; stats probe.ntp stays cold",
-            if ntp.value.trim().is_empty() {
-                "(empty = off)"
-            } else {
-                ntp.value.as_str()
-            },
-            ntp_interval.value
-        )
-    }];
+    // Issue #991 settlement policy + receivable aging budget — body in
+    // `policy.rs` (#780 split, pure code motion). Returns the policy, the
+    // aging budget (still `Sourced`), and the boot echo.
+    let (unverified_expiry_policy, receivable_max_age, receivable_echo) =
+        super::policy::resolve_unverified_expiry_policy(env, &mut report);
+
+    // NTP clock-offset probe — body in `policy.rs` (#780 split, pure code
+    // motion). Returns the host, the interval, and the boot echo.
+    let (ntp_host, ntp_interval_secs_val, ntp_echo) =
+        super::policy::resolve_ntp(env, ntp_host, ntp_interval_secs);
 
     // ── E17/#264 + issue #967 (Phase-5): the engine-level exit ladder ───────
     // Effective chain: CLI > env(.env) > compiled default. The TOML `[exit]`
@@ -1304,8 +1266,11 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         sizing_echo,
         max_orderbook_stale_ms: stale.value,
         orderbook_stale_echo,
-        ntp_host: ntp.value,
-        ntp_interval_secs: ntp_interval.value,
+        unverified_expiry_policy,
+        receivable_max_age_ms: receivable_max_age.value,
+        receivable_echo,
+        ntp_host,
+        ntp_interval_secs: ntp_interval_secs_val,
         markets,
         auto_exits,
         max_positions,

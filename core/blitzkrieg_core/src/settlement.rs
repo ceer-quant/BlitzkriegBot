@@ -97,6 +97,17 @@ pub const SETTLEMENT_EXIT_REASON: ExitReason = ExitReason::Settlement;
 /// value, not a payout, and the label is what makes that auditable forever.
 pub const UNVERIFIED_EXPIRY_EXIT_REASON: ExitReason = ExitReason::UnverifiableExpiry;
 
+/// The closed-position `price_source` spelling (issue #1002) for a fallback
+/// close priced at the position's LAST KNOWN MID — a real feed observation,
+/// though not a venue verdict.
+pub const PRICE_SOURCE_CURRENT: &str = "current";
+/// The closed-position `price_source` spelling (issue #1002) for a fallback
+/// close priced at the ENTRY price — the zero-feed corner where no mid was
+/// ever observed. This is the self-favoring ambiguity the field exists to
+/// expose: the record reads "moved 0%", and only the label says the feed was
+/// dead, not the market flat.
+pub const PRICE_SOURCE_ENTRY_FALLBACK: &str = "entry_fallback";
+
 /// One position's settlement, as computed from a venue resolution. Pure data:
 /// the caller decides whether it becomes a booking, which keeps the arithmetic
 /// testable without a core.
@@ -317,6 +328,67 @@ impl MergeClaim {
     }
 }
 
+/// Issue #991/#1002: an unverifiable-expiry close's notional, parked as a
+/// RECEIVABLE instead of spendable cash (`BK_UNVERIFIED_EXPIRY_POLICY=receivable`).
+///
+/// A MINIMAL claim, the #461 merge-claim shape: it carries only what the
+/// fallback path actually knows (the position id, the account, the fallback
+/// price and the share count it was priced at). It is deliberately NOT a
+/// [`RedemptionClaim`]: a redemption claim describes ON-CHAIN collateral to
+/// redeem through the CTF adapter (outcome-share vectors, winning token,
+/// NegRisk) — data a venue verdict that has not arrived cannot supply, and
+/// inventing it would be redeeming a fabrication (#684's own reasoning). The
+/// venue's cash truth for this claim is an ACCOUNTING event, not an on-chain
+/// redeem: when a resolution or a reconcile fill prices the condition, the
+/// claim redeems LOCALLY (receivable → cash) with #998-style correction rows
+/// for the venue-vs-fallback delta.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpiryFallbackClaim {
+    pub id: String,
+    /// The position the fallback close wrote off.
+    pub position_id: String,
+    /// The market whose verdict this claim is waiting on.
+    pub condition_id: String,
+    /// The outcome token the position held — the key venue truth prices the
+    /// redemption with (`resolution.payout_per_share(&token_id)`, or a venue
+    /// sell fill's price on this token from the reconcile sweep).
+    pub token_id: String,
+    /// The account whose book carries the receivable (§9.2 attribution — the
+    /// same rule `MergeClaim.account_id` and `RedemptionClaim.account_id` live
+    /// by: a claim redeems into exactly one book).
+    pub account_id: String,
+    /// Shares written off at close (`closed.dust_shares` — the un-sold
+    /// remainder `close()` priced at the fallback price).
+    pub shares: Decimal,
+    /// The bookkeeping price the close booked (`price_source` says which of
+    /// "current" / "entry_fallback" it was): the receivable's booked amount is
+    /// `fallback_price × shares`.
+    pub fallback_price: Decimal,
+    pub created_at_ms: i64,
+    /// The close's `price_source` spelling ("current" | "entry_fallback") —
+    /// carried so the redemption's correction row can name what the estimate
+    /// was based on. Additive field.
+    pub price_source: String,
+    /// The trade record's net PnL as booked at close — the retract triple's
+    /// third leg. The redemption amends the recorded net to venue truth
+    /// (Δrealized must equal the ledger's correction delta or the anchored
+    /// trade-leg identity breaks structurally), and matching on
+    /// (position id, exit time, booked net) is what keeps the amendment from
+    /// eating a different close.
+    pub booked_net_pnl_usd: Decimal,
+    /// The close's `exited_at_ms` — the retract triple's second leg.
+    pub closed_at_ms: i64,
+}
+
+impl ExpiryFallbackClaim {
+    /// The booked (estimated) amount: what the close priced the un-sold shares
+    /// at. The redemption books cash against THIS number as the model row and
+    /// corrects to venue truth.
+    pub fn booked_usd(&self) -> Decimal {
+        self.fallback_price * self.shares
+    }
+}
+
 /// How one market's resolution query is going.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryState {
@@ -387,6 +459,40 @@ enum JournalLine {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_number: Option<u64>,
     },
+    /// Issue #991: an unverifiable-expiry close booked its notional as a
+    /// receivable claim. The durable commit point of the receivable model —
+    /// replaying it re-opens the claim, so the estimated notional is never
+    /// lost across a restart (the same shape [`JournalLine::MergeBurned`]
+    /// gives the merge path).
+    ExpiryFallbackBooked {
+        at_ms: i64,
+        claim_id: String,
+        position_id: String,
+        condition_id: String,
+        /// The outcome token the position held (venue truth prices the
+        /// redemption with).
+        #[serde(default)]
+        token_id: String,
+        account_id: String,
+        #[serde(with = "crate::decimal")]
+        shares: Decimal,
+        #[serde(with = "crate::decimal")]
+        fallback_price: Decimal,
+        /// "current" | "entry_fallback" — what the estimate was based on.
+        #[serde(default)]
+        price_source: String,
+        /// The trade record's net at close (the retract-amend match leg).
+        #[serde(default, with = "crate::decimal")]
+        booked_net_pnl_usd: Decimal,
+        /// The close's `exited_at_ms` (the retract-amend match leg).
+        #[serde(default)]
+        closed_at_ms: i64,
+    },
+    /// Issue #991: venue truth arrived for a fallback receivable and the
+    /// claim redeemed LOCALLY (receivable → cash at the venue number). This
+    /// is an accounting event — no on-chain redeem request exists for a
+    /// fallback claim — so there is no tx_hash/block to carry.
+    ExpiryFallbackRedeemed { at_ms: i64, claim_id: String },
 }
 
 /// The journal file: append-only JSONL beside the other core logs.
@@ -430,6 +536,11 @@ pub struct SettlementBook {
     merges: BTreeMap<String, MergeClaim>,
     /// Merge ids already confirmed, so an id is never confirmed twice.
     merged: BTreeSet<String>,
+    /// Issue #991: unverifiable-expiry closes booked as receivables
+    /// (`BK_UNVERIFIED_EXPIRY_POLICY=receivable`), by id.
+    fallback_claims: BTreeMap<String, ExpiryFallbackClaim>,
+    /// Fallback-claim ids already redeemed, so an id never redeems twice.
+    fallback_redeemed: BTreeSet<String>,
     journal: Option<SettlementJournal>,
 }
 
@@ -447,6 +558,8 @@ impl SettlementBook {
             blind_alerted: false,
             merges: BTreeMap::new(),
             merged: BTreeSet::new(),
+            fallback_claims: BTreeMap::new(),
+            fallback_redeemed: BTreeSet::new(),
             journal: path.map(|p| SettlementJournal {
                 path: p.to_path_buf(),
             }),
@@ -566,6 +679,45 @@ impl SettlementBook {
                 self.merges.remove(&claim_id);
                 self.merged.insert(claim_id);
             }
+            JournalLine::ExpiryFallbackBooked {
+                at_ms,
+                claim_id,
+                position_id,
+                condition_id,
+                token_id,
+                account_id,
+                shares,
+                fallback_price,
+                price_source,
+                booked_net_pnl_usd,
+                closed_at_ms,
+            } => {
+                // Replay re-opens the claim unless a later ExpiryFallbackRedeemed
+                // line already removed it (that arm inserts nothing then) — the
+                // same last-writer-wins order the merge family replays by.
+                // `created_at_ms` rides the journal's `at_ms`, so the aging
+                // clock (boundary 1) survives a restart exactly as the claim
+                // itself does.
+                self.fallback_claims
+                    .entry(claim_id.clone())
+                    .or_insert_with(|| ExpiryFallbackClaim {
+                        id: claim_id.clone(),
+                        position_id,
+                        condition_id,
+                        token_id,
+                        account_id,
+                        shares,
+                        fallback_price,
+                        created_at_ms: at_ms,
+                        price_source,
+                        booked_net_pnl_usd,
+                        closed_at_ms,
+                    });
+            }
+            JournalLine::ExpiryFallbackRedeemed { claim_id, .. } => {
+                self.fallback_claims.remove(&claim_id);
+                self.fallback_redeemed.insert(claim_id);
+            }
         }
     }
 
@@ -584,11 +736,15 @@ impl SettlementBook {
     }
 
     /// Collateral earned but not yet in the wallet — the receivable the
-    /// accounting identity carries.
+    /// accounting identity carries. Issue #991: fallback-closed notional
+    /// booked as receivables rides the SAME pool (estimated money must never
+    /// read as spendable cash, and the audit identity must cover it exactly
+    /// like a settled claim).
     pub fn receivable_usd(&self) -> Decimal {
         self.claims
             .values()
             .fold(Decimal::ZERO, |a, c| a + c.payout_usd)
+            + self.fallback_receivable_usd()
     }
 
     /// The receivable of ONE account's claims (each claim carries the
@@ -600,6 +756,46 @@ impl SettlementBook {
             .values()
             .filter(|c| c.account_id == account)
             .fold(Decimal::ZERO, |a, c| a + c.payout_usd)
+            + self.fallback_receivable_usd_for(account)
+    }
+
+    /// Issue #991: the fallback-claim slice of the receivable pool — booked
+    /// but unverified expiry close notionals, pooled with the settled claims
+    /// above so every consumer (audit identity, panel, day budget) reads ONE
+    /// receivable number.
+    pub fn fallback_receivable_usd(&self) -> Decimal {
+        self.fallback_claims
+            .values()
+            .fold(Decimal::ZERO, |a, c| a + c.booked_usd())
+    }
+
+    /// ONE account's fallback-claim slice (same principle as
+    /// [`Self::receivable_usd_for`]).
+    pub fn fallback_receivable_usd_for(&self, account: &str) -> Decimal {
+        self.fallback_claims
+            .values()
+            .filter(|c| c.account_id == account)
+            .fold(Decimal::ZERO, |a, c| a + c.booked_usd())
+    }
+
+    /// Issue #991: fallback receivable claims still awaiting venue truth.
+    pub fn fallback_claims(&self) -> impl Iterator<Item = &ExpiryFallbackClaim> {
+        self.fallback_claims.values()
+    }
+
+    pub fn pending_fallback_claim_count(&self) -> usize {
+        self.fallback_claims.len()
+    }
+
+    /// Issue #991 boundary 1: the OLDEST open fallback claim's age in ms
+    /// (`None` when no fallback claim is open) — the continuous aging signal
+    /// the panel's amber banner reads. The per-claim warn is edge-detected by
+    /// the caller; this is the number that survives page refreshes.
+    pub fn oldest_fallback_claim_age_ms(&self, now_ms: i64) -> Option<i64> {
+        self.fallback_claims
+            .values()
+            .map(|c| now_ms - c.created_at_ms)
+            .min()
     }
 
     pub fn claims(&self) -> impl Iterator<Item = &RedemptionClaim> {
@@ -1150,202 +1346,105 @@ impl SettlementBook {
         )
     }
 
-    // ── Merge receivables (#461) ────────────────────────────────────────────
+    // ── Issue #991: the fallback receivable pool ────────────────────────────
 
-    /// A merge burned `pairs` complete share-pairs at intent time. The pairs
-    /// are now on-chain collateral the wallet has NOT received yet: the claim
-    /// goes into the receivable, and cash is credited only when the venue's
-    /// merge transaction is confirmed. Durable via the journal, so a restart
-    /// between the burn and the receipt never loses the $1/pair. `venue` is
-    /// #647's routing attribution — the venue the burned pairs sit on, so the
-    /// request drains to that venue's executor.
-    pub fn note_merge_burned(
+    /// Issue #991: book an unverifiable-expiry close's notional as a
+    /// receivable claim (the `receivable` arm of
+    /// `BK_UNVERIFIED_EXPIRY_POLICY`). The journal line is the durable commit
+    /// point — replaying it re-opens the claim, so the estimated notional
+    /// never vanishes across a restart. Idempotent per claim id: a re-book of
+    /// a live id is a no-op (the caller mints the id from the position id,
+    /// and a closed position cannot fall back twice).
+    #[allow(clippy::too_many_arguments)] // the claim IS the position's own facts, spelled
+    pub fn book_fallback_claim(
         &mut self,
+        position_id: &str,
         condition_id: &str,
+        token_id: &str,
         account_id: &str,
-        venue: &str,
-        neg_risk: bool,
-        pairs: Decimal,
+        shares: Decimal,
+        fallback_price: Decimal,
+        price_source: &str,
+        booked_net_pnl_usd: Decimal,
+        closed_at_ms: i64,
         now_ms: i64,
     ) -> String {
-        let id = format!("{condition_id}#merge");
-        let mut n = 1;
-        while self.merges.contains_key(&id) || self.merged.contains(&id) {
-            n += 1;
-            let next = format!("{condition_id}#merge-{n}");
-            if self.merges.contains_key(&next) || self.merged.contains(&next) {
-                continue;
-            }
-            return self.note_merge_burned_inner(
-                next,
-                condition_id,
-                account_id,
-                venue,
-                neg_risk,
-                pairs,
-                now_ms,
-            );
+        let id = format!("expiry-fallback:{position_id}");
+        if self.fallback_claims.contains_key(&id) {
+            return id;
         }
-        self.note_merge_burned_inner(id, condition_id, account_id, venue, neg_risk, pairs, now_ms)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn note_merge_burned_inner(
-        &mut self,
-        id: String,
-        condition_id: &str,
-        account_id: &str,
-        venue: &str,
-        neg_risk: bool,
-        pairs: Decimal,
-        now_ms: i64,
-    ) -> String {
-        let pairs_usd = pairs;
-        self.merges.insert(
+        self.fallback_claims.insert(
             id.clone(),
-            MergeClaim {
+            ExpiryFallbackClaim {
                 id: id.clone(),
+                position_id: position_id.to_string(),
                 condition_id: condition_id.to_string(),
+                token_id: token_id.to_string(),
                 account_id: account_id.to_string(),
-                venue: venue.to_string(),
-                neg_risk,
-                pairs_usd,
+                shares,
+                fallback_price,
                 created_at_ms: now_ms,
-                attempts: 0,
-                next_attempt_ms: 0,
-                manual: false,
-                last_error: None,
-                tx_hash: None,
-                block_number: None,
+                price_source: price_source.to_string(),
+                booked_net_pnl_usd,
+                closed_at_ms,
             },
         );
         if let Some(j) = self.journal.as_ref() {
-            j.append(&JournalLine::MergeBurned {
+            j.append(&JournalLine::ExpiryFallbackBooked {
                 at_ms: now_ms,
                 claim_id: id.clone(),
+                position_id: position_id.to_string(),
                 condition_id: condition_id.to_string(),
+                token_id: token_id.to_string(),
                 account_id: account_id.to_string(),
-                venue: venue.to_string(),
-                neg_risk,
-                pairs_usd,
+                shares,
+                fallback_price,
+                price_source: price_source.to_string(),
+                booked_net_pnl_usd,
+                closed_at_ms,
             });
         }
         id
     }
 
-    /// Merge collateral due but not yet in the wallet — rides the SAME
-    /// receivable the audit's cash identity carries.
-    pub fn merge_receivable_usd(&self) -> Decimal {
-        self.merges
-            .values()
-            .fold(Decimal::ZERO, |a, m| a + m.pairs_usd)
-    }
-
-    /// ONE account's merge receivable (same principle as
-    /// [`Self::receivable_usd_for`]).
-    pub fn merge_receivable_usd_for(&self, account: &str) -> Decimal {
-        self.merges
-            .values()
-            .filter(|m| m.account_id == account)
-            .fold(Decimal::ZERO, |a, m| a + m.pairs_usd)
-    }
-
-    pub fn pending_merge_count(&self) -> usize {
-        self.merges.len()
-    }
-
-    /// Merges due for an attempt. Dispatching stamps the backoff, so a lost
-    /// result retries instead of spinning.
-    pub fn take_merges(&mut self, now_ms: i64) -> Vec<blitzkrieg_market_api::MergeRequest> {
-        let due: Vec<String> = self
-            .merges
-            .values()
-            .filter(|m| !m.manual && m.next_attempt_ms <= now_ms)
-            .map(|m| m.id.clone())
-            .collect();
-        let mut out = Vec::new();
-        for id in due {
-            if let Some(m) = self.merges.get_mut(&id) {
-                m.attempts += 1;
-                m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
-                out.push(m.request());
-            }
-        }
-        out
-    }
-
-    /// #647: the per-venue drain — every due merge whose request names
-    /// `venue`, plus the UNTAGGED (`""`-venue) merges when `untagged_fallback`
-    /// (the requested plugin is the host's active one). Same dispatch
-    /// semantics as [`Self::take_merges`]; a sibling executor never sees a
-    /// merge this drain handed out.
-    pub fn take_merges_for_venue(
+    /// Issue #991: venue truth arrived for a fallback claim — redeem it
+    /// LOCALLY (an accounting event; no on-chain redeem exists for a claim
+    /// whose collateral was never verified). Returns the redemption's full
+    /// instruction: `(account_id, booked_usd, booked_net, closed_at_ms,
+    /// shares, fallback_price)` — the caller credits
+    /// `venue_truth × shares` against `booked_usd` (the #998 two-row shape)
+    /// and amends the recorded trade net from `booked_net` by the same delta
+    /// (the anchored identity: Δcash must equal Δrealized). Unknown or
+    /// already-redeemed ids return `None` (never a second credit).
+    pub fn redeem_fallback_claim(
         &mut self,
-        venue: &str,
-        untagged_fallback: bool,
+        position_id: &str,
         now_ms: i64,
-    ) -> Vec<blitzkrieg_market_api::MergeRequest> {
-        let due: Vec<String> = self
-            .merges
-            .values()
-            .filter(|m| {
-                !m.manual
-                    && m.next_attempt_ms <= now_ms
-                    && (m.venue == venue || (untagged_fallback && m.venue.is_empty()))
-            })
-            .map(|m| m.id.clone())
-            .collect();
-        let mut out = Vec::new();
-        for id in due {
-            if let Some(m) = self.merges.get_mut(&id) {
-                m.attempts += 1;
-                m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
-                out.push(m.request());
-            }
-        }
-        out
-    }
-
-    /// A merge attempt failed. Same retry vocabulary as a redemption.
-    pub fn note_merge_failure(
-        &mut self,
-        id: &str,
-        failure: &blitzkrieg_market_api::RedemptionFailure,
-        now_ms: i64,
-    ) -> bool {
-        let Some(m) = self.merges.get_mut(id) else {
-            return false;
-        };
-        m.last_error = Some(failure.message.clone());
-        m.manual = failure.manual;
-        if failure.manual {
-            m.next_attempt_ms = i64::MAX;
-        } else {
-            m.next_attempt_ms = now_ms + backoff_ms(m.attempts);
-        }
-        true
-    }
-
-    /// A merge landed: the claim leaves the receivable. Returns
-    /// `(account_id, usd)` — the collateral that must be credited (once).
-    pub fn note_merge_confirmed(
-        &mut self,
-        id: &str,
-        tx_hash: Option<String>,
-        block_number: Option<u64>,
-        now_ms: i64,
-    ) -> Option<(String, Decimal)> {
-        let m = self.merges.remove(id)?;
-        self.merged.insert(id.to_string());
+    ) -> Option<(String, Decimal, Decimal, i64, Decimal, Decimal)> {
+        let id = format!("expiry-fallback:{position_id}");
+        let claim = self.fallback_claims.remove(&id)?;
+        let booked_usd = claim.booked_usd();
+        self.fallback_redeemed.insert(id.clone());
         if let Some(j) = self.journal.as_ref() {
-            j.append(&JournalLine::MergeConfirmed {
+            j.append(&JournalLine::ExpiryFallbackRedeemed {
                 at_ms: now_ms,
-                claim_id: id.to_string(),
-                tx_hash,
-                block_number,
+                claim_id: id,
             });
         }
-        Some((m.account_id, m.pairs_usd))
+        Some((
+            claim.account_id,
+            booked_usd,
+            claim.booked_net_pnl_usd,
+            claim.closed_at_ms,
+            claim.shares,
+            claim.fallback_price,
+        ))
+    }
+
+    /// Is there an OPEN fallback claim for this position?
+    pub fn has_fallback_claim(&self, position_id: &str) -> bool {
+        self.fallback_claims
+            .contains_key(&format!("expiry-fallback:{position_id}"))
     }
 }
 
@@ -1377,6 +1476,8 @@ fn outcome_shares_for(resolution: &MarketResolution, booking: &SettlementBooking
     }
     v
 }
+
+mod merge;
 
 #[cfg(test)]
 mod tests;

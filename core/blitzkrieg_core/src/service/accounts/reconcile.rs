@@ -2,6 +2,7 @@
 
 use crate::model::*;
 use crate::schema::Event;
+use crate::service::config::UnverifiedExpiryPolicy;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
@@ -410,6 +411,55 @@ impl Core {
                     "reconcile backfill: venue cash truth confirmed {} fallback-closed position(s); source marked reconciled, fallback exit price kept (issue 991: estimated prices are never re-labeled venue)",
                     flipped
                 );
+            }
+        }
+        // Issue #991 (receivable policy): a venue SELL fill on a token is venue
+        // CASH TRUTH at a real price — exactly what a fallback receivable
+        // claim is waiting for. Redeem the claims whose token the sweep saw
+        // traded: receivable → cash, #998 correction rows for the
+        // venue-vs-estimate delta, the trade record amended by the same delta.
+        // (The venue fill itself books nothing extra here: it moved on a
+        // position we already wrote off — the fill's notional belongs to
+        // whoever bought our old inventory, not to this book; the claim's
+        // redemption is this book's money fact.)
+        if self.config.unverified_expiry_policy == UnverifiedExpiryPolicy::Receivable {
+            let truth: std::collections::HashMap<String, Decimal> = self
+                .settlement
+                .fallback_claims()
+                .filter_map(|c| {
+                    let t = c.token_id.as_str();
+                    if !venue_tokens.contains(t) {
+                        return None;
+                    }
+                    // A real venue SELL price on this token. FilledGap deltas
+                    // carry the venue's fill price too — both are the venue's
+                    // word on what the token traded at.
+                    let price = report
+                        .unknown_fills
+                        .iter()
+                        .filter(|f| f.side == Side::Sell && f.token_id.as_str() == t)
+                        .map(|f| f.price)
+                        .chain(report.actions.iter().filter_map(|a| match a {
+                            crate::reconcile::ReconcileAction::FilledGap { delta, .. }
+                                if delta.token_id.as_str() == t && delta.side == Side::Sell =>
+                            {
+                                Some(delta.price)
+                            }
+                            _ => None,
+                        }))
+                        .next_back();
+                    price.map(|p| (c.position_id.clone(), p))
+                })
+                .collect();
+            if !truth.is_empty() {
+                let redeemed =
+                    self.redeem_fallback_claims_at(&move |id| truth.get(id).copied(), snap.now_ms);
+                if redeemed > 0 {
+                    tracing::info!(
+                        redeemed,
+                        "reconcile sweep redeemed fallback receivable(s) at venue fill prices (issue 991)"
+                    );
+                }
             }
         }
         // A terminal status the sweep just stamped (filled-without-gap,

@@ -96,6 +96,16 @@ fn the_kernels_real_engine_stats_payload_deserializes_into_the_view() {
         Some(1)
     );
     assert_eq!(row.gate_exemptions, Vec::<String>::new());
+
+    // Issue #991: the settlement block is CARRIED (no longer waived — the
+    // amber overdue-receivable banner reads `oldestFallbackClaimAgeMs` /
+    // `fallbackReceivableUsd` / `unverifiedExpiryPolicy` from it). The dry
+    // fixture's policy is the factory default and nothing has fallen back.
+    let settlement = &v.settlement;
+    assert_eq!(settlement.unverified_expiry_policy, "cash");
+    assert_eq!(settlement.pending_fallback_claims, 0);
+    assert_eq!(settlement.fallback_receivable_usd, Some(0.0));
+    assert_eq!(settlement.oldest_fallback_claim_age_ms, None);
 }
 
 /// The safety keys must survive BYTE-FOR-BYTE through the view: a re-spelled
@@ -120,6 +130,25 @@ fn safety_keys_round_trip_the_wire_values_through_the_view() {
             carried.get(key),
             raw.get(key),
             "`{key}` reaches the panel in a different shape than the kernel sent it"
+        );
+    }
+    // Issue #991: `settlement` is carried as a SLICE — the view keeps the
+    // fields the panel reads (`receivableUsd` + the fallback-aging surface)
+    // and drops the bookkeeping rest, so the round-trip is per-field, not
+    // whole-block. Every carried field must equal the wire's value exactly.
+    let raw_settlement = raw
+        .get("settlement")
+        .and_then(|s| s.as_object())
+        .expect("the fixture carries the settlement block");
+    let carried_settlement = carried
+        .get("settlement")
+        .and_then(|s| s.as_object())
+        .expect("the view serializes the settlement slice back");
+    for key in carried_settlement.keys() {
+        assert_eq!(
+            carried_settlement.get(key),
+            raw_settlement.get(key),
+            "`settlement.{key}` reaches the panel in a different shape than the kernel sent it"
         );
     }
 }
@@ -182,10 +211,6 @@ const NOT_CARRIED: &[(&str, &str)] = &[
     (
         "exitReasons",
         "pending-close reason table; no panel surface yet",
-    ),
-    (
-        "settlement",
-        "settled-but-unredeemed claims; no panel surface yet",
     ),
     ("confirmedDetail", "per-token confirmation diagnostics"),
     ("archive", "event archive status; no panel surface yet"),

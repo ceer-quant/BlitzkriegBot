@@ -139,6 +139,10 @@ impl Core {
             // watch is forgotten, or the mark would only ever fire when a
             // fallback row and an open position coexisted on the same market.
             self.backfill_fallback_to_venue(&resolution.condition_id);
+            // Issue #991 (receivable policy): the verdict also REDEEMS the
+            // condition's fallback claims — receivable → cash at venue truth,
+            // #998 correction rows for the delta.
+            self.redeem_fallback_claims_for_resolution(&resolution, now_ms);
             self.settlement.forget_market(&resolution.condition_id);
             return;
         }
@@ -238,6 +242,13 @@ impl Core {
         // report, flagged). Positions settled via this resolution carry
         // `source == "venue"` from `close()` itself.
         self.backfill_fallback_to_venue(&resolution.condition_id);
+        // Issue #991 (receivable policy): the verdict also REDEEMS the
+        // condition's fallback claims — receivable → cash at venue truth,
+        // #998 correction rows for the delta. (A claim whose token the
+        // resolution prices opens no settlement booking — its shares left the
+        // open book at the fallback close — so this is the claim's ONLY
+        // redemption path.)
+        self.redeem_fallback_claims_for_resolution(&resolution, now_ms);
         self.settlement.forget_market(&resolution.condition_id);
     }
 
@@ -754,160 +765,6 @@ impl Core {
         }
     }
 
-    /// #684: close positions the settlement path can never resolve — a market
-    /// whose expiry is long past AND whose verdict query has never been
-    /// answered by the venue. The updown round list only carries future rounds,
-    /// so an already-expired condition never appears in an answer: waiting is
-    /// not patience, it is a ghost position forever (`positions.exit` bounces
-    /// off the venue's "Insufficient position", and nothing else can clear it).
-    ///
-    /// The close is deliberately NOT a settlement:
-    ///   * price = the position's last known mid; `0` (a dead feed) falls back
-    ///     to the entry price, i.e. cost recovery — never an invented payout;
-    ///   * NO redemption claim is booked (`SettlementBook::book` is not
-    ///     called): with no verified verdict, redeeming a "winner" would be
-    ///     redeeming an invention. The venue's own cash truth folds in through
-    ///     the existing reconcile/realign sweep, which is exactly why this
-    ///     price may stay conservative;
-    ///   * the trade record's exit reason is `unverifiable_expiry`
-    ///     ([`UNVERIFIED_EXPIRY_EXIT_REASON`]), so history can never be read
-    ///     as a venue verdict.
-    ///
-    /// Idempotent by construction: the position leaves the open book on the
-    /// first close, so the second pass finds nothing; the watch list forgets
-    /// the market through [`Self::sync_settlement_watch`] once its last
-    /// position is gone.
-    pub(crate) fn run_expiry_fallback_sweep(&mut self, now_ms: i64) {
-        // Only markets the venue has structurally never answered, past the
-        // silence bound. `answers > 0` means the venue is ruling on this
-        // condition honestly (even "not resolved yet") — keep waiting.
-        let unanswered: std::collections::HashSet<String> = self
-            .settlement
-            .unanswered_since(EXPIRY_FALLBACK_AFTER_MS, now_ms)
-            .into_iter()
-            .map(|(c, _)| c)
-            .collect();
-        if unanswered.is_empty() {
-            return;
-        }
-        let targets: Vec<crate::position::OpenPosition> = self
-            .positions
-            .open_positions()
-            .iter()
-            .filter(|p| {
-                unanswered.contains(&p.condition_id)
-                    // Only past-expiry holdings qualify: a future expiry with an
-                    // unanswered query is still (theoretically) settleable.
-                    && p.expires_at_ms <= now_ms
-            })
-            .cloned()
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
-        let closed_count = targets.len();
-        for pos in targets {
-            // Fallback price: the last known mid; a zeroed feed recovers cost
-            // via the entry price. Both are bookkeeping values — the venue's
-            // real cash position is what the reconcile sweep reports.
-            // No floor: the price is booked as-is, so a dead feed (current_price
-            // == 0) lands as a real -100% loss instead of being laundered into
-            // a -50% fake loss.
-            let price = if pos.current_price > Decimal::ZERO {
-                pos.current_price
-            } else {
-                pos.entry_price
-            };
-            let closed = self.positions.close(
-                &pos.id,
-                price,
-                UNVERIFIED_EXPIRY_EXIT_REASON,
-                true,
-                now_ms,
-                "fallback",
-            );
-            if let Some(closed) = closed {
-                // The position left the open book, so the audit identity's
-                // spent/received folds shrink by its flows. The settlement path
-                // covers that with a receivable claim; this path books none, so
-                // the fallback notional moves into cash HERE — exactly what
-                // `close` priced the un-sold shares at (fee-free maker close).
-                self.credit_expiry_fallback_cash(&closed, price);
-                // Trade record first, then the snapshot — the same order the
-                // settlement path closes with (the audit reads the record).
-                self.on_position_closed(&closed, now_ms);
-                tracing::warn!(
-                    position = %closed.id,
-                    condition = %closed.condition_id,
-                    account = %closed.account_id.as_str(),
-                    shares = %closed.shares,
-                    fallback_price = %price,
-                    "position closed at unverifiable expiry — the venue never answered this market's settlement query; \
-                     no redemption claim booked (cash truth follows the reconcile sweep)"
-                );
-            }
-        }
-        self.persist_positions();
-        // A market whose LAST position left via the fallback: the watch would
-        // only forget it on the next drain's `sync_settlement_watch` — forget
-        // it NOW (the same thing `on_market_resolution` does), so the panel's
-        // `trackedMarkets` reads 0 immediately and `unanswered_since` stops
-        // naming a market we no longer hold.
-        for condition_id in &unanswered {
-            if self
-                .positions
-                .open_positions()
-                .iter()
-                .all(|p| p.condition_id != *condition_id)
-            {
-                self.settlement.forget_market(condition_id);
-            }
-        }
-        self.emit(Event::RiskAlert {
-            code: blitzkrieg_market_api::CoreErrorCode::Internal,
-            message: format!(
-                "expiry fallback: closed {} position(s) on market(s) the venue never answered \
-                 (unverifiable-expiry, no redemption claim — reconcile sweep owns the cash truth)",
-                closed_count
-            ),
-        });
-    }
-
-    /// #684 shared ledger leg of the fallback close: credit what `close` priced
-    /// the position's un-sold shares at (`price × dust_shares`; a maker close
-    /// charges no exit fee) into the POSITION's own account book. Without it the
-    /// position walks out of the open book with no compensating entry and
-    /// `trade_ledger_identity` drifts by exactly the closed notional. The
-    /// journal row's kind is `ExpiryFallback` — never a venue sell, never a
-    /// redemption: the venue's truth stays the reconcile sweep's to report.
-    /// An unknown account cannot happen (the position was opened in a
-    /// configured book), so a failure is logged loudly rather than folded into
-    /// the active book's cash.
-    pub(crate) fn credit_expiry_fallback_cash(
-        &mut self,
-        closed: &crate::position::ClosedPosition,
-        price: Decimal,
-    ) {
-        let amount = price * closed.dust_shares;
-        if amount <= Decimal::ZERO {
-            return;
-        }
-        let account = closed.account_id.clone();
-        let position_id = closed.id.clone();
-        if let Err(e) = self
-            .accounts
-            .get_mut(&account)
-            .map(|l| l.credit_expiry_fallback(amount, &position_id))
-        {
-            tracing::error!(
-                position = %position_id,
-                account = %account.as_str(),
-                error = %e,
-                "expiry fallback credit FAILED — cash identity will drift by {amount}"
-            );
-        }
-    }
-
     /// #684: the operator's clear-out verb for one EXPIRED market's position
     /// (`positions.force_close`). The kernel-side gates, in order:
     ///   1. the position exists (unknown id → refused, nothing written);
@@ -983,21 +840,23 @@ impl Core {
             ));
         };
         // The same fallback price the sweep uses: last known mid, else entry
-        // (cost recovery). Bookkeeping value, never an invented payout.
-        let price = if pos.current_price > Decimal::ZERO {
-            pos.current_price
+        // (cost recovery). Bookkeeping value, never an invented payout. The
+        // basis is named on the record (issue #1002).
+        let (price, price_source) = if pos.current_price > Decimal::ZERO {
+            (pos.current_price, PRICE_SOURCE_CURRENT)
         } else {
-            pos.entry_price
+            (pos.entry_price, PRICE_SOURCE_ENTRY_FALLBACK)
         };
         let closed = self
             .positions
-            .close(
+            .close_priced(
                 position_id,
                 price,
                 UNVERIFIED_EXPIRY_EXIT_REASON,
                 true,
                 now_ms,
                 "fallback",
+                price_source,
             )
             .ok_or_else(|| {
                 // Lost a race with another closer: refuse without writing
@@ -1008,7 +867,9 @@ impl Core {
                 )
             })?;
         // Trade record first, then the snapshot — the close paths' shared order.
-        self.credit_expiry_fallback_cash(&closed, price);
+        // The SAME policy dispatcher the sweep uses: cash (default) credits
+        // spendable cash, receivable books the claim (issue #991).
+        self.book_expiry_fallback(&closed, price, price_source, now_ms);
         self.on_position_closed(&closed, now_ms);
         self.persist_positions();
         // The manual-ops audit row is the operator's fingerprint on the close:
@@ -1151,6 +1012,16 @@ impl Core {
             // "settled, waiting to redeem" from "merged, waiting to mine".
             "mergeReceivableUsd": dec_json(self.settlement.merge_receivable_usd()),
             "pendingMerges": self.settlement.pending_merge_count(),
+            // Issue #991: the fallback receivable's own slice (additive keys —
+            // older panels ignore them) plus the aging signal the amber banner
+            // reads (`oldestFallbackClaimAgeMs`, `null` when no fallback claim
+            // is open) and the policy in force (`unverifiedExpiryPolicy`:
+            // "cash" | "receivable", the boot value — the flag is NOT
+            // hot-reloadable).
+            "fallbackReceivableUsd": dec_json(self.settlement.fallback_receivable_usd()),
+            "pendingFallbackClaims": self.settlement.pending_fallback_claim_count(),
+            "oldestFallbackClaimAgeMs": self.settlement.oldest_fallback_claim_age_ms(as_of_ms),
+            "unverifiedExpiryPolicy": self.config.unverified_expiry_policy.as_str(),
             "lastError": match self.settlement.last_error() {
                 Some((claim, message, manual)) => serde_json::json!({
                     "claim": claim, "message": message, "manual": manual,

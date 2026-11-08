@@ -18,8 +18,10 @@ use crate::position::PositionConfig;
 use crate::reconcile::{AuditReport, CashIdentity};
 use crate::risk::RiskConfig;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::collections::HashMap;
+
+mod fee;
+pub use fee::*;
 
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -438,7 +440,69 @@ pub struct CoreConfig {
     /// keeps the historic every-tick behaviour on every path. Default
     /// `false`.
     pub replay_scheduling: bool,
+    /// Issue #991/#1002: what an unverifiable-expiry fallback close books.
+    /// `Cash` (default) is the #684 behaviour, byte-identical: the fallback
+    /// notional is credited to spendable cash at close time
+    /// (`Ledger::credit_expiry_fallback`). `Receivable` books the same
+    /// notional as a claim in the settlement receivable pool instead —
+    /// estimated money is not spendable money — and the claim redeems into
+    /// cash (with #998-style correction rows for any venue-vs-fallback
+    /// delta) when venue truth arrives. Read ONCE at boot
+    /// (`BK_UNVERIFIED_EXPIRY_POLICY=cash|receivable`); NOT hot-reloadable —
+    /// a policy switch changes what already-booked journal rows mean, so it
+    /// takes a restart (documented in `.env.example`).
+    pub unverified_expiry_policy: UnverifiedExpiryPolicy,
+    /// Issue #991 boundary 1: how old a fallback receivable claim may get
+    /// (ms from `created_at_ms`) before the kernel warns that the venue still
+    /// has not answered. Amber, never red: an aging claim is ATTENTION (the
+    /// settlement path may still be waiting on a structurally-never-answered
+    /// market), not trading-down. Default [`RECEIVABLE_MAX_AGE_MS_DEFAULT`]
+    /// (48h) — `BK_RECEIVABLE_MAX_AGE_MS`.
+    pub receivable_max_age_ms: i64,
 }
+
+/// Issue #991/#1002: the two complete models an unverifiable-expiry close can
+/// book under. `serde` spells it lowercase on the wire (`"cash"` /
+/// `"receivable"`); the env value parses through
+/// [`UnverifiedExpiryPolicy::parse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnverifiedExpiryPolicy {
+    /// #684 behaviour, unchanged: the fallback close credits spendable cash
+    /// immediately at the bookkeeping price.
+    #[default]
+    Cash,
+    /// Issue #991: the fallback close books a receivable claim; cash moves
+    /// only when venue truth redeems the claim (reconcile/resolution path),
+    /// with correction rows for the delta.
+    Receivable,
+}
+
+impl UnverifiedExpiryPolicy {
+    /// Parse the env spelling. Accepts the two documented values only — an
+    /// unknown value is a boot-time error, never a silent fall-back to cash
+    /// (a typo'd policy must not quietly change the accounting model).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cash" => Some(Self::Cash),
+            "receivable" => Some(Self::Receivable),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cash => "cash",
+            Self::Receivable => "receivable",
+        }
+    }
+}
+
+/// Issue #991 boundary 1: the shipped aging bound — 48 hours. A venue that
+/// has not answered a settlement query in 48h is structurally silent (the
+/// #684 signature); the receivable it owes us must become VISIBLE, not
+/// quietly sit in the panel's receivable number forever.
+pub const RECEIVABLE_MAX_AGE_MS_DEFAULT: i64 = 172_800_000;
 
 impl CoreConfig {
     /// Build the engine config from this core config — the ONE mapping used by
@@ -1053,205 +1117,16 @@ impl Default for CoreConfig {
             // Issue #390: replay maintenance scheduling off by default — the
             // live kernel stays every-tick on every path.
             replay_scheduling: false,
+            // Issue #991/#1002: the #684 cash model stays the default — the
+            // operator's receivable model is opt-in, so no existing
+            // deployment (or test) changes behaviour without naming the
+            // policy explicitly.
+            unverified_expiry_policy: UnverifiedExpiryPolicy::Cash,
+            // Issue #991 boundary 1: the shipped 48h aging bound.
+            receivable_max_age_ms: RECEIVABLE_MAX_AGE_MS_DEFAULT,
         }
     }
 }
-
-// ── Fee model (#182, #203) ───────────────────────────────────────────────────
-//
-// The taker fee was a formula copied into four places: the kernel's charge path
-// and three gate/reconcile scripts. Copies cannot notice each other changing,
-// and the failure is one-directional and quiet — the kernel switches its default
-// schedule, the scripts keep asserting the old arithmetic, and a gate that
-// passes stops meaning what it says. The scripts now take the per-share fee from
-// `core.feeQuote` (below) and pin the DECLARED model, so a change here without a
-// change there is a red gate instead of a wrong green one.
-//
-// The schedule itself lives in ONE place — `exit_policy::FeeSchedule`, whose
-// `source` field names the publication each set of parameters comes from — and
-// the quote below reports whatever that is, so a fee can never be charged under
-// one name and declared under another. `official` (Polymarket's published
-// `rate * p * (1 - p)`, exponent 1) is the succession path: switching the
-// default means changing `exit_policy::legacy_quadratic_schedule` to it AND the
-// pinned expectation in `scripts/lib/fee-model.mjs`, in the same change — which
-// is the point. What that costs the strategies is measured, not argued:
-// `scripts/fee-model-sensitivity-check.mjs` replays the frozen corpus under both
-// schedules (#203).
-//
-// #234 finished the close-out. The curve's arithmetic has ONE spelling in the
-// kernel — `FeeSchedule::fee_per_share` — so `fee_quote` no longer recomputes
-// `rate * (p*(1-p))^exponent` beside it; `model_matches` now holds the charged
-// fee against the PINNED parameters (`exit_policy::pinned_fee_parameters`), a
-// source independent of the schedule it is checking, so a changed rate is
-// reported instead of hiding behind two identical spellings. The authoritative
-// cross-language self-check is `scripts/core-parity.mjs::assertPinnedFeeModel`
-// against `scripts/lib/fee-model.mjs`; this one is the in-process half.
-
-/// The fee actually charged per share at `price` under `schedule`:
-/// `(schedule.fee_pct(p)/100) * p`, spelled exactly as the charge path spells it
-/// (`apply_delta_effects`, `reconcile`), so a quote cannot drift from a fill.
-/// Maker fills are exempt and are reported separately as zero.
-pub(super) fn charged_per_share(
-    schedule: crate::exit_policy::FeeSchedule,
-    price: Decimal,
-) -> Decimal {
-    (schedule.fee_pct(price) / Decimal::ONE_HUNDRED) * price
-}
-
-/// The fee actually charged per share at `price` under the schedule in force.
-pub fn charged_fee_per_share(price: Decimal) -> Decimal {
-    charged_per_share(crate::exit_policy::fee_schedule(), price)
-}
-
-/// Does the schedule in force still price what this repository PINS for its
-/// declared name (#234, item 1)?
-///
-/// The pin is `exit_policy::pinned_fee_parameters` — deliberately NOT the
-/// registry the schedule itself came from, because a check that reads the same
-/// source as the thing it checks cannot fail: flipping the shipped rate from
-/// 0.125 to 0.07 moved the declaration and the charge together and this reported
-/// `true` while the fee moved 44%. Reading the pin makes that flip report
-/// `false`, which is what the field was introduced to mean.
-///
-/// The pin is held against the schedule's PARAMETERS, not against the number one
-/// sampled price happens to produce. `fee_quote` samples a single price (0.5
-/// unless the caller asks otherwise) and two different `(rate, exponent)` pairs
-/// can cross there: `0.03125*(p(1-p))^1` prices the pinned legacy curve's
-/// `0.0078125` per share at p=0.5 and a different fee at every other price, so a
-/// value-only comparison at the sampled point reports a wrong configuration as a
-/// match (see `fee_quote_tests::model_matches_rejects_a_curve_that_only_coincides_at_the_sampled_price`).
-/// Because both sides of that comparison run the same expression, it cannot see
-/// a change to the expression itself either — what it can see is exactly the
-/// parameters, which is what the pin describes. Drift in the arithmetic is
-/// covered where the arithmetic lives (`exit_policy`'s own pricing tests) and by
-/// the cross-language gate below, which recomputes the fee independently.
-/// A schedule whose name this repository cannot describe is reported as NOT
-/// matching, rather than as a green "nothing to check".
-///
-/// This is the in-process half. The authoritative, cross-language fee self-check
-/// is `scripts/core-parity.mjs::assertPinnedFeeModel`, which holds this kernel's
-/// `core.feeQuote` against the pinned table in `scripts/lib/fee-model.mjs` — the
-/// two pins must be changed together, in the same change as the schedule.
-pub(super) fn schedule_reproduces_pin(schedule: crate::exit_policy::FeeSchedule) -> bool {
-    let Some((rate, exponent)) = crate::exit_policy::pinned_fee_parameters(schedule.name) else {
-        return false;
-    };
-    schedule.rate == rate && schedule.exponent == exponent
-}
-
-/// Read-only quote of the fee schedule (#182). `price` defaults to the widest
-/// point of the schedule (0.5) so a caller that only wants the model metadata
-/// does not have to invent a price.
-pub fn fee_quote(price: Option<Decimal>) -> crate::schema::FeeQuoteResult {
-    fee_quote_at(crate::exit_policy::fee_schedule(), price)
-}
-
-/// [`fee_quote`] with the schedule supplied, so a test can ask what a
-/// DIFFERENT schedule would report — the check has to be able to say "no", and
-/// the process-wide schedule can only be set once (#234).
-pub(super) fn fee_quote_at(
-    schedule: crate::exit_policy::FeeSchedule,
-    price: Option<Decimal>,
-) -> crate::schema::FeeQuoteResult {
-    let price = price.unwrap_or_else(|| dec!(0.5));
-    let charged = charged_per_share(schedule, price);
-    let model_matches = schedule_reproduces_pin(schedule);
-    crate::schema::FeeQuoteResult {
-        model: schedule.name.to_string(),
-        rate: schedule.rate,
-        exponent: schedule.exponent,
-        price,
-        fee_per_share: charged,
-        fee_pct_of_price: schedule.fee_pct(price),
-        maker_fee_per_share: Decimal::ZERO,
-        model_matches,
-    }
-}
-
-/// `round_duration.get` readout (`round_duration_readout`): assembled from the
-/// LIVE config and the persisted cell on every call — the boot resolution
-/// wrote `source` into the config's twin fields at startup, so a read answers
-/// "what is running" and "what will the restart run" without any cached
-/// snapshot that a write could make a lie. A core with no runtime config path
-/// (backtests, in-process tests) reports `persisted: false` — there is no cell
-/// to read, and the effective value is the truth for the next session too.
-pub fn round_duration_readout(core: &Core) -> crate::schema::RoundDurationResult {
-    use crate::schema::{RoundDurationOption, RoundDurationResult};
-    let effective = core.config().round_duration_sec;
-    let cell = core.config().runtime_config_path.as_deref().and_then(|p| {
-        crate::runtime_config::load_round_duration_from(
-            std::path::Path::new(p),
-            &core.config().allowed_round_secs,
-        )
-    });
-    let next_session = cell.map(|c| c.duration_sec).unwrap_or(effective);
-    // The declared union the plugins own — the kernel hardcodes nothing
-    // (whichever durations appear are exactly what the plugins claimed) and
-    // the labels travel the same road (issue 648): the readout renders the
-    // plugins' declared names, not a kernel-side decoder table.
-    let mut allowed: Vec<RoundDurationOption> = core
-        .config()
-        .allowed_round_secs
-        .iter()
-        .map(|&sec| RoundDurationOption {
-            sec,
-            label: core.config().round_labels.get(&sec).copied(),
-        })
-        .collect();
-    // A non-standard boot value (e.g. a test's 60s) is not in the declared
-    // union — list it too, unlabeled, so the card can name what is actually
-    // running instead of silently showing the nearest allowed value (and an
-    // EMPTY union still answers with the effective value: the truth is
-    // reported, even though every set would refuse).
-    if !core.config().allowed_round_secs.contains(&effective) {
-        allowed.push(RoundDurationOption {
-            sec: effective,
-            label: None,
-        });
-    }
-    RoundDurationResult {
-        effective_sec: effective,
-        source: core.config().round_duration_source,
-        allowed,
-        next_session_sec: next_session,
-        persisted: cell.is_some(),
-    }
-}
-
-/// One position selected by `Core::flatten`, in the order its destructuring
-/// loop consumes: id, token, condition, shares, strategy, asset, direction,
-/// current price, account id.
-pub(super) type FlattenTarget = (
-    String,
-    String,
-    String,
-    Decimal,
-    String,
-    String,
-    String,
-    Decimal,
-    AccountId,
-);
-
-/// One due `maker_then_taker` order selected by `Core::tick`, in the order its
-/// destructuring loop consumes: id, side, remaining, token, condition,
-/// strategy, asset, direction, round slot, maker timeout, account id, and
-/// (#963) whether the maker was a CLOSE — the escalated taker keeps the
-/// close-intent status under its `exit-escalated:` key.
-pub(super) type EscalationTarget = (
-    String,
-    Side,
-    Decimal,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    i64,
-    AccountId,
-    bool,
-);
 
 /// Append-only journal of the OME's applied-fill idempotency table (issue #178).
 ///

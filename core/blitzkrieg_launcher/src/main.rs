@@ -301,6 +301,12 @@ async fn main() -> anyhow::Result<()> {
     for line in &args.shadow_evolution_echo {
         eprintln!("blitzkrieg-core: {line}");
     }
+    // Issue #991: the expiry-settlement policy and its aging budget, echoed
+    // unconditionally for the same reason — "where did the fallback money go?"
+    // must be answerable from the boot log of a run that set no env.
+    for line in &args.receivable_echo {
+        eprintln!("blitzkrieg-core: {line}");
+    }
 
     // Which code this process is (#179). On stderr and deliberately NOT through
     // `tracing`: the filter is configurable (`RUST_LOG=error` is a legitimate
@@ -555,6 +561,11 @@ async fn main() -> anyhow::Result<()> {
         dry_seed_balance: args.seed_balance,
         // #205: the validated freshness budget (0 = check off).
         max_orderbook_stale_ms: args.max_orderbook_stale_ms,
+        // Issue #991: the unverified-expiry settlement policy (cash default)
+        // and the overdue-receivable aging budget. Both are boot-time reads —
+        // no hot reload, a change takes effect on restart.
+        unverified_expiry_policy: args.unverified_expiry_policy,
+        receivable_max_age_ms: args.receivable_max_age_ms,
         // 任务二 1-3: the NTP probe's boot configuration. The server spawns the
         // measurement loop only for a non-empty host with a positive interval;
         // a replay never reaches that code path (production-only by placement).

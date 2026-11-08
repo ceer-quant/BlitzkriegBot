@@ -458,6 +458,7 @@ async fn execution_policy_preview_replays_history_through_evaluate() {
             venue: String::new(),
             source: String::new(),
             original_fallback_price: None,
+            price_source: String::new(),
         };
         c.positions_mut()
             .push_closed_for_test(mk("BTC", dec!(0.40)));

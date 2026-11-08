@@ -94,6 +94,13 @@ pub struct TradeRecord {
     /// auditors can see what was booked before the venue's truth arrived.
     #[serde(default, with = "crate::decimal::opt")]
     pub original_fallback_price: Option<Decimal>,
+    /// Issue #1002 (additive): the fallback close's price basis — `"current"`
+    /// (last known mid) or `"entry_fallback"` (dead feed, entry price). Empty
+    /// on venue closes and on rows written before the field existed; the
+    /// trade-log JSONL is append-only, so serde(default) keeps every
+    /// pre-#1002 line loadable without migration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub price_source: String,
 }
 
 impl TradeRecord {
@@ -139,6 +146,7 @@ impl TradeRecord {
             venue: c.venue.clone(),
             source: c.source.clone(),
             original_fallback_price: c.original_fallback_price,
+            price_source: c.price_source.clone(),
         }
     }
 }
@@ -374,6 +382,73 @@ impl TradeDb {
         self.persist_summary();
     }
 
+    /// Issue #991: amend ONE recorded trade's net PnL to venue truth. A
+    /// fallback receivable's redemption moves cash by
+    /// `venue_truth − booked_estimate`, and the anchored trade-leg identity
+    /// demands Δrealized equal that delta — so the RECORD must move with the
+    /// ledger, exactly the discipline a #995 receipt correction lives by.
+    ///
+    /// The amendment rewrites the matched line in place (matched by
+    /// `(id, exit_time, net_pnl_usd)` — the same retract triple, so a
+    /// reissued id can never eat a different close) and rebuilds the
+    /// summaries. The gross/fees legs are re-derived from the new net the way
+    /// [`Self::from_closed`] derives them, so the line stays internally
+    /// consistent. Returns true when a line was amended.
+    pub fn amend_net_pnl(
+        &mut self,
+        id: &str,
+        exit_time: i64,
+        booked_net: Decimal,
+        delta: Decimal,
+        now_ms: i64,
+    ) -> bool {
+        let Ok(text) = std::fs::read_to_string(&self.jsonl_path) else {
+            return false;
+        };
+        let mut remaining: Vec<TradeRecord> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let Some(rec) = remaining
+            .iter_mut()
+            .find(|r| r.id == id && r.exit_time == exit_time && r.net_pnl_usd == booked_net)
+        else {
+            return false;
+        };
+        // Gross carries the same delta (fees are unchanged — the close's fee
+        // legs are not venue truth's subject; only the payout was estimated).
+        rec.net_pnl_usd += delta;
+        rec.gross_pnl_usd += delta;
+        let Ok(body) = remaining
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|lines| lines.join("\n"))
+        else {
+            return false;
+        };
+        let mut out = body;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        if !crate::jsonl::rewrite_atomic(&self.jsonl_path, out.as_bytes()) {
+            return false;
+        }
+        // Rebuild the summaries from what is actually on file now (the same
+        // rebuild `retract` runs — a fold-delta would drift win/loss counts
+        // if the amendment ever crossed the zero line).
+        self.summary = TradeSummary::default();
+        self.by_account.clear();
+        for r in &remaining {
+            let bucket = self.by_account.entry(r.account_id.clone()).or_default();
+            Self::fold_into(bucket, r);
+            Self::fold_into(&mut self.summary, r);
+        }
+        self.summary.last_updated = now_ms;
+        self.persist_summary();
+        true
+    }
+
     /// issue 561 账户维重置：只撤 `account` 的成交行 —— 其他账户的行与
     /// 全局 summary 累计值原样保留（重置 B 账户不能抹掉 A 的成交史）。
     /// 语义与 [`Self::retract`] 同族（rewrite_atomic 重写 + 从存留行重建
@@ -485,6 +560,7 @@ mod tests {
             venue: String::new(),
             source: String::new(),
             original_fallback_price: None,
+            price_source: String::new(),
         }
     }
 

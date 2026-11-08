@@ -51,6 +51,7 @@ fn live_recent_trades_do_not_read_the_dry_ledger() {
         venue: "polymarket".into(),
         source: String::new(),
         original_fallback_price: None,
+        price_source: String::new(),
     };
     crate::trade_db::TradeDb::new(&dry_path)
         .record(&crate::trade_db::TradeRecord::from_closed(&dry_closed), 1);
@@ -209,6 +210,7 @@ fn reset_trading_re_anchors_the_accounting_audit_instead_of_halting_forever() {
         venue: "polymarket".into(),
         source: String::new(),
         original_fallback_price: None,
+        price_source: String::new(),
     };
     c.trade_db
         .as_mut()
@@ -296,6 +298,7 @@ fn reset_trading_clears_the_strategy_pnl_counters() {
         venue: "polymarket".into(),
         source: String::new(),
         original_fallback_price: None,
+        price_source: String::new(),
     };
     let rec = crate::trade_db::TradeRecord::from_closed(&closed);
     c.trade_db

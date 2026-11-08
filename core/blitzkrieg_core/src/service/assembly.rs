@@ -456,6 +456,7 @@ impl Core {
                 ..Default::default()
             },
             settlement,
+            receivable_warned_age_ms: 0,
             archive_recording_last: true,
             ghost_cash_alerted: std::collections::HashMap::new(),
             venue_truth_last: std::collections::HashMap::new(),

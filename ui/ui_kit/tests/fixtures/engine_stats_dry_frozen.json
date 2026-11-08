@@ -60,11 +60,11 @@
   "placeRejected": 0,
   "probe": {
     "fd": {
-      "critical": false,
-      "hard": 9223372036854775807,
+      "soft": 0,
+      "hard": 0,
       "open": null,
-      "soft": 1048575,
-      "usagePct": null
+      "usagePct": null,
+      "critical": false
     },
     "ntp": {
       "failures": 0,
@@ -107,16 +107,20 @@
     "blindSinceMs": null,
     "bookedThisSession": 0,
     "claims": [],
+    "fallbackReceivableUsd": 0.0,
     "lastError": null,
     "manualRedemptions": 0,
     "mergeReceivableUsd": 0.0,
+    "oldestFallbackClaimAgeMs": null,
+    "pendingFallbackClaims": 0,
     "pendingMerges": 0,
     "pendingRedemptions": 0,
     "receivableUsd": 0.0,
     "redeemedClaims": 0,
     "retryableRedemptions": 0,
     "settledPositions": 0,
-    "trackedMarkets": 0
+    "trackedMarkets": 0,
+    "unverifiedExpiryPolicy": "cash"
   },
   "signals": 0,
   "sizing": {

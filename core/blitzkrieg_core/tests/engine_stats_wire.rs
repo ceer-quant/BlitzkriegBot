@@ -191,4 +191,24 @@ fn frozen_fixture_carries_the_panel_safety_keys() {
         v["selfCheck"]["items"][0]["name"], "venue_balance",
         "the fixture's self-check probe is the consumer half's assertion target"
     );
+    // Issue #991: the settlement block is a CARRIED key (the amber
+    // overdue-receivable banner reads its fallback slice), so the fixture
+    // must keep the block AND its #991 additive fields. Presence, not
+    // non-null: `oldestFallbackClaimAgeMs` is legitimately `null` when no
+    // fallback claim is open.
+    let settlement = v["settlement"]
+        .as_object()
+        .expect("the fixture carries the settlement block (issue #991's receivable surface)");
+    for key in [
+        "fallbackReceivableUsd",
+        "pendingFallbackClaims",
+        "oldestFallbackClaimAgeMs",
+        "unverifiedExpiryPolicy",
+    ] {
+        assert!(
+            settlement.contains_key(key),
+            "the frozen fixture lost `settlement.{key}` — re-freeze deliberately \
+             (issue #991's receivable-aging surface)"
+        );
+    }
 }

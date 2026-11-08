@@ -805,6 +805,18 @@ pub struct ClosedPosition {
     /// row (no invented price, no cash-ledger divergence).
     #[serde(default, with = "crate::decimal::opt")]
     pub original_fallback_price: Option<Decimal>,
+    /// Issue #1002 (additive): HOW a fallback close's price was derived —
+    /// `"current"` when the close priced at the position's last known mid (a
+    /// real feed observation, though not a venue verdict), `"entry_fallback"`
+    /// when the feed was dead and the close priced at the ENTRY price (the
+    /// PnL then reads as if the market moved 0% — a self-favoring ambiguity
+    /// only this label resolves). Empty on venue closes and on rows written
+    /// before the field existed. serde(default) keeps pre-#1002 snapshots
+    /// loadable; existing golden families stay byte-identical (additive-only
+    /// discipline — the field is absent from venue rows and empty-string
+    /// serializes as present, so only new fallback rows carry it on the wire).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub price_source: String,
 }
 
 /// The result of one MERGE (task 2.2): complete UP+DOWN share-pairs of one

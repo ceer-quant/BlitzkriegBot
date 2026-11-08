@@ -17,6 +17,7 @@ use std::str::FromStr;
 #[macro_use]
 mod macros;
 mod args;
+mod policy;
 mod replay_flags;
 
 pub(crate) use args::parse_args;
@@ -242,6 +243,22 @@ pub(crate) struct Args {
     /// answer to "how long after the feed goes quiet does this bot stop
     /// trading?" must not depend on someone having thought to configure it.
     pub(crate) orderbook_stale_echo: Vec<String>,
+    /// Issue #991/#1002 — the unverifiable-expiry policy in force
+    /// (`BK_UNVERIFIED_EXPIRY_POLICY`: "cash" | "receivable", default cash).
+    /// Read ONCE at boot; NOT hot-reloadable — a policy switch changes what
+    /// already-booked journal rows mean, so it takes a restart. The echo names
+    /// it unconditionally: "which accounting model did this boot arm?" must be
+    /// answerable from the boot log alone (the same posture as the freshness
+    /// echo).
+    pub(crate) unverified_expiry_policy: blitzkrieg_core::service::UnverifiedExpiryPolicy,
+    /// Issue #991 boundary 1 — how old a fallback receivable may get (ms)
+    /// before the aging warn fires (`BK_RECEIVABLE_MAX_AGE_MS`, default 48h;
+    /// 0/negative = the check is off).
+    pub(crate) receivable_max_age_ms: i64,
+    /// Issue #991 — the boot echo for the expiry-settlement policy and its
+    /// aging budget, printed unconditionally (same posture as
+    /// `orderbook_stale_echo`).
+    pub(crate) receivable_echo: Vec<String>,
     /// 任务二 1-3 — NTP 时钟偏差探针的服务器主机。空串 = 探针关闭（零网络
     /// 任务启动，回放安全）。编译默认 `probe::DEFAULT_NTP_HOST`。
     pub(crate) ntp_host: String,
