@@ -1191,3 +1191,74 @@ async fn account_create_probes_credential_env_like_boot() {
         .to_path_buf();
     let _ = std::fs::remove_dir_all(scratch);
 }
+
+// ── 2026-11-08 pre-release find: balance follows the SESSION switch ────────
+
+/// `ledger.balance` used to read the PROCESS-default ledger even after this
+/// connection ran `account.switch` — the switch handler writes
+/// `session.session_active`, the balance handler never consulted it, so the
+/// panel's balance card stopped following the account switcher (§9.5's
+/// 会话级 promise). The read must walk the same session → display →
+/// process-default chain the account views use.
+#[tokio::test]
+async fn ledger_balance_follows_the_session_account_switch() {
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    // A DISTINCT cash number for paper, so an assertion cannot pass by
+    // accident off two equal seeds.
+    {
+        let mut c = core.lock().await;
+        c.accounts_mut()
+            .get_mut(&AccountId::from("paper"))
+            .expect("paper ledger")
+            .seed(rust_decimal_macros::dec!(777));
+    }
+    let mut session = SessionState::default();
+    // Fresh session, no switch: the default book.
+    let reply = rpc_with_subs(
+        &core,
+        &registry,
+        &peer,
+        &mut session,
+        r#"{"jsonrpc":"2.0","id":1,"method":"ledger.balance","params":{}}"#.to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "first read lands: {reply}");
+    let before = reply["result"]["balance"].clone();
+    assert_ne!(
+        before,
+        serde_json::json!(777),
+        "pre-switch read answers a book distinct from paper's"
+    );
+    // Switch THIS connection to paper…
+    let reply = rpc_with_subs(
+        &core,
+        &registry,
+        &peer,
+        &mut session,
+        r#"{"jsonrpc":"2.0","id":2,"method":"account.switch","params":{"accountId":"paper"}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "switch lands: {reply}");
+    assert_eq!(reply["result"]["active"], "paper");
+    // …and the SAME connection's balance must now answer paper's book.
+    let reply = rpc_with_subs(
+        &core,
+        &registry,
+        &peer,
+        &mut session,
+        r#"{"jsonrpc":"2.0","id":3,"method":"ledger.balance","params":{}}"#.to_string(),
+    )
+    .await;
+    assert!(
+        reply.get("error").is_none(),
+        "post-switch read lands: {reply}"
+    );
+    assert_eq!(
+        reply["result"]["balance"].as_f64(),
+        Some(777.0),
+        "balance must follow the session account switch (§9.5)"
+    );
+    let scratch = env_path.parent().expect("fixture parent").to_path_buf();
+    let _ = std::fs::remove_dir_all(scratch);
+}

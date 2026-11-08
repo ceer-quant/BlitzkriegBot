@@ -117,13 +117,24 @@ impl Core {
                 now_ms,
                 self.config.positions.exit.max_book_age_sec,
             ) else {
-                tracing::info!(
-                    token = %pos.token_id,
-                    strategy = %pos.strategy,
-                    "strategy exit withheld: no fresh best bid (will not sell the mid)"
-                );
+                // 2026-11-08 pre-release find: a restored position whose book
+                // never freshens re-emits this intent every engine tick, and
+                // the per-tick INFO ran at hundreds of lines/second for
+                // minutes (~2M lines from one boot). Log the state CHANGE:
+                // once per position while the withhold holds, cleared as soon
+                // as a fresh bid resolves it again.
+                if self.withheld_exit_logged.insert(pos.id.clone()) {
+                    tracing::info!(
+                        token = %pos.token_id,
+                        strategy = %pos.strategy,
+                        "strategy exit withheld: no fresh best bid (will not sell the mid)"
+                    );
+                }
                 continue;
             };
+            // Fresh bid back: the next withhold for this position is news
+            // again.
+            self.withheld_exit_logged.remove(&pos.id);
             let tag: String = intent
                 .reason
                 .chars()

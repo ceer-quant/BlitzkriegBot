@@ -203,7 +203,12 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
         if let Err(e) = ctx.risk.check_with_equity(&intent.request, ctx.equity) {
             let reason = match e.code {
                 blitzkrieg_market_api::CoreErrorCode::KillSwitchActive => RejectReason::KillSwitch,
-                _ => RejectReason::GlobalLimit,
+                // #983 removed the global-limit face: this check IS the
+                // per-account one (cap × equity on the intent's own account),
+                // so every non-kill-switch refusal here is an ACCOUNT limit.
+                // The GlobalLimit variant survives only for historical
+                // records' serde — no production site may produce it again.
+                _ => RejectReason::AccountLimit,
             };
             gates.push(GateTrace {
                 gate: GateId::Risk,
@@ -574,6 +579,36 @@ mod tests {
         assert_eq!(physics.stop_price, want_stop);
         // The probe released: the ledger is net-unchanged.
         assert_eq!(ledger.reserved(), Decimal::ZERO);
+    }
+
+    /// Gate 2 (2026-11-08 pre-release find): a per-order notional-cap refusal
+    /// is an ACCOUNT limit. The pipeline's catch-all used to label it
+    /// `GlobalLimit` — a face #983 deleted — so the panel's rejected-reason
+    /// column advertised a global limit that no longer exists. The
+    /// `GlobalLimit` variant survives only for historical records' serde;
+    /// no production site may produce it.
+    #[test]
+    fn per_order_cap_refusal_is_an_account_limit_not_a_global_one() {
+        let (mut ledger, _risk, breaker, exit_cfg, tokens) = setup();
+        // Shrink the absolute per-order cap: 0.40 × 12 = 4.80 notional.
+        let mut tight = crate::service::CoreConfig::default().risk.clone();
+        tight.max_order_notional = dec!(4);
+        tight.max_order_notional_pct = Decimal::ZERO; // the absolute cap decides
+        let risk = RiskGate::new(tight);
+        let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);
+        let out = process_intent(
+            &StrategyIntent::from_request(request(dec!(0.40), dec!(12))),
+            &mut c,
+        );
+        let Decision::Rejected { reason, gate, .. } = &out.decision else {
+            panic!("expected Rejected, got {:?}", out.decision);
+        };
+        assert_eq!(*gate, GateId::Risk);
+        assert_eq!(
+            *reason,
+            RejectReason::AccountLimit,
+            "the per-order cap is per-account: the reason must not resurrect GlobalLimit"
+        );
     }
 
     /// A hold-to-settlement strategy's PHYSICS projection binds the WIDE
