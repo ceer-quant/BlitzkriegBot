@@ -468,16 +468,25 @@ const cumStats = computed(() => {
 const recon = computed(() => {
   const row = store.activeAccountRow
   if (row) {
+    // 现金真值锚点（操作员裁决 2026-11-08）：本金从该账户账本的累计 Seed
+    // 入金取（account.list 行的 seededTotal），与 Overview 同一口径 —— 不再
+    // 借用快照顶层（那是会话账户的配置值，且两拍不同步会造出「同一账户两
+    // 个余额」）。老内核行缺 seededTotal → 回落快照顶层 seed。
+    const rowSeed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
+    const seedNum = rowSeed ?? (snap.value?.balance?.seed ?? null)
+    const cash = Number(row.balance) || 0
+    // 净利走账本恒等（现金 − 本金），与 Overview 完全同源同拍。
+    const ledgerNet = seedNum !== null ? cash - seedNum : cumStats.value.net
     return balanceView(
       {
         // account.list 行的十进制跨线是 string|number，归一成 number 再进
         // balanceView（该函数与内核快照的 number 口径对齐）。
-        balance: Number(row.balance) || 0,
+        balance: cash,
         reserved: Number(row.reserved) || 0,
         available: Number(row.available) || 0,
-        seed: snap.value?.balance?.seed ?? null,
+        seed: seedNum,
       },
-      cumStats.value.net,
+      ledgerNet,
       cumStats.value.fees,
     )
   }
