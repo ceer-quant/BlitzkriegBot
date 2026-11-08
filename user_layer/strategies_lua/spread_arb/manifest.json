@@ -1,11 +1,11 @@
 {
   "name": "spread_arb",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "eeedfb8edbf3414d8d693b9496125f05e6cde4e9a5a67c7eba360ec892ebc6df",
+  "sha256": "2218656ff3371f9a95773da48a1ba3b3ea5b0284e01f1e3316a29ec0cfe8c9b9",
   "author": "BlitzkriegBot",
-  "description": "DISPROVEN, keep OFF — trend-following entries in 15m rounds lose structurally: revived post-#419 locked-top fix, the full v2 corpus census measured -$475.06 / WR 10.06% (2,505 stop-loss legs -$473.80; RETEST-2026-10-10, docs/strategy-review-0.4.1.md). Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel. Thesis death (issue 961 convergence, form B): declares BK_THESIS_DEATH_ENABLE = true — the stdlib default predicate (the held token's own bid reversed >= thesis_death_reversal_pct, default 25, sliding linearly to thesis_death_reversal_pct_tight, default 0 = off, as the round drains; or its quoting fields vanished/stale past thesis_death_stale_ms, default 30000) — enforced by the runtime as an unconditional same-tick full-taker close (exit_reason thesis_death_exit).",
+  "description": "DISPROVEN, keep OFF — trend-following entries in 15m rounds lose structurally: revived post-#419 locked-top fix, the full v2 corpus census measured -$475.06 / WR 10.06% (2,505 stop-loss legs -$473.80; RETEST-2026-10-10, docs/strategy-review-0.4.1.md). Trend-confirmed dip buyer — the exact Lua port of the Rust reference implementation (strategy_logic TrendTracker + evaluate_spread_arb). Prices run on scaled-integer decimals (rust_decimal semantics incl. banker's round2); entries are resting bids at factor*mid off FRESH books only; every intent is adjudicated by the kernel. Thesis death (issue 1003, per-package closed): the #961 form-B declaration is REVOKED with a written exemption (docs/thesis_death.md §6) — the measured death arm is net WORSE than no-death on identical entries (Δ -$73.10 official fee, Δ -$62.64 legacy fee; misfire 309/764 = 40.45%): the stdlib default judges ONE leg in isolation while this package's thesis is the spread, whose wide odds-band entries ride out 25% in-round leg variance that then recovers via settlement or the kernel's trailing/stop ladder. Exit surfaces unchanged (kernel trailing/stop ladder + settlement); no strategy-side stop is introduced.",
   "trailing_exit": true,
   "tunables": {
     "trend_min_price": {
@@ -85,24 +85,6 @@
       "default": "30",
       "min": "1",
       "max": "99"
-    },
-    "thesis_death_reversal_pct": {
-      "type": "decimal",
-      "default": "25",
-      "min": "0",
-      "max": "100"
-    },
-    "thesis_death_reversal_pct_tight": {
-      "type": "decimal",
-      "default": "0",
-      "min": "0",
-      "max": "100"
-    },
-    "thesis_death_stale_ms": {
-      "type": "int",
-      "default": "30000",
-      "min": "0",
-      "max": "300000"
     }
   }
 }

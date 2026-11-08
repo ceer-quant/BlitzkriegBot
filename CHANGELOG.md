@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [Unreleased]
 
+- **#1003 thesis_death 误杀按包关闭**：A/B 实测（`scripts/ab-thesis-death-1003.mjs`，
+  15m-act 语料，official 费档）证明 spread_arb 的形态 B 声明被 stdlib 默认判据
+  （单腿 bid 回撤 25% 带）误杀——death 臂净利 −568.971 vs nodeath −495.867
+  （Δ −$73.10，误杀率 309/764 = 40.45%），single_leg_pair −6.735 vs −6.665
+  （误杀 121/238 = 50.84%）；「净利不劣于基线」验收锚被证伪，两包按 issue 处置
+  **按包关闭**（撤销声明 + manifest 去掉 thesis_death_* tunables + 版本 +1 重签 +
+  gate EXEMPT 书面理由；非全局删钩子，新包仍须声明）。关闭后 Δ ≡ 0、0 笔强制平仓，
+  出场面回到内核 trailing/stop 阶梯 + 结算。豁免正规出口与四步程序落在
+  `docs/thesis_death.md` §0，报告 `docs/reports/strategies/THESIS-DEATH-MISFIRE-1003.md`。
+
 ## [0.4.2] - 2026-11-08 (内容定稿；tag 待 #842 合并后落)
 
 0.4.1 → 0.4.2 的 ~100 条提交，六大主线：**微内核化与契约冻结**（0.4.2 epic

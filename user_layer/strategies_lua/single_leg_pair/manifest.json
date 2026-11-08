@@ -1,11 +1,11 @@
 {
   "name": "single_leg_pair",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "api": "1.0",
   "entry": "strategy.lua",
-  "sha256": "8d26f9cfae933fe3f875f162a36cc68624f103ff3acc4223780532ffb39195cc",
+  "sha256": "60b4a727eca082b607b68d0ea7ba6f95bec40ac3559e4f6df3fb13e6027d012c",
   "author": "BlitzkriegBot",
-  "description": "Single-leg round participant for binary rounds (@almach mechanism, issue #387): 55.1% of the wallet's 15m rounds had only ONE leg worth lifting — outside pair_discount_arb's action space. When a round exposes a sole liftable leg (the other side's ask is gone) or a declared leader (strictly higher ask, gap >= min_gap — default 0.30, the 2026-10-11 pre-registered recalibration from the @almach on-chain profile: his leader-leg gaps run p10=+0.215/p50=+0.475 over the entry ask, far above the old 0.10 floor; lifting 0.10→0.30 is worth +$60.97 full-corpus (combo 301.59→362.56, WR 57.6%→65.5%) with BOTH time halves agreeing (train +$48.98, val +$11.98), and 0.45 is a measured NEGATIVE step (−$30.47 — the 0.2-0.4 opposite-ask band is the profit body, an over-tight gap floor starves it); note ~70% of the delta is the second-order gain to pair_discount_arb, which stops competing with this package for the same tokens once weak-gap legs are refused), buy that side at its ask when it prices inside [min_entry_price, max_entry_price] (default 0.55-0.88 — the 2026-10-10 replay re-calibration on the post-#419 kernel: the 0.55-0.60 and 0.85-0.88 slices are both net-positive margins (+$35.06/1907 and +$3.90/8 trades) while the 0.50-0.55 coin-flip dead band is a measured NEGATIVE margin (−$2.17/85) and stays refused, and the sub-0.50 lottery zone is refused). The position is a NAKED directional leg: survival belongs to the kernel (charter 「止损不归你管」, DEV_V0_3 §16.4 — the strategy computes no stop, monitors no stop, and expresses no stop; a leg rides its round to settlement, the kernel's force-exit, or an honest hold when no REDEEM evidence exists; no merge is ever emitted because no complete pair exists; the dead-zone deadline exit this round structure wants is a kernel exit-policy surface, issue #396), its cap is the strategy's own per-round max_open_positions (default 10 — the 2026-10-10 replay: the per-round concurrency cap was binding and lifting 3→10 is worth +$72.79/2242 trades), and NOTHING is waived — every kernel gate (timing, momentum, risk, sizing) applies at full strength; the fee schedule must be in force or nothing prices (fail-closed). v1.1 confines NEW entries to the round's FIRST half (entry_window 0.5 default, round_sec 900 — the @almach in-round evidence: fill density concentrates early, tail prices are more expensive; entry_window=0 restores the whole-round path; the maker fill doctrine is untouched — this package keeps its own EV-table entry logic). holds_to_settlement only tells the kernel's generic exit ladder to leave the legs alone: settlement semantics are untouched — the winner redeems $1.00, the loser zero, and a leg without REDEEM evidence is honestly held. Signal-only: the kernel adjudicates, sizes, gates and settles every intent. Thesis death (issue 961 convergence, form B): declares BK_THESIS_DEATH_ENABLE = true — the stdlib default predicate (the held token's own bid reversed >= thesis_death_reversal_pct, default 25, sliding linearly to thesis_death_reversal_pct_tight, default 0 = off, as the round drains; or its quoting fields vanished/stale past thesis_death_stale_ms, default 30000) — enforced by the runtime as an unconditional same-tick full-taker close (exit_reason thesis_death_exit).",
+  "description": "Single-leg round participant for binary rounds (@almach mechanism, issue #387): 55.1% of the wallet's 15m rounds had only ONE leg worth lifting — outside pair_discount_arb's action space. When a round exposes a sole liftable leg (the other side's ask is gone) or a declared leader (strictly higher ask, gap >= min_gap — default 0.30, the 2026-10-11 pre-registered recalibration from the @almach on-chain profile: his leader-leg gaps run p10=+0.215/p50=+0.475 over the entry ask, far above the old 0.10 floor; lifting 0.10→0.30 is worth +$60.97 full-corpus (combo 301.59→362.56, WR 57.6%→65.5%) with BOTH time halves agreeing (train +$48.98, val +$11.98), and 0.45 is a measured NEGATIVE step (−$30.47 — the 0.2-0.4 opposite-ask band is the profit body, an over-tight gap floor starves it); note ~70% of the delta is the second-order gain to pair_discount_arb, which stops competing with this package for the same tokens once weak-gap legs are refused), buy that side at its ask when it prices inside [min_entry_price, max_entry_price] (default 0.55-0.88 — the 2026-10-10 replay re-calibration on the post-#419 kernel: the 0.55-0.60 and 0.85-0.88 slices are both net-positive margins (+$35.06/1907 and +$3.90/8 trades) while the 0.50-0.55 coin-flip dead band is a measured NEGATIVE margin (−$2.17/85) and stays refused, and the sub-0.50 lottery zone is refused). The position is a NAKED directional leg: survival belongs to the kernel (charter 「止损不归你管」, DEV_V0_3 §16.4 — the strategy computes no stop, monitors no stop, and expresses no stop; a leg rides its round to settlement, the kernel's force-exit, or an honest hold when no REDEEM evidence exists; no merge is ever emitted because no complete pair exists; the dead-zone deadline exit this round structure wants is a kernel exit-policy surface, issue #396), its cap is the strategy's own per-round max_open_positions (default 10 — the 2026-10-10 replay: the per-round concurrency cap was binding and lifting 3→10 is worth +$72.79/2242 trades), and NOTHING is waived — every kernel gate (timing, momentum, risk, sizing) applies at full strength; the fee schedule must be in force or nothing prices (fail-closed). v1.1 confines NEW entries to the round's FIRST half (entry_window 0.5 default, round_sec 900 — the @almach in-round evidence: fill density concentrates early, tail prices are more expensive; entry_window=0 restores the whole-round path; the maker fill doctrine is untouched — this package keeps its own EV-table entry logic). holds_to_settlement only tells the kernel's generic exit ladder to leave the legs alone: settlement semantics are untouched — the winner redeems $1.00, the loser zero, and a leg without REDEEM evidence is honestly held. Signal-only: the kernel adjudicates, sizes, gates and settles every intent. Thesis death (issue 1003, per-package closed): the #961 form-B declaration is REVOKED with a written exemption (docs/thesis_death.md §6) — the measured death arm is NOT better than no-death on identical entries and the misfire rate is the headline (121/238 = 50.84% of death-closed tokens would have finished net-positive under their natural exits; Δ -$0.07 official fee after #998, the legacy-fee +$0.66 reading was fee magnitude and flipped sign): the stdlib default's per-leg reversal band is a strategy-side stop, and this package's charter deliberately delegates survival to the kernel — a 25% adverse move inside the [0.55, 0.88] odds band is the variance the band's EV pricing rides out. Exit surfaces unchanged (settlement / kernel force-exit); no stop introduced.",
   "holds_to_settlement": true,
   "gate_exemptions": {},
   "tunables": {
@@ -62,24 +62,6 @@
       "default": "900",
       "min": "60",
       "max": "86400"
-    },
-    "thesis_death_reversal_pct": {
-      "type": "decimal",
-      "default": "25",
-      "min": "0",
-      "max": "100"
-    },
-    "thesis_death_reversal_pct_tight": {
-      "type": "decimal",
-      "default": "0",
-      "min": "0",
-      "max": "100"
-    },
-    "thesis_death_stale_ms": {
-      "type": "int",
-      "default": "30000",
-      "min": "0",
-      "max": "300000"
     }
   },
   "modes": [

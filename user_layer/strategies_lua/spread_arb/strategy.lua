@@ -36,23 +36,39 @@
 -- signs). No stop-loss logic anywhere — the exit discipline belongs to the
 -- kernel (the「止损不归你管」seal).
 
--- ── thesis death declaration (#961 convergence, form B) ─────────────────────
--- THESIS DEATH DECLARATION (#961)
+-- ── thesis death: PER-PACKAGE CLOSED (#961 → #1003 exemption) ────────────────
+-- #961 convergence shipped form B (the stdlib-default opt-in). Issue #1003's
+-- measured A/B (death arm vs nodeath arm, same corpus, same capital, the death
+-- hook the ONLY difference) falsified the #961 acceptance anchor "net not
+-- worse than baseline" for THIS package:
+--
+--   death −568.971  vs  nodeath −495.867   Δ −$73.10  (workbuddy W5 re-test,
+--   misfire 309/764 = 40.45%; kernel 31d4850e, official fee; the pre-#998
+--   legacy-fee run measured the same verdict at Δ −$62.64 — the direction is
+--   fee-model-independent).
+--
+-- WHY the default predicate misfires here: the death criterion judges ONE leg
+-- in isolation (its own bid off its own entry), but this package's thesis is a
+-- SPREAD — its entry legs sit at the edges of the odds distribution (entry
+-- band up to 0.88), where a 25% adverse move on one leg is ordinary in-round
+-- variance, not a dead thesis. The forced same-tick full-taker close realizes
+-- the drawdown (plus double-sided fees) on positions whose natural exits —
+-- settlement, the kernel's trailing/stop ladder — recover more often than not
+-- (the nodeath arm wins $73 more on identical entries). Tuning the band looser
+-- was measured in #961's own follow-up and could not recover the baseline.
+-- The hook is therefore disabled FOR THIS PACKAGE ONLY with this written
+-- reason (docs/thesis_death.md §6 exemption table); the global hook and every
+-- other package's declaration are untouched. A package that re-shapes its
+-- entry thesis must re-declare per the template.
+--
+-- THESIS DEATH DECLARATION (#961) — REVOKED 2026-11-08, issue #1003
 --   entry thesis : the confirmed uptrend's dip to trend support is a buyable
 --                  dislocation — buy the dip while the trend still stands
---   death cond 1 : 盘口瞬时反转 — stdlib default: the held token's own bid
---                  reversed >= thesis_death_reversal_pct (25 flat, sliding to
---                  thesis_death_reversal_pct_tight as the round drains) off
---                  entry_price — the dislocation was not a dip but a trend
---                  break
---   death cond 2 : 论点依赖字段消失/超时 — stdlib default: the held token's
---                  book vanished or its quote is older than
---                  thesis_death_stale_ms (the trend thesis needs a live quote)
---   death cond 3 : 轮次时间加权越界 — stdlib default (tight = 0: off)
---   enforcement  : runtime-injected thesis_death_exit（不由本策略 exits 表执行）
--- Form B (docs/thesis_death.md §1): the package adopts the stdlib default
--- predicate verbatim; all three bands are manifest tunables (hot-adjustable).
-BK_THESIS_DEATH_ENABLE = true
+--   revocation   : stdlib default = a per-leg stop, and this package's thesis
+--                  is the spread, not the leg; the measured death arm is net
+--                  WORSE (Δ −$73.10) with a 40.45% misfire rate. The declared
+--                  exit surface stays the kernel's (trailing/stop ladder +
+--                  settlement) — never a strategy-side stop.
 
 -- ── exact decimal helpers ───────────────────────────────────────────────────
 -- A decimal is `{ m = mantissa, s = scale }` meaning m / 10^s. Mantissas stay

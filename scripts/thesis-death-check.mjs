@@ -86,6 +86,14 @@ const EXEMPT = new Map([
     'smart_money_reverse',
     '自有 thesis_reversed 判决已声明死亡条件（thesis_break_pct 对 rebound_anchor，#847 fix 2 形态）：钩子平移以 mad_dog 同形先例为准，留待专项收敛',
   ],
+  [
+    'spread_arb',
+    '#1003 按包关闭（2026-11-08 实测撤销 #961 形态 B 声明）：stdlib 默认判据按单腿自身 bid 判死，而本包论点是 spread —— 25% 的单腿回撤在宽赔率带入场里是轮内普通方差，强制 taker 平仓把会自然恢复的仓位 realize 成损失；A/B 实测 death 臂净利劣于 nodeath（official 费 Δ −$73.10 / legacy 费 Δ −$62.64，误杀率 309/764 = 40.45%，workbuddy W5 复测），调松带宽已测无法收回基线。出场面保持内核 trailing/stop 阶梯 + 结算，不引入策略侧止损。改动入场论点须按模板重新声明',
+  ],
+  [
+    'single_leg_pair',
+    '#1003 按包关闭（2026-11-08 实测撤销 #961 形态 B 声明）：包章约明确「止损不归你管」——裸腿生存权交给内核（结算 / force-exit），而 stdlib 默认的单腿反转带就是策略侧止损；[0.55,0.88] 赔率带内的 25% 逆向波动正是 EV 定价要扛的方差，判死等于把噪声 realize 成损失（误杀率 121/238 = 50.84%；official 费下 death 臂不再优于 nodeath，Δ −$0.07，workbuddy W5 复测）。出场面保持结算 / 内核 force-exit，不引入止损。改动入场论点须按模板重新声明',
+  ],
 ]);
 
 const checks = [];

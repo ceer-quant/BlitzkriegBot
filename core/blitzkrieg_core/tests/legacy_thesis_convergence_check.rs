@@ -1,14 +1,24 @@
-//! #961 legacy convergence acceptance — the five pre-#961 packages that now
-//! declare `BK_THESIS_DEATH_ENABLE = true` (form B of docs/thesis_death.md):
-//! flash_arb, hot_side_momentum, single_leg_pair, spread_arb, whale_follow.
+//! #961 legacy convergence acceptance — the pre-#961 packages that declare
+//! `BK_THESIS_DEATH_ENABLE = true` (form B of docs/thesis_death.md).
 //!
-//! Each package is the REAL shipped directory driven through the engine
-//! adapter — exactly the surface the kernel runs (the lua_momentum
-//! thesis check is the harness precedent). The declaration is form B, so
-//! the stdlib default predicate (`bk.thesis_death_default`) judges every
-//! held position with the package's own manifest tunables (all five ship
-//! the documented defaults: a 25% flat reversal band, tightening off, a
-//! 30s quoting timeout):
+//! #1003 (2026-11-08) moved two of the original five to a reasoned per-package
+//! exemption (`scripts/thesis-death-check.mjs` EXEMPT map, docs/thesis_death.md
+//! §6): the measured death arm was net WORSE than the no-death arm for
+//! spread_arb (Δ −$73.10 official fee, misfire 40.45%) and not better for
+//! single_leg_pair (misfire 50.84%) — the stdlib default's per-leg reversal
+//! band contradicts those packages' theses (the spread / the odds band with
+//! kernel-owned survival). They now declare NOTHING, so they are asserted the
+//! other way: the runtime must NOT force any exit on them (the forced hook was
+//! these packages' only exit emitter on this path, so an exit row here would
+//! be a residual forced verdict, not a strategy row).
+//!
+//! The remaining form-B packages — flash_arb, hot_side_momentum, whale_follow
+//! — keep the full #961 contract, driven as the REAL shipped directory through
+//! the engine adapter (the lua_momentum thesis check is the harness
+//! precedent). The declaration is form B, so the stdlib default predicate
+//! (`bk.thesis_death_default`) judges every held position with the package's
+//! own manifest tunables (all three ship the documented defaults: a 25% flat
+//! reversal band, tightening off, a 30s quoting timeout):
 //!
 //!   alive — a sub-band drift (8.3% off entry) emits NO exit intent: the
 //!           death never fires on inventory noise, and these packages'
@@ -36,15 +46,15 @@ use rust_decimal_macros::dec;
 const NOW: i64 = 1_700_000_000_000;
 const TOK: &str = "up";
 
-/// The five packages the #961 legacy convergence moved to form B, in
-/// alphabetical order (the order the CI gate reports them).
-const FORM_B: &[&str] = &[
-    "flash_arb",
-    "hot_side_momentum",
-    "single_leg_pair",
-    "spread_arb",
-    "whale_follow",
-];
+/// The packages the #961 legacy convergence moved to form B that still carry
+/// the declaration (alphabetical, the order the CI gate reports them).
+/// #1003 exempted `single_leg_pair` and `spread_arb` — see
+/// [`exempted_packages_declare_nothing_and_force_no_exit`].
+const FORM_B: &[&str] = &["flash_arb", "hot_side_momentum", "whale_follow"];
+
+/// The packages #1003 closed per-package (the reasoned exemption, NOT a bare
+/// grandfather): the measured death arm misfires on their thesis shapes.
+const EXEMPTED_BY_1003: &[&str] = &["single_leg_pair", "spread_arb"];
 
 fn package_dir(pkg: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -135,8 +145,8 @@ fn sub_band_drift_is_alive_in_every_form_b_package() {
 /// DEATH: the held token's own bid reversed past the shipped 25% band
 /// (0.40 bid = 33.3% off the 0.60 entry) — the SAME evaluate emits ONE
 /// runtime-injected forced close, tagged thesis_death_exit, full taker,
-/// unpriced, for the held token by name. This is the Exit-First contract
-/// these five packages adopted: a deep reversal can no longer ride bare.
+/// unpriced, for the held token, by name. This is the Exit-First contract
+/// these packages adopted: a deep reversal can no longer ride bare.
 #[test]
 fn reversal_past_the_stdlib_band_closes_same_tick_in_every_form_b_package() {
     for pkg in FORM_B {
@@ -175,7 +185,7 @@ fn reversal_past_the_stdlib_band_closes_same_tick_in_every_form_b_package() {
 }
 
 /// The manifest tunables flowed: every form-B package narrows or loosens
-/// the stdlib bands through its own manifest (these five ship the
+/// the stdlib bands through its own manifest (these three ship the
 /// documented defaults), so a 30% reversal with `thesis_death_stale_ms`
 /// judged fresh (1s-old quote) dies by the REVERSAL condition, not the
 /// stale one — and the 30s timeout with `0` off is provably not what
@@ -194,5 +204,43 @@ fn the_death_is_the_reversal_condition_not_the_stale_timeout() {
             "{pkg}: a 30% reversal on a fresh quote must die by the band: {exits:?}"
         );
         assert_eq!(exits[0].reason, "thesis_death_exit", "{pkg}");
+    }
+}
+
+/// #1003: the per-package closure is real — an exempted package declares
+/// NEITHER form, so the runtime's forced scan is a no-op for it even on a
+/// past-the-band reversal (the exact scenario the pre-#1003 declaration
+/// closed on). The forced hook was these packages' only exit emitter on
+/// this path, so ANY exit row would be a residual forced verdict — the
+/// exemption must leave the package honestly exit-silent (its survival
+/// surface is the kernel's: settlement / force-exit / trailing ladder).
+#[test]
+fn exempted_packages_declare_nothing_and_force_no_exit() {
+    for pkg in EXEMPTED_BY_1003 {
+        // The shipped directory must not carry either declaration form.
+        let src = std::fs::read_to_string(package_dir(pkg).join("strategy.lua"))
+            .unwrap_or_else(|e| panic!("{pkg} strategy.lua must read: {e}"));
+        let declares_bool = src.contains("BK_THESIS_DEATH_ENABLE = true");
+        let declares_fn = {
+            // A declaration predicate is `function bk_thesis_death(` at a
+            // statement position; comments about the revocation must not
+            // count. Lua line comments start with `--`.
+            src.lines().any(|l| {
+                let t = l.trim_start();
+                !t.starts_with("--") && t.contains("function bk_thesis_death(")
+            })
+        };
+        assert!(
+            !declares_bool && !declares_fn,
+            "{pkg}: the #1003 exemption must remove the declaration (bool={declares_bool}, fn={declares_fn})"
+        );
+        // And the runtime must not force anything on a past-the-band book.
+        let mut a = adapter(pkg);
+        evaluate_held(&mut a, pkg, dec!(0.40), dec!(0.42), NOW + 2_000);
+        let exits: Vec<StrategyExitIntent> = a.take_exit_intents();
+        assert!(
+            exits.is_empty(),
+            "{pkg}: an exempted package gets NO forced death — even a 33.3% reversal emits nothing: {exits:?}"
+        );
     }
 }
