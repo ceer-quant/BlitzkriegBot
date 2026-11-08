@@ -13,7 +13,8 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } fr
 import { Moon, Sun, SunMoon, Bell, BellOff, LogOut, Radio } from 'lucide-vue-next'
 import { useIntervalFn, useNow } from '@vueuse/core'
 import { usePanelStore } from './stores/panel'
-import { hasToken, logout, ping } from './api/client'
+import { hasToken, getToken, logout, ping } from './api/client'
+import { readEventStream } from './lib/sse'
 import { SESSION_EXPIRED_REASON } from './lib/session'
 import { useTheme } from './lib/theme'
 import { clockTime } from './lib/format'
@@ -129,6 +130,35 @@ watch(() => store.navRequest, (req) => {
 // 15s auto-refresh; pages that need faster pacing run their own tick.
 const { pause: stopPoll } = useIntervalFn(() => { void store.refresh() }, 15_000)
 onUnmounted(() => { stopPoll() })
+
+/**
+ * #838: the SSE change stream rides BESIDE the poll loop, never instead of
+ * it. Frames carry the exact /api/snapshot document, so each delivery is a
+ * freshness upgrade (event-shaped readings — banners, order terminal states —
+ * land within the server's 1s tick instead of the next poll); when the
+ * stream dies the loop below is untouched and the panel stays informed. The
+ * reconnect only fires after a stream that actually delivered something
+ * (a refused stream means the session/gateway needs polling's own alert
+ * path, not a hot loop of failed handshakes). `getToken()` per attempt: a
+ * re-login must feed the NEXT reconnect, not a captured stale token.
+ */
+const sseRunning = ref(false)
+watch(authed, (on) => {
+  if (!on) { sseRunning.value = false; return }
+  if (sseRunning.value) return
+  sseRunning.value = true
+  void (async () => {
+    while (sseRunning.value && hasToken()) {
+      const delivered = await readEventStream(getToken(), (frame) => {
+        if (frame.kind === 'snapshot') store.applySseSnapshot(frame.doc)
+      })
+      if (!delivered) break // never delivered: polling owns this session
+      await new Promise((r) => setTimeout(r, 3000)) // brief, bounded backoff
+    }
+    sseRunning.value = false
+  })()
+})
+onUnmounted(() => { sseRunning.value = false })
 
 onMounted(() => {
   if (!authed.value) return

@@ -484,6 +484,46 @@ export const usePanelStore = defineStore('panel', () => {
     sessionExpired.value = false
   }
 
+  /**
+   * #838: write one SSE-delivered snapshot document into the store. The
+   * gateway's push stream carries the exact `/api/snapshot` document, so the
+   * writeback mirrors what `refresh()` does with its polled snapshot — same
+   * display-account mirror, same feed-progress liveness stamp. Scope is
+   * deliberately snapshot-only: the account-scoped aggregates keep their own
+   * poll cadence (they are request-time folds, not kernel state), and pages
+   * that already run their own fast tick keep doing so. `tradeRows` is a
+   * computed over the snapshot, so banners (lastError) and order terminal
+   * states refresh with no extra code — the two event-shaped readings the
+   * stream exists for.
+   */
+  function applySseSnapshot(doc: Record<string, unknown>): void {
+    if (!hasToken()) return
+    const snap = doc as unknown as Snapshot
+    snapshot.value = snap
+    // issue 561 mirror, verbatim from refresh(): the snapshot's top-level
+    // displayAccount/displayVenue are the kernel's account facts; a mismatch
+    // invalidates in-flight writes by advancing the epoch.
+    const snapDisplay = snap.displayAccount
+    if (typeof snapDisplay === 'string' && snapDisplay) {
+      const nextVenue =
+        snap.displayVenue ??
+        accounts.value.find((a) => a.id === snapDisplay)?.venue ??
+        ''
+      if (displayAccount.value &&
+        (snapDisplay !== displayAccount.value || nextVenue !== displayVenue.value)) {
+        displayEpoch++
+      }
+      displayAccount.value = snapDisplay
+      displayVenue.value = nextVenue
+    }
+    const progress = feedProgress(snap.stats?.books, snap.stats?.tops)
+    if (progress !== lastProgress) {
+      lastProgress = progress
+      feedAt.value = Date.now()
+    }
+    lastUpdated.value = Date.now()
+  }
+
   return {
     snapshot, plugins, error, loading, lastUpdated,
     connected, strategyRows, tradeRows, feedAt, sessionExpired,
@@ -491,7 +531,7 @@ export const usePanelStore = defineStore('panel', () => {
     activeAccount, accounts, setAccounts, setDisplayAccount, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow, setAccountRounds,
     displayAccount, displayVenue,
     accountTradeSummary, accountStrategyStats,
-    refresh, acknowledgeSessionReset,
+    refresh, acknowledgeSessionReset, applySseSnapshot,
     requestNav, clearNavRequest, requestBlueprintPreload, takeBlueprintPreload,
   }
 })

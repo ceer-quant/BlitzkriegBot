@@ -96,6 +96,14 @@ impl WebServer {
         // the failed response is already on the wire, so the accept loop is
         // never held and a successful login is never delayed.
         let mut respond_then_delay_ms: Option<u64> = None;
+        // #838: the SSE stream owns its socket — it cannot ride the
+        // (status, ctype, body) tuple below (no Content-Length, connection
+        // held open). The auth gate above already passed; hand the stream to
+        // the ticker thread and return: the accept loop is free immediately.
+        if req.method == "GET" && target == "/api/events" {
+            super::sse::serve_events(self, stream);
+            return;
+        }
         let (status, ctype, body): (u16, &'static str, Vec<u8>) = match (
             req.method.as_str(),
             target.as_str(),
