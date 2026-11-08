@@ -1226,4 +1226,57 @@ then = { action = "skip" }
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// 2026-11-08 live find (operator blocked): the panel's "defaults" chip
+    /// sends accountId="defaults"; the write face spelled the keys
+    /// `POLICY_*_DEFAULTS` while the loader reads the bare `POLICY_*` for the
+    /// defaults section — the save round-tripped as a no-op (the ge-20 rule
+    /// landed on a key nobody reads; the panel kept showing ge 2). The write
+    /// face normalizes the pseudo-account to the defaults footprint AND
+    /// sweeps the pre-fix writer's ghost keys on every defaults write.
+    #[test]
+    fn the_defaults_chip_writes_the_keys_the_loader_reads() {
+        let section = SectionFields {
+            rules: Some(vec![Rule {
+                name: "global_backstop".into(),
+                priority: 100,
+                enabled: true,
+                when: When {
+                    field: ConditionField::OpenPositions,
+                    op: CompareOp::Ge,
+                    value: ConditionValue::Num(rust_decimal_macros::dec!(20)),
+                },
+                then: Action {
+                    action: Some(SkipAction::Skip),
+                    budget_ratio: None,
+                    min_budget_usd: None,
+                    max_budget_usd: None,
+                    cooldown_sec: None,
+                },
+                reason: Some("ge 20".into()),
+            }]),
+            ..SectionFields::default()
+        };
+        let state = section_env_state("defaults", Some(&section)).expect("state");
+        // The loader's own spelling for the defaults section: bare keys.
+        assert!(
+            state.contains_key("POLICY_RULES"),
+            "defaults writes POLICY_RULES (the key apply_env(None) reads)"
+        );
+        assert!(
+            !state.contains_key("POLICY_RULES_DEFAULTS_ONLY_CHECK"),
+            "no invented keys"
+        );
+        let rules = state
+            .get("POLICY_RULES")
+            .and_then(|v| v.as_ref())
+            .expect("rules written");
+        assert!(rules.contains("20"), "the operator's value lands: {rules}");
+        // The ghost keys the pre-fix writer created are swept with the write.
+        assert_eq!(state.get("POLICY_RULES_DEFAULTS"), Some(&None));
+        // And a real account keeps its suffixed spelling.
+        let acct = section_env_state("polysim", Some(&section)).expect("state");
+        assert!(acct.contains_key("POLICY_RULES_POLYSIM"));
+        assert!(!acct.contains_key("POLICY_RULES"));
+    }
 }

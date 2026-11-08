@@ -186,6 +186,49 @@ pub async fn run(
     }
     let core = Arc::new(AsyncMutex::new(core));
 
+    // The env-file watcher (operator ruling 2026-11-08): an EXTERNAL hand
+    // edit of the cockpit families in `.env` re-derives the working copies
+    // within one poll — a hand edit is a first-class write, never a silent
+    // no-op (the file is the single source of truth; the in-memory config is
+    // its read-only cache). 2s mtime poll, dependency-free; the derived
+    // changes carry the audit line so the operator sees what their edit did.
+    if let Some(watch_path) = core
+        .lock()
+        .await
+        .cockpit_env_path()
+        .map(std::path::Path::to_path_buf)
+    {
+        let core = core.clone();
+        tokio::spawn(async move {
+            let mut last = std::fs::metadata(&watch_path)
+                .and_then(|m| m.modified())
+                .ok();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let cur = std::fs::metadata(&watch_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                if cur.is_some() && cur != last {
+                    last = cur;
+                    let mut c = core.lock().await;
+                    match c.refresh_cockpit_from_env_file() {
+                        Ok(applied) if !applied.is_empty() => {
+                            tracing::info!(
+                                target: "risk",
+                                "cockpit config re-derived from the env file                                  (external edit): {}",
+                                applied.join("; ")
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("cockpit env-file watch: re-derive failed: {e}")
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // 任务二 1-3: the NTP clock-offset probe. PRODUCTION-ONLY (the same
     // structural posture as `apply_account_strategy_assignments_at_boot`):
     // this block lives in `server::run`, which the replay/backtest driver

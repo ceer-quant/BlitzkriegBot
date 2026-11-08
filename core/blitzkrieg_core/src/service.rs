@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 mod accounts;
 mod assembly;
+mod cockpit_env;
 mod config;
 mod engine_cycle;
 mod helpers;
