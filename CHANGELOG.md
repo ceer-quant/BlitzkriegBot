@@ -37,7 +37,9 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   `price` 字段——策略报价 maker-TP（profit-side 门 + PnL 守门
   #939/#946/#957）；出场升级钟 250ms maker→taker + 同期出场优先于入场
   （#963）；lua_momentum 0.4.0 时间加权止盈带 + 0.2.1 退出族 + 0.3.0
-  双腿&0.15 地板。
+  双腿&0.15 地板——时间加权移动止盈止损把策略做活，出场工程直接生效；
+  coin_flip 出场对照实验 16 点网格全负（#962/#964 框架如实给出负结果，
+  证伪的是该具体实验而非出场哲学）。
 - **回测坐标系制度**：mine 档钉 0 tick 滑点 + 报告头标注坐标系（#879）；
   `--backtest-knob` 按 tunable 声明类型解析、支持 string（#916）；
   l2-delay 命名预设（真实 L2+150ms 延迟回放，#862）；A/B 出场对照实验
@@ -51,7 +53,8 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   与已实现 PnL 分列（#987/#988）；reconcile 真价回填改三态
   `source=reconciled`——venue 真价进 reconcile 报告而不冒充平仓价，
   未核实敞口 IPC 查询（#1000）；风控只跟随账户——删除全局限额段
-  （#983）；到期兜底亏损 cap 50% + single-market verdict fallback
+  （#983）；到期兜底亏损 cap 50% 引入后被取缔（#969 引入、#985
+  拆除——残值 mid 如实记账，无托底）+ single-market verdict fallback
   （#969/#956/#960）；拒单理由落 orders 行（#930）。
 - **config 单源**：risk/exit 归一化 .env（BK_RISK_*/BK_EXIT_*，TOML 层
   断链，#967/#968）；设置持久化 env-only 模型 + 一次性迁移脚本
