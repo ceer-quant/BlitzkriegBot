@@ -83,6 +83,10 @@ const EXEMPT = new Map([
     '抛弃式回放二分探针（bisect 1，flash_arb latch 原样复刻）：仅诊断触发链，非生产策略，无独立论点',
   ],
   [
+    'lua_momentum',
+    '动量剥头皮（操作员裁决 2026-11-08，实测误杀）：premise flip 在正常盘口抖动上秒级触发、12%→6% 反转带对 0.15-0.50 价区是一个 tick 的幅度——仓位入场 0-24s 即被强平（实测 ~20% WR 窗口 vs 72% 累计基线，全程 thesis_death_exit 小亏滚动）。它自己的 TP 带/trailing/stop_loss_pct=50/持有到结算就是出场机制',
+  ],
+  [
     'smart_money_reverse',
     '自有 thesis_reversed 判决已声明死亡条件（thesis_break_pct 对 rebound_anchor，#847 fix 2 形态）：钩子平移以 mad_dog 同形先例为准，留待专项收敛',
   ],
@@ -106,7 +110,14 @@ const check = (name, ok, detail = '') => {
 function declares(pkgDir) {
   const entry = join(pkgDir, 'strategy.lua');
   if (!existsSync(entry)) return { ok: false, why: 'no strategy.lua' };
-  const src = readFileSync(entry, 'utf8');
+  // Comment lines never declare (2026-11-08: lua_momentum's doc header
+  // mentioned the opt-in literal and false-greened the scan while the
+  // package's real declaration had been removed — the exemption map never
+  // got consulted). Strip `--` comments before matching.
+  const src = readFileSync(entry, 'utf8')
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('--'))
+    .join('\n');
   if (/function\s+bk_thesis_death\s*\(/.test(src)) return { ok: true, why: 'bk_thesis_death predicate' };
   if (/BK_THESIS_DEATH_ENABLE\s*=\s*true/.test(src)) return { ok: true, why: 'BK_THESIS_DEATH_ENABLE = true' };
   return { ok: false, why: 'neither bk_thesis_death nor BK_THESIS_DEATH_ENABLE' };
