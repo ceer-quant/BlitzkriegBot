@@ -148,15 +148,18 @@ const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
 const balance = computed(() => {
   const row = store.activeAccountRow
   if (row) {
+    // 现金真值锚点（操作员裁决 2026-11-08：账本流水=唯一真相）：本金从
+    // 该账户自有账本的累计 Seed 入金取（account.list 行的 seededTotal），
+    // 不再借用快照顶层（那是会话账户的配置值，显示账户不是它时口径错位）。
+    // 老内核行缺 seededTotal → 回落快照顶层 seed（旧行为）。
+    const rowSeed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
     return {
       // account.list 行的十进制跨线是 string|number，归一成 number 再进
       // balanceView（该函数与内核快照的 number 口径对齐）。
       balance: Number(row.balance) || 0,
       reserved: Number(row.reserved) || 0,
       available: Number(row.available) || 0,
-      // account.list 行不带 seed —— 本金从快照顶层（dry 配置值）取，
-      // equity = 本金 + 该账户净利的口径不变。
-      seed: snap.value?.balance?.seed ?? null,
+      seed: rowSeed ?? snap.value?.balance?.seed ?? null,
     }
   }
   // 行未到（面板刚启动的一拍）：回落快照顶层，标称口径由 balanceTitle
@@ -217,15 +220,40 @@ const trades = computed(() => {
 })
 
 /**
- * 真实余额 = 本金 ＋ 净利润. The core's cash ledger is deliberately not shown
- * beside it in DRY (see `lib/balance.ts` for why it is a subset of what the
- * trade log already records).
+ * 真实余额 = 本金 ＋ 净利润，但两个加数都是**账本口径**（操作员裁决
+ * 2026-11-08：现金流水=唯一真相）：净利 = 该账户账本现金 − 累计种子入金
+ * （`seededTotal`）——构造上恒等，面板不再拿成交行的模型费净利去拼一个
+ * 可能两头都不是的余额（default 曾拼出 $996.92：账本 $1,000 + 重置前旧
+ * 净利 −$3.08）。成交行折叠（trades.net）只服务权益曲线/胜率/手续费这些
+ * 「成交口径」展示，与钱数分离后另行标注。
  *
  * Fees are an expense, so they are shown as a cost charged against gross profit
  * — never folded into the balance, which would make the fee look like it moved
  * the principal.
  */
-const recon = computed(() => balanceView(balance.value, trades.value.net, trades.value.fees))
+const recon = computed(() => {
+  const b = balance.value
+  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+  if (b && seedNum !== null) {
+    const ledgerNet = (Number(b.balance) || 0) - seedNum
+    return balanceView(b, ledgerNet, trades.value.fees)
+  }
+  // 无账本锚点（老内核行缺 seededTotal，且快照顶层也没有 seed）：回落成交
+  // 折叠口径，权益可能与被重置过账本对不上——identityBroken 分支如实标注。
+  return balanceView(b, trades.value.net, trades.value.fees)
+})
+
+/**
+ * 成交折叠与账本口径是否劈叉（>半分钱）：只决定「手续费/曲线」这些成交类
+ * 展示要不要挂「成交口径」标注——钱数（headline）恒走账本，永不参与拼接。
+ */
+const foldDiverges = computed(() => {
+  const b = balance.value
+  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+  if (!b || seedNum === null) return false
+  const ledgerNet = (Number(b.balance) || 0) - seedNum
+  return Math.abs(trades.value.net - ledgerNet) > 0.005
+})
 
 /**
  * The tile label tracks what the figure above it actually is. When the equity is
@@ -536,21 +564,22 @@ const needsStrategyHint = computed(() => {
     <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <StatTile
         :label="balanceTitle"
-        :value="recon.equity !== null ? money(recon.equity) : money(recon.cash)"
+        :value="money(recon.cash)"
         :tone="isDry ? 'gold' : 'default'"
       >
         <template #sub>
           <!--
-            The row above is 本金 ＋ 净利润. State that arithmetic, because
-            a reader who expects the core's cash number here needs to know which
-            figure they are looking at and why the two differ.
+            径流恒等式（操作员裁决 2026-11-08：现金流水=唯一真相）：净利 =
+            账本现金 − 累计种子入金，两个加数同源自该账户的 journal，相加
+            构造上恒等于 headline。成交折叠口径只出现在手续费/曲线这些
+            「成交口径」展示里，并与钱数分离标注。
           -->
           <Tooltip
             v-if="recon.equity !== null"
-            :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 已实现净利 ${signedMoney(recon.net)}。净利是扣费后的数字：毛利 ${money(recon.gross)} 减去手续费 ${money(recon.fees)}。手续费是成本，不改变本金，因此不并入余额。`"
+            :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 账本净利 ${signedMoney(recon.net)}（账本口径：该账户现金流水累计，含手续费）。手续费支出 ${money(recon.fees)} 与毛利 ${money(recon.gross)} 是成交记录口径（成交行按费率模型折叠），与账本口径可能有差额——它们描述成交史，不参与余额计算。`"
           >
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              本金 {{ money(recon.seed) }} ＋ 净利 {{ signedMoney(recon.net) }}
+              本金 {{ money(recon.seed) }} ＋ 账本净利 {{ signedMoney(recon.net) }}
             </span>
           </Tooltip>
           <!--
@@ -575,9 +604,9 @@ const needsStrategyHint = computed(() => {
           v-if="recon.equity !== null && recon.fees > 0"
           class="mt-2 flex items-center gap-1.5 text-[10.5px] leading-snug text-faint-fg"
         >
-          <Tooltip :content="`手续费是本次运行的开支：毛利 ${money(recon.gross)} − 手续费 ${money(recon.fees)} = 净利 ${signedMoney(recon.net)}。它从利润里扣，不影响本金。`">
+          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(trades.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              手续费支出 {{ money(recon.fees) }} · 毛利 {{ money(recon.gross) }}
+              手续费支出 {{ money(recon.fees) }}（成交口径）· 毛利 {{ money(recon.gross) }}
             </span>
           </Tooltip>
         </div>
@@ -660,7 +689,12 @@ const needsStrategyHint = computed(() => {
     <!-- equity + counters -->
     <div class="mt-3.5 grid gap-3.5 xl:grid-cols-[1.55fr_1fr]">
       <Card>
-        <CardHeader label="权益曲线">
+        <!--
+          曲线画的是成交行折叠的净利轨迹（成交口径）。headline 的钱数恒走
+          账本口径（裁决 2026-11-08），两口径劈叉（>半分钱）时标题如实点名
+          「成交口径」，免得读成同一个量。
+        -->
+        <CardHeader :label="foldDiverges ? '累计净利（成交口径）' : '权益曲线'">
           <template #title>
             <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
               <RollingNumber :value="signedMoney(trades.net)" />

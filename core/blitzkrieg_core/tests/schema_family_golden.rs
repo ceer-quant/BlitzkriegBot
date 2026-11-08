@@ -392,6 +392,8 @@ fn family_18_account_view() {
         rounds: vec![900],
         open_positions: 2,
         day_realized_usd: d("1.25"),
+        // 现金真值锚点（操作员裁决 2026-11-08）：累计 Seed 入金。
+        seeded_total: d("100"),
         updated_at_ms: 1_760_000_000_000,
     };
     // `status` is a plain wire tag string (§12.1) and `statusReason` only
@@ -399,7 +401,7 @@ fn family_18_account_view() {
     // exists to prevent.
     assert_eq!(
         wire(&v),
-        r#"{"id":"acc-1","name":"main","marketType":"prediction","status":"active","balance":100.0,"available":95.0,"reserved":5.0,"credentialsLoaded":true,"venue":"polymarket","tradingEnabled":true,"strategies":["mad_dog"],"rounds":[900],"openPositions":2,"dayRealizedUsd":1.25,"updatedAtMs":1760000000000}"#
+        r#"{"id":"acc-1","name":"main","marketType":"prediction","status":"active","balance":100.0,"available":95.0,"reserved":5.0,"credentialsLoaded":true,"venue":"polymarket","tradingEnabled":true,"strategies":["mad_dog"],"rounds":[900],"openPositions":2,"dayRealizedUsd":1.25,"seededTotal":100.0,"updatedAtMs":1760000000000}"#
     );
 }
 

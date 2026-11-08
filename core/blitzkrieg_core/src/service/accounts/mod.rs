@@ -663,6 +663,7 @@ impl Core {
                     rounds: a.rounds.clone(),
                     open_positions,
                     day_realized_usd,
+                    seeded_total: ledger.seeded_total(),
                     updated_at_ms: a.updated_at_ms,
                 }
             })
