@@ -69,6 +69,7 @@ pub(super) fn render_help(f: &mut Frame, _app: &App) {
 /// other.
 pub(super) fn render_net_check(f: &mut Frame, app: &App) {
     use blitzkrieg_ui_kit::core::net_check::{hint_label, row_columns, status_label};
+    use blitzkrieg_ui_kit::core::types::NetCheckReportExt;
     let area = f.area();
 
     let mut lines: Vec<Line> = Vec::new();

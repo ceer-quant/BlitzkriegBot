@@ -3,7 +3,7 @@
 use super::*;
 
 use crate::core::ipc_client::IpcClient;
-use crate::core::types::{NetCheckReportView, UiSnapshot};
+use crate::core::types::{NetCheckReportExt, NetCheckReportView, UiSnapshot};
 use crate::gateway::supervisor::{
     RestartPolicy, StartOutcome, StopOutcome, Supervisor, SupervisorConfig,
 };
