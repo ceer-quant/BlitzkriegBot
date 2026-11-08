@@ -1,0 +1,184 @@
+{
+  "accountFreezes": {},
+  "accountingAudit": {
+    "anchored": false,
+    "failures": 0,
+    "haltReason": "",
+    "halted": false,
+    "mergeReceivableUsd": 0.0,
+    "note": "audit not run yet",
+    "ok": true,
+    "receivableUsd": 0.0,
+    "runs": 0,
+    "summary": ""
+  },
+  "archive": null,
+  "blocked": null,
+  "books": 0,
+  "cashflowRebates": 0,
+  "cashflowRebatesUsd": 0.0,
+  "cashflowRewards": 0,
+  "cashflowRewardsUsd": 0.0,
+  "confirmed": [],
+  "confirmedDetail": [],
+  "dailyLoss": {
+    "account": "default",
+    "accounts": [],
+    "anyTripped": false,
+    "dayIndex": null,
+    "equityBasis": null,
+    "limitUsd": "0",
+    "openingEquityUsd": "0",
+    "realizedPnlUsd": "0",
+    "suppressedStops": 0,
+    "tripped": false,
+    "trippedAtMs": 0
+  },
+  "evaluations": 0,
+  "exitReasons": {
+    "capacity": 64,
+    "evictedTotal": 0,
+    "orphaned": 0,
+    "sweptTotal": 0,
+    "tracked": 0
+  },
+  "illegalPriceRejected": 0,
+  "kline": null,
+  "lastError": {
+    "code": "VENUE_ERROR",
+    "message": "trading self-check failed on polymarket: venue_balance: HTTP 401 unauthorized",
+    "tsMs": 1000000000005
+  },
+  "lastVenueError": {
+    "message": "VenueError: trading self-check failed on polymarket: venue_balance: HTTP 401 unauthorized",
+    "tsMs": 1000000000005
+  },
+  "orderbookFreshness": {
+    "checkEnabled": true,
+    "maxStaleMs": 8000
+  },
+  "placeRejected": 0,
+  "probe": {
+    "fd": {
+      "critical": false,
+      "hard": 9223372036854775807,
+      "open": null,
+      "soft": 1048575,
+      "usagePct": null
+    },
+    "ntp": {
+      "failures": 0,
+      "lastCheckMs": null,
+      "offsetMs": null,
+      "skewRed": false,
+      "synced": false
+    },
+    "spot": {
+      "lastSeenMs": null,
+      "staleMs": null,
+      "staleWarnings": 0
+    },
+    "tickHealth": {
+      "lastSummaryMs": null,
+      "maxSilenceMs": 0,
+      "streamBreakWarnings": 0,
+      "windowTicks": 0,
+      "zeroTickTokens": []
+    }
+  },
+  "reconcile": {
+    "consecutiveSweepFailures": 1,
+    "freezeThreshold": 3
+  },
+  "resolutions": 0,
+  "rounds": 0,
+  "selfCheck": {
+    "items": [
+      {
+        "detail": "HTTP 401 unauthorized",
+        "name": "venue_balance",
+        "ok": false
+      }
+    ],
+    "ok": false,
+    "tsMs": 1000000000005
+  },
+  "settlement": {
+    "blindSinceMs": null,
+    "bookedThisSession": 0,
+    "claims": [],
+    "lastError": null,
+    "manualRedemptions": 0,
+    "mergeReceivableUsd": 0.0,
+    "pendingMerges": 0,
+    "pendingRedemptions": 0,
+    "receivableUsd": 0.0,
+    "redeemedClaims": 0,
+    "retryableRedemptions": 0,
+    "settledPositions": 0,
+    "trackedMarkets": 0
+  },
+  "signals": 0,
+  "sizing": {
+    "closesExemptFromEquityCap": true,
+    "equityCapUsd": null,
+    "equityUsd": 1000.0,
+    "maxOrderNotionalPct": 0.0,
+    "maxOrderNotionalUsd": 100.0,
+    "maxPrice": 1.0,
+    "maxShares": 10.0,
+    "minShares": 10.0,
+    "shareBandUsd": 10.0,
+    "sizeBudgetUsd": null,
+    "sizePct": 0.0,
+    "sizePctSkippedSignals": 0,
+    "worstCaseOrderUsd": 10.0,
+    "worstCasePctOfEquity": 1.0
+  },
+  "spots": 0,
+  "strategies": [
+    {
+      "accounts": [
+        "default"
+      ],
+      "blockedMomentum": 0,
+      "blockedTiming": 0,
+      "closedTrades": 0,
+      "effectiveMaxShares": 10.0,
+      "effectiveMinShares": 10.0,
+      "effectiveSizePct": 0.0,
+      "effectiveSizeUsd": 2.5,
+      "enabled": false,
+      "entryBudgetUsd": 2.5,
+      "feesUsd": 0.0,
+      "gateExemptedMomentum": 0,
+      "gateExemptedTiming": 0,
+      "gateExemptionTimingFloorSec": null,
+      "gateExemptions": [],
+      "limitRejected": 0,
+      "losses": 0,
+      "maxOpenNotionalUsd": null,
+      "maxOpenPositions": null,
+      "name": "spread_arb",
+      "netPnlUsd": 0.0,
+      "openNotionalUsd": 0.0,
+      "openPositions": 0,
+      "ordersPlaced": 0,
+      "ordersRejected": 1,
+      "rejectionCauses": {
+        "venue.NotAuthenticated": 1
+      },
+      "sizeWeight": null,
+      "sizingSource": "global",
+      "source": "",
+      "wins": 0
+    }
+  ],
+  "strategyLimitRejected": 0,
+  "tops": 0,
+  "tradingFrozen": {
+    "active": true,
+    "reason": "trading self-check failed on polymarket: venue_balance: HTTP 401 unauthorized"
+  },
+  "venueRejected": 1
+}

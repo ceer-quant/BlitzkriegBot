@@ -18,7 +18,7 @@
 //!     was refused by policy before any dial" — an operator who reads either as
 //!     "the venue is down" goes hunting for the wrong problem.
 
-use crate::core::types::{NetCheckItemView, NetCheckReportView};
+use crate::core::types::{NetCheckItemView, NetCheckReportExt, NetCheckReportView};
 
 /// Human label for one probe's `status`. Unknown values are echoed.
 pub fn status_label(status: &str) -> String {

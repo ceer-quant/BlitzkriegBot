@@ -13,7 +13,6 @@ blitzkrieg-core > blitzkrieg-lua-runtime
 blitzkrieg-core > blitzkrieg-market-api
 blitzkrieg-core > blitzkrieg-onchain-pull
 blitzkrieg-core > blitzkrieg-strategy-api
-blitzkrieg-core > blitzkrieg-ui-kit
 blitzkrieg-core > parity-logic
 blitzkrieg-core > strategy-logic
 blitzkrieg-data-model > blitzkrieg-market-api
@@ -32,6 +31,7 @@ blitzkrieg-onchain-pull > blitzkrieg-data-model
 blitzkrieg-polysimulator > blitzkrieg-bk-contract
 blitzkrieg-predictfun > blitzkrieg-bk-contract
 blitzkrieg-strategy-api > blitzkrieg-market-api
+blitzkrieg-ui-kit > blitzkrieg-bk-contract
 blitzkrieg-ui-panel > blitzkrieg-build-info
 blitzkrieg-ui-panel > blitzkrieg-ui-kit
 polymarket-extension > blitzkrieg-bk-contract

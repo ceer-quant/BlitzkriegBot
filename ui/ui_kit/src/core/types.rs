@@ -1,9 +1,24 @@
-//! Shared UI data model — ONE-TO-ONE with the core's IPC messages.
+//! Shared UI data model — the IPC-facing view layer.
 //!
-//! These are deliberately a *mirror* of `core/blitzkrieg_core/src/schema/` and
-//! `model.rs`, not a re-export: the UI Kit must not link the core's trading
-//! crate, so it stays a replaceable presentation layer. Every field name matches
-//! the wire (camelCase) so deserialisation is direct.
+//! Issue #842 (lane A) ownership discipline, three buckets:
+//!
+//! 1. **Re-exported from `blitzkrieg-bk-contract`**: types the kernel emits
+//!    on the wire as the CONTRACT crate's own structs (`NetCheckItem`,
+//!    `NetCheckReport`, `SelfCheckItem`, `SelfCheckReport` — the `net.check`
+//!    reply, `--net-check` stdout and `engine.stats.selfCheck`). Defined once,
+//!    behind producer and consumer alike.
+//! 2. **Local view structs (this file)**: one-to-one mirrors of payload shapes
+//!    the kernel builds ad-hoc as `serde_json::json!` inside
+//!    `core::schema`/service producers (`engine.stats`, `positions.list`,
+//!    `market.list`, …). The canonical wire schema is frozen in
+//!    `core/blitzkrieg_core/src/schema/` and its golden
+//!    (`tests/schema_family_golden.rs`); a leaf-crate move of those types into
+//!    `bk_contract` is the schema owner's 0.5.0 decision, not the UI's. The
+//!    kit still links NO `blitzkrieg_core` — the mirror is textual, kept in
+//!    step by the shared-fixture contract test (`tests/engine_stats_fixture.rs`)
+//!    and the deserialisation tests here.
+//! 3. **Pure presentation state** (view models, the event bus, `UiSnapshot`
+//!    aggregation): not wire DTOs at all; they stay local unconditionally.
 //!
 //! Decimals cross the wire as JSON numbers (the core serialises `Decimal` as an
 //! f64) but Polymarket-sourced payloads can use strings, so `de_num` accepts
@@ -329,30 +344,15 @@ pub struct LegacyVenueErrorView {
     pub message: String,
 }
 
-/// #163: one probe of the trading-capability self-check.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SelfCheckItemView {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub ok: bool,
-    #[serde(default)]
-    pub detail: String,
-}
-
-/// The newest self-check report; `null` until one has run (a dry core never
-/// runs one, and a restart clears it).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SelfCheckView {
-    #[serde(default)]
-    pub ok: bool,
-    #[serde(default)]
-    pub ts_ms: i64,
-    #[serde(default)]
-    pub items: Vec<SelfCheckItemView>,
-}
+// Issue #842 lane A: `SelfCheckItemView`/`SelfCheckView` were hand-mirrors of
+// the contract's `SelfCheckItem`/`SelfCheckReport` (one-to-one fields, same
+// camelCase serde). The kernel serializes the CONTRACT types on the wire
+// (inside `engine.stats.selfCheck` and as the `net.check` reply), so the
+// canonical definitions now come straight from `blitzkrieg-bk-contract` — one
+// definition behind producer and consumer, no second copy to keep in step.
+pub use blitzkrieg_bk_contract::{
+    SelfCheckItem as SelfCheckItemView, SelfCheckReport as SelfCheckView,
+};
 
 /// Kill-switch state. Always present on a core that has the key — the kernel
 /// emits `{active:false}` rather than `null` when trading is live — but a core
@@ -593,64 +593,27 @@ pub struct MarketListView {
 
 // ── net.check ────────────────────────────────────────────────────────────────
 
-/// One network probe (`net.check`). Mirrors the core's `NetCheckItem` — the UI
-/// Kit does not link the core crate, so the shapes are kept in step by hand and
-/// by the snapshot tests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetCheckItemView {
-    /// `venue-rest` | `venue-ws` | `discovery` | `spot-ws` — an identifier the
-    /// UI labels, never prose.
-    pub name: String,
-    /// The endpoint an operator recognises (`clob.polymarket.com`).
-    #[serde(default)]
-    pub target: String,
-    pub ok: bool,
-    /// `ok` | `dns_failed` | `tcp_refused` | `tcp_timeout` | `tls_cert` |
-    /// `tls_error` | `timeout` | `http_error` | `transport_error` |
-    /// `proxy_unreachable` | `rejected` | `unsupported`. Rendered through
-    /// `core::net_check::status_label`, which
-    /// echoes an unknown value instead of hiding it.
-    pub status: String,
-    #[serde(default)]
-    pub addrs: Vec<String>,
-    /// Every resolved address is inside a proxy's fake-IP range. A fact about
-    /// the resolver, not a failure of the path.
-    #[serde(default)]
-    pub fake_ip: bool,
-    #[serde(default)]
-    pub ms: i64,
-    #[serde(default)]
-    pub detail: String,
+// Issue #842 lane A: `NetCheckItemView`/`NetCheckReportView` were hand-mirrors
+// of the contract's `NetCheckItem`/`NetCheckReport` (field-for-field identical,
+// including the doc-locked status/hint vocabularies). The kernel serializes the
+// CONTRACT types both as the `net.check` reply and inside `--net-check` stdout,
+// so the UI now consumes the canonical definitions from `blitzkrieg-bk-contract`
+// directly — the shapes are kept in step by the compiler, not by hand.
+pub use blitzkrieg_bk_contract::{
+    NetCheckItem as NetCheckItemView, NetCheckReport as NetCheckReportView,
+};
+
+/// Presentation state the wire DTO must not carry: how many probes passed out
+/// of how many. Implemented as an extension trait so the contract type stays a
+/// pure data row (issue #842: zero logic may leak into `bk_contract`, and the
+/// counting rule is a UI rendering decision — `0 / 0` on an unsupported report
+/// is deliberately not "all clear"; [`NetCheckReportView::ok`] decides that).
+pub trait NetCheckReportExt {
+    fn passed(&self) -> (usize, usize);
 }
 
-/// Result of probing every network path the active venue trades over.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetCheckReportView {
-    /// True only when every probe passed; an empty or `unsupported` report is
-    /// never a pass.
-    pub ok: bool,
-    #[serde(default)]
-    pub ts_ms: i64,
-    /// `ok` | `tls_blocked` | `dns_failed` | `proxy_unreachable` | `proxy_env` |
-    /// `fake_ip` | `partial` | `unsupported` — see `core::net_check::hint_label`.
-    #[serde(default)]
-    pub hint_code: String,
-    /// The reading in one sentence, composed by the core.
-    #[serde(default)]
-    pub hint: String,
-    /// NAMES (never values) of the proxy variables the probing process saw.
-    #[serde(default)]
-    pub proxy_env: Vec<String>,
-    #[serde(default)]
-    pub items: Vec<NetCheckItemView>,
-}
-
-impl NetCheckReportView {
-    /// How many probes passed / total. `0 / 0` on an unsupported report is
-    /// deliberately not "all clear" — [`Self::ok`] is what decides that.
-    pub fn passed(&self) -> (usize, usize) {
+impl NetCheckReportExt for NetCheckReportView {
+    fn passed(&self) -> (usize, usize) {
         (self.items.iter().filter(|i| i.ok).count(), self.items.len())
     }
 }

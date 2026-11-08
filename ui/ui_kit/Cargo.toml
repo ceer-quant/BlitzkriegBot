@@ -19,6 +19,14 @@ path = "src/bin/app.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Issue #842 (lane A): the UI's wire DTOs converge on the frozen contract
+# crate. `blitzkrieg-bk-contract` is the #840 leaf (serde/serde_json/
+# rust_decimal only, no internal dependency, no I/O) — the market-plugin
+# boundary types (NetCheckReport/SelfCheckReport/…) are defined ONCE there and
+# re-exported here, so a panel and the kernel cannot drift apart the way the
+# hand-mirrored `*View` structs did. Still NO blitzkrieg_core dependency: the
+# kit remains a replaceable presentation layer.
+blitzkrieg-bk-contract = { path = "../../core/bk_contract" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 # #460: credential comparison must be constant-time by construction, not by
 # hand-rolled XOR folklore. `subtle` is the ecosystem's audited primitive.

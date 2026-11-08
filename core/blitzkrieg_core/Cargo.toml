@@ -99,12 +99,14 @@ libc = "0.2"
 
 [dev-dependencies]
 rust_decimal_macros = "1"
-# #236 seam test (tests/engine_stats_view_seam.rs): the kernel's own
-# `engine.stats` payload is fed to the UI Kit's `EngineStatsView`, so the
-# producer/consumer contract is pinned by a test instead of by review. Test-only
-# on purpose — the shipped library must not link a UI crate (the kit is the layer
-# meant to be replaceable), and a dev-dependency is not part of the lib graph.
-blitzkrieg-ui-kit = { path = "../../ui/ui_kit" }
+# Issue #842 lane A: the #236 core→UI seam dev-dependency
+# (`blitzkrieg-ui-kit` + tests/engine_stats_view_seam.rs) is GONE. The
+# producer/consumer contract is now pinned contract-side: the engine.stats
+# payload shape is golden-frozen (tests/schema_family_golden.rs family 23 +
+# tests/engine_stats_wire.rs, which freezes the REAL dry-core payload), and the
+# ui_kit shared-fixture test (ui/ui_kit/tests/engine_stats_fixture.rs) proves
+# the UI view deserializes that same JSON — with no core→UI edge in either
+# graph (A1/A2 of the acceptance doc).
 # Shared deterministic algorithm used by the E7 in-tree-vs-dylib parity harness
 # (tests/foreign_parity.rs). Dev-only: never linked into the shipped library.
 parity-logic = { path = "../../user_layer/parity_logic" }

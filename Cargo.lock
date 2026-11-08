@@ -1198,7 +1198,6 @@ dependencies = [
  "blitzkrieg-market-api",
  "blitzkrieg-onchain-pull",
  "blitzkrieg-strategy-api",
- "blitzkrieg-ui-kit",
  "criterion",
  "dhat",
  "futures-util",
@@ -1362,6 +1361,7 @@ dependencies = [
 name = "blitzkrieg-ui-kit"
 version = "0.4.2"
 dependencies = [
+ "blitzkrieg-bk-contract",
  "serde",
  "serde_json",
  "subtle",
