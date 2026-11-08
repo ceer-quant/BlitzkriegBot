@@ -111,12 +111,24 @@ fn engine_stats_matches_the_frozen_dry_fixture_byte_for_byte() {
     );
 
     let raw = c.engine_stats_at(NOW + 6);
+
+    // The `probe.fd` block is an OBSERVATION of the host's rlimit (hard = RLIMIT_NOFILE:
+    // 9223372036854775807 on this macOS host, 65536 on Linux CI; `open`/`usagePct` read
+    // procfs, which macOS does not have). Those numbers are environment facts, not wire
+    // shape — the deleted seam test avoided them by asserting only selected keys. The
+    // freeze keeps the full payload byte-exact and normalizes ONLY this block to a
+    // canonical placeholder on both sides, so shape drift anywhere else still fails.
+    let raw = normalize_host_facts(raw);
+
     let produced = serde_json::to_string_pretty(&raw).expect("engine.stats serializes");
 
     // Byte-for-byte: `serde_json::to_string_pretty` on both sides keeps field
     // order and formatting part of the freeze (the same discipline as the
     // schema_family_golden wire literals).
-    let frozen = FROZEN.trim_end();
+    let frozen = normalize_host_facts(
+        serde_json::from_str(FROZEN).expect("the frozen fixture is valid JSON"),
+    );
+    let frozen = serde_json::to_string_pretty(&frozen).expect("frozen fixture re-serializes");
     if produced != frozen {
         // A produced-vs-frozen diff that names the first differing line, so a
         // red run is diagnosable without re-running under a debugger.
@@ -137,6 +149,21 @@ fn engine_stats_matches_the_frozen_dry_fixture_byte_for_byte() {
              (and re-check the consumer half in ui/ui_kit/tests)."
         );
     }
+}
+
+/// Environment-dependent numbers in the payload, normalized to a canonical
+/// placeholder so the byte freeze compares SHAPE on every host. Only the
+/// `probe.fd` rlimit/procfs observation is host-dependent; everything else in
+/// `engine.stats_at` is derived from the fixture's fixed virtual clock and the
+/// deterministic dry core. Field NAMES stay frozen on both sides.
+fn normalize_host_facts(mut v: serde_json::Value) -> serde_json::Value {
+    let placeholder = serde_json::json!({
+        "soft": 0, "hard": 0, "open": null, "usagePct": null, "critical": false,
+    });
+    if let Some(probe) = v.get_mut("probe").and_then(|p| p.as_object_mut()) {
+        probe.insert("fd".to_string(), placeholder);
+    }
+    v
 }
 
 /// Fixture guard, kernel side: the frozen fixture really does carry what the
