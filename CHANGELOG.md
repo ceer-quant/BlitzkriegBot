@@ -53,9 +53,8 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   与已实现 PnL 分列（#987/#988）；reconcile 真价回填改三态
   `source=reconciled`——venue 真价进 reconcile 报告而不冒充平仓价，
   未核实敞口 IPC 查询（#1000）；风控只跟随账户——删除全局限额段
-  （#983）；到期兜底亏损 cap 50% 引入后被取缔（#969 引入、#985
-  拆除——残值 mid 如实记账，无托底）+ single-market verdict fallback
-  （#969/#956/#960）；拒单理由落 orders 行（#930）。
+  （#983）；残值 mid 如实记账（兜底价无托底）+ single-market verdict
+  fallback（#969/#956/#960/#985）；拒单理由落 orders 行（#930）。
 - **config 单源**：risk/exit 归一化 .env（BK_RISK_*/BK_EXIT_*，TOML 层
   断链，#967/#968）；设置持久化 env-only 模型 + 一次性迁移脚本
   （#965/#990/#993）；三 factory tomls 退役（#920）；重启不再全面冻结
