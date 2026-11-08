@@ -9,27 +9,48 @@
  * (reverse acceptance B), and this gate is the static third layer (§2.4
  * step 3): a text scan over the strategy sources.
  *
- * LITERAL SCOPE — what a PASS does and does not mean (honest statement):
- *   R1/R2 are literal text patterns. A PASS certifies "no stop-named binding
- *   and no reserved intent key in the scanned sources", NOT "no stop-loss
- *   logic exists". A real hard stop whose identifiers avoid `stop`/止损
- *   evades R2 by naming alone — known instances: lua_momentum binds
- *   `sl = dec_param(params, "stop_loss_pct", …)` (a protective stop
- *   sanctioned by the operator, ruling dated 2026-11-06), and #999 shipped
- *   coin_flip_exit_lab's hard stop as DEFAULT_HALT/halt (reverted in the
- *   #999 follow-up). Whether this gate should grow a semantic detector
- *   (call-shape / reason-string scan) is an OPERATOR ruling, not a gate
- *   maintainer's: it would also red the sanctioned lua_momentum stop. Until
- *   that ruling, this header is the gate's honest claim.
+ * THREE TIERS — the operator's declared stop-loss ruling (2026-11-08) re-reads
+ * E24's intent: not "zero stop-loss" but "DECLARED stop-loss only". The
+ * nearest manifest.json walking UP from a file's directory picks the tier
+ * (strict flags; an absent or unparseable manifest is the default tier):
+ *   none (default, implicit)  no declaration → the literal scan below is the
+ *                             whole verdict: any stop-named binding = FAIL.
+ *   declared                  `"stop_loss_policy": "declared"` (EXACT string)
+ *                             + `"stop_loss_knobs": ["stop_loss_pct", …]`
+ *                             (non-empty array of non-empty names): the scan
+ *                             still runs everywhere, but an R2 stop binding
+ *                             whose right-hand side is EXACTLY
+ *                             `dec_param(params, "<declared knob>", …)` is
+ *                             ALLOWED — loudly: a per-package DECLARED line
+ *                             (name + knob list + ruling reference) prints
+ *                             and the summary repeats it. Every allowed
+ *                             binding also prints its own line. Hardcoded
+ *                             stop math, other knobs, and arithmetic layered
+ *                             on top of the knob call stay RED.
+ *   lab                       `"lab_only": true` (STRICT boolean) → loud
+ *                             SKIP, no certification (#1006 mechanism
+ *                             unchanged; lab outranks declared if both are
+ *                             declared — never certify a lab package).
+ * ALWAYS RED in EVERY tier:
+ *   * R1 reserved intent keys (/suggested_(stop_loss|take_profit|
+ *     max_hold_sec)/) — absolute, never exempt;
+ *   * hardcoded stop math — a numeric stop floor computed from literals
+ *     (the `price * 0.965` shape) never becomes legal by declaring a policy;
+ *   * undeclared knob names used as a stop source — the declared list is the
+ *     whole authority; naming games and tier games buy nothing.
  *
- * lab_only exemption (#999 follow-up — no more identifier-naming luck): a
- *   package whose manifest.json declares "lab_only": true (strict boolean)
- *   is SKIPPED with a loud per-package skip line (package name + reason)
- *   that the summary repeats. The flag is the operator's explicit
- *   "replay/research lab, never a live default config" declaration; the
- *   gate does NOT certify a skipped package and does not rule on any
- *   stop-loss logic inside it. No flag = no skip: renaming
- *   DEFAULT_STOP→DEFAULT_HALT no longer flips any verdict here.
+ * What a PASS certifies per tier (honest claim): a none-tier package has no
+ * stop-named binding and no reserved key; a declared package additionally
+ * shows every knob-bound dec_param binding it carries, and nothing else
+ * stop-shaped; a lab package is skipped unseen. The scan is still LITERAL
+ * text matching — in a none-tier package a stop whose identifiers avoid
+ * `stop`/止损 still evades R2 by naming alone (the loader's sha256 gate and
+ * the kernel's foreign.rs remain the other two layers of the seal).
+ *
+ * Endgame (documented direction, NOT implemented here): stop logic belongs in
+ * the kernel. The E26 READOUT precedent (apply_physics binds stop/force-exit
+ * from the kernel-side READOUT) is the shape — when stop_loss_pct becomes a
+ * kernel param, this tier system retires.
  *
  * Scan scope — the trees a strategy author ships (.rs/.lua):
  *   user_layer/strategies/**, user_layer/strategies_lua/** (lands with E30),
@@ -50,10 +71,15 @@
  *                       (never `==`/`<=`/`>=`/`!=`), or 止损… bound with
  *                       `=`/`：` — this is the shape of
  *                       `local stop = price * 0.965`.
+ *                       Declared-tier exemption: R2's binding operator also
+ *                       splits off the right-hand side, and ONLY the exact
+ *                       double-quoted `dec_param(…, "<declared knob>", …)`
+ *                       call consuming the whole RHS is exemptible — any
+ *                       other shape stays RED.
  *
  * Usage:
  *   node scripts/strategy-no-stop-loss-check.mjs             # the real verdict
- *   node scripts/strategy-no-stop-loss-check.mjs --self-test # fixtures + lab_only sandbox, no repo tree
+ *   node scripts/strategy-no-stop-loss-check.mjs --self-test # fixtures + lab_only/declared sandboxes, no repo tree
  *   node scripts/strategy-no-stop-loss-check.mjs --teeth     # must go red
  * Exit: 0 pass / 1 verdict failure / 2 usage.
  */
@@ -107,8 +133,44 @@ function stripComments(text, family) {
   return out;
 }
 
-/** All hits in one file's text: { rule, line (1-based), snippet } */
-export function scanText(text, family) {
+// ── declared-tier R2 exemption (operator ruling 2026-11-08) ─────────────────
+// The ONLY exemptible R2 shape: the binding's whole right-hand side is ONE
+// `dec_param(<params>, "<knob>", …)` call whose second argument is a
+// double-quoted string literal naming a DECLARED knob. Everything else —
+// literal math (`price * 0.965`), an undeclared knob, arithmetic layered on
+// top of the call, a knob read some other way — stays RED. Fail-closed: an
+// unusual shape is not an exemption, it is a finding.
+function declaredKnobDecParam(rhs, knobs) {
+  const head = /^dec_param\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,\s*"([^"]*)"\s*,/.exec(rhs);
+  if (!head || !knobs.has(head[1])) return null;
+  // The call must CONSUME the whole RHS: walk to the balanced close paren
+  // (skipping string literals) and allow only whitespace after it.
+  let depth = 0;
+  let i = rhs.indexOf('(');
+  for (; i < rhs.length; i++) {
+    const c = rhs[i];
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      while (i < rhs.length && rhs[i] !== q) { if (rhs[i] === '\\') i++; i++; }
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')') { depth--; if (depth === 0) break; }
+  }
+  if (depth !== 0 || i >= rhs.length) return null;
+  if (rhs.slice(i + 1).trim() !== '') return null;
+  return head[1];
+}
+
+/**
+ * All hits in one file's text: { rule, line (1-based), snippet }.
+ * `exempt` (optional) is the declared-tier authority `{ knobs: Set<string> }`:
+ * R2 hits whose RHS is exactly a declared-knob dec_param call come back with
+ * `allowed: true, knob` — still reported, never silent, never counted as a
+ * verdict hit. R1 is NEVER exempt, any tier.
+ */
+export function scanText(text, family, exempt = null) {
   const hits = [];
   const lines = stripComments(text, family);
   lines.forEach((code, i) => {
@@ -116,7 +178,15 @@ export function scanText(text, family) {
       hits.push({ rule: 'R1 reserved intent key', line: i + 1, snippet: code.trim().slice(0, 120) });
     }
     for (const [re, msg] of STOP_BINDING) {
-      if (re.test(code)) {
+      const m = re.exec(code);
+      if (m) {
+        if (exempt) {
+          const knob = declaredKnobDecParam(code.slice(m.index + m[0].length).trim(), exempt.knobs);
+          if (knob) {
+            hits.push({ rule: `R2 ${msg}`, line: i + 1, snippet: code.trim().slice(0, 120), allowed: true, knob });
+            continue;
+          }
+        }
         hits.push({ rule: `R2 ${msg}`, line: i + 1, snippet: code.trim().slice(0, 120) });
       }
     }
@@ -155,19 +225,22 @@ function scopeFiles(root = ROOT, scopes = SCOPES) {
   return files;
 }
 
-// ── lab_only exemption (#999 follow-up) ─────────────────────────────────────
+// ── per-package tier resolution (#1006 walk, generalized to both flags) ─────
 // The nearest manifest.json walking UP from a file's directory (bounded at the
-// scope root, inclusive) decides the package. Flag rules:
-//   * "lab_only": true — STRICT boolean. "true" (string) or 1 is NOT a skip:
-//     no flag = no skip, and a near-miss flag must not silently widen it.
-//   * An absent or unparseable manifest is NO flag — the files stay under the
-//     scan (fail-closed for a text scanner; malformed manifests are the Lua
-//     loader's own gate territory).
+// scope root, inclusive) decides the package — ONE walk reads lab_only AND the
+// stop-loss declaration. Flag rules (both strict, fail-closed):
+//   * "lab_only": true — STRICT boolean. "true" (string) or 1 is NOT a skip.
+//   * "stop_loss_policy": "declared" — EXACT string, and "stop_loss_knobs"
+//     must be a non-empty array of non-empty strings. A near-miss spelling
+//     ("Declared", a bare string knob list, an empty array) is NOT a
+//     declaration: the package stays on the default (none) tier.
+//   * An absent or unparseable manifest is NO flag — default tier, fail-closed
+//     (malformed manifests are the Lua loader's own gate territory).
 //   * The NEAREST manifest wins, so an inner package with its own manifest is
-//     judged by its own flag, not the outer one.
+//     judged by its own flags, not the outer one.
 const manifestCache = new Map(); // scopeBase\0dir → parsed manifest object | null
 
-function labOnlyInfo(f) {
+function packageFlags(f) {
   let dir = dirname(f.path);
   for (;;) {
     const key = `${f.scopeBase}\u0000${dir}`;
@@ -182,12 +255,23 @@ function labOnlyInfo(f) {
       manifestCache.set(key, manifest);
     }
     if (manifest) {
-      if (manifest.lab_only !== true) return null;
       const rel = relative(f.scopeBase, dir);
       const pkgRel = [f.scopeDir, ...rel.split(sep)].filter(Boolean).join('/');
       const name =
         typeof manifest.name === 'string' && manifest.name ? manifest.name : pkgRel || basename(dir);
-      return { name, pkgRel };
+      const labOnly = manifest.lab_only === true;
+      const knobsRaw = manifest.stop_loss_knobs;
+      const knobsOk =
+        Array.isArray(knobsRaw) &&
+        knobsRaw.length > 0 &&
+        knobsRaw.every((k) => typeof k === 'string' && k !== '');
+      const declared = manifest.stop_loss_policy === 'declared' && knobsOk;
+      const knobs = declared ? [...new Set(knobsRaw)] : null;
+      const ruling =
+        typeof manifest.stop_loss_ruling === 'string' && manifest.stop_loss_ruling
+          ? manifest.stop_loss_ruling
+          : '';
+      return { name, pkgRel, labOnly, declared, knobs, ruling };
     }
     if (dir === f.scopeBase) return null; // scope root reached — no package above it
     dir = dirname(dir);
@@ -229,6 +313,7 @@ function selfTest() {
   console.log(`\nno-stop-loss self-test: ${clean.length + dirty.length} fixtures passed`);
 
   labOnlySandboxTest();
+  declaredTierSandboxTest();
 }
 
 // The lab_only exemption exercised through the REAL scan path (scanTree over a
@@ -272,6 +357,88 @@ function labOnlySandboxTest() {
   }
 }
 
+// The declared tier exercised through the REAL scan path (scanTree over a temp
+// sandbox): the operator ruling's five cases plus two strictness near-misses.
+//   (a) declared + knob-source binding  → allowed + loud DECLARED line
+//   (b) declared + hardcoded stop math  → RED
+//   (c) declared + UNDECLARED knob      → RED
+//   (d) undeclared + knob-source binding → RED (tier games buy nothing)
+//   (e) R1 reserved key in a declared package → RED (absolute, never exempt)
+function declaredTierSandboxTest() {
+  const root = mkdtempSync(join(tmpdir(), 'no-stop-loss-declared-'));
+  const scopes = [['user_layer/strategies_lua', 'lua']];
+  const write = (pkg, manifest, strategy) => {
+    const dir = join(root, 'user_layer', 'strategies_lua', pkg);
+    mkdirSync(dir, { recursive: true });
+    if (manifest !== null) writeFileSync(join(dir, 'manifest.json'), manifest);
+    writeFileSync(join(dir, 'strategy.lua'), strategy);
+  };
+  const ruling = 'operator ruling 2026-11-08: sandbox fixture';
+  const declared = JSON.stringify({
+    name: 'PLACEHOLDER',
+    stop_loss_policy: 'declared',
+    stop_loss_knobs: ['stop_loss_pct'],
+    stop_loss_ruling: ruling,
+  });
+  const knobBinding = 'local DEFAULT_SL = { m = 50, s = 0 }\nlocal stop = dec_param(params, "stop_loss_pct", DEFAULT_SL)\n';
+  const dm = (pkg, extra = {}) =>
+    JSON.stringify({ name: pkg, stop_loss_policy: 'declared', stop_loss_knobs: ['stop_loss_pct'], stop_loss_ruling: ruling, ...extra });
+  write('declared_ok', dm('declared_ok'), '-- (a) declared, knob-source binding\n' + knobBinding);
+  write('declared_hardcoded', dm('declared_hardcoded'), '-- (b) declared, hardcoded stop math\nlocal stop = price * 0.965\n');
+  write('declared_other_knob', dm('declared_other_knob'), '-- (c) declared, UNDECLARED knob as stop source\nlocal DEFAULT_X = { m = 5, s = 0 }\nlocal stop = dec_param(params, "secret_sl_pct", DEFAULT_X)\n');
+  write('plain_knob_pkg', JSON.stringify({ name: 'plain_knob_pkg' }), '-- (d) undeclared, knob-source binding\n' + knobBinding);
+  write('declared_r1_pkg', dm('declared_r1_pkg'), '-- (e) declared, R1 reserved key\nlocal payload = json.encode({ suggested_stop_loss = "0.30" })\n');
+  // strictness near-misses: the exact spellings are the whole authority
+  write('declared_casey', dm('declared_casey', { stop_loss_policy: 'Declared' }), '-- policy near-miss: must stay RED\n' + knobBinding);
+  write('declared_stringy', dm('declared_stringy', { stop_loss_knobs: 'stop_loss_pct' }), '-- knobs near-miss (string): must stay RED\n' + knobBinding);
+  try {
+    const { hits, skipped, declared: declaredPkgs } = scanTree(scopeFiles(root, scopes));
+    let bad = 0;
+    const fail = (m) => { bad += 1; console.error(`  FAIL ${m}`); };
+    const pkgHits = (pkg) => hits.filter((h) => h.rel.includes(pkg));
+    const verdictHits = (pkg) => pkgHits(pkg).filter((h) => !h.allowed);
+
+    // (a) allowed + DECLARED line
+    if (verdictHits('declared_ok').length > 0) fail('(a) declared knob-source binding was flagged — exemption missing');
+    else if (!pkgHits('declared_ok').some((h) => h.allowed)) fail('(a) declared knob-source binding produced no allowed-hit line');
+    else console.log('  ok   (a) declared knob-source binding allowed, loud allowed line printed');
+    const decA = declaredPkgs.find((d) => d.name === 'declared_ok');
+    if (!decA) fail('(a) no DECLARED line for declared_ok');
+    else if (!/declared/.test(decA.reason) || !/\[stop_loss_pct\]/.test(decA.reason) || !decA.ruling) {
+      fail(`(a) DECLARED line incomplete: ${decA.reason}`);
+    } else console.log(`  ok   (a) DECLARED line loud: ${decA.line.trim()}`);
+
+    // (b) hardcoded math stays RED
+    if (verdictHits('declared_hardcoded').length < 1) fail('(b) hardcoded stop math in a declared package was NOT flagged');
+    else console.log(`  ok   (b) declared + hardcoded stop math stays RED (${verdictHits('declared_hardcoded').length} hit(s))`);
+
+    // (c) undeclared knob stays RED
+    if (verdictHits('declared_other_knob').length < 1) fail('(c) UNDECLARED knob as stop source in a declared package was NOT flagged');
+    else console.log(`  ok   (c) declared + undeclared knob stays RED (${verdictHits('declared_other_knob').length} hit(s))`);
+
+    // (d) tier games buy nothing
+    if (verdictHits('plain_knob_pkg').length < 1) fail('(d) knob-source binding in an UNDECLARED package was NOT flagged');
+    else console.log(`  ok   (d) undeclared + knob-source binding stays RED (${verdictHits('plain_knob_pkg').length} hit(s))`);
+
+    // (e) R1 absolute
+    const r1 = verdictHits('declared_r1_pkg').filter((h) => h.rule.includes('R1 reserved intent key'));
+    if (r1.length < 1) fail('(e) R1 reserved key inside a declared package was NOT flagged');
+    else console.log(`  ok   (e) R1 reserved key in a declared package stays RED (${r1.length} hit(s))`);
+
+    // strictness near-misses
+    if (verdictHits('declared_casey').length < 1) fail('strictness: policy "Declared" (wrong case) was treated as a declaration');
+    else console.log('  ok   strictness: stop_loss_policy "Declared" (wrong case) is NOT a declaration — stays RED');
+    if (verdictHits('declared_stringy').length < 1) fail('strictness: string stop_loss_knobs was treated as a declaration');
+    else console.log('  ok   strictness: stop_loss_knobs as a bare string is NOT a declaration — stays RED');
+    if (skipped.length > 0) fail(`no package in this sandbox should be skipped, got ${JSON.stringify(skipped.map((s) => s.name))}`);
+
+    if (bad > 0) { console.error(`\nno-stop-loss self-test: declared-tier sandbox ${bad} case(s) failed`); process.exit(1); }
+    console.log('no-stop-loss self-test: declared-tier sandbox cases passed');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const TEETH_SOURCE = [
   '// --teeth: the bad implementation §16.6 row 1 demands the gate catch.',
   'local stop = price * 0.965',
@@ -281,7 +448,8 @@ const TEETH_SOURCE = [
 function teeth() {
   // Feed the BAD implementation to the judge and EXPECT failure (§A.4 step 3):
   // the injected source must be flagged with the §16.6 message, and a gate
-  // that stays green here is toothless.
+  // that stays green here is toothless. No manifest context → no tier → no
+  // exemption: the injected literal stop math must stay RED in every tier.
   const hits = scanText(TEETH_SOURCE, 'lua');
   const ok = hits.some((h) => h.rule.includes('stop-loss logic found'));
   console.log(`${ok ? '  ok  ' : '  FAIL'} teeth: injected "local stop = price * 0.965" into an exits reason`);
@@ -295,26 +463,46 @@ function teeth() {
 }
 
 // One pass over the scope files: every hit printed LOUDLY as it is found
-// (rule @ file:line), every lab_only package skipped with a loud line.
-// Returns { hits, skipped } so --self-test can drive the real verdict path.
+// (rule @ file:line), every lab_only package skipped with a loud line, every
+// declared package announced with a loud DECLARED line (name + knobs + ruling)
+// and every allowed knob-bound binding printed. Returns { hits, skipped,
+// declared } so --self-test can drive the real verdict path.
 function scanTree(files) {
   const hits = [];
   const skipped = [];
+  const declared = [];
+  const printedDeclared = new Set();
   for (const f of files) {
-    const lab = labOnlyInfo(f);
-    if (lab) {
+    const pkg = packageFlags(f);
+    if (pkg && pkg.labOnly) {
       const reason = `lab_only — manifest.json declares "lab_only": true (operator-declared replay/research lab); gate does NOT certify this package`;
-      const line = `  SKIP ${lab.name} (${f.scopeDir}/…): ${reason}`;
+      const line = `  SKIP ${pkg.name} (${f.scopeDir}/…): ${reason}`;
       console.log(line);
-      skipped.push({ name: lab.name, pkgRel: lab.pkgRel, reason, line });
+      skipped.push({ name: pkg.name, pkgRel: pkg.pkgRel, reason, line });
       continue;
     }
-    for (const h of scanText(readFileSync(f.path, 'utf8'), f.family)) {
-      console.log(`  ${h.rule} @ ${f.rel}:${h.line}: ${h.snippet}`);
-      hits.push({ ...h, rel: f.rel });
+    if (pkg && pkg.declared && !printedDeclared.has(pkg.pkgRel)) {
+      printedDeclared.add(pkg.pkgRel);
+      const knobsTxt = `[${pkg.knobs.join(', ')}]`;
+      const rulingTxt = pkg.ruling || '(ruling reference missing)';
+      const reason = `stop_loss_policy=declared, knobs=${knobsTxt} (${rulingTxt})`;
+      const line = `  DECLARED ${pkg.name} (${pkg.pkgRel}): ${reason}`;
+      console.log(line);
+      declared.push({ name: pkg.name, pkgRel: pkg.pkgRel, knobs: pkg.knobs, ruling: pkg.ruling, reason, line });
+    }
+    const exempt = pkg && pkg.declared ? { knobs: new Set(pkg.knobs) } : null;
+    for (const h of scanText(readFileSync(f.path, 'utf8'), f.family, exempt)) {
+      if (h.allowed) {
+        const line = `  ok declared binding allowed (knob "${h.knob}" via dec_param) @ ${f.rel}:${h.line}: ${h.snippet}`;
+        console.log(line);
+        hits.push({ ...h, rel: f.rel, allowedLine: line });
+      } else {
+        console.log(`  ${h.rule} @ ${f.rel}:${h.line}: ${h.snippet}`);
+        hits.push({ ...h, rel: f.rel });
+      }
     }
   }
-  return { hits, skipped };
+  return { hits, skipped, declared };
 }
 
 function main() {
@@ -323,24 +511,33 @@ function main() {
   if (argv.includes('--teeth')) return teeth();
 
   const files = scopeFiles();
-  const { hits, skipped } = scanTree(files);
+  const { hits, skipped, declared } = scanTree(files);
+  const verdictHits = hits.filter((h) => !h.allowed);
+  const allowedCount = hits.length - verdictHits.length;
   console.log(
     `no-stop-loss: scanned ${files.length - skipped.length} strategy source file(s) ` +
       `across ${SCOPES.length} scopes` +
-      (skipped.length ? `; ${skipped.length} lab_only package(s) SKIPPED` : ''),
+      (skipped.length ? `; ${skipped.length} lab_only package(s) SKIPPED` : '') +
+      (declared.length ? `; ${declared.length} declared stop-loss package(s)` : '') +
+      (allowedCount ? `; ${allowedCount} declared-knob binding(s) allowed` : ''),
   );
   if (skipped.length) {
     for (const s of skipped) console.log(`  lab_only skip in summary: ${s.name} (${s.pkgRel}) — ${s.reason}`);
   }
-  if (hits.length > 0) {
+  if (declared.length) {
+    for (const d of declared) console.log(`  DECLARED in summary: ${d.name} (${d.pkgRel}): ${d.reason}`);
+  }
+  if (verdictHits.length > 0) {
     console.error(
-      `\nRESULT: FAIL — ${hits.length} stop-loss hit(s) in strategy sources.\n` +
+      `\nRESULT: FAIL — ${verdictHits.length} stop-loss hit(s) in strategy sources.\n` +
         'A strategy computes no stop and monitors no stop; the kernel owns exits\n' +
-        '(STRATEGY_GUIDE「止损不归你管」). Move the logic out of the strategy.',
+        '(STRATEGY_GUIDE「止损不归你管」). A declared tier exempts ONLY knob-bound\n' +
+        'dec_param stop bindings — R1 reserved keys and hardcoded stop math are\n' +
+        'never exempt, any tier. Move the logic out of the strategy or declare it.',
     );
     process.exit(1);
   }
-  console.log('RESULT: PASS — zero stop-loss logic, zero reserved intent keys in strategy sources');
+  console.log('RESULT: PASS — zero undeclared stop-loss bindings, zero reserved intent keys in strategy sources');
 }
 
 main();
