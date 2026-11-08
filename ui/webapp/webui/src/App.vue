@@ -132,8 +132,8 @@ const { pause: stopPoll } = useIntervalFn(() => { void store.refresh() }, 15_000
 onUnmounted(() => { stopPoll() })
 
 /**
- * #838: the SSE change stream rides BESIDE the poll loop, never instead of
- * it. Frames carry the exact /api/snapshot document, so each delivery is a
+ * The SSE change stream (issue 838) rides BESIDE the poll loop, never instead
+ * of it. Frames carry the exact /api/snapshot document, so each delivery is a
  * freshness upgrade (event-shaped readings — banners, order terminal states —
  * land within the server's 1s tick instead of the next poll); when the
  * stream dies the loop below is untouched and the panel stays informed. The
