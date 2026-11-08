@@ -225,9 +225,11 @@ fn receivable_fallback_books_claim_and_resolution_redeems_at_venue_truth() {
     let trades = c.recent_trades(10);
     assert_eq!(trades.len(), 1);
     let got = trades[0]["netPnlUsd"].as_f64().expect("net is a number");
+    // No taint interpolation in the message (CodeQL cleartext-logging): the
+    // delta itself is public arithmetic, the ledger-derived numbers are not.
     assert!(
         (got - expected_net.to_f64().unwrap()).abs() < 1e-9,
-        "the recorded net is amended by the venue-vs-estimate delta: got {got}, want {expected_net}"
+        "the recorded net is amended by the venue-vs-estimate delta"
     );
     // The amend keeps the provenance flags: still an estimated close.
     let closed_after = &c.positions().closed_positions()[0];
