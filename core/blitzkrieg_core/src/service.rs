@@ -77,6 +77,14 @@ pub struct Core {
     /// line when the withhold first hits a position, the entry cleared as
     /// soon as a fresh bid resolves it again.
     withheld_exit_logged: std::collections::HashSet<String>,
+    /// Entry-rejection tuples already logged (same 2026-11-08 find, entry
+    /// side): while a gate holds (loss breaker, capacity, …) the strategy
+    /// re-emits candidates every tick and the identical INFO line ran at
+    /// ~34-100 lines/second for the whole episode. One line per distinct
+    /// (strategy, gate, reason, detail) episode; the set is bounded — when
+    /// it grows past the cap it drains, so a pathological detail variety
+    /// degrades to the old per-tick logging instead of unbounded memory.
+    entry_reject_logged: std::collections::HashSet<String>,
     /// 跨所套利弹窗 v2: the leg configuration in force (the `ACCOUNT_ARB_*`
     /// env grammar's memory mirror). `None` = unconfigured.
     /// Written by `arb_config_set_persisting` (`.env` + memory in one
