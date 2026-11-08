@@ -658,8 +658,21 @@ impl Core {
                     detail.clone(),
                 ));
                 *acc.rejection_causes.entry(cause).or_default() += 1;
-                tracing::info!(target: "strategy",
-                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                // 2026-11-08 pre-release find: while a gate holds (loss
+                // breaker, capacity, …) the strategy re-emits candidates every
+                // tick and this identical INFO line ran at ~34-100 lines/s for
+                // the whole episode. Log the EPISODE, not every tick: one line
+                // per distinct (strategy, gate, reason, detail); the set is
+                // bounded — past the cap it drains, degrading to the old
+                // per-tick logging instead of unbounded memory.
+                let reject_key = format!("{name}|{gate:?}|{reason:?}|{detail}");
+                if self.entry_reject_logged.insert(reject_key) {
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                    if self.entry_reject_logged.len() > 512 {
+                        self.entry_reject_logged.clear();
+                    }
+                }
                 continue;
             }
             let mut req = intent.request;
@@ -1105,8 +1118,21 @@ impl Core {
                     detail.clone(),
                 ));
                 *acc.rejection_causes.entry(cause).or_default() += 1;
-                tracing::info!(target: "strategy",
-                    "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                // 2026-11-08 pre-release find: while a gate holds (loss
+                // breaker, capacity, …) the strategy re-emits candidates every
+                // tick and this identical INFO line ran at ~34-100 lines/s for
+                // the whole episode. Log the EPISODE, not every tick: one line
+                // per distinct (strategy, gate, reason, detail); the set is
+                // bounded — past the cap it drains, degrading to the old
+                // per-tick logging instead of unbounded memory.
+                let reject_key = format!("{name}|{gate:?}|{reason:?}|{detail}");
+                if self.entry_reject_logged.insert(reject_key) {
+                    tracing::info!(target: "strategy",
+                        "entry rejected: strategy={name} cause=arbitration gate={gate:?} reason={reason:?} detail={detail}");
+                    if self.entry_reject_logged.len() > 512 {
+                        self.entry_reject_logged.clear();
+                    }
+                }
                 continue;
             }
             let mut req = intent.request;

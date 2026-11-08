@@ -374,6 +374,7 @@ impl Core {
             },
             strategy_exits: Vec::new(),
             withheld_exit_logged: std::collections::HashSet::new(),
+            entry_reject_logged: std::collections::HashSet::new(),
             engine: None,
             strategy_declarations: HashMap::new(),
             plugin_modes: Vec::new(),
