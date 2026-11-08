@@ -69,6 +69,14 @@ pub struct Core {
     /// Strategy close intents drained from the engine in `engine_evaluate` and
     /// consumed by the shared exit-submission path in `run_exit_checks`.
     strategy_exits: Vec<crate::strategies::StrategyExitIntent>,
+    /// Positions whose "exit withheld: no fresh best bid" state has ALREADY
+    /// been logged (2026-11-08 pre-release find): a restored position whose
+    /// venue book never freshens re-emits the intent every engine tick, and
+    /// the per-tick INFO line ran at hundreds of lines/second for minutes
+    /// (~2M lines from one boot). Log the STATE CHANGE, not the state: one
+    /// line when the withhold first hits a position, the entry cleared as
+    /// soon as a fresh bid resolves it again.
+    withheld_exit_logged: std::collections::HashSet<String>,
     /// 跨所套利弹窗 v2: the leg configuration in force (the `ACCOUNT_ARB_*`
     /// env grammar's memory mirror). `None` = unconfigured.
     /// Written by `arb_config_set_persisting` (`.env` + memory in one

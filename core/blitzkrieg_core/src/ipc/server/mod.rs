@@ -390,10 +390,12 @@ async fn handle_line(
 
     let reply: Result<Value, (i32, String, Option<ErrorData>)> = match method {
         method::PING => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::READY => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::SYSTEM_VERSION => {
             handlers::system::handle_system(method, core, peer, update_state, session, params).await
@@ -412,7 +414,8 @@ async fn handle_line(
             handlers::system::handle_system(method, core, peer, update_state, session, params).await
         }
         method::CORE_FEE_QUOTE => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::RISK_KILL => handlers::risk::handle_risk(method, core, peer, params).await,
         method::RISK_RESUME => handlers::risk::handle_risk(method, core, peer, params).await,
@@ -456,7 +459,8 @@ async fn handle_line(
             handlers::order::handle_order(method, core, session, params).await
         }
         method::LEDGER_BALANCE => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::ORDER_RECONCILE => {
             handlers::order::handle_order(method, core, session, params).await
@@ -476,16 +480,19 @@ async fn handle_line(
             handlers::position::handle_position(method, core, peer, params).await
         }
         method::BOOK_SNAPSHOT => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::ENGINE_BOOK => {
             handlers::engine::handle_engine(method, core, registry, params).await
         }
         method::TOP_OF_BOOK => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::SPOT_PRICE => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::ENGINE_STATS => {
             handlers::engine::handle_engine(method, core, registry, params).await
@@ -525,7 +532,8 @@ async fn handle_line(
             handlers::market::handle_market(method, core, registry, peer, params).await
         }
         method::NET_CHECK => {
-            handlers::misc::handle_misc(method, core, registry, peer, data_plane, params).await
+            handlers::misc::handle_misc(method, core, registry, peer, data_plane, session, params)
+                .await
         }
         method::EXTENSION_ENABLE => {
             handlers::extension::handle_extension(method, core, params).await

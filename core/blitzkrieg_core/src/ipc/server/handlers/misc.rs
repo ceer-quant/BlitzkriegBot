@@ -1,4 +1,6 @@
-use super::super::{DataPlaneRuntime, PeerAuth, SOCKET_MODE, typed};
+use super::super::{
+    DataPlaneRuntime, PeerAuth, SOCKET_MODE, SessionState, effective_default_account, typed,
+};
 use super::prelude::*;
 use crate::schema::*;
 
@@ -15,6 +17,7 @@ pub(crate) async fn handle_misc(
     registry: &crate::market::registry::MarketPluginRegistry,
     peer: &PeerAuth,
     data_plane: &DataPlaneRuntime,
+    session: &SessionState,
     params: Value,
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
     match method {
@@ -67,6 +70,17 @@ pub(crate) async fn handle_misc(
         }
         method::LEDGER_BALANCE => {
             let c = core.lock().await;
+            // The balance answers for the SESSION's default account (§9.5),
+            // not the process default: `account.switch` on this connection
+            // must move this read, or the panel's balance card stops
+            // following the account switcher. Same resolution chain
+            // account.list uses (session → display → process default).
+            let active = effective_default_account(session, c.accounts());
+            // The chain only names existing accounts (session ids pass
+            // `require` at switch time; the display pointer's invariant
+            // covers the tail), so the fallback is unreachable in practice —
+            // but an unknown id must never 500 a read, hence the fallback.
+            let ledger = c.accounts().ledger_of(&active).unwrap_or(c.ledger());
             // The dry seed is only a principal while DRY: a live core's opening
             // cash is the venue's number, so it reports no principal at all
             // rather than a config value that never applied.
@@ -88,15 +102,11 @@ pub(crate) async fn handle_misc(
             // its own env declares nothing here, and an account whose keys did
             // load still has no number until the venue actually answers. The
             // first venue report re-establishes it after every boot.
-            let unfunded_live = c.mode() == Mode::Live && !c.active_ledger_venue_reported();
+            let unfunded_live = c.mode() == Mode::Live && !ledger.venue_reported();
             let (balance, reserved, available) = if unfunded_live {
                 (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
             } else {
-                (
-                    c.ledger().balance(),
-                    c.ledger().reserved(),
-                    c.ledger().available(),
-                )
+                (ledger.balance(), ledger.reserved(), ledger.available())
             };
             Ok(serde_json::to_value(BalanceResult {
                 balance,

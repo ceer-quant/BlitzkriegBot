@@ -687,3 +687,108 @@ fn the_escalated_close_key_keeps_close_intent() {
     assert!(!crate::risk::is_close_intent("dry_5:escalated"));
     assert!(!crate::risk::is_close_intent("spread_arb:BTC:up:1"));
 }
+
+// ── 2026-11-08 pre-release find: the withheld-exit log is a state change ───
+
+/// A restored position whose venue book never freshens re-emits the strategy
+/// exit intent every engine tick, and the "no fresh best bid" withhold used
+/// to log an INFO line PER TICK — one boot produced ~2M lines at
+/// hundreds/second until the expiry sweep closed the position. The withhold
+/// itself is correct pricing discipline (never sell the mid); the LOG must
+/// carry the state CHANGE: once when the withhold first hits the position,
+/// silent on every repeat, news again once a fresh bid resolves it.
+#[test]
+fn withheld_exit_log_fires_once_per_state_change_not_per_tick() {
+    let mut c = fault_core(|_| {});
+    open_at(
+        &mut c,
+        rust_decimal_macros::dec!(0.40),
+        rust_decimal_macros::dec!(2),
+        1_000,
+    );
+    let pos_id = c
+        .positions()
+        .open_positions()
+        .iter()
+        .find(|p| p.token_id == "tok")
+        .expect("seed position open")
+        .id
+        .clone();
+    let intent = crate::strategies::StrategyExitIntent {
+        token_id: "tok".into(),
+        reason: "tp".into(),
+        account_id: crate::model::default_account_id().to_string(),
+        use_maker: false,
+        exit_price: None,
+    };
+    // Far past the seed book's trust window: the entry book is stale here.
+    let now = 1_000_000;
+
+    // Tick 1: withheld, logged (first news for this position).
+    let jobs = c.exit_jobs_from_strategy_intents(
+        vec![intent.clone()],
+        &mut std::collections::HashSet::new(),
+        now,
+    );
+    assert!(
+        jobs.is_empty(),
+        "no fresh bid → no job (len {})",
+        jobs.len()
+    );
+    assert!(
+        c.withheld_exit_logged.contains(&pos_id),
+        "first withhold is logged (state change)"
+    );
+
+    // Tick 2..N: SAME withhold — the set already carries the position, so
+    // every repeat stays silent (the fix: no per-tick line).
+    let jobs = c.exit_jobs_from_strategy_intents(
+        vec![intent.clone()],
+        &mut std::collections::HashSet::new(),
+        now,
+    );
+    assert!(jobs.is_empty());
+    assert!(c.withheld_exit_logged.contains(&pos_id));
+
+    // A fresh bid resolves the intent into a job — and clears the mark, so a
+    // LATER withhold for the same position is news again.
+    c.book_snapshot(
+        "tok",
+        vec![(
+            rust_decimal_macros::dec!(0.50),
+            rust_decimal_macros::dec!(500),
+        )],
+        vec![(
+            rust_decimal_macros::dec!(0.51),
+            rust_decimal_macros::dec!(500),
+        )],
+        now,
+    );
+    let jobs = c.exit_jobs_from_strategy_intents(
+        vec![intent.clone()],
+        &mut std::collections::HashSet::new(),
+        now,
+    );
+    assert_eq!(
+        jobs.len(),
+        1,
+        "a fresh bid resolves the exit (len {})",
+        jobs.len()
+    );
+    assert!(
+        !c.withheld_exit_logged.contains(&pos_id),
+        "resolved exit clears the withheld mark"
+    );
+
+    // Book goes stale again: the withhold logs once more (new state change).
+    let jobs = c.exit_jobs_from_strategy_intents(
+        vec![intent],
+        &mut std::collections::HashSet::new(),
+        now + 1_000_000,
+    );
+    assert!(jobs.is_empty());
+    assert!(
+        c.withheld_exit_logged.contains(&pos_id),
+        "a fresh withhold after resolution is news again"
+    );
+}
