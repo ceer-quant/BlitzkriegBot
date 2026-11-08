@@ -31,9 +31,13 @@
  *   --fee-model official --slippage-ticks 1 --backtest-tick-ms 50 --backtest-fast
  *   identity 档（引擎默认恒等成交模型）只作附录上界，用 --profile both 顺带跑。
  *
- * 确定性（#351 / #964 验收 1）：每个臂 × 每个窗口默认跑两遍，报告文件
- * sha256 必须逐字节一致、tradesSha256 相同 —— 不一致 = 确定性 bug，判实验
- * 无效而不是当统计噪音。--single-run 可跳过第二遍（快速过框架用）。
+ * 确定性（#351 / #964 验收 1；#1004 加「非空」前置）：每个臂 × 每个窗口默认
+ * 跑两遍，报告文件 sha256 必须逐字节一致、tradesSha256 相同 —— 不一致 =
+ * 确定性 bug，判实验无效而不是当统计噪音。0 tradeLines 的臂（closed==0）
+ * 两份空报告必然逐字节相等（「空==空」），记 vacuous（UNJUDGEABLE_EMPTY_RUN）
+ * 而不是 PASS：空跑不构成确定性证据，带着 vacuous 臂的实验判不可用；
+ * arm-starved 的结构化归因声明路径不受影响。--single-run 可跳过第二遍
+ * （快速过框架用）。
  *
  * 平均持仓时长（预先声明的近似口径）：backtest 报告的 tradeLines 不带逐笔
  * 时间戳（引擎 schema 限制，backtest.rs TradeLine），逐笔秒数不可测。本脚本
@@ -192,6 +196,8 @@ const OUT_DIR = REPORT_ONLY ? resolve(REPORT_ONLY) : resolve(flag('--out') ?? jo
 
 const utc = (ms) => (ms == null ? '—' : new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z'));
 const r4 = (n) => (n == null ? '—' : (Math.round(n * 10000) / 10000).toString());
+// 千分位分组，手写不用 toLocaleString —— 报告文本必须跨环境逐字节稳定。
+const fmtInt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const sha256File = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
 const num = (v) => {
   if (v == null) return null;
@@ -297,6 +303,10 @@ async function scanCorpus(corpus) {
   const assetsAll = new Set();
   let totalLines = 0;
   let firstAtMs = null, lastAtMs = null;
+  // top 报价锁价统计（#1004：报告里的结构归因数字必须从本次语料实算，
+  // 禁止写死「实测」值）。k=top 行的 ba/bb 是报价字符串；等价 = 同一数值
+  // 表示（"0.44" 与 "0.440" 都算锁价 —— 归因关心的是数值本身，不是字面）。
+  let topQuotes = 0, topLocked = 0, topUnparsed = 0;
   const rl = createInterface({ input: createReadStream(corpus), crlfDelay: Infinity });
   for await (const line of rl) {
     totalLines++;
@@ -305,6 +315,13 @@ async function scanCorpus(corpus) {
     if (Number.isFinite(at)) {
       if (firstAtMs == null) firstAtMs = at;
       lastAtMs = at;
+    }
+    if (line.includes('"k":"top"')) {
+      let d;
+      try { d = JSON.parse(line); } catch { d = null; }
+      const ba = num(d?.ba), bb = num(d?.bb);
+      if (ba == null || bb == null) topUnparsed++;
+      else { topQuotes++; if (ba === bb) topLocked++; }
     }
     if (line.includes('"k":"round"')) {
       let d;
@@ -328,7 +345,11 @@ async function scanCorpus(corpus) {
       }
     }
   }
-  return { rounds, resLineOf, resAtLine, totalLines, firstAtMs, lastAtMs, assetsAll: [...assetsAll].sort() };
+  return {
+    rounds, resLineOf, resAtLine, totalLines, firstAtMs, lastAtMs,
+    assetsAll: [...assetsAll].sort(),
+    topStats: { quotes: topQuotes, locked: topLocked, unparsed: topUnparsed },
+  };
 }
 
 // ── 窗口规划（轮数等分 + 结算完整性校验，不挑窗口）──────────────────────────
@@ -593,6 +614,26 @@ function runBacktest(cmd, reportPath, label) {
 
 const SETTLED_REASONS = new Set(['Settlement']);
 
+/**
+ * 双跑确定性判定（#1004 加非空前置）。
+ *
+ * 旧逻辑只比整份 report 的 sha256：0 tradeLines 的臂两份空报告必然逐字节
+ * 相等（「空==空」），于是被记成 match 并充当确定性 PASS —— 这是外推造假：
+ * 空跑不构成引擎确定性的证据。本判定加前置：双跑同 hash 且 tradeLines 非空
+ * 才记 'match'；同 hash 但为空记 'vacuous-empty-runs'（= UNJUDGEABLE_EMPTY_RUN，
+ * 未判定而非通过）；不同 hash 恒记 'mismatch'（空报告也不会 hash 相撞）。
+ * 'skipped'（--single-run）与 'missing'（断点续跑缺第二份报告）语义不变。
+ *
+ * @param {string} h1 run1 报告文件 sha256
+ * @param {string} h2 run2 报告文件 sha256
+ * @param {number} tradeLineCount run1 报告的 tradeLines 条数
+ * @returns {'match'|'vacuous-empty-runs'|'mismatch'|'skipped'|'missing'}
+ */
+function determinismVerdict(h1, h2, tradeLineCount) {
+  if (h1 !== h2) return 'mismatch';
+  return tradeLineCount > 0 ? 'match' : 'vacuous-empty-runs';
+}
+
 function extractMetrics(rep, win, profile) {
   const t = rep.trades ?? {};
   const closed = num(t.closed) ?? 0;
@@ -767,24 +808,43 @@ function aggregate(arm, perWindow) {
     avgHoldSecUpper: closed > 0 ? holdUpper / closed : null,
     reasonHistogram: reasons,
     entry: { ordersPlaced, ordersRejected, rejectionCauses, accountFreezes: freezes },
-    determinism: all.every((m) => m.determinism === 'match') ? 'match'
-      : all.some((m) => m.determinism === 'mismatch') ? 'mismatch'
-        : all.every((m) => m.determinism === 'skipped') ? 'skipped' : 'mixed',
+    // 跨窗确定性合成（#1004 语义）：vacuous-empty-runs 是独立状态，不并入
+    // match（空跑不是证据），也不并入 mismatch（没有破裂证据）。vacuous +
+    // match 混合 = 'vacuous-mixed' —— 只有非空窗口的 match 算数，空窗不算。
+    determinism: all.some((m) => m.determinism === 'mismatch') ? 'mismatch'
+      : all.some((m) => m.determinism === 'missing') ? 'missing'
+        : all.every((m) => m.determinism === 'match') ? 'match'
+          : all.every((m) => m.determinism === 'vacuous-empty-runs') ? 'vacuous-empty-runs'
+            : all.some((m) => m.determinism === 'vacuous-empty-runs') ? 'vacuous-mixed'
+              : all.every((m) => m.determinism === 'skipped') ? 'skipped' : 'mixed',
     perWindow: all.map(({ _lossMags, ...rest }) => rest),
   };
 }
 
 function verdictOf(aggs, coverage, minBetter) {
   // gates 先行：任何一条不过，实验整体判无效 —— 结论区只做归因，不做遮掩。
+  // #1004：确定性门禁区分「通过」与「证据」——match 是证据；skipped 是声明式
+  // 跳过；vacuous-empty-runs / vacuous-mixed 是 UNJUDGEABLE（0 tradeLines 双跑
+  // 「空==空」）不是 PASS。带 vacuous 臂的实验判不可用：该臂的确定性主张
+  // 没有证据。mismatch/missing 照旧直接红。
+  const DETERMINISM_PASS = new Set(['match', 'skipped']);
   const gates = {
     coverage: coverage.ok,
     coverageDetail: coverage.detail,
     determinism: Object.fromEntries(Object.entries(aggs).map(([k, v]) => [k, v.determinism])),
+    determinismVacuous: Object.fromEntries(Object.entries(aggs)
+      .filter(([, v]) => typeof v.determinism === 'string' && v.determinism.startsWith('vacuous'))
+      .map(([k, v]) => [k, v.determinism])),
     contamination: Object.fromEntries(Object.entries(aggs).map(([k, v]) => [k, v.contaminated ?? false])),
   };
   const usable = gates.coverage
-    && Object.values(gates.determinism).every((d) => d === 'match' || d === 'skipped')
+    && Object.values(gates.determinism).every((d) => DETERMINISM_PASS.has(d))
     && Object.values(gates.contamination).every((c) => !c);
+  // 硬红 = 与「饿死臂必然 vacuous」无关的门禁破裂：覆盖不足、归因污染、
+  // 确定性 mismatch/missing。这些无论臂饿死与否都直接判 invalid。
+  const hardFail = !gates.coverage
+    || Object.values(gates.contamination).some(Boolean)
+    || Object.values(gates.determinism).some((d) => d === 'mismatch' || d === 'missing');
 
   // 行方向约定：compareRows(base, cand) → a=base 列, b=cand 列, delta=cand−base,
   // verdict 'better' = cand 优于 base。三张表都让 cand=更"动态"的那一臂。
@@ -824,16 +884,43 @@ function verdictOf(aggs, coverage, minBetter) {
     }
   }
   const starved = Object.keys(starvedDetail).length > 0;
+  // #1004 结论序：arm-starved 优先于 invalid。饿死臂（closed==0）的双跑必然
+  // vacuous —— 那正是「臂没上场」的表现，不该把结构归因判决（issue 验收：
+  // arm-starved 路径保持原样）降级成 invalid；vacuous 记录在
+  // gates.determinismVacuous 里随报告显式可读。只有存在与饿死无关的硬红
+  // （覆盖不足 / 污染 / mismatch / missing）才判 invalid —— 硬红优先于
+  // starved，绝不给带真门禁破裂的跑批出结构归因。usable 仍按门禁原样：
+  // vacuous 臂不充当确定性证据，带 vacuous 的跑批 usable=false。
+  const vacuousArms = Object.keys(gates.determinismVacuous);
   const conclusion = !aggs.B || !aggs.A ? 'pending'
-    : !usable ? 'invalid'
+    : hardFail ? 'invalid'
       : starved ? 'arm-starved'
-        : expectBetter(bVsA, 'expectancyUsd') === 'better' && expectBetter(bVsA, 'payoff') === 'better' ? 'B-better-on-both-target-metrics'
-          : bBetterOn >= minBetter ? 'B-better-on-enough-metrics'
-            : 'B-not-better';
-  return { usable, gates, bVsA, bVsC, cVsA, bBetterOn, minBetter, conclusion, starved, starvedDetail };
+        : !usable ? 'invalid'
+          : expectBetter(bVsA, 'expectancyUsd') === 'better' && expectBetter(bVsA, 'payoff') === 'better' ? 'B-better-on-both-target-metrics'
+            : bBetterOn >= minBetter ? 'B-better-on-enough-metrics'
+              : 'B-not-better';
+  return { usable, gates, bVsA, bVsC, cVsA, bBetterOn, minBetter, conclusion, starved, starvedDetail, vacuousArms };
 }
 
 // ── 报告渲染 ────────────────────────────────────────────────────────────────
+
+/**
+ * arm-starved 段的结构归因文本（#1004：所有「实测」数字必须能追到本次语料，
+ * 算不出来就印「未测」，禁止写死字面量）。
+ *
+ * 数字来源 = 本次 run manifest 的 corpusTopStats（scanCorpus 流式实算的
+ * k=top 行统计）：locked/quotes 两个数与锁价占比都从这里派生；字段缺失
+ * （旧 manifest --report-only 复渲染）时整段印「未测」，绝不回退到写死值。
+ */
+function armStarvedAttribution(manifest) {
+  const ts = manifest.corpusTopStats;
+  let measured = 'top 报价锁价占比未测（本次 run manifest 无 corpusTopStats —— 旧 manifest 复渲染不伪造实测值）';
+  if (ts && Number.isFinite(ts.quotes) && Number.isFinite(ts.locked) && ts.quotes > 0) {
+    const unparsedNote = ts.unparsed > 0 ? `，另有 ${fmtInt(ts.unparsed)} 行 top 未解析、不计入分母` : '';
+    measured = `top 报价锁价 ${fmtInt(ts.locked)}/${fmtInt(ts.quotes)}（${((ts.locked / ts.quotes) * 100).toFixed(2)}%${unparsedNote}，ba==bb，单边成交价派生，本次语料实算）`;
+  }
+  return `结构性归因（issue 归因分支 3「市场结构」）：本语料（data/onchain 15m-act）的 ${measured}。A 臂（lua_momentum）的入场由 manifest \`entry_maker: true\` 声明为纯 maker（宿主强制 never-escalate，lua_loader.rs），提交瞬间即穿越（buy@best_bid == best_ask）→ WouldCross 拒单 → 5 连拒触发内核账户冻结。这是包学说 × 语料结构的交互，不是旋钮可修的：被饿死是「错失机会，从非损失」（包注释原话）在锁价簿上的必然结果。**真数据 A/B 需审计裁决坐标**：(a) 接受主坐标下的结构性结论；或 (b) A 臂换档案书语料（data/archive frozen-corpus 惯例，真 L2 有档差，962 同款）。本脚本不改策略实现、不改引擎（#964 禁止触碰项）。`;
+}
 
 function renderMd(manifest, windows, aggs, verdict, tradesIndex) {
   const md = [];
@@ -848,7 +935,7 @@ function renderMd(manifest, windows, aggs, verdict, tradesIndex) {
   md.push(`- 窗口：${windows.length} 窗 × ≥${manifest.minRounds} 轮，轮数等分连续切片；每窗校验 resolution 行完整性。全窗口清单见附录。`);
   md.push(`- 资金与费率：seed-balance ${manifest.seedBalance} USD；min/max shares ${manifest.minShares}/${manifest.maxShares}（top-only 语料名义深度 1 手 → sizing 固定 1，两臂同值）；max-order-notional ${manifest.maxOrderNotional}；max-positions ${manifest.maxPositions}；fee-model=${manifest.profile === 'realistic' ? 'official' : '(引擎默认 legacy)'}；slippage=${manifest.profile === 'realistic' ? '1 tick' : '0 (identity)'}；tick-ms=${manifest.tickMs}${manifest.profile === 'realistic' ? '；--backtest-fast' : ''}。`);
   md.push(`- seed：B/C 臂 coin_seed=${manifest.seed}（--backtest-knob 显式下发）；A 臂无 seed（确定性引擎）。`);
-  md.push(`- 确定性：${manifest.singleRun ? 'single-run（--single-run，验收 1 的双跑校验未执行）' : '每臂×每窗双跑，报告 sha256 必须一致'}。`);
+  md.push(`- 确定性：${manifest.singleRun ? 'single-run（--single-run，验收 1 的双跑校验未执行）' : '每臂×每窗双跑，报告 sha256 必须一致且 tradeLines 非空（0 tradeLines 双跑 = vacuous，不计证据，#1004）'}。`);
   md.push('');
   md.push('### 平均持仓时长 —— 预先声明的近似口径');
   md.push('');
@@ -868,7 +955,15 @@ function renderMd(manifest, windows, aggs, verdict, tradesIndex) {
   md.push('');
   md.push(`- 覆盖：${verdict.gates.coverage ? 'PASS' : 'FAIL'} — ${verdict.gates.coverageDetail}`);
   for (const [arm, d] of Object.entries(verdict.gates.determinism)) {
-    md.push(`- 确定性 ${arm}：${d === 'match' ? 'PASS（双跑逐字节一致）' : d === 'skipped' ? 'SKIPPED（--single-run）' : `**FAIL（${d}）**`}`);
+    md.push(`- 确定性 ${arm}：${d === 'match' ? 'PASS（双跑逐字节一致）'
+      : d === 'skipped' ? 'SKIPPED（--single-run）'
+        : d === 'vacuous-empty-runs' ? '**UNJUDGEABLE_EMPTY_RUN（双跑同 hash 但 0 tradeLines：空==空，不构成确定性证据）**'
+          : d === 'vacuous-mixed' ? '**UNJUDGEABLE_EMPTY_RUN（部分窗口 0 tradeLines：vacuous 窗不计证据，非空窗 match 不救整臂）**'
+            : `**FAIL（${d}）**`}`);
+  }
+  const vacuousGates = Object.entries(verdict.gates.determinismVacuous ?? {});
+  if (vacuousGates.length) {
+    md.push(`- 确定性 vacuous 臂（#1004）：${vacuousGates.map(([a, d]) => `${a}=${d}`).join('，')} —— vacuous 臂不计入确定性证据，整跑 usable=false。`);
   }
   for (const [arm, c] of Object.entries(verdict.gates.contamination)) {
     md.push(`- 归因污染 ${arm}：${c ? '**FAIL（报告里出现了别的策略名）**' : 'PASS'}`);
@@ -917,7 +1012,7 @@ function renderMd(manifest, windows, aggs, verdict, tradesIndex) {
       md.push(`**${arm} 臂全程 0 平仓（对照不成立）**：下单 ${d.ordersPlaced}，被拒 ${d.ordersRejected}，原因 ${JSON.stringify(d.rejectionCauses)}；账户冻结 ${JSON.stringify(d.accountFreezes)}。`);
     }
     md.push('');
-    md.push('结构性归因（issue 归因分支 3「市场结构」）：本语料（data/onchain 15m-act）的 top 报价 100% 锁价（ba==bb，单边成交价派生，实测 293,286/293,286）。A 臂（lua_momentum）的入场由 manifest `entry_maker: true` 声明为纯 maker（宿主强制 never-escalate，lua_loader.rs），提交瞬间即穿越（buy@best_bid == best_ask）→ WouldCross 拒单 → 5 连拒触发内核账户冻结。这是包学说 × 语料结构的交互，不是旋钮可修的：被饿死是「错失机会，从非损失」（包注释原话）在锁价簿上的必然结果。**真数据 A/B 需审计裁决坐标**：(a) 接受主坐标下的结构性结论；或 (b) A 臂换档案书语料（data/archive frozen-corpus 惯例，真 L2 有档差，962 同款）。本脚本不改策略实现、不改引擎（#964 禁止触碰项）。');
+    md.push(armStarvedAttribution(manifest));
   } else if (verdict.conclusion === 'invalid') {
     md.push('**门禁未过，本报告不可作为证据。**');
   } else {
@@ -1077,6 +1172,117 @@ function selfTest() {
     eq(v4.starvedDetail.A.rejectionCauses['venue.WouldCross'], 115);
   });
 
+  // 4b) 空跑确定性（#1004）：0 tradeLines 双跑 = vacuous，不是 PASS。
+  // 饿死臂的确定性必然 vacuous —— 它不构成引擎确定性证据；vacuous 臂
+  // 把 usable 拉成 false，但 arm-starved 声明路径（结构化判决 + 拒单
+  // 证据）保持原样，不降级成 invalid。
+  ok &= P('verdict/空tradeLines双跑=vacuous非PASS', () => {
+    // determinismVerdict：同 hash + 空行 = vacuous；同 hash + 非空 = match；异 hash = mismatch
+    eq(determinismVerdict('h', 'h', 0), 'vacuous-empty-runs');
+    eq(determinismVerdict('h', 'h', 3), 'match');
+    eq(determinismVerdict('h1', 'h2', 0), 'mismatch');
+    // 全 vacuous 臂：determinism 合成不是 match；门禁不是 PASS；usable=false
+    const mk = (over) => ({
+      winRatePct: null, payoff: null, expectancyUsd: null, netPnlUsd: 0, maxDrawdownUsd: 0,
+      worstTradeUsd: null, tailLoss: { p99: null }, feesUsd: 0, settlementRatePct: null,
+      avgHoldSecFloor: null, closed: 0, windowsRun: 3, determinism: 'match', contaminated: false,
+      entry: { ordersPlaced: 0, ordersRejected: 0, rejectionCauses: {}, accountFreezes: {} },
+      ...over,
+    });
+    const aggVac = aggregate('A', [mk({ determinism: 'vacuous-empty-runs' }), mk({ determinism: 'vacuous-empty-runs' })]);
+    eq(aggVac.determinism, 'vacuous-empty-runs');
+    const aggMix = aggregate('A', [mk({ determinism: 'vacuous-empty-runs' }), mk({ determinism: 'match', closed: 5 })]);
+    eq(aggMix.determinism, 'vacuous-mixed');
+    const aggsVac = {
+      A: mk({ determinism: 'vacuous-empty-runs', entry: { ordersPlaced: 115, ordersRejected: 115, rejectionCauses: { 'venue.WouldCross': 115 }, accountFreezes: { default: '5 consecutive venue rejections' } } }),
+      B: mk({ determinism: 'match', closed: 100, winRatePct: 55, payoff: 1.2, expectancyUsd: 0.2 }),
+      C: mk({ determinism: 'match', closed: 90, winRatePct: 50, payoff: 1.1, expectancyUsd: 0.15 }),
+    };
+    const v5 = verdictOf(aggsVac, { ok: true, detail: 't' }, 2);
+    // 空臂不充当确定性证据：usable 拉闸，gates 里 vacuous 显式记录
+    eq(v5.usable, false);
+    eq(v5.gates.determinism.A, 'vacuous-empty-runs');
+    eq(v5.gates.determinismVacuous.A, 'vacuous-empty-runs');
+    eq(v5.gates.determinismVacuous.B, undefined);
+    // arm-starved 声明路径保持：结构化判决 + 拒单证据原样给出，不降级 invalid
+    eq(v5.conclusion, 'arm-starved');
+    eq(v5.starvedDetail.A.rejectionCauses['venue.WouldCross'], 115);
+    eq(v5.starvedDetail.A.closed, 0);
+    // B 臂空转（closed=0 无拒单）也走既定 starved 声明（closed==0 即 starved，
+    // 证据如实为空），vacuous 只拉 usable，不改判决种类
+    const aggsVacNoEvidence = {
+      A: mk({ determinism: 'match', closed: 50, winRatePct: 50, payoff: 1, expectancyUsd: 0.1 }),
+      B: mk({ determinism: 'vacuous-empty-runs' }),
+      C: mk({ determinism: 'match', closed: 40, winRatePct: 50, payoff: 1, expectancyUsd: 0.1 }),
+    };
+    const v6 = verdictOf(aggsVacNoEvidence, { ok: true, detail: 't' }, 2);
+    eq(v6.usable, false);
+    eq(v6.conclusion, 'arm-starved');
+    eq(v6.starvedDetail.B.closed, 0);
+    eq(v6.starvedDetail.B.ordersPlaced, 0);
+    // 真 mismatch 无论饿死与否都是 invalid（硬红优先于 starved）
+    const aggsHard = {
+      A: mk({ determinism: 'mismatch' }),
+      B: mk({ determinism: 'match', closed: 100, winRatePct: 55, payoff: 1.2, expectancyUsd: 0.2 }),
+      C: mk({ determinism: 'match', closed: 90, winRatePct: 50, payoff: 1.1, expectancyUsd: 0.15 }),
+    };
+    const v7 = verdictOf(aggsHard, { ok: true, detail: 't' }, 2);
+    eq(v7.usable, false);
+    eq(v7.conclusion, 'invalid');
+    // 无 vacuous 时旧门禁语义不变：全 match → usable 且可出对照判决
+    const v8 = verdictOf({
+      A: mk({ closed: 100, winRatePct: 50, payoff: 1, expectancyUsd: 0.1, netPnlUsd: 10, maxDrawdownUsd: 5, worstTradeUsd: -2, tailLoss: { p99: 2 }, feesUsd: 1 }),
+      B: mk({ closed: 100, winRatePct: 55, payoff: 1.2, expectancyUsd: 0.2, netPnlUsd: 20, maxDrawdownUsd: 4, worstTradeUsd: -1.5, tailLoss: { p99: 1.5 }, feesUsd: 0.9 }),
+      C: mk({ closed: 90 }),
+    }, { ok: true, detail: 't' }, 2);
+    eq(v8.usable, true);
+    eq(v8.conclusion, 'B-better-on-both-target-metrics');
+    eq(v8.gates.determinismVacuous, {});
+  });
+
+  // 4c) arm-starved 归因段的数字可追溯（#1004）：报告文本里的「实测」数
+  // 必须由 corpusTopStats 派生；旧 manifest（无该字段）必须印「未测」，
+  // 绝不回退写死字面量。
+  ok &= P('renderMd/arm-starved数字来自语料实算', () => {
+    const baseManifest = {
+      profile: 'realistic', seed: 962, seedBalance: '1000', maxOrderNotional: '12',
+      minShares: '1', maxShares: '2', maxPositions: '10', minRounds: 200, tickMs: '50',
+      generatedAtMs: 0, outDir: 'run', singleRun: false,
+      corpus: { corpus: 'c.jsonl', sha256: 'a'.repeat(64), manifest: { market: 'm', startMs: null, endMs: null }, fixResolutions: { ok: 1, bad: 0 } },
+      assetsAll: ['A'], windows: [],
+      armDeclarations: {},
+    };
+    const starvedAgg = (determinism) => ({
+      arm: 'A', windowsRun: 1, rounds: 200, closed: 0, wins: 0, losses: 0,
+      winRatePct: null, payoff: null, expectancyUsd: null, netPnlUsd: 0,
+      maxDrawdownUsd: 0, worstTradeUsd: null, tailLoss: { n: 0, p95: null, p99: null },
+      feesUsd: 0, settlementRatePct: null, avgHoldSecFloor: null, avgHoldSecUpper: null,
+      reasonHistogram: {}, entry: { ordersPlaced: 115, ordersRejected: 115, rejectionCauses: { 'venue.WouldCross': 115 }, accountFreezes: {} },
+      determinism, contaminated: false, perWindow: [],
+    });
+    const okAgg = (determinism, closed) => ({
+      arm: 'X', windowsRun: 1, rounds: 200, closed, wins: Math.floor(closed / 2), losses: closed - Math.floor(closed / 2),
+      winRatePct: 50, payoff: 1, expectancyUsd: 0.1, netPnlUsd: closed * 0.1,
+      maxDrawdownUsd: 1, worstTradeUsd: -1, tailLoss: { n: 1, p95: 1, p99: 1 },
+      feesUsd: 0.5, settlementRatePct: 50, avgHoldSecFloor: 100, avgHoldSecUpper: 900,
+      reasonHistogram: {}, entry: { ordersPlaced: 10, ordersRejected: 0, rejectionCauses: {}, accountFreezes: {} },
+      determinism, contaminated: false, perWindow: [],
+    });
+    const verdictVac = verdictOf({ A: starvedAgg('vacuous-empty-runs'), B: okAgg('match', 10), C: okAgg('match', 9) }, { ok: true, detail: 't' }, 2);
+    eq(verdictVac.conclusion, 'arm-starved');
+    // 带 corpusTopStats：锁价数随输入变（3/4 ≠ 293,286），旧字面量不得再现
+    const md1 = renderMd({ ...baseManifest, corpusTopStats: { quotes: 4, locked: 3, unparsed: 0 } }, [], { A: starvedAgg('vacuous-empty-runs'), B: okAgg('match', 10), C: okAgg('match', 9) }, verdictVac, []);
+    if (!md1.includes('锁价 3/4（75.00%')) throw new Error(`锁价数未随输入实算: ${md1.match(/锁价[^）]*）?/)?.[0]}`);
+    if (md1.includes('293,286')) throw new Error('报告仍含硬编码 293,286');
+    // 旧 manifest 无 corpusTopStats：印「未测」，不伪造实测值
+    const md2 = renderMd(baseManifest, [], { A: starvedAgg('match'), B: okAgg('match', 10), C: okAgg('match', 9) }, verdictVac, []);
+    if (!md2.includes('未测')) throw new Error('旧 manifest 复渲染未印「未测」');
+    if (md2.includes('293,286')) throw new Error('「未测」分支仍含硬编码 293,286');
+    // 门禁区：vacuous 臂显式标 UNJUDGEABLE_EMPTY_RUN，不是 PASS
+    if (!md1.includes('UNJUDGEABLE_EMPTY_RUN')) throw new Error('vacuous 臂未标 UNJUDGEABLE_EMPTY_RUN');
+    if (/确定性 A：PASS/.test(md1)) throw new Error('vacuous 臂被判 PASS');
+  });
+
   // 5) 对照组旋钮口径：与 #962 README 声明逐项对上
   ok &= P('CONTROL_KNOBS/对照口径', () => {
     const got = Object.fromEntries(CONTROL_KNOBS);
@@ -1157,7 +1363,7 @@ if (REPORT_ONLY) {
         m._firstAtMs = win.firstAtMs;
         const p2 = join(runDir, 'report-2.json');
         m.determinism = existsSync(p2)
-          ? (sha256File(p1) === sha256File(p2) ? 'match' : 'mismatch')
+          ? determinismVerdict(sha256File(p1), sha256File(p2), (Array.isArray(rep.tradeLines) ? rep.tradeLines : []).length)
           : (manifest.singleRun ? 'skipped' : 'missing');
         m._lossMags = (Array.isArray(rep.tradeLines) ? rep.tradeLines : [])
           .map((l) => num(l.netPnlUsd)).filter((v) => v != null && v < 0).map((v) => -v);
@@ -1272,9 +1478,12 @@ for (const profile of profiles) {
           continue;
         }
         const h1 = sha256File(p1), h2 = sha256File(p2);
-        determinism = h1 === h2 ? 'match' : 'mismatch';
+        const run1Lines = Array.isArray(r1.report.tradeLines) ? r1.report.tradeLines : [];
+        determinism = determinismVerdict(h1, h2, run1Lines.length);
         if (determinism === 'mismatch') {
           console.error(`    DETERMINISM MISMATCH ${label}: run1 ${h1.slice(0, 12)} vs run2 ${h2.slice(0, 12)} — 确定性 bug，实验无效`);
+        } else if (determinism === 'vacuous-empty-runs') {
+          console.error(`    DETERMINISM VACUOUS ${label}: 双跑 hash 相同但 0 tradeLines（空==空，UNJUDGEABLE_EMPTY_RUN）— 不计确定性证据`);
         }
       }
       const m = extractMetrics(r1.report, win, profile);
@@ -1305,6 +1514,7 @@ for (const profile of profiles) {
     coreBinSha256: sha256File(CORE_BIN),
     corpus: pre,
     assetsAll: scan.assetsAll,
+    corpusTopStats: scan.topStats,
     windows,
     profiles,
     profile,
