@@ -308,7 +308,7 @@ end
 
 local DEC_0 = { m = 0, s = 0 }
 local DEC_100 = { m = 100, s = 0 }
-local DEFAULT_HALT = { m = 20, s = 0 }
+local DEFAULT_STOP = { m = 20, s = 0 }
 local DEFAULT_TP = { m = 30, s = 0 }
 local DEFAULT_TP_TIGHT = { m = 5, s = 0 }
 local DEFAULT_ARM = { m = 25, s = 0 }
@@ -479,10 +479,10 @@ local function consider_exit(out, row, round)
     -- 1. hard stop — the single-trade max loss, on NET proceeds: a nominal
     --    -X% that fees eat to -X-δ% still counts (more conservative than the
     --    nominal bid). 0 = off.
-    local halt = dec_param(params, "hard_stop_loss_pct", DEFAULT_HALT)
-    if halt.m > 0 then
+    local stop = dec_param(params, "hard_stop_loss_pct", DEFAULT_STOP)
+    if stop.m > 0 then
         -- proceeds <= entry * (100 - X)/100 (integer-scaled, no negative scale)
-        local floor_entry = dec_mul(entry, { m = 100 - halt.m, s = 2 })
+        local floor_entry = dec_mul(entry, { m = 100 - stop.m, s = 2 })
         if dec_cmp(proceeds, floor_entry) <= 0 then
             out.exits[#out.exits + 1] = { token = token, reason = "hard_stop_loss" }
             return
