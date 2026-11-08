@@ -8,6 +8,7 @@
 //!
 //!   GET  /                    HTML panel (auto-refresh)
 //!   GET  /api/snapshot        JSON snapshot
+//!   GET  /api/events          SSE change stream (issue #838)
 //!   GET  /api/command?cmd=..  dispatch one command → JSON outcome
 //!   POST /api/command         body = command text (or `{"cmd":"..."}`) → JSON
 //!
@@ -30,6 +31,7 @@ mod http;
 mod render;
 mod routes;
 mod server;
+mod sse;
 
 use auth::*;
 use checks::*;
@@ -45,6 +47,9 @@ mod evolution_tests;
 
 #[cfg(test)]
 mod safety_tests;
+
+#[cfg(test)]
+mod sse_tests;
 
 #[cfg(test)]
 mod tests;

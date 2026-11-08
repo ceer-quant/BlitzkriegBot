@@ -230,6 +230,13 @@ fn try_wait_for_bound(server: &Arc<WebServer>, attempts: usize) -> Option<Socket
     None
 }
 
+/// Bind-wait shared with the #838 SSE tests (`sse_tests.rs`): same server
+/// harness, same discipline — read the port back from the server's own
+/// record instead of probing for a free port.
+pub(super) fn wait_for_bound_shared(server: &Arc<WebServer>) -> SocketAddr {
+    wait_for_bound(server)
+}
+
 /// Log in and return the session token.
 fn login(addr: SocketAddr, user: &str, password: &str) -> String {
     let body = format!("{{\"user\":\"{user}\",\"password\":\"{password}\"}}");
