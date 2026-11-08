@@ -177,6 +177,19 @@ function preflight() {
     if (env[key] !== v) problems.push(`${key}=${env[key]} want ${v}`);
   }
   const daily = num(toml.max_daily_drawdown_usd);
+  // Issue #991: the fallback settlement policy is read at boot only, so the
+  // 72h profile must SPELL it — the soak gate then records exactly which
+  // policy the run exercised. `cash` is the default; either value passes the
+  // gate, but the key may not be missing. The aging budget must be a number
+  // when present (default 172800000 = 48h; <= 0 disables the aging warn).
+  if (env.BK_UNVERIFIED_EXPIRY_POLICY === undefined) {
+    problems.push('BK_UNVERIFIED_EXPIRY_POLICY is unset (issue 991: spell cash|receivable — the soak must record which policy ran)');
+  } else if (env.BK_UNVERIFIED_EXPIRY_POLICY !== 'cash' && env.BK_UNVERIFIED_EXPIRY_POLICY !== 'receivable') {
+    problems.push(`BK_UNVERIFIED_EXPIRY_POLICY=${env.BK_UNVERIFIED_EXPIRY_POLICY} (want cash|receivable)`);
+  }
+  if (env.BK_RECEIVABLE_MAX_AGE_MS !== undefined && !(num(env.BK_RECEIVABLE_MAX_AGE_MS) >= 0)) {
+    problems.push(`BK_RECEIVABLE_MAX_AGE_MS=${env.BK_RECEIVABLE_MAX_AGE_MS} (want a non-negative number of ms, empty = 48h default)`);
+  }
   if (!(num(env.BK_MAX_DAILY_LOSS_PCT) > 0 && num(env.BK_MAX_DAILY_LOSS_PCT) <= 10)) {
     problems.push(`BK_MAX_DAILY_LOSS_PCT=${env.BK_MAX_DAILY_LOSS_PCT} (want 1..10)`);
   }

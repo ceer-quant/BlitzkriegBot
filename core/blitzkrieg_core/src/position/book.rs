@@ -25,6 +25,33 @@ impl PositionManager {
         now_ms: i64,
         source: &str,
     ) -> Option<ClosedPosition> {
+        self.close_priced(
+            position_id,
+            exit_price,
+            reason,
+            was_maker,
+            now_ms,
+            source,
+            "",
+        )
+    }
+
+    /// [`Self::close`] with the issue-#1002 `price_source` label — HOW a
+    /// fallback close's price was derived (`"current"` = last known mid,
+    /// `"entry_fallback"` = dead feed, entry price). Every existing caller
+    /// keeps the plain `close` spelling (empty label = not a fallback
+    /// derivation question); only the fallback paths name their price basis.
+    #[allow(clippy::too_many_arguments)] // the close's full fact sheet, as `close` + the #1002 label
+    pub fn close_priced(
+        &mut self,
+        position_id: &str,
+        exit_price: Decimal,
+        reason: ExitReason,
+        was_maker: bool,
+        now_ms: i64,
+        source: &str,
+        price_source: &str,
+    ) -> Option<ClosedPosition> {
         let idx = self.open.iter().position(|p| p.id == position_id)?;
         let mut pos = self.open.remove(idx);
         pos.flows = pos.flows();
@@ -147,6 +174,15 @@ impl PositionManager {
                 Some(exit_price)
             } else {
                 None
+            },
+            // Issue #1002: the fallback close's price basis, named at the ONE
+            // construction site every close funnels through. A `fallback`
+            // source with an empty `price_source` is a pre-#1002 row (serde
+            // default keeps it loadable).
+            price_source: if source == "fallback" {
+                price_source.to_string()
+            } else {
+                String::new()
             },
         };
         self.closed.push(closed.clone());

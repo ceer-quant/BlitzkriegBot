@@ -109,6 +109,7 @@ fn closed_trade(id: &str) -> crate::trade_db::TradeRecord {
         venue: String::new(),
         source: String::new(),
         original_fallback_price: None,
+        price_source: String::new(),
     })
 }
 

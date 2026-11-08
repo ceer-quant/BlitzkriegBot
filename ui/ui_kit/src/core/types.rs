@@ -381,6 +381,34 @@ pub struct ReconcileView {
     pub freeze_threshold: u64,
 }
 
+/// Issue #991/#686: the slice of the kernel's `settlement` block the panel
+/// needs. Carrying the block (rather than waiving it in the #236 seam's
+/// `NOT_CARRIED` list) is what lets the amber overdue-receivable banner read
+/// `oldestFallbackClaimAgeMs` — the drift guard would otherwise drop the key
+/// before any surface could see it. Every field defaults: an older core
+/// (or a cash-policy core) that omits the additive keys still deserializes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettlementView {
+    /// Settled-but-unredeemed claim money (the chain still owes this).
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub receivable_usd: Option<f64>,
+    /// The #991 fallback receivable's own slice (estimated, unverified).
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub fallback_receivable_usd: Option<f64>,
+    /// How many fallback claims are open (estimated money not yet redeemed).
+    #[serde(default)]
+    pub pending_fallback_claims: u64,
+    /// Age of the oldest open fallback claim, ms; `None` when no claim is
+    /// open. The amber banner fires when this crosses
+    /// `BK_RECEIVABLE_MAX_AGE_MS`.
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub oldest_fallback_claim_age_ms: Option<f64>,
+    /// The boot policy in force: "cash" | "receivable" (not hot-reloadable).
+    #[serde(default)]
+    pub unverified_expiry_policy: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatsView {
@@ -428,6 +456,13 @@ pub struct EngineStatsView {
     /// E31-b: reconcile-sweep failure streak against the freeze threshold.
     #[serde(default)]
     pub reconcile: Option<ReconcileView>,
+    /// Issue #991: the settlement block (additive carry — the amber
+    /// overdue-receivable banner reads `oldestFallbackClaimAgeMs` /
+    /// `fallbackReceivableUsd` / `unverifiedExpiryPolicy` from it; `null`
+    /// from the kernel means no settlement book, `de_null_default` keeps the
+    /// banner quiet).
+    #[serde(default, deserialize_with = "de_null_default")]
+    pub settlement: SettlementView,
     /// #163: newest trading-capability self-check report.
     #[serde(default)]
     pub self_check: Option<SelfCheckView>,

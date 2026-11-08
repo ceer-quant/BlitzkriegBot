@@ -438,7 +438,69 @@ pub struct CoreConfig {
     /// keeps the historic every-tick behaviour on every path. Default
     /// `false`.
     pub replay_scheduling: bool,
+    /// Issue #991/#1002: what an unverifiable-expiry fallback close books.
+    /// `Cash` (default) is the #684 behaviour, byte-identical: the fallback
+    /// notional is credited to spendable cash at close time
+    /// (`Ledger::credit_expiry_fallback`). `Receivable` books the same
+    /// notional as a claim in the settlement receivable pool instead —
+    /// estimated money is not spendable money — and the claim redeems into
+    /// cash (with #998-style correction rows for any venue-vs-fallback
+    /// delta) when venue truth arrives. Read ONCE at boot
+    /// (`BK_UNVERIFIED_EXPIRY_POLICY=cash|receivable`); NOT hot-reloadable —
+    /// a policy switch changes what already-booked journal rows mean, so it
+    /// takes a restart (documented in `.env.example`).
+    pub unverified_expiry_policy: UnverifiedExpiryPolicy,
+    /// Issue #991 boundary 1: how old a fallback receivable claim may get
+    /// (ms from `created_at_ms`) before the kernel warns that the venue still
+    /// has not answered. Amber, never red: an aging claim is ATTENTION (the
+    /// settlement path may still be waiting on a structurally-never-answered
+    /// market), not trading-down. Default [`RECEIVABLE_MAX_AGE_MS_DEFAULT`]
+    /// (48h) — `BK_RECEIVABLE_MAX_AGE_MS`.
+    pub receivable_max_age_ms: i64,
 }
+
+/// Issue #991/#1002: the two complete models an unverifiable-expiry close can
+/// book under. `serde` spells it lowercase on the wire (`"cash"` /
+/// `"receivable"`); the env value parses through
+/// [`UnverifiedExpiryPolicy::parse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnverifiedExpiryPolicy {
+    /// #684 behaviour, unchanged: the fallback close credits spendable cash
+    /// immediately at the bookkeeping price.
+    #[default]
+    Cash,
+    /// Issue #991: the fallback close books a receivable claim; cash moves
+    /// only when venue truth redeems the claim (reconcile/resolution path),
+    /// with correction rows for the delta.
+    Receivable,
+}
+
+impl UnverifiedExpiryPolicy {
+    /// Parse the env spelling. Accepts the two documented values only — an
+    /// unknown value is a boot-time error, never a silent fall-back to cash
+    /// (a typo'd policy must not quietly change the accounting model).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cash" => Some(Self::Cash),
+            "receivable" => Some(Self::Receivable),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cash => "cash",
+            Self::Receivable => "receivable",
+        }
+    }
+}
+
+/// Issue #991 boundary 1: the shipped aging bound — 48 hours. A venue that
+/// has not answered a settlement query in 48h is structurally silent (the
+/// #684 signature); the receivable it owes us must become VISIBLE, not
+/// quietly sit in the panel's receivable number forever.
+pub const RECEIVABLE_MAX_AGE_MS_DEFAULT: i64 = 172_800_000;
 
 impl CoreConfig {
     /// Build the engine config from this core config — the ONE mapping used by
@@ -1053,6 +1115,13 @@ impl Default for CoreConfig {
             // Issue #390: replay maintenance scheduling off by default — the
             // live kernel stays every-tick on every path.
             replay_scheduling: false,
+            // Issue #991/#1002: the #684 cash model stays the default — the
+            // operator's receivable model is opt-in, so no existing
+            // deployment (or test) changes behaviour without naming the
+            // policy explicitly.
+            unverified_expiry_policy: UnverifiedExpiryPolicy::Cash,
+            // Issue #991 boundary 1: the shipped 48h aging bound.
+            receivable_max_age_ms: RECEIVABLE_MAX_AGE_MS_DEFAULT,
         }
     }
 }

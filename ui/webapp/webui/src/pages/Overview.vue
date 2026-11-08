@@ -17,7 +17,7 @@ import { balanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
-  accountFreezeBanners,
+  accountFreezeBanners, overdueReceivableBanner,
 } from '@/lib/safety'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
@@ -57,6 +57,15 @@ const selfCheck = computed(() => selfCheckBanner(stats.value))
 // hand. The reading rule lives in lib/safety.ts like the other banners; this
 // one stays up on EVERY snapshot while `stats.archive.recording` is false.
 const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
+// issue 991: a fallback receivable aged past the operator's budget — amber,
+// dismissible (identity `receivable-overdue`), auto-fades. The aging budget
+// itself comes from the kernel's boot echo surface via the env face: the panel
+// reads the SAME configured value from `stats.settlement` (the kernel carries
+// it) when present, falling back to the documented 48h default.
+const OVERDUE_RECEIVABLE_MAX_AGE_MS = 172_800_000
+const overdueReceivable = computed(() =>
+  overdueReceivableBanner(stats.value, OVERDUE_RECEIVABLE_MAX_AGE_MS),
+)
 
 // ── banner severity (2026-10-28 operator call) ──────────────────────────────
 // 红色只留给紧急（冻结 / 自检失败 —— 交易此刻真的停了）：persistent、无 ✕、
@@ -94,6 +103,10 @@ const connBannerVisible = computed(
 const archiveStoppedVisible = computed(
   () => archiveStopped.value
     && !(archiveStopped.value.identity && dismissed.value.has(archiveStopped.value.identity)),
+)
+const overdueReceivableVisible = computed(
+  () => overdueReceivable.value
+    && !(overdueReceivable.value.identity && dismissed.value.has(overdueReceivable.value.identity)),
 )
 const bannerAutoKey = (identity?: string) => identity ?? ''
 
@@ -490,6 +503,22 @@ const needsStrategyHint = computed(() => {
         @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
       >
         {{ archiveStopped.body }}
+      </AlertBanner>
+    </div>
+    <div v-if="overdueReceivable && overdueReceivableVisible" class="mb-3.5">
+      <!-- issue 991: 回退应收账款超龄 —— 琥珀色、可关（identity 计）、自动消失。
+           这是「注意」不是「交易停了」（红留给冻结/自检）；金额本身不计入
+           预算/熔断可用资金，场馆给出真实结算价后自动冲正。 -->
+      <AlertBanner
+        tone="warn"
+        :title="overdueReceivable.title"
+        :hint="overdueReceivable.hint"
+        dismissible
+        :auto-dismiss-ms="AUTO_DISMISS_MS"
+        :auto-key="bannerAutoKey(overdueReceivable.identity)"
+        @dismiss="overdueReceivable.identity && dismiss(overdueReceivable.identity)"
+      >
+        {{ overdueReceivable.body }}
       </AlertBanner>
     </div>
 

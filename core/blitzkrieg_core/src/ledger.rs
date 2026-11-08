@@ -467,6 +467,35 @@ impl Ledger {
         self.apply(JournalKind::Redemption, payout_usd, claim_id);
     }
 
+    /// Issue #991 — redeem a fallback receivable at VENUE TRUTH. Two rows,
+    /// the #998 arithmetic that never double-counts: the claim's own row
+    /// credits the BOOKED (fallback-estimated) amount — exactly what the
+    /// receivable carried — then a correction row moves the venue-vs-booked
+    /// delta when the venue's number differs (the `ref` names the position,
+    /// so the correction stands alone in the journal for reconciliation to
+    /// list, the way a `fee_source = "receipt"` row does). Equal amounts
+    /// append the redemption row only — a ZERO-DELTA redemption books no
+    /// correction row, because a correction of nothing is not a fact and an
+    /// empty correction section must mean "no venue disagreement ever
+    /// observed", not "we forgot to check". Net cash = venue truth.
+    pub fn credit_redemption_with_correction(
+        &mut self,
+        booked_usd: Decimal,
+        venue_usd: Decimal,
+        position_id: &str,
+    ) {
+        self.credit_redemption(booked_usd, position_id);
+        if venue_usd != booked_usd {
+            self.apply(
+                JournalKind::Redemption,
+                venue_usd - booked_usd,
+                &format!(
+                    "fallback redemption correction (venue truth vs fallback estimate) {position_id}"
+                ),
+            );
+        }
+    }
+
     /// #684: credit the fallback notional of an expired, never-answered
     /// position closed WITHOUT a settlement claim. The position's cash identity
     /// walks out of the open book when it closes (`spent`/`received` folds

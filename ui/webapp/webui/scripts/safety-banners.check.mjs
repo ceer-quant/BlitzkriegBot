@@ -36,7 +36,7 @@ const check = (label, fn) => {
 
 const {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
-  accountFreezeBanners, accountFrozen,
+  accountFreezeBanners, accountFrozen, overdueReceivableBanner,
 } = await import('../src/lib/safety.ts')
 
 console.log('trading-safety banners — the three states that used to be invisible')
@@ -221,6 +221,50 @@ check('the countdown pause predicate answers for the DISPLAYED account only', ()
   assert.equal(accountFrozen({}, 'acct-b'), false, 'a core without the map cannot freeze')
   assert.equal(accountFrozen(null, 'acct-b'), false)
 })
+
+// Issue #991: a fallback receivable aged past the operator's budget. Amber +
+// dismissible + stable identity — an aging claim is ATTENTION, never the red
+// pair (red stays reserved for freeze/self-check). Older cores / cash-policy
+// kernels (no additive settlement keys, age null) render nothing.
+check('an overdue fallback receivable raises the amber aging banner (issue 991)', () => {
+  const stats = {
+    settlement: {
+      receivableUsd: '0',
+      fallbackReceivableUsd: '12.34',
+      pendingFallbackClaims: 1,
+      oldestFallbackClaimAgeMs: 172_800_000,
+      unverifiedExpiryPolicy: 'receivable',
+    },
+  }
+  const b = overdueReceivableBanner(stats, 172_800_000)
+  assert.ok(b, 'a claim at exactly the budget is overdue — the banner must show')
+  assert.equal(b.tone, 'warn', 'aging receivable is attention, not trading-down')
+  assert.equal(b.urgent, false, 'never the red pair (red = freeze/self-check)')
+  assert.equal(b.identity, 'receivable-overdue', 'stable identity for dismiss-memory')
+  assert.match(b.body, /172800|48/, 'the age is DATA on screen (hours)')
+  assert.match(b.body, /12\.34/, 'the estimated amount is DATA on screen')
+})
+
+check('a young or absent receivable raises no banner', () => {
+  const young = {
+    settlement: { fallbackReceivableUsd: '5', oldestFallbackClaimAgeMs: 3_600_000 },
+  }
+  assert.equal(overdueReceivableBanner(young, 172_800_000), null, 'under budget → quiet')
+  const noClaim = { settlement: { fallbackReceivableUsd: '0', oldestFallbackClaimAgeMs: null } }
+  assert.equal(overdueReceivableBanner(noClaim, 172_800_000), null, 'no open claim → quiet')
+  // Older cores omit the additive keys entirely; a cash-policy kernel keeps
+  // the age null. Both must render nothing — never an invented receivable.
+  assert.equal(overdueReceivableBanner({}, 172_800_000), null)
+  assert.equal(overdueReceivableBanner({ settlement: null }, 172_800_000), null)
+  assert.equal(overdueReceivableBanner(null, 172_800_000), null)
+  // A disabled budget (0) never fires, whatever the age.
+  const ancient = {
+    settlement: { oldestFallbackClaimAgeMs: 999_999_999_999 },
+  }
+  assert.equal(overdueReceivableBanner(ancient, 0), null, 'budget 0 = the check is off')
+  assert.equal(overdueReceivableBanner(ancient, null), null)
+})
+
 // 红色只留给紧急（交易此刻真的停了：冻结 / 自检失败），其余黄色 + 可关闭 +
 // 自动消失。tone 已经各自断言过；这里钉住的是 urgent 分级本身——红色横幅
 // 必须钉住（不可关、不自动消失），琥珀横幅必须可关且带去重 identity。

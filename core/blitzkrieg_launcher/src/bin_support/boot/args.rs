@@ -1109,6 +1109,88 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         )
     }];
 
+    // ── issue #991: the unverified-expiry settlement policy ─────────────────
+    // Read at boot only — NOT hot-reloadable: a mid-session switch would
+    // re-price claims already journaled under the other policy, so honoring a
+    // change requires a restart (documented in .env.example).
+    let policy_raw = env.text("BK_UNVERIFIED_EXPIRY_POLICY");
+    let unverified_expiry_policy = match policy_raw.as_deref().map(str::trim) {
+        None => blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash,
+        Some(raw) => match blitzkrieg_core::service::UnverifiedExpiryPolicy::parse(raw) {
+            Some(policy) => {
+                report.push(format!(
+                    "engine.unverified_expiry_policy={} (env)",
+                    policy.as_str()
+                ));
+                policy
+            }
+            None => {
+                eprintln!(
+                    "blitzkrieg-core: BK_UNVERIFIED_EXPIRY_POLICY={raw:?} is not a \
+                         known policy — expected \"cash\" or \"receivable\""
+                );
+                std::process::exit(2);
+            }
+        },
+    };
+    // Overdue-receivable aging budget for the receivable policy. The compiled
+    // default (48 h) rides `RECEIVABLE_MAX_AGE_MS_DEFAULT`; 0 disables the warn.
+    let receivable_max_age = pick(
+        None::<i64>,
+        env.num::<i64>("BK_RECEIVABLE_MAX_AGE_MS"),
+        blitzkrieg_core::service::RECEIVABLE_MAX_AGE_MS_DEFAULT,
+    );
+    if receivable_max_age.is_explicit() {
+        report.push(format!(
+            "engine.receivable_max_age_ms={} ({})",
+            receivable_max_age.value,
+            receivable_max_age.source.as_str()
+        ));
+    }
+    if receivable_max_age.value < 0 {
+        eprintln!(
+            "blitzkrieg-core: BK_RECEIVABLE_MAX_AGE_MS={} is negative — the aging \
+             budget cannot be negative (0 = warn disabled)",
+            receivable_max_age.value
+        );
+        std::process::exit(2);
+    }
+    // Boot echo carries the policy always (its default is a posture statement)
+    // and the aging budget only when the receivable policy is actually armed.
+    let receivable_echo = vec![
+        format!(
+            "expiry settlement policy: {} ({}) — unverified-expiry closes {}",
+            match unverified_expiry_policy {
+                blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash => "cash",
+                blitzkrieg_core::service::UnverifiedExpiryPolicy::Receivable => "receivable",
+            },
+            if policy_raw.is_some() {
+                "env"
+            } else {
+                "default"
+            },
+            match unverified_expiry_policy {
+                blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash => {
+                    "credit spendable cash immediately at the fallback price (flag-off behavior)"
+                }
+                blitzkrieg_core::service::UnverifiedExpiryPolicy::Receivable => {
+                    "book a receivable claim redeemed at venue truth on resolution/reconcile; \
+                     the estimated amount is excluded from day-budget and loss-breaker headroom"
+                }
+            },
+        ),
+        format!(
+            "receivable aging budget: {} ms ({}) — overdue receivables warn amber once per episode{}",
+            receivable_max_age.value,
+            receivable_max_age.source.as_str(),
+            if receivable_max_age.value == 0 {
+                "; warn DISABLED"
+            } else {
+                ""
+            },
+        ),
+    ];
+
     // ── 任务二 1-3: the NTP clock-offset probe ──────────────────────────────
     // CLI > env > default. The empty string is the documented "off" spelling:
     // `probe::should_spawn_ntp` refuses it, so a configured-off probe spawns
@@ -1304,6 +1386,9 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         sizing_echo,
         max_orderbook_stale_ms: stale.value,
         orderbook_stale_echo,
+        unverified_expiry_policy,
+        receivable_max_age_ms: receivable_max_age.value,
+        receivable_echo,
         ntp_host: ntp.value,
         ntp_interval_secs: ntp_interval.value,
         markets,

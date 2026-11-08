@@ -141,6 +141,20 @@ export interface EngineStats {
   } | null
   confirmed?: string[]
   strategies?: StrategyStatsRow[]
+  /**
+   * Issue #991: the settlement block's panel-facing slice. The amber
+   * overdue-receivable banner reads `oldestFallbackClaimAgeMs` (fires when it
+   * crosses `BK_RECEIVABLE_MAX_AGE_MS`, 48h default) and names the policy via
+   * `unverifiedExpiryPolicy`. Older cores omit the key (or the additive keys)
+   * entirely — absence renders nothing, never an invented receivable.
+   */
+  settlement?: {
+    receivableUsd?: string | number
+    fallbackReceivableUsd?: string | number
+    pendingFallbackClaims?: number
+    oldestFallbackClaimAgeMs?: number | null
+    unverifiedExpiryPolicy?: string
+  } | null
 }
 
 /** Market plugin classes — the kernel's seven-value enum (market_api types.rs),

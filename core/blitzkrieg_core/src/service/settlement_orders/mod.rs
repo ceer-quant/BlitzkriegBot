@@ -9,9 +9,10 @@ use crate::model::*;
 use crate::ome::{FillDelta, FillOutcome, LateFill, SubmitParams};
 use crate::position::OpenParams;
 use crate::schema::Event;
+use crate::service::config::UnverifiedExpiryPolicy;
 use crate::settlement::{
-    EXPIRY_FALLBACK_AFTER_MS, SETTLEMENT_EXIT_REASON, UNVERIFIED_EXPIRY_EXIT_REASON, booking_for,
-    settlement_key,
+    EXPIRY_FALLBACK_AFTER_MS, PRICE_SOURCE_CURRENT, PRICE_SOURCE_ENTRY_FALLBACK,
+    SETTLEMENT_EXIT_REASON, UNVERIFIED_EXPIRY_EXIT_REASON, booking_for, settlement_key,
 };
 use crate::sim::{Book, rests_on_book};
 use rust_decimal::Decimal;

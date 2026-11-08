@@ -240,6 +240,15 @@ pub struct Core {
     /// resolves its own markets and simulates the redemption; in live mode the
     /// venue plugin answers and redeems.
     settlement: SettlementBook,
+    /// Issue #991 boundary 1: the receivable-aging warn's edge memory — the
+    /// `oldest_fallback_claim_age_ms` value the last warn was emitted against
+    /// (0 = no warn outstanding). The warn fires when the oldest claim crosses
+    /// `receivable_max_age_ms`, and only re-fires when the claim is redeemed
+    /// and a NEW one ages past the bound again (the alert is per-episode, not
+    /// per-tick; the continuous face is the panel's amber banner, which reads
+    /// `oldestFallbackClaimAgeMs` every snapshot). Session-scoped: a restart
+    /// may re-warn once, which is honest — the operator was away.
+    receivable_warned_age_ms: i64,
     /// The event archive's recording state as THIS core last saw it (issue
     /// #669): `true` = recording (and the boot assumption — an archive that
     /// opened stopped — still arms the edge below, because `stop()` may also
@@ -1292,6 +1301,7 @@ mod tests {
     mod order_state_machine_462_tests;
     mod pair_entry_maker_tests;
     mod postonly_entry_maker_tests;
+    mod receivable_991_tests;
     mod risk_bottom_line_963_tests;
     mod round_expiry_tests;
     mod round_family_b1b_tests;

@@ -428,6 +428,10 @@ impl Core {
             // `unanswered_since` names it, so a healthy book pays one
             // hash-set build per settlement pass and nothing else.
             self.run_expiry_fallback_sweep(now_ms);
+            // Issue #991 boundary 1: receivable aging — one edge warn when the
+            // oldest fallback claim crosses BK_RECEIVABLE_MAX_AGE_MS. Rides
+            // the same settlement-pass gate: the claim set only moves here.
+            self.check_receivable_aging(now_ms);
         }
 
         // Accounting audit (issue #189): the kernel's own periodic three-way money

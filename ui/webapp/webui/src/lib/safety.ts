@@ -259,3 +259,38 @@ export function archiveStoppedBanner(stats: EngineStats | null | undefined): Saf
     hint: '行情事件不再落盘，回测/复盘语料从停录时刻起缺失。清理磁盘或调大归档上限后重启会话恢复录制。',
   }
 }
+
+/**
+ * A fallback receivable has aged past the operator's budget (issue #991, amber
+ * banner #3). Under `BK_UNVERIFIED_EXPIRY_POLICY=receivable` an unverifiable-
+ * expiry close books an estimated receivable instead of cash; the claim
+ * redeems at venue truth on resolution/reconcile. When the venue stays silent
+ * past `BK_RECEIVABLE_MAX_AGE_MS` (48h default) the estimated money is stuck:
+ * it is excluded from day-budget and loss-breaker headroom, so the operator
+ * must know it exists. Reads `stats.settlement.oldestFallbackClaimAgeMs`
+ * (`null` when no claim is open) — the continuous face of the kernel's
+ * once-per-episode warn. Amber + dismissible + auto-fade: an aging claim is
+ * ATTENTION, not trading-down (red stays reserved for freeze/self-check).
+ * Cash-policy kernels and older cores (no additive keys) render nothing.
+ */
+export function overdueReceivableBanner(
+  stats: EngineStats | null | undefined,
+  maxAgeMs: number | null | undefined,
+): SafetyBanner | null {
+  const settlement = stats?.settlement
+  const age = settlement?.oldestFallbackClaimAgeMs
+  if (age == null) return null
+  if (maxAgeMs == null || maxAgeMs <= 0) return null
+  if (age < maxAgeMs) return null
+  const usd = settlement?.fallbackReceivableUsd
+  const usdText =
+    usd == null ? '' : `，金额 ${typeof usd === 'number' ? usd.toFixed(2) : usd} USDC`
+  return {
+    tone: 'warn',
+    urgent: false,
+    identity: 'receivable-overdue',
+    title: '回退应收账款超龄',
+    body: `有一笔过期回退结算的应收账款已等待 ${Math.round(age / 3_600_000)} 小时未获场馆确认${usdText}。`,
+    hint: '这笔估算金额不计入日内预算与连损熔断的可用资金（不可交易），场馆给出真实结算价后会自动冲正入账。持续超龄请检查该市场的结算状态。',
+  }
+}
