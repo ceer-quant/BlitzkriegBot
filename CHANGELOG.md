@@ -33,7 +33,14 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
   single_leg_pair 50.84%），manifest 去 thesis_death_* tunables + 版本
   +1 重签 + gate EXEMPT 书面理由，非全局删钩子，新包仍须声明；
   豁免出口落 `docs/thesis_death.md` §0，报告
-  THESIS-DEATH-MISFIRE-1003.md（#1009）；exit wire 加
+  THESIS-DEATH-MISFIRE-1003.md（#1009）；#1021 lua_momentum 同形撤销
+  （操作员裁决 2026-11-08：thesis_death 声明制启用、非默认）——premise
+  flip 盘口抖动秒级触发 + 12%→6% 反转带一个 tick 误杀（实测 ~20% WR
+  窗口 vs 72.2% 基线），0.5.1 摘 bk_thesis_death + thesis_death_*
+  tunables 重签，gate 加实测理由豁免 + declares() 注释感知（doc 提及
+  opt-in 字面量不再计为声明）；同日操作员裁决 **.env 文件=cockpit 域
+  唯一真值**（内存降级只读缓存、risk.limits 查询时读文件、boot 文件
+  派生、2s watcher 手改热跟随、defaults 写键归一化+幽灵键自愈）；exit wire 加
   `price` 字段——策略报价 maker-TP（profit-side 门 + PnL 守门
   #939/#946/#957）；出场升级钟 250ms maker→taker + 同期出场优先于入场
   （#963）；lua_momentum 0.4.0 时间加权止盈带 + 0.2.1 退出族 + 0.3.0
