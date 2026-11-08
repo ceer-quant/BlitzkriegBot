@@ -20,7 +20,7 @@
 - **双账本绝对独立**（#941）：live/dry journal 拆双文件，dry→live 零继承（A/B/E 测试钉死）
 - **pending receivable 裁决落地**（#991/#1002）：unverifiable-expiry 平仓的估计现金不再混入可支用 cash——单 flag `BK_UNVERIFIED_EXPIRY_POLICY=cash|receivable` 双完整模型，复用 settlement receivable 池，reconcile 时按场地真值 redemption + 双行校正；48h 冻结上限 + 琥珀横幅；day budget/连损断路器基数只算可支用现金
 - venue-price 回填三态 `source=reconciled`：标签不再跑在现金前面；`positions.unverified_exposure` IPC（golden 族 23）
-- 官方费率模型 `0.07·p(1−p)` 入账 + `fee_source` 双行校正模式；到期兜底亏损 cap 50%
+- 官方费率模型 `0.07·p(1−p)` 入账 + `fee_source` 双行校正模式；到期兜底亏损 cap 50% 已取缔——残值 mid 如实记账，未卖掉的单不洗成假账
 
 ## 🎯 三、策略出场栈一代目
 
@@ -28,7 +28,7 @@
 - 出场 wire 加 `price` 字段：策略报价 maker-TP（profit-side 门 + PnL 守门）
 - 出场升级钟 250ms maker→taker + 同期出场优先于入场
 - lua_momentum 0.4.0 时间加权止盈带（二项定价收敛 {0,1}，带子随轮钟线性收紧）
-- **实证文化**：coin_flip 出场实验（#962）16 点网格全负——Exit-First 哲学在 15m 二项市场证伪，edge 在入场侧 maker 结构与方向选择；真数据 A/B 双判决（#964）23 窗 × 3 臂 × 双跑逐字节
+- **实证文化**：出场栈交付即见效——lua_momentum 0.4.0 时间加权止盈带（移动止盈止损）正是把策略做活的那一环；coin_flip 出场对照实验（#962）16 点网格全负、真数据 A/B 双判决（#964）23 窗 × 3 臂 × 双跑逐字节——框架如实给出负结果，证伪的是「掷硬币当出场」这一具体实验，不是出场哲学本身
 
 ## ⚙️ 四、config 单源 .env
 
