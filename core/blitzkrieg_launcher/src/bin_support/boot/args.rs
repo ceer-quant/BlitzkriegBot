@@ -1109,136 +1109,16 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         )
     }];
 
-    // ── issue #991: the unverified-expiry settlement policy ─────────────────
-    // Read at boot only — NOT hot-reloadable: a mid-session switch would
-    // re-price claims already journaled under the other policy, so honoring a
-    // change requires a restart (documented in .env.example).
-    let policy_raw = env.text("BK_UNVERIFIED_EXPIRY_POLICY");
-    let unverified_expiry_policy = match policy_raw.as_deref().map(str::trim) {
-        None => blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash,
-        Some(raw) => match blitzkrieg_core::service::UnverifiedExpiryPolicy::parse(raw) {
-            Some(policy) => {
-                report.push(format!(
-                    "engine.unverified_expiry_policy={} (env)",
-                    policy.as_str()
-                ));
-                policy
-            }
-            None => {
-                eprintln!(
-                    "blitzkrieg-core: BK_UNVERIFIED_EXPIRY_POLICY={raw:?} is not a \
-                         known policy — expected \"cash\" or \"receivable\""
-                );
-                std::process::exit(2);
-            }
-        },
-    };
-    // Overdue-receivable aging budget for the receivable policy. The compiled
-    // default (48 h) rides `RECEIVABLE_MAX_AGE_MS_DEFAULT`; 0 disables the warn.
-    let receivable_max_age = pick(
-        None::<i64>,
-        env.num::<i64>("BK_RECEIVABLE_MAX_AGE_MS"),
-        blitzkrieg_core::service::RECEIVABLE_MAX_AGE_MS_DEFAULT,
-    );
-    if receivable_max_age.is_explicit() {
-        report.push(format!(
-            "engine.receivable_max_age_ms={} ({})",
-            receivable_max_age.value,
-            receivable_max_age.source.as_str()
-        ));
-    }
-    if receivable_max_age.value < 0 {
-        eprintln!(
-            "blitzkrieg-core: BK_RECEIVABLE_MAX_AGE_MS={} is negative — the aging \
-             budget cannot be negative (0 = warn disabled)",
-            receivable_max_age.value
-        );
-        std::process::exit(2);
-    }
-    // Boot echo carries the policy always (its default is a posture statement)
-    // and the aging budget only when the receivable policy is actually armed.
-    let receivable_echo = vec![
-        format!(
-            "expiry settlement policy: {} ({}) — unverified-expiry closes {}",
-            match unverified_expiry_policy {
-                blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash => "cash",
-                blitzkrieg_core::service::UnverifiedExpiryPolicy::Receivable => "receivable",
-            },
-            if policy_raw.is_some() {
-                "env"
-            } else {
-                "default"
-            },
-            match unverified_expiry_policy {
-                blitzkrieg_core::service::UnverifiedExpiryPolicy::Cash => {
-                    "credit spendable cash immediately at the fallback price (flag-off behavior)"
-                }
-                blitzkrieg_core::service::UnverifiedExpiryPolicy::Receivable => {
-                    "book a receivable claim redeemed at venue truth on resolution/reconcile; \
-                     the estimated amount is excluded from day-budget and loss-breaker headroom"
-                }
-            },
-        ),
-        format!(
-            "receivable aging budget: {} ms ({}) — overdue receivables warn amber once per episode{}",
-            receivable_max_age.value,
-            receivable_max_age.source.as_str(),
-            if receivable_max_age.value == 0 {
-                "; warn DISABLED"
-            } else {
-                ""
-            },
-        ),
-    ];
+    // Issue #991 settlement policy + receivable aging budget — body in
+    // `policy.rs` (#780 split, pure code motion). Returns the policy, the
+    // aging budget (still `Sourced`), and the boot echo.
+    let (unverified_expiry_policy, receivable_max_age, receivable_echo) =
+        super::policy::resolve_unverified_expiry_policy(env, &mut report);
 
-    // ── 任务二 1-3: the NTP clock-offset probe ──────────────────────────────
-    // CLI > env > default. The empty string is the documented "off" spelling:
-    // `probe::should_spawn_ntp` refuses it, so a configured-off probe spawns
-    // ZERO network tasks (the replay-safe posture). An explicit --ntp-host ""
-    // and an absent host are pinned apart by the snapshot test.
-    let ntp = pick(
-        ntp_host,
-        env.text("BK_NTP_HOST"),
-        blitzkrieg_core::probe::DEFAULT_NTP_HOST.to_string(),
-    );
-    let ntp_interval = pick(
-        ntp_interval_secs,
-        env.num::<i64>("BK_NTP_INTERVAL_SECS"),
-        blitzkrieg_core::probe::DEFAULT_NTP_INTERVAL_SECS,
-    );
-    if ntp_interval.value < 0 {
-        // Parse arms already refuse a negative CLI value; a negative from the
-        // env layer lands here (same fail-loud posture, never a silent default).
-        eprintln!(
-            "blitzkrieg-core: BK_NTP_INTERVAL_SECS={} is negative — the NTP probe \
-             interval cannot be negative (0 = off)",
-            ntp_interval.value
-        );
-        std::process::exit(2);
-    }
-    let ntp_echo = vec![if blitzkrieg_core::probe::should_spawn_ntp(&ntp.value)
-        && ntp_interval.value > 0
-    {
-        format!(
-            "environment probes: NTP clock-offset probe ON — every {} s against \
-             {} ({}/{}); |offset| >= 50 ms warns, >= 100 ms flags probe.ntp.skewRed",
-            ntp_interval.value,
-            ntp.value,
-            ntp.source.as_str(),
-            ntp_interval.source.as_str()
-        )
-    } else {
-        format!(
-            "environment probes: NTP clock-offset probe OFF (host={}, interval={}s) — \
-             zero network tasks spawned; stats probe.ntp stays cold",
-            if ntp.value.trim().is_empty() {
-                "(empty = off)"
-            } else {
-                ntp.value.as_str()
-            },
-            ntp_interval.value
-        )
-    }];
+    // NTP clock-offset probe — body in `policy.rs` (#780 split, pure code
+    // motion). Returns the host, the interval, and the boot echo.
+    let (ntp_host, ntp_interval_secs_val, ntp_echo) =
+        super::policy::resolve_ntp(env, ntp_host, ntp_interval_secs);
 
     // ── E17/#264 + issue #967 (Phase-5): the engine-level exit ladder ───────
     // Effective chain: CLI > env(.env) > compiled default. The TOML `[exit]`
@@ -1389,8 +1269,8 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         unverified_expiry_policy,
         receivable_max_age_ms: receivable_max_age.value,
         receivable_echo,
-        ntp_host: ntp.value,
-        ntp_interval_secs: ntp_interval.value,
+        ntp_host,
+        ntp_interval_secs: ntp_interval_secs_val,
         markets,
         auto_exits,
         max_positions,

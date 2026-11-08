@@ -17,6 +17,7 @@ use std::str::FromStr;
 #[macro_use]
 mod macros;
 mod args;
+mod policy;
 mod replay_flags;
 
 pub(crate) use args::parse_args;
