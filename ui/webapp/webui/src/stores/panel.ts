@@ -53,6 +53,10 @@ export interface PanelAccountRow {
   /** 账户自有账本的预留/可用（账户级余额瓦片走这里，进程级 ledger 不再是
    *  余额来源 —— E28 §9.5：一个账户一套账本）。 */
   reserved?: string | number
+  /** 现金真值锚点（操作员裁决 2026-11-08：账本流水=唯一真相）：本账户历史
+   *  累计 Seed 入金。净利的账本口径 = balance − seededTotal（构造上恒等）；
+   *  成交行的模型费净利降级为「成交口径」展示。老内核缺字段 = undefined。 */
+  seededTotal?: string | number
 }
 
 export const usePanelStore = defineStore('panel', () => {
@@ -341,6 +345,7 @@ export const usePanelStore = defineStore('panel', () => {
           strategies?: unknown
           rounds?: unknown
           reserved?: string
+          seededTotal?: string | number
         }>
       } | undefined
       if (!doc) return '网关未返回账户数据'
@@ -360,6 +365,7 @@ export const usePanelStore = defineStore('panel', () => {
         strategies: Array.isArray(a.strategies) ? [...(a.strategies as string[])] : undefined,
         rounds: Array.isArray(a.rounds) ? [...(a.rounds as number[])] : undefined,
         reserved: a.reserved ?? '',
+        seededTotal: a.seededTotal,
       }))
       // issue 561：镜像只供行数据与显示兜底 —— display 账户优先读快照
       // （内核事实），报文的 displayAccount 在场也采纳（快照未到的一拍）；

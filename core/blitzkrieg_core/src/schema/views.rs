@@ -652,6 +652,12 @@ pub struct AccountView {
     pub open_positions: usize,
     #[serde(with = "crate::decimal")]
     pub day_realized_usd: Decimal,
+    /// 现金真值锚点（操作员裁决 2026-11-08：账本流水=唯一真相）：本账户
+    /// 历史累计 Seed 入金。面板的净利 = `balance − seeded_total`（构造上
+    /// 恒等），成交行的模型费净利降级为「成交口径」展示。增量字段：老面板
+    /// 忽略；`default` 让老的 account.list 报文（无该键）仍能解析。
+    #[serde(default, with = "crate::decimal")]
+    pub seeded_total: Decimal,
     pub updated_at_ms: i64,
 }
 

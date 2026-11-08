@@ -103,6 +103,13 @@ pub struct Ledger {
     /// [`Self::journal_seq_basis`]). Not serialized: the JournalEntry shape
     /// and the journal.jsonl contract are untouched.
     journal_total: u64,
+    /// 现金真值锚点（操作员裁决 2026-11-08：账本流水=唯一真相）：本账本
+    /// 历史累计 Seed 入金（boot 播种 + `account.create` 铸造）。净利的账本
+    /// 口径 = `balance − seeded_total`——构造上恒等，面板不再拿成交行的
+    /// 模型费净利去拼一个可能两头都不是的余额。`apply_tagged` 在 Seed 类
+    /// 行上累加，`replay_journal` 从全量文件行重建（窗口淘汰不影响：文件
+    /// 是 append-only 全史）。不序列化——journal 行形状与合同不动。
+    seeded_total: Decimal,
     /// Where journal rows append — per-mode since issue 941
     /// (`data/ledger/<account>.journal.live.jsonl` trading,
     /// `<account>.journal.dry.jsonl` locally-settling; the pre-941
@@ -138,6 +145,12 @@ impl Ledger {
     /// summing traversal. Only the newest [`JOURNAL_CAP`] rows stay in memory.
     pub(crate) fn replay_journal(&mut self, rows: Vec<JournalEntry>) {
         self.journal.clear();
+        // 现金真值锚点从全量文件行重建（append-only 全史，窗口淘汰不缺页）。
+        self.seeded_total = rows
+            .iter()
+            .filter(|r| r.kind == JournalKind::Seed)
+            .map(|r| r.amount)
+            .sum();
         for row in rows {
             if self.journal.len() == JOURNAL_CAP {
                 self.journal.pop_front();
@@ -181,6 +194,9 @@ impl Ledger {
         let new_balance = (self.balance + requested).max(Decimal::ZERO);
         let amount = new_balance - self.balance;
         self.balance = new_balance;
+        if kind == JournalKind::Seed && amount != Decimal::ZERO {
+            self.seeded_total += amount;
+        }
         if amount != Decimal::ZERO {
             let entry = JournalEntry {
                 at_ms: now_ms(),
@@ -224,6 +240,11 @@ impl Ledger {
 
     pub fn balance(&self) -> Decimal {
         self.balance
+    }
+
+    /// 历史累计 Seed 入金——账本口径净利的减数（`balance − seeded_total`）。
+    pub fn seeded_total(&self) -> Decimal {
+        self.seeded_total
     }
 
     pub fn reserved(&self) -> Decimal {
@@ -1368,5 +1389,38 @@ mod tests {
         // Idempotence: a second pass with nothing left is a clean no-op.
         crate::account::AccountLedgers::archive_legacy_journals(&dir);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 现金真值锚点（操作员裁决 2026-11-08）：`seeded_total` 累计 Seed 入金
+    /// ——boot 播种、账户铸造、以及 replay 重建（窗口淘汰不影响，重建读
+    /// 全量文件行）。账本口径净利 = `balance − seeded_total`，面板的
+    /// 「本金 ＋ 净利 = 余额」恒等式由它保证。
+    #[test]
+    fn seeded_total_accumulates_seeds_and_rebuilds_on_replay() {
+        use rust_decimal_macros::dec;
+        let mut l = Ledger::new();
+        l.seed(dec!(1000));
+        assert_eq!(l.seeded_total(), dec!(1000));
+        // 成交不改本金锚：买一笔、卖一笔（含费），余额动了，锚不动。
+        l.settle_buy_fill("o1", dec!(30), Decimal::ZERO);
+        l.settle_sell_fill(dec!(21), dec!(1));
+        assert_eq!(l.seeded_total(), dec!(1000));
+        // 1000 − 30(买) + (21 − 1)(卖净额) = 990。
+        assert_eq!(l.balance(), dec!(990));
+        assert_eq!(l.balance() - l.seeded_total(), dec!(-10), "账本口径净利");
+        // 账户铸造的 fund() 也是 Seed 类，进锚。
+        l.fund(dec!(500), "create");
+        assert_eq!(l.seeded_total(), dec!(1500));
+
+        // Replay 重建：把现journal全量喂回去，锚 + 余额从行重建。
+        let rows: Vec<JournalEntry> = l.journal_snapshot();
+        let mut replayed = Ledger::new();
+        replayed.replay_journal(rows);
+        assert_eq!(
+            replayed.seeded_total(),
+            l.seeded_total(),
+            "replay rebuilds the seed anchor from the full row list"
+        );
+        assert_eq!(replayed.balance(), l.balance());
     }
 }

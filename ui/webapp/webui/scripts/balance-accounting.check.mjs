@@ -74,6 +74,26 @@ check('equity is the principal plus the net, whatever the ledger says', () => {
   assert.equal(Number(a.equity.toFixed(2)), 1039.44)
 })
 
+check('a reset ledger is flagged identityBroken — the tile stops composing the equation', () => {
+  // 2026-11-08 live find: default's ledger was reset to a fresh $1,000 seed
+  // while its 36 pre-reset trades (net −$3.08) stayed in the log; seed+net
+  // composed $996.92 — a number that was NEITHER the real cash ($1,000) nor
+  // the fold (−$3.08). polysimulator grew the same gap ($2.31) once the fee
+  // cash-truth (#995) desynced the ledger's fee movements from the rows'
+  // model fees. balanceView flags the broken identity so the tile shows the
+  // LEDGER cash and labels the net/fees 全史累计 instead of composing.
+  const broken = balanceView(balance({ balance: 1000, available: 1000, seed: 1000 }), -3.08, 1.86)
+  assert.equal(broken.identityBroken, true, 'cash ≠ seed+net beyond rounding → the equation is dead')
+  assert.equal(broken.equity, 996.92, 'the composed figure still computes — the TILE chooses the ledger')
+  assert.equal(broken.cash, 1000, 'the ledger figure the tile falls back to')
+  // Within rounding (cents) the identity holds and nothing changes.
+  const ok = balanceView(balance({ balance: 1039.44, available: 1039.44, seed: 1000 }), 39.44, 0)
+  assert.equal(ok.identityBroken, false, 'a cent-rounding gap is not a broken identity')
+  // No principal: the identity question does not arise (the LIVE headline is cash anyway).
+  const live = balanceView(balance({ balance: 1073.29, available: 1073.29, seed: null }), 39.44, 34.96)
+  assert.equal(live.identityBroken, false, 'no seed → no equation to break')
+})
+
 check('a fee is an expense: it reduces net profit, never the principal', () => {
   // Same trade with and without fees. The principal is untouched; the net profit
   // absorbs the cost; gross is the pre-cost figure fees are charged against.
