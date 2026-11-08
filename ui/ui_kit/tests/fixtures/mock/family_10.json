@@ -1,0 +1,1 @@
+{"title":"Will BTC close above 100k?","listings":[{"venue":"polymarket","conditionId":"0xc","upTokenId":"up","downTokenId":"down","asset":"bitcoin","title":"BTC up","settlementRules":"expiry","settlementSource":"chainlink","expiresAtMs":1760000000000,"status":"active"}],"actor":"panel"}

@@ -1,0 +1,1 @@
+{"accountId":"default","budgetRatio":"0.5","minBudgetUsd":"10","maxBudgetUsd":"50","minEquityUsd":"20","maxPositionsPerAsset":3,"rules":[{"op":"cap"}]}

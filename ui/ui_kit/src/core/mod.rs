@@ -7,6 +7,7 @@ mod evolution_tests;
 pub mod ipc_client;
 #[cfg(test)]
 mod ipc_client_tests;
+pub mod mock_server;
 pub mod net_check;
 pub mod notifier;
 #[cfg(test)]

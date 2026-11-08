@@ -27,7 +27,7 @@ serde_json = { workspace = true }
 # hand-mirrored `*View` structs did. Still NO blitzkrieg_core dependency: the
 # kit remains a replaceable presentation layer.
 blitzkrieg-bk-contract = { path = "../../core/bk_contract" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "io-util", "net", "time"] }
 # #460: credential comparison must be constant-time by construction, not by
 # hand-rolled XOR folklore. `subtle` is the ecosystem's audited primitive.
 subtle = { version = "2.6", default-features = false }
