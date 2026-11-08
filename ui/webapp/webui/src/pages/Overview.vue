@@ -224,7 +224,7 @@ const trades = computed(() => {
  * 2026-11-08：现金流水=唯一真相）：净利 = 该账户账本现金 − 累计种子入金
  * （`seededTotal`）——构造上恒等，面板不再拿成交行的模型费净利去拼一个
  * 可能两头都不是的余额（default 曾拼出 $996.92：账本 $1,000 + 重置前旧
- * 净利 −$3.08）。成交行折叠（trades.net）只服务权益曲线/胜率/手续费这些
+ * 净利 −$3.08）。成交行折叠（recon.net）只服务权益曲线/胜率/手续费这些
  * 「成交口径」展示，与钱数分离后另行标注。
  *
  * Fees are an expense, so they are shown as a cost charged against gross profit
@@ -594,7 +594,7 @@ const needsStrategyHint = computed(() => {
           v-if="recon.equity !== null && recon.fees > 0"
           class="mt-2 flex items-center gap-1.5 text-[10.5px] leading-snug text-faint-fg"
         >
-          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(trades.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
+          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(recon.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
               手续费支出 {{ money(recon.fees) }}（成交口径）· 毛利 {{ money(recon.gross) }}
             </span>
@@ -647,7 +647,7 @@ const needsStrategyHint = computed(() => {
         :tone="recon.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
-          扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
+          扣费净利 <RollingNumber :value="signedMoney(recon.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
         </template>
         <div class="mt-2 flex items-center gap-2">
           <Badge variant="up"><ArrowUpRight class="size-3" /><RollingNumber :value="trades.win" /></Badge>
