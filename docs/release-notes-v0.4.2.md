@@ -24,7 +24,7 @@
 
 ## 🎯 三、策略出场栈一代目
 
-- `thesis_death_exit` 落内核 + Lua 标准库 `bk.thesis_death_default`——**禁止扛单**：逻辑死亡当 tick 无条件平仓
+- `thesis_death_exit` 落内核 + Lua 标准库 `bk.thesis_death_default`——**声明制启用**：包声明后才强制，逻辑死亡当 tick 无条件平仓；lua_momentum 实测误杀（premise flip 盘口抖动秒级触发、12%→6% 反转带对 0.15-0.50 binary token 是一个 tick，仓位入场 0-24s 即强平，~20% WR 窗口 vs 72.2% 累计基线），按操作员裁决 2026-11-08 撤销声明（0.5.1），出场面回归自身 TP/trailing/stop_loss/结算
 - 出场 wire 加 `price` 字段：策略报价 maker-TP（profit-side 门 + PnL 守门）
 - 出场升级钟 250ms maker→taker + 同期出场优先于入场
 - lua_momentum 0.4.0 时间加权止盈带（二项定价收敛 {0,1}，带子随轮钟线性收紧）
