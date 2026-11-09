@@ -443,8 +443,10 @@ onMounted(() => {
                  可达性优先，见下方按钮注释）。
                  移动端：整个 action 区域 overflow-x-auto 横向滚动，所有元素
                  同行显示，避免 SegmentedControl 宽度挤掉搜索/创建按钮。 -->
-            <div class="overflow-x-auto pb-1">
-              <div class="flex items-center gap-2 min-w-0 flex-nowrap">
+            <div class="pb-1">
+              <!-- 移动端按钮换行：flex-wrap 让 SegmentedControl / 搜索 / 创建按钮
+                   在窄屏自动折行，不再横向滚动也不再互相挤掉。 -->
+              <div class="flex items-start gap-2 flex-wrap min-w-0">
                 <SegmentedControl
                   v-model="perfTab"
                   :segments="[
@@ -471,7 +473,7 @@ onMounted(() => {
                 <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy" class="shrink-0">
                   <Plus class="size-3.5" />创建策略
                 </Button>
-                <!-- 创建套利：配置双腿意图（A 腿 + B 腿 + 币对）并启用所选套利策略
+                <!-- 创建套利：配置双腿套利并启用所选套利策略
                      （配置意图模型，创建即持久化；弹窗内自取配置与凭证读数）。
                      可达性优先：套利 tab 对非腿账户不可见，而本按钮是弹窗的唯一
                      入口 —— 故固定在 header，两 tab 共用，任何账户都能开弹窗。 -->
