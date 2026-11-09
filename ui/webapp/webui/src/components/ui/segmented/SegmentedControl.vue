@@ -30,7 +30,7 @@ const count = computed(() => Math.max(1, props.segments.length))
 <template>
   <div
     :class="cn(
-      'relative inline-grid items-center gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md',
+      'relative inline-grid items-center gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md min-w-0',
       props.class,
     )"
     :style="{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }"
