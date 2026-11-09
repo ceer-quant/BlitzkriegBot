@@ -615,6 +615,12 @@ async fn handle_line(
             )
             .await
         }
+        method::ACCOUNT_UNFREEZE => {
+            handlers::account::handle_account(
+                method, core, registry, peer, host, data_plane, session, params,
+            )
+            .await
+        }
         method::ACCOUNT_STRATEGIES_SET => {
             handlers::account::handle_account(
                 method, core, registry, peer, host, data_plane, session, params,

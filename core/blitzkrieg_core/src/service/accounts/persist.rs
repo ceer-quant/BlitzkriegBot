@@ -1218,10 +1218,9 @@ impl Core {
         for v in orphaned_venues {
             self.venue_fact_cursor.remove(&v);
         }
-        // 冻结簿随账户走：旧实现留着悬空冻结项（同名 id 重建即继承上一世
-        // 的 kill switch），自愈时间戳同理一并摘除。
-        self.freeze_book.account_freezes.remove(id.as_str());
-        self.freeze_book.auto_frozen.remove(id.as_str());
+        // #1045: 入场闸门纯内存、按账户一份——账户撤销时同步摘除其闸门，
+        // 不留同名 id 重建后继承的悬空闸门。不碰账本任何数字。
+        self.clear_account_gate(id.as_str());
         self.accounts.repair_active_after_removal(id);
         // 显示账户配置化: the removal must not orphan the display pointer —
         // the file was rewritten WITHOUT the row above, and the same render

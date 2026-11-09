@@ -894,11 +894,11 @@ pub const ACCOUNT_TRADING_SET_NOTE: &str = "false = new entries refused for this
      positions stay managed until flat (exits always flow); persisted to the \
      operator's `.env` (ACCOUNT_*), re-read at next boot";
 
-/// `account.freeze` params: the account-scoped kill switch. `frozen: true`
-/// refuses the account's NEW orders (manual and strategy entries) while its
-/// EXITS keep flowing; `frozen: false` lifts the freeze. Session-scoped —
-/// not persisted (an automatic freeze must not outlive the
-/// process that observed its cause; a restart re-probes).
+/// `account.freeze` params: the account-scoped entry gate (#1045).
+/// `frozen: true` places a `Manual` gate on the account—new orders (manual and
+/// strategy entries) are refused, its EXITS keep flowing; `frozen: false` is an
+/// alias of `account.unfreeze` and lifts the gate. The gate is pure in-memory:
+/// session-scoped, not persisted, a restart starts clean.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountFreezeParams {
@@ -909,8 +909,9 @@ pub struct AccountFreezeParams {
     pub reason: Option<String>,
 }
 
-/// `account.freeze` result: the freeze state now in force, with the reason
-/// currently on the book (a no-op re-freeze keeps the FIRST reason).
+/// `account.freeze` result: the gate state now in force (`frozen` = the account's
+/// entry gate is blocked) with the reason currently on the book; a no-op
+/// re-freeze keeps the FIRST reason.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountFreezeResult {
@@ -924,6 +925,24 @@ pub struct AccountFreezeResult {
 pub const ACCOUNT_FREEZE_NOTE: &str = "true = new orders refused for this account (manual and \
      strategy entries), existing positions stay managed until flat (exits \
      always flow); session-scoped — a restart starts clean and re-probes";
+
+/// `account.unfreeze` params (#1045): lift the account's entry gate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUnfreezeParams {
+    pub account_id: String,
+}
+
+/// `account.unfreeze` result (#1045): the kernel's receipt of the unfreeze.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUnfreezeResult {
+    pub account_id: String,
+    pub unfrozen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_reason: Option<String>,
+    pub entries_allowed: bool,
+}
 
 /// `account.strategies.set` params: the account's strategy ENABLEMENT set
 /// (the 启用按钮's persistence). Names are validated against the REGISTERED

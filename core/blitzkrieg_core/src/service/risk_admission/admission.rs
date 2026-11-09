@@ -333,8 +333,8 @@ impl Core {
         // Account-scoped kill switch: a frozen account refuses NEW orders at
         // the submission gate (closes pass — the #174 hatch, per account).
         // Manual-orders enforcement point; strategy entries were already
-        // dropped in the engine (the frozen-scope filter).
-        self.account_freeze_permits(&req)?;
+        // dropped in the engine (the frozen-scope filter). #1045: single gate.
+        self.account_gate_permits(&req, now_ms)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
         self.refuse_cross_account_close(&req)?;

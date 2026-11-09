@@ -11,8 +11,8 @@ use crate::schema::Event;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 
-use super::Core;
 use super::config::{AuditRuntime, LastError};
+use super::{Core, GateReason};
 
 impl Core {
     /// Apply a hot update of the ENTRY limits (#191) — the whole safe subset
@@ -995,16 +995,10 @@ impl Core {
             self.config.breaker_cooldown_sec,
         );
         self.risk.resume();
-        // #861: the reset scrubbed the freeze book directly (not via
-        // `resume_account`), so the durable cell needs the same scrub — the
-        // account's freeze/stamp rows go with the reset (the `risk.resume()`
-        // above already cleared the kill in the cell).
-        if let Some(c) = &mut self.risk_state {
-            c.file.account_freezes.remove(account_id.as_str());
-            c.file.auto_frozen.remove(account_id.as_str());
-            c.file.saved_at_ms = now_ms;
-        }
-        self.persist_risk_state();
+        // #1045: 入场闸门纯内存、重启即清，不落风险状态文件——这里只清
+        // 该账户的入场闸门（与旧 freeze_book.scrub 同语义），不碰账本任何
+        // 数字（不改 realized、不改 cap、不清亏损）。
+        self.clear_account_gate(account_id.as_str());
 
         // 4) 持仓簿账户维摘除 + 磁盘记录按账户截断（不重启进程）。
         let open_before = pre.open_positions;
@@ -1398,6 +1392,17 @@ impl Core {
                     CoreErrorCode::RiskRejected,
                     format!("[{}] {}", id.as_str(), message),
                 );
+                // UTC 日边界真正翻过：日内熔断闸门自动到期，该账户新单入场恢复。
+                // 账本不动，只解闸；若 realized 仍超上限，下一 tick 的
+                // emit_daily_trip 会按账本重新上 DailyLoss 闸门——这是「按账本
+                // 推导」，不是「回放冻结」。Manual / ConfigReadOnly /
+                // ConfigSuspended 闸门不受此清除（它们不是日内熔断）。
+                if roll.previous_day_index.is_some()
+                    && let Some(gate) = self.account_gate(id.as_str())
+                    && gate.reason_kind == GateReason::DailyLoss
+                {
+                    self.clear_account_gate(id.as_str());
+                }
             }
         }
     }
@@ -1425,7 +1430,41 @@ impl Core {
     /// close, so the freeze is visible at the moment it happens and again after
     /// a restart restored an already-breached budget.
     pub(super) fn emit_daily_trip(&mut self) {
+        let now_ms = blitzkrieg_market_api::net::now_ms();
+        // 下一个 UTC 日零点：日内熔断闸门在此自动到期（DailyLoss 到期自动清，
+        // 无需操作员手动解冻）。
+        let expires_at_ms = (crate::position::utc_day_index(now_ms) + 1) * crate::position::DAY_MS;
+        // 先摘未报的 trip（同时把此处检测到的已违约账户标记 tripped），再对
+        // 所有 tripped 账户上/刷新 DailyLoss 闸门。emit_daily_trip 每 tick 执行，
+        // 所以「中途解冻也于下一 tick 被日内熔断重新拒绝」——解冻只放行入场，
+        // 不擦除账本上的已实现亏损。
         let trips = self.positions.take_daily_trips();
+        // 先把 tripped 快照出来（Clone，开销极小），再分别上闸门：
+        // 避免 `daily_states()` 的不可变借贷与 `set_account_gate` 的可变借贷在循环体内重叠。
+        let tripped: Vec<(String, crate::position::DailyLossState)> = self
+            .positions
+            .daily_states()
+            .iter()
+            .filter(|(_, s)| s.tripped)
+            .map(|(id, s)| (id.to_string(), s.clone()))
+            .collect();
+        for (account, state) in tripped {
+            self.set_account_gate(
+                &account,
+                format!(
+                    "Daily loss limit for account {} — net ${} against a ${} cap ({}% of the day's opening equity ${})",
+                    account,
+                    state.realized_pnl_usd,
+                    state.tripped_limit_usd,
+                    self.config.positions.max_daily_loss_equity_pct,
+                    state.opening_equity_usd,
+                ),
+                GateReason::DailyLoss,
+                state.tripped_at_ms,
+                Some(expires_at_ms),
+                "daily-loss breaker",
+            );
+        }
         for (account, t) in trips {
             let message = format!(
                 "DAILY LOSS LIMIT REACHED for account {account}: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",

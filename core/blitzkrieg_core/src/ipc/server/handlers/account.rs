@@ -608,10 +608,10 @@ pub(crate) async fn handle_account(
                     let id = AccountId::from(p.account_id.as_str());
                     let mut c = core.lock().await;
                     // #780 boundary hygiene: existence-only check through the
-                    // narrow read (the blunt `accounts_mut` is test-only
-                    // now — #825, never default); the freeze/resume writes
-                    // below are Core methods, not book surgery.
+                    // narrow read; the gate writes below are Core methods,
+                    // not book surgery.
                     c.require_account(&id)?;
+                    let now_ms = blitzkrieg_market_api::net::now_ms();
                     if p.frozen {
                         c.freeze_account_manual(
                             id.as_str(),
@@ -620,13 +620,33 @@ pub(crate) async fn handle_account(
                                 .unwrap_or_else(|| "manual freeze".to_string()),
                         );
                     } else {
-                        c.resume_account(id.as_str());
+                        c.unfreeze_account(id.as_str(), "panel", now_ms);
                     }
                     Ok(serde_json::to_value(AccountFreezeResult {
                         account_id: id.as_str().to_string(),
-                        frozen: p.frozen,
-                        reason: c.account_freeze_reason(id.as_str()).map(String::from),
+                        frozen: c.account_gate_blocked(id.as_str(), now_ms),
+                        reason: c.account_freeze_reason(id.as_str(), now_ms),
                         note: ACCOUNT_FREEZE_NOTE,
+                    })
+                    .unwrap_or(Value::Null))
+                }
+            })
+            .await
+        }
+        method::ACCOUNT_UNFREEZE => {
+            typed(params, |p: AccountUnfreezeParams| {
+                let core = core.clone();
+                async move {
+                    let id = AccountId::from(p.account_id.as_str());
+                    let mut c = core.lock().await;
+                    c.require_account(&id)?;
+                    let now_ms = blitzkrieg_market_api::net::now_ms();
+                    let r = c.unfreeze_account(id.as_str(), "ipc", now_ms);
+                    Ok(serde_json::to_value(AccountUnfreezeResult {
+                        account_id: id.as_str().to_string(),
+                        unfrozen: r.unfrozen,
+                        previous_reason: r.previous_reason,
+                        entries_allowed: r.entries_allowed,
                     })
                     .unwrap_or(Value::Null))
                 }

@@ -39,6 +39,8 @@ pub(crate) use exits::{
 // manager; `service.rs` re-exports it for the struct field and the
 // integration tree's handle.
 pub(crate) use freeze::FreezeBook;
+// #1045: the single in-memory per-account entry gate.
+pub(crate) use freeze::{AccountGate, GateReason};
 
 // #861: the runtime risk state's durable side file (hot entry caps, systemic
 // bounds, kill switch, freeze book) — the cell type `service.rs`'s Core

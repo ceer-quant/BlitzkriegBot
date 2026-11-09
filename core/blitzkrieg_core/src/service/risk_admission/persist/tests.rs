@@ -231,6 +231,14 @@ fn a_migrated_file_loads_clean_without_the_retirement_warning() {
     assert!(matches!(load_risk_state_file(&path), RiskStateLoad::Ok(_)));
     let c = core_with(&path, &["default"]);
     assert_eq!(c.risk.config().max_order_notional, dec!(250));
+    assert!(
+        c.is_killed(),
+        "the kill switch still restores across restart"
+    );
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_none(),
+        "stale accountFreezes rows are ignored, not replayed (#1045)"
+    );
     let single = &c.risk.config().systemic.account.max_single_loss_usd;
     assert_eq!(single.value(), Decimal::ZERO);
     assert_eq!(single.source(), LimitSource::Default);
@@ -269,7 +277,7 @@ fn a_corrupt_risk_state_file_boots_fail_closed() {
     // posture must not quietly resume trading (the corrupt-boot clause that
     // survives the #928 retirement of the restart default freeze).
     assert_eq!(
-        c2.account_freeze_reason("default"),
+        c2.account_freeze_reason("default", now_ms()).as_deref(),
         Some(
             "risk-state file unreadable — risk posture unverifiable until resumed \
                       (fail-closed, issue #861)"
@@ -282,87 +290,85 @@ fn a_corrupt_risk_state_file_boots_fail_closed() {
     );
 }
 
-/// (c1) The #685 shape across a restart: an operator's manual freeze comes
-/// back with its original reason, venue health NEVER lifts it (no
-/// auto_frozen stamp travels with it), and only an explicit resume clears it.
+/// (c1) #685 + #1045: an operator's manual freeze is a `Manual` gate — venue
+/// health NEVER lifts it, only `account.unfreeze`/resume does, and a restart
+/// clears every gate (pure in-memory). The manual freeze does NOT survive a
+/// restart; only `realized_pnl_usd` (the ledger) is durable.
 #[test]
-fn manual_freeze_survives_restart_and_never_self_lifts() {
+fn manual_freeze_never_self_lifts_and_clears_on_restart() {
     let root = TempRoot::new("manual-freeze");
     let path = root.file();
 
     let mut c = core_with(&path, &["default"]);
     c.freeze_account_manual("default", "operator pause".to_string());
+    assert_eq!(
+        c.account_freeze_reason("default", now_ms()).as_deref(),
+        Some("operator pause"),
+        "manual freeze is in force this session"
+    );
+    // Venue health past the debounce must NOT lift a manual gate.
+    c.auto_lift_if_venue_healthy("default", "venue healthy", now_ms() + 86_400_000);
+    assert_eq!(
+        c.account_freeze_reason("default", now_ms()).as_deref(),
+        Some("operator pause"),
+        "#685: a manual freeze never self-lifts"
+    );
+    c.resume_account("default");
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_none(),
+        "resume clears the gate"
+    );
     drop(c);
 
-    let mut c2 = core_with(&path, &["default"]);
-    assert_eq!(
-        c2.account_freeze_reason("default"),
-        Some("operator pause"),
-        "the original reason rides the restart"
-    );
-    // Far past the debounce — a stamped auto freeze would lift here. A manual
-    // freeze has no stamp, so this must be a no-op.
-    c2.auto_lift_if_venue_healthy("default", "venue healthy", now_ms() + 86_400_000);
-    assert_eq!(
-        c2.account_freeze_reason("default"),
-        Some("operator pause"),
-        "#685: a manual freeze never self-lifts, across restarts too"
-    );
-    c2.resume_account("default");
-    assert!(c2.account_freeze_reason("default").is_none());
-    drop(c2);
-
-    // The lift is durable (#928): a clean boot does NOT re-freeze — the
-    // account with an empty freeze book on the disk comes up trading.
-    let c3 = core_with(&path, &["default"]);
+    // Restart: gates are pure in-memory, a clean boot starts trading.
+    let c2 = core_with(&path, &["default"]);
     assert!(
-        c3.account_freeze_reason("default").is_none(),
-        "issue 928: a clean restart must not re-freeze a resumed account"
+        c2.account_freeze_reason("default", now_ms()).is_none(),
+        "#1045: a restart clears the manual freeze; realized ledger untouched"
     );
 }
 
-/// (c2) The kernel's auto-freeze stamp survives a restart, so the self-heal
-/// still debounces from the instant the kernel FIRST lost the account — and
-/// a healthy venue past `FREEZE_AUTO_LIFT_MIN_MS` lifts it, exactly as it
-/// would have without the restart in between.
+/// (c2) #1045: a venue-rejection auto-freeze is a `VenueRejection` gate — the
+/// health probe lifts it past the debounce, but NOTHING survives a restart
+/// (no `auto_frozen` stamp any more).
 #[test]
-fn auto_frozen_stamp_survives_and_still_self_lifts() {
+fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     let root = TempRoot::new("auto-freeze");
     let path = root.file();
 
-    let mut c = core_with(&path, &["default"]);
     let frozen_at = now_ms();
+    let mut c = core_with(&path, &["default"]);
     c.freeze_account_auto(
         "default",
         "5 consecutive venue rejections".to_string(),
         frozen_at,
     );
-    assert!(c.freeze_book.auto_frozen.contains_key("default"));
-    drop(c);
-
-    let mut c2 = core_with(&path, &["default"]);
     assert_eq!(
-        c2.account_freeze_reason("default"),
+        c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("5 consecutive venue rejections"),
-        "the circumstantial freeze comes back with its cause"
+        "the circumstantial freeze is in force this session"
     );
+    // Inside the debounce window a healthy venue must NOT lift.
+    c.auto_lift_if_venue_healthy("default", "venue healthy", frozen_at + 1_000);
     assert_eq!(
-        c2.freeze_book.auto_frozen.get("default"),
-        Some(&frozen_at),
-        "the stamp restores — the debounce counts from the original freeze"
+        c.account_freeze_reason("default", now_ms()).as_deref(),
+        Some("5 consecutive venue rejections"),
     );
-    // Inside the debounce window a healthy venue must NOT lift (the stamp is
-    // what makes the check possible at all).
-    c2.auto_lift_if_venue_healthy("default", "venue healthy", frozen_at + 1_000);
-    assert!(c2.account_freeze_reason("default").is_some());
-    // Past the debounce, the same self-heal lifts it — the restart did not
-    // turn a circumstantial freeze into a life sentence.
-    c2.auto_lift_if_venue_healthy(
+    // Past the debounce the self-heal lifts it — same session, no restart needed.
+    c.auto_lift_if_venue_healthy(
         "default",
         "venue healthy",
         frozen_at + crate::service::FREEZE_AUTO_LIFT_MIN_MS,
     );
-    assert!(c2.account_freeze_reason("default").is_none());
+    assert!(c.account_freeze_reason("default", now_ms()).is_none());
+    drop(c);
+
+    // Restart: gate cleared — the account comes up trading; no stamp replayed.
+    let c2 = core_with(&path, &["default"]);
+    assert!(
+        c2.account_freeze_reason("default", now_ms()).is_none(),
+        "#1045: no freeze posture is replayed across a restart"
+    );
 }
 
 /// (d) The global kill switch outlives the process — with the reason an
@@ -431,60 +437,57 @@ fn a_pathless_core_stays_memory_only_and_never_boot_freezes() {
         "no file, no persistence claim — the honest memory-only report"
     );
     assert!(
-        c.account_freeze_reason("default").is_none(),
+        c.account_freeze_reason("default", now_ms()).is_none(),
         "no risk-state file was ever present: no boot freeze of any kind"
     );
     // And nothing was written under the (unused) temp root.
     assert!(!root.file().exists());
 }
 
-/// A restart with a risk-state file on disk does NOT blanket-freeze (#928:
-/// the #861 restart default freeze is retired by operator ruling). The
-/// freeze book the disk carries is the whole posture: a frozen account
-/// stays frozen with its reason, a resumed account comes up trading, and
-/// the caps still recover.
+/// A restart freezes nobody (#928): a manual freeze on `paper` does NOT
+/// survive the reboot — gates are pure in-memory. Only the ledger
+/// (`realized_pnl_usd`) and the kill switch are durable; the disk's stale
+/// `accountFreezes` rows are ignored, not replayed.
 #[test]
-fn a_clean_restart_freezes_nobody_and_keeps_the_disk_freeze_book() {
+fn a_clean_restart_freezes_nobody() {
     let root = TempRoot::new("default-freeze");
     let path = root.file();
 
-    // Boot 1: the file does not exist yet — no freeze, and a hot write
-    // creates the file.
+    // Boot 1: no freeze yet; a hot write creates the file; one account is
+    // manually frozen at runtime.
     let mut c = core_with(&path, &["default", "paper"]);
-    assert!(c.account_freeze_reason("default").is_none());
-    assert!(c.account_freeze_reason("paper").is_none());
+    assert!(c.account_freeze_reason("default", now_ms()).is_none());
+    assert!(c.account_freeze_reason("paper", now_ms()).is_none());
     let patch = SetRiskLimitsParams {
         max_order_notional: Some(dec!(250)),
         ..Default::default()
     };
     c.apply_risk_limits(&patch, "op", 1_000)
         .expect("limits apply");
-    // One account frozen at runtime (the operator's own verdict).
     c.freeze_account_manual("paper", "operator pause".to_string());
+    assert_eq!(
+        c.account_freeze_reason("paper", now_ms()).as_deref(),
+        Some("operator pause")
+    );
     drop(c);
 
-    // Boot 2: the file exists — the disk freeze book is the ENTIRE boot
-    // posture. paper stays frozen (its reason rides along); the never-frozen
-    // default comes up TRADING (#928).
+    // Boot 2: the disk's stale freeze rows are NOT replayed — nobody comes up
+    // frozen, and resume is a no-op on an already-clear gate.
     let mut c2 = core_with(&path, &["default", "paper"]);
     assert!(
-        c2.account_freeze_reason("default").is_none(),
+        c2.account_freeze_reason("default", now_ms()).is_none(),
         "issue 928: a restart must not blanket-freeze an unfrozen account"
     );
-    assert_eq!(
-        c2.account_freeze_reason("paper"),
-        Some("operator pause"),
-        "the disk's manual freeze survives the restart unchanged"
+    assert!(
+        c2.account_freeze_reason("paper", now_ms()).is_none(),
+        "#1045: manual freeze cleared on restart"
     );
-    // Resuming paper is durable now too — no boot re-freezes behind the
-    // operator's back.
     c2.resume_account("paper");
     drop(c2);
 
-    // Boot 3: a CLEAN restart (nothing frozen on disk) — nobody freezes, and
-    // the operator's caps still recovered through all of it.
+    // Boot 3: a CLEAN restart — nobody freezes, caps still recovered.
     let c3 = core_with(&path, &["default", "paper"]);
-    assert!(c3.account_freeze_reason("default").is_none());
-    assert!(c3.account_freeze_reason("paper").is_none());
+    assert!(c3.account_freeze_reason("default", now_ms()).is_none());
+    assert!(c3.account_freeze_reason("paper", now_ms()).is_none());
     assert_eq!(c3.risk.config().max_order_notional, dec!(250));
 }

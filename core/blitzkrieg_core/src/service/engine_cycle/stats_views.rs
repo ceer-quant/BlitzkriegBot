@@ -503,12 +503,33 @@ impl Core {
             } else {
                 serde_json::json!({ "active": false })
             },
-            // The account-scoped kill book (account.freeze / auto-freeze on
-            // the venue-rejection streak): account id → why. Empty object when
-            // nothing is frozen — a client distinguishes "global freeze"
-            // (tradingFrozen.active) from "these accounts only" without
-            // parsing reasons.
-            "accountFreezes": self.freeze_book.account_freezes,
+            // #1045: the single in-memory entry gate per account
+            // (blocked / reason / reasonKind / sinceMs / expiresAtMs / actor).
+            // Pure in-memory, a restart starts clean; expired DailyLoss gates
+            // read as not-blocked automatically.
+            "accountGates": self
+                .account_gates()
+                .iter()
+                .map(|(id, g)| {
+                    serde_json::json!({
+                        "account": id.as_str(),
+                        "blocked": g.blocked,
+                        "reason": g.reason,
+                        "reasonKind": g.reason_kind,
+                        "sinceMs": g.since_ms,
+                        "expiresAtMs": g.expires_at_ms,
+                        "actor": g.actor,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            // `accountFreezes` 由 account_gates 衍生的只读快照（被阻断账户 → 原因）。
+            // #1045: 只读派生，不再单独落盘；前端应切 accountGates，此字段仅过渡保留。
+            "accountFreezes": self
+                .account_gates()
+                .iter()
+                .filter(|(_, g)| g.blocked)
+                .map(|(id, g)| (id.as_str().to_string(), serde_json::json!(g.reason)))
+                .collect::<serde_json::Map<_, _>>(),
             // In-kernel accounting audit (issue #189): the latest verdict, so the
             // panel shows what the kernel itself concluded about the books.
             "accountingAudit": self.accounting_audit_view(),

@@ -391,19 +391,12 @@ impl PositionManager {
         if live >= self.config.max_positions {
             return Err(format!("Max positions ({})", self.config.max_positions));
         }
-        if self.daily_loss_tripped_for(account) {
-            let daily = self.daily_bucket(account);
-            let limit = if daily.tripped_limit_usd > Decimal::ZERO {
-                daily.tripped_limit_usd
-            } else {
-                self.effective_daily_loss_limit_for(account)
-            };
-            return Err(format!(
-                "Daily loss limit for account {account} (${limit}; realized ${}, day {})",
-                daily.realized_pnl_usd,
-                daily.day_index.unwrap_or(0)
-            ));
-        }
+        // NOTE: the daily-loss breaker no longer blocks entries here. Entry
+        // blocking is Core's single account gate (`account_gate_permits` in
+        // `place_gated`/`place_pending`): `emit_daily_trip` re-lifts a
+        // `DailyLoss` gate every tick until the UTC day rolls, so "unfreeze
+        // does not erase the daily loss" holds automatically. `can_open`
+        // keeps judging capacity + cooldown only.
         if self.config.stop_loss_cooldown_sec > 0
             && self.last_stop_loss_at > 0
             && now_ms - self.last_stop_loss_at < self.config.stop_loss_cooldown_sec * 1000

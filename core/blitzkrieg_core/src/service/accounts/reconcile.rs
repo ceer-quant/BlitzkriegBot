@@ -6,7 +6,7 @@ use crate::service::config::UnverifiedExpiryPolicy;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
-use crate::service::{FREEZE_AUTO_LIFT_MIN_MS, PLACE_TIMEOUT_VERDICT_MS, SWEEP_FAILURE_FREEZE};
+use crate::service::{PLACE_TIMEOUT_VERDICT_MS, SWEEP_FAILURE_FREEZE};
 
 use super::Core;
 
@@ -341,27 +341,15 @@ impl Core {
         // alive, and a fresh failure just rebuilds its own streak).
         self.freeze_book.consecutive_sweep_failures = 0;
         self.freeze_book.consecutive_sweep_failures_by_venue.clear();
-        // 冻结自愈：a successful sweep proves the transport fabric alive, but
-        // the snapshot names no venue — so every AUTO-frozen account gets the
-        // same evidence, debounced by FREEZE_AUTO_LIFT_MIN_MS (a fresh freeze
-        // rides out the flash outage that caused it before the lift fires).
-        // Manual freezes are invisible to this loop by construction.
-        for account in self
-            .freeze_book
-            .auto_frozen
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            if let Some(t) = self.freeze_book.auto_frozen.get(account.as_str())
-                && snap.now_ms - t >= FREEZE_AUTO_LIFT_MIN_MS
-            {
-                self.auto_lift_if_venue_healthy(
-                    account.as_str(),
-                    "reconcile sweep succeeded",
-                    snap.now_ms,
-                );
-            }
+        // #1045: 冻结自愈只解 `VenueRejection` 闸门（带 FREEZE_AUTO_LIFT_MIN_MS
+        // debounce），`Manual`/`DailyLoss` 闸门对此无感。auto_lift_if_venue_healthy
+        // 内部已按 reason_kind 过滤，这里只需遍历全部闸门。
+        for account in self.account_gates().keys().cloned().collect::<Vec<_>>() {
+            self.auto_lift_if_venue_healthy(
+                account.as_str(),
+                "reconcile sweep succeeded",
+                snap.now_ms,
+            );
         }
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
