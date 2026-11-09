@@ -50,6 +50,18 @@ export interface BalanceView {
    * (LIVE, or a core older than the field), which is when `cash` takes over.
    */
   equity: number | null
+  /**
+   * True when the 本金 ＋ 净利 identity does NOT reproduce the cash ledger
+   * (|cash − (seed + net)| beyond rounding): the account's ledger was reset
+   * or seeded out-of-band while the trade log kept older rows, so the fold's
+   * net describes a previous era's cash. 2026-11-08 live find: default's
+   * ledger reset to a fresh $1,000 seed while its 36 pre-reset trades
+   * (net −$3.08) stayed in the log — the tile composed $996.92, a number
+   * that was neither the real cash nor the fold. When this flag is set the
+   * panel shows the LEDGER cash as the headline and labels the net/fees as
+   * 全史累计 instead of composing the equation.
+   */
+  identityBroken: boolean
   /** The core's cash ledger, gross of local reservations. The LIVE headline. */
   cash: number
   /** Cash tied up in resting buy orders. */
@@ -76,6 +88,8 @@ export function balanceView(
     fees: paidFees,
     gross: realized + paidFees,
     equity: seed === null ? null : seed + realized,
+    identityBroken:
+      seed !== null && Math.abs(cash - (seed + realized)) > 0.005,
     cash,
     reserved,
     available,
