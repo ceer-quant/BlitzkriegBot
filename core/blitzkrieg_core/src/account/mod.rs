@@ -418,8 +418,8 @@ impl AccountLedgers {
         id: &AccountId,
         seed: rust_decimal::Decimal,
     ) -> CoreResult<bool> {
-        self.get_mut(id)?.reset_account_to_seed(seed);
-        Ok(true)
+        let ledger = self.get_mut(id)?;
+        Ok(ledger.reset_account_to_seed(seed))
     }
 
     /// The process-level default account (§9.5). Session-level switches live
