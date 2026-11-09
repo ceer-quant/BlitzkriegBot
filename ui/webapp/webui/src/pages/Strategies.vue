@@ -491,7 +491,7 @@ onMounted(() => {
           content: mode tags left the name cell (they were what overlapped the
           source path), and the source cell holds only a truncating path.
         -->
-        <table class="w-full table-fixed text-[13px]">
+        <table class="w-full min-w-[1080px] table-fixed text-[13px]">
           <colgroup>
             <col class="w-[13%]" />
             <col class="w-[5.5%]" />
