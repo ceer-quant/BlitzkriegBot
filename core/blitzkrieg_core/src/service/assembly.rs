@@ -79,7 +79,7 @@ impl Core {
             && let Some(position_log_path) = &config.position_log_path
         {
             let stem = position_log_path.trim_end_matches(".jsonl");
-            positions.daily_pnl_path = Some(format!("{stem}.daily-loss.dry.json"));
+            positions.daily_pnl_path = Some(format!("{stem}.daily-loss.json"));
         }
         if let Some(policy) = &execution_policy {
             positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;
