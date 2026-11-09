@@ -50,18 +50,18 @@ defineProps<{
     <Card>
       <CardHeader label="累计净 PnL">
         <template #title>
-          <span class="stat-num text-[16px]" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
-            <RollingNumber :value="signedMoney(cumStats.net)" />
+          <span class="stat-num text-[16px]" :class="recon.net >= 0 ? 'text-up' : 'text-down'">
+            <RollingNumber :value="signedMoney(recon.net)" />
           </span>
         </template>
         <template #action>
-          <Badge variant="default">扣费口径</Badge>
+          <Badge variant="default">账本口径</Badge>
         </template>
       </CardHeader>
       <EquityCurve :rows="historyRows" :height="128" :show-axis="false" />
       <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
-        <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(cumStats.gross)" /></span></span>
-        <span>费用 <span class="num text-down"><RollingNumber :value="money(cumStats.fees)" /></span></span>
+        <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(recon.gross)" /></span></span>
+        <span>费用 <span class="num text-down"><RollingNumber :value="money(recon.fees)" /></span></span>
       </div>
     </Card>
 
