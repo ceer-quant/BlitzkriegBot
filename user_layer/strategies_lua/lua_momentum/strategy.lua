@@ -817,6 +817,7 @@ function bk_evaluate()
 
     local allow_both = int_param(bk.params(), "allow_both_sides", 0) == 1
     local floor = min_entry_price()
+    local params = bk.params()
     local exiting = {}
     for i = 1, #out.exits do
         exiting[out.exits[i].token] = true
