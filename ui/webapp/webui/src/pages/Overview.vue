@@ -628,10 +628,10 @@ const needsStrategyHint = computed(() => {
       <StatTile
         label="已平仓交易"
         :value="num(trades.count)"
-        :tone="trades.net >= 0 ? 'up' : 'down'"
+        :tone="accountBalance.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
-          扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
+          扣费净利 <RollingNumber :value="signedMoney(accountBalance.net)" /> · 费用 <RollingNumber :value="money(accountBalance.fees)" />
         </template>
         <div class="mt-2 flex items-center gap-2">
           <Badge variant="up"><ArrowUpRight class="size-3" /><RollingNumber :value="trades.win" /></Badge>
