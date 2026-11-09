@@ -146,22 +146,11 @@ impl Ledger {
     pub(crate) fn replay_journal(&mut self, rows: Vec<JournalEntry>) {
         self.journal.clear();
         // 现金真值锚点从全量文件行重建（append-only 全史，窗口淘汰不缺页）。
-        // issue #1026：以最后一个 Reset 行为分界，该行 amount 是新世代的
-        // 本金锚（绝对目标值），只累加其后的 Seed 行；重置前的旧 Seed 行
-        // 不计入当前世代本金。无 Reset 行时保持原有行为（累加全部 Seed 行）。
-        let mut seeded_total: Decimal = Decimal::ZERO;
-        for row in &rows {
-            match row.kind {
-                JournalKind::Reset => {
-                    seeded_total = row.amount; // 绝对目标值，覆盖旧锚
-                }
-                JournalKind::Seed => {
-                    seeded_total += row.amount;
-                }
-                _ => {}
-            }
-        }
-        self.seeded_total = seeded_total;
+        self.seeded_total = rows
+            .iter()
+            .filter(|r| r.kind == JournalKind::Seed)
+            .map(|r| r.amount)
+            .sum();
         for row in rows {
             if self.journal.len() == JOURNAL_CAP {
                 self.journal.pop_front();
@@ -607,9 +596,6 @@ impl Ledger {
         self.reservations.clear();
         self.balance = target;
         self.journal.clear();
-        // issue #1026：重置后内存本金锚同步置为目标值，避免重启 replay 时
-        // 以 0 锚启动导致面板把全部本金记成净利。
-        self.seeded_total = target;
         // issue 749: the book is a seed again, not venue truth.
         self.venue_reported = false;
         // issue 723: every path below appends exactly one `Reset` row — the
