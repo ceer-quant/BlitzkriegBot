@@ -13,7 +13,8 @@ import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
 import { api } from '@/api/client'
-import { balanceView } from '@/lib/balance'
+import { useAccountBalance } from '@/lib/account-balance'
+import type { BalanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
@@ -139,32 +140,23 @@ async function clearExpiredPosition(positionId: string): Promise<void> {
   }
 }
 
-// ── balance (principal + net profit is the real balance in both modes) ──────
+// ── balance (真实余额 = 账本现金，唯一来源：useAccountBalance) ──────
 // issue 561（裁决 1）：真实余额瓦片跟随显示账户 —— 读 account.list 行
 // （内核 account_views 已按 ledger_of(id) 读该账户自有账本：balance/
-// available/reserved），不再读快照顶层的进程级 ledger.balance。切到 B 账户
-// 时显示 B 的账本，不能扣 B 的名字却算 A 的钱。
+// available/reserved），不再读快照顶层的进程级 ledger.balance。
+// issue 561 + 用户原则：余额 = 账本现金影子，统一来源 useAccountBalance，
+// 绝不拿成交折叠净利去拼余额。
 const isDry = computed(() => (snap.value?.mode ?? 'dry') === 'dry')
-const balance = computed(() => {
+const accountBalance = computed<BalanceView>(() => {
   const row = store.activeAccountRow
-  if (row) {
-    // 现金真值锚点（操作员裁决 2026-11-08：账本流水=唯一真相）：本金从
-    // 该账户自有账本的累计 Seed 入金取（account.list 行的 seededTotal），
-    // 不再借用快照顶层（那是会话账户的配置值，显示账户不是它时口径错位）。
-    // 老内核行缺 seededTotal → 回落快照顶层 seed（旧行为）。
-    const rowSeed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
-    return {
-      // account.list 行的十进制跨线是 string|number，归一成 number 再进
-      // balanceView（该函数与内核快照的 number 口径对齐）。
-      balance: Number(row.balance) || 0,
-      reserved: Number(row.reserved) || 0,
-      available: Number(row.available) || 0,
-      seed: rowSeed ?? snap.value?.balance?.seed ?? null,
-    }
+  if (!row) return {
+    seed: null, net: 0, fees: 0, gross: 0, equity: null, identityBroken: false,
+    cash: 0, reserved: 0, available: 0,
   }
-  // 行未到（面板刚启动的一拍）：回落快照顶层，标称口径由 balanceTitle
-  // 的 row 兜底分支如实标注 —— 不渲染一个猜出来的 0。
-  return snap.value?.balance ?? null
+  return useAccountBalance(row) ?? {
+    seed: null, net: 0, fees: 0, gross: 0, equity: null, identityBroken: false,
+    cash: 0, reserved: 0, available: 0,
+  }
 })
 const walletAddr = computed(() => snap.value?.wallet?.funder ?? snap.value?.wallet?.signer ?? null)
 
@@ -231,28 +223,10 @@ const trades = computed(() => {
  * — never folded into the balance, which would make the fee look like it moved
  * the principal.
  */
-const recon = computed(() => {
-  const b = balance.value
-  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
-  if (b && seedNum !== null) {
-    const ledgerNet = (Number(b.balance) || 0) - seedNum
-    return balanceView(b, ledgerNet, trades.value.fees)
-  }
-  // 无账本锚点（老内核行缺 seededTotal，且快照顶层也没有 seed）：回落成交
-  // 折叠口径，权益可能与被重置过账本对不上——identityBroken 分支如实标注。
-  return balanceView(b, trades.value.net, trades.value.fees)
-})
-
-/**
- * 成交折叠与账本口径是否劈叉（>半分钱）：只决定「手续费/曲线」这些成交类
- * 展示要不要挂「成交口径」标注——钱数（headline）恒走账本，永不参与拼接。
- */
 const foldDiverges = computed(() => {
-  const b = balance.value
-  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
-  if (!b || seedNum === null) return false
-  const ledgerNet = (Number(b.balance) || 0) - seedNum
-  return Math.abs(trades.value.net - ledgerNet) > 0.005
+  const ab = accountBalance.value
+  if (!ab || ab.seed === null) return false
+  return Math.abs(trades.value.net - ab.net) > 0.005
 })
 
 /**
@@ -265,7 +239,7 @@ const foldDiverges = computed(() => {
  */
 const balanceTitle = computed(() => {
   if (store.activeAccountRow === null) return '进程级读数'
-  if (recon.value.equity !== null) return isDry.value ? '真实余额' : '账户权益'
+  if (accountBalance.value.equity !== null) return isDry.value ? '真实余额' : '账户权益'
   return isDry.value ? '内核现金账' : '交易所余额'
 })
 
@@ -564,7 +538,7 @@ const needsStrategyHint = computed(() => {
     <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
       <StatTile
         :label="balanceTitle"
-        :value="money(recon.cash)"
+        :value="money(accountBalance.cash)"
         :tone="isDry ? 'gold' : 'default'"
       >
         <template #sub>
@@ -575,11 +549,11 @@ const needsStrategyHint = computed(() => {
             「成交口径」展示里，并与钱数分离标注。
           -->
           <Tooltip
-            v-if="recon.equity !== null"
-            :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 账本净利 ${signedMoney(recon.net)}（账本口径：该账户现金流水累计，含手续费）。手续费支出 ${money(recon.fees)} 与毛利 ${money(recon.gross)} 是成交记录口径（成交行按费率模型折叠），与账本口径可能有差额——它们描述成交史，不参与余额计算。`"
+            v-if="accountBalance.equity !== null"
+            :content="`真实余额 = 本金 ${money(accountBalance.seed)} ＋ 账本净利 ${signedMoney(accountBalance.net)}（账本口径：该账户现金流水累计，含手续费）。手续费支出 ${money(accountBalance.fees)} 与毛利 ${money(accountBalance.gross)} 是成交记录口径（成交行按费率模型折叠），与账本口径可能有差额——它们描述成交史，不参与余额计算。`"
           >
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              本金 {{ money(recon.seed) }} ＋ 账本净利 {{ signedMoney(recon.net) }}
+              本金 {{ money(accountBalance.seed) }} ＋ 账本净利 {{ signedMoney(accountBalance.net) }}
             </span>
           </Tooltip>
           <!--
@@ -595,18 +569,18 @@ const needsStrategyHint = computed(() => {
             </span>
           </Tooltip>
           <template v-else>
-            可用 <RollingNumber :value="money(recon.available)" /> · 预留 <RollingNumber :value="money(recon.reserved)" />
+            可用 <RollingNumber :value="money(accountBalance.available)" /> · 预留 <RollingNumber :value="money(accountBalance.reserved)" />
           </template>
         </template>
 
         <!-- Fees are a cost: shown against gross profit, never inside the balance. -->
         <div
-          v-if="recon.equity !== null && recon.fees > 0"
+          v-if="accountBalance.equity !== null && accountBalance.fees > 0"
           class="mt-2 flex items-center gap-1.5 text-[10.5px] leading-snug text-faint-fg"
         >
-          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(trades.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
+          <Tooltip :content="`手续费支出 ${money(accountBalance.fees)} · 毛利 ${money(accountBalance.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(trades.net - accountBalance.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              手续费支出 {{ money(recon.fees) }}（成交口径）· 毛利 {{ money(recon.gross) }}
+              手续费支出 {{ money(accountBalance.fees) }}（成交口径）· 毛利 {{ money(accountBalance.gross) }}
             </span>
           </Tooltip>
         </div>
