@@ -356,7 +356,7 @@ end
 -- Z15-8-1: bid 0.60→0.10 单跳，首个有 bid tick 必须发 stop_loss（bid 0.00 视为无买盘）
 do
   reset()
-  state.params = { stop_loss_pct = "50" }
+  state.params = { ["stop_loss_pct"] = "50" }
   hold("down-1", "0.60")
   quote("down-1", "0.10", "0.11")
   local r = evaluate()
@@ -367,7 +367,7 @@ end
 -- Z15-8-2: 重启恢复持仓仍止损（direction 来自 holdings，armed_dir 仅加分）
 do
   reset()
-  state.params = { stop_loss_pct = "50" }
+  state.params = { ["stop_loss_pct"] = "50" }
   hold("down-1", "0.60")
   quote("down-1", "0.10", "0.11")
   local r1 = evaluate()  -- 第一轮：armed_dir 为空，row.direction = "down" 仍应止损
@@ -383,42 +383,42 @@ end
 -- Z15-8-3: stop_loss_pct_down=0 关闭止损（down 腿读 stop_loss_pct_down）
 do
   reset()
-  state.params = { stop_loss_pct_down = "0" }
+  state.params = { ["stop_loss_pct_down"] = "0" }
   hold("down-1", "0.60")
   quote("down-1", "0.10", "0.11")
   local r = evaluate()
-  ok(#r.exits == 0, "stop_loss_pct_down=0：止损关闭，不发出 exit，got " .. exit_reasons(r))
+  ok(#r.exits == 0, "pct_down=0：未发出 exit，got " .. exit_reasons(r))
 end
 
 -- Z15-8-4: stop_loss_pct=50 生效（-50% 阈值）
 do
   reset()
-  state.params = { stop_loss_pct = "50" }
+  state.params = { ["stop_loss_pct"] = "50" }
   hold("down-1", "0.60")
   quote("down-1", "0.31", "0.32")
   local r = evaluate()
   ok(#r.exits == 1 and r.exits[1].reason == "stop_loss",
-    "stop_loss_pct=50：-50% 止损阈值触发，got " .. exit_reasons(r))
+    "pct=50：-50% 阈值已触发，got " .. exit_reasons(r))
 end
 
 -- Z15-8-5: stop_loss_pct_down=0.5（0.5%，不是 5%）
 do
   reset()
-  state.params = { stop_loss_pct_down = "0.5" }
+  state.params = { ["stop_loss_pct_down"] = "0.5" }
   hold("down-1", "0.60")
   -- bid 0.598：费净后约 -3.1%，应触达 0.5% 止损（sl_pct 取整为 1）
   quote("down-1", "0.598", "0.599")
   local r = evaluate()
   ok(#r.exits == 1 and r.exits[1].reason == "stop_loss",
-    "stop_loss_pct_down=0.5：应按 0.5%（非 5%）止损，got " .. exit_reasons(r))
+    "pct_down=0.5：应按 0.5%（非 5%），got " .. exit_reasons(r))
 end
 
 -- Z15-8-6: 任意参数组合 bk_evaluate 不报错
 do
   reset()
   state.params = {
-    stop_loss_pct = "999", stop_loss_pct_up = "-1", stop_loss_pct_down = "abc",
-    stop_loss_delay_sec = "0", stop_loss_confirm_sec = "0",
+    ["stop_loss_pct"] = "999", ["stop_loss_pct_up"] = "-1", ["stop_loss_pct_down"] = "abc",
+    ["stop_loss_delay_sec"] = "0", ["stop_loss_confirm_sec"] = "0",
   }
   hold("down-1", "0.50")
   quote("down-1", "0.40", "0.41")
