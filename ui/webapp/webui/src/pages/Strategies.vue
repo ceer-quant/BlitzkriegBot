@@ -59,7 +59,6 @@ const store = usePanelStore()
 const rows = computed<StrategyStatsRow[]>(() => store.strategyRows)
 
 const busy = ref<string | null>(null)
-const flash = ref<{ name: string; ok: boolean; msg: string } | null>(null)
 
 /**
  * 该策略在**显示账户**（issue 561：面板唯一可信账户源；store.activeAccount
@@ -99,7 +98,6 @@ function isAccountEnabled(r: StrategyStatsRow): boolean | null {
 
 async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
   busy.value = r.name
-  flash.value = null
   try {
     // 启停带当前显示账户（issue 561：面板唯一可信账户源；合同：
     // strategy.enable/disable 接受 accountId，缺省 = default）。无账户读数
@@ -114,19 +112,12 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
     if (res.error) {
       throw new Error(String(res.error))
     }
-    flash.value = {
-      name: r.name,
-      ok: res.ok !== false && !res.reason,
-      // §8.2: an enable refused by the mode handshake speaks BOTH sides —
-      // surface the core's reason verbatim instead of the generic "已启用".
-      msg: res.reason ?? res.message ?? `${r.name} 已${next ? '启用' : '停用'}`,
-    }
     await store.refresh()
   } catch (e) {
-    flash.value = { name: r.name, ok: false, msg: e instanceof Error ? e.message : String(e) }
+    // 启停失败不弹任何卡片/提示：按钮本身已是反馈，操作者按需重试。
+    console.error(`策略 ${r.name} 启停失败:`, e instanceof Error ? e.message : String(e))
   } finally {
     busy.value = null
-    setTimeout(() => { flash.value = null }, 5000)
   }
 }
 
@@ -273,7 +264,7 @@ function isLua(r: StrategyStatsRow): boolean {
 
 // ── tunables 编辑卡（issue 481 G3）：详情行内的声明域编辑 ────────────────────
 // `strategy.params.get` 读声明域与生效值；`strategy.params.set` 原子写入
-// （内核按声明域校验，plan-first 一个非法整体拒）。回执进 flash，读数刷新。
+// （内核按声明域校验，plan-first 一个非法整体拒）。读数刷新。
 const paramsCache = ref<Record<string, StrategyParamsReadoutDoc>>({})
 // Draft 键是 `strategy::knob` 的拍平表：v-model 需要普通索引访问做赋值目标
 // （可选链 `draft[s]?.[k]` 编译成非法赋值目标，esbuild 拒绝）。
@@ -316,20 +307,12 @@ async function saveParams(name: string): Promise<void> {
   paramsBusy.value = name
   try {
     const res = await api.strategyParamsSet({ name, params: patch })
-    flash.value = {
-      name,
-      ok: true,
-      msg: res.applied.length
-        ? `已应用 ${res.applied.map((c) => `${c.knob}: ${c.from} → ${c.to}`).join('，')}（下次评估生效，未持久化）`
-        : '无变更',
-    }
     await loadParams(name)
   } catch (e) {
-    // 内核拒绝（域外/未声明/非十进制）——如实转述，值不动。
-    flash.value = { name, ok: false, msg: e instanceof Error ? e.message : String(e) }
+    // 内核拒绝（域外/未声明/非十进制）——如实转述，值不动。不弹任何卡片。
+    console.error(`参数保存失败 ${name}:`, e instanceof Error ? e.message : String(e))
   } finally {
     paramsBusy.value = null
-    setTimeout(() => { flash.value = null }, 6000)
   }
 }
 
@@ -442,18 +425,6 @@ onMounted(() => {
           </Tooltip>
         </template>
       </StatTile>
-    </div>
-
-    <div v-if="flash" class="mt-3.5">
-      <AlertBanner
-        :tone="flash.ok ? 'info' : 'error'"
-        :title="flash.name"
-        :hint="flash.ok ? undefined : '若持续失败，确认网关在线后重试。'"
-        dismissible
-        @dismiss="flash = null"
-      >
-        {{ flash.msg }}
-      </AlertBanner>
     </div>
 
     <!-- 创建套利的提交回执（弹窗成功关闭后出现；失败留在弹窗内转述）。 -->
