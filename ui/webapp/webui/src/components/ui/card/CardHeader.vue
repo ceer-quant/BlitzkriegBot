@@ -14,7 +14,7 @@ defineProps<{ label?: string; class?: string }>()
       <slot name="title" />
       <h2 v-if="label" class="label-micro">{{ label }}</h2>
     </div>
-    <div class="flex items-center gap-2 shrink-0">
+    <div class="flex items-center gap-2 shrink-0 min-w-0 flex-wrap">
       <slot name="action" />
     </div>
   </header>

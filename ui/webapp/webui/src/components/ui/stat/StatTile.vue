@@ -29,7 +29,7 @@ const toneClass = {
 
 <template>
   <div :class="cn('glass glass-hover card-pad relative overflow-hidden', props.class)">
-    <div class="flex items-start justify-between gap-2">
+    <div class="flex items-center justify-between gap-2 min-h-[1.5rem]">
       <span class="label-micro">{{ props.label }}</span>
       <slot name="action" />
     </div>

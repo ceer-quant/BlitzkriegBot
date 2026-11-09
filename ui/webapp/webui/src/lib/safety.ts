@@ -145,6 +145,24 @@ export function lastErrorBanner(
   const structured = stats?.lastError
   if (structured) {
     if (SUPPRESSED_BANNER_CODES.has(structured.code)) return null
+    // RISK_REJECTED 表示内核的风控系统拒绝了交易——日损失限额、持仓上限、
+    // 安全网熔断等都是“交易此刻停了”的冻结级条件，不是可忽略的瞬态拒绝。
+    // 渲染为红色紧急横幅，钉住、无 ✕、不自动消失；与 WOULD_CROSS 这种
+    // 市场正常结果的拒单（已在 SUPPRESSED_BANNER_CODES 里屏蔽）严格区分。
+    if (structured.code === 'RISK_REJECTED') {
+      // 日损失限额触发 = 该账户交易已停 = 冻结。标题写账户名 + 冻结，
+      // 第三行（hint）用操作者能读懂的中文：日内损失已超限额，内核冻结了此账户的交易。
+      const accountMatch = structured.message.match(/account\s+(\S+)/)
+      const account = accountMatch ? accountMatch[1] : ''
+      return {
+        tone: 'error',
+        urgent: true,
+        title: `${account}账户交易已经冻结`,
+        body: structured.message,
+        code: structured.code,
+        hint: '日内交易损失已经超过限额，内核冻结了此账户的交易。设置 · 风控可解锁。',
+      }
+    }
     return {
       tone: 'warn',
       urgent: false,

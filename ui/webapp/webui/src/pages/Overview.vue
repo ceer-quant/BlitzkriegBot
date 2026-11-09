@@ -16,16 +16,11 @@ import { api } from '@/api/client'
 import { useAccountBalance } from '@/lib/account-balance'
 import type { BalanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
-import {
-  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
-  accountFreezeBanners, overdueReceivableBanner,
-} from '@/lib/safety'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
-import BalanceCard from '@/components/ui/balance/BalanceCard.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
-import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
+import PnLCurveCard from '@/components/ui/pnl/PnLCurveCard.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import EquityCurve from '@/components/charts/EquityCurve.vue'
@@ -36,96 +31,6 @@ const store = usePanelStore()
 
 const snap = computed(() => store.snapshot)
 const strategyRows = computed(() => store.strategyRows)
-
-// ── trading safety (freeze / last refusal / self-check) ─────────────────────
-// The three banners below were dark because `snap.stats` could not carry the
-// fields they read — the kernel sent them, the UI Kit view type dropped them
-// (issue 236). The reading rules (and what each title is allowed to claim) live
-// in lib/safety.ts so they are testable; this page only renders them.
-const stats = computed(() => snap.value?.stats ?? null)
-const connBanner = computed(() => connectionBanner(snap.value))
-const freeze = computed(() => freezeBanner(stats.value))
-// issue 943: per-account freezes — the kernel froze ONE account while others
-// keep trading, and without these lines the panel looks perfectly normal.
-// Reading rule + copy live in lib/safety.ts; each frozen account gets its own
-// urgent red banner (a two-account freeze is two red lines).
-const accountFreezes = computed(() => {
-  const banners = accountFreezeBanners(stats.value)
-  // 补充来源：账户行 status === 'frozen'（内核可能把单账户冻结上报在
-  // AccountView.status 里而 stats.accountFreezes 为空）——两处都要覆盖，
-  // 免得红色横幕与解锁按钮一并失语。
-  const rowFreezes = store.accounts
-    .filter((a) => a.status === 'frozen')
-    .map((a) => ({
-      tone: 'error' as const,
-      urgent: true,
-      title: `账户已冻结（${a.id}）`,
-      body: a.statusReason || '该账户已被冻结，原因未上报。',
-      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解锁（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
-    }))
-  return [...banners, ...rowFreezes]
-})
-const lastError = computed(
-  () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
-)
-const selfCheck = computed(() => selfCheckBanner(stats.value))
-// issue 669: the event archive stopped recording — the kernel's stop was a
-// single journal line, so an operator found days of missing backtest corpus by
-// hand. The reading rule lives in lib/safety.ts like the other banners; this
-// one stays up on EVERY snapshot while `stats.archive.recording` is false.
-const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
-// issue 991: a fallback receivable aged past the operator's budget — amber,
-// dismissible (identity `receivable-overdue`), auto-fades. The aging budget
-// itself comes from the kernel's boot echo surface via the env face: the panel
-// reads the SAME configured value from `stats.settlement` (the kernel carries
-// it) when present, falling back to the documented 48h default.
-const OVERDUE_RECEIVABLE_MAX_AGE_MS = 172_800_000
-const overdueReceivable = computed(() =>
-  overdueReceivableBanner(stats.value, OVERDUE_RECEIVABLE_MAX_AGE_MS),
-)
-
-// ── banner severity (2026-10-28 operator call) ──────────────────────────────
-// 红色只留给紧急（冻结 / 自检失败 —— 交易此刻真的停了）：persistent、无 ✕、
-// 不自动消失。其余（最近交易错误 / 连接 / 归档）琥珀色 + ✕ + 40s 自动消失；
-// 关掉的是「这一条」（identity 计），同一条不再重弹，新错误重新亮起。
-const AUTO_DISMISS_MS = 40_000
-// Dismiss memory lives in sessionStorage, not in a ref: the kernel's lastError
-// slot survives page refreshes (it only moves when the NEXT error arrives), so
-// an in-memory Set re-lit the exact banner the operator just closed on reload.
-// sessionStorage scopes that to the tab session — a fresh tab / new error
-// (different identity) alerts again, as it should.
-const DISMISS_KEY = 'overview.dismissed-banners'
-const loadDismissed = (): Set<string> => {
-  try {
-    const raw = sessionStorage.getItem(DISMISS_KEY)
-    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
-  } catch { return new Set() }
-}
-const dismissed = ref(loadDismissed())
-const dismiss = (identity: string) => {
-  const next = new Set(dismissed.value)
-  next.add(identity)
-  dismissed.value = next
-  try { sessionStorage.setItem(DISMISS_KEY, JSON.stringify([...next])) } catch { /* private mode */ }
-}
-// The kernel's `lastError` slot keeps its value until the NEXT error overwrites
-// it — a dismissed identity must stay dismissed across snapshots. A different
-// message/code yields a different identity, so the banner returns for it.
-const lastErrorVisible = computed(
-  () => lastError.value && !(lastError.value.identity && dismissed.value.has(lastError.value.identity)),
-)
-const connBannerVisible = computed(
-  () => connBanner.value && !(connBanner.value.identity && dismissed.value.has(connBanner.value.identity)),
-)
-const archiveStoppedVisible = computed(
-  () => archiveStopped.value
-    && !(archiveStopped.value.identity && dismissed.value.has(archiveStopped.value.identity)),
-)
-const overdueReceivableVisible = computed(
-  () => overdueReceivable.value
-    && !(overdueReceivable.value.identity && dismissed.value.has(overdueReceivable.value.identity)),
-)
-const bannerAutoKey = (identity?: string) => identity ?? ''
 
 // ── issue 684 过期持仓清除（positions.force_close）──────────────────────────
 // 场地 updown 列表只载未来 ~20h 的未到期轮次，已过期 conditionId 的结算裁决
@@ -271,7 +176,10 @@ const accountBadge = computed(() => {
   const id = store.activeAccount
   if (!id) return ''
   const row = store.accounts.find((a) => a.id === id)
-  return row?.name ? `${id} · ${row.name}` : id
+  const name = row?.name
+  if (!name) return id
+  // id 与 name 相同时只显示一次，避免「polysimulator · polysimulator」这种重复
+  return name === id ? id : `${id} · ${name}`
 })
 
 const round = computed(() => snap.value?.round ?? null)
@@ -458,88 +366,6 @@ const needsStrategyHint = computed(() => {
 
 <template>
   <template v-if="snap">
-    <!--
-      警示横幅在驾驶舱最顶上（2026-10-28 运营者裁决：挪到 page 最上方、低于
-      App header）——交易安全面先于一切数据瓦片进视线；KPI 行从「第一眼」退
-      为「横幅之下」。横幅自身的分级/钉住/自动消失语义见 lib/safety.ts 与上
-      方脚本块，此处只管摆位。
-    -->
-    <div v-if="connBanner && connBannerVisible" class="mb-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="connBanner.title"
-        :hint="connBanner.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(connBanner.identity)"
-        @dismiss="connBanner.identity && dismiss(connBanner.identity)"
-      >{{ connBanner.body }}</AlertBanner>
-    </div>
-    <div v-if="freeze" class="mb-3.5">
-      <!-- 紧急：交易此刻停了 —— 红色、钉住、无 ✕（藏掉唯一的红 = 藏掉事故） -->
-      <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
-    </div>
-    <div v-else-if="lastError && lastErrorVisible" class="mb-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="lastError.title"
-        :hint="lastError.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(lastError.identity)"
-        @dismiss="lastError.identity && dismiss(lastError.identity)"
-      >
-        <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
-      </AlertBanner>
-    </div>
-    <div
-      v-for="af in accountFreezes"
-      :key="`account-freeze-${af.title}`"
-      class="mb-3.5"
-    >
-      <!-- 紧急：issue 943 —— 单账户冻结不设全局 kill，藏掉它就是把事故说成
-           正常。每冻结户一条红横幅：钉住、无 ✕；指引去 设置·风控 解锁 -->
-      <AlertBanner tone="error" :title="af.title" :hint="af.hint">{{ af.body }}</AlertBanner>
-    </div>
-    <div v-if="selfCheck" class="mb-3.5">
-      <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->
-      <AlertBanner tone="error" :title="selfCheck.title">
-        {{ selfCheck.body }}
-        <span v-for="item in selfCheck.items" :key="item.name" class="block">
-          {{ item.name }}：{{ item.detail }}
-        </span>
-      </AlertBanner>
-    </div>
-    <div v-if="archiveStopped && archiveStoppedVisible" class="mb-3.5">
-      <AlertBanner
-        tone="warn"
-        :title="archiveStopped.title"
-        :hint="archiveStopped.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(archiveStopped.identity)"
-        @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
-      >
-        {{ archiveStopped.body }}
-      </AlertBanner>
-    </div>
-    <div v-if="overdueReceivable && overdueReceivableVisible" class="mb-3.5">
-      <!-- issue 991: 回退应收账款超龄 —— 琥珀色、可关（identity 计）、自动消失。
-           这是「注意」不是「交易停了」（红留给冻结/自检）；金额本身不计入
-           预算/熔断可用资金，场馆给出真实结算价后自动冲正。 -->
-      <AlertBanner
-        tone="warn"
-        :title="overdueReceivable.title"
-        :hint="overdueReceivable.hint"
-        dismissible
-        :auto-dismiss-ms="AUTO_DISMISS_MS"
-        :auto-key="bannerAutoKey(overdueReceivable.identity)"
-        @dismiss="overdueReceivable.identity && dismiss(overdueReceivable.identity)"
-      >
-        {{ overdueReceivable.body }}
-      </AlertBanner>
-    </div>
-
     <!-- beginner hint: the panel is live but the robot is not yet allowed to act -->
     <div v-if="needsStrategyHint" class="mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
       <CircleDot class="size-3.5 shrink-0 text-primary" />
@@ -611,8 +437,8 @@ const needsStrategyHint = computed(() => {
           <CircleDot class="size-3" /> 模拟资金，非真实资产
           <template v-if="accountBadge">
             <span class="opacity-50">·</span>
-            <!-- 账户标识符不是读数（不滚动），故不进 num 槽位（round-header 门禁）。 -->
-            <span>{{ accountBadge }}</span>
+            <!-- 账户标识符不是读数（不滚动），故不进 num 槽位（round-header 门禁）。truncate 保证长账户名/venue 不换行，宁可截断不出界 -->
+            <span class="min-w-0 truncate">{{ accountBadge }}</span>
           </template>
         </div>
         <div v-else-if="accountBadge || walletAddr" class="mt-2 text-[11px] text-faint-fg">
@@ -629,26 +455,47 @@ const needsStrategyHint = computed(() => {
         </div>
       </StatTile>
 
-      <StatTile :label="roundTileTitle" :value="roundDisplay ? `#${roundDisplay.slot}` : '—'">
+      <StatTile
+        :label="roundTileTitle"
+        :value="roundDisplay ? `#${roundDisplay.slot}` : '—'"
+        :roll="false"
+        :tone="roundCanTrade ? 'up' : 'gold'"
+      >
         <template #sub>
           <span v-if="roundDisplay">{{ duration(roundDisplay.ageSec) }} 已过 · {{ duration(roundTimeLeft) }} 剩余</span>
           <!-- issue 488: 行情插件活跃但轮次空 = 数据源没到达（网络/代理），不是「等待插件」。 -->
           <span v-else-if="snap?.marketActiveName">行情插件 {{ snap?.marketActiveName }} 活跃，等待轮次数据</span>
           <span v-else>等待行情插件</span>
         </template>
-        <div v-if="roundDisplay" class="mt-2">
+        <div v-if="roundDisplay" class="mt-2 flex items-center gap-2">
           <Badge :variant="roundCanTrade ? 'up' : 'gold'" dot>{{ roundCanTrade ? '可交易' : '等待窗口' }}</Badge>
         </div>
       </StatTile>
 
-      <BalanceCard
+      <!-- 已平仓交易卡：与运行模式卡片同款 StatTile 布局，第四行胜/负徽章独立出 sub，与当前轮次卡片的“可交易”徽章同中轴线 -->
+      <StatTile
         label="已平仓交易"
-        :balance="accountBalance"
-        :count="trades.count"
-        :win="trades.win"
-        :loss="trades.loss"
-        :win-rate="trades.winRate"
-      />
+        :value="pct(trades.winRate)"
+        :roll="false"
+        tone="gold"
+      >
+        <template #action>
+          <Badge variant="default">{{ trades.count }} 笔</Badge>
+        </template>
+        <template #sub>
+          <span class="text-[11px] text-faint-fg">胜率</span>
+        </template>
+        <div v-if="trades.win !== undefined || trades.loss !== undefined" class="mt-2 flex items-center gap-2">
+          <Badge v-if="trades.win !== undefined" variant="up">
+            <ArrowUpRight class="size-3" />
+            <span>{{ trades.win }}</span>
+          </Badge>
+          <Badge v-if="trades.loss !== undefined" variant="down">
+            <ArrowDownRight class="size-3" />
+            <span>{{ trades.loss }}</span>
+          </Badge>
+        </div>
+      </StatTile>
 
       <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->
       <StatTile
@@ -672,24 +519,7 @@ const needsStrategyHint = computed(() => {
 
     <!-- equity + counters -->
     <div class="mt-3.5 grid gap-3.5 xl:grid-cols-[1.55fr_1fr]">
-      <Card>
-        <!--
-          曲线画的是成交行折叠的净利轨迹（成交口径）。headline 的钱数恒走
-          账本口径（裁决 2026-11-08），两口径劈叉（>半分钱）时标题如实点名
-          「成交口径」，免得读成同一个量。
-        -->
-        <CardHeader :label="foldDiverges ? '累计净利（成交口径）' : '权益曲线'">
-          <template #title>
-            <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber :value="signedMoney(trades.net)" />
-            </span>
-          </template>
-          <template #action>
-            <Badge variant="default" dot><RollingNumber :value="trades.count" /> 笔</Badge>
-          </template>
-        </CardHeader>
-        <EquityCurve :rows="equityCurveRows" :height="196" />
-      </Card>
+      <PnLCurveCard />
 
       <Card>
         <CardHeader :label="engineCounterLabel">

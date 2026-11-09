@@ -26,6 +26,10 @@ import AccountSwitcher from './components/AccountSwitcher.vue'
 import SegmentedControl from './components/ui/segmented/SegmentedControl.vue'
 import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
+import {
+  connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
+  accountFreezeBanners, overdueReceivableBanner,
+} from '@/lib/safety'
 
 const store = usePanelStore()
 const { theme, isDark, cycleTheme, sound, toggleSound } = useTheme()
@@ -88,6 +92,65 @@ function onTopNav(id: string): void {
 const now = useNow({ interval: 1000 })
 const updatedAt = computed(() => (store.lastUpdated ? clockTime(store.lastUpdated) : '—'))
 const modeLabel = computed(() => (store.snapshot?.mode ?? '').toUpperCase())
+
+// ── trading-safety banners (顶部，任何页面均可见) ──────────────────────────
+// 冻结 / 最近拒绝 / 自检失败 / 归档停录 / 应收账款超龄 — 读统一的 reading 规则
+//（lib/safety.ts），这里只负责渲染与去重 dismiss。
+const OVERDUE_RECEIVABLE_MAX_AGE_MS = 172_800_000
+const stats = computed(() => store.snapshot?.stats ?? null)
+const connBanner = computed(() => connectionBanner(store.snapshot))
+const freeze = computed(() => freezeBanner(stats.value))
+const accountFreezes = computed(() => {
+  const banners = accountFreezeBanners(stats.value)
+  const rowFreezes = store.accounts
+    .filter((a) => a.status === 'frozen')
+    .map((a) => ({
+      tone: 'error' as const,
+      urgent: true,
+      title: `账户已冻结（${a.id}）`,
+      body: a.statusReason || '该账户已被冻结，原因未上报。',
+      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解锁（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
+    }))
+  return [...banners, ...rowFreezes]
+})
+const lastError = computed(
+  () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
+)
+const selfCheck = computed(() => selfCheckBanner(stats.value))
+const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
+const overdueReceivable = computed(() =>
+  overdueReceivableBanner(stats.value, OVERDUE_RECEIVABLE_MAX_AGE_MS),
+)
+
+// Dismiss memory lives in sessionStorage, scoped to the tab session.
+const AUTO_DISMISS_MS = 40_000
+const DISMISS_KEY = 'overview.dismissed-banners'
+const loadDismissed = (): Set<string> => {
+  try {
+    const raw = sessionStorage.getItem(DISMISS_KEY)
+    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+  } catch { return new Set() }
+}
+const dismissed = ref(loadDismissed())
+const dismiss = (identity: string) => {
+  const next = new Set(dismissed.value)
+  next.add(identity)
+  dismissed.value = next
+  try { sessionStorage.setItem(DISMISS_KEY, JSON.stringify([...next])) } catch { /* private mode */ }
+}
+const bannerAutoKey = (identity?: string) => identity ?? ''
+const lastErrorVisible = computed(
+  () => lastError.value && !(lastError.value.identity && dismissed.value.has(lastError.value.identity)),
+)
+const connBannerVisible = computed(
+  () => connBanner.value && !(connBanner.value.identity && dismissed.value.has(connBanner.value.identity)),
+)
+const archiveStoppedVisible = computed(
+  () => archiveStopped.value && !(archiveStopped.value.identity && dismissed.value.has(archiveStopped.value.identity)),
+)
+const overdueReceivableVisible = computed(
+  () => overdueReceivable.value && !(overdueReceivable.value.identity && dismissed.value.has(overdueReceivable.value.identity)),
+)
 
 /**
  * A refused session drops us back to the login form, carrying the reason so the
@@ -273,6 +336,75 @@ onMounted(() => {
           hint="检查网关进程与端口；网关恢复后本面板会自动重连，无需刷新页面。"
         >{{ store.error }}</AlertBanner>
       </div>
+
+      <!-- trading-safety banners — 顶部，任何页面均可见：红色紧急（冻结/自检/RISK_REJECTED）
+           钉住、无 ✕、不自动消失；琥珀（连接/归档/应收账款/其余拒单）可关 + 40s 自动消失 -->
+      <div v-if="connBanner && connBannerVisible" class="mb-3.5">
+        <AlertBanner
+          tone="warn"
+          :title="connBanner.title"
+          :hint="connBanner.hint"
+          dismissible
+          :auto-dismiss-ms="AUTO_DISMISS_MS"
+          :auto-key="bannerAutoKey(connBanner.identity)"
+          @dismiss="connBanner.identity && dismiss(connBanner.identity)"
+        >{{ connBanner.body }}</AlertBanner>
+      </div>
+      <div v-if="freeze" class="mb-3.5">
+        <!-- 紧急：交易此刻停了 —— 红色、钉住、无 ✕（藏掉唯一的红 = 藏掉事故） -->
+        <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
+      </div>
+      <div v-else-if="lastError && lastErrorVisible" class="mb-3.5">
+        <!-- RISK_REJECTED（如日损失限额）由 safety.ts 升为 urgent：tone=error、不 dismissible、
+             不自动消失、无 ✕；其余拒单保持琥珀 warn + 可关 + 40s 自动消失 -->
+        <AlertBanner
+          :tone="lastError.tone"
+          :title="lastError.title"
+          :hint="lastError.hint"
+          :dismissible="!lastError.urgent"
+          :auto-dismiss-ms="!lastError.urgent ? AUTO_DISMISS_MS : 0"
+          :auto-key="bannerAutoKey(lastError.identity)"
+          @dismiss="lastError.identity && dismiss(lastError.identity)"
+        >
+          <code v-if="lastError.code" class="mr-1.5 font-semibold">{{ lastError.code }}</code>{{ lastError.body }}
+        </AlertBanner>
+      </div>
+      <div v-for="af in accountFreezes" :key="`account-freeze-${af.title}`" class="mb-3.5">
+        <!-- 紧急：单账户冻结不设全局 kill，藏掉它就是把事故说成正常。每冻结户一条红横幅 -->
+        <AlertBanner tone="error" :title="af.title" :hint="af.hint">{{ af.body }}</AlertBanner>
+      </div>
+      <div v-if="selfCheck" class="mb-3.5">
+        <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->
+        <AlertBanner tone="error" :title="selfCheck.title">
+          {{ selfCheck.body }}
+          <span v-for="item in selfCheck.items" :key="item.name" class="block">
+            {{ item.name }}：{{ item.detail }}
+          </span>
+        </AlertBanner>
+      </div>
+      <div v-if="archiveStopped && archiveStoppedVisible" class="mb-3.5">
+        <AlertBanner
+          tone="warn"
+          :title="archiveStopped.title"
+          :hint="archiveStopped.hint"
+          dismissible
+          :auto-dismiss-ms="AUTO_DISMISS_MS"
+          :auto-key="bannerAutoKey(archiveStopped.identity)"
+          @dismiss="archiveStopped.identity && dismiss(archiveStopped.identity)"
+        >{{ archiveStopped.body }}</AlertBanner>
+      </div>
+      <div v-if="overdueReceivable && overdueReceivableVisible" class="mb-3.5">
+        <AlertBanner
+          tone="warn"
+          :title="overdueReceivable.title"
+          :hint="overdueReceivable.hint"
+          dismissible
+          :auto-dismiss-ms="AUTO_DISMISS_MS"
+          :auto-key="bannerAutoKey(overdueReceivable.identity)"
+          @dismiss="overdueReceivable.identity && dismiss(overdueReceivable.identity)"
+        >{{ overdueReceivable.body }}</AlertBanner>
+      </div>
+
       <!-- 组内叶子是页内 tab（SettingsPage 的域切换模式）：内容上方一排页签，
            不在导航条上出现第二级控件。 -->
       <nav v-if="activeGroup" class="mb-4 px-4 sm:px-0">

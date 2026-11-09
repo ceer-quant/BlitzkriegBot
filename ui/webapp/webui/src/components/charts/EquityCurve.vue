@@ -10,7 +10,7 @@ import { signedMoney } from '@/lib/format'
 import type { TradeRow } from '@/api/client'
 
 const props = withDefaults(
-  defineProps<{ rows: TradeRow[]; height?: number; showAxis?: boolean; live?: boolean }>(),
+  defineProps<{ rows: TradeRow[]; height?: number; showAxis?: boolean; live?: boolean; total?: number }>(),
   { height: 132, showAxis: true, live: false },
 )
 
@@ -31,10 +31,16 @@ const el = ref<HTMLDivElement | null>(null)
 const series = computed<number[]>(() => {
   let cum = 0
   const pts = props.rows.map((t) => (cum += Number(t.netPnlUsd) || 0))
+  // 最后一笔的累计值以账本口径总计（props.total）为准，避免与卡片头条金额不一致：
+  // 头条显示账本口径（balance − seededTotal），图表末点也应显示同一个数，
+  // 不再出现成交口径累计（cumStats）那个误导性的 +28。
+  if (props.total != null && pts.length > 0) {
+    pts[pts.length - 1] = props.total
+  }
   return [0, ...pts]
 })
 
-const total = computed(() => series.value.at(-1) ?? 0)
+const total = computed(() => props.total ?? series.value.at(-1) ?? 0)
 const positive = computed(() => total.value >= 0)
 
 const option = computed<EChartsOption>(() => {

@@ -72,13 +72,16 @@ check('the refusal banner title claims no source (#232)', () => {
     lastError: { tsMs: 1, code: 'RISK_REJECTED', message: 'position cap reached' },
   })
   const legacy = lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'RiskRejected: position cap' } })
-  for (const b of [structured, legacy]) {
-    assert.ok(b)
-    assert.doesNotMatch(b.title, /venue/i, `title must not pin a source: ${b.title}`)
-    assert.doesNotMatch(b.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
-  }
-  // The same slot carries non-venue causes; the title must survive all of them.
-  assert.equal(structured.title, legacy.title, 'one slot, one title, whatever wrote it')
+  // RISK_REJECTED 结构化记录渲染为冻结标题（不命名来源，也不含 venue）
+  assert.ok(structured)
+  assert.equal(structured.title, '账户交易已经冻结', 'RISK_REJECTED title is the freeze title')
+  assert.doesNotMatch(structured.title, /venue/i, `title must not pin a source: ${structured.title}`)
+  assert.doesNotMatch(structured.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
+  // legacy 字段走普通 refuse 分支，标题不变，也不命名来源
+  assert.ok(legacy)
+  assert.equal(legacy.title, '最近交易错误', 'legacy title unchanged')
+  assert.doesNotMatch(legacy.title, /venue/i, `title must not pin a source: ${legacy.title}`)
+  assert.doesNotMatch(legacy.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
 })
 
 check('an old core falls back to lastVenueError, and only then', () => {

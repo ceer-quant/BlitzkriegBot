@@ -141,7 +141,7 @@ const netBadge = computed(() => {
       </CardHeader>
 
       <div v-if="gateway" class="grid gap-x-6 gap-y-2 text-[12px] sm:grid-cols-2">
-        <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5">
+        <div class="flex items-center justify-between gap-3 border-b border-line pb-1.5 min-w-0">
           <span class="text-faint-fg shrink-0">socket</span>
           <span class="truncate text-right num min-w-0" :title="gateway.socket">{{ gateway.socket }}</span>
         </div>

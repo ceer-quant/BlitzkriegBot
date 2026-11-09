@@ -458,14 +458,14 @@ onMounted(() => {
             v-for="d in datasets"
             :key="d.dataset"
             type="button"
-            class="rounded-md border px-3 py-2 text-left transition-colors"
+            class="rounded-md border px-3 py-2 text-left transition-colors min-w-0"
             :class="selected === d.eventsPath
               ? 'border-primary/55 bg-primary/8'
               : 'border-line bg-panel-2 hover:border-line-strong'"
             @click="selected = d.eventsPath"
           >
-            <div class="flex items-center justify-between gap-2">
-              <span class="truncate text-[13px] font-medium text-fg">{{ d.dataset }}</span>
+            <div class="flex items-center justify-between gap-2 min-w-0">
+              <span class="min-w-0 truncate text-[13px] font-medium text-fg">{{ d.dataset }}</span>
               <Badge variant="default">{{ num(d.manifest?.counts?.events) }} 事件</Badge>
             </div>
             <div class="mt-0.5 text-[11.5px] text-faint-fg">
@@ -476,7 +476,7 @@ onMounted(() => {
 
         <!-- 拉取任务进度 -->
         <div v-if="pullDocs.length" class="space-y-1.5 rounded-md border border-line bg-panel-2 p-2.5">
-          <div v-for="d in pullDocs" :key="d.jobId" class="flex items-center gap-2 text-[12px]">
+          <div v-for="d in pullDocs" :key="d.jobId" class="flex items-center gap-2 text-[12px] min-w-0">
             <span
               v-if="d.state === 'running'"
               class="size-3 shrink-0 animate-spin rounded-full border-2 border-line-strong border-t-primary"

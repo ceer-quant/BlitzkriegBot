@@ -410,7 +410,7 @@ const cycleAgo = (ms: number): string => {
         打开上方「进化引擎」开关即可让它跑起来；开关状态以
         <span class="num">.env</span> 的
         <span class="num">SHADOW_ENABLED</span>/<span class="num">SHADOW_AUTO_EVOLVE</span>
-        为唯一可信源（issue 751），面板翻转会写回 .env，重启后仍然有效。
+        为唯一可信源，面板翻转会写回 .env，重启后仍然有效。
       </AlertBanner>
     </div>
 

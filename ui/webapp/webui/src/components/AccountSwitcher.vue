@@ -145,6 +145,9 @@ const venueLabel = (v: string | undefined): string =>
 const tradingBusy = ref<string | null>(null)
 const tradingErr = ref<string | null>(null)
 const tradingMsg = ref<string | null>(null)
+const freezeBusy = ref<string | null>(null)
+const freezeErr = ref<string | null>(null)
+const freezeMsg = ref<string | null>(null)
 
 function tradingLabel(a: AccountRow): string {
   if (a.tradingEnabled === false) return a.openPositions > 0 ? `已停止·${a.openPositions} 笔持仓管理中` : '已停止'
@@ -190,11 +193,31 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e)
     tradingErr.value = msg
     if (tradingConfirmOpen.value) tradingConfirmErr.value = msg
-  } finally {
-    tradingBusy.value = null
-    setTimeout(() => { tradingMsg.value = null }, 6000)
+    } finally {
+      tradingBusy.value = null
+      setTimeout(() => { tradingMsg.value = null }, 6000)
+    }
   }
-}
+
+  /** 解冻账户：frozen → false，恢复该账户新单入场权限。 */
+  async function unfreezeAccount(a: AccountRow): Promise<void> {
+    if (freezeBusy.value) return
+    freezeBusy.value = a.id
+    freezeErr.value = null
+    freezeMsg.value = null
+    try {
+      const res = await api.accountFreezeSet({ accountId: a.id, frozen: false, reason: 'panel unfreeze' })
+      if (res.error) throw new Error(res.error)
+      freezeMsg.value = `账户 ${a.id} 已解冻${res.persisted ? '（已落盘）' : ''}。`
+      await refresh()
+      store.refresh()
+    } catch (e) {
+      freezeErr.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      freezeBusy.value = null
+      setTimeout(() => { freezeMsg.value = null }, 6000)
+    }
+  }
 
 // ── 添加账户（#517）：弹窗（选交易所→填 API）。可选项 = 已注册的行情插件。──
 const addOpen = ref(false)
@@ -387,13 +410,13 @@ onBeforeUnmount(() => {
       @click="toggle"
     >
       <Wallet class="size-3.5" />
-      <span class="num hidden sm:inline max-w-[70px] truncate sm:max-w-[120px]">{{ active || '账户' }}</span>
+      <span class="num hidden lg:inline max-w-[70px] truncate lg:max-w-[120px]">{{ active || '账户' }}</span>
       <ChevronDown class="size-3 opacity-60" :class="open ? 'rotate-180' : ''" />
     </button>
 
     <div
       v-if="open"
-      class="fixed z-30 left-1/2 -translate-x-1/2 top-20 w-auto max-w-[calc(100vw-32px)] sm:absolute sm:top-full sm:mt-2 sm:left-auto sm:-translate-x-0 sm:right-0 sm:w-96 sm:max-w-none"
+      class="fixed z-30 left-1/2 -translate-x-1/2 top-20 w-full max-w-[calc(100vw-16px)] rounded-xl border border-line bg-panel-solid p-2 shadow-lg sm:absolute sm:top-full sm:mt-2 sm:left-auto sm:-translate-x-0 sm:right-0 sm:w-96 sm:max-w-none"
     >
       <div class="mb-1 flex items-center justify-between px-2 py-1">
         <span class="label-micro">账户账本</span>
@@ -478,6 +501,14 @@ onBeforeUnmount(() => {
               :disabled="tradingBusy !== null"
               @click.stop="askTrading(a)"
             >{{ tradingLabel(a) }}</button>
+            <button
+              v-if="a.status === 'frozen'"
+              class="shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors"
+              :class="freezeBusy.value === a.id ? 'bg-down/15 text-down animate-pulse' : 'bg-up/15 text-up hover:bg-up/25'"
+              :title="`解冻账户 ${a.id}，恢复新单入场权限（平仓照放）`"
+              :disabled="freezeBusy.value !== null"
+              @click.stop="unfreezeAccount(a)"
+            >{{ freezeBusy.value === a.id ? '解冻中…' : '解冻' }}</button>
             <span
               class="min-w-0 flex-1 truncate"
               :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"
@@ -549,6 +580,8 @@ onBeforeUnmount(() => {
           </span>
           <span v-if="tradingErr" class="mt-0.5 block text-[10.5px] text-down">{{ tradingErr }}</span>
           <span v-else-if="tradingMsg" class="mt-0.5 block text-[10.5px] text-up">{{ tradingMsg }}</span>
+          <span v-if="freezeErr" class="mt-0.5 block text-[10.5px] text-down">{{ freezeErr }}</span>
+          <span v-else-if="freezeMsg" class="mt-0.5 block text-[10.5px] text-up">{{ freezeMsg }}</span>
           <span v-if="a.statusReason" class="mt-0.5 block truncate text-[11px] text-down">
             {{ a.statusReason }}
           </span>

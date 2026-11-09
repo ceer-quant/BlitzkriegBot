@@ -9,10 +9,13 @@
 import type { TradeRow } from '@/api/client'
 import type { CumStats } from './types'
 import Card from '@/components/ui/card/Card.vue'
-import BalanceCard from '@/components/ui/balance/BalanceCard.vue'
+import CardHeader from '@/components/ui/card/CardHeader.vue'
+import Badge from '@/components/ui/badge/Badge.vue'
+import PnLCurveCard from '@/components/ui/pnl/PnLCurveCard.vue'
 import StatRow from '@/components/ui/stat/StatRow.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import { money, signedMoney, pct, signedPct, duration } from '@/lib/format'
+import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 
 defineProps<{
   /** Chronological rows for the equity curve (the account+venue slice). */
@@ -43,12 +46,13 @@ defineProps<{
     long scroll. `sm:grid-cols-2` puts them 2×2 across that whole range instead,
     and 累计净 PnL keeps the wider column whenever the split is active.
   -->
-  <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
-    <BalanceCard label="累计净 PnL" :balance="recon" :show-curve="true" :curve-rows="historyRows" />
+    <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
+      <!-- 累计净 PnL（账本口径）：与 Overview.vue 同款 PnLCurveCard，统一从 store 读取账本口径数据，不再维护成交口径数据源 -->
+      <PnLCurveCard />
 
-    <Card>
-      <CardHeader label="胜率分布" />
-      <div class="stat-num text-[30px] leading-none">
+      <Card>
+        <CardHeader label="胜率分布" />
+        <div class="stat-num text-[30px] leading-none">
         <RollingNumber :value="pct(cumStats.winRate)" />
       </div>
       <div class="mt-1 flex items-center gap-3 text-[11.5px]">

@@ -150,7 +150,7 @@ const EXIT_ROW_DEFS: ExitRowDef[] = [
     field: 'trailingEnabled',
     label: '移动止盈',
     toggle: true,
-    hint: '浮盈回吐即锁利离场。出厂关（issue 356 校准：旧操盘手全部持有到期）；spread_arb 一类价差策略建议开。',
+    hint: '浮盈回吐即锁利离场。出厂关；spread_arb 一类价差策略建议开。',
   },
   {
     field: 'makerFirstExits',
@@ -403,10 +403,6 @@ onMounted(() => void loadRisk())
       <!-- issue 393 (①): 账户生效执行参数（可编辑）插进来 —— 有运行时写路径的
            风控参数与系统限额同卡呈现，各归各位（插槽内容来自编排壳）。 -->
       <slot name="params" />
-
-      <!-- issue 943: 冻结账户解锁行插进来 —— 红横幅（总览）的另一半：看得见
-           何处被冻，也能就地解锁（插槽内容来自编排壳）。 -->
-      <slot name="unfreezes" />
 
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <Button

@@ -16,7 +16,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
 import { Activity, Play, Square, Bell, BellOff, X, Clock, Filter, Info, Timer, Check } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type OrderRow, type NetCheckDoc } from '@/api/client'
-import { accountFrozen } from '@/lib/safety'
+import { accountFrozen, lastErrorBanner } from '@/lib/safety'
 import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
@@ -95,7 +95,15 @@ const identityAccount = computed<string | null>(
 // 会把「没在交易」读成「一切正常」。停法 = 本地插值不再前进（serverLeft/
 // serverAt 冻在场值，leftSec 钉在冻结瞬间的残值），新钟首帧也不换锚 ——
 // 解锁瞬间从钉住的残值继续本地插值，等下一帧 server 值自然校准。
-const frozenClock = computed(() => accountFrozen(snap.value?.stats, identityAccount.value))
+const lastError = computed(() => lastErrorBanner(snap.value?.stats, false))
+// issue 943 ③：日损失限额（RISK_REJECTED）由内核只写 lastError、不一定置
+// accountFreezes，所以 accountFrozen() 可能读不到。把 lastErrorBanner 的
+// RISK_REJECTED 紧急横幅也并入 frozenClock，让倒计时在日损失限额触发时
+// 同步停走，与 Overview 的红色冻结横幅保持同一判据。
+const frozenClock = computed(() =>
+  accountFrozen(snap.value?.stats, identityAccount.value) ||
+  (lastError.value?.urgent && lastError.value?.code === 'RISK_REJECTED')
+)
 const marketName = computed(() => {
   if (!identityVenue.value) return snap.value?.marketActiveName ?? null
   const row = (snap.value?.round?.prices ?? []).find(

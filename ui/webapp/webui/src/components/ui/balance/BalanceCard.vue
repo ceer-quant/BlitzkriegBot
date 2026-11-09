@@ -21,8 +21,9 @@ import NetPnLDisplay from '@/components/ui/balance/NetPnLDisplay.vue'
 import type { TradeRow } from '@/api/client'
 
 defineProps<{
-  /** 账本口径的余额视图（唯一来源） */
-  balance: Pick<BalanceView, 'net' | 'fees' | 'gross'>
+  /** 账本口径的余额视图（唯一来源）；未传时卡片只渲染笔数/胜率，不展示利润头条——
+   * 总览页「已平仓交易」卡本质上是胜率卡，利润数字由下方「累计净利」卡片统一展示 */
+  balance?: Pick<BalanceView, 'net' | 'fees' | 'gross'>
   /** 卡片标题 */
   label?: string
   /** 已平仓笔数（总览页「已平仓交易」卡片需要） */
@@ -43,27 +44,24 @@ defineProps<{
 <template>
   <Card>
     <CardHeader :label="label">
-      <template #title>
-        <div class="flex items-baseline gap-2">
-          <NetPnLDisplay :net="balance.net" />
-          <span v-if="count !== undefined" class="text-[11px] text-faint-fg">
-            · {{ count }} 笔
-          </span>
-        </div>
-      </template>
       <template #action>
-        <Badge variant="default">账本口径</Badge>
+        <Badge v-if="count !== undefined" variant="default">{{ count }} 笔</Badge>
+        <Badge v-if="balance" variant="default">账本口径</Badge>
       </template>
     </CardHeader>
-    <template v-if="showCurve && curveRows">
-      <EquityCurve :rows="curveRows" :height="128" :show-axis="false" />
-    </template>
-    <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
-      <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(balance.gross)" /></span></span>
-      <span>费用 <span class="num text-down"><RollingNumber :value="money(balance.fees)" /></span></span>
+
+    <!-- 胜率大字（黄色渐变），参考运行模式卡片的“大数值”布局 -->
+    <div v-if="winRate !== undefined" class="mt-3 flex items-baseline gap-1">
+      <span class="text-[32px] font-bold text-gold">{{ pct(winRate) }}</span>
     </div>
-    <div v-if="count !== undefined && (win !== undefined || loss !== undefined || winRate !== undefined)"
-         class="mt-2 flex items-center gap-2 text-[11px] text-faint-fg">
+
+    <!-- 胜率小字标签 -->
+    <div v-if="winRate !== undefined" class="mt-1 text-[11px] text-faint-fg">
+      胜率
+    </div>
+
+    <!-- 胜/负数字（保留 badge 样式，绿胜/红负） -->
+    <div v-if="win !== undefined || loss !== undefined" class="mt-3 flex items-center gap-2 text-[11px] text-faint-fg">
       <Badge v-if="win !== undefined" variant="up">
         <ArrowUpRight class="size-3" />
         <span>{{ win }}</span>
@@ -72,7 +70,16 @@ defineProps<{
         <ArrowDownRight class="size-3" />
         <span>{{ loss }}</span>
       </Badge>
-      <span v-if="winRate !== undefined" class="num">胜率 {{ pct(winRate) }}</span>
     </div>
+
+    <!-- 毛利/费用（balance 传入时显示；已平仓交易卡不传 balance，不展示） -->
+    <div v-if="balance" class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
+      <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(balance.gross)" /></span></span>
+      <span>费用 <span class="num text-down"><RollingNumber :value="money(balance.fees)" /></span></span>
+    </div>
+
+    <template v-if="showCurve && curveRows">
+      <EquityCurve :rows="curveRows" :height="128" :show-axis="false" />
+    </template>
   </Card>
 </template>
