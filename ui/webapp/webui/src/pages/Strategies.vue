@@ -441,40 +441,44 @@ onMounted(() => {
                  当前显示账户是已配置套利的腿账户时渲染（不可见 = 段消失）；
                  「创建套利」按钮留在 header 供所有账户可达（唯一弹窗入口，
                  可达性优先，见下方按钮注释）。
-                 移动端：SegmentedControl 独占一行（w-full），搜索+操作按钮
-                 在第二行，避免四元素同行拥挤导致对齐错位与内容出界。 -->
-            <SegmentedControl
-              v-model="perfTab"
-              :segments="[
-                { id: 'single', label: '单交易所策略', badge: singleRows.length },
-                ...(arbTabVisible ? [{ id: 'arb', label: '套利策略', badge: arbRows.length }] : []),
-              ]"
-              size="sm"
-              class="w-full sm:w-auto mb-2 sm:mb-0"
-            />
-            <div class="flex items-center gap-2 min-w-0 flex-wrap sm:flex-nowrap">
-              <div class="relative min-w-0 flex-1 sm:flex-0">
-                <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-faint-fg" />
-                <Input
-                  :model-value="query"
-                  placeholder="搜索策略…"
+                 移动端：整个 action 区域 overflow-x-auto 横向滚动，所有元素
+                 同行显示，避免 SegmentedControl 宽度挤掉搜索/创建按钮。 -->
+            <div class="overflow-x-auto pb-1">
+              <div class="flex items-center gap-2 min-w-0 flex-nowrap">
+                <SegmentedControl
+                  v-model="perfTab"
+                  :segments="[
+                    { id: 'single', label: '单交易所策略', badge: singleRows.length },
+                    ...(arbTabVisible ? [{ id: 'arb', label: '套利策略', badge: arbRows.length }] : []),
+                  ]"
                   size="sm"
-                  class="w-full sm:w-44 pl-7"
-                  @update:model-value="query = $event"
+                  class="shrink-0"
                 />
+                <div class="relative min-w-0 shrink-0">
+                  <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-faint-fg" />
+                  <Input
+                    :model-value="query"
+                    placeholder="搜索策略…"
+                    size="sm"
+                    class="w-44 pl-7"
+                    @update:model-value="query = $event"
+                  />
+                </div>
+                <Badge variant="gold" dot class="shrink-0">
+                  <RollingNumber :value="currentRows.length" /> 行
+                </Badge>
+                <!-- issue 393 (⑤): the page's create entry — jumps to the blueprint canvas. -->
+                <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy" class="shrink-0">
+                  <Plus class="size-3.5" />创建策略
+                </Button>
+                <!-- 创建套利：配置双腿意图（A 腿 + B 腿 + 币对）并启用所选套利策略
+                     （配置意图模型，创建即持久化；弹窗内自取配置与凭证读数）。
+                     可达性优先：套利 tab 对非腿账户不可见，而本按钮是弹窗的唯一
+                     入口 —— 故固定在 header，两 tab 共用，任何账户都能开弹窗。 -->
+                <Button variant="outline" size="sm" title="配置双腿套利并启用所选套利策略" @click="arbOpen = true" class="shrink-0">
+                  <Link2 class="size-3.5" />创建套利
+                </Button>
               </div>
-              <Badge variant="gold" dot><RollingNumber :value="currentRows.length" /> 行</Badge>
-              <!-- issue 393 (⑤): the page's create entry — jumps to the blueprint canvas. -->
-              <Button variant="gold" size="sm" title="在蓝图中新建一个策略" @click="createStrategy">
-                <Plus class="size-3.5" />创建策略
-              </Button>
-              <!-- 创建套利：配置双腿意图（A 腿 + B 腿 + 币对）并启用所选套利策略
-                   （配置意图模型，创建即持久化；弹窗内自取配置与凭证读数）。
-                   可达性优先：套利 tab 对非腿账户不可见，而本按钮是弹窗的唯一
-                   入口 —— 故固定在 header，两 tab 共用，任何账户都能开弹窗。 -->
-              <Button variant="outline" size="sm" title="配置双腿套利并启用所选套利策略" @click="arbOpen = true">
-                <Link2 class="size-3.5" />创建套利
-              </Button>
             </div>
           </template>
         </CardHeader>
