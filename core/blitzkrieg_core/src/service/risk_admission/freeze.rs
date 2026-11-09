@@ -185,26 +185,44 @@ impl Core {
 
     /// 入场闸判定：账户被闸门阻断，且意图不是平仓（平仓腿永远放行，#174
     /// 逃生舱，按账户独立计）。新单拒、平仓放行。
+    ///
+    /// 闸门纯内存、重启即清：重启首 tick 前 `emit_daily_trip` 尚未复立
+    //   DailyLoss 闸门，此时回退到持久化的 `daily_loss_tripped_for` 门闩，
+    //   避免重启洗今天的亏损预算。`emit_daily_trip` 会在下一 tick 复立闸门。
     pub(crate) fn account_gate_permits(&self, req: &OrderRequest, now_ms: i64) -> CoreResult<()> {
-        if let Some(gate) = self.account_gate(req.account_id.as_str())
-            && gate.blocked
-            && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
-            && !crate::risk::is_close_intent(&req.internal_key)
-        {
-            let message = match gate.reason_kind {
-                GateReason::DailyLoss => format!(
-                    "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
-                    req.account_id
-                ),
-                _ => format!(
-                    "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
-                    req.account_id,
-                    gate.reason_kind.label(),
-                    gate.reason
-                ),
-            };
-            return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
+        let account_id = req.account_id.as_str();
+        let is_close = crate::risk::is_close_intent(&req.internal_key);
+
+        // 1) 显式账户闸门（由 emit_daily_trip、手动冻结等设置）。
+        if let Some(gate) = self.account_gate(account_id) {
+            if gate.blocked && gate.expires_at_ms.is_none_or(|expires| now_ms < expires) && !is_close {
+                let message = match gate.reason_kind {
+                    GateReason::DailyLoss => format!(
+                        "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
+                        account_id
+                    ),
+                    _ => format!(
+                        "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
+                        account_id,
+                        gate.reason_kind.label(),
+                        gate.reason
+                    ),
+                };
+                return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
+            }
         }
+
+        // 2) 重启首 tick 回退：闸门尚未复立，但门闩已落盘，仍拒新单。
+        if !is_close && self.positions.daily_loss_tripped_for(account_id) {
+            return Err(CoreError::new(
+                CoreErrorCode::KillSwitchActive,
+                format!(
+                    "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
+                    account_id
+                ),
+            ));
+        }
+
         Ok(())
     }
 
