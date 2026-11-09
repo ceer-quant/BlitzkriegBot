@@ -194,12 +194,12 @@ impl Core {
         let is_close = crate::risk::is_close_intent(&req.internal_key);
 
         // 1) 显式账户闸门（由 emit_daily_trip、手动冻结等设置）。
-        if let Some(gate) = self.account_gate(account_id) {
-            if gate.blocked
-                && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
-                && !is_close
-            {
-                let message = match gate.reason_kind {
+        if let Some(gate) = self.account_gate(account_id)
+            && gate.blocked
+            && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
+            && !is_close
+        {
+            let message = match gate.reason_kind {
                     GateReason::DailyLoss => format!(
                         "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
                         account_id
