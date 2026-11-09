@@ -282,7 +282,7 @@ local DEFAULT_SL_DOWN = { m = 50, s = 0 }
 --                        触发 stop loss，避免无方向依据的盲目止损。默认 1。
 -- max_entry_price: 入场价上限，0.5 以上筹码赔率差（赚不到 100% 却承担归零
 --                  风险），不入场。0 禁用。
-local DEFAULT_DELAY      = 60
+local DEFAULT_DELAY      = 0
 local DEFAULT_CONFIRM    = 30
 local DEFAULT_REBOUND    = { m = 10, s = 0 }
 local DEFAULT_REQUIRE    = 1
@@ -586,10 +586,13 @@ local function consider_exit(out, row, round)
     end
     local book = bk.book(token)
     if book == nil or book.fresh ~= true or book.best_bid == nil then
+        -- Z15-7: 无买盘不静默，产出可观测状态
+        out.exits[#out.exits + 1] = { token = token, reason = "stop_blocked_no_liquidity" }
         return
     end
     local bid = dec_parse(book.best_bid)
     if not bid or bid.m <= 0 then
+        out.exits[#out.exits + 1] = { token = token, reason = "stop_blocked_no_liquidity" }
         return
     end
     local fee = decision_fee(bid)
@@ -600,6 +603,7 @@ local function consider_exit(out, row, round)
     note_peak(token, proceeds)
     local peak = peak_proceeds[token]
     local params = bk.params()
+    local now_ms = bk.now_ms()
 
     -- Duration seed: the largest time_left seen this round IS the round
     -- length (a healthy adapter's first evaluate sees the full clock; a
@@ -609,75 +613,52 @@ local function consider_exit(out, row, round)
         round_duration_cache = round.time_left_sec
     end
 
-    -- Time-weighted bands (2026-11-06): each band slides from its base
-    -- toward `*_tight_pct` as the round drains; *_tight_pct=0 keeps the
-    -- flat band exactly (default — no behavior change without an opt-in).
-    --
-    --保护性止损：方向分层 + 入场冷却期 + 触及确认窗 + 信号双重确认
-    --UP 方向用 stop_loss_pct_up（更紧，避免 0.5 以上筹码归零风险），
-    --DOWN 方向用 stop_loss_pct_down（更宽，真边需要空间）。
-    local dir = armed_dir[token]
+    -- Z15-2: 方向优先用持仓自带 direction（内核持久化，重启不丢）；armed_dir 仅作加分确认
+    local dir = row.direction
     local sl
     if dir == "up" then
         sl = dec_param(params, "stop_loss_pct_up", DEFAULT_SL_UP)
     else
         sl = dec_param(params, "stop_loss_pct_down", DEFAULT_SL_DOWN)
     end
-    local sl_pct = sl.m
+    local sl_pct_num = sl and tonumber(dec_fmt(sl)) or 0
+    local sl_pct = math.floor(sl_pct_num + 0.5)  -- 整数百分比，0.5%→1%，50%→50%
     if sl_pct > 0 then
-        -- net_reaches(proceeds, entry, sl) means (proceeds-entry)/entry >= sl%
-        -- 我们要反向：(proceeds-entry)/entry <= -sl% → proceeds <= entry*(1-sl/100)
-        -- 用 dec_mul: entry * (100 - sl)/100 —— 直接乘缩放后的 0.xx，不能
-        -- 用负 scale（dec_mul 只累加 s，s=-2 会被当成 ×100，阈值变 2450
-        -- 导致每次 evaluate 都立即触发止损）。
+        -- (proceeds-entry)/entry <= -sl%  ⟺  proceeds <= entry*(100-sl)/100
         local floor_entry = dec_mul(entry, { m = 100 - sl_pct, s = 2 })
         local breached = dec_cmp(proceeds, floor_entry) <= 0
         if breached then
-            -- 信号双重确认：require_signal 且无 armed_dir（无方向依据）时不触发
+            -- 信号双重确认：require_signal 且无方向依据时不触发
             local require_signal = int_param(params, "stop_loss_require_signal", DEFAULT_REQUIRE) == 1
-            if require_signal and dir == nil then
+            if require_signal and (dir == nil or dir == "") then
                 breached = false
             end
         end
         if breached then
-            -- 入场冷却期：首次观察到持仓时记录 entry_time，冷却期内不触发
-            local et = entry_time[token]
-            if et == nil then
-                entry_time[token] = bk.now_ms()
-                et = entry_time[token]
+            -- Z15-6: 首次触及即发 exit，无延迟
+            out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
+            -- 标记已发出，下一轮窗口内反弹可取消重复发出
+            sl_triggered[token] = { ms = now_ms, price = proceeds }
+            return
+        end
+    else
+        sl_triggered[token] = nil
+    end
+
+    -- Z15-6: confirm 仅用于反弹取消（窗口内反弹超过 rebound_pct 则取消止损）
+    local st = sl_triggered[token]
+    if st ~= nil then
+        local confirm = int_param(params, "stop_loss_confirm_sec", DEFAULT_CONFIRM)
+        local rebound = dec_param(params, "stop_loss_rebound_pct", DEFAULT_REBOUND)
+        local in_window = confirm > 0 and (now_ms - st.ms) < confirm * 1000
+        if in_window and rebound.m > 0 then
+            local rebound_floor = dec_mul(st.price, { m = 100 + rebound.m, s = 2 })
+            if dec_cmp(proceeds, rebound_floor) >= 0 then
+                -- 反弹够了，取消止损，继续持仓
+                sl_triggered[token] = nil
             end
-            local delay = int_param(params, "stop_loss_delay_sec", DEFAULT_DELAY)
-            local now_ms = bk.now_ms()
-            if delay > 0 and et ~= nil and now_ms - et < delay * 1000 then
-                -- 冷却期内，不触发止损，给方向判断留缓冲
-            else
-                -- 触及确认窗：首次触及记录时刻，窗口期内若反弹超过 rebound_pct 则取消
-                local confirm = int_param(params, "stop_loss_confirm_sec", DEFAULT_CONFIRM)
-                local st = sl_triggered[token]
-                if st == nil then
-                    sl_triggered[token] = { ms = now_ms, price = proceeds }
-                else
-                    if now_ms - st.ms < confirm * 1000 then
-                        -- 仍在观察窗，检查反弹是否足够取消止损
-                        local rebound = dec_param(params, "stop_loss_rebound_pct", DEFAULT_REBOUND)
-                        if rebound.m > 0 then
-                            local rebound_floor = dec_mul(st.price, { m = 100 + rebound.m, s = 2 })
-                            if dec_cmp(proceeds, rebound_floor) >= 0 then
-                                -- 反弹够了，取消止损，清除触发记录，继续持仓
-                                sl_triggered[token] = nil
-                            end
-                        end
-                        -- 不立即退出，继续观察
-                    else
-                        -- 观察窗结束，价格仍在阈值以下，执行止损
-                        out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
-                        sl_triggered[token] = nil
-                        return
-                    end
-                end
-            end
-        else
-            -- 未触及止损阈值，清除触发记录（下次触及重新计窗）
+        elseif not in_window then
+            -- 窗口已过，不再取消
             sl_triggered[token] = nil
         end
     end
