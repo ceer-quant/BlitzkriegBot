@@ -191,6 +191,10 @@ impl Core {
             && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
             && !crate::risk::is_close_intent(&req.internal_key)
         {
+            let code = match gate.reason_kind {
+                GateReason::DailyLoss => CoreErrorCode::RiskRejected,
+                _ => CoreErrorCode::KillSwitchActive,
+            };
             let message = match gate.reason_kind {
                 GateReason::DailyLoss => format!(
                     "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
@@ -203,7 +207,7 @@ impl Core {
                     gate.reason
                 ),
             };
-            return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
+            return Err(CoreError::new(code, message));
         }
         Ok(())
     }
