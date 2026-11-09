@@ -231,7 +231,17 @@ const trades = computed(() => {
  * — never folded into the balance, which would make the fee look like it moved
  * the principal.
  */
-	const recon = computed(() => balanceView(balance.value))
+const recon = computed(() => {
+  const b = balance.value
+  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+  if (b && seedNum !== null) {
+    const ledgerNet = (Number(b.balance) || 0) - seedNum
+    return balanceView(b, ledgerNet, trades.value.fees)
+  }
+  // 无账本锚点（老内核行缺 seededTotal，且快照顶层也没有 seed）：回落成交
+  // 折叠口径，权益可能与被重置过账本对不上——identityBroken 分支如实标注。
+  return balanceView(b, trades.value.net, trades.value.fees)
+})
 
 /**
  * 成交折叠与账本口径是否劈叉（>半分钱）：只决定「手续费/曲线」这些成交类
@@ -565,7 +575,7 @@ const needsStrategyHint = computed(() => {
             「成交口径」展示里，并与钱数分离标注。
           -->
           <Tooltip
-            v-if="recon.seed !== null"
+            v-if="recon.equity !== null"
             :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 账本净利 ${signedMoney(recon.net)}（账本口径：该账户现金流水累计，含手续费）。手续费支出 ${money(recon.fees)} 与毛利 ${money(recon.gross)} 是成交记录口径（成交行按费率模型折叠），与账本口径可能有差额——它们描述成交史，不参与余额计算。`"
           >
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
