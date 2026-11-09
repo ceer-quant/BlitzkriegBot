@@ -224,26 +224,36 @@ const trades = computed(() => {
  * 2026-11-08：现金流水=唯一真相）：净利 = 该账户账本现金 − 累计种子入金
  * （`seededTotal`）——构造上恒等，面板不再拿成交行的模型费净利去拼一个
  * 可能两头都不是的余额（default 曾拼出 $996.92：账本 $1,000 + 重置前旧
- * 净利 −$3.08）。成交行折叠（recon.net）只服务权益曲线/胜率/手续费这些
+ * 净利 −$3.08）。成交行折叠（trades.net）只服务权益曲线/胜率/手续费这些
  * 「成交口径」展示，与钱数分离后另行标注。
  *
  * Fees are an expense, so they are shown as a cost charged against gross profit
  * — never folded into the balance, which would make the fee look like it moved
  * the principal.
  */
-	const recon = computed(() => balanceView(balance.value))
+const recon = computed(() => {
+  const b = balance.value
+  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+  if (b && seedNum !== null) {
+    const ledgerNet = (Number(b.balance) || 0) - seedNum
+    return balanceView(b, ledgerNet, trades.value.fees)
+  }
+  // 无账本锚点（老内核行缺 seededTotal，且快照顶层也没有 seed）：回落成交
+  // 折叠口径，权益可能与被重置过账本对不上——identityBroken 分支如实标注。
+  return balanceView(b, trades.value.net, trades.value.fees)
+})
 
 /**
  * 成交折叠与账本口径是否劈叉（>半分钱）：只决定「手续费/曲线」这些成交类
  * 展示要不要挂「成交口径」标注——钱数（headline）恒走账本，永不参与拼接。
  */
-	const foldDiverges = computed(() => {
-	  const b = balance.value
-	  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
-	  if (!b || seedNum === null) return false
-	  const ledgerNet = (Number(b.balance) || 0) - seedNum
-	  return Math.abs(recon.value.net - ledgerNet) > 0.005
-	})
+const foldDiverges = computed(() => {
+  const b = balance.value
+  const seedNum = b?.seed === null || b?.seed === undefined ? null : Number(b.seed)
+  if (!b || seedNum === null) return false
+  const ledgerNet = (Number(b.balance) || 0) - seedNum
+  return Math.abs(trades.value.net - ledgerNet) > 0.005
+})
 
 /**
  * The tile label tracks what the figure above it actually is. When the equity is
@@ -565,7 +575,7 @@ const needsStrategyHint = computed(() => {
             「成交口径」展示里，并与钱数分离标注。
           -->
           <Tooltip
-            v-if="recon.seed !== null"
+            v-if="recon.equity !== null"
             :content="`真实余额 = 本金 ${money(recon.seed)} ＋ 账本净利 ${signedMoney(recon.net)}（账本口径：该账户现金流水累计，含手续费）。手续费支出 ${money(recon.fees)} 与毛利 ${money(recon.gross)} 是成交记录口径（成交行按费率模型折叠），与账本口径可能有差额——它们描述成交史，不参与余额计算。`"
           >
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
@@ -594,7 +604,7 @@ const needsStrategyHint = computed(() => {
           v-if="recon.equity !== null && recon.fees > 0"
           class="mt-2 flex items-center gap-1.5 text-[10.5px] leading-snug text-faint-fg"
         >
-          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(recon.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
+          <Tooltip :content="`手续费支出 ${money(recon.fees)} · 毛利 ${money(recon.gross)} —— 成交记录口径（成交行按费率模型折叠）${foldDiverges ? '；与账本口径相差 ' + money(Math.abs(trades.net - recon.net)) + '，钱数以账本为准' : ''}。手续费是成本：从利润里扣，不改变本金。`">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
               手续费支出 {{ money(recon.fees) }}（成交口径）· 毛利 {{ money(recon.gross) }}
             </span>
@@ -644,10 +654,10 @@ const needsStrategyHint = computed(() => {
       <StatTile
         label="已平仓交易"
         :value="num(trades.count)"
-        :tone="recon.net >= 0 ? 'up' : 'down'"
+        :tone="trades.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
-          扣费净利 <RollingNumber :value="signedMoney(recon.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
+          扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
         </template>
         <div class="mt-2 flex items-center gap-2">
           <Badge variant="up"><ArrowUpRight class="size-3" /><RollingNumber :value="trades.win" /></Badge>
@@ -686,8 +696,8 @@ const needsStrategyHint = computed(() => {
         -->
         <CardHeader :label="foldDiverges ? '累计净利（成交口径）' : '权益曲线'">
           <template #title>
-            <span class="stat-num text-[15px]" :class="recon.net >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber :value="signedMoney(recon.net)" />
+            <span class="stat-num text-[15px]" :class="trades.net >= 0 ? 'text-up' : 'text-down'">
+              <RollingNumber :value="signedMoney(trades.net)" />
             </span>
           </template>
           <template #action>
