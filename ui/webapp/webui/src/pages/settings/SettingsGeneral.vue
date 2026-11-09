@@ -262,8 +262,8 @@ async function doResetTrading(): Promise<void> {
       </AlertBanner>
 
       <template v-else>
-        <div class="flex items-center justify-between gap-3">
-          <div>
+        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
+          <div class="min-w-0 sm:min-w-auto">
             <div class="text-[12.5px] font-semibold">下次会话的全局轮长</div>
             <p class="mt-0.5 text-[11px] text-faint-fg">
               这是复盘坐标系与未配置账户的回落，不是各账户的交易周期 —— 账户各跑各的周期族在账户卡配置（热生效）。
@@ -275,10 +275,11 @@ async function doResetTrading(): Promise<void> {
             :segments="roundSegments"
             size="sm"
             :disabled="roundBusy"
+            class="w-full sm:w-auto"
           />
         </div>
 
-        <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
+        <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0 rounded-md border border-line bg-panel-2 px-3 py-2">
           <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
             <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
             <span v-if="roundFlagLocked">
@@ -291,7 +292,7 @@ async function doResetTrading(): Promise<void> {
               尚无面板设置：下次会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
             </span>
           </div>
-          <div class="flex shrink-0 items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
             <Button
               variant="ghost"
               size="sm"
@@ -434,7 +435,7 @@ async function doResetTrading(): Promise<void> {
           （或直接写 <span class="font-mono">.env</span>，真实环境变量始终优先）。
         </p>
         <div class="overflow-x-auto">
-          <table class="w-full min-w-[620px] text-[12px]">
+          <table class="w-full text-[12px]">
             <thead>
               <tr class="text-left">
                 <th class="label-micro px-2 pb-2">插件</th>

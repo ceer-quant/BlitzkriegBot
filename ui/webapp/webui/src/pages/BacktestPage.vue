@@ -489,8 +489,8 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="grid gap-2 md:grid-cols-4">
-          <label class="md:col-span-2">
+        <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-4">
+          <label class="md:col-span-2 sm:col-span-2">
             <span class="label-micro">钱包地址</span>
             <Input v-model="wallet" placeholder="0x…（要回测的钱包）" size="sm" />
             <span v-if="activeVenueNote" class="mt-1 block text-[11px] text-faint-fg">{{ activeVenueNote }}</span>
@@ -526,7 +526,7 @@ onMounted(() => {
           <SegmentedControl v-model="mode" :segments="modeSegments" />
           <p class="mt-1.5 text-[12px] text-faint-fg">{{ modeHint }}</p>
         </div>
-        <div class="grid gap-2 md:grid-cols-3">
+        <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
           <label>
             <span class="label-micro">滑点 (tick)</span>
             <Input v-model="slippageTicks" type="number" size="sm" />
@@ -535,7 +535,7 @@ onMounted(() => {
             <span class="label-micro">延迟 (ms)</span>
             <Input v-model="verifyLatencyMs" type="number" size="sm" />
           </label>
-          <label :class="mode === 'verify' ? '' : 'md:col-span-2'">
+          <label :class="mode === 'verify' ? '' : 'md:col-span-2 sm:col-span-2'">
             <span class="label-micro">只跑这些策略（可选，留空 = 当前启用的）</span>
             <Input v-model="strategiesRaw" placeholder="策略名，逗号分隔" size="sm" />
           </label>
@@ -630,7 +630,7 @@ onMounted(() => {
         </div>
       </Card>
 
-      <div class="grid gap-3 md:grid-cols-4">
+      <div class="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
         <StatTile label="净盈亏" :tone="netPnl >= 0 ? 'up' : 'down'" :value="signedMoney(netPnl)">
           <template #sub>
             毛利 +{{ money(report.trades?.grossProfitUsd) }} · 毛亏 {{ money(report.trades?.grossLossUsd) }}

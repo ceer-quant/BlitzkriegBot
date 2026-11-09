@@ -242,7 +242,7 @@ onMounted(() => {
     </header>
 
     <!-- compact nav for narrow viewports with smooth horizontal scroll and touch padding -->
-    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-start overflow-x-auto px-2 no-scrollbar sm:mt-6 sm:justify-center sm:px-4 md:hidden">
+    <nav class="mx-auto mt-6 flex max-w-[1280px] justify-start overflow-x-auto px-4 no-scrollbar sm:mt-6 sm:justify-center sm:px-4 md:hidden">
       <SegmentedControl
         :model-value="activeGroup?.id ?? tab"
         :segments="topSegments"
@@ -275,7 +275,7 @@ onMounted(() => {
       </div>
       <!-- 组内叶子是页内 tab（SettingsPage 的域切换模式）：内容上方一排页签，
            不在导航条上出现第二级控件。 -->
-      <nav v-if="activeGroup" class="mb-4">
+      <nav v-if="activeGroup" class="mb-4 px-4 sm:px-0">
         <SegmentedControl v-model="tab" :segments="activeGroup.children" />
       </nav>
       <component :is="activePage" />
