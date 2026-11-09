@@ -19,6 +19,7 @@ mod accounts;
 mod assembly;
 mod cockpit_env;
 mod config;
+mod daily_loss_gate;
 mod engine_cycle;
 mod helpers;
 mod risk_admission;
