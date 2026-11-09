@@ -320,6 +320,7 @@ do
   end
 end
 
+
 -- ═══ EXITS — the owner's giveback, priced on the bid ════════════════════════
 -- UP 10 @ 0.28 ran to a 0.42 bid (+50% gross) with ~7m41s left, then gave
 -- it back. Defaults bank it. PolySim's fee schedule is nil here: the
@@ -349,6 +350,80 @@ local function exit_reasons(r)
   local s = {}
   for i = 1, #r.exits do s[i] = r.exits[i].reason end
   return table.concat(s, ",")
+end
+-- ═══ STOP LOSS — Z15-8 回归 ════════════════════════════════════════════════════
+
+-- Z15-8-1: bid 0.60→0.10 单跳，首个有 bid tick 必须发 stop_loss（bid 0.00 视为无买盘）
+do
+  reset()
+  state.params = { stop_loss_pct = "50" }
+  hold("down-1", "0.60")
+  quote("down-1", "0.10", "0.11")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "stop_loss",
+    "bid 0.60→0.10 单跳：首个有 bid tick 必须发 stop_loss，got " .. exit_reasons(r))
+end
+
+-- Z15-8-2: 重启恢复持仓仍止损（direction 来自 holdings，armed_dir 仅加分）
+do
+  reset()
+  state.params = { stop_loss_pct = "50" }
+  hold("down-1", "0.60")
+  quote("down-1", "0.10", "0.11")
+  local r1 = evaluate()  -- 第一轮：armed_dir 为空，row.direction = "down" 仍应止损
+  ok(#r1.exits == 1 and r1.exits[1].reason == "stop_loss",
+    "重启后方向来自 holdings.direction，止损仍触发，got " .. exit_reasons(r1))
+  -- 第二轮：再次跌，应继续止损（armed_dir 已清，但 holdings.direction 仍在）
+  quote("down-1", "0.10", "0.11")
+  local r2 = evaluate()
+  ok(#r2.exits == 1 and r2.exits[1].reason == "stop_loss",
+    "重启后第二轮：holdings.direction 仍驱动止损，got " .. exit_reasons(r2))
+end
+
+-- Z15-8-3: stop_loss_pct_down=0 关闭止损（down 腿读 stop_loss_pct_down）
+do
+  reset()
+  state.params = { stop_loss_pct_down = "0" }
+  hold("down-1", "0.60")
+  quote("down-1", "0.10", "0.11")
+  local r = evaluate()
+  ok(#r.exits == 0, "stop_loss_pct_down=0：止损关闭，不发出 exit，got " .. exit_reasons(r))
+end
+
+-- Z15-8-4: stop_loss_pct=50 生效（-50% 阈值）
+do
+  reset()
+  state.params = { stop_loss_pct = "50" }
+  hold("down-1", "0.60")
+  quote("down-1", "0.31", "0.32")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "stop_loss",
+    "stop_loss_pct=50：-50% 止损阈值触发，got " .. exit_reasons(r))
+end
+
+-- Z15-8-5: stop_loss_pct_down=0.5（0.5%，不是 5%）
+do
+  reset()
+  state.params = { stop_loss_pct_down = "0.5" }
+  hold("down-1", "0.60")
+  -- bid 0.598：费净后约 -3.1%，应触达 0.5% 止损（sl_pct 取整为 1）
+  quote("down-1", "0.598", "0.599")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "stop_loss",
+    "stop_loss_pct_down=0.5：应按 0.5%（非 5%）止损，got " .. exit_reasons(r))
+end
+
+-- Z15-8-6: 任意参数组合 bk_evaluate 不报错
+do
+  reset()
+  state.params = {
+    stop_loss_pct = "999", stop_loss_pct_up = "-1", stop_loss_pct_down = "abc",
+    stop_loss_delay_sec = "0", stop_loss_confirm_sec = "0",
+  }
+  hold("down-1", "0.50")
+  quote("down-1", "0.40", "0.41")
+  local ok_result, err = pcall(evaluate)
+  ok(ok_result, "任意参数组合 bk_evaluate 不报错，got " .. tostring(err))
 end
 
 -- the peak itself: bid 0.42, entry 0.28, fee 0.07*0.42*0.58 = 0.017052,
@@ -410,21 +485,25 @@ do
   ok(#evaluate().exits == 0, "a 0.42 mid with a 0.30 bid is not a take-profit")
 end
 
--- no bid, or a stale book: no exit, even when the last mid looks rich.
+-- no bid, or a stale book: Z15-7 不得静默 return，产出 stop_blocked_no_liquidity
 do
   reset()
   state.time_left = 461
   hold("down-1", "0.28")
   quote("down-1", "0.42", "0.43")
   state.books["down-1"].best_bid = nil
-  ok(#evaluate().exits == 0, "no best bid: no exit")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "stop_blocked_no_liquidity",
+    "no best bid: stop_blocked_no_liquidity, got " .. exit_reasons(r))
 end
 do
   reset()
   state.time_left = 461
   hold("down-1", "0.28")
   quote("down-1", "0.42", "0.43", false)
-  ok(#evaluate().exits == 0, "a stale book does not price an exit")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "stop_blocked_no_liquidity",
+    "a stale book: stop_blocked_no_liquidity, got " .. exit_reasons(r))
 end
 
 -- absolute price target, still net of the fee. 0.42 clears 0.40 and the
