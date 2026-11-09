@@ -213,13 +213,8 @@ function rowNetPnl(r: StrategyStatsRow): string | number {
   return perfTab.value === 'arb' ? (r.arbNetPnlUsd ?? r.netPnlUsd) : r.netPnlUsd
 }
 
-const groups = computed(() =>
-  [
-    { id: 'running', label: '运行中', rows: filteredRows.value.filter((r) => (isAccountEnabled(r) ?? r.enabled) && !isAbnormal(r)) },
-    { id: 'stopped', label: '已停止', rows: filteredRows.value.filter((r) => !(isAccountEnabled(r) ?? r.enabled) && !isAbnormal(r)) },
-    { id: 'abnormal', label: '异常', rows: filteredRows.value.filter(isAbnormal) },
-  ].filter((g) => g.rows.length > 0),
-)
+/** 策略列表不再按启停/异常分组：按名称字母排序，位置固定，开关位置不漂移。 */
+const sortedRows = computed(() => [...filteredRows.value].sort((a, b) => a.name.localeCompare(b.name)))
 
 /** 当前 tab 的行数（SegmentedControl badge；车队 KPI 恒显全量，不随 tab 漂移）。 */
 const currentRows = computed(() => (perfTab.value === 'arb' ? arbRows.value : singleRows.value))
@@ -546,24 +541,8 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <template v-for="g in groups" :key="g.id">
-              <!-- 状态分组头：一行一组，色点 + 组名 + 计数（异常组用 ⚠ 图标） -->
-              <tr>
-                <td colspan="13" class="px-2 pt-3.5 pb-1">
-                  <span class="inline-flex items-center gap-2">
-                    <AlertTriangle v-if="g.id === 'abnormal'" class="size-3 text-down" />
-                    <span
-                      v-else
-                      class="size-1.5 rounded-full"
-                      :style="{ background: g.id === 'running' ? 'var(--up)' : 'var(--faint-fg)' }"
-                    />
-                    <span class="label-micro">{{ g.label }}</span>
-                    <Badge variant="outline"><RollingNumber :value="g.rows.length" /></Badge>
-                  </span>
-                </td>
-              </tr>
-              <template v-for="r in g.rows" :key="r.name">
-                <tr class="border-t border-line transition-colors hover:bg-panel-2">
+            <template v-for="r in sortedRows" :key="r.name">
+              <tr class="border-t border-line transition-colors hover:bg-panel-2">
                   <td class="px-2 py-2.5 font-semibold">
                     <!-- 名称与动作分两区：名字截断在左，编辑/不相容钉在列右缘 ——
                          按钮的 x 不随名称长度前后移动。 -->
@@ -779,8 +758,7 @@ onMounted(() => {
                   </td>
                 </tr>
               </template>
-            </template>
-            <tr v-if="!groups.length">
+              <tr v-if="!sortedRows.length">
               <td colspan="13" class="px-3 py-10">
                 <EmptyState
                   text="没有匹配的策略"
