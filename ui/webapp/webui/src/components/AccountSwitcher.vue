@@ -504,11 +504,11 @@ onBeforeUnmount(() => {
             <button
               v-if="a.status === 'frozen'"
               class="shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors"
-              :class="freezeBusy.value === a.id ? 'bg-down/15 text-down animate-pulse' : 'bg-up/15 text-up hover:bg-up/25'"
+              :class="freezeBusy === a.id ? 'bg-down/15 text-down animate-pulse' : 'bg-up/15 text-up hover:bg-up/25'"
               :title="`解冻账户 ${a.id}，恢复新单入场权限（平仓照放）`"
-              :disabled="freezeBusy.value !== null"
+              :disabled="freezeBusy !== null"
               @click.stop="unfreezeAccount(a)"
-            >{{ freezeBusy.value === a.id ? '解冻中…' : '解冻' }}</button>
+            >{{ freezeBusy === a.id ? '解冻中…' : '解冻' }}</button>
             <span
               class="min-w-0 flex-1 truncate"
               :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"

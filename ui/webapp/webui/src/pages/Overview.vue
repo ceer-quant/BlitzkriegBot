@@ -6,9 +6,10 @@
  */
 import { computed, ref } from 'vue'
 import {
-  CircleDot, ShieldCheck, ArrowUpRight, ArrowDownRight,
+  ShieldCheck, ArrowUpRight, ArrowDownRight,
 } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
+import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import {
   num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
 } from '@/lib/format'
@@ -367,14 +368,11 @@ const needsStrategyHint = computed(() => {
 <template>
   <template v-if="snap">
     <!-- beginner hint: the panel is live but the robot is not yet allowed to act -->
-    <div v-if="needsStrategyHint" class="mb-3.5 flex items-center gap-2 rounded-lg border border-dashed border-line bg-panel-2 px-3 py-2 text-[12px] text-muted-fg">
-      <CircleDot class="size-3.5 shrink-0 text-primary" />
-      <span>
-        机器人还没有启用任何策略 —— 到
-        <span class="font-semibold text-fg">策略</span>
-        页内打开开关后，成交与裁决会出现在这里。
-      </span>
-    </div>
+    <AlertBanner v-if="needsStrategyHint" tone="info">
+      机器人还没有启用任何策略 —— 到
+      <span class="font-semibold text-fg">策略</span>
+      页内打开开关后，成交与裁决会出现在这里。
+    </AlertBanner>
 
     <!-- KPI row -->
     <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
