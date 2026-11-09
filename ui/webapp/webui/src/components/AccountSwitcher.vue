@@ -393,7 +393,7 @@ onBeforeUnmount(() => {
 
     <div
       v-if="open"
-      class="absolute top-full z-30 mt-2 rounded-xl border border-line bg-panel-solid p-2 shadow-lg left-1/2 -translate-x-1/2 w-full max-w-xs sm:left-auto sm:-translate-x-0 sm:right-0 sm:w-96 sm:max-w-none"
+      class="absolute top-full z-30 mt-2 rounded-xl border border-line bg-panel-solid p-2 shadow-lg left-1/2 -translate-x-1/2 w-auto max-w-[calc(100vw-32px)] sm:left-auto sm:-translate-x-0 sm:right-0 sm:w-96 sm:max-w-none"
     >
       <div class="mb-1 flex items-center justify-between px-2 py-1">
         <span class="label-micro">账户账本</span>
