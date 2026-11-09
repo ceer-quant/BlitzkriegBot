@@ -23,7 +23,7 @@ import { useTheme } from '@/lib/theme'
 import {
   num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration,
 } from '@/lib/format'
-import { balanceView } from '@/lib/balance'
+import { useAccountBalance } from '@/lib/account-balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import { newestFirst, positionExpired } from '@/lib/trades'
 import { feedStaleness } from '@/lib/feed'
@@ -465,32 +465,17 @@ const cumStats = computed(() => {
 // 进程级 ledger.balance。切户后下一拍 refreshAccounts 镜像带回新账户的
 // balance/available/reserved，读数随显示账户走；行未到的一拍回落快照顶层，
 // 下面的标注 computed 如实说出该兜底口径，绝不冒充账户级。
-	const recon = computed(() => {
-	  const row = store.activeAccountRow
-	  if (row) {
-	    // 现金真值锚点（操作员裁决 2026-11-08）：本金从该账户自有账本的累计
-	    // 种子入金（account.list 行的 seededTotal），净利 = balance − seededTotal
-	    // （账本口径，构造上恒等），绝不拿成交折叠净利去拼余额。与 Overview
-	    // 同一口径，消除「一账户两余额」。
-	    const rowSeed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
-	    const cash = Number(row.balance) || 0
-	    const ledgerNet = rowSeed !== null ? cash - rowSeed : null
-	    return balanceView(
-	      {
-	        // account.list 行的十进制跨线是 string|number，归一成 number 再进
-	        // balanceView（该函数与内核快照的 number 口径对齐）。
-	        balance: cash,
-	        reserved: Number(row.reserved) || 0,
-	        available: Number(row.available) || 0,
-	        seed: rowSeed,
-	      },
-	      ledgerNet ?? cumStats.value.net,
-	      cumStats.value.fees,
-	    )
-	  }
-	  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
-	})
-// 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级」；账户行在场
+// ── balance (真实余额 = 账本现金，唯一来源：useAccountBalance) ──────
+// issue 561（裁决 1）：瓦片换源到显示账户自有账本 —— account.list 行
+// （内核 account_views 按 ledger_of(id) 读该账户账本），不再读快照顶层的
+// 进程级 ledger.balance。issue 561 + 用户原则：余额 = 账本现金影子，
+// 统一来源 useAccountBalance，绝不拿成交折叠净利去拼余额。
+const accountBalance = computed(() => {
+  const row = store.activeAccountRow
+  if (!row) return null
+  return useAccountBalance(row)
+})
+// 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级”；账户行在场
 // 时读数就是显示账户的自有账本，不再有「显示账户的名字 + 进程级的钱」的
 // 错位（issue 561 裁决 1 要消除的正是一句标注遮不住的错位本身）。
 const balanceAccountNote = computed(() => {
@@ -505,8 +490,14 @@ const balanceAccountSuffix = (label: string): string => {
   return `${label} · ${id}`
 }
 const balanceLabel = computed(() =>
-  balanceAccountSuffix(isDry.value ? (recon.value.equity !== null ? '真实余额' : '内核现金账') : (recon.value.equity !== null ? '账户权益' : '交易所余额')),
+  balanceAccountSuffix(isDry.value ? (accountBalance.value?.equity !== null ? '真实余额' : '内核现金账') : (accountBalance.value?.equity !== null ? '账户权益' : '交易所余额')),
 )
+
+// 与 StatsRow 的 recon 接口保持兼容：始终存在一个 BalanceView 形状的对象，
+// 账户行未到时给出空默认（不渲染编造的数字）。
+const recon = computed(() => accountBalance.value ?? {
+  seed: null, net: 0, fees: 0, gross: 0, equity: null, cash: 0, reserved: 0, available: 0,
+})
 
 // ── history filters ─────────────────────────────────────────────────────────
 const fTime = ref<'all' | 'today' | '7d'>('all')
