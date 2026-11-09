@@ -465,18 +465,24 @@ const cumStats = computed(() => {
 // 进程级 ledger.balance。切户后下一拍 refreshAccounts 镜像带回新账户的
 // balance/available/reserved，读数随显示账户走；行未到的一拍回落快照顶层，
 // 下面的标注 computed 如实说出该兜底口径，绝不冒充账户级。
-	const recon = computed(() => {
-	  const row = store.activeAccountRow
-	  if (row) {
-	    return balanceView({
-	      balance: Number(row.balance) || 0,
-	      reserved: Number(row.reserved) || 0,
-	        available: Number(row.available) || 0,
-	        seed: row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null,
-	    })
-	  }
-	  return balanceView(snap.value?.balance)
-	})
+const recon = computed(() => {
+  const row = store.activeAccountRow
+  if (row) {
+    return balanceView(
+      {
+        // account.list 行的十进制跨线是 string|number，归一成 number 再进
+        // balanceView（该函数与内核快照的 number 口径对齐）。
+        balance: Number(row.balance) || 0,
+        reserved: Number(row.reserved) || 0,
+        available: Number(row.available) || 0,
+        seed: snap.value?.balance?.seed ?? null,
+      },
+      cumStats.value.net,
+      cumStats.value.fees,
+    )
+  }
+  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
+})
 // 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级」；账户行在场
 // 时读数就是显示账户的自有账本，不再有「显示账户的名字 + 进程级的钱」的
 // 错位（issue 561 裁决 1 要消除的正是一句标注遮不住的错位本身）。
