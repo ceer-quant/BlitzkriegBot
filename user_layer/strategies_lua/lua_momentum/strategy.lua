@@ -229,6 +229,8 @@ local confirmed = {}      -- token -> true while a momentum premise holds
 local direction = {}      -- token -> "up" | "down" (which premise is armed)
 local armed_dir = {}      -- token -> direction THIS position entered under (#961)
 local peak_proceeds = {}  -- token -> best (bid − taker fee) seen while held
+local entry_time = {}     -- token -> entry timestamp (ms), set on first observe of a held position
+local sl_triggered = {}   -- token -> { ms, price } stop-loss trigger state (confirm window)
 -- (round slot, condition) -> { count, open, last_exit_ms }. `open` means a
 -- resting attempt is still being quoted; `count` is how many attempts this
 -- round has started. Wiped when the round slot changes.
@@ -266,6 +268,25 @@ end
 -- 注意：用 NET proceeds (bid - taker fee) 判断——名义 -40% 但 fee 吃掉后
 -- 可能已经 net -48%，所以 net 比名义更保守。
 local DEFAULT_SL = { m = 50, s = 0 }
+-- 方向分层止损：UP 方向更紧（0.5 以上筹码赔率差，不该承担归零风险），
+-- DOWN 方向保持 50%（真边，需要空间容纳波动）。0 禁用。
+local DEFAULT_SL_UP   = { m = 30, s = 0 }
+local DEFAULT_SL_DOWN = { m = 50, s = 0 }
+-- 止损推迟触发机制（甜点参数待回放挖掘）：
+-- stop_loss_delay_sec  : 入场冷却期（秒），冷却期内即使触及 -sl% 也不立即平，
+--                        给方向判断留缓冲，避免开场噪音洗出。默认 60s。
+-- stop_loss_confirm_sec: 触及 -sl% 后的观察窗（秒），窗口期内若反弹超过
+--                        stop_loss_rebound_pct 则取消止损，继续持仓。默认 30s。
+-- stop_loss_rebound_pct: 观察窗内反弹多少个百分点取消止损。默认 10%。
+-- stop_loss_require_signal: 是否要求 armed_dir 存在（策略信号一致）才允许
+--                        触发 stop loss，避免无方向依据的盲目止损。默认 1。
+-- max_entry_price: 入场价上限，0.5 以上筹码赔率差（赚不到 100% 却承担归零
+--                  风险），不入场。0 禁用。
+local DEFAULT_DELAY      = 60
+local DEFAULT_CONFIRM    = 30
+local DEFAULT_REBOUND    = { m = 10, s = 0 }
+local DEFAULT_REQUIRE    = 1
+local DEFAULT_MAX_ENTRY  = { m = 50, s = 2 } -- 0.50
 
 local function classify(token, mid)
     local prev = last_mid[token]
@@ -534,6 +555,16 @@ local function forget_unheld(held)
             armed_dir[tok] = nil
         end
     end
+    for tok in pairs(entry_time) do
+        if held[tok] == nil then
+            entry_time[tok] = nil
+        end
+    end
+    for tok in pairs(sl_triggered) do
+        if held[tok] == nil then
+            sl_triggered[tok] = nil
+        end
+    end
 end
 
 local function note_peak(token, proceeds)
@@ -582,20 +613,72 @@ local function consider_exit(out, row, round)
     -- toward `*_tight_pct` as the round drains; *_tight_pct=0 keeps the
     -- flat band exactly (default — no behavior change without an opt-in).
     --
-    --保护性止损 (stop_loss_pct) 优先级最高：浮亏达到阈值立即市价出。
-    --用 net proceeds 算（bid - taker fee），不是名义 bid——保守一点。
-    local sl = dec_param(params, "stop_loss_pct", DEFAULT_SL)
-    if sl.m > 0 then
+    --保护性止损：方向分层 + 入场冷却期 + 触及确认窗 + 信号双重确认
+    --UP 方向用 stop_loss_pct_up（更紧，避免 0.5 以上筹码归零风险），
+    --DOWN 方向用 stop_loss_pct_down（更宽，真边需要空间）。
+    local dir = armed_dir[token]
+    local sl
+    if dir == "up" then
+        sl = dec_param(params, "stop_loss_pct_up", DEFAULT_SL_UP)
+    else
+        sl = dec_param(params, "stop_loss_pct_down", DEFAULT_SL_DOWN)
+    end
+    local sl_pct = sl.m
+    if sl_pct > 0 then
         -- net_reaches(proceeds, entry, sl) means (proceeds-entry)/entry >= sl%
         -- 我们要反向：(proceeds-entry)/entry <= -sl% → proceeds <= entry*(1-sl/100)
         -- 用 dec_mul: entry * (100 - sl)/100 —— 直接乘缩放后的 0.xx，不能
         -- 用负 scale（dec_mul 只累加 s，s=-2 会被当成 ×100，阈值变 2450
         -- 导致每次 evaluate 都立即触发止损）。
-        local floor_entry = dec_mul(entry, { m = 100 - sl.m, s = 2 })
-        if dec_cmp(proceeds, floor_entry) <= 0 then
-            -- 净亏损达到 -sl%，立即市价止损。use_maker=false → 立即 taker 成交。
-            out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
-            return
+        local floor_entry = dec_mul(entry, { m = 100 - sl_pct, s = 2 })
+        local breached = dec_cmp(proceeds, floor_entry) <= 0
+        if breached then
+            -- 信号双重确认：require_signal 且无 armed_dir（无方向依据）时不触发
+            local require_signal = int_param(params, "stop_loss_require_signal", DEFAULT_REQUIRE) == 1
+            if require_signal and dir == nil then
+                breached = false
+            end
+        end
+        if breached then
+            -- 入场冷却期：首次观察到持仓时记录 entry_time，冷却期内不触发
+            local et = entry_time[token]
+            if et == nil then
+                entry_time[token] = bk.now_ms()
+                et = entry_time[token]
+            end
+            local delay = int_param(params, "stop_loss_delay_sec", DEFAULT_DELAY)
+            local now_ms = bk.now_ms()
+            if delay > 0 and et ~= nil and now_ms - et < delay * 1000 then
+                -- 冷却期内，不触发止损，给方向判断留缓冲
+            else
+                -- 触及确认窗：首次触及记录时刻，窗口期内若反弹超过 rebound_pct 则取消
+                local confirm = int_param(params, "stop_loss_confirm_sec", DEFAULT_CONFIRM)
+                local st = sl_triggered[token]
+                if st == nil then
+                    sl_triggered[token] = { ms = now_ms, price = proceeds }
+                else
+                    if now_ms - st.ms < confirm * 1000 then
+                        -- 仍在观察窗，检查反弹是否足够取消止损
+                        local rebound = dec_param(params, "stop_loss_rebound_pct", DEFAULT_REBOUND)
+                        if rebound.m > 0 then
+                            local rebound_floor = dec_mul(st.price, { m = 100 + rebound.m, s = 2 })
+                            if dec_cmp(proceeds, rebound_floor) >= 0 then
+                                -- 反弹够了，取消止损，清除触发记录，继续持仓
+                                sl_triggered[token] = nil
+                            end
+                        end
+                        -- 不立即退出，继续观察
+                    else
+                        -- 观察窗结束，价格仍在阈值以下，执行止损
+                        out.exits[#out.exits + 1] = { token = token, reason = "stop_loss" }
+                        sl_triggered[token] = nil
+                        return
+                    end
+                end
+            end
+        else
+            -- 未触及止损阈值，清除触发记录（下次触及重新计窗）
+            sl_triggered[token] = nil
         end
     end
 
@@ -768,16 +851,28 @@ function bk_evaluate()
                         -- the near-zero leg has nothing left to catch.
                         local bid = tonumber(book.best_bid)
                         if bid ~= nil and (floor <= 0 or bid >= floor) then
-                            begin_attempt(round.slot, market.condition_id)
-                            -- #961: anchor the direction this position
-                            -- enters under — the thesis-death predicate
-                            -- reads it to detect a premise flip while held.
-                            armed_dir[token] = leg.want
-                            out.entries[#out.entries + 1] = {
-                                token = token,
-                                price = book.best_bid,
-                                reason = "lua momentum " .. leg.want,
-                            }
+                            -- 0.5 价位上限：0.5 以上筹码赔率差（赚不到 100% 却承担
+                            -- 归零风险），不接手。max_entry_price = 0 禁用该限制。
+                            local max_entry = dec_param(params, "max_entry_price", DEFAULT_MAX_ENTRY)
+                            local skip_entry = false
+                            if max_entry.m > 0 then
+                                local max_bid = tonumber(dec_fmt(max_entry))
+                                if bid > max_bid then
+                                    skip_entry = true
+                                end
+                            end
+                            if not skip_entry then
+                                begin_attempt(round.slot, market.condition_id)
+                                -- #961: anchor the direction this position
+                                -- enters under — the thesis-death predicate
+                                -- reads it to detect a premise flip while held.
+                                armed_dir[token] = leg.want
+                                out.entries[#out.entries + 1] = {
+                                    token = token,
+                                    price = book.best_bid,
+                                    reason = "lua momentum " .. leg.want,
+                                }
+                            end
                         end
                     end
                 end
