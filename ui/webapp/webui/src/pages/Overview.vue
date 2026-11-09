@@ -23,6 +23,7 @@ import {
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
+import BalanceCard from '@/components/ui/balance/BalanceCard.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import EmptyState from '@/components/ui/empty/EmptyState.vue'
@@ -625,20 +626,14 @@ const needsStrategyHint = computed(() => {
         </div>
       </StatTile>
 
-      <StatTile
+      <BalanceCard
         label="已平仓交易"
-        :value="num(trades.count)"
-        :tone="trades.net >= 0 ? 'up' : 'down'"
-      >
-        <template #sub>
-          扣费净利 <RollingNumber :value="signedMoney(trades.net)" /> · 费用 <RollingNumber :value="money(trades.fees)" />
-        </template>
-        <div class="mt-2 flex items-center gap-2">
-          <Badge variant="up"><ArrowUpRight class="size-3" /><RollingNumber :value="trades.win" /></Badge>
-          <Badge variant="down"><ArrowDownRight class="size-3" /><RollingNumber :value="trades.loss" /></Badge>
-          <span class="text-[11px] text-faint-fg num">胜率 <RollingNumber :value="pct(trades.winRate)" /></span>
-        </div>
-      </StatTile>
+        :balance="accountBalance"
+        :count="trades.count"
+        :win="trades.win"
+        :loss="trades.loss"
+        :win-rate="trades.winRate"
+      />
 
       <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->
       <StatTile

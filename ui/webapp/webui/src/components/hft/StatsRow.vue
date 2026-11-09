@@ -9,12 +9,9 @@
 import type { TradeRow } from '@/api/client'
 import type { CumStats } from './types'
 import Card from '@/components/ui/card/Card.vue'
-import CardHeader from '@/components/ui/card/CardHeader.vue'
-import Badge from '@/components/ui/badge/Badge.vue'
+import BalanceCard from '@/components/ui/balance/BalanceCard.vue'
 import StatRow from '@/components/ui/stat/StatRow.vue'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
-import EquityCurve from '@/components/charts/EquityCurve.vue'
-import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import { money, signedMoney, pct, signedPct, duration } from '@/lib/format'
 
 defineProps<{
@@ -47,23 +44,7 @@ defineProps<{
     and 累计净 PnL keeps the wider column whenever the split is active.
   -->
   <div class="mt-3.5 grid gap-3.5 sm:grid-cols-2 xl:grid-cols-[1.6fr_1fr_1fr_1fr]">
-    <Card>
-      <CardHeader label="累计净 PnL">
-        <template #title>
-          <span class="stat-num text-[16px]" :class="recon.net >= 0 ? 'text-up' : 'text-down'">
-            <RollingNumber :value="signedMoney(recon.net)" />
-          </span>
-        </template>
-        <template #action>
-          <Badge variant="default">账本口径</Badge>
-        </template>
-      </CardHeader>
-      <EquityCurve :rows="historyRows" :height="128" :show-axis="false" />
-      <div class="mt-2 flex items-center gap-4 text-[11px] text-faint-fg">
-        <span>毛利 <span class="num text-fg"><RollingNumber :value="signedMoney(recon.gross)" /></span></span>
-        <span>费用 <span class="num text-down"><RollingNumber :value="money(recon.fees)" /></span></span>
-      </div>
-    </Card>
+    <BalanceCard label="累计净 PnL" :balance="recon" :show-curve="true" :curve-rows="historyRows" />
 
     <Card>
       <CardHeader label="胜率分布" />
