@@ -2,8 +2,9 @@
 
 //! #1045 acceptance: the single in-memory account gate.
 //!
-//! 1. trip → unfreeze → entry still refused (the DailyLoss gate re-lifts every
-//!    tick until the UTC day rolls — unfreeze never erases the daily loss);
+//! 1. trip → unfreeze → entries allowed for the rest of the day (unfreeze clears
+//!    the session trip latch; `emit_daily_trip` never re-lifts a stale latch —
+//!    cash truth wins over a remembered breaker);
 //! 2. trip → UTC day roll → gate auto-clears, entries re-open;
 //! 3. a legacy risk-state file carrying `accountFreezes`/`auto_frozen` parses
 //!    without error and replays nothing — a clean boot starts trading.
@@ -60,17 +61,20 @@ fn entry_req(key: &str) -> OrderRequest {
     r
 }
 
-/// Book a 600 loss on `default` against a 50 cap (5% of the 1000 seed), then
-/// announce the trip via `emit_daily_trip` (this is what every tick does).
-/// The loss is booked straight into the day's realized bucket so the test does
-/// not depend on the engine cycle matching a buy against a sell.
+/// Book a 600 loss on `default` against a 50 cap (5% of the 1000 seed), latch
+/// the trip this session (as `note_daily_drawdown` would), then announce it via
+/// `emit_daily_trip` (this is what every tick does). The loss is booked
+/// straight into the day's realized bucket so the test does not depend on the
+/// engine cycle matching a buy against a sell.
 fn trip_daily_loss(c: &mut Core, at_ms: i64) {
+    let acct = crate::model::default_account_id();
     c.positions
         .roll_daily("default", at_ms, SEED, EquityBasis::Dry);
+    c.positions.set_daily_realized_for_test(&acct, dec!(-600));
     c.positions
-        .set_daily_realized_for_test(&crate::model::default_account_id(), dec!(-600));
-    // Announce the trip (every tick does this): latches the trip and lifts a
-    // DailyLoss gate expiring at the next UTC day boundary.
+        .set_daily_tripped_for_test(&acct, at_ms, dec!(50));
+    // Announce the trip (every tick does this): lifts a DailyLoss gate
+    // expiring at the next UTC day boundary.
     c.emit_daily_trip();
     assert!(
         c.account_gate_blocked("default", at_ms + 500),
@@ -79,12 +83,18 @@ fn trip_daily_loss(c: &mut Core, at_ms: i64) {
 }
 
 #[test]
-fn daily_loss_trip_unfreeze_still_refused() {
+fn daily_loss_trip_unfreeze_allows_entries_rest_of_day() {
     let mut c = gate_core();
     let t0 = 1_700_000_000_000;
     trip_daily_loss(&mut c, t0);
+    assert!(
+        c.account_gate_blocked("default", t0 + 500),
+        "trip gates entries"
+    );
 
-    // Unfreeze clears the gate for this instant ...
+    // Unfreeze clears the gate AND the session trip latch — entries allowed for
+    // the rest of the day. Unfreeze never erases the realized loss, but the
+    // daily-loss gate is not re-armed until the UTC day rolls.
     let r = c.unfreeze_account("default", "op", t0 + 600);
     assert!(r.unfrozen, "gate was cleared");
     assert!(
@@ -92,21 +102,21 @@ fn daily_loss_trip_unfreeze_still_refused() {
         "the receipt names the previous gate"
     );
     assert!(r.entries_allowed, "entries allowed at the unfreeze instant");
-    assert!(!c.account_gate_blocked("default", t0 + 600));
+    assert!(
+        !c.account_gate_blocked("default", t0 + 700),
+        "entries allowed after unfreeze"
+    );
 
-    // ... but the daily loss is untouched: the next tick re-lifts the gate and
-    // the refusal names the daily loss breaker.
+    // A subsequent emit_daily_trip does NOT re-lift the gate: the latch was
+    // cleared by unfreeze, and emit_daily_trip only gates newly-latched trips.
     c.emit_daily_trip();
-    assert!(c.account_gate_blocked("default", t0 + 700));
-    let err = c.place_pending(entry_req("entry"), t0 + 800).unwrap_err();
-    assert_eq!(
-        err.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+    assert!(
+        !c.account_gate_blocked("default", t0 + 800),
+        "emit_daily_trip does not re-latch after unfreeze"
     );
     assert!(
-        err.message.contains("Daily loss limit"),
-        "refusal must name the daily loss breaker, got: {}",
-        err.message
+        c.place_pending(entry_req("entry"), t0 + 900).is_ok(),
+        "an unfrozen account trades again"
     );
 }
 

@@ -511,9 +511,14 @@ impl Core {
                 .account_gates()
                 .iter()
                 .map(|(id, g)| {
+                    // #1045 BLOCK-3: report the EFFECTIVE blocked state (expired
+                    // DailyLoss gates read as not-blocked), not the stale stored
+                    // `g.blocked`, so a gate that expired at UTC day roll shows
+                    // blocked=false while entries are in fact allowed.
+                    let effectively_blocked = self.account_gate_blocked(id, as_of_ms);
                     serde_json::json!({
                         "account": id.as_str(),
-                        "blocked": g.blocked,
+                        "blocked": effectively_blocked,
                         "reason": g.reason,
                         "reasonKind": g.reason_kind,
                         "sinceMs": g.since_ms,
@@ -523,11 +528,12 @@ impl Core {
                 })
                 .collect::<Vec<_>>(),
             // `accountFreezes` 由 account_gates 衍生的只读快照（被阻断账户 → 原因）。
+            // #1045 BLOCK-3: only gates that are effectively blocked now.
             // #1045: 只读派生，不再单独落盘；前端应切 accountGates，此字段仅过渡保留。
             "accountFreezes": self
                 .account_gates()
                 .iter()
-                .filter(|(_, g)| g.blocked)
+                .filter(|(id, _)| self.account_gate_blocked(id, as_of_ms))
                 .map(|(id, g)| (id.as_str().to_string(), serde_json::json!(g.reason)))
                 .collect::<serde_json::Map<_, _>>(),
             // In-kernel accounting audit (issue #189): the latest verdict, so the
