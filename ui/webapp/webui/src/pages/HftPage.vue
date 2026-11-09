@@ -465,24 +465,31 @@ const cumStats = computed(() => {
 // 进程级 ledger.balance。切户后下一拍 refreshAccounts 镜像带回新账户的
 // balance/available/reserved，读数随显示账户走；行未到的一拍回落快照顶层，
 // 下面的标注 computed 如实说出该兜底口径，绝不冒充账户级。
-const recon = computed(() => {
-  const row = store.activeAccountRow
-  if (row) {
-    return balanceView(
-      {
-        // account.list 行的十进制跨线是 string|number，归一成 number 再进
-        // balanceView（该函数与内核快照的 number 口径对齐）。
-        balance: Number(row.balance) || 0,
-        reserved: Number(row.reserved) || 0,
-        available: Number(row.available) || 0,
-        seed: snap.value?.balance?.seed ?? null,
-      },
-      cumStats.value.net,
-      cumStats.value.fees,
-    )
-  }
-  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
-})
+	const recon = computed(() => {
+	  const row = store.activeAccountRow
+	  if (row) {
+	    // 现金真值锚点（操作员裁决 2026-11-08）：本金从该账户自有账本的累计
+	    // 种子入金（account.list 行的 seededTotal），净利 = balance − seededTotal
+	    // （账本口径，构造上恒等），绝不拿成交折叠净利去拼余额。与 Overview
+	    // 同一口径，消除「一账户两余额」。
+	    const rowSeed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
+	    const cash = Number(row.balance) || 0
+	    const ledgerNet = rowSeed !== null ? cash - rowSeed : null
+	    return balanceView(
+	      {
+	        // account.list 行的十进制跨线是 string|number，归一成 number 再进
+	        // balanceView（该函数与内核快照的 number 口径对齐）。
+	        balance: cash,
+	        reserved: Number(row.reserved) || 0,
+	        available: Number(row.available) || 0,
+	        seed: rowSeed,
+	      },
+	      ledgerNet ?? cumStats.value.net,
+	      cumStats.value.fees,
+	    )
+	  }
+	  return balanceView(snap.value?.balance, cumStats.value.net, cumStats.value.fees)
+	})
 // 兜底一拍的诚实标注：行未到（或单账户部署）才说「进程级」；账户行在场
 // 时读数就是显示账户的自有账本，不再有「显示账户的名字 + 进程级的钱」的
 // 错位（issue 561 裁决 1 要消除的正是一句标注遮不住的错位本身）。
