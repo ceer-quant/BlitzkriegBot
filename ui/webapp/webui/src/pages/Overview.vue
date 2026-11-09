@@ -49,7 +49,22 @@ const freeze = computed(() => freezeBanner(stats.value))
 // keep trading, and without these lines the panel looks perfectly normal.
 // Reading rule + copy live in lib/safety.ts; each frozen account gets its own
 // urgent red banner (a two-account freeze is two red lines).
-const accountFreezes = computed(() => accountFreezeBanners(stats.value))
+const accountFreezes = computed(() => {
+  const banners = accountFreezeBanners(stats.value)
+  // 补充来源：账户行 status === 'frozen'（内核可能把单账户冻结上报在
+  // AccountView.status 里而 stats.accountFreezes 为空）——两处都要覆盖，
+  // 免得红色横幕与解锁按钮一并失语。
+  const rowFreezes = store.accounts
+    .filter((a) => a.status === 'frozen')
+    .map((a) => ({
+      tone: 'error' as const,
+      urgent: true,
+      title: `账户已冻结（${a.id}）`,
+      body: a.statusReason || '该账户已被冻结，原因未上报。',
+      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解锁（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
+    }))
+  return [...banners, ...rowFreezes]
+})
 const lastError = computed(
   () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
 )

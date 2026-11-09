@@ -110,10 +110,22 @@ const freezeOperateId = ref<string | null>(null)
 
 const frozenAccounts = computed(() => {
   const freezes = store.snapshot?.stats?.accountFreezes
-  if (!freezes) return []
-  return Object.entries(freezes)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([id, reason]) => ({ id, reason }))
+  const statsFreezes = freezes
+    ? Object.entries(freezes)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([id, reason]) => ({ id, reason }))
+    : []
+  // 补充来源：账户行 status === 'frozen'（与 Overview 的红色横幕同源）
+  const rowFreezes = store.accounts
+    .filter((a) => a.status === 'frozen')
+    .map((a) => ({ id: a.id, reason: a.statusReason || '原因未上报' }))
+  // 以 id 去重，stats 来源优先
+  const seen = new Set<string>()
+  return [...statsFreezes, ...rowFreezes].filter((f) => {
+    if (seen.has(f.id)) return false
+    seen.add(f.id)
+    return true
+  })
 })
 
 async function unfreeze(accountId: string): Promise<void> {
