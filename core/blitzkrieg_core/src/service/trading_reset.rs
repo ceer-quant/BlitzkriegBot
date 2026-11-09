@@ -1444,11 +1444,6 @@ impl Core {
                 "{}",
                 message
             );
-            // The daily-loss breaker freezes the account's entries — record it in
-            // the freeze book so `accountFreezes` (panel stats) reflects it and the
-            // operator can unfreeze via `account.freeze {frozen:false}`. Idempotent:
-            // re-trips of an already-frozen account keep the original reason/stamp.
-            self.freeze_account_auto(account.as_str(), message.clone(), now_ms());
             self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
         }
     }

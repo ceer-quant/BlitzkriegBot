@@ -261,15 +261,13 @@ fn random_entry_fault_injection_single_loss_cap_holds_and_daily_breaker_trips() 
         c.positions().daily_loss_tripped_for("default"),
         "the trip latch is sticky for the day"
     );
-    // And the tripped breaker REFUSES the next entry — now via the account-scoped
-    // freeze book (the daily-loss trip records the account as frozen), so the
-    // refusal carries KillSwitchActive instead of the position-manager message.
+    // And the tripped breaker REFUSES the next entry by name.
     let err = c
         .place(fault_order(dec!(0.5), dec!(1), "post-trip"), 0, t + 1_000)
         .unwrap_err();
     assert!(
-        err.message.contains("is frozen") || err.message.contains("Daily loss limit"),
-        "post-trip entry must be refused by the daily breaker / account freeze, got {err}"
+        err.message.contains("Daily loss limit"),
+        "post-trip entry must name the daily breaker, got {err}"
     );
 }
 
