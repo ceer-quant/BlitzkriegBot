@@ -71,16 +71,6 @@ impl Core {
         // file, which loads the code defaults) leaves the compiled 1 — the
         // historical one-per-asset gate, byte for byte.
         let mut positions = config.positions.clone();
-        // Wire up daily-loss persistence from the position log path so tripped
-        // daily-loss budgets survive restart and can be lifted via
-        // account.freeze {frozen:false}. Without this, daily_pnl_path defaults
-        // to None and the daily-loss state never loads from disk.
-        if positions.daily_pnl_path.is_none()
-            && let Some(position_log_path) = &config.position_log_path
-        {
-            let stem = position_log_path.trim_end_matches(".jsonl");
-            positions.daily_pnl_path = Some(format!("{stem}.daily-loss.json"));
-        }
         if let Some(policy) = &execution_policy {
             positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;
         }
