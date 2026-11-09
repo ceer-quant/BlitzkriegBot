@@ -216,6 +216,13 @@ function rowNetPnl(r: StrategyStatsRow): string | number {
 /** 策略列表不再按启停/异常分组：按名称字母排序，位置固定，开关位置不漂移。 */
 const sortedRows = computed(() => [...filteredRows.value].sort((a, b) => a.name.localeCompare(b.name)))
 
+/** 策略按状态分组：运行中 / 已停止 / 异常。分组口径与启用按钮同键，均读 isAccountEnabled。 */
+const groups = computed(() => [
+  { id: 'running', label: '运行中', rows: sortedRows.value.filter(r => !isAbnormal(r) && (isAccountEnabled(r) ?? r.enabled)) },
+  { id: 'stopped', label: '已停止', rows: sortedRows.value.filter(r => !isAbnormal(r) && !(isAccountEnabled(r) ?? r.enabled)) },
+  { id: 'abnormal', label: '异常', rows: sortedRows.value.filter(r => isAbnormal(r)) },
+].filter((g) => g.rows.length > 0))
+
 /** 当前 tab 的行数（SegmentedControl badge；车队 KPI 恒显全量，不随 tab 漂移）。 */
 const currentRows = computed(() => (perfTab.value === 'arb' ? arbRows.value : singleRows.value))
 
