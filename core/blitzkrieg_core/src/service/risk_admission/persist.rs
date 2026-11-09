@@ -292,6 +292,30 @@ impl Core {
                 self.freeze_book.auto_frozen.insert(id, at);
             }
         }
+        // Daily-loss limit tripped accounts must also sit in account_freeves:
+        // daily-loss is persisted independently (positions.daily-loss.json) and
+        // never writes account_freeves on its own. Any account whose daily loss
+        // is tripped but missing from the freeze book must be re-frozen here so
+        // account.freeze {frozen:false} can lift it across restarts.
+        let tripped_accounts: Vec<String> = self
+            .positions
+            .daily_states()
+            .iter()
+            .filter(|(_, state)| state.tripped)
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for id in tripped_accounts {
+            if !self.freeze_book.account_freezes.contains_key(id.as_str()) {
+                let state = self.positions.daily_state_for(id.as_str());
+                self.freeze_account(
+                    id.as_str(),
+                    format!(
+                        "daily loss limit reached (${} realized vs ${} cap), new entries frozen until next UTC day",
+                        state.realized_pnl_usd, state.tripped_limit_usd
+                    ),
+                );
+            }
+        }
         // A CLEAN boot freezes nobody (issue #928: the #861 restart default
         // freeze is retired — the disk's freeze book is the posture, not a
         // blanket). The corrupt-boot fail-closed freeze is the only remaining

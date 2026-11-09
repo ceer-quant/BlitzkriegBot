@@ -121,7 +121,43 @@ impl Core {
         // #173: the daily budget freezes entries the moment its cap is reached —
         // reported here (not only on the next tick) so the freeze and the loss
         // land in the same audit window.
+        //
+        // Collect tripped accounts BEFORE emit_daily_trip() clears the tripped
+        // flags (take_daily_trips resets them). Then freeze each tripped
+        // account in account_freeves so account.freeze {frozen:false} can lift
+        // it. Without this, RISK_REJECTED is session-scoped only: lastError
+        // shows it but account.freeze is a no-op for daily-loss freezes.
+        let tripped: Vec<(String, Decimal, Decimal)> = self
+            .positions
+            .daily_states()
+            .iter()
+            .filter(|(_, state)| state.tripped)
+            .map(|(id, state)| {
+                (
+                    id.to_string(),
+                    state.realized_pnl_usd,
+                    state.tripped_limit_usd,
+                )
+            })
+            .collect();
+
         self.emit_daily_trip();
+
+        for (account, realized, limit) in tripped {
+            if !self
+                .freeze_book
+                .account_freezes
+                .contains_key(account.as_str())
+            {
+                self.freeze_account(
+                    account.as_str(),
+                    format!(
+                        "daily loss limit reached (${} realized vs ${} cap), new entries frozen until next UTC day",
+                        realized, limit
+                    ),
+                );
+            }
+        }
     }
 
     /// Record the reason an in-flight close of `token` was submitted with.
