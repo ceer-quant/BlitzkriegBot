@@ -404,11 +404,11 @@ fn socket_path_for(prefix: &str) -> String {
     format!("{dir}/{prefix}-{user}.sock").replace("//", "/")
 }
 
-fn default_socket() -> String {
+pub(crate) fn default_socket() -> String {
     socket_path_for(SOCKET_PREFIX)
 }
 
-fn default_strategy_dir() -> Option<String> {
+pub(crate) fn default_strategy_dir() -> Option<String> {
     let local = std::path::Path::new("user_layer/strategies");
     if local.is_dir() {
         return Some("user_layer/strategies".to_string());

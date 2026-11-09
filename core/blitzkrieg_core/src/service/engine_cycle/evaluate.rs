@@ -128,7 +128,13 @@ impl Core {
             engine.set_account_equity(id, equity);
             engine.set_account_trading(id, a.trading_enabled);
             engine.set_account_venue(id, &a.venue);
-            engine.set_account_frozen(id, self.freeze_book.account_freezes.contains_key(id));
+            // #1045: the engine mirror is fed by the single in-memory gate,
+            // borrowed at field level (disjoint from `engine`'s mutable borrow
+            // of self.engine).
+            let blocked = self.account_gates.get(id).is_some_and(|g| {
+                g.blocked && g.expires_at_ms.is_none_or(|expires| now_ms < expires)
+            });
+            engine.set_account_frozen(id, blocked);
         }
         engine.set_positions_view(held_view);
         // 视图落引擎的 per-cycle 快照（evaluate 的 ctx 构造从这取）。
@@ -882,7 +888,13 @@ impl Core {
                     e.set_account_equity(id, equity);
                     e.set_account_trading(id, a.trading_enabled);
                     e.set_account_venue(id, &a.venue);
-                    e.set_account_frozen(id, self.freeze_book.account_freezes.contains_key(id));
+                    // #1045: the engine mirror is fed by the single in-memory gate,
+                    // borrowed at field level (disjoint from `e`'s mutable borrow
+                    // of self.engine).
+                    let blocked = self.account_gates.get(id).is_some_and(|g| {
+                        g.blocked && g.expires_at_ms.is_none_or(|expires| now_ms < expires)
+                    });
+                    e.set_account_frozen(id, blocked);
                 }
                 e.set_positions_view(held_view);
                 e.replay_candidates(now_ms)

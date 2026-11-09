@@ -1,33 +1,99 @@
 use super::*;
+use serde::Serialize;
 
-/// 冻结/熔断状态簿（#834，Core 上帝结构第一环）：原散落在 `Core` 上的 7 个
-/// 裸字段收拢为一份内聚状态，`freeze.rs` 是它的唯一管理者。字段语义与
-/// 收拢前逐字一致；`Core` 只持有 `freeze_book: FreezeBook` 一个字段。
+/// 账户入场闸门（#1045）：每账户一份，**纯内存、永不落盘**，进程重启即清，
+/// 唯一由 `account.freeze` / `account.unfreeze`、日内亏损熔断和场地自愈三条
+/// 路由改写。所有入场路径只读 `gate.blocked`；出场永不阻断。
 ///
-/// - `account_freezes`：account-scoped kill book（account id → freeze
-///   reason）。冻结账户在提交闸拒新单、引擎镜像丢 entry 候选，平仓腿照走
-///   ——「拒开仓、放平仓」合同。全局 kill switch（`risk.kill`）依旧压过
-///   这里的一切。
-/// - `auto_frozen`：冻结自愈簿（2026-10-28 真线事故）——account id → 冻结
-///   时间戳 (ms)。只有三条自动冻结路由（拒单 streak / 自检失败 / sweep
-///   失败 streak）登记，`auto_lift_if_venue_healthy` 据此区分「内核凭间接
-///   证据冻的」与操作员手动 `account.freeze`——后者永不自解。手动冻结路由
-///   会先摘戳（操作员裁决压过自愈）。
-/// - `consecutive_venue_rejects`（全局）与 `.._by_account`（按账户）：
-///   LIVE venue 拒单连击，成功下单清零；顶到阈值触发冻结。冻结决策读
-///   by_account 图——一个场地的故障只冻绑它的账户，不冻整个进程。
-/// - `consecutive_sweep_failures`（全局，#673 退避 streak）与
-///   `.._by_venue`（按场地，#624 venue 维冻结，2026-10-25）：对账 sweep
-///   连败 streak，成功 sweep 清零；顶到阈值冻结——瞎的安全网才是让幽灵
-///   和孤儿堆积的失败模式（E31-b）。每个插件以自己的名字上报，一个场地
-///   的失败不再搭全局计数便车、也不冻兄弟场地的账户。
-/// - `venue_free_by_venue`：各场地最近一次上报的自由现金 venue →
-///   `(at_ms, free)`——审计的场地腿只读被审计（活跃）账户绑定场地的上报
-///   ，兄弟场地的现金是另一本账的真值。
+/// 取代旧 `FreezeBook` 里的 `account_freezes` + `auto_frozen` 两张持久表：
+/// 不再有任何冻结姿态随进程重启而重播。`realized_pnl_usd` 继续持久化（资金
+/// 真相），重启只清闸门；重启后若账本里的已实现亏损仍超当日上限，会在
+/// 下一次 `emit_daily_trip` 时按账本重新上 `DailyLoss` 闸门——这是「按账本
+/// 推导」，不是「回放冻结」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountGate {
+    pub(crate) blocked: bool,
+    /// 运营可读的原因文案（算法给定：如 "daily loss limit reached" / 手动冻结
+    /// 的 operator 原因 / 场地拒单原因）。
+    pub(crate) reason: String,
+    /// 原因种类，决定优先级与谁可以自解。
+    pub(crate) reason_kind: GateReason,
+    /// 闸门首次上锁的时点（ms），供 UI 倒计时与审计。
+    pub(crate) since_ms: i64,
+    /// 自动到期点（ms）：`DailyLoss` 是下一个 UTC 日零点；`None` = 仅由解冻
+    /// 操作或配置改写清除（`Manual`、`ConfigReadOnly`、`ConfigSuspended`）。
+    pub(crate) expires_at_ms: Option<i64>,
+    pub(crate) actor: String,
+}
+
+/// 闸门原因，声明顺序即优先级从低到高：
+/// `VenueRejection < DailyLoss < ConfigReadOnly < ConfigSuspended < Manual`。
+///
+/// 更高优先级的闸门可覆盖更低的；较低优先级的路由永远不会静默解除更高
+/// 优先级的闸门（场地健康探针只解 `VenueRejection`，碰不着 `Manual`/`DailyLoss`）。
+///
+/// `ConfigReadOnly` / `ConfigSuspended` 由账户配置态（`account.trading.set` 的
+/// read_only / suspended）产生，由 #1044 的 WebUI/TUI 呈现层消费；本单
+/// 只声明它们以统一闸门模型，优先级高于 `DailyLoss`/`VenueRejection`，低
+/// 于 `Manual`，且不被任何自愈路由碰触。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum GateReason {
+    /// 场地拒单/自检失败/sweep 连击造成的自动冻结：场地健康探针可自愈。
+    VenueRejection,
+    /// 日内亏损熔断：UTC 日边界自动到期，无需操作。
+    DailyLoss,
+    /// 账户配置为 read_only：交易开关关，新单拒、平仓放行。
+    ConfigReadOnly,
+    /// 账户配置为 suspended：同上，且带运营原因。
+    ConfigSuspended,
+    /// 操作员 `account.freeze {frozen: true}` 手动冻结：仅 `account.unfreeze`
+    /// / 手动解冻可解，健康探针与日内熔断均不得碰。
+    Manual,
+}
+
+impl GateReason {
+    pub(crate) fn priority(&self) -> u8 {
+        match self {
+            GateReason::VenueRejection => 0,
+            GateReason::DailyLoss => 1,
+            GateReason::ConfigReadOnly => 2,
+            GateReason::ConfigSuspended => 3,
+            GateReason::Manual => 4,
+        }
+    }
+
+    /// 统一措辞，供面板与回执文案；前端不得据此推断 `kind` 之外的语义，
+    /// 也不得编造恢复时间——恢复时间只读内核 `expires_at_ms`。
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            GateReason::VenueRejection => "venue rejection",
+            GateReason::DailyLoss => "daily loss limit",
+            GateReason::ConfigReadOnly => "account read-only",
+            GateReason::ConfigSuspended => "account suspended",
+            GateReason::Manual => "manual freeze",
+        }
+    }
+}
+
+/// 解冻操作的内核回执（#1045 API：`account.unfreeze`）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnfreezeResult {
+    pub(crate) unfrozen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) previous_reason: Option<String>,
+    /// 解冻后该账户是否可开新单（本闸已清且无更高优先级闸门）。
+    pub(crate) entries_allowed: bool,
+}
+
+/// 冻结/熔断剩余状态簿（#834 收拢后的上帝结构一环）：`account_freezes` 与
+/// `auto_frozen` 已被 `Core.account_gates` 单一闸门取代（#1045），本簿只保
+/// 留与账户无关的全局/场地维连击与自由现金事实。
 #[derive(Default)]
 pub(crate) struct FreezeBook {
-    pub(crate) account_freezes: HashMap<String, String>,
-    pub(crate) auto_frozen: HashMap<String, i64>,
     pub(crate) consecutive_venue_rejects: u32,
     pub(crate) consecutive_venue_rejects_by_account: HashMap<String, u32>,
     pub(crate) venue_free_by_venue: HashMap<String, (i64, Decimal)>,
@@ -36,20 +102,247 @@ pub(crate) struct FreezeBook {
 }
 
 impl FreezeBook {
-    /// 单账户重置（`trading_reset` 路径，原 941-946 五连的收拢）：该账户
-    /// 的冻结簿/自愈簿条目移除、按账户的拒单 streak 移除；全局拒单与
-    /// sweep streak 归零（一次账户级重置视为一次新鲜的开始，历史语义）。
+    /// 单账户重置（`trading_reset` 路径）：该账户的按账户拒单 streak 移除；
+    /// 全局拒单与 sweep streak 归零（一次账户级重置视为一次新鲜的开始）。
     /// by_venue sweep streak 不在此清——场地维的失败事实不属于账户重置。
+    /// 账户入场闸门由 `Core` 同步清除（`reset_for_account` 调用方自行决定）。
     pub(crate) fn reset_for_account(&mut self, account_id: &str) {
         self.consecutive_venue_rejects = 0;
         self.consecutive_venue_rejects_by_account.remove(account_id);
-        self.account_freezes.remove(account_id);
-        self.auto_frozen.remove(account_id);
         self.consecutive_sweep_failures = 0;
     }
 }
 
 impl Core {
+    /// 单账户入场闸门（只读）。
+    pub(crate) fn account_gate(&self, account: &str) -> Option<&AccountGate> {
+        self.account_gates.get(account)
+    }
+
+    /// 全部闸门（stats 读出与 UI 呈现）。
+    pub(crate) fn account_gates(&self) -> &HashMap<String, AccountGate> {
+        &self.account_gates
+    }
+
+    /// 该账户当前是否被闸门拒绝入场。已过 `expires_at_ms` 的闸门按不阻断
+    /// 处理（自动到期，无需额外清理动作）。
+    pub(crate) fn account_gate_blocked(&self, account: &str, now_ms: i64) -> bool {
+        let Some(g) = self.account_gates.get(account) else {
+            return false;
+        };
+        g.blocked && g.expires_at_ms.is_none_or(|expires| now_ms < expires)
+    }
+
+    /// 设置或升级一账户的闸门。新原因的优先级 **严格高于** 现存闸门时才
+    /// 覆盖（先到者胜、更高优先级者覆盖），防止低优先级路由（如场地
+    /// 自愈）静默解除高优先级闸门（`Manual`/`DailyLoss`）。返回是否写入。
+    pub(crate) fn set_account_gate(
+        &mut self,
+        account: &str,
+        reason: String,
+        reason_kind: GateReason,
+        since_ms: i64,
+        expires_at_ms: Option<i64>,
+        actor: &str,
+    ) -> bool {
+        let should_set = match self.account_gates.get(account) {
+            None => true,
+            Some(existing) => reason_kind.priority() > existing.reason_kind.priority(),
+        };
+        if !should_set {
+            return false;
+        }
+        self.account_gates.insert(
+            account.to_string(),
+            AccountGate {
+                blocked: true,
+                reason,
+                reason_kind,
+                since_ms,
+                expires_at_ms,
+                actor: actor.to_string(),
+            },
+        );
+        true
+    }
+
+    /// 清除一账户的闸门（解冻）。返回被清除的闸门，供调用方审计与回执。
+    pub(crate) fn clear_account_gate(&mut self, account: &str) -> Option<AccountGate> {
+        self.account_gates.remove(account)
+    }
+
+    /// 该账户的冻结原因文案（仅在被闸门阻断时有意义），供 `account.list`/
+    /// `account.freeze` 回执与面板呈现。
+    pub(crate) fn account_freeze_reason(&self, account: &str, now_ms: i64) -> Option<String> {
+        self.account_gate(account).and_then(|g| {
+            if g.blocked && g.expires_at_ms.is_none_or(|expires| now_ms < expires) {
+                Some(g.reason.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 入场闸判定：账户被闸门阻断，且意图不是平仓（平仓腿永远放行，#174
+    /// 逃生舱，按账户独立计）。新单拒、平仓放行。
+    ///
+    /// 闸门纯内存、重启即清：重启首 tick 前 `emit_daily_trip` 尚未复立
+    //   DailyLoss 闸门，此时回退到持久化的 `daily_loss_tripped_for` 门闩，
+    //   避免重启洗今天的亏损预算。`emit_daily_trip` 会在下一 tick 复立闸门。
+    #[allow(clippy::collapsible_if)]
+    pub(crate) fn account_gate_permits(&self, req: &OrderRequest, now_ms: i64) -> CoreResult<()> {
+        let account_id = req.account_id.as_str();
+        let is_close = crate::risk::is_close_intent(&req.internal_key);
+
+        // 1) 显式账户闸门（由 emit_daily_trip、手动冻结等设置）。
+        if let Some(gate) = self.account_gate(account_id) {
+            if gate.blocked
+                && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
+                && !is_close
+            {
+                let message = match gate.reason_kind {
+                    GateReason::DailyLoss => format!(
+                        "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
+                        account_id
+                    ),
+                    _ => format!(
+                        "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
+                        account_id,
+                        gate.reason_kind.label(),
+                        gate.reason
+                    ),
+                };
+                return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
+            }
+        }
+
+        // 2) 重启首 tick 回退：闸门尚未复立，但门闩已落盘，仍拒新单。
+        if !is_close && self.positions.daily_loss_tripped_for(account_id) {
+            return Err(CoreError::new(
+                CoreErrorCode::KillSwitchActive,
+                format!(
+                    "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
+                    account_id
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Freeze ONE account (operator route, `account.freeze {frozen: true}`):
+    /// `Manual` 闸门，优先级最高，健康探针与日内熔断均不得自解。会话内
+    /// 立即生效，重启即清，永不落盘。同一账户重复冻结保留首次原因。
+    pub fn freeze_account(&mut self, account: &str, reason: String) {
+        let now_ms = blitzkrieg_market_api::net::now_ms();
+        let _ = self.set_account_gate(
+            account,
+            reason.clone(),
+            GateReason::Manual,
+            now_ms,
+            None,
+            &format!("operator:{account}"),
+        );
+        tracing::error!(account = %account, reason = %reason, "account frozen (manual gate, in-memory only, restart-clear)");
+    }
+
+    /// The AUTOMATIC freeze route (venue-rejection streak etc.): `VenueRejection`
+    /// 闸门，优先级最低，仅在账户当前无同等或更高优先级闸门时上锁；场地
+    /// 健康探针可解（仅此一条），`Manual`/`DailyLoss` 绝不自解。不登记任何
+    /// 持久态。
+    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, now_ms: i64) {
+        let _ = self.set_account_gate(
+            account,
+            reason.clone(),
+            GateReason::VenueRejection,
+            now_ms,
+            None,
+            &format!("auto:{account}"),
+        );
+        tracing::warn!(account = %account, reason = %reason, "account auto-frozen (venue rejection gate, in-memory only)");
+    }
+
+    /// `account.freeze {frozen: true}` 的显式运营路由：`Manual` 闸门，与
+    /// [`Self::freeze_account`] 同一优先级，保留为调用方语义清晰的别名。
+    pub fn freeze_account_manual(&mut self, account: &str, reason: String) {
+        self.freeze_account(account, reason);
+    }
+
+    /// Lift one account's gate (`account.unfreeze` / `account.freeze {frozen: false}`
+    /// / the reset path). Unknown account = no-op.
+    pub fn resume_account(&mut self, account: &str) -> bool {
+        self.clear_account_gate(account).is_some()
+    }
+
+    /// #1045 API: 解冻一账户并返回内核回执 `{unfrozen, previousReason, entriesAllowed}`，
+    /// 并写审计日志（actor/reason/时间）。解冻只放行入场，不碰账本任何数字。
+    pub(crate) fn unfreeze_account(
+        &mut self,
+        account: &str,
+        actor: &str,
+        now_ms: i64,
+    ) -> UnfreezeResult {
+        let previous = self.clear_account_gate(account);
+        let previous_reason = previous.as_ref().map(|g| g.reason.clone());
+        // 解冻后立即复读：单闸门模型下本账户无其他并行闸门。
+        let entries_allowed = !self.account_gate_blocked(account, now_ms);
+        if previous.is_some() {
+            tracing::info!(
+                actor = %actor,
+                account = %account,
+                previous_reason = ?previous_reason,
+                entries_allowed,
+                "account unfrozen (gate cleared, in-memory only; realized ledger untouched)"
+            );
+            self.emit(Event::RiskAlert {
+                code: blitzkrieg_market_api::CoreErrorCode::RiskRejected,
+                message: format!(
+                    "account {account} unfrozen by {actor} — previous gate: {}",
+                    previous_reason
+                        .as_ref()
+                        .map_or_else(|| "none".to_string(), |r| r.clone())
+                ),
+            });
+        }
+        UnfreezeResult {
+            unfrozen: previous.is_some(),
+            previous_reason,
+            entries_allowed,
+        }
+    }
+
+    /// 冻结自愈的解冻半边（#1045：只清 `VenueRejection`，不得清 `Manual`/`DailyLoss`。
+    /// 手动冻结与日内熔断均不属于「场地不健康」的自愈范围。
+    ///
+    /// 每个调用方（reconcile sweep、venue ack）先等出 `FREEZE_AUTO_LIFT_MIN_MS`
+    /// (#867) 再来，避免波动期内的反复解锁。
+    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
+        let Some(gate) = self.account_gate(account) else {
+            return;
+        };
+        if gate.reason_kind != GateReason::VenueRejection {
+            return;
+        }
+        if now_ms - gate.since_ms < crate::service::FREEZE_AUTO_LIFT_MIN_MS {
+            return;
+        }
+        let since_ms = gate.since_ms;
+        self.clear_account_gate(account);
+        let minutes = (now_ms - since_ms).max(0) / 60_000;
+        tracing::warn!(
+            account = %account,
+            frozen_duration_ms = now_ms - since_ms,
+            trigger = %trigger,
+            "venue-rejection gate auto-lifted — venue proved healthy"
+        );
+        self.emit(Event::RiskAlert {
+            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
+            message: format!(
+                "自动冻结已解除（{trigger}）：账户 {account} 场地拒单闸门 {minutes} 分钟后场地恢复"
+            ),
+        });
+    }
+
     /// Freeze trading (kill switch) with a reason the panel can show. A
     /// restart or an explicit `risk.resume` clears it; the startup self-check
     /// re-probes either way. The freeze is logged at error level (#184) — a kill
@@ -86,197 +379,6 @@ impl Core {
             blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             reason,
         ));
-    }
-
-    /// Freeze ONE account (the account-scoped kill switch). Same 「拒开仓、
-    /// 放平仓」 contract as the global kill and the trading switch: the
-    /// submission gate refuses the account's new orders, the engine mirror
-    /// drops its entry candidates, its exits keep flowing. The reason is
-    /// shown by `account.list` (`accountFreezes`) and the doctor's accounts
-    /// section. Idempotent: the first reason wins — a re-freeze while
-    /// already frozen does not overwrite the cause an operator first saw.
-    pub fn freeze_account(&mut self, account: &str, reason: String) {
-        if self.freeze_book.account_freezes.contains_key(account) {
-            return;
-        }
-        self.freeze_book
-            .account_freezes
-            .insert(account.to_string(), reason.clone());
-        // #861: the freeze outlives the process. Note the restart default
-        // freeze rides this same write path — it is therefore durable too,
-        // and only an operator's resume clears it.
-        if let Some(c) = &mut self.risk_state {
-            c.file
-                .account_freezes
-                .insert(account.to_string(), reason.clone());
-            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
-        }
-        self.persist_risk_state();
-        self.engine_set_account_frozen(account, true);
-        self.emit(Event::RiskAlert {
-            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
-            message: format!("account {account} frozen: {reason}"),
-        });
-        tracing::error!(account = %account, reason = %reason, "account frozen (account-scoped kill switch)");
-    }
-
-    /// The AUTOMATIC freeze route: [`Self::freeze_account`] plus a timestamp
-    /// in `auto_frozen` — but only when the freeze actually landed. The
-    /// freeze is idempotent (first reason wins), so a re-freeze of an
-    /// already-frozen account keeps the ORIGINAL stamp: the clock an
-    /// auto-lift debounces against is the moment the operator first lost
-    /// the account, not the latest symptom.
-    ///
-    /// 手动冻结（`account.freeze` 直达 `freeze_account`）从不登记 —— 操作员
-    /// 的裁决只能由操作员推翻，健康探针不得越权。
-    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, now_ms: i64) {
-        let fresh = !self.freeze_book.account_freezes.contains_key(account);
-        self.freeze_account(account, reason);
-        if fresh {
-            self.freeze_book
-                .auto_frozen
-                .insert(account.to_string(), now_ms);
-            // #861: the stamp is what separates a circumstantial freeze (the
-            // self-heal may lift it) from an operator verdict (never) — it
-            // rides the risk-state file too, or a restart would turn every
-            // auto freeze into an un-liftable manual one.
-            if let Some(c) = &mut self.risk_state {
-                c.file.auto_frozen.insert(account.to_string(), now_ms);
-                c.file.saved_at_ms = now_ms;
-            }
-            self.persist_risk_state();
-        }
-    }
-
-    /// The OPERATOR freeze route: [`Self::freeze_account`] plus dropping any
-    /// `auto_frozen` stamp first.
-    ///
-    /// `freeze_account` is idempotent, so freezing an account the kernel had
-    /// ALREADY auto-frozen used to leave the auto stamp in place — the next
-    /// healthy-venue sweep (`auto_lift_if_venue_healthy`) then resumed the
-    /// account and the operator's kill switch was silently lifted. Clearing the
-    /// ledger makes the operator verdict outrank the self-heal by construction.
-    pub fn freeze_account_manual(&mut self, account: &str, reason: String) {
-        self.freeze_book.auto_frozen.remove(account);
-        self.freeze_account(account, reason);
-        // #861: the durable stamp goes the same way — a manual re-freeze of
-        // an auto-frozen account must not leave the file stamping a verdict
-        // the kernel now treats as an operator's (it would survive the
-        // restart and re-arm the self-heal).
-        if let Some(c) = &mut self.risk_state
-            && c.file.auto_frozen.remove(account).is_some()
-        {
-            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
-            self.persist_risk_state();
-        }
-    }
-
-    /// 冻结自愈的解冻半边：only an AUTO-frozen account may self-lift, and
-    /// only on positive evidence the venue recovered (`trigger` names it).
-    /// A manual freeze is never touched — `auto_frozen` is the ledger that
-    /// separates kernel circumstantial freezes from operator verdicts.
-    ///
-    /// Every caller — a reconcile sweep and a venue ack — waits out
-    /// `FREEZE_AUTO_LIFT_MIN_MS` (#867). An in-flight close can still be
-    /// acked while the account is frozen (closes are admitted); that ack
-    /// clears the rejection streak in the caller, but it must not reopen
-    /// entries during the outage that froze the account. `saturating_sub`
-    /// treats a clock step backwards as "not yet", so a 72-hour run does
-    /// not wrap into an instant lift.
-    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
-        let Some(frozen_at) = self.freeze_book.auto_frozen.get(account).copied() else {
-            return;
-        };
-        if now_ms.saturating_sub(frozen_at) < crate::service::FREEZE_AUTO_LIFT_MIN_MS {
-            return;
-        }
-        self.resume_account(account);
-        self.freeze_book.auto_frozen.remove(account);
-        let minutes = (now_ms - frozen_at).max(0) / 60_000;
-        tracing::warn!(
-            account = %account,
-            frozen_duration_ms = now_ms - frozen_at,
-            trigger = %trigger,
-            "auto-frozen account auto-lifted — venue proved healthy"
-        );
-        self.emit(Event::RiskAlert {
-            code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
-            message: format!(
-                "自动冻结已解除（{trigger}）：账户 {account} 冻结 {minutes} 分钟后场地恢复"
-            ),
-        });
-    }
-
-    /// Lift one account's freeze (`account.freeze` with `frozen: false`, the
-    /// reset path, or a future operator verb). Unknown account = no-op: the
-    /// freeze book only ever contains accounts the kernel knows.
-    pub fn resume_account(&mut self, account: &str) {
-        if self.freeze_book.account_freezes.remove(account).is_some() {
-            self.engine_set_account_frozen(account, false);
-            tracing::info!(account = %account, "account freeze lifted");
-        }
-        // 手动解冻也要摘掉自愈时间戳：freeze book 与 auto ledger 对同一
-        // 账户要么都有意、要么都干净，半悬空状态只会让下一次 auto-lift
-        // 读到一个已不存在的冻结。
-        self.freeze_book.auto_frozen.remove(account);
-        // #861: the lift is an operator verdict — it must survive as one.
-        if let Some(c) = &mut self.risk_state {
-            c.file.account_freezes.remove(account);
-            c.file.auto_frozen.remove(account);
-            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
-        }
-        self.persist_risk_state();
-    }
-
-    /// Why an account is frozen, when it is.
-    pub fn account_freeze_reason(&self, account: &str) -> Option<&str> {
-        self.freeze_book
-            .account_freezes
-            .get(account)
-            .map(String::as_str)
-    }
-
-    /// The whole freeze book, for the stats readout.
-    pub fn account_freezes(&self) -> &HashMap<String, String> {
-        &self.freeze_book.account_freezes
-    }
-
-    /// Is this account's order admitted under the account-scoped kill
-    /// switch? CLOSING intents always pass (the #174 escape hatch is per
-    /// account here, exactly as it is globally). Called from the submission
-    /// gate right beside Gate 2.
-    pub(crate) fn account_freeze_permits(&self, req: &OrderRequest) -> CoreResult<()> {
-        if let Some(reason) = self
-            .freeze_book
-            .account_freezes
-            .get(req.account_id.as_str())
-            && !crate::risk::is_close_intent(&req.internal_key)
-        {
-            return Err(CoreError::new(
-                CoreErrorCode::KillSwitchActive,
-                format!(
-                    "account `{}` is frozen (account-scoped kill switch): {reason} — \
-                     new orders refused, exits keep flowing",
-                    req.account_id
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Push one account's freeze fact into the engine mirror. `None` = the
-    /// engine is not installed (backtest/in-process shapes) — nothing to
-    /// mirror.
-    pub(crate) fn engine_set_account_frozen(&mut self, account: &str, frozen: bool) {
-        if let Some(e) = self.engine.as_mut() {
-            e.set_account_frozen(account, frozen);
-        }
-    }
-
-    pub(crate) fn emit(&self, ev: Event) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(ev);
-        }
     }
 
     pub(crate) fn emit_order(&self, id: &str) {
@@ -391,5 +493,11 @@ impl Core {
     /// readout honest after a hot edit.
     pub fn risk_config(&self) -> &RiskConfig {
         self.risk.config()
+    }
+
+    pub(crate) fn emit(&self, ev: Event) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(ev);
+        }
     }
 }

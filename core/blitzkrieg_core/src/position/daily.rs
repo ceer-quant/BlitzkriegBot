@@ -409,4 +409,19 @@ impl PositionManager {
         }
         self.persist_daily();
     }
+
+    /// Test-only: force the day's realized PnL for an account, so the
+    /// daily-loss breaker can be driven without matching a buy against a sell
+    /// through the engine cycle.
+    #[cfg(test)]
+    pub(crate) fn set_daily_realized_for_test(
+        &mut self,
+        account: &AccountId,
+        realized_pnl_usd: Decimal,
+    ) {
+        self.daily_by_account
+            .entry(account.clone())
+            .or_default()
+            .realized_pnl_usd = realized_pnl_usd;
+    }
 }

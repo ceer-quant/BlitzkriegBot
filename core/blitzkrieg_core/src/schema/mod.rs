@@ -424,6 +424,10 @@ pub mod method {
     /// automatic freeze (venue-rejection streak) lives in memory only, so
     /// the lift is too — a restart starts clean and re-probes.
     pub const ACCOUNT_FREEZE: &str = "account.freeze";
+    /// #1045: unfreeze one account's entry gate, returning
+    /// `{unfrozen, previousReason, entriesAllowed}` and writing an audit log
+    /// (actor/reason/time). `account.freeze {frozen: false}` is an alias.
+    pub const ACCOUNT_UNFREEZE: &str = "account.unfreeze";
     /// The per-account strategy ENABLEMENT write (`account.strategies.set`
     /// / the persistence half of the panel's per-account 启用按钮): the
     /// set spells exactly which (strategy, account) scopes run; a removed

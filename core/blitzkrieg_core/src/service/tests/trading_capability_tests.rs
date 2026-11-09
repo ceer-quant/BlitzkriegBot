@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::risk::RiskConfig;
+use blitzkrieg_market_api::net::now_ms;
 use rust_decimal_macros::dec;
 
 fn core() -> Core {
@@ -87,7 +88,7 @@ fn consecutive_venue_rejections_freeze_trading() {
         "4 consecutive rejections must not freeze yet"
     );
     assert!(
-        c.account_freeze_reason("default").is_none(),
+        c.account_freeze_reason("default", now_ms()).is_none(),
         "and the account is not frozen yet either"
     );
     let (id, _) = c.place_pending(pending_req("k4", "s1"), 5_000).unwrap();
@@ -101,7 +102,7 @@ fn consecutive_venue_rejections_freeze_trading() {
         "the venue-rejection streak freezes the ACCOUNT, never the global gate"
     );
     assert!(
-        c.account_freeze_reason("default")
+        c.account_freeze_reason("default", now_ms())
             .is_some_and(|r| r.contains("consecutive venue rejections")),
         "the 5th consecutive rejection must freeze the account with the streak's reason"
     );
@@ -171,11 +172,11 @@ fn a_venue_rejection_streak_freezes_only_that_account() {
     }
     // paper is frozen with the streak's reason; default is untouched.
     assert!(
-        c.account_freeze_reason("paper")
+        c.account_freeze_reason("paper", now_ms())
             .is_some_and(|r| r.contains("consecutive venue rejections")),
         "paper's 5-rejection streak must freeze paper"
     );
-    assert!(c.account_freeze_reason("default").is_none());
+    assert!(c.account_freeze_reason("default", now_ms()).is_none());
     assert!(!c.is_killed(), "the global gate must stay quiet");
 
     // default trades on (its orders pass every gate).
@@ -200,7 +201,7 @@ fn a_venue_rejection_streak_freezes_only_that_account() {
 
     // Manual lift re-opens entries (session-scoped: no persistence).
     c.resume_account("paper");
-    assert!(c.account_freeze_reason("paper").is_none());
+    assert!(c.account_freeze_reason("paper", now_ms()).is_none());
     c.place_pending(paper_key("p11"), 6_300)
         .unwrap_or_else(|e| panic!("a resumed account trades again: {e}"));
 }
@@ -390,13 +391,13 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         },
     );
     assert!(
-        c.account_freeze_reason("poly-acct")
+        c.account_freeze_reason("poly-acct", now_ms())
             .is_some_and(|r| r.contains("self-check failed on polymarket")),
         "the failed polymarket self-check must freeze the account bound to it: {:?}",
-        c.account_freeze_reason("poly-acct")
+        c.account_freeze_reason("poly-acct", now_ms())
     );
     assert!(
-        c.account_freeze_reason("polysim-acct").is_none(),
+        c.account_freeze_reason("polysim-acct", now_ms()).is_none(),
         "the sibling venue's account must stay unbound by the failure"
     );
     assert!(
@@ -445,12 +446,12 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         c.on_venue_reconcile_failed("polymarket", sweep_err(), 2_000 + i);
     }
     assert!(
-        c.account_freeze_reason("poly-acct")
+        c.account_freeze_reason("poly-acct", now_ms())
             .is_some_and(|r| r.contains("self-check failed on polymarket")),
         "freeze is idempotent: the first reason wins, the streak must not overwrite it"
     );
     assert!(
-        c.account_freeze_reason("polysim-acct").is_none(),
+        c.account_freeze_reason("polysim-acct", now_ms()).is_none(),
         "three polymarket sweep failures must not freeze the sibling account"
     );
     assert!(
@@ -465,7 +466,7 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
     c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_000);
     c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_100);
     assert!(
-        c.account_freeze_reason("polysim-acct").is_none(),
+        c.account_freeze_reason("polysim-acct", now_ms()).is_none(),
         "two failures are under the threshold of {SWEEP_FAILURE_FREEZE}: nothing freezes"
     );
     c.place_pending(polysim_req("ps3"), 3_200)
@@ -473,16 +474,17 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
 
     c.on_venue_reconcile_failed("polysimulator", sweep_err(), 3_300);
     assert!(
-        c.account_freeze_reason("polysim-acct").is_some_and(
-            |r| r.contains("reconciliation sweep failed 3 times in a row on polysimulator")
-        ),
+        c.account_freeze_reason("polysim-acct", now_ms())
+            .is_some_and(
+                |r| r.contains("reconciliation sweep failed 3 times in a row on polysimulator")
+            ),
         "polysimulator's own 3rd failure must freeze ITS account: {:?}",
-        c.account_freeze_reason("polysim-acct")
+        c.account_freeze_reason("polysim-acct", now_ms())
     );
     // Both venues are now frozen per-account — and the global switch is
     // STILL quiet: two account freezes are not a kill switch.
     assert!(
-        c.account_freeze_reason("poly-acct").is_some(),
+        c.account_freeze_reason("poly-acct", now_ms()).is_some(),
         "the sibling venue's earlier freeze is untouched by polysimulator's streak"
     );
     assert!(
@@ -519,15 +521,16 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         "a cleared streak rebuilt from 1 must stay under the threshold"
     );
     assert!(
-        c.account_freeze_reason("polysim-acct")
+        c.account_freeze_reason("polysim-acct", now_ms())
             .is_some_and(|r| r.contains("reconciliation sweep failed 3 times")),
         "the earlier freeze is deliberate state, not streak fallout — it persists"
     );
     c.on_venue_reconcile_failed("polysimulator", sweep_err(), 4_300);
     assert!(
-        c.account_freeze_reason("polysim-acct").is_some_and(
-            |r| r.contains("sweep failed 3 times in a row on polysimulator: sweep timed out")
-        ),
+        c.account_freeze_reason("polysim-acct", now_ms())
+            .is_some_and(
+                |r| r.contains("sweep failed 3 times in a row on polysimulator: sweep timed out")
+            ),
         "the freeze was idempotent from the first streak: the reason the operator saw first stands"
     );
     assert!(!c.is_killed(), "still account-scoped, never global");

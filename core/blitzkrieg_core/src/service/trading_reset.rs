@@ -11,8 +11,8 @@ use crate::schema::Event;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
 
-use super::Core;
 use super::config::{AuditRuntime, LastError};
+use super::{Core, GateReason};
 
 impl Core {
     /// Apply a hot update of the ENTRY limits (#191) — the whole safe subset
@@ -995,16 +995,10 @@ impl Core {
             self.config.breaker_cooldown_sec,
         );
         self.risk.resume();
-        // #861: the reset scrubbed the freeze book directly (not via
-        // `resume_account`), so the durable cell needs the same scrub — the
-        // account's freeze/stamp rows go with the reset (the `risk.resume()`
-        // above already cleared the kill in the cell).
-        if let Some(c) = &mut self.risk_state {
-            c.file.account_freezes.remove(account_id.as_str());
-            c.file.auto_frozen.remove(account_id.as_str());
-            c.file.saved_at_ms = now_ms;
-        }
-        self.persist_risk_state();
+        // #1045: 入场闸门纯内存、重启即清，不落风险状态文件——这里只清
+        // 该账户的入场闸门（与旧 freeze_book.scrub 同语义），不碰账本任何
+        // 数字（不改 realized、不改 cap、不清亏损）。
+        self.clear_account_gate(account_id.as_str());
 
         // 4) 持仓簿账户维摘除 + 磁盘记录按账户截断（不重启进程）。
         let open_before = pre.open_positions;
@@ -1398,6 +1392,17 @@ impl Core {
                     CoreErrorCode::RiskRejected,
                     format!("[{}] {}", id.as_str(), message),
                 );
+                // UTC 日边界真正翻过：日内熔断闸门自动到期，该账户新单入场恢复。
+                // 账本不动，只解闸；若 realized 仍超上限，下一 tick 的
+                // emit_daily_trip 会按账本重新上 DailyLoss 闸门——这是「按账本
+                // 推导」，不是「回放冻结」。Manual / ConfigReadOnly /
+                // ConfigSuspended 闸门不受此清除（它们不是日内熔断）。
+                if roll.previous_day_index.is_some()
+                    && let Some(gate) = self.account_gate(id.as_str())
+                    && gate.reason_kind == GateReason::DailyLoss
+                {
+                    self.clear_account_gate(id.as_str());
+                }
             }
         }
     }
@@ -1417,34 +1422,6 @@ impl Core {
             EquityBasis::Dry
         } else {
             EquityBasis::Live
-        }
-    }
-
-    /// Announce a tripped daily-loss breaker exactly once per process (see
-    /// `DailyLossState::tripped_reported`). Consumed here AND at the losing
-    /// close, so the freeze is visible at the moment it happens and again after
-    /// a restart restored an already-breached budget.
-    pub(super) fn emit_daily_trip(&mut self) {
-        let trips = self.positions.take_daily_trips();
-        for (account, t) in trips {
-            let message = format!(
-                "DAILY LOSS LIMIT REACHED for account {account}: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",
-                t.realized_pnl_usd,
-                self.positions.unrealized_pnl_usd_for(account.as_str()),
-                t.realized_pnl_usd + self.positions.unrealized_pnl_usd_for(account.as_str()),
-                t.limit_usd,
-                self.config.positions.max_daily_loss_equity_pct,
-                t.opening_equity_usd
-            );
-            tracing::warn!(
-                day = t.day_index,
-                account = %account.as_str(),
-                realized = %t.realized_pnl_usd,
-                limit = %t.limit_usd,
-                "{}",
-                message
-            );
-            self.emit_risk_alert(CoreErrorCode::RiskRejected, message);
         }
     }
 

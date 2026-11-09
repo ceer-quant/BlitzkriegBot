@@ -72,10 +72,8 @@ fn the_cap_is_a_share_of_the_days_opening_equity_and_resets_only_across_days() {
         NOW + 3_000,
     );
     assert!(pm.daily_loss_tripped_for("default"), "the cap must latch");
-    let err = pm
-        .can_open("default", None, None, NOW + 4_000)
-        .expect_err("a tripped cap must refuse new entries");
-    assert!(err.contains("Daily loss limit"), "{err}");
+    // #1045: entry blocking is Core's single account gate (`account_gate_permits`);
+    // `can_open` keeps capacity + cooldown only, it no longer refuses on daily loss.
 
     // Same day: a later tick does not clear it.
     assert!(
@@ -157,10 +155,8 @@ fn a_restart_keeps_the_days_loss_and_the_next_day_still_clears_it() {
         second.daily_loss_tripped_for("default"),
         "the restored budget is already spent"
     );
-    let err = second
-        .can_open("default", None, None, NOW + 2_000)
-        .expect_err("a restored loss must gate the very first entry");
-    assert!(err.contains("Daily loss limit"), "{err}");
+    // #1045: entry blocking is Core's single account gate; `can_open` keeps
+    // capacity + cooldown only. The restored latch is what matters here.
 
     // The boundary still lifts it, restored budget and all.
     let roll = second
@@ -232,7 +228,12 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
             NOW + 6_000,
         )
         .expect_err("the day's cap is spent");
-    assert_eq!(err.code, CoreErrorCode::RiskRejected);
+    // #1045: entry blocking lives in Core's single account gate, which answers
+    // KillSwitchActive naming the DailyLoss gate until the UTC day rolls.
+    assert_eq!(
+        err.code,
+        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+    );
     assert!(err.message.contains("Daily loss limit"), "{}", err.message);
 
     // …and a restart does not give the day a second budget.
@@ -929,10 +930,8 @@ fn a_rebase_below_the_days_realized_loss_trips_it_immediately() {
         logs.contains("already spent"),
         "the freeze must be part of the same warning: {logs}"
     );
-    let err = live
-        .can_open("default", None, None, NOW + 61_000)
-        .expect_err("entries must be refused");
-    assert!(err.contains("Daily loss limit"), "{err}");
+    // #1045: entry blocking is Core's single account gate; `can_open` keeps
+    // capacity + cooldown only. The tripped latch is what matters here.
 
     // …and it is persisted: a further restart cannot launder it either.
     drop(live);
@@ -1078,7 +1077,12 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
             NOW + 61_000,
         )
         .expect_err("a spent, tightened cap must refuse entries");
-    assert_eq!(err.code, CoreErrorCode::RiskRejected);
+    // #1045: entry blocking lives in Core's single account gate, which answers
+    // KillSwitchActive naming the DailyLoss gate until the UTC day rolls.
+    assert_eq!(
+        err.code,
+        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
+    );
     assert!(err.message.contains("Daily loss limit"), "{}", err.message);
 
     // (5) …and the position that was already open still gets out.

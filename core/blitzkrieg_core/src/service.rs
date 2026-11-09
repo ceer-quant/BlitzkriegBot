@@ -19,6 +19,7 @@ mod accounts;
 mod assembly;
 mod cockpit_env;
 mod config;
+mod daily_loss_gate;
 mod engine_cycle;
 mod helpers;
 mod risk_admission;
@@ -36,6 +37,9 @@ pub use engine_cycle::{venue_credentials_missing, venue_credentials_ready};
 // #834 cycle 1: the freeze/circuit-breaker state book moved next to its only
 // manager; surfaced for the struct field and the integration tree's handle.
 pub(crate) use risk_admission::FreezeBook;
+// #1045: the single in-memory per-account entry gate (replaces
+// FreezeBook's retired `account_freezes` + `auto_frozen` tables).
+pub(crate) use risk_admission::{AccountGate, GateReason};
 // #861: the runtime risk-state cell (path + parsed file) the Core struct
 // holds — same re-export shape as FreezeBook above.
 pub(crate) use risk_admission::RiskStateCell;
@@ -216,9 +220,13 @@ pub struct Core {
     /// 冻结/熔断状态簿（#834，Core 上帝结构第一环）：account-scoped kill
     /// book（account id → reason）、#685 冻结自愈簿、venue 拒单连击（全局
     /// +按账户）、venue 维 sweep 连败（全局+按场地）、venue 自由现金簿。
-    /// 原 7 个裸字段收拢为一，字段语义逐字保留，唯一管理者是
-    /// [`FreezeBook`]（risk_admission/freeze.rs）。
+    /// 冻结/熔断剩余状态簿（#834）：`account_freezes` + `auto_frozen` 已被
+    /// `account_gates` 单一闸门取代（#1045），本簿只保留全局/场地维连击
+    /// 与自由现金事实；唯一管理者是 [`FreezeBook`]（risk_admission/freeze.rs）。
     freeze_book: FreezeBook,
+    /// #1045: 唯一账户入场闸门，每账户一份，纯内存，永不落盘，重启即清。
+    /// 所有入场路径只读 `gate.blocked`；出场永不阻断。
+    account_gates: HashMap<String, AccountGate>,
     /// #861: the runtime risk state's durable mirror (`Option<RiskStateCell>`
     /// — path + parsed file). `None` (backtester, most tests) = the historic
     /// session-scoped behaviour: no risk knob is written or restored, and no
@@ -1301,6 +1309,7 @@ mod tests {
     pub(crate) use service_inline_tests::{
         dry_core, live_core, order, reset_audit_dir, reset_params,
     };
+    mod account_gate_tests;
     mod account_precision_tests;
     mod audit_fix_tests;
     mod balance_trust_749_tests;

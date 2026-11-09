@@ -1,5 +1,6 @@
 {
   "accountFreezes": {},
+  "accountGates": [],
   "accountingAudit": {
     "anchored": false,
     "failures": 0,

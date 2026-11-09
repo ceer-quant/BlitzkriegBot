@@ -147,6 +147,8 @@ use blitzkrieg_core::position::PositionConfig;
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::service::CoreConfig;
 use rust_decimal::Decimal;
+use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 // #699 — main.rs 体积拆分：boot/subcommands/tests 三列纯代码搬移。
 // 子文件经 `mod` 挂载在 bin 根；下列 `use` 重导出让 main() 的裸名引用
@@ -160,9 +162,9 @@ mod bin_tests;
 // any embedded reader share ONE name song.
 use bin_support::boot::{
     EnvVars, bootstrap_policy_template, builtin_registry, daily_loss_path_for,
-    default_position_log_for, default_strategy_state_for, parse_args, parse_strategy_limits,
-    parse_virtual_limits, resolve_event_archive, resolved_policy_path, risk_state_path_for,
-    round_duration_source_from, run_net_check,
+    default_position_log_for, default_socket, default_strategy_state_for, parse_args,
+    parse_strategy_limits, parse_virtual_limits, resolve_event_archive, resolved_policy_path,
+    risk_state_path_for, round_duration_source_from, run_net_check,
 };
 use bin_support::subcommands::{
     run_backtest, run_blueprint_compile, run_mode_backtest, run_regime_eval, run_replay,
@@ -190,6 +192,15 @@ async fn main() -> anyhow::Result<()> {
     // Configuration is loaded BEFORE the arguments, because the arguments are
     // resolved against it (CLI > env > TOML > default).
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    // #1045: `account unfreeze <id>` — a tiny UDS JSON-RPC client that tells a
+    // running core to lift an account's entry gate. No core is booted here, no
+    // data latch is taken, no ledger is touched; it only asks the live process
+    // (reached through its UDS socket) to clear the gate and prints the
+    // kernel's receipt. WebUI / TUI / CLI share this single IPC verb.
+    if argv.len() >= 3 && argv[0] == "account" && argv[1] == "unfreeze" {
+        return run_account_unfreeze(&argv[2..], default_socket()).await;
+    }
 
     // `--version` is answered before anything else is touched: it must work with
     // no config file, no socket, no data/ and no git, and must not boot a core.
@@ -1270,5 +1281,76 @@ async fn main() -> anyhow::Result<()> {
 
     server::run(args.socket.clone(), config, args.tick_ms, rx, registry).await?;
     eprintln!("blitzkrieg-core stopped");
+    Ok(())
+}
+
+/// #1045 CLI: `account unfreeze <id> [--socket <path>]`.
+///
+/// A tiny UDS JSON-RPC client: it tells a *running* core to lift an account's
+/// entry gate (`account.unfreeze`) and prints the kernel's receipt verbatim to
+/// stdout. It does not boot a core, does not take the data latch, and does not
+/// touch any ledger — the gate is pure in-memory, so this only makes sense
+/// against a live process that actually froze the account.
+async fn run_account_unfreeze(rest: &[String], default_socket: String) -> anyhow::Result<()> {
+    let mut socket = default_socket;
+    let mut account_id: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--socket" => {
+                socket = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--socket needs a path"))?
+                    .clone();
+            }
+            a if a.starts_with("--socket=") => socket = a["--socket=".len()..].to_string(),
+            a if !a.starts_with('-') && account_id.is_none() => account_id = Some(a.to_string()),
+            _ => {
+                eprintln!("blitzkrieg-core: unexpected argument `{a}` for `account unfreeze <id>`");
+                std::process::exit(2);
+            }
+        }
+    }
+    let account_id = account_id.ok_or_else(|| {
+        anyhow::anyhow!("usage: blitzkrieg-core account unfreeze <accountId> [--socket <path>]")
+    })?;
+
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot connect to core socket {socket} (is blitzkrieg-core running?): {e}"
+            )
+        })?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "account.unfreeze",
+        "params": { "accountId": account_id },
+    });
+    writer
+        .write_all(format!("{}\n", request).as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to send unfreeze request to {socket}: {e}"))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to flush unfreeze request to {socket}: {e}"))?;
+
+    let mut line = String::new();
+    let n = reader
+        .read_line(&mut line)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read unfreeze reply from {socket}: {e}"))?;
+    if n == 0 {
+        eprintln!(
+            "blitzkrieg-core: core socket {socket} closed without a reply to `account.unfreeze`"
+        );
+        std::process::exit(1);
+    }
+    // Print the kernel's receipt verbatim (issue #1045: "输出内核回执原文").
+    println!("{}", line.trim_end());
     Ok(())
 }

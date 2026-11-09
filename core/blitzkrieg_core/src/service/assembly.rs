@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::account::AccountLedgers;
+use std::collections::HashMap;
 
 impl Core {
     pub fn new(config: CoreConfig) -> Self {
@@ -446,6 +447,7 @@ impl Core {
             escalation_skips: HashSet::new(),
             pending_venue_cancels: Vec::new(),
             freeze_book: FreezeBook::default(),
+            account_gates: HashMap::new(),
             last_error: None,
             recon_watermark_ms: 0,
             boot_replayed_journal,

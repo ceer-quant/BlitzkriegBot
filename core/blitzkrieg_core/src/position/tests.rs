@@ -619,10 +619,11 @@ fn daily_loss_limit_blocks_new_positions() {
     )
     .unwrap();
     assert!(pm.daily_pnl_for("default") < dec!(-1));
-    assert!(
-        pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
-            .is_err()
-    );
+    // NOTE (issue #1045): entry blocking no longer lives in `can_open` — the
+    // daily-loss breaker trips the account (see `daily_loss_tripped_for` below)
+    // and Core's `account_gate_permits` refuses new entries until the UTC day
+    // rolls. `can_open` keeps judging capacity + cooldown only.
+    assert!(pm.daily_loss_tripped_for("default"));
 }
 
 /// 每账户日亏（2026-10-25 操作者裁决）：一个账户把日亏预算烧穿，兄弟
@@ -654,10 +655,9 @@ fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
     )
     .unwrap();
     assert!(pm.daily_loss_tripped_for("default"));
-    assert!(
-        pm.can_open("default", Some("ETH"), Some(SignalDirection::Up), 2000)
-            .is_err()
-    );
+    // NOTE (issue #1045): entry blocking no longer lives in `can_open` — the
+    // tripped latch is tracked on `daily_loss_tripped_for`, and Core's
+    // `account_gate_permits` refuses new entries until the UTC day rolls.
     // poly 账户自己的一天：从零开始，进场不被兄弟的冻结拦住。
     let mut poly_params = params("BTC", SignalDirection::Up, dec!(0.4));
     poly_params.account_id = AccountId::from("poly");
@@ -680,10 +680,9 @@ fn one_account_s_daily_loss_never_burns_a_sibling_s_budget() {
     )
     .unwrap();
     assert!(pm.daily_loss_tripped_for("poly"));
-    assert!(
-        pm.can_open("poly", Some("ETH"), Some(SignalDirection::Up), 5000)
-            .is_err()
-    );
+    // NOTE (issue #1045): entry blocking no longer lives in `can_open` — the
+    // tripped latch is tracked per account, and Core's `account_gate_permits`
+    // refuses new entries until the UTC day rolls.
     // 全账户日盈亏合计 = 两账户之和。
     assert_eq!(
         pm.daily_pnl_total(),
@@ -776,11 +775,9 @@ fn daily_loss_breaker_trips_on_unrealized_loss() {
         pm.daily_loss_tripped_for("default"),
         "realized + unrealized −20 must breach the 10 cap"
     );
-    assert!(
-        pm.can_open("default", Some("SOL"), Some(SignalDirection::Up), 2000)
-            .is_err(),
-        "the net breach freezes entries"
-    );
+    // NOTE (issue #1045): entry blocking no longer lives in `can_open` — the
+    // tripped latch is tracked on `daily_loss_tripped_for`, and Core's
+    // `account_gate_permits` refuses new entries until the UTC day rolls.
 }
 
 /// #464 reverse acceptance: `daily_loss_marks_unrealized = false` restores

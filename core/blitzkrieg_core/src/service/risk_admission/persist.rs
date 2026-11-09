@@ -69,14 +69,12 @@ pub(crate) struct RiskStateFile {
     /// The global kill switch, engaged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kill: Option<KillCell>,
-    /// Account-scoped freezes: account id → the reason on the book.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) account_freezes: BTreeMap<String, String>,
-    /// The auto-freeze stamps (`FreezeBook::auto_frozen`): account id → the
-    /// instant the kernel froze it. A manual freeze has NO row here — across
-    /// a restart too, so #685's never-self-lifts survives.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) auto_frozen: BTreeMap<String, i64>,
+    // #1045: `account_freezes` / `auto_frozen` retired from this file — account
+    // entry gates are pure in-memory (`Core.account_gates`) and a restart starts
+    // clean. An OLD file that still carries those keys deserializes fine here
+    // (serde ignores unknown keys); the boot restore ignores them, so no freeze
+    // is ever replayed and no account is frozen at boot. (The next `save`
+    // rewrites the file without those stale rows.)
 }
 
 fn is_zero(v: &i64) -> bool {
@@ -249,79 +247,30 @@ impl Core {
     pub(crate) fn restore_risk_state_at_boot(&mut self, state_file_present: bool) {
         // Snapshot everything the restore needs out of the cell FIRST — the
         // restore itself runs the freeze paths, which take `&mut self`.
-        let (kill, freezes, stamps, path) = {
+        let (kill, _path) = {
             let Some(cell) = &self.risk_state else {
                 return;
             };
             if !state_file_present {
                 return;
             }
-            (
-                cell.file.kill.clone(),
-                cell.file.account_freezes.clone(),
-                cell.file.auto_frozen.clone(),
-                cell.path.display().to_string(),
-            )
+            (cell.file.kill.clone(), cell.path.display().to_string())
         };
         // 1) the global kill switch: a kernel that went down killed stays
         //    killed — the reason on the file is the one the operator saw.
         if let Some(k) = kill {
             self.freeze_trading(format!("restored across restart: {}", k.reason), now_ms());
         }
-        // 2) the freeze book: every freeze re-lands with its original reason
-        //    (manual freezes keep their no-stamp shape — never self-lift,
-        //    #685), and the auto stamps restore so the self-heal's debounce
-        //    still counts from the instant the kernel first lost the account.
-        for (id, reason) in &freezes {
-            if self
-                .accounts
-                .account(&crate::account::AccountId::from(id.as_str()))
-                .is_none()
-            {
-                tracing::warn!(
-                    account = %id,
-                    path = %path,
-                    "risk-state file freezes unknown account \"{id}\" — skipped"
-                );
-                continue;
-            }
-            self.freeze_account(id, reason.clone());
-        }
-        for (id, at) in stamps {
-            if self.freeze_book.account_freezes.contains_key(&id) {
-                self.freeze_book.auto_frozen.insert(id, at);
-            }
-        }
-        // Daily-loss limit tripped accounts must also sit in account_freeves:
-        // daily-loss is persisted independently (positions.daily-loss.json) and
-        // never writes account_freeves on its own. Any account whose daily loss
-        // is tripped but missing from the freeze book must be re-frozen here so
-        // account.freeze {frozen:false} can lift it across restarts.
-        let tripped_accounts: Vec<String> = self
-            .positions
-            .daily_states()
-            .iter()
-            .filter(|(_, state)| state.tripped)
-            .map(|(id, _)| id.to_string())
-            .collect();
-        for id in tripped_accounts {
-            if !self.freeze_book.account_freezes.contains_key(id.as_str()) {
-                let state = self.positions.daily_state_for(id.as_str());
-                self.freeze_account(
-                    id.as_str(),
-                    format!(
-                        "daily loss limit reached (${} realized vs ${} cap), new entries frozen until next UTC day",
-                        state.realized_pnl_usd, state.tripped_limit_usd
-                    ),
-                );
-            }
-        }
-        // A CLEAN boot freezes nobody (issue #928: the #861 restart default
-        // freeze is retired — the disk's freeze book is the posture, not a
-        // blanket). The corrupt-boot fail-closed freeze is the only remaining
-        // boot-time freeze (`freeze_all_accounts_corrupt_boot`, called from
-        // the assembly for the Corrupt case only).
-        self.persist_risk_state();
+        // #1045: account entry gates are pure in-memory and a restart starts
+        // clean. An OLD risk-state file that still carries `account_freezes` /
+        // `auto_frozen` keys is read without error (serde ignores unknown keys)
+        // and those keys are deliberately NOT replayed: no freeze is restored,
+        // no account is frozen at boot, and the file's stale rows are simply
+        // ignored (the next `save` rewrites the file without them). The daily
+        // loss breaker is re-derived from the persisted daily budget on the
+        // first tick (`emit_daily_trip` re-lifts the `DailyLoss` gate for any
+        // account whose realized loss still exceeds the cap)—"按账本推导",
+        // 不是「回放冻结」。
     }
 
     /// The corrupt-boot fail-closed freeze (issue #861's surviving clause):
