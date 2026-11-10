@@ -28,9 +28,13 @@ for (const rel of collect(docsRoot).sort()) {
 
 // 临时：现有文档存在 14 处死链与 23 篇裸占位符，先容忍构建，
 // 待 #1080 文档重写完成后改为 false，届时死链必须清零。
+
+// GitHub Pages 项目站点发布在 /BlitzkriegBot/ 下，由工作流注入；本地开发保持根路径。
+// head 里的资源路径不会被 VitePress 自动加 base，必须自己拼，否则 favicon 会指向根域名而 404。
+const base = process.env.DOCS_BASE || '/'
+
 export default defineConfig({
-  // GitHub Pages 项目站点发布在 /BlitzkriegBot/ 下，由工作流注入；本地开发保持根路径。
-  base: process.env.DOCS_BASE || '/',
+  base,
   title: 'BlitzkriegBot',
   description: 'BlitzkriegBot 文档：入门、概念、任务、参考、排障、决策',
   lang: 'zh-CN',
@@ -41,7 +45,7 @@ export default defineConfig({
   appearance: true,
   head: [
     ['meta', { name: 'theme-color', content: '#11141b' }],
-    ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
+    ['link', { rel: 'icon', type: 'image/png', href: `${base}favicon.png` }],
     [
       'script',
       {},
