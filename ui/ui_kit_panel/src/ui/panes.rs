@@ -106,10 +106,7 @@ pub(super) fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
             Style::default().fg(DIM),
         ),
     };
-    f.render_widget(
-        stat("Net PnL", net_big, net_sub, net_style),
-        cards[3],
-    );
+    f.render_widget(stat("Net PnL", net_big, net_sub, net_style), cards[3]);
 
     // Prices
     let body = rows[1];
