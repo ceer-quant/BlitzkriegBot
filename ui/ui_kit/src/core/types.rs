@@ -1114,9 +1114,7 @@ impl UiSnapshot {
     /// venue report, or an older core): the UI must **not** fall back to trade
     /// folding to fake a ledger number. Show `unknown` instead.
     pub fn net_pnl(&self) -> Option<f64> {
-        self.balance
-            .as_ref()
-            .and_then(|b| b.cumulative_net_pnl)
+        self.balance.as_ref().and_then(|b| b.cumulative_net_pnl)
     }
 
     /// Source label for the net PnL figure, surfaced so the panel never
@@ -1124,7 +1122,8 @@ impl UiSnapshot {
     /// balance + reserved − opening_equity, `"trade-fold"` when only trade
     /// rows exist (display-only, not ledger).
     pub fn net_pnl_source(&self) -> &'static str {
-        if self.balance
+        if self
+            .balance
             .as_ref()
             .and_then(|b| b.cumulative_net_pnl)
             .is_some()
