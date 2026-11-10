@@ -26,7 +26,9 @@ pub struct AppView {
     pub open_positions: usize,
     pub trades: usize,
     pub win_rate: f64,
-    pub net_pnl: f64,
+    /// Ledger PnL (`balance − seed`); `None` when seed is absent (LIVE / older
+    /// core) — never trade-folded into a fake ledger number.
+    pub net_pnl: Option<f64>,
     pub rows: Vec<AppRow>,
     pub last_error: Option<String>,
 }
@@ -123,8 +125,15 @@ pub fn render_headless(v: &AppView) -> String {
     o.push_str("┌─ Blitzkrieg UI Kit — App (headless) ─────────────\n");
     o.push_str(&format!("│ {}\n", v.headline));
     o.push_str(&format!(
-        "│ balance ${:.2} · open {} · trades {} · WR {:.0}% · net {:+.2}\n",
-        v.balance, v.open_positions, v.trades, v.win_rate, v.net_pnl
+        "│ balance ${:.2} · open {} · trades {} · WR {:.0}% · net {}\n",
+        v.balance,
+        v.open_positions,
+        v.trades,
+        v.win_rate,
+        match v.net_pnl {
+            Some(n) => format!("{:+.2}", n),
+            None => "—".into(),
+        }
     ));
     if v.rows.is_empty() {
         o.push_str("│ (no open positions)\n");

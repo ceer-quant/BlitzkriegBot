@@ -820,7 +820,12 @@ fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
             "asset": p.asset, "direction": p.direction, "entryPrice": p.entry_price,
             "currentPrice": p.current_price, "unrealizedPct": p.unrealized_pct,
             "strategy": p.strategy, "remainingSec": p.remaining_sec })).collect::<Vec<_>>(),
-        "pnl": { "net": s.net_pnl(), "trades": s.trades.len(), "winRate": s.win_rate() },
+        "pnl": {
+            "net": s.net_pnl(),
+            "netPnlSource": s.net_pnl_source(),
+            "trades": s.trades.len(),
+            "winRate": s.win_rate()
+        },
     })
 }
 
@@ -855,7 +860,10 @@ fn format_status(s: &UiSnapshot) -> String {
     out.push_str(&format!(
         "Trades: {} net {} ({}% WR)\n",
         s.trades.len(),
-        fmt_usd(s.net_pnl()),
+        match s.net_pnl() {
+            Some(n) => fmt_usd(n),
+            None => "—".into(),
+        },
         s.win_rate().round()
     ));
     out.push_str(&format!("Open positions: {}", s.positions.len()));

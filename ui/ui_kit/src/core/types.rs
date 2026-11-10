@@ -1096,9 +1096,27 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
-    /// Realised PnL over the loaded trades (the panel's "net").
-    pub fn net_pnl(&self) -> f64 {
-        self.trades.iter().map(|t| t.net_pnl_usd).sum()
+    /// Ledger PnL = balance − seed (the panel's "net").
+    ///
+    /// Returns `None` when `seed` is absent (LIVE or an older core): the UI
+    /// must **not** fall back to trade folding to fake a ledger number. Show
+    /// `—` instead.
+    pub fn net_pnl(&self) -> Option<f64> {
+        self.balance
+            .as_ref()
+            .and_then(|b| b.seed.map(|seed| b.balance - seed))
+    }
+
+    /// Source label for the net PnL figure, surfaced so the panel never
+    /// presents trade-folding as ledger. `"ledger"` when computed from
+    /// balance−seed, `"trade-fold"` when only trade rows exist (display-only,
+    /// not ledger).
+    pub fn net_pnl_source(&self) -> &'static str {
+        if self.balance.as_ref().and_then(|b| b.seed).is_some() {
+            "ledger"
+        } else {
+            "trade-fold"
+        }
     }
     pub fn wins(&self) -> usize {
         self.trades.iter().filter(|t| t.net_pnl_usd > 0.0).count()

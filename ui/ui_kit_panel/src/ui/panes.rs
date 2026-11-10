@@ -84,17 +84,29 @@ pub(super) fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         cards[2],
     );
 
-    // Net PnL
-    let net = s.net_pnl();
-    f.render_widget(
-        stat(
-            "Net PnL",
+    // Net PnL — ledger口径 (balance − seed)。seed 缺失（LIVE / 老内核）时
+    // 显式显示 "—"，不得以成交折叠冒充净利；source 透出到子行。
+    let (net_big, net_sub, net_style) = match s.net_pnl() {
+        Some(net) => (
             blitzkrieg_ui_kit::web::money(net),
-            format!("{} trades · {:.0}% WR", s.trades.len(), s.win_rate()),
+            format!(
+                "{} trades · {:.0}% WR · ledger (balance − seed)",
+                s.trades.len(),
+                s.win_rate()
+            ),
             Style::default().fg(color_of(net)),
         ),
-        cards[3],
-    );
+        None => (
+            "—".into(),
+            format!(
+                "{} trades · {:.0}% WR · trade-fold (not ledger)",
+                s.trades.len(),
+                s.win_rate()
+            ),
+            Style::default().fg(DIM),
+        ),
+    };
+    f.render_widget(stat("Net PnL", net_big, net_sub, net_style), cards[3]);
 
     // Prices
     let body = rows[1];
