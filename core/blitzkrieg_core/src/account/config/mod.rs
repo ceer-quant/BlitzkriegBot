@@ -761,6 +761,54 @@ pub fn persist_account_trading(
     )
 }
 
+/// The persisted write of ONE account's lifecycle STATUS
+/// (`account.unfreeze` writes back `status = Active`). `Active` REMOVES the key
+/// (the toml grammar spells "active" by absence), any other posture writes the
+/// status string verbatim. Same fail-closed read-modify-write discipline as
+/// `persist_account_trading`.
+pub fn persist_account_status(
+    path: &Path,
+    account_id: &str,
+    status: &AccountStatus,
+) -> Result<(), CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml unreadable, refusing the status write: {e}"),
+        )
+    })?;
+    let mut file: AccountsFile = toml::from_str(&text).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!("accounts.toml does not parse; refusing the status write: {e}"),
+        )
+    })?;
+    let target = file
+        .account
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml declares no `[[account]]` with id `{account_id}`"),
+            )
+        })?;
+    match status {
+        AccountStatus::Active => target.status = None,
+        other => target.status = Some(other.clone()),
+    }
+    write_accounts_file_atomic(
+        path,
+        &toml::to_string(&file).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("accounts.toml does not render: {e}"),
+            )
+        })?,
+        "status",
+    )
+}
+
 /// The persisted write of ONE account's strategy ENABLEMENT set
 /// (`account.strategies.set` / the per-account half of `strategy.enable`).
 /// An EMPTY list REMOVES the key — the file spells "this account runs no

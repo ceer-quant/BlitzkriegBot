@@ -222,3 +222,68 @@ fn legacy_risk_state_freezes_are_ignored_at_boot() {
     drop(c);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #1062 阻断 1：unfreeze persist 失败 → gate 仍在，绝不假成功。
+/// 当没有 `accounts_config_path`（无法落盘 .env/accounts.toml），解冻必须
+/// 返回错误，运行时闸门不动，账户仍拒新单。
+#[test]
+fn unfreeze_persist_failure_keeps_gate() {
+    use crate::account::{Account, AccountId, AccountLedgers, AccountStatus, CredentialKeys};
+    use crate::model::Mode;
+
+    let now = now_ms();
+    let book = AccountLedgers::new(
+        vec![Account {
+            id: AccountId::from("default"),
+            name: "default".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: AccountStatus::ReadOnly,
+            credential_keys: CredentialKeys::default(),
+            venue: String::new(),
+            trading_enabled: false,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            opening_equity: None,
+            updated_at_ms: now,
+        }],
+        AccountId::from("default"),
+    );
+
+    // No accounts_config_path → account_env_write_paths() returns None → persist
+    // refuses. The account starts non-trading so the unfreeze persist branch is
+    // entered (not skipped).
+    let mut c = crate::service::Core::with_account_book(
+        crate::service::CoreConfig {
+            mode: Mode::Dry,
+            risk: crate::risk::RiskConfig::default(),
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            ..Default::default()
+        },
+        book,
+    );
+
+    // A Manual gate on top of the config posture.
+    c.freeze_account("default", "operator: investigating".into());
+    assert!(
+        c.account_gate_blocked("default", now),
+        "precondition: account is gated"
+    );
+
+    // Unfreeze must fail because persist cannot write (no config path).
+    let r = c.unfreeze_account("default", "operator", now);
+    assert!(
+        r.is_err(),
+        "unfreeze must refuse when persist cannot write"
+    );
+
+    // The gate is still there — nothing cleared, nothing assumed.
+    assert!(
+        c.account_gate_blocked("default", now),
+        "persist failure leaves the gate in place"
+    );
+    assert!(
+        c.account_freeze_reason("default", now).is_some(),
+        "freeze reason still readable"
+    );
+}

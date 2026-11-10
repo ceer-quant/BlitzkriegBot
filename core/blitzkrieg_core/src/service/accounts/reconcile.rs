@@ -81,7 +81,12 @@ impl Core {
             // #532 routing): same contract as `freeze_account` — new entries
             // refused, closes keep flowing.
             for account in self.accounts.account_ids_bound_to_venue(venue) {
-                self.freeze_account_auto(&account, message.clone(), ts);
+                self.freeze_account_auto(
+                    &account,
+                    message.clone(),
+                    Some(venue),
+                    ts,
+                );
             }
             // No bound account (unbound deployments, dry tests): keep the
             // legacy global freeze so the failure is never silently dropped.
@@ -152,6 +157,7 @@ impl Core {
                         "reconciliation sweep failed {streak} times in a row on {venue}: {}",
                         err.message
                     ),
+                    Some(venue),
                     now_ms,
                 );
             }
@@ -347,7 +353,7 @@ impl Core {
         for account in self.account_gates().keys().cloned().collect::<Vec<_>>() {
             self.auto_lift_if_venue_healthy(
                 account.as_str(),
-                "reconcile sweep succeeded",
+                Some(venue),
                 snap.now_ms,
             );
         }

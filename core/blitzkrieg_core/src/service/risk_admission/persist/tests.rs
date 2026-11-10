@@ -309,7 +309,7 @@ fn manual_freeze_never_self_lifts_and_clears_on_restart() {
         "manual freeze is in force this session"
     );
     // Venue health past the debounce must NOT lift a manual gate.
-    c.auto_lift_if_venue_healthy("default", "venue healthy", now_ms() + 86_400_000);
+    c.auto_lift_if_venue_healthy("default", Some("venue healthy"), now_ms() + 86_400_000);
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("operator pause"),
@@ -343,6 +343,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     c.freeze_account_auto(
         "default",
         "5 consecutive venue rejections".to_string(),
+        Some("venue-A"),
         frozen_at,
     );
     assert_eq!(
@@ -351,7 +352,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
         "the circumstantial freeze is in force this session"
     );
     // Inside the debounce window a healthy venue must NOT lift.
-    c.auto_lift_if_venue_healthy("default", "venue healthy", frozen_at + 1_000);
+    c.auto_lift_if_venue_healthy("default", Some("venue-A"), frozen_at + 1_000);
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("5 consecutive venue rejections"),
@@ -359,7 +360,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     // Past the debounce the self-heal lifts it — same session, no restart needed.
     c.auto_lift_if_venue_healthy(
         "default",
-        "venue healthy",
+        Some("venue-A"),
         frozen_at + crate::service::FREEZE_AUTO_LIFT_MIN_MS,
     );
     assert!(c.account_freeze_reason("default", now_ms()).is_none());

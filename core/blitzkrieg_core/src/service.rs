@@ -1365,7 +1365,7 @@ pub(crate) fn reconcile_config_gate_for(core: &mut Core, id: &AccountId, now_ms:
         };
         // 只升不覆：优先级更高的运行时闸门（Manual / KillSwitch 等）不会
         // 被配置态闸门降级；同优先级的“先到者胜”保持稳定。
-        let _ = core.set_account_gate(&id_str, reason, kind, None, "config", now_ms);
+        let _ = core.set_account_gate(&id_str, reason, kind, None, "config", now_ms, None);
     } else {
         // 配置态允新单：移除由配置派生的闸门，保留运行时闸门不动。
         if let Some(g) = core.account_gate(&id_str) {

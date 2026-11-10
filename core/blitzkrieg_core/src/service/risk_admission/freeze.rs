@@ -26,6 +26,9 @@ pub(crate) struct AccountGate {
     /// 操作或配置改写清除（`Manual`、`ConfigReadOnly`、`ConfigSuspended`）。
     pub(crate) expires_at_ms: Option<i64>,
     pub(crate) actor: String,
+    /// 导致该闸门的场地（VenueRejection 时有值，其他闸门为 None）。
+    /// 用于场地自愈时只解除该场地造成的冻结，避免误解除其他场地导致的冻结。
+    pub(crate) venue: Option<String>,
 }
 
 /// 闸门原因，声明顺序即优先级从低到高：
@@ -156,6 +159,7 @@ impl Core {
     ///（如场地自愈）静默解除高优先级闸门（`Manual`/`DailyLoss`）。已过期
     /// 的闸门（DailyLoss 过 UTC 日翻界）不阻挡新闸门：过期的 DailyLoss(1)
     /// 不得吞掉随后的 VenueRejection(0)。返回是否写入。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_account_gate(
         &mut self,
         account: &str,
@@ -164,6 +168,7 @@ impl Core {
         expires_at_ms: Option<i64>,
         actor: &str,
         now_ms: i64,
+        venue: Option<&str>,
     ) -> bool {
         let should_set = match self.account_gates.get(account) {
             None => true,
@@ -188,6 +193,7 @@ impl Core {
                 since_ms: now_ms,
                 expires_at_ms,
                 actor: actor.to_string(),
+                venue: venue.map(|v| v.to_string()),
             },
         );
         true
@@ -288,6 +294,7 @@ impl Core {
             None,
             &format!("operator:{account}"),
             now_ms,
+            None,
         );
         tracing::error!(account = %account, reason = %reason, "account frozen (manual gate, in-memory only, restart-clear)");
     }
@@ -296,7 +303,7 @@ impl Core {
     /// 闸门，优先级最低，仅在账户当前无同等或更高优先级闸门时上锁；场地
     /// 健康探针可解（仅此一条），`Manual`/`DailyLoss` 绝不自解。不登记任何
     /// 持久态。
-    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, now_ms: i64) {
+    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, venue: Option<&str>, now_ms: i64) {
         let _ = self.set_account_gate(
             account,
             reason.clone(),
@@ -304,8 +311,9 @@ impl Core {
             None,
             &format!("auto:{account}"),
             now_ms,
+            venue,
         );
-        tracing::warn!(account = %account, reason = %reason, "account auto-frozen (venue rejection gate, in-memory only)");
+        tracing::warn!(account = %account, reason = %reason, venue = ?venue, "account auto-frozen (venue rejection gate, in-memory only)");
     }
 
     /// `account.freeze {frozen: true}` 的显式运营路由：`Manual` 闸门，与
@@ -346,21 +354,20 @@ impl Core {
         }
 
         // #1057 阻断 1 & 4：先 persist 配置态（unfreeze 写回 Active /
-        // trading_enabled=true 并落盘），失败则什么都不变、不 clear gate。
+        // trading_enabled=true 并落盘到 .env 和 accounts.toml），失败则
+        // 什么都不变、不 clear gate。toml 先于 .env，保证部分写入时
+        // 重启后仍保有配置闸门，绝不假成功。
         if account != GLOBAL_KILL_ACCOUNT
             && let Some(acct) = self.accounts.account(&id)
             && (!acct.trading_enabled || !acct.status.allows_entries())
         {
-            self.set_account_trading_persisting(&id, true, actor, "unfreeze", now_ms)?;
-            // persist 成功后，把 lifecycle status 也重置为 Active
-            //（loosening，直接修改内存；set_status 是 tighten-only
-            // 不能用，故这里直写）。
-            if let Some(acct) = self.accounts.account_mut(&id)
-                && !acct.status.allows_entries()
-            {
-                acct.status = AccountStatus::Active;
-                acct.updated_at_ms = now_ms;
-            }
+            self.set_account_status_persisting(
+                &id,
+                AccountStatus::Active,
+                actor,
+                "unfreeze",
+                now_ms,
+            )?;
         }
 
         // 然后 clear gate：先 persist 后 clear，失败则 gate 仍在。
@@ -404,11 +411,20 @@ impl Core {
     ///
     /// 每个调用方（reconcile sweep、venue ack）先等出 `FREEZE_AUTO_LIFT_MIN_MS`
     /// (#867) 再来，避免波动期内的反复解锁。
-    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
+    ///
+    /// `venue` 是导致冻结的场地。只有当闸门的 venue 与 `venue` 匹配（或闸门
+    /// 未记录 venue，即未知来源）时才会解冻，避免场地 A 的冻结被场地 B 的
+    /// 自愈误解。
+    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, venue: Option<&str>, now_ms: i64) {
         let Some(gate) = self.account_gate(account) else {
             return;
         };
         if gate.reason_kind != GateReason::VenueRejection {
+            return;
+        }
+        // 只解除该场地导致的冻结。闸门未记录 venue（历史数据 / 未绑定 venue 的账户 / 遗留全局冻结）时仍按旧逻辑解冻；
+        // 只有两边都有值且不匹配时才拒绝，避免场地 A 的冻结被场地 B 的自愈误解。
+        if gate.venue.is_some() && gate.venue.as_deref() != venue {
             return;
         }
         if now_ms - gate.since_ms < crate::service::FREEZE_AUTO_LIFT_MIN_MS {
@@ -420,13 +436,14 @@ impl Core {
         tracing::warn!(
             account = %account,
             frozen_duration_ms = now_ms - since_ms,
-            trigger = %trigger,
+            venue = ?venue,
             "venue-rejection gate auto-lifted - venue proved healthy"
         );
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             message: format!(
-                "自动冻结已解除（{trigger}）：账户 {account} 场地拒单闸门 {minutes} 分钟后场地恢复"
+                "自动冻结已解除（{}）：账户 {account} 场地拒单闸门 {minutes} 分钟后场地恢复",
+                venue.unwrap_or("unknown"),
             ),
         });
     }
@@ -458,6 +475,7 @@ impl Core {
             None,
             "system",
             now_ms,
+            None,
         );
         self.persist_risk_state();
         self.emit(Event::RiskAlert {
@@ -518,6 +536,7 @@ impl Core {
             None,
             "system",
             blitzkrieg_market_api::net::now_ms(),
+            None,
         );
         self.persist_risk_state();
         tracing::error!(reason = %reason, "kill switch engaged (in-memory, restart-clear)");

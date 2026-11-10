@@ -38,6 +38,7 @@ impl Core {
                 Some(expires_at_ms),
                 "daily-loss breaker",
                 now_ms,
+                None,
             );
             let message = format!(
                 "DAILY LOSS LIMIT REACHED for account {account}: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",
