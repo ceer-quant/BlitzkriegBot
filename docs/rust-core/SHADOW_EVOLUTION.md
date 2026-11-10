@@ -79,8 +79,8 @@
 
 ## 4. 热切换（可摘除的覆盖层）
 
-`ParamRegistry` 为每个策略持有 `Arc<ArcSwap<StrategyParams>>`：读侧是**无锁加载**（纳秒级），
-写侧是**按策略原子发布**。引擎持有注册表句柄，`EngineStrategy::set_hot_params(Option<Arc<ParamRegistry>>)`：
+`ParamRegistry` 为每个策略持有 `Arc<ArcSwap&lt;StrategyParams&gt;>`：读侧是**无锁加载**（纳秒级），
+写侧是**按策略原子发布**。引擎持有注册表句柄，`EngineStrategy::set_hot_params(Option<Arc&lt;ParamRegistry&gt;>)`：
 
 - `Some(registry)` → **挂上**覆盖层；策略每次 evaluate 读**自己那一个**单元。
 - `None` → **摘除**覆盖层。这不是「忽略参数」，而是**物理上没有句柄可读**——
@@ -104,7 +104,7 @@ E2-c 修复：`strategy.load` 载入的新库会**立即**拿到参数单元（`
 **两个开关，两个问题（#249）**，它们的**唯一可信源是 `.env`**
 （`SHADOW_ENABLED` / `SHADOW_AUTO_EVOLVE`，issue 751；本 toml 文件是
 env 键缺席时的兼容回退，迁移脚本 `scripts/migrate-config-to-env.sh`
-把两键落进 `.env` 后将它退役进 `data/config-backup-<ts>/`）：
+把两键落进 `.env` 后将它退役进 `data/config-backup-&lt;ts&gt;/`）：
 
 | 开关 | 问题 | 关掉它 | 打开它 |
 |:---|:---|:---|:---|
@@ -188,7 +188,7 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 | `EVOLUTION_APPLIED` | 该策略参数已原子切换成功 |
 | `EVOLUTION_REJECTED` | 提议被安全锁拒绝（含 reason） |
 
-面板/命令：`/crypto-hft shadow-evolution [enable|disable|status|history [strategy]|apply <strategy> <knob=value>…|rollback <strategy>]`
+面板/命令：`/crypto-hft shadow-evolution [enable|disable|status|history [strategy]|apply &lt;strategy&gt; <knob=value>…|rollback &lt;strategy&gt;]`
 
 ### 6.b 提案工作流（E13 / #95）
 
@@ -200,7 +200,7 @@ evolutionsApplied, evolutionsRejected, secondsSinceLastEvolution }`。
 
 - **人工模式（`auto_evolve = false`）**：提案挂到待决区（每策略最多一个在挂——同参数重复提案是
   no-op，目标不同则旧提案标记 superseded）。三端 UI（webui「进化」页 / TUI
-  第 5 页签 / 命令动词）都能 `decide <id> accept|reject|defer`；accept 在
+  第 5 页签 / 命令动词）都能 `decide &lt;id&gt; accept|reject|defer`；accept 在
   **决策时刻重跑全套安全锁**（域 → 渐变 → 不可变），通过才热切换并落账。
 - **自动模式（`auto_evolve = true`）**：提案直接采纳并记 promotions——无托管运行。
   并且**每一轮评估先结清积压**：上一段人工模式留下的待决提案会在这一轮以
@@ -256,11 +256,11 @@ IPC 增量：
 CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 `--se-deep-dims N`；env：`BK_SE_AUTO_EVOLVE` / `BK_SE_CYCLE_SECS` /
 `BK_SE_TTL_SECS` / `BK_SE_DEEP_DIMS`。面板命令动词：`proposals [N]`、
-`decide <id> accept|reject|defer`、`auto-evolve on|off`、`evolve on|off`、`rollback <strategy>`。
+`decide &lt;id&gt; accept|reject|defer`、`auto-evolve on|off`、`evolve on|off`、`rollback &lt;strategy&gt;`。
 
 ## 7. 审计（按策略分文件）
 
-每次（尝试）进化写入 **`data/evolution/<strategy>.jsonl`**：
+每次（尝试）进化写入 **`data/evolution/&lt;strategy&gt;.jsonl`**：
 
 ```json
 {
@@ -289,7 +289,7 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 
 > **迁移说明（D-17）**：E2-c 之前只有一个全局文件 `data/evolution/evolution.jsonl`，
 > 因生产从未开启进化（`enabled=false`）而始终是 0 字节。它**被保留不删**，
-> 新代码只读写 `data/evolution/<strategy>.jsonl`。旧文件不再被任何代码路径追加。
+> 新代码只读写 `data/evolution/&lt;strategy&gt;.jsonl`。旧文件不再被任何代码路径追加。
 
 ## 8. 验收对照
 
@@ -312,7 +312,7 @@ CLI：`--se-auto-evolve on|off`、`--se-cycle-secs N`、`--se-ttl-secs N`、
 | 风控不可被改 | `ImmutableConfig` + `validate_immutable` | 单测 `immutable_risk_cannot_be_weakened` |
 | 违反锁被记录/告警 | `audit::record_rejection` | 单测 `a_disabled_audit_writes_no_files`、`each_strategy_gets_its_own_file_and_history` |
 | 回滚按策略独立 | `rollback(strategy, …)` | 单测 `rollback_is_per_strategy`；集成 `apply_and_rollback_move_exactly_one_strategy`；门禁回滚 A 不动 B |
-| 每次进化完整审计（分文件） | `data/evolution/<strategy>.jsonl` | 单测 `each_strategy_gets_its_own_file_and_history`；集成断言 `alpha.jsonl` 无 beta/spread_arb 记录，且 `beta.jsonl` / `spread_arb.jsonl` 不存在（后两者未进化，就不该有文件） |
+| 每次进化完整审计（分文件） | `data/evolution/&lt;strategy&gt;.jsonl` | 单测 `each_strategy_gets_its_own_file_and_history`；集成断言 `alpha.jsonl` 无 beta/spread_arb 记录，且 `beta.jsonl` / `spread_arb.jsonl` 不存在（后两者未进化，就不该有文件） |
 | 手动 apply / 回滚有标记 | `manual` / `rollback` 字段 | 单测 `manual_and_rollback_records_are_flagged`、`a_manual_apply_is_audited_and_domain_checked`；集成 `apply_and_rollback_move_exactly_one_strategy` |
 | 关掉进化行为逐位一致 | 覆盖层**摘除**（`None`） | 集成 `evolution_off_is_byte_for_byte_the_previous_behaviour` |
 | 孪生重放的是同一份出场策略 | `ExitConfig` 取自 `config.positions.exit` | 单测 `the_exit_policy_replayed_is_the_configured_one` |

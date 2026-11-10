@@ -39,7 +39,7 @@ core --no-config --engine --fee-model official --round-sec 900 --min-round-age 0
 2. **BookView（exit_policy.rs / position.rs / service.rs）**：出场路径不再每仓位每 tick 构造完整 `OrderbookSnapshot`（两次 level 向量 clone + token String + 5 次 Decimal 归约），改为无生命周期 `Copy` 标量视图 `BookView::from_book`；`BookScalarView` trait 让生产代码与测试共享同一泛型出场管线。
 3. 风控门禁测试改用 trait 对象适配（risk_gates.rs）。
 
-## 4. 剖析（`sample <pid> 8 -file`，1ms 采样，fast FULL 稳态）
+## 4. 剖析（`sample &lt;pid&gt; 8 -file`，1ms 采样，fast FULL 稳态）
 
 | 符号（含栈权重） | base nofast (5754 样本) | step4 fast (6316) | step5 fast (5716) |
 | --- | --- | --- | --- |
@@ -56,6 +56,6 @@ core --no-config --engine --fee-model official --round-sec 900 --min-round-age 0
 ## 5. LuaJIT 评估结论（默认不实施）
 
 - 宿主：mlua 0.12.1，`features = ["lua54", "vendored", "send"]`（`user_layer/lua_runtime/Cargo.toml:16`）→ **stock Lua 5.4**（lua-src 551.0.2），非 LuaJIT。
-- 全部 10 个策略包扫描（`user_layer/strategies_lua/*/strategy.lua`）：**无** `goto`、`<const>/<close>` 属性、`& | ~ >> <<` 位运算符、`bit32/bit` 库、`string.pack/unpack`、`math.type/round`、`utf8.*`、`coroutine.close`；仅用 `//`（整除，LuaJIT 2.1 亦支持）；`luac -p`（5.5.1）全部通过。
+- 全部 10 个策略包扫描（`user_layer/strategies_lua/*/strategy.lua`）：**无** `goto`、`&lt;const&gt;/&lt;close&gt;` 属性、`& | ~ >> <<` 位运算符、`bit32/bit` 库、`string.pack/unpack`、`math.type/round`、`utf8.*`、`coroutine.close`；仅用 `//`（整除，LuaJIT 2.1 亦支持）；`luac -p`（5.5.1）全部通过。
 - 结论：**语法层全部 LuaJIT 兼容**。但语义层有两个风险点：LuaJIT 无整数子类型（`//` 返回浮点，依赖整数十进制展开的 `d.m // POW10[...]` 需行为审计）；GC/字符串驻留行为不同。且剖析显示求值地板主要在 **宿主编组与 pcall 开销**（`call_callback` 48%），LuaJIT 解释器只能小幅改善这部分。
 - 建议：维持 Lua 5.4；性能上优先做批量编组（§4），而非换 VM。

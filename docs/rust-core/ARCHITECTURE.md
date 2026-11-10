@@ -156,10 +156,10 @@ per-strategy 限额/分账。策略标签贯穿订单（`OrderRequest.strategy`�
 `Extension` 是**生命周期钩子**，**刻意不给交易能力**；`MarketPlugin` 才是"市场接入点"。
 新增一个市场 = 实现 `MarketPlugin` 并加一个 Cargo feature；新增一个生命周期钩子 = 实现 `Extension`。
 
-> `extensions/<name>/config.toml` 的 `[meta]` **已被内核读取并与已链接扩展校验**
+> `extensions/&lt;name&gt;/config.toml` 的 `[meta]` **已被内核读取并与已链接扩展校验**
 > （KI-11，见 `EXTENSION_GUIDE.md §5`）；`[market]`/`[risk]`/`[dependencies]`
 > 被识别但**无适配器读取**，启动时明确报告为「已声明未生效」。
-> 装配仍走 Cargo feature，选择仍走 `--market-plugin <name>`，无热加载。
+> 装配仍走 Cargo feature，选择仍走 `--market-plugin &lt;name&gt;`，无热加载。
 
 ## 6. 通用化边界（不做的事）
 
@@ -229,8 +229,8 @@ venue/feed/discovery/gamma 从内核**物理迁出**到扩展，行为逐笔等�
    `account_id` 的旧行读回为 `default`，重新写出的行带 `"default"`（读旧写新，
    无迁移脚本）。
 
-UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `account <id>`
-命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account <id>`；
+UI 呈现：WebUI 顶栏 `AccountSwitcher.vue`（经 gateway `accounts` / `account &lt;id&gt;`
+命令动词透传 `account.list` / `account.switch`）、TUI 命令栏 `account &lt;id&gt;`；
 凭证在像素层同样只显 `credentialsLoaded` 布尔。
 
 ## 7.7 系统性风控限额（E26，DEV_V0_3 §4）

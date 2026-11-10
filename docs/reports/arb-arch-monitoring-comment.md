@@ -11,7 +11,7 @@
 
 **监控 1（⑥-a，P0 升格）：风控读到错误 venue 余额放行的超额订单。**
 机制：两 venue bridge 各自 seed/realign 同一本 active 账簿（polymarket live.rs:91/440、kalshi executor.rs:265/480 → host.rs:462-494 → `set_balance` service.rs:2774-2796，单格 `venue_free` :1548），风控 `check_with_equity`（place_gated :11724-11725、place_pending :7767-7768）的裁决基准因此在两笔真实余额间震荡。
-核对：对每笔超额嫌疑订单 O——`jq 'select(.orderId=="O")' data/orders/orders.jsonl` 取名义价值；`grep 'core: venue cash reconcile'`（host.rs:480）与 `jq 'select(.ledgerRealigned != null)' reconcile.jsonl`（service.rs:8267，30s 间隔）找 O 提交前 ~10s 的余额改写现场；用 `data/ledger/<account>.journal.jsonl` 复原 O 所落 venue 的真实余额。
+核对：对每笔超额嫌疑订单 O——`jq 'select(.orderId=="O")' data/orders/orders.jsonl` 取名义价值；`grep 'core: venue cash reconcile'`（host.rs:480）与 `jq 'select(.ledgerRealigned != null)' reconcile.jsonl`（service.rs:8267，30s 间隔）找 O 提交前 ~10s 的余额改写现场；用 `data/ledger/&lt;account&gt;.journal.jsonl` 复原 O 所落 venue 的真实余额。
 阈值：复原余额 < O 名义价值，且改写来自另一 venue 的 realign（限「无挂单改簿」区间；有挂单时 host.rs:487-489 只报 drift 不改簿，不算）。
 升格动作：**升格 P0**，凭对账工单在 RFC 定稿前插队裁决。
 

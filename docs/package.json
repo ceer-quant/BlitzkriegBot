@@ -1,0 +1,15 @@
+{
+  "name": "blitzkrieg-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "pagefind": "^1.3.0",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-pagefind": "^0.4.13"
+  }
+}

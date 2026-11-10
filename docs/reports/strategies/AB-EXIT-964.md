@@ -68,7 +68,7 @@ TradeLine）。逐笔秒数在本 issue 内不可测（改引擎属禁止触碰�
 | 期望（USD/笔） | `trades.netPnlUsd / closed` |
 | 最大回撤 | `trades.maxDrawdownUsd`（正数幅值，越低越好） |
 | 单笔最大亏损 | tradeLines `netPnlUsd` 最小值 |
-| 尾亏 P95/P99 | tradeLines 亏损额分布（netPnlUsd<0 取绝对值），线性插值分位；逐窗 tradeLines 导出 `trades/<profile>/<臂>/<win>.trades.jsonl` |
+| 尾亏 P95/P99 | tradeLines 亏损额分布（netPnlUsd<0 取绝对值），线性插值分位；逐窗 tradeLines 导出 `trades/&lt;profile&gt;/<臂>/&lt;win&gt;.trades.jsonl` |
 | 平均持仓时长 | §1.1 声明的 round_slot 近似（floor/upper + settlementRatePct） |
 | 出场结构 | reason 直方图（Settlement/TimeExit/TakeProfit/TrailingStop/StrategySignal(含 thesis_death)/…） |
 | 入场饥饿证据 | 每窗 `ordersPlaced/ordersRejected/rejectionCauses/accountFreezes` |
@@ -76,7 +76,7 @@ TradeLine）。逐笔秒数在本 issue 内不可测（改引擎属禁止触碰�
 
 ## 4. 对照表与结论（模板 —— 真数据后补）
 
-> 脚本按本节结构自动生成 `ab-exit-964-<profile>.md`；本节先放结构，
+> 脚本按本节结构自动生成 `ab-exit-964-&lt;profile&gt;.md`；本节先放结构，
 > `待补` 处由真数据回填。
 
 ### 4.1 门禁
@@ -157,23 +157,23 @@ best_ask → `venue.WouldCross` 拒单 → 5 连拒触发内核账户冻结 → 
 
 ## 7. 可追溯性
 
-- run 目录（默认 `data/evolution/ab-exit-964/<UTCstamp>/`）：
+- run 目录（默认 `data/evolution/ab-exit-964/&lt;UTCstamp&gt;/`）：
   - `ab-exit-964.json` —— run manifest（语料 sha、窗口切片区间与 sha、
     臂声明、包 sha256、全部指标、判决）；
-  - `ab-exit-964-<profile>.md` —— 本模板的实数据渲染；
+  - `ab-exit-964-&lt;profile&gt;.md` —— 本模板的实数据渲染；
   - `windows/win-*.jsonl` —— 窗口切片（复跑输入，`slices-manifest.json`
     记录行区间 + sha256）；
-  - `runs/<profile>/<臂>/<win>/report-{1,2}.json` —— 双跑原始报告
+  - `runs/&lt;profile&gt;/<臂>/&lt;win&gt;/report-{1,2}.json` —— 双跑原始报告
     （旁置 `.cmd.txt` 防陈旧缓存）；
-  - `trades/<profile>/<臂>/<win>.trades.jsonl` —— tradeLines 导出
+  - `trades/&lt;profile&gt;/<臂>/&lt;win&gt;.trades.jsonl` —— tradeLines 导出
     （尾亏分布的原始证据）。
-- 重渲染：`node scripts/ab-exit-964.mjs --report-only <runDir>`。
+- 重渲染：`node scripts/ab-exit-964.mjs --report-only &lt;runDir&gt;`。
 
 ## 8. 待跑清单（真数据前置条件）
 
 1. **#962 合并**：`coin_flip_exit_lab` 进 `user_layer/strategies_lua/` 后，
    无需 `--b-pkg-dir` 直接跑（缺失时脚本 exit 2 拒绝，不降级）。
-2. **语料前置**：`python3 scripts/corpus/fix_resolutions.py --check <corpus>`
+2. **语料前置**：`python3 scripts/corpus/fix_resolutions.py --check &lt;corpus&gt;`
    （脚本已内联为门禁）；如需官方结算标签重钉：
    `relabel_official.py --apply-corpus`（需网络，操作员执行，脚本校验
    manifest sha256 防漂移）。

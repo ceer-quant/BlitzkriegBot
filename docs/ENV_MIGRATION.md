@@ -31,7 +31,7 @@
 ## 2. launcher 与内核 CLI 旗标（盘点，无改动）
 
 - **launcher 自加载**：`ui/ui_kit_panel/src/bin/blitzkrieg.rs:337` 在 tokio 启动前调
-  `load_cwd_env()` 读 `<cwd>/.env`；既存环境变量永远赢过文件（dotenv 惯例，与内核
+  `load_cwd_env()` 读 `&lt;cwd&gt;/.env`；既存环境变量永远赢过文件（dotenv 惯例，与内核
   CLI > env > file > default 读序一致，`ui/ui_kit_panel/src/env_file.rs:11`）。
 - **launcher 旗标 env**（scripts/ 面全部真实在读）：`BLITZKRIEG_UPGRADE_SOURCE`、
   `BLITZKRIEG_UPGRADE_DEADLINE`（`scripts/upgrade.sh`）、`BLITZKRIEG_SHIM_DIR`
@@ -108,7 +108,7 @@ issue 499）原样保留。**值只在 live `.env` 里，永不进入 PR、文�
 | `BLITZKRIEG_ALLOWED_ORIGINS` | `ui/ui_kit/src/web/gateway_run.rs:128` |
 | `BLITZKRIEG_ALERT_NOTIFY` | `ui/ui_kit/src/gateway/supervisor.rs:53`（崩溃告警通道） |
 | `BLITZKRIEG_UPDATE_CHECK` / `BLITZKRIEG_UPDATE_AUTO` / `BLITZKRIEG_UPDATE_INTERVAL_SECS` | `core/blitzkrieg_core/src/main.rs:1810-1835` |
-| `BUDGET_RATIO` / `MAX_BUDGET_USD`（含 `_<ACCOUNT_ID>` 后缀形） | `core/blitzkrieg_core/src/execution_policy.rs:65` |
+| `BUDGET_RATIO` / `MAX_BUDGET_USD`（含 `_&lt;ACCOUNT_ID&gt;` 后缀形） | `core/blitzkrieg_core/src/execution_policy.rs:65` |
 
 顺带补各扩展的 URL/轮询调优键（`KALSHI_API_URL`、`*_POLL_MS`、`*_NO_PROXY`、
 `PREDICT_JWT_TOKEN` 等——全部有 grep 读点）。`.env.example` 中没有任何过时键

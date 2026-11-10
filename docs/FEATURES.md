@@ -148,7 +148,7 @@ shadow_evolution.decide · shadow_evolution.proposals · shadow_evolution.set_au
 | 无停机热更新（`ArcSwap` 原子交换，按策略独立 cell） | ✅ 已验证（离线）——`ParamRegistry`，每策略一格 |
 | 安全锁一：参数渐变 ≤ ±5%（超限跳变被硬拒） | ✅ 已验证（离线）——报告 §2.3 梯度探测 |
 | 安全锁二：底层风控不可进化（`ImmutableConfig` 不可达） | ✅ 已验证（离线） |
-| 审计：按策略分文件 `data/evolution/<strategy>.jsonl` | ✅ 已验证（离线） |
+| 审计：按策略分文件 `data/evolution/&lt;strategy&gt;.jsonl` | ✅ 已验证（离线） |
 | `apply` / `rollback` 按策略独立 | ✅ 已验证（离线） |
 | **实况长期运行** | ⚠️ **未做**——生产从未开启（`enabled=false`），**在跑会话中从未真实进化过** |
 
@@ -173,7 +173,7 @@ B 组净盈亏 +12.66、胜率 +6.6pt、回撤不变，参数单调收敛一步�
 新增交易所 = 写一个 crate + 用 Cargo feature 注册，**内核不改一行**。
 指南：[`blitzkrieg/EXTENSION_GUIDE.md`](blitzkrieg/EXTENSION_GUIDE.md)。
 
-**扩展配置**（`extensions/<name>/config.toml`）：`[meta]` 已被内核读取并与已链接的
+**扩展配置**（`extensions/&lt;name&gt;/config.toml`）：`[meta]` 已被内核读取并与已链接的
 扩展做漂移校验（KI-11 / §59）；`[market]`/`[risk]`/`[dependencies]` 被识别但
 **无适配器读取**，启动时明确报告为 `declared_only`。**无热加载**。
 

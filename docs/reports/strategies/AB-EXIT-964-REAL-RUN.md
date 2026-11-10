@@ -153,9 +153,9 @@ C 臂清零口径（#962 声明）：hard 0 / tp 0(+tight) / trail 0(+tight) / d
 | tradeLines 导出：B × realistic | `trades/realistic/B/`（逐窗 .trades.jsonl） |
 | tradeLines 导出：C × realistic | `trades/realistic/C/`（逐窗 .trades.jsonl） |
 | 窗口切片（复跑输入） | `/Volumes/Hard Disk/BlitzkriegBot-worktrees/lab-964-real-data/data/evolution/ab-exit-964/20261107-171158Z/windows/` |
-| 逐窗双份回放报告 | `/Volumes/Hard Disk/BlitzkriegBot-worktrees/lab-964-real-data/data/evolution/ab-exit-964/20261107-171158Z/runs/<profile>/<arm>/<win>/{report-1,report-2}.json` |
+| 逐窗双份回放报告 | `/Volumes/Hard Disk/BlitzkriegBot-worktrees/lab-964-real-data/data/evolution/ab-exit-964/20261107-171158Z/runs/&lt;profile&gt;/&lt;arm&gt;/&lt;win&gt;/{report-1,report-2}.json` |
 
-每个数字 = run manifest 里对应字段的直出或四则组合；重新渲染：`node scripts/ab-exit-964.mjs --report-only <runDir>`。
+每个数字 = run manifest 里对应字段的直出或四则组合；重新渲染：`node scripts/ab-exit-964.mjs --report-only &lt;runDir&gt;`。
 
 ## 附录：全部窗口（#964 验收 3 —— 不挑窗口）
 

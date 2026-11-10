@@ -18,10 +18,10 @@
 | 0.3 | 现有 `build.rs` | 仅 2 个：`core/blitzkrieg_core/build.rs`（真做 provenance）、`ui/webapp/src-tauri/build.rs`（tauri-build，与本方案无关） | `find . -name build.rs -not -path '*/target/*'` | 复用并扩展 core 的注入逻辑，不另起一套 |
 | 0.4 | 已有注入的环境变量名 | `BLITZKRIEG_GIT_SHA`、`BLITZKRIEG_GIT_DIRTY`（12 位短 sha，`nogit` 兜底） | `core/blitzkrieg_core/build.rs` | **保留这两个名字**，新增 `_VERSION` / `_BUILD_DATE` / `_TARGET` |
 | 0.5 | 内核版本常量 | 已有：`pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");` | `core/blitzkrieg_core/src/lib.rs:56` | 复用，改为指向新的 `BUILD_INFO` |
-| 0.6 | 运行时 provenance 模块 | 已有 `ipc/build_info.rs`：`GIT_SHA` / `GIT_DIRTY` / `version_string()`=`<semver>+g<sha>` / `provenance_line()`，含 3 个测试 | `core/blitzkrieg_core/src/ipc/build_info.rs` | 改为再导出，4 个调用点（`server.rs`、`main.rs:1838`、`main.rs:1912`、`data_lock.rs` 测试）不动 |
+| 0.6 | 运行时 provenance 模块 | 已有 `ipc/build_info.rs`：`GIT_SHA` / `GIT_DIRTY` / `version_string()`=`&lt;semver&gt;+g&lt;sha&gt;` / `provenance_line()`，含 3 个测试 | `core/blitzkrieg_core/src/ipc/build_info.rs` | 改为再导出，4 个调用点（`server.rs`、`main.rs:1838`、`main.rs:1912`、`data_lock.rs` 测试）不动 |
 | 0.7 | **provenance 门禁的版本正则** | `/^\d+\.\d+\.\d+\+(?:g[0-9a-f]{4,40}|nogit)$/`——**不接受 `-rc.1` 之类的预发布后缀** | `scripts/lib/core-provenance.mjs` L31 | ⚠️ 冲突：一旦发 `0.2.1-rc.1`，门禁必红。发预发布前必须同改正则 |
 | 0.8 | CLI `blitzkrieg version` | **不存在**；且启动器**完全没有** `--version` 分支 | `grep -c '\-\-version' ui/ui_kit_panel/src/bin/blitzkrieg.rs` → `0` | ⚠️ `blitzkrieg --version` 现在会落进 `run_unified` **启动整套交易栈**（#228 的同形缺陷，在启动器这侧仍未修） |
-| 0.9 | 内核 `--version` | 已实现，且在 `parse_args` 之前短路 | `core/blitzkrieg_core/src/main.rs:1837` | 保留其单行格式 `<semver>+g<sha>`（门禁依赖） |
+| 0.9 | 内核 `--version` | 已实现，且在 `parse_args` 之前短路 | `core/blitzkrieg_core/src/main.rs:1837` | 保留其单行格式 `&lt;semver&gt;+g&lt;sha&gt;`（门禁依赖） |
 | 0.10 | IPC 方法表位置 | `core/blitzkrieg_core/src/ipc/schema.rs` 的 `pub mod method`；分发在 `server.rs:545` 的 `match method` | 已读 | 新方法加在这两处；**线上一律 camelCase** |
 | 0.11 | IPC 现有版本字段 | `core.ready` 已返回 `version` / `commit` / `dirty` | `server.rs` READY 分支 | `system.version` 与之不冲突，职责更全（含更新状态） |
 | 0.12 | 依赖可用性（HTTP/摘要/semver） | 锁里**已有** `reqwest 0.13.2`(rustls)、`sha2 0.10`、`semver 1.0.28`；但 **core / ui_kit / ui_kit_panel 都没有直接依赖它们** | `Cargo.lock`；三处 `Cargo.toml` | 新增直接依赖**不引入新依赖树**（复用同版本） |
@@ -120,15 +120,15 @@
 
 - 必须能被 `semver 1.x` 解析；`prerelease` 只允许 `rc.N`（本项目约定）。
 - 版本号**不带** `v`；tag **带** `v`。映射关系恒为 `tag = "v" + version`，由 V8-2 的守卫强制。
-- **构建元数据不进入版本号**。`<semver>+g<sha>` 里的 `+g<sha>` 是 provenance 后缀，由 `build_info` 在运行时拼接，**不写进 `Cargo.toml`**（`Cargo.toml` 里写 `+` 会让 cargo 拒绝或静默丢弃，且会让 semver 比较失去意义）。
+- **构建元数据不进入版本号**。`&lt;semver&gt;+g&lt;sha&gt;` 里的 `+g&lt;sha&gt;` 是 provenance 后缀，由 `build_info` 在运行时拼接，**不写进 `Cargo.toml`**（`Cargo.toml` 里写 `+` 会让 cargo 拒绝或静默丢弃，且会让 semver 比较失去意义）。
 
 ### 2.2 与版本哲学对齐
 
 | minor 奇偶 | 语义 | 分支 | tag 示例 |
 |---|---|---|---|
-| 单数（0.1、0.3） | **功能线**：可引入新能力、可破坏 | 从 `main` 开 `feat/*`，归并到下一个 `release/<minor>` | `v0.3.0` |
+| 单数（0.1、0.3） | **功能线**：可引入新能力、可破坏 | 从 `main` 开 `feat/*`，归并到下一个 `release/&lt;minor&gt;` | `v0.3.0` |
 | 双数（0.2、0.4） | **RC / 稳定线**：只允许修复与内务，**不接受新功能** | `release/0.2` 只接受 `fix/*`、`chore/*` | `v0.2.0`、`v0.2.1`… |
-| patch | 稳定修复：同一条线上的递增 | `release/<minor>` | `v0.2.1`、`v0.2.2` |
+| patch | 稳定修复：同一条线上的递增 | `release/&lt;minor&gt;` | `v0.2.1`、`v0.2.2` |
 
 当前路径（不发明历史）：
 
@@ -163,15 +163,15 @@ release/0.2 ───┴──●────●────●───┘     
 
 - `main` 的保护规则：**仅允许** `release/*`、`rc/*` 通过 PR 合并；禁止直推；禁止 force push；必须全绿。
 - `release/0.2` 的保护规则：仅允许 `fix/*`、`chore/*` 通过 PR 合并。
-- 每条补丁线一个长期分支，命名 `release/<major>.<minor>`；**一条线只对应一个**，不允许 `release/0.2` 与 `release/0.2-fix` 并存。
+- 每条补丁线一个长期分支，命名 `release/&lt;major&gt;.&lt;minor&gt;`；**一条线只对应一个**，不允许 `release/0.2` 与 `release/0.2-fix` 并存。
 - 短期分支只允许 `feat/*`、`fix/*`、`chore/*`、`docs/*`、`rc/*` 五种前缀。现行仓库里 `tmp-*`、`wip/*`、`trace/*`、`panel-*`、`e9-*` 等前缀一律为不合规，收敛方式见 V7-1（**不批量删除**）。
-- 每个 patch 必须打 tag 且 tag 必须带注释（`git tag -a`），tag 消息首行 `BlitzkriegBot <version>`。
+- 每个 patch 必须打 tag 且 tag 必须带注释（`git tag -a`），tag 消息首行 `BlitzkriegBot &lt;version&gt;`。
 
 ### 2.5 tag 规范
 
 | 项 | 规范 |
 |---|---|
-| 形式 | `v<major>.<minor>.<patch>[-rc.N]` |
+| 形式 | `v&lt;major&gt;.&lt;minor&gt;.&lt;patch&gt;[-rc.N]` |
 | 类型 | 附注 tag（`-a`），必须带签名可选项（`-s`，有 GPG 时推荐） |
 | 指向 | **只指向 `main` 或 `release/*` 上的合并提交**，不指向 `feat/*`/`fix/*` |
 | 保护 | tags 保护规则：`v*` 禁止删除与强制推送 |
@@ -552,7 +552,7 @@ mod tests {
 }
 ```
 
-> **`git_dirty` 为什么单独一位而不是拼进版本串**：`<semver>+g<sha>` 要能在 CI 日志、本地构建、部署现场之间**逐字节**比较；`-dirty` 后缀会让每次比较都失败，于是门禁会开始「合理地」变红——这正是 #172 的成因。
+> **`git_dirty` 为什么单独一位而不是拼进版本串**：`&lt;semver&gt;+g&lt;sha&gt;` 要能在 CI 日志、本地构建、部署现场之间**逐字节**比较；`-dirty` 后缀会让每次比较都失败，于是门禁会开始「合理地」变红——这正是 #172 的成因。
 
 ### 3.4 接线：内核与启动器都从 `blitzkrieg-build-info` 取值
 
@@ -594,7 +594,7 @@ pub fn provenance_line() -> String { BUILD_INFO.provenance_line() }
 | 调用点 | 期望 |
 |---|---|
 | `core/blitzkrieg_core/src/ipc/server.rs` READY 分支（`build` / `commit` / `dirty`） | 输出不变 |
-| `core/blitzkrieg_core/src/main.rs:1838`（`--version` 单行输出） | `<semver>+g<sha>` |
+| `core/blitzkrieg_core/src/main.rs:1838`（`--version` 单行输出） | `&lt;semver&gt;+g&lt;sha&gt;` |
 | `core/blitzkrieg_core/src/main.rs:1912`（启动横幅 `provenance_line()`） | 含版本、sha、dirty/clean |
 | `core/blitzkrieg_core/src/data_lock.rs` 测试（`rec.version.starts_with(CORE_VERSION)`） | 仍通过 |
 | `scripts/lib/core-provenance.mjs`（驱动二进制的门禁） | `VERSION_RE` 仍匹配 |
@@ -663,7 +663,7 @@ blitzkrieg version [--json] [--core] [--socket <path>]
 必须做的两件事：
 
 1. 新增 `version` 子命令（本节）。
-2. **同时**给启动器加 `--version` / `-V` / `-v` 短路（返回单行 `<semver>+g<sha>`，与内核格式一致、退出码 0）。这不是附赠功能：没有它，`blitzkrieg --version` 会拉起一个交易栈——正是 #228 记录过的同形风险。加上之后，`--version` 与 `version` 两个入口都安全，且 `--version` 的单行格式与内核一致，门禁与运维脚本可以统一解析。
+2. **同时**给启动器加 `--version` / `-V` / `-v` 短路（返回单行 `&lt;semver&gt;+g&lt;sha&gt;`，与内核格式一致、退出码 0）。这不是附赠功能：没有它，`blitzkrieg --version` 会拉起一个交易栈——正是 #228 记录过的同形风险。加上之后，`--version` 与 `version` 两个入口都安全，且 `--version` 的单行格式与内核一致，门禁与运维脚本可以统一解析。
 
 ### 4.3 实现（`ui/ui_kit_panel/src/bin/blitzkrieg.rs`）
 
@@ -1036,7 +1036,7 @@ else if (updateAvailable) console.log('  note 有新版本可用（这是发布�
 
 1. `ui/ui_kit_panel/src/app.rs`：`enum Tab` 加 `Settings`，并同步 `titles()` / `index()` / `next()` 三个方法（现状这三处各有一份手写映射——加变体时漏改任何一处都会让 Tab 循环错位）。
 2. `ui/ui_kit_panel/src/lib.rs`：Tab 快捷键映射加 `Some("6") | Some("settings") => Tab::Settings`；主循环加一次 `system_version` 拉取（低频：与快照同周期即可，版本不会在运行中变化）。
-3. `ui/ui_kit_panel/src/ui.rs`：新增 `fn render_settings(...)`——门禁按这个名字查找（`fn render_<tab>`），命名必须精确。
+3. `ui/ui_kit_panel/src/ui.rs`：新增 `fn render_settings(...)`——门禁按这个名字查找（`fn render_&lt;tab&gt;`），命名必须精确。
 
 ```rust
 // ui/ui_kit_panel/src/app.rs —— Tab 三处映射同步（节选）
@@ -2548,9 +2548,9 @@ on:
 
 | 编号 | 目标 | 关键任务 | 依赖 |
 |---|---|---|---|
-| V2-1 | 堵住启动器的 `--version` 坑 | `tokio_main` 新增 `--version`/`-V`/`-v` 短路（单行 `<semver>+g<sha>`，退出码 0）；加一条测试断言它**不**启动任何进程（现状 0.8） | V1-4 |
+| V2-1 | 堵住启动器的 `--version` 坑 | `tokio_main` 新增 `--version`/`-V`/`-v` 短路（单行 `&lt;semver&gt;+g&lt;sha&gt;`，退出码 0）；加一条测试断言它**不**启动任何进程（现状 0.8） | V1-4 |
 | V2-2 | `version` 子命令 | `run_version_subcommand`（`--json` / `--core` / `--socket` / `--help`）；退出码 0/1/2 三分；`HELP_TEXT` 补一行 | V2-1 |
-| V2-3 | IPC 客户端方法 | `IpcClient::system_version()` + `SystemVersionView`（含 `update_available: Option<bool>` 三态） | V1-4 |
+| V2-3 | IPC 客户端方法 | `IpcClient::system_version()` + `SystemVersionView`（含 `update_available: Option&lt;bool&gt;` 三态） | V1-4 |
 | V2-4 | 格式钉住 | 三个格式（人读文本 / `--json` / `--version` 单行）各写一条快照式测试；`--json` 的键名测试 | V2-2, V2-3 |
 
 ### E-V3 `system.version` IPC（P0）
@@ -2629,7 +2629,7 @@ on:
 | F1 | `cargo metadata` 里默认成员版本全部相等且等于根版本 | `node scripts/version-guard.mjs` |
 | F2 | `blitzkrieg version --json` 的 `version` 与 F1 相同 | 脚本解析 |
 | F3 | `blitzkrieg version --core --json` 的 `version`/`gitHash` 与运行中内核一致 | 起内核后解析 |
-| F4 | `blitzkrieg --version` 输出单行且匹配 `<semver>+g<sha>`，退出码 0，**未启动任何进程** | 断言 stdout 单行 + `pgrep blitzkrieg-core` 为空 |
+| F4 | `blitzkrieg --version` 输出单行且匹配 `&lt;semver&gt;+g&lt;sha&gt;`，退出码 0，**未启动任何进程** | 断言 stdout 单行 + `pgrep blitzkrieg-core` 为空 |
 | F5 | `system.version` 的 12 个字段齐全且类型正确 | JSON schema 断言 |
 | F6 | TUI 第 6 个 tab 显示版本 4 项 + 更新三态 | `tui-demo-check.mjs` 风格的 PTY 断言 |
 | F7 | WebUI 设置页第 5 块显示同 4 项 + 三态徽章 | `version-panel.check.mjs` |
@@ -2646,7 +2646,7 @@ on:
 |---|---|---|---|
 | N1 | 把某个成员的 `version.workspace = true` 改回 `version = "9.9.9"` | `version-guard.mjs` 的成员检查 + `cargo metadata` 比对 | 唯一来源的头号敌人就是「顺手写一个」 |
 | N2 | 把根版本改成 `0.2.5` 但不重建 | `version-guard.mjs` 的第 4 项（二进制自述 vs 仓库） | 证明「盘上/源码」两处真的在比对，而不是各自自言自语 |
-| N3 | 把 `version_string()` 的格式改成 `<semver> <sha>`（空格代替 `+`） | `core-provenance.mjs` 的 `VERSION_RE` 门禁 + `build_info` 的格式单测 | 这是 #179 的原始契约，破了会让所有门禁失去「在测哪份代码」的能力 |
+| N3 | 把 `version_string()` 的格式改成 `&lt;semver&gt; &lt;sha&gt;`（空格代替 `+`） | `core-provenance.mjs` 的 `VERSION_RE` 门禁 + `build_info` 的格式单测 | 这是 #179 的原始契约，破了会让所有门禁失去「在测哪份代码」的能力 |
 | N4 | 让 `BUILD_INFO.version` 硬编码成 `"0.2.1"`（不走 `env!`） | V1-3 的「不是占位符」单测在 bump 后仍绿 —— 所以**额外**需要一条 diff 检查：`build_info/src/lib.rs` 中不得出现 `"0.` 字面量 | 硬编码是唯一来源最隐蔽的破坏方式：它让所有测试继续绿 |
 | N5 | `system_version_payload` 把「未检查」写成 `Some(false)` | `the_payload_is_three_state` 单测 + WebUI 徽章文案断言 | 把「不知道」画成「已是最新」是这份设计最想消灭的谎言 |
 | N6 | `is_newer` 改成字符串比较 | `comparison_is_semver_not_lexicographic`（`0.10.0` vs `0.9.0`） | 字符串比较会静默地永远不提示 0.10 系 |
@@ -2678,7 +2678,7 @@ on:
 | # | 禁止 | 理由 |
 |---|---|---|
 | P1 | 在任何 crate 的 `Cargo.toml` 里写死 `version = "..."` | 唯一来源立刻变成两处；N1 就是这条的守卫 |
-| P2 | 在 `Cargo.toml` 里写 `+g<sha>` 之类的构建元数据 | cargo 不接受这种版本号；`+` 后缀只属于运行时的自述字符串 |
+| P2 | 在 `Cargo.toml` 里写 `+g&lt;sha&gt;` 之类的构建元数据 | cargo 不接受这种版本号；`+` 后缀只属于运行时的自述字符串 |
 | P3 | 把版本号或 sha 硬编码进 Rust 源码 | 最隐蔽的漂移方式（N4）。必须经 `env!()` 取自盖章 |
 | P4 | 修改 `version_string()` 的格式而不改 `core-provenance.mjs` | 所有门禁失去「在测哪份代码」的能力（#179 的原始事故） |
 | P5 | 让 `build.rs` 因拿不到 git 而构建失败 | 源码 tarball / 无 git 的镜像必须能构建；`nogit` 是可见的诚实答案 |
@@ -2707,7 +2707,7 @@ on:
 | P18 | 从 `feat/*` / `fix/*` 直接打 tag | tag 必须落在 `release/*` 或 `main`；否则发布的是「没有分支拥有」的代码（V8-2 的守卫） |
 | P19 | 复用已发布的 tag（删除后重打、或覆盖 Release 资产） | 一个版本号必须永远指向同一批字节（N14） |
 | P20 | 批量删除存量分支（如 `git branch | grep -v main | xargs -r git branch -D`） | 仓库里有未合并的工作；分支收敛必须逐个分类 + 人工确认（V8-1） |
-| P21 | 新增 `release/0.2-fix`、`release/0.2.1` 之类的分支 | 一条线只对应一个 `release/<major>.<minor>`；同线多分支会让「哪个是权威」变成考古 |
+| P21 | 新增 `release/0.2-fix`、`release/0.2.1` 之类的分支 | 一条线只对应一个 `release/&lt;major&gt;.&lt;minor&gt;`；同线多分支会让「哪个是权威」变成考古 |
 | P22 | 让 tag 触发的工作流复用 `contents: write` 给所有作业 | 权限最小化；只有 `publish`/`release` 需要写 |
 
 ### 11.4 范围红线（本次明确不动）
@@ -2746,9 +2746,9 @@ on:
 
 | 日期 | 变更 | 影响 |
 |---|---|---|
-| 2026-09-25 | 建立：`<semver>+g<sha>` 自述格式被定为门禁契约 | 与 `scripts/lib/core-provenance.mjs` 的 `VERSION_RE` 双向绑定；改任一侧必须同时改另一侧（V8-5） |
+| 2026-09-25 | 建立：`&lt;semver&gt;+g&lt;sha&gt;` 自述格式被定为门禁契约 | 与 `scripts/lib/core-provenance.mjs` 的 `VERSION_RE` 双向绑定；改任一侧必须同时改另一侧（V8-5） |
 | 2026-09-25 | 建立：`system.version` 的 `updateAvailable` 三态 | WebUI 徽章与 TUI 状态行都依赖 `null ≠ false` |
-| 2026-09-25 | 建立：`<semver>+g<sha>` **不带** `-dirty` 后缀，脏状态走 `gitDirty` 布尔 | 保持版本串可逐字节比较（`build.rs` 已有注释记录这一决定） |
+| 2026-09-25 | 建立：`&lt;semver&gt;+g&lt;sha&gt;` **不带** `-dirty` 后缀，脏状态走 `gitDirty` 布尔 | 保持版本串可逐字节比较（`build.rs` 已有注释记录这一决定） |
 | 2026-09-25 | 建立：更新检查/自动更新默认关闭，且关闭时**零出站连接** | 任何降低这项保证的改动都必须在 12.3 留一行，并在 10.2 补一条反向验收 |
 | 2026-09-25 | 建立：安装由启动器执行，内核永不替换自身二进制 | 内核与启动器的职责边界；越界即为 P12 |
 

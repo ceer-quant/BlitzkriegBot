@@ -68,7 +68,7 @@
 
 按收益排序（样本占比见 §2）：
 1. **键预计算/interest 缓存**（~10-13%）：`kline_preview_last_ms` 键从每轮 `(String, KlineInterval)` clone+双 SipHash 改为——Kline 聚合器已按 bar 维护（aggregator.rs:216 的 `self.bars` BTreeMap），把"上次推送时间"直接挂在聚合器的 bar 值上，或用 `(u64 symbol_hash, u8 interval)` 键。消灭 #3 与 #5。
-2. **克隆改借用/事件瘦身**（~25-30%）：`kline_current_bars` 返回 `Vec<&Kline>` 或只返回 `(symbol, interval, open/high/low/close, is_closed)` 的 Copy 视图（#390 已对 BookView 做过同型改造，有先例与测试范式）；`Event::KlineUpdate` 若必须保留完整 Kline，改为 `Arc<Kline>` 或瘦身枚举，消灭 #1/#2 的大部分与 #6。
+2. **克隆改借用/事件瘦身**（~25-30%）：`kline_current_bars` 返回 `Vec<&Kline>` 或只返回 `(symbol, interval, open/high/low/close, is_closed)` 的 Copy 视图（#390 已对 BookView 做过同型改造，有先例与测试范式）；`Event::KlineUpdate` 若必须保留完整 Kline，改为 `Arc&lt;Kline&gt;` 或瘦身枚举，消灭 #1/#2 的大部分与 #6。
 3. **节拍放宽**：`FAST_KLINE_MIN_MS`（service.rs:1412，现 250ms）在 replay_sched 下本可放宽——但因 P0 已整体跳过，此项只对 live 有意义，**不动**。
 
 - **预期加速**：三项合计把 preview 家族成本砍 ~70-85%，对应全量回放 ~1.5-2×；但均被 P0 包含，仅作 P0 不可行时的替代路线。
