@@ -7,7 +7,6 @@
  */
 import { computed } from 'vue'
 import { usePanelStore } from '@/stores/panel'
-import { useAccountBalance } from '@/lib/account-balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
 import { signedMoney } from '@/lib/format'
 import Card from '@/components/ui/card/Card.vue'
@@ -23,14 +22,9 @@ const props = defineProps<{
 
 const store = usePanelStore()
 
-/** 账本口径净利：balance − seededTotal（操作员裁决 2026-11-08：账本流水=唯一真相） */
-const accountBalance = computed(() => {
-  const row = store.activeAccountRow
-  if (!row) return null
-  return useAccountBalance(row)
-})
-
-const net = computed(() => accountBalance.value?.net ?? 0)
+/** 累计净 PnL（账本口径 = balance + reserved − openingEquity，issue #1046）。
+ * 唯一读取入口：老内核/未上报期初权益时为 null，页面显示「未知」。 */
+const net: number | null = store.cumulativeNetPnl
 
 /** 已平仓笔数 + 权益曲线行：按显示账户 + 显示账户绑定的 venue 过滤，两页保持一致 */
 const closedRows = computed(() => {
@@ -46,7 +40,8 @@ const curveRows = computed(() => closedRows.value)
   <Card>
     <CardHeader label="累计净 PnL">
       <template #title>
-        <span class="stat-num text-[15px]" :class="net >= 0 ? 'text-up' : 'text-down'">
+        <span v-if="net === null" class="stat-num text-[15px] text-faint-fg">未知</span>
+        <span v-else class="stat-num text-[15px]" :class="net >= 0 ? 'text-up' : 'text-down'">
           <RollingNumber :value="signedMoney(net)" />
         </span>
       </template>
@@ -54,6 +49,6 @@ const curveRows = computed(() => closedRows.value)
         <Badge variant="default" dot><RollingNumber :value="count" /> 笔</Badge>
       </template>
     </CardHeader>
-    <EquityCurve :rows="curveRows" :height="height ?? 196" :total="net" />
+    <EquityCurve :rows="curveRows" :height="height ?? 196" :total="net ?? undefined" />
   </Card>
 </template>

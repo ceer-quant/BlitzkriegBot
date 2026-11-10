@@ -211,6 +211,14 @@ export const usePanelStore = defineStore('panel', () => {
   const connected = computed(() => snapshot.value?.connected ?? plugins.value?.connected ?? false)
 
   /**
+   * 累计净 PnL（账本口径 = balance + reserved − openingEquity），issue #1046。
+   * 唯一读取入口：老内核/未上报期初权益时为 null，页面须显示「未知」，
+   * 禁止回退到成交折叠。所有页面（PnLCurveCard、StatsRow、HftPage 累计头
+   * 卡、TUI）都从此处读，天然四处相等。
+   */
+  const cumulativeNetPnl = computed(() => snapshot.value?.balance?.cumulativeNetPnl ?? null)
+
+  /**
    * Closed-trade rows with cross-run id collisions collapsed. `hft-N` restarts
    * at 1 on every core boot while the trade log is append-only, so a long-lived
    * log holds several rows per id; summing the raw list over-counts trades and
@@ -532,7 +540,7 @@ export const usePanelStore = defineStore('panel', () => {
 
   return {
     snapshot, plugins, error, loading, lastUpdated,
-    connected, strategyRows, tradeRows, feedAt, sessionExpired,
+    connected, cumulativeNetPnl, strategyRows, tradeRows, feedAt, sessionExpired,
     navRequest, blueprintPreload,
     activeAccount, accounts, setAccounts, setDisplayAccount, clearAccountScoped, refreshAccounts, activeAccountVenue, activeAccountRow, setAccountRounds,
     displayAccount, displayVenue,

@@ -313,9 +313,9 @@ export interface CumulativeTradeSummary {
   wins?: number
   losses?: number
   winRate?: number
-  totalGrossPnl?: number
+  attributedGrossPnl?: number
   totalFees?: number
-  totalNetPnl?: number
+  attributedNetPnl?: number
   avgHoldTimeSec?: number
   best?: number
   worst?: number
@@ -363,6 +363,20 @@ export interface Snapshot {
      * LIVE and on older cores — treat missing as "unknown", never as zero.
      */
     seed?: number | null
+    /**
+     * Account opening equity — the principal cumulative net PnL is measured
+     * against. DRY: equals `seed`. LIVE: the venue's first reported equity,
+     * persisted exactly once. Absent until known — treat as "unknown", never
+     * as zero (issue #1046).
+     */
+    openingEquity?: number | null
+    /**
+     * Cumulative net PnL = balance + reserved − openingEquity (the single
+     * ledger truth, issue #1046). Absent when openingEquity is unknown — never
+     * derived from trade folding. Render "未知" when null, never fall back to
+     * a trade-fold sum.
+     */
+    cumulativeNetPnl?: number | null
   } | null
   round?: Round | null
   positions?: Position[]

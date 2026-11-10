@@ -433,9 +433,9 @@ const cumStats = computed(() => {
   if (s && (s.totalTrades ?? 0) > 0) {
     return {
       total: s.totalTrades ?? rows.length,
-      gross: s.totalGrossPnl ?? 0,
+      gross: s.attributedGrossPnl ?? 0,
       fees: s.totalFees ?? 0,
-      net: s.totalNetPnl ?? 0,
+      net: s.attributedNetPnl ?? 0,
       wins: s.wins ?? 0,
       losses: s.losses ?? 0,
       winRate: winRatePct(s.winRate),
@@ -1237,10 +1237,12 @@ const journalOpen = ref(false)
             <div class="stat-num mt-1 text-[22px] leading-none"><RollingNumber :value="cumStats.total" /></div>
           </div>
           <div>
-            <div class="label-micro">累计利润（扣费）</div>
-            <div class="stat-num mt-1 text-[22px] leading-none" :class="cumStats.net >= 0 ? 'text-up' : 'text-down'">
-              <RollingNumber :value="signedMoney(cumStats.net)" />
-            </div>
+            <div class="label-micro">累计净 PnL（账本口径）</div>
+          <div class="stat-num mt-1 text-[22px] leading-none"
+            :class="store.cumulativeNetPnl === null ? 'text-faint-fg' : (store.cumulativeNetPnl >= 0 ? 'text-up' : 'text-down')">
+            <span v-if="store.cumulativeNetPnl === null">未知（未记录期初权益）</span>
+            <span v-else><RollingNumber :value="signedMoney(store.cumulativeNetPnl)" /></span>
+          </div>
           </div>
           <div>
             <div class="label-micro">累计胜率</div>
