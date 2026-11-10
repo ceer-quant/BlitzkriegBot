@@ -272,10 +272,7 @@ fn unfreeze_persist_failure_keeps_gate() {
 
     // Unfreeze must fail because persist cannot write (no config path).
     let r = c.unfreeze_account("default", "operator", now);
-    assert!(
-        r.is_err(),
-        "unfreeze must refuse when persist cannot write"
-    );
+    assert!(r.is_err(), "unfreeze must refuse when persist cannot write");
 
     // The gate is still there — nothing cleared, nothing assumed.
     assert!(
@@ -301,8 +298,11 @@ fn unfreeze_writes_env_back_and_entries_stay_open_after_rebuild() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("test-1062-unfreeze-{}-{}", std::process::id(), nanos));
+    let root = std::env::temp_dir().join(format!(
+        "test-1062-unfreeze-{}-{}",
+        std::process::id(),
+        nanos
+    ));
     std::fs::create_dir_all(&root).expect("temp root");
     let env_path = root.join(".env");
     let accounts_path = root.join("accounts.toml"); // deliberately ABSENT

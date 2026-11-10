@@ -230,7 +230,12 @@ fn manual_freeze_not_lifted_by_venue_health() {
 #[test]
 fn manual_freeze_after_an_auto_freeze_is_never_self_healed() {
     let mut c = core();
-    c.freeze_account_auto("default", "venue rejecting (3)".into(), Some("venue-A"), 1_000_000);
+    c.freeze_account_auto(
+        "default",
+        "venue rejecting (3)".into(),
+        Some("venue-A"),
+        1_000_000,
+    );
     assert!(
         c.account_freeze_reason("default", now_ms()).is_some(),
         "auto-frozen"
@@ -312,7 +317,12 @@ fn auto_lift_still_works_seventy_two_hours_later() {
 #[test]
 fn re_freeze_after_auto_lift_carries_new_reason() {
     let mut c = core();
-    c.freeze_account_auto("default", "cause A: sweep failed".into(), Some("venue-A"), 1_000);
+    c.freeze_account_auto(
+        "default",
+        "cause A: sweep failed".into(),
+        Some("venue-A"),
+        1_000,
+    );
     assert!(c.account_freeze_reason("default", now_ms()).is_some());
     c.auto_lift_if_venue_healthy(
         "default",
@@ -323,14 +333,15 @@ fn re_freeze_after_auto_lift_carries_new_reason() {
         c.account_freeze_reason("default", now_ms()).is_some(),
         "one millisecond short of the window must not lift"
     );
-    c.auto_lift_if_venue_healthy(
-        "default",
-        Some("venue-A"),
-        1_000 + FREEZE_AUTO_LIFT_MIN_MS,
-    );
+    c.auto_lift_if_venue_healthy("default", Some("venue-A"), 1_000 + FREEZE_AUTO_LIFT_MIN_MS);
     assert!(c.account_freeze_reason("default", now_ms()).is_none());
 
-    c.freeze_account_auto("default", "cause B: self-check failed".into(), Some("venue-A"), 3_000);
+    c.freeze_account_auto(
+        "default",
+        "cause B: self-check failed".into(),
+        Some("venue-A"),
+        3_000,
+    );
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("cause B: self-check failed"),

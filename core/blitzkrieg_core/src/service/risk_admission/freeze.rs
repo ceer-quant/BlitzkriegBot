@@ -303,7 +303,13 @@ impl Core {
     /// 闸门，优先级最低，仅在账户当前无同等或更高优先级闸门时上锁；场地
     /// 健康探针可解（仅此一条），`Manual`/`DailyLoss` 绝不自解。不登记任何
     /// 持久态。
-    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, venue: Option<&str>, now_ms: i64) {
+    pub(crate) fn freeze_account_auto(
+        &mut self,
+        account: &str,
+        reason: String,
+        venue: Option<&str>,
+        now_ms: i64,
+    ) {
         let _ = self.set_account_gate(
             account,
             reason.clone(),
@@ -413,7 +419,12 @@ impl Core {
     /// `venue` 是导致冻结的场地。只有当闸门的 venue 与 `venue` 匹配（或闸门
     /// 未记录 venue，即未知来源）时才会解冻，避免场地 A 的冻结被场地 B 的
     /// 自愈误解。
-    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, venue: Option<&str>, now_ms: i64) {
+    pub(crate) fn auto_lift_if_venue_healthy(
+        &mut self,
+        account: &str,
+        venue: Option<&str>,
+        now_ms: i64,
+    ) {
         let Some(gate) = self.account_gate(account) else {
             return;
         };

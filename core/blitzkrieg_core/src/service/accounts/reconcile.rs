@@ -81,12 +81,7 @@ impl Core {
             // #532 routing): same contract as `freeze_account` — new entries
             // refused, closes keep flowing.
             for account in self.accounts.account_ids_bound_to_venue(venue) {
-                self.freeze_account_auto(
-                    &account,
-                    message.clone(),
-                    Some(venue),
-                    ts,
-                );
+                self.freeze_account_auto(&account, message.clone(), Some(venue), ts);
             }
             // No bound account (unbound deployments, dry tests): keep the
             // legacy global freeze so the failure is never silently dropped.
@@ -351,11 +346,7 @@ impl Core {
         // debounce），`Manual`/`DailyLoss` 闸门对此无感。auto_lift_if_venue_healthy
         // 内部已按 reason_kind 过滤，这里只需遍历全部闸门。
         for account in self.account_gates().keys().cloned().collect::<Vec<_>>() {
-            self.auto_lift_if_venue_healthy(
-                account.as_str(),
-                Some(venue),
-                snap.now_ms,
-            );
+            self.auto_lift_if_venue_healthy(account.as_str(), Some(venue), snap.now_ms);
         }
         // Ledger + position effects for any gap fills the OME just applied.
         for gap in report.actions.iter().filter_map(|a| match a {
