@@ -312,6 +312,47 @@ fn auto_lift_still_works_seventy_two_hours_later() {
     );
 }
 
+/// #1058 T19：场地 A 的冻结必须不被场地 B 的自愈误解。闸门
+/// venue=Some("venue-A")，即使过了 debounce，传入 Some("venue-B") 也必须
+/// 保持冻结——两边都有值且不匹配时拒绝解冻。
+#[test]
+fn auto_lift_venue_mismatch_does_not_lift() {
+    let mut c = core();
+    let t0 = 1_700_000_000_000;
+    c.freeze_account_auto("default", "venue rejecting".into(), Some("venue-A"), t0);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "auto-frozen on venue-A"
+    );
+    c.auto_lift_if_venue_healthy(
+        "default",
+        Some("venue-B"),
+        t0 + FREEZE_AUTO_LIFT_MIN_MS + 60_000,
+    );
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "venue-B 的自愈必须不碰 venue-A 的冻结"
+    );
+}
+
+/// #1058 T20：未绑定 venue 的自动冻结（gate.venue=None）仍可自愈。调用方
+/// 传 None 时不做场地等值比较，过了 debounce 即解除。
+#[test]
+fn auto_lift_unbound_venue_still_heals() {
+    let mut c = core();
+    let t0 = 1_700_000_000_000;
+    c.freeze_account_auto("default", "venue rejecting".into(), None, t0);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "auto-frozen without a bound venue"
+    );
+    c.auto_lift_if_venue_healthy("default", None, t0 + FREEZE_AUTO_LIFT_MIN_MS + 60_000);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_none(),
+        "未绑定 venue 的闸门在 venue 健康时仍可自愈"
+    );
+}
+
 /// After an auto-lift, a fresh failure re-freezes with the NEW trigger's
 /// reason — the heal must not leave a stale cause in the panel's freeze book.
 #[test]
