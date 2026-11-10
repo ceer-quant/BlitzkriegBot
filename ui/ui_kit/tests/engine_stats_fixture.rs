@@ -81,8 +81,7 @@ fn the_kernels_real_engine_stats_payload_deserializes_into_the_view() {
     assert_eq!(v.account_gates.len(), 1);
     assert_eq!(v.account_gates[0].account, "global");
     assert!(v.account_gates[0].blocked);
-    assert!(v
-        .account_gates[0]
+    assert!(v.account_gates[0]
         .reason
         .as_deref()
         .unwrap_or_default()

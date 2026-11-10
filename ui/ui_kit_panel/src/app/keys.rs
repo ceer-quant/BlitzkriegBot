@@ -94,9 +94,9 @@ impl App {
                         Action::None
                     }
                 },
-	                _ => Action::None,
-	            };
-	        }
+                _ => Action::None,
+            };
+        }
         // #1059: the `U` unfreeze overlay owns the keys while up — ↑/↓ move
         // the cursor over frozen rows, Enter sends `account.unfreeze` for the
         // selected one, Esc/`U` close.
@@ -143,7 +143,7 @@ impl App {
                 _ => Action::None,
             };
         }
-	        // Command bar owns input while focused.
+        // Command bar owns input while focused.
         if self.input_active {
             match key.code {
                 KeyCode::Enter => {
@@ -332,7 +332,9 @@ impl App {
                 if self.unfreeze_doc.is_none() {
                     self.unfreeze_busy = true;
                     // Empty account_id = "fetch the gate book", not an unfreeze.
-                    Action::AccountUnfreeze { account_id: String::new() }
+                    Action::AccountUnfreeze {
+                        account_id: String::new(),
+                    }
                 } else {
                     Action::None
                 }

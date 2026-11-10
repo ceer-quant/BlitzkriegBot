@@ -115,7 +115,7 @@ const freezeOperateId = ref<string | null>(null)
 
 // 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
 // 取 blocked === true 的条目。
-    const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
+const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   const gates = store.snapshot?.stats?.accountGates
   return gates
     ? gates

@@ -111,7 +111,9 @@ pub enum Action {
     /// Fresh client of its own; the reply is the kernel's
     /// `AccountUnfreezeResult` (`unfrozen`/`entriesAllowed`), re-read so the
     /// panel never guesses that unfreeze "succeeded".
-    AccountUnfreeze { account_id: String },
+    AccountUnfreeze {
+        account_id: String,
+    },
 }
 
 /// How far the self-check has got. Advances as snapshots finally arrive with

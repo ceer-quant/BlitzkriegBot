@@ -3,9 +3,7 @@
 //! kill banner, confirm bar, command bar and log pane.
 
 use super::evolution::render_evolution;
-use super::overlays::{
-    render_accounts, render_help, render_net_check, render_unfreeze,
-};
+use super::overlays::{render_accounts, render_help, render_net_check, render_unfreeze};
 use super::panes::{
     render_decisions, render_orders, render_overview, render_plugins, render_positions,
     render_trades,
