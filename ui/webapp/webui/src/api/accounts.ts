@@ -139,7 +139,7 @@ export interface AccountStrategiesSetDoc {
 
 // ── 账户级急冻（account.freeze，issue 943 解锁面）───────────────────────────
 // PR G 的写动词（网关 /api/account-freeze/set 路由已存在）：冻结 = 该账户拒
-// 一切新单（手动+策略 entry）、平仓照放；会话级不持久化。面板常态只读
+  // 一切新单（手动+策略 entry）、平仓照放；本会话不持久化。面板常态只读
 // stats.accountFreezes；这里只补「解锁」半边 —— 冻结的下单入口是自动的风控
 // 后果，手冻入口留在行情/账户卡，设置页不自造重复闸门。
 

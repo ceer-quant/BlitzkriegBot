@@ -17,7 +17,7 @@
  * 落盘→重读→落审计后才应答），不新增任何旁路。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw, LockOpen } from 'lucide-vue-next'
+import { RefreshCw, LockOpen, Minus } from 'lucide-vue-next'
 import {
   api,
   type ExecutionPolicyListDoc, type ExecutionPolicySectionDoc,
@@ -102,31 +102,32 @@ async function switchAccount(id: string): Promise<void> {
   await loadPolicy()
 }
 
-// ── 账户冻结解冻（issue 943，红色横幅的另一半）──────────────────────────────
-// 当前冻结中的账户列表（来源 stats.accountFreezes：`accountId → reason`，
-// 与 lib/safety 的红横幅同一份数据 —— 看见何处、解冻处也何处）。解冻走
-// account.unfreeze（issue 1069）：内核先 persist 配置态再清闸门，回执带
-// entriesAllowed（解冻后该账户是否可开新单），面板必读该字段，不得
-// 把「发出请求」当作「已解冻」。会话级自动冻结的解除即恢复接新单；
-// 若原因链仍在（比如场地 401），内核会按既有 streak 规则随交易再次
-// 冻结 —— 面板不猜原因是否清除，行内反馈只转述内核回执/错误。
+// ── 账户冻结解冻（issue 943，红色横幅的另一半；issue 1044 呈现真相）─────────
+// 风控冻结（accountFreezes，内核 freeze book）：账户因 venue-rejection 连拒
+// 或日内亏损熔断被冻结，拒开仓、平仓照放；解冻走 account.unfreeze（issue
+// 1069），内核先 persist 配置态再清闸门，回执带 entriesAllowed，面板必读
+  // 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
+  // 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
+// 配置态停用（account.status === 'frozen'）：来自 .env AccountStatus，与
+// 风控冻结是两回事，只读呈现「配置停用」，不提供内核解冻按钮（需改
+// .env 并重启）。
 const freezeOperateId = ref<string | null>(null)
 
+// 风控冻结账户（可解冻）：唯一来源是内核 freeze book stats.accountFreezes。
 const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   const freezes = store.snapshot?.stats?.accountFreezes
-  const statsFreezes = freezes
+  return freezes
     ? Object.entries(freezes)
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([id, reason]) => ({ id, reason }))
     : []
-  // 补充来源：账户行 status === 'frozen'（与 Overview 的红色横幕同源）
-  const rowFreezes = store.accounts
+})
+
+// 配置态停用账户（不可从面板解冻）：来源 account.status === 'frozen'。
+const configuredFrozenAccounts = computed<{ id: string; reason: string }[]>(() => {
+  return store.accounts
     .filter((a) => a.status === 'frozen')
-    .map((a) => ({ id: a.id, reason: a.statusReason || '原因未上报' }))
-  // 只列出真正可解冻的冻结（accountFreezes / 账户行 status）。
-  // lastError 中的 RISK_REJECTED 日损失限额不走 accountFreezes，account.unfreeze API 对它无效，
-  // 因此不列入可解冻列表，避免用户点击解冻后无任何效果。
-  return [...statsFreezes, ...rowFreezes]
+    .map((a) => ({ id: a.id, reason: a.statusReason || '配置态停用（需改 .env 并重启）' }))
 })
 
 async function unfreeze(accountId: string): Promise<void> {
@@ -137,14 +138,35 @@ async function unfreeze(accountId: string): Promise<void> {
   try {
     const r = await api.accountUnfreeze({ accountId })
     if (r.error) throw new Error(r.error)
-    if (!r.entriesAllowed) {
-      policyErr.value = `解冻 ${accountId} 未生效：闸门已清但 entriesAllowed=false，仍有其他闸门在，未恢复新单入场。`
+    // entriesAllowed 是内核的即时「可开新单」判断：全局 kill 期间它会为 false，
+    // 而 freeze book / dailyLoss 都盖不住全局 kill（issue 1062 回滚 F3 后 accountFreezes
+    // 已过滤 GLOBAL_KILL_ACCOUNT）。不得把请求发出当作「已解冻」。
+    if (r.entriesAllowed === false) {
+      policyErr.value = `解冻 ${accountId} 未生效：内核回报 entriesAllowed=false，仍有全局或其他闸门在，未恢复新单入场。`
       return
     }
+    // 复读两个闸门：freeze book + daily loss latch，给出更细化的说明。
     await store.refresh()
-    const stillFrozen = frozenAccounts.value.some((f) => f.id === accountId)
-    if (stillFrozen) {
-      policyErr.value = `解冻 ${accountId} 未生效：账户仍处于冻结状态，请检查内核风控记录。`
+    const dailyLoss = store.snapshot?.stats?.dailyLoss
+    const acctDaily = dailyLoss?.accounts?.find((a) => a.account === accountId)
+    const dailyStillTripped = acctDaily?.tripped ?? false
+    const resetAtMs = acctDaily?.resetAtMs ?? null
+    // carried_trip 跨日残留：trip 的 day_index 可能早于当前 UTC 日，
+    // 此时 resetAtMs 已早于当前时间，闸门实际已到期，不应阻断解冻。
+    const now = Date.now()
+    const resetPassed = resetAtMs !== null && resetAtMs < now
+    const stillInFreezeBook = frozenAccounts.value.some((f) => f.id === accountId)
+    if (stillInFreezeBook) {
+      policyErr.value = `解冻 ${accountId} 未生效：账户仍在风控冻结书中，请检查内核风控记录。`
+      return
+    }
+    if (dailyStillTripped && resetAtMs && !resetPassed) {
+      const resetUtc = new Date(resetAtMs).toISOString().slice(11, 16) // UTC HH:MM
+      policyErr.value = `解冻 ${accountId}：风控闸门已解除，但日内亏损熔断仍在，将于 UTC ${resetUtc} 自动恢复入场权限。`
+      return
+    }
+    if (dailyStillTripped && !resetAtMs) {
+      policyErr.value = `解冻 ${accountId}：风控闸门已解除，但日内亏损熔断仍在，入场暂未恢复。`
       return
     }
     policyMsg.value = `已解冻 ${accountId}，该账户恢复接新单。`
@@ -250,16 +272,16 @@ async function rollbackPolicy(): Promise<void> {
       <span v-if="policyBusy" class="text-[11px] text-faint-fg">读取中…</span>
     </div>
 
-    <!-- issue 943: 冻结账户解冻卡片 —— 与生效风控卡并列，同款 Card + CardHeader 结构。 -->
+    <!-- issue 943 / issue 1044: 风控冻结账户（可从面板解冻；唯一来源是内核 freeze book stats.accountFreezes） -->
     <Card v-if="frozenAccounts.length" class="mt-3.5 mb-4">
-      <CardHeader label="冻结中的账户">
+      <CardHeader label="风控冻结中的账户">
         <template #title>
           <LockOpen class="size-4 shrink-0 text-down" />
         </template>
       </CardHeader>
       <p class="mt-3 text-[11px] leading-snug text-muted-fg">
-        冻结 = 该账户拒一切新单（手动 + 策略开仓），平仓照放；只影响这一个账户，其他账户照常交易。
-        解冻恢复接新单 —— 若原因链仍在，内核会按既有 streak 规则随交易再次冻结。
+        风控冻结 = 该账户因场地连拒或日内亏损熔断被拒新单，平仓照放；只影响这一个账户。
+        冻结持久，需到本卡「解冻」运营解锁，或由健康探针自愈（仅自动冻结）；不存在按会期自动解除，亦不随节点重启自动清。
       </p>
       <div
         v-for="fa in frozenAccounts"
@@ -279,6 +301,31 @@ async function rollbackPolicy(): Promise<void> {
         >
           {{ freezeOperateId === fa.id ? '解冻中…' : '解冻' }}
         </Button>
+      </div>
+    </Card>
+
+    <!-- 配置态停用账户（不可从面板解冻；来源 account.status === 'frozen'，与风控冻结是两回事） -->
+    <Card v-if="configuredFrozenAccounts.length" class="mt-3.5 mb-4">
+      <CardHeader label="配置停用的账户">
+        <template #title>
+          <Minus class="size-4 shrink-0 text-muted-fg" />
+        </template>
+      </CardHeader>
+      <p class="mt-3 text-[11px] leading-snug text-muted-fg">
+        配置停用 = 该账户在 .env 中 status=Frozen 或 trading_enabled=false，内核拒绝新单；
+        此状态由 .env 决定、重启后生效，面板不提供内核解冻（改 .env 并重启即可）。
+      </p>
+      <div
+        v-for="fa in configuredFrozenAccounts"
+        :key="fa.id"
+        class="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel-2/40 px-3 py-2.5"
+      >
+        <Minus class="size-3.5 shrink-0 text-muted-fg" />
+        <span class="text-[12.5px] font-semibold text-fg truncate min-w-[80px]">{{ fa.id }}</span>
+        <span class="min-w-0 flex-1 truncate text-[11px] text-muted-fg" :title="fa.reason">
+          {{ fa.reason || '原因未上报' }}
+        </span>
+        <span class="text-[10px] text-muted-fg">配置停用 · 无面板解冻入口</span>
       </div>
     </Card>
 

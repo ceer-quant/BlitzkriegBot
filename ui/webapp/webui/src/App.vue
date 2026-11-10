@@ -100,19 +100,10 @@ const OVERDUE_RECEIVABLE_MAX_AGE_MS = 172_800_000
 const stats = computed(() => store.snapshot?.stats ?? null)
 const connBanner = computed(() => connectionBanner(store.snapshot))
 const freeze = computed(() => freezeBanner(stats.value))
-const accountFreezes = computed(() => {
-  const banners = accountFreezeBanners(stats.value)
-  const rowFreezes = store.accounts
-    .filter((a) => a.status === 'frozen')
-    .map((a) => ({
-      tone: 'error' as const,
-      urgent: true,
-      title: `账户已冻结（${a.id}）`,
-      body: a.statusReason || '该账户已被冻结，原因未上报。',
-      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解冻（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
-    }))
-  return [...banners, ...rowFreezes]
-})
+	// 风控冻结（issue 943 / issue 1044）：唯一来源是内核 freeze book stats.accountFreezes。
+	// 配态停用（account.status === 'frozen'）与风控冻结是两回事，不得混入同一 red
+	// banner；配态停用在设置页单独呈现为「配置停用」，不提供面板解冻。
+	const accountFreezes = computed(() => accountFreezeBanners(stats.value))
 const lastError = computed(
   () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
 )
@@ -278,7 +269,7 @@ onMounted(() => {
           </span>
           <span class="text-[11.5px] text-faint-fg num">{{ modeLabel }}</span>
         </span>
-        <!-- E28 多账户：切换的是本面板连接的默认账户（§9.5 会话级）。成功后
+        <!-- E28 多账户：切换的是本面板连接的默认账户（§9.5 本会话）。成功后
              AccountSwitcher 自己 store.refresh()，快照/插件读数随下一次轮询
              全量重拉，无需各页另挂监听。 -->
         <AccountSwitcher />
