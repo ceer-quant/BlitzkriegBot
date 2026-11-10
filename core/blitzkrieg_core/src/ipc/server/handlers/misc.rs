@@ -116,10 +116,16 @@ pub(crate) async fn handle_misc(
             } else {
                 (ledger.balance(), ledger.reserved(), ledger.available())
             };
-            // Cumulative net PnL = balance + reserved − opening_equity (the
-            // single ledger truth, issue 1046). None when opening_equity is
-            // unknown — never derived from trade folding.
-            let cumulative_net_pnl = opening_equity.map(|oe| balance + reserved - oe);
+            // Cumulative net PnL = balance − opening_equity (the single ledger
+            // truth, issue 1046 / #1063 fix). `balance` is venue-reported cash
+            // gross of local reservations, so `reserved` must NOT be added back:
+            // balance already equals available + reserved, and cumulative net
+            // PnL measures equity against opening equity, not collateral.
+            // None when opening_equity is unknown — never derived from trade folding.
+            // `cumulative_net_pnl` is a pure function of (balance, opening_equity):
+            // `reserved` does not appear in its signature, so it structurally
+            // cannot influence the result.
+            let cumulative_net_pnl = cumulative_net_pnl(balance, opening_equity);
             Ok(serde_json::to_value(BalanceResult {
                 balance,
                 reserved,
@@ -234,5 +240,41 @@ pub(crate) async fn handle_misc(
         // Routed here only from `handle_line`'s dispatch, which sends exactly
         // this family's verbs; `&str` matching needs the exhaustive arm.
         _ => unreachable!("family handler called with a verb of another family"),
+    }
+}
+
+/// Cumulative net PnL = balance − opening_equity (issue 1046 / #1063).
+///
+/// `balance` is venue-reported cash gross of local reservations
+/// (`available + reserved == balance`), so `reserved` must NOT be added back.
+/// `reserved` does not appear in this function's signature at all, so it
+/// structurally cannot inflate the reported net PnL — the double-count from
+/// `balance + reserved − oe` is impossible here.
+/// Returns `None` when `opening_equity` is unknown — never derived from
+/// trade folding.
+pub(crate) fn cumulative_net_pnl(
+    balance: Decimal,
+    opening_equity: Option<Decimal>,
+) -> Option<Decimal> {
+    opening_equity.map(|oe| balance - oe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn cumulative_net_pnl_excludes_reserved_by_signature() {
+        // #1063 regression: `reserved` is not a parameter of this pure
+        // function, so it structurally cannot inflate the reported net PnL.
+        // A resting BUY collateral of 50 must not change cumulative net PnL
+        // versus 0 when balance and opening equity match.
+        assert_eq!(
+            cumulative_net_pnl(dec!(100), Some(dec!(80))),
+            Some(dec!(20))
+        );
+        assert_eq!(cumulative_net_pnl(dec!(100), None), None);
+        assert_eq!(cumulative_net_pnl(dec!(50), Some(dec!(50))), Some(dec!(0)));
     }
 }

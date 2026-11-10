@@ -190,17 +190,25 @@ fn family_07_balance_result() {
         wire(&with_seed),
         r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80"}"#
     );
-    // issue 1046: cumulative net PnL = balance + reserved − opening_equity;
-    // DRY opening equity == seed → 100 + 5 − 80 = 25.
+    // issue 1046 / #1063 fix: cumulative net PnL = balance − opening_equity.
+    // balance is venue-reported cash gross of reservations
+    // (available + reserved == balance), so reserved must NOT be added back:
+    // 100 − 80 = 20, not 25.
     let with_cum = BalanceResult {
         opening_equity: Some(d("80")),
-        cumulative_net_pnl: Some(d("25")),
+        cumulative_net_pnl: Some(d("20")),
         ..with_seed
     };
     assert_eq!(
         wire(&with_cum),
-        r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80","openingEquity":"80","cumulativeNetPnl":"25"}"#
+        r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80","openingEquity":"80","cumulativeNetPnl":"20"}"#
     );
+
+    // #1063 regression: reserved is collateral, not equity. The pure function
+    // `cumulative_net_pnl(balance, opening_equity)` (unit-tested in misc.rs)
+    // has `reserved` nowhere in its signature, so it structurally cannot
+    // inflate the reported net PnL; this golden wire assertion pins the
+    // corrected value 100 − 80 = 20 instead of the double-counted 25.
     // cumulative_net_pnl absent when opening_equity unknown → reader treats
     // as "unknown", never zero.
     let no_cum = BalanceResult { ..with_seed };
