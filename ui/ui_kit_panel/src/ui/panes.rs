@@ -84,20 +84,21 @@ pub(super) fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         cards[2],
     );
 
-    // Net PnL — ledger口径 (balance − seed)。seed 缺失（LIVE / 老内核）时
-    // 显式显示 "—"，不得以成交折叠冒充净利；source 透出到子行。
+    // Net PnL — ledger口径 = balance + reserved − opening_equity（issue #1046）。
+    // opening_equity 缺失（LIVE 未首次上报 venue equity，或老内核）时
+    // 显式显示 "unknown"，不得以成交折叠冒充净利；source 透出到子行。
     let (net_big, net_sub, net_style) = match s.net_pnl() {
         Some(net) => (
             blitzkrieg_ui_kit::web::money(net),
             format!(
-                "{} trades · {:.0}% WR · ledger (balance − seed)",
+                "{} trades · {:.0}% WR · ledger (balance − opening_equity)",
                 s.trades.len(),
                 s.win_rate()
             ),
             Style::default().fg(color_of(net)),
         ),
         None => (
-            "—".into(),
+            "unknown".into(),
             format!(
                 "{} trades · {:.0}% WR · trade-fold (not ledger)",
                 s.trades.len(),

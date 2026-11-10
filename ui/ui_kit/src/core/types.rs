@@ -96,6 +96,17 @@ pub struct BalanceView {
     /// Starting principal in DRY mode; `None` in LIVE or against an older core.
     #[serde(default, deserialize_with = "de_num_opt")]
     pub seed: Option<f64>,
+    /// Account opening equity — the principal cumulative net PnL is measured
+    /// against. DRY: equals `seed`. LIVE: the venue's first reported equity,
+    /// persisted exactly once. Absent until known — treat as "unknown", never
+    /// as zero (issue #1046).
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub opening_equity: Option<f64>,
+    /// Cumulative net PnL = balance − opening_equity (the single ledger truth,
+    /// issue #1046). Absent when openingEquity is unknown — never derived from
+    /// trade folding.
+    #[serde(default, deserialize_with = "de_num_opt")]
+    pub cumulative_net_pnl: Option<f64>,
 }
 
 // ── positions.list ───────────────────────────────────────────────────────────
@@ -1096,23 +1107,27 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
-    /// Ledger PnL = balance − seed (the panel's "net").
+    /// Cumulative net PnL = balance − opening_equity (issue #1046),
+    /// the single ledger truth. Never derived from trade folding.
     ///
-    /// Returns `None` when `seed` is absent (LIVE or an older core): the UI
-    /// must **not** fall back to trade folding to fake a ledger number. Show
-    /// `—` instead.
+    /// Returns `None` when `opening_equity` is absent (LIVE before the first
+    /// venue report, or an older core): the UI must **not** fall back to trade
+    /// folding to fake a ledger number. Show `unknown` instead.
     pub fn net_pnl(&self) -> Option<f64> {
-        self.balance
-            .as_ref()
-            .and_then(|b| b.seed.map(|seed| b.balance - seed))
+        self.balance.as_ref().and_then(|b| b.cumulative_net_pnl)
     }
 
     /// Source label for the net PnL figure, surfaced so the panel never
-    /// presents trade-folding as ledger. `"ledger"` when computed from
-    /// balance−seed, `"trade-fold"` when only trade rows exist (display-only,
-    /// not ledger).
+    /// presents trade-folding as ledger. `"ledger" when computed from
+    /// balance − opening_equity, `"trade-fold"` when only trade rows exist
+    /// (display-only, not ledger).
     pub fn net_pnl_source(&self) -> &'static str {
-        if self.balance.as_ref().and_then(|b| b.seed).is_some() {
+        if self
+            .balance
+            .as_ref()
+            .and_then(|b| b.cumulative_net_pnl)
+            .is_some()
+        {
             "ledger"
         } else {
             "trade-fold"
