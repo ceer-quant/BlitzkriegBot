@@ -42,6 +42,9 @@ export default defineConfig({
   head: [
     ['meta', { name: 'theme-color', content: '#0b0f14' }],
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
+    // appearance: 'dark' 只锁定主题，不保证 <html> 带上 dark 类；
+    // VitePress 的自定义容器等样式依赖该类，这里显式补上。
+    ['script', {}, "document.documentElement.classList.add('dark')"],
   ],
   vite: {
     plugins: [

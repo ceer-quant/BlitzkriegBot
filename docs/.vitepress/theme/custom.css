@@ -39,12 +39,35 @@
   --vp-code-block-bg: oklch(0.115 0.014 268);
   --vp-code-line-highlight-color: oklch(0.78 0.16 68 / 0.08);
 
+  /* 中性色阶：VitePress 的次要按钮 / 边框 / 图标都从 default 与 gray 两套别名取色。
+     不覆盖它们，次要按钮会沿用浅色主题的值 —— 浅灰底配浅灰字，等于看不见。 */
+  --vp-c-default-1: oklch(0.97 0.004 268);
+  --vp-c-default-2: oklch(0.68 0.018 268);
+  --vp-c-default-3: oklch(0.24 0.016 268);
+  --vp-c-default-4: oklch(0.2 0.016 268);
+  --vp-c-default-soft: oklch(0.24 0.016 268 / 0.6);
+
+  --vp-c-gray-1: oklch(0.97 0.004 268);
+  --vp-c-gray-2: oklch(0.68 0.018 268);
+  --vp-c-gray-3: oklch(0.24 0.016 268);
+  --vp-c-gray-4: oklch(0.2 0.016 268);
+  --vp-c-gray-soft: oklch(0.24 0.016 268 / 0.6);
+
   --vp-button-brand-bg: oklch(0.78 0.16 68);
   --vp-button-brand-border: transparent;
   --vp-button-brand-hover-bg: oklch(0.86 0.14 74);
   --vp-button-brand-active-bg: oklch(0.7 0.17 62);
   --vp-button-brand-text: oklch(0.2 0.05 60);
   --vp-button-brand-hover-text: oklch(0.2 0.05 60);
+
+  /* 次要按钮：面板底 + 细描边上，hover 提亮描边而不是反白 */
+  --vp-button-alt-bg: oklch(0.24 0.016 268);
+  --vp-button-alt-border: oklch(1 0 0 / 0.16);
+  --vp-button-alt-text: oklch(0.97 0.004 268);
+  --vp-button-alt-hover-bg: oklch(0.3 0.016 268);
+  --vp-button-alt-hover-border: oklch(0.78 0.16 68 / 0.45);
+  --vp-button-alt-hover-text: oklch(0.97 0.004 268);
+  --vp-button-alt-active-bg: oklch(0.2 0.016 268);
 
   --vp-nav-bg-color: oklch(0.145 0.014 268 / 0.72);
   --vp-sidebar-bg-color: oklch(0.145 0.014 268);
