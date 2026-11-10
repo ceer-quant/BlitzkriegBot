@@ -133,21 +133,30 @@ impl Core {
         g.blocked && g.expires_at_ms.is_none_or(|expires| now_ms < expires)
     }
 
-    /// 设置或升级一账户的闸门。新原因的优先级 **严格高于** 现存闸门时才
-    /// 覆盖（先到者胜、更高优先级者覆盖），防止低优先级路由（如场地
-    /// 自愈）静默解除高优先级闸门（`Manual`/`DailyLoss`）。返回是否写入。
+    /// 设置或升级一账户的闸门。新原因的优先级 **严格高于** 现存**未过期**
+    /// 闸门时才覆盖（先到者胜、更高优先级者覆盖），防止低优先级路由
+    ///（如场地自愈）静默解除高优先级闸门（`Manual`/`DailyLoss`）。已过期
+    /// 的闸门（DailyLoss 过 UTC 日翻界）不阻挡新闸门：过期的 DailyLoss(1)
+    /// 不得吞掉随后的 VenueRejection(0)。返回是否写入。
     pub(crate) fn set_account_gate(
         &mut self,
         account: &str,
         reason: String,
         reason_kind: GateReason,
-        since_ms: i64,
         expires_at_ms: Option<i64>,
         actor: &str,
+        now_ms: i64,
     ) -> bool {
         let should_set = match self.account_gates.get(account) {
             None => true,
-            Some(existing) => reason_kind.priority() > existing.reason_kind.priority(),
+            Some(existing) => {
+                // 已过期的闸门（expires_at_ms 已到）不再生效，视为不存在，
+                // 避免过期的 DailyLoss(1) 吞掉随后的 VenueRejection(0)。
+                let existing_live = existing
+                    .expires_at_ms
+                    .is_none_or(|expires| now_ms < expires);
+                existing_live && reason_kind.priority() > existing.reason_kind.priority()
+            }
         };
         if !should_set {
             return false;
@@ -158,7 +167,7 @@ impl Core {
                 blocked: true,
                 reason,
                 reason_kind,
-                since_ms,
+                since_ms: now_ms,
                 expires_at_ms,
                 actor: actor.to_string(),
             },
@@ -186,45 +195,33 @@ impl Core {
     /// 入场闸判定：账户被闸门阻断，且意图不是平仓（平仓腿永远放行，#174
     /// 逃生舱，按账户独立计）。新单拒、平仓放行。
     ///
-    /// 闸门纯内存、重启即清：重启首 tick 前 `emit_daily_trip` 尚未复立
-    //   DailyLoss 闸门，此时回退到持久化的 `daily_loss_tripped_for` 门闩，
-    //   避免重启洗今天的亏损预算。`emit_daily_trip` 会在下一 tick 复立闸门。
-    #[allow(clippy::collapsible_if)]
+    /// 唯一依据是 `account_gates` 内存表（由 `emit_daily_trip`、手动冻结、
+    /// 场地自愈设置）。**不**回退到持久化的 `daily_loss_tripped_for` 闩锁：
+    /// 重启后 `tripped` 不持久化，故重启不自动重触发日内熔断；解冻后
+    /// 当日余下时间可交易。这是 #1045 裁决 v3：「删除 tripped* 落盘字段、
+    /// 删读时重闩、重启/解冻后当日不再自动重触发」。
     pub(crate) fn account_gate_permits(&self, req: &OrderRequest, now_ms: i64) -> CoreResult<()> {
         let account_id = req.account_id.as_str();
         let is_close = crate::risk::is_close_intent(&req.internal_key);
 
-        // 1) 显式账户闸门（由 emit_daily_trip、手动冻结等设置）。
-        if let Some(gate) = self.account_gate(account_id) {
-            if gate.blocked
-                && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
-                && !is_close
-            {
-                let message = match gate.reason_kind {
-                    GateReason::DailyLoss => format!(
-                        "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
-                        account_id
-                    ),
-                    _ => format!(
-                        "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
-                        account_id,
-                        gate.reason_kind.label(),
-                        gate.reason
-                    ),
-                };
-                return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
-            }
-        }
-
-        // 2) 重启首 tick 回退：闸门尚未复立，但门闩已落盘，仍拒新单。
-        if !is_close && self.positions.daily_loss_tripped_for(account_id) {
-            return Err(CoreError::new(
-                CoreErrorCode::KillSwitchActive,
-                format!(
+        if let Some(gate) = self.account_gate(account_id)
+            && gate.blocked
+            && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
+            && !is_close
+        {
+            let message = match gate.reason_kind {
+                GateReason::DailyLoss => format!(
                     "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
                     account_id
                 ),
-            ));
+                _ => format!(
+                    "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
+                    account_id,
+                    gate.reason_kind.label(),
+                    gate.reason
+                ),
+            };
+            return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
         }
 
         Ok(())
@@ -239,9 +236,9 @@ impl Core {
             account,
             reason.clone(),
             GateReason::Manual,
-            now_ms,
             None,
             &format!("operator:{account}"),
+            now_ms,
         );
         tracing::error!(account = %account, reason = %reason, "account frozen (manual gate, in-memory only, restart-clear)");
     }
@@ -255,9 +252,9 @@ impl Core {
             account,
             reason.clone(),
             GateReason::VenueRejection,
-            now_ms,
             None,
             &format!("auto:{account}"),
+            now_ms,
         );
         tracing::warn!(account = %account, reason = %reason, "account auto-frozen (venue rejection gate, in-memory only)");
     }
@@ -284,6 +281,9 @@ impl Core {
     ) -> UnfreezeResult {
         let previous = self.clear_account_gate(account);
         let previous_reason = previous.as_ref().map(|g| g.reason.clone());
+        // 清 session trip latch：解冻后当日余下时间可交易，不再被旧 latch 重拒。
+        self.positions
+            .clear_daily_tripped_for(&crate::model::AccountId::from(account));
         // 解冻后立即复读：单闸门模型下本账户无其他并行闸门。
         let entries_allowed = !self.account_gate_blocked(account, now_ms);
         if previous.is_some() {

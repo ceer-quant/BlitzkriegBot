@@ -334,36 +334,33 @@ impl PositionManager {
         let mut trips = Vec::new();
         let accounts: Vec<AccountId> = self.daily_by_account.keys().cloned().collect();
         for account in accounts {
-            if !self.daily_loss_tripped_for(account.as_str()) {
+            // Only THIS SESSION's tripped accounts are reported. `tripped` is
+            // NOT persisted (see DailyLossState docs), so a restart starts with
+            // `tripped = false` and never re-arms the daily-loss gate from a
+            // stale latch. The cap is still enforced by `note_daily_drawdown`
+            // (which sets `tripped = true` when the loss lands) and
+            // `reconcile_same_day_base`.
+            let Some(daily) = self.daily_by_account.get(&account) else {
+                continue;
+            };
+            if !daily.tripped || daily.tripped_reported {
                 continue;
             }
-            // The latch cap is computed BEFORE the mutable borrow (it reads
-            // the bucket's opening equity through the same map).
-            let latch_limit = self.effective_daily_loss_limit_for(account.as_str());
-            let (day_index, realized, opening, limit, at_ms) = {
-                let daily = self
-                    .daily_by_account
-                    .get_mut(&account)
-                    .expect("bucket exists (keys come from the map)");
-                if !daily.tripped {
-                    // Detected here rather than only in `close` (a restored budget can
-                    // arrive already breached): latch it so the panel agrees.
-                    daily.tripped = true;
-                    daily.tripped_at_ms = daily.opened_at_ms;
-                    daily.tripped_limit_usd = latch_limit;
-                }
-                if daily.tripped_reported {
-                    continue;
-                }
-                daily.tripped_reported = true;
-                (
-                    daily.day_index.unwrap_or(0),
-                    daily.realized_pnl_usd,
-                    daily.opening_equity_usd,
-                    daily.tripped_limit_usd,
-                    daily.tripped_at_ms,
-                )
-            };
+            // Fetch the limit while only immutably borrowing self, then
+            // re-borrow mutably to flip tripped_reported (avoids a simultaneous
+            // &mut/& self borrow on daily_by_account).
+            let limit = self.effective_daily_loss_limit_for(account.as_str());
+            let daily = self
+                .daily_by_account
+                .get_mut(&account)
+                .expect("bucket exists (keys come from the map)");
+            daily.tripped_reported = true;
+            let (day_index, realized, opening, at_ms) = (
+                daily.day_index.unwrap_or(0),
+                daily.realized_pnl_usd,
+                daily.opening_equity_usd,
+                daily.tripped_at_ms,
+            );
             self.persist_daily();
             trips.push((
                 account,
@@ -423,5 +420,32 @@ impl PositionManager {
             .entry(account.clone())
             .or_default()
             .realized_pnl_usd = realized_pnl_usd;
+    }
+
+    /// Test-only: latch the daily-loss trip for an account (as
+    /// `note_daily_drawdown` would), so `emit_daily_trip` can gate it.
+    #[cfg(test)]
+    pub(crate) fn set_daily_tripped_for_test(
+        &mut self,
+        account: &AccountId,
+        at_ms: i64,
+        limit_usd: Decimal,
+    ) {
+        if let Some(daily) = self.daily_by_account.get_mut(account) {
+            daily.tripped = true;
+            daily.tripped_at_ms = at_ms;
+            daily.tripped_limit_usd = limit_usd;
+        }
+    }
+
+    /// Clear the session trip latch for an account (used by `account.unfreeze`):
+    /// mid-day unfreeze re-opens entries for the rest of the day — the latch is
+    /// not re-armed because `emit_daily_trip` only gates newly-latched trips.
+    pub(crate) fn clear_daily_tripped_for(&mut self, account: &AccountId) {
+        if let Some(daily) = self.daily_by_account.get_mut(account) {
+            daily.tripped = false;
+            daily.tripped_at_ms = 0;
+            daily.tripped_limit_usd = Decimal::ZERO;
+        }
     }
 }

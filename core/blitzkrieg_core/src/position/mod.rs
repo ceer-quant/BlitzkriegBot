@@ -247,10 +247,21 @@ pub struct DailyLossState {
     /// still belongs to the book in front of it, so it re-anchors like any
     /// other change.
     pub equity_basis: Option<EquityBasis>,
-    /// True once the cap was breached; entries stay frozen until the next day.
+    /// True once the cap was breached THIS SESSION. Entries stay frozen until
+    /// the next day; `tripped` is deliberately NOT persisted — a restart starts
+    /// with `tripped = false`, so a restart never re-arms the daily-loss gate
+    /// from a stale latch (cash truth wins over a remembered breaker).
+    ///
+    /// The panel reads `dailyLoss.accounts[].tripped` from this in-memory flag
+    /// to show 「已超限·已放行」; it must NOT be used as an entry gate — that is
+    /// [`Core::account_gate_permits`] alone, fed by [`Core::emit_daily_trip`].
+    #[serde(skip)]
     pub tripped: bool,
+    /// When the cap was breached this session; NOT persisted (see `tripped`).
+    #[serde(skip)]
     pub tripped_at_ms: i64,
-    /// The cap that tripped (USD), for the panel/alert after a restart.
+    /// The cap that tripped this session (USD); NOT persisted (see `tripped`).
+    #[serde(skip)]
     pub tripped_limit_usd: Decimal,
     /// Whether the trip has already been announced. Deliberately NOT persisted:
     /// after a restart the operator must again be told that entries are frozen.
