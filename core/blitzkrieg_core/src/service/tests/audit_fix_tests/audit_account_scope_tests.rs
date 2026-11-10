@@ -22,6 +22,7 @@ fn live_core_with_leftover_book(balance: Decimal, loaded: bool, mode: Mode) -> C
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         }],
         crate::account::AccountId::from("default"),
@@ -1045,9 +1046,9 @@ fn trade_summary_scopes_to_one_account() {
     assert_eq!(p["totalTrades"], 1);
     assert_eq!(p["losses"], 1);
     assert!(
-        p["totalNetPnl"].as_f64().unwrap() < 0.0,
+        p["attributedNetPnl"].as_f64().unwrap() < 0.0,
         "paper's slice is the losing one: {}",
-        p["totalNetPnl"]
+        p["attributedNetPnl"]
     );
 
     // An unknown account answers an EMPTY summary, not the global one.

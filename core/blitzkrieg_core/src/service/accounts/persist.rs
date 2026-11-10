@@ -1021,6 +1021,7 @@ impl Core {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: now_ms,
         })?;
         // A runtime mint on a locally-settling core gets the same seed a boot

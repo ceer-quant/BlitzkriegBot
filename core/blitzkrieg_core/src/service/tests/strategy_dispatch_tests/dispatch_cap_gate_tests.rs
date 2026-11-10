@@ -956,6 +956,7 @@ fn arb_totals_ride_every_account_slice_of_the_arb_row_only() {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         })
         .expect("arb-b does not exist yet");

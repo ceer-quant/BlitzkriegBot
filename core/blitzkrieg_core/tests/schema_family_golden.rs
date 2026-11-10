@@ -171,6 +171,8 @@ fn family_07_balance_result() {
         reserved: d("5"),
         available: d("95"),
         seed: None,
+        opening_equity: None,
+        cumulative_net_pnl: None,
     };
     // `seed` absent in LIVE (skip_serializing_if) — the reader treats it as
     // "unknown", not zero.
@@ -186,6 +188,24 @@ fn family_07_balance_result() {
     };
     assert_eq!(
         wire(&with_seed),
+        r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80"}"#
+    );
+    // issue 1046: cumulative net PnL = balance + reserved − opening_equity;
+    // DRY opening equity == seed → 100 + 5 − 80 = 25.
+    let with_cum = BalanceResult {
+        opening_equity: Some(d("80")),
+        cumulative_net_pnl: Some(d("25")),
+        ..with_seed
+    };
+    assert_eq!(
+        wire(&with_cum),
+        r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80","openingEquity":"80","cumulativeNetPnl":"25"}"#
+    );
+    // cumulative_net_pnl absent when opening_equity unknown → reader treats
+    // as "unknown", never zero.
+    let no_cum = BalanceResult { ..with_seed };
+    assert_eq!(
+        wire(&no_cum),
         r#"{"balance":100.0,"reserved":5.0,"available":95.0,"seed":"80"}"#
     );
 }

@@ -1265,7 +1265,7 @@ impl Core {
         let rows = if rows.is_empty() { &empty } else { &rows };
         let mut s = serde_json::json!({
             "totalTrades": 0u64, "wins": 0u64, "losses": 0u64, "winRate": 0.0,
-            "totalGrossPnl": 0.0, "totalFees": 0.0, "totalNetPnl": 0.0,
+            "attributedGrossPnl": 0.0, "totalFees": 0.0, "attributedNetPnl": 0.0,
             "avgHoldTimeSec": 0.0, "bestTradePnl": 0.0, "worstTradePnl": 0.0,
         });
         let (mut wins, mut losses, mut gross, mut fees, mut net, mut best, mut worst, mut holds) = (
@@ -1302,9 +1302,9 @@ impl Core {
         } else {
             0.0
         });
-        s["totalGrossPnl"] = serde_json::json!(gross);
+        s["attributedGrossPnl"] = serde_json::json!(gross);
         s["totalFees"] = serde_json::json!(fees);
-        s["totalNetPnl"] = serde_json::json!(net);
+        s["attributedNetPnl"] = serde_json::json!(net);
         s["avgHoldTimeSec"] = serde_json::json!(if n > 0.0 { holds / n } else { 0.0 });
         s["bestTradePnl"] = serde_json::json!(if rows.is_empty() { 0.0 } else { best });
         s["worstTradePnl"] = serde_json::json!(if rows.is_empty() { 0.0 } else { worst });

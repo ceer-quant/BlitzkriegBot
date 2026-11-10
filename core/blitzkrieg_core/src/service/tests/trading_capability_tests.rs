@@ -279,6 +279,7 @@ fn two_book_fixture() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -291,6 +292,7 @@ fn two_book_fixture() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],
@@ -552,6 +554,7 @@ fn two_venue_book_fixture() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -564,6 +567,7 @@ fn two_venue_book_fixture() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],

@@ -727,6 +727,7 @@ async fn policy_fixture_with_accounts(
                     trading_enabled: true,
                     strategies: Vec::new(),
                     rounds: Vec::new(),
+                    opening_equity: None,
                     updated_at_ms: now,
                 })
                 .collect(),
@@ -772,6 +773,7 @@ async fn two_account_fixture() -> (
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: now,
             },
             crate::account::Account {
@@ -784,6 +786,7 @@ async fn two_account_fixture() -> (
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: now,
             },
         ],

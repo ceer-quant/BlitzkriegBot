@@ -143,6 +143,7 @@ fn two_book_core() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -155,6 +156,7 @@ fn two_book_core() -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],
@@ -199,6 +201,7 @@ fn venue_bound_core_opts(order_log_path: Option<String>) -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -211,6 +214,7 @@ fn venue_bound_core_opts(order_log_path: Option<String>) -> Core {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],

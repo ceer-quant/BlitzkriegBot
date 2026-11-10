@@ -231,6 +231,7 @@ fn replay(events: Vec<TimedEvent>) -> blitzkrieg_core::backtest::BacktestReport 
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: NOW,
         })
         .expect("the kalshi account mints (unique id)");

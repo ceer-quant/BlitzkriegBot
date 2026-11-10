@@ -1,6 +1,7 @@
 //! Split out of the parent module (issue #780): pure move.
 
 use super::*;
+use rust_decimal::Decimal;
 
 /// Load the account book from ACCOUNT_* environment keys (issue 751).
 /// `ACCOUNT_LIST` names the ids in book order; a missing/empty value →
@@ -61,6 +62,7 @@ pub fn load_account_ledgers_from_env(
             trading_enabled: row.trading_enabled.unwrap_or(true),
             strategies: row.strategies.clone(),
             rounds: validate_rounds_from(&rounds_key, rounds, allowed)?,
+            opening_equity: None,
             updated_at_ms: now_ms,
         });
     }
@@ -240,6 +242,9 @@ fn account_env_keys(account_id: &str) -> Vec<String> {
         "SECRET_ENV",
         "PASSPHRASE_ENV",
         "PRIVATE_KEY_ENV",
+        "OPENING_EQUITY",
+        "OPENING_EQUITY_AT",
+        "OPENING_EQUITY_SOURCE",
     ]
     .iter()
     .map(|tail| format!("ACCOUNT_{sfx}_{tail}"))
@@ -409,6 +414,39 @@ pub fn env_persist_account_trading(
         vars.insert(key, "false".to_string());
         env_upsert(env_path, &vars, "trading")?;
     }
+    Ok(())
+}
+
+/// `account.opening_equity` persist — the LIVE venue's first reported equity,
+/// written exactly once (an already-present key is never overwritten) together
+/// with its source ("venue") and a timestamp. This is the account's principal
+/// the cumulative net PnL is measured against; it must never be revised after
+/// the first write so the ledger identity stays stable.
+pub fn env_persist_account_opening_equity(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    equity: Decimal,
+    at_ms: i64,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "opening_equity")?;
+    let key_eq = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_OPENING_EQUITY"))
+        .unwrap();
+    // Only write once: an already-recorded opening equity is authoritative and
+    // must never be overwritten by a later venue report.
+    let lookup = env_lookup_for_write(env_path);
+    if lookup(&key_eq).is_some() {
+        return Ok(());
+    }
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert(key_eq, equity.to_string());
+    let key_at = format!("ACCOUNT_{}_OPENING_EQUITY_AT", env_suffix(account_id));
+    vars.insert(key_at, at_ms.to_string());
+    let key_src = format!("ACCOUNT_{}_OPENING_EQUITY_SOURCE", env_suffix(account_id));
+    vars.insert(key_src, "venue".to_string());
+    env_upsert(env_path, &vars, "opening_equity")?;
     Ok(())
 }
 

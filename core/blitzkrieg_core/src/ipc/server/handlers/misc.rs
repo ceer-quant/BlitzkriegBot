@@ -91,6 +91,14 @@ pub(crate) async fn handle_misc(
                 // seed — reporting none would misdescribe a funded simulation.
                 Mode::ReadOnly => Some(c.config().dry_seed_balance),
             };
+            // issue 1046: opening equity — the principal the cumulative net PnL
+            // is measured against. DRY/ReadOnly: the configured seed. LIVE: the
+            // venue's first reported equity, persisted to the account file exactly
+            // once (never overwritten) and read back here. `None` until known.
+            let opening_equity = match c.mode() {
+                Mode::Dry | Mode::ReadOnly => seed,
+                Mode::Live => c.accounts().account(&active).and_then(|a| a.opening_equity),
+            };
             // issue 787 + issue 749: same projection as `account_views` — a
             // live core whose ACTIVE book no venue has ever reported has no
             // venue number behind it, so whatever sits there is leftover (a
@@ -108,11 +116,17 @@ pub(crate) async fn handle_misc(
             } else {
                 (ledger.balance(), ledger.reserved(), ledger.available())
             };
+            // Cumulative net PnL = balance + reserved − opening_equity (the
+            // single ledger truth, issue 1046). None when opening_equity is
+            // unknown — never derived from trade folding.
+            let cumulative_net_pnl = opening_equity.map(|oe| balance + reserved - oe);
             Ok(serde_json::to_value(BalanceResult {
                 balance,
                 reserved,
                 available,
                 seed,
+                opening_equity,
+                cumulative_net_pnl,
             })
             .unwrap_or(Value::Null))
         }

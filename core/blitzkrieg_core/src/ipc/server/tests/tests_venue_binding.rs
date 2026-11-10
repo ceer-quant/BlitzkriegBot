@@ -51,6 +51,7 @@ async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
                     trading_enabled: true,
                     strategies: Vec::new(),
                     rounds: Vec::new(),
+                    opening_equity: None,
                     updated_at_ms: now,
                 },
                 crate::account::Account {
@@ -63,6 +64,7 @@ async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
                     trading_enabled: true,
                     strategies: Vec::new(),
                     rounds: Vec::new(),
+                    opening_equity: None,
                     updated_at_ms: now,
                 },
             ],
@@ -236,6 +238,7 @@ async fn account_create_mount_times_out_fail_closed_then_retry_mounts_all_famili
             // The new account's round family — must be mounted alongside the
             // global 900s family.
             rounds: vec![60],
+            opening_equity: None,
             updated_at_ms: now,
         }],
         AccountId::from("paper"),

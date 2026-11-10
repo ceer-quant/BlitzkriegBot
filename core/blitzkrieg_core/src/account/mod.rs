@@ -17,6 +17,7 @@
 //! Wave 0 has no behavior: no file is read, no credential is loaded, nothing
 //! here runs.
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 pub use blitzkrieg_market_api::account::{AccountId, DEFAULT_ACCOUNT_ID, default_account_id};
@@ -287,6 +288,13 @@ pub struct Account {
     /// first-seen order kept.
     #[serde(default)]
     pub rounds: Vec<i64>,
+    /// Live opening equity — the venue's first reported cash for this account,
+    /// persisted exactly once (never overwritten) and used as the principal the
+    /// cumulative net PnL is measured against. DRY keeps the seed in
+    /// `BalanceResult.seed`; this field is the LIVE analogue. `None` until the
+    /// first venue report lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_equity: Option<Decimal>,
     pub updated_at_ms: i64,
 }
 
@@ -376,6 +384,7 @@ impl AccountLedgers {
                 // GLOBAL toggle" behaviour is retired).
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: now_ms,
             }],
             default_account_id(),
@@ -648,6 +657,12 @@ impl AccountLedgers {
 
     pub fn account(&self, id: &AccountId) -> Option<&Account> {
         self.accounts.get(id)
+    }
+
+    /// The account for MUTATING metadata (e.g. recording the LIVE opening
+    /// equity once). Refuses an unknown account by returning `None`.
+    pub fn account_mut(&mut self, id: &AccountId) -> Option<&mut Account> {
+        self.accounts.get_mut(id)
     }
 
     /// Refuse with the standard `unknown account` error when `id` is not
