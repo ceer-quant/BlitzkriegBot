@@ -102,12 +102,14 @@ async function switchAccount(id: string): Promise<void> {
   await loadPolicy()
 }
 
-// ── 账户冻结解锁（issue 943，红色横幅的另一半）──────────────────────────────
+// ── 账户冻结解冻（issue 943，红色横幅的另一半）──────────────────────────────
 // 当前冻结中的账户列表（来源 stats.accountFreezes：`accountId → reason`，
-// 与 lib/safety 的红横幅同一份数据 —— 看见何处、解锁处也何处）。解锁走
-// account.freeze {frozen:false}（PR G 写动词）：会话级自动冻结的解除即恢
-// 复接新单；若原因链仍在（比如场地 401），内核会按既有 streak 规则随交易
-// 再次冻结 —— 面板不猜原因是否清除，行内反馈只转述内核回执/错误。
+// 与 lib/safety 的红横幅同一份数据 —— 看见何处、解冻处也何处）。解冻走
+// account.unfreeze（#1069）：内核先 persist 配置态再清闸门，回执带
+// entriesAllowed（解冻后该账户是否可开新单），面板必读该字段，不得
+// 把「发出请求」当作「已解冻」。会话级自动冻结的解除即恢复接新单；
+// 若原因链仍在（比如场地 401），内核会按既有 streak 规则随交易再次
+// 冻结 —— 面板不猜原因是否清除，行内反馈只转述内核回执/错误。
 const freezeOperateId = ref<string | null>(null)
 
 const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
@@ -121,9 +123,9 @@ const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   const rowFreezes = store.accounts
     .filter((a) => a.status === 'frozen')
     .map((a) => ({ id: a.id, reason: a.statusReason || '原因未上报' }))
-  // 只列出真正可解锁的冻结（accountFreezes / 账户行 status）。
-  // lastError 中的 RISK_REJECTED 日损失限额不走 accountFreezes，account.freeze API 对它无效，
-  // 因此不列入可解锁列表，避免用户点击解锁后无任何效果。
+  // 只列出真正可解冻的冻结（accountFreezes / 账户行 status）。
+  // lastError 中的 RISK_REJECTED 日损失限额不走 accountFreezes，account.unfreeze API 对它无效，
+  // 因此不列入可解冻列表，避免用户点击解冻后无任何效果。
   return [...statsFreezes, ...rowFreezes]
 })
 
@@ -133,15 +135,19 @@ async function unfreeze(accountId: string): Promise<void> {
   policyErr.value = null
   policyMsg.value = null
   try {
-    const r = await api.accountFreezeSet({ accountId, frozen: false })
+    const r = await api.accountUnfreeze({ accountId })
     if (r.error) throw new Error(r.error)
+    if (!r.entriesAllowed) {
+      policyErr.value = `解冻 ${accountId} 未生效：闸门已清但 entriesAllowed=false，仍有其他闸门在，未恢复新单入场。`
+      return
+    }
     await store.refresh()
     const stillFrozen = frozenAccounts.value.some((f) => f.id === accountId)
     if (stillFrozen) {
-      policyErr.value = `解锁 ${accountId} 未生效：账户仍处于冻结状态，请检查内核风控记录。`
+      policyErr.value = `解冻 ${accountId} 未生效：账户仍处于冻结状态，请检查内核风控记录。`
       return
     }
-    policyMsg.value = `已解锁 ${accountId}，该账户恢复接新单。`
+    policyMsg.value = `已解冻 ${accountId}，该账户恢复接新单。`
   } catch (e) {
     policyErr.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -244,7 +250,7 @@ async function rollbackPolicy(): Promise<void> {
       <span v-if="policyBusy" class="text-[11px] text-faint-fg">读取中…</span>
     </div>
 
-    <!-- issue 943: 冻结账户解锁卡片 —— 与生效风控卡并列，同款 Card + CardHeader 结构。 -->
+    <!-- issue 943: 冻结账户解冻卡片 —— 与生效风控卡并列，同款 Card + CardHeader 结构。 -->
     <Card v-if="frozenAccounts.length" class="mt-3.5 mb-4">
       <CardHeader label="冻结中的账户">
         <template #title>
@@ -253,7 +259,7 @@ async function rollbackPolicy(): Promise<void> {
       </CardHeader>
       <p class="mt-3 text-[11px] leading-snug text-muted-fg">
         冻结 = 该账户拒一切新单（手动 + 策略开仓），平仓照放；只影响这一个账户，其他账户照常交易。
-        解锁恢复接新单 —— 若原因链仍在，内核会按既有 streak 规则随交易再次冻结。
+        解冻恢复接新单 —— 若原因链仍在，内核会按既有 streak 规则随交易再次冻结。
       </p>
       <div
         v-for="fa in frozenAccounts"
@@ -271,7 +277,7 @@ async function rollbackPolicy(): Promise<void> {
           :disabled="freezeOperateId !== null"
           @click="unfreeze(fa.id)"
         >
-          {{ freezeOperateId === fa.id ? '解锁中…' : '解锁' }}
+          {{ freezeOperateId === fa.id ? '解冻中…' : '解冻' }}
         </Button>
       </div>
     </Card>

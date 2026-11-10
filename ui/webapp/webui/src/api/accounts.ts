@@ -154,6 +154,19 @@ export interface AccountFreezeSetDoc {
   error?: string
 }
 
+/** `account.unfreeze` 回执（#1069）：内核解冻后的诚实回执，`entriesAllowed`
+ * 是面板必须读的唯一凭据——发出请求不等于已解冻，entriesAllowed 为
+ * false 时面板不得向用户宣称「已解冻」。 */
+export interface AccountUnfreezeDoc {
+  accountId: string
+  unfrozen: boolean
+  /** 解冻前的冻结原因（无冻结则缺席）。 */
+  previousReason?: string | null
+  /** 解冻后该账户是否可开新单：true = Gate 2 放行，false = 仍有其他闸门在。 */
+  entriesAllowed: boolean
+  error?: string
+}
+
 // ── 账户簿运行时增删（account.create / account.remove，#516 内核面）─────────
 
 /** `account.create` 回执。 */
@@ -287,6 +300,17 @@ export const accountsApi = {
    */
   accountFreezeSet: (body: { accountId: string; frozen: boolean; reason?: string }) =>
     request<AccountFreezeSetDoc>('/account-freeze/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 账户解冻写（#1069）：`account.unfreeze` —— 内核先 persist 配置态再
+   * 清闸门，回执带 `entriesAllowed`（解冻后该账户是否可开新单）。
+   * body 即 `{accountId, reason?}` 逐字转发，同 account-trading/set 的纪律。
+   * 调用方必须读 entriesAllowed，不得把请求发出当作「已解冻」。
+   */
+  accountUnfreeze: (body: { accountId: string; reason?: string }) =>
+    request<AccountUnfreezeDoc>('/account-unfreeze', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

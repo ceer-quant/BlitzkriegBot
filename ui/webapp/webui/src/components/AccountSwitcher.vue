@@ -199,16 +199,21 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
     }
   }
 
-  /** 解冻账户：frozen → false，恢复该账户新单入场权限。 */
+  /** 解冻账户：改走 `account.unfreeze`，回执必读 `entriesAllowed` ——
+   * 发出请求不等于已解冻，entriesAllowed=false 时不得宣称「已解冻」。 */
   async function unfreezeAccount(a: AccountRow): Promise<void> {
     if (freezeBusy.value) return
     freezeBusy.value = a.id
     freezeErr.value = null
     freezeMsg.value = null
     try {
-      const res = await api.accountFreezeSet({ accountId: a.id, frozen: false, reason: 'panel unfreeze' })
+      const res = await api.accountUnfreeze({ accountId: a.id, reason: 'panel unfreeze' })
       if (res.error) throw new Error(res.error)
-      freezeMsg.value = `账户 ${a.id} 已解冻${res.persisted ? '（已落盘）' : ''}。`
+      if (!res.entriesAllowed) {
+        freezeErr.value = `账户 ${a.id} 闸门已清，但 entriesAllowed=false：仍有其他闸门在，未恢复新单入场。`
+        return
+      }
+      freezeMsg.value = `账户 ${a.id} 已解冻，恢复新单入场。`
       await refresh()
       store.refresh()
     } catch (e) {
