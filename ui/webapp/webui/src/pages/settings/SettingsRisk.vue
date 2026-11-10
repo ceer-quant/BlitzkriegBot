@@ -105,7 +105,7 @@ async function switchAccount(id: string): Promise<void> {
 // ── 账户冻结解冻（issue 943，红色横幅的另一半）──────────────────────────────
 // 当前冻结中的账户列表（来源 stats.accountFreezes：`accountId → reason`，
 // 与 lib/safety 的红横幅同一份数据 —— 看见何处、解冻处也何处）。解冻走
-// account.unfreeze（#1069）：内核先 persist 配置态再清闸门，回执带
+// account.unfreeze（issue 1069）：内核先 persist 配置态再清闸门，回执带
 // entriesAllowed（解冻后该账户是否可开新单），面板必读该字段，不得
 // 把「发出请求」当作「已解冻」。会话级自动冻结的解除即恢复接新单；
 // 若原因链仍在（比如场地 401），内核会按既有 streak 规则随交易再次
