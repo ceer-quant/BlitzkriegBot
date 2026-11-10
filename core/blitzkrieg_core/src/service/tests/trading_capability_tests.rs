@@ -110,10 +110,19 @@ fn consecutive_venue_rejections_freeze_trading() {
     assert_eq!(stats["venueRejected"], 5);
     assert_eq!(stats["tradingFrozen"]["active"], false);
     assert!(
-        stats["accountFreezes"]["default"]
-            .as_str()
-            .unwrap_or("")
-            .contains("consecutive venue rejections"),
+        stats["accountGates"]
+            .as_array()
+            .map(|arr| {
+                arr.iter().any(|g| {
+                    g.get("account").and_then(|a| a.as_str()) == Some("default")
+                        && g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && g.get("reason")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("")
+                            .contains("consecutive venue rejections")
+                })
+            })
+            .unwrap_or(false),
         "the freeze book carries the reason for the panel: {stats}"
     );
     assert!(
@@ -154,7 +163,7 @@ fn consecutive_venue_rejections_freeze_trading() {
 /// deliberately not shared.
 #[test]
 fn a_venue_rejection_streak_freezes_only_that_account() {
-    let mut c = two_book_fixture();
+    let mut c = two_book_fixture_2();
     let paper_key = |k: &str| {
         let mut r = pending_req(k, "s1");
         r.account_id = crate::account::AccountId::from("paper");
@@ -206,7 +215,7 @@ fn a_venue_rejection_streak_freezes_only_that_account() {
 /// layers must agree before an order can open on a frozen account.
 #[test]
 fn frozen_account_gate_refuses_entries_closes_flow() {
-    let mut c = two_book_fixture();
+    let mut c = two_book_fixture_2();
     c.freeze_account("paper", "teeth: entries refused".into());
     let e = c.place(pending_req_for("paper", "x1"), 0, 1).unwrap_err();
     assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
@@ -215,23 +224,25 @@ fn frozen_account_gate_refuses_entries_closes_flow() {
     close.side = Side::Sell;
     close.internal_key = "flatten:backstop:tok".into();
     c.place_pending(close, 1)
-        .unwrap_or_else(|e| panic!("a frozen account's flatten must flow: {e}"));
+        .unwrap_or_else(|e| panic!("a frozen account's close must flow: {e}"));
 }
 
+/// PR G teeth: a venue-rejection streak on account `paper` freezes ONLY
+/// `paper` — `default` keeps placing, the global kill switch stays quiet,
+/// and nothing automatic lifts the freeze. The fixture lives in
+/// `audit_fix_tests`; re-declared here because module fixtures are
+/// deliberately not shared.
 fn pending_req_for(account: &str, key: &str) -> OrderRequest {
     let mut r = pending_req(key, "s1");
     r.account_id = crate::account::AccountId::from(account);
     r
 }
 
-/// PR G found the E28-era audit scope error: `reservations_match_open_buys`
-/// compared the ACTIVE ledger's `reserved` against the unfilled notional of
-/// ALL accounts' live BUYs, so a sibling account's open order read as drift
-/// and blocked new entries on the active book. The sibling's notional is
-/// spoken for in ITS ledger — here it must not trip the audit.
+/// The audit reads reservations from the ACTIVE account's book only: a
+/// sibling account's live BUY must not surface as the active book's drift.
 #[test]
 fn audit_reservation_scope_is_per_account() {
-    let mut c = two_book_fixture();
+    let mut c = two_book_fixture_2();
     // default (active) carries a live BUY; paper carries one too.
     c.place_pending(pending_req("d1", "s1"), 1).unwrap();
     c.place_pending(pending_req_for("paper", "p1"), 2).unwrap();
@@ -255,9 +266,12 @@ fn audit_reservation_scope_is_per_account() {
     assert_eq!(res.actual, dec!(4), "default's own unfilled notional only");
 }
 
-/// The `audit_fix_tests::two_book_core` fixture, module-local: two
-/// Active accounts (default + paper), no trade log, single config shape.
-fn two_book_fixture() -> Core {
+/// #379: venue-rejection streak on account `paper` freezes ONLY
+/// `paper` — `default` keeps placing, the global kill switch stays quiet,
+/// and nothing automatic lifts the freeze. The fixture lives in
+/// `audit_fix_tests`; re-declared here because module fixtures are
+/// deliberately not shared.
+fn two_book_fixture_2() -> Core {
     let book = crate::account::AccountLedgers::new(
         vec![
             crate::account::Account {
@@ -301,6 +315,59 @@ fn two_book_fixture() -> Core {
         // `data/orders/orders.jsonl` — these tests must not leave live
         // orders there for the next cwd-sharing fixture to restore.
         order_log_path: None,
+        ..Default::default()
+    };
+    Core::with_account_book(cfg, book)
+}
+
+/// The two-venue book this file's venue-scoped-freeze acceptance uses:
+/// BOTH accounts are ACTIVE and each is bound to its own venue, so
+/// `account_ids_bound_to_venue` has a routing table to work with.
+fn two_venue_book_fixture() -> Core {
+    let book = crate::account::AccountLedgers::new(
+        vec![
+            crate::account::Account {
+                id: crate::account::AccountId::from("poly-acct"),
+                name: "polymarket 主账户".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polymarket".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                opening_equity: None,
+                updated_at_ms: 0,
+            },
+            crate::account::Account {
+                id: crate::account::AccountId::from("polysim-acct"),
+                name: "polysimulator 练习账户".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: "polysimulator".into(),
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                opening_equity: None,
+                updated_at_ms: 0,
+            },
+        ],
+        crate::account::AccountId::from("poly-acct"),
+    );
+    let cfg = CoreConfig {
+        mode: Mode::Dry,
+        risk: RiskConfig {
+            max_order_notional: dec!(100),
+            ..Default::default()
+        },
+        dry_seed_balance: dec!(1000),
+        auto_exits_enabled: false,
+        trade_log_path: None,
+        // Same discipline as `two_book_fixture`: the cwd-relative default
+        // order log must not collect these tests' orders.
+        order_log_path: None,
+        position_log_path: None,
         ..Default::default()
     };
     Core::with_account_book(cfg, book)
@@ -403,14 +470,28 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         "the global freeze banner stays down: {stats}"
     );
     assert!(
-        stats["accountFreezes"]["poly-acct"]
-            .as_str()
-            .unwrap_or("")
-            .contains("self-check failed on polymarket"),
+        stats["accountGates"]
+            .as_array()
+            .map(|arr| {
+                arr.iter().any(|g| {
+                    g.get("account").and_then(|a| a.as_str()) == Some("poly-acct")
+                        && g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && g.get("reason")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("")
+                            .contains("self-check failed on polymarket")
+                })
+            })
+            .unwrap_or(false),
         "the freeze book carries the reason for the panel: {stats}"
     );
     assert!(
-        stats["accountFreezes"].get("polysim-acct").is_none(),
+        stats["accountGates"].as_array().is_none_or(|arr| {
+            !arr.iter().any(|g| {
+                g.get("account").and_then(|a| a.as_str()) == Some("polysim-acct")
+                    && g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false)
+            })
+        }),
         "the sibling account is in no freeze book: {stats}"
     );
 
@@ -521,59 +602,6 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         "the freeze was idempotent from the first streak: the reason the operator saw first stands"
     );
     assert!(!c.is_killed(), "still account-scoped, never global");
-}
-
-/// The two-venue book this file's venue-scoped-freeze acceptance uses:
-/// BOTH accounts are ACTIVE and each is bound to its own venue, so
-/// `account_ids_bound_to_venue` has a routing table to work with.
-fn two_venue_book_fixture() -> Core {
-    let book = crate::account::AccountLedgers::new(
-        vec![
-            crate::account::Account {
-                id: crate::account::AccountId::from("poly-acct"),
-                name: "polymarket 主账户".into(),
-                market_type: blitzkrieg_market_api::MarketType::Prediction,
-                status: crate::account::AccountStatus::Active,
-                credential_keys: crate::account::CredentialKeys::default(),
-                venue: "polymarket".into(),
-                trading_enabled: true,
-                strategies: Vec::new(),
-                rounds: Vec::new(),
-                opening_equity: None,
-                updated_at_ms: 0,
-            },
-            crate::account::Account {
-                id: crate::account::AccountId::from("polysim-acct"),
-                name: "polysimulator 练习账户".into(),
-                market_type: blitzkrieg_market_api::MarketType::Prediction,
-                status: crate::account::AccountStatus::Active,
-                credential_keys: crate::account::CredentialKeys::default(),
-                venue: "polysimulator".into(),
-                trading_enabled: true,
-                strategies: Vec::new(),
-                rounds: Vec::new(),
-                opening_equity: None,
-                updated_at_ms: 0,
-            },
-        ],
-        crate::account::AccountId::from("poly-acct"),
-    );
-    let cfg = CoreConfig {
-        mode: Mode::Dry,
-        risk: RiskConfig {
-            max_order_notional: dec!(100),
-            ..Default::default()
-        },
-        dry_seed_balance: dec!(1000),
-        auto_exits_enabled: false,
-        trade_log_path: None,
-        // Same discipline as `two_book_fixture`: the cwd-relative default
-        // order log must not collect these tests' orders.
-        order_log_path: None,
-        position_log_path: None,
-        ..Default::default()
-    };
-    Core::with_account_book(cfg, book)
 }
 
 /// A venue sell on an order the OME never issued (a manual close made

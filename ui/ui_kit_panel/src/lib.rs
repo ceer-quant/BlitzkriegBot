@@ -74,6 +74,10 @@ pub enum Msg {
     /// 账户↔venue 解耦（本轮）：the `A` overlay's `account.list` answered —
     /// raw kernel book (`Err` = the core refused / transport died).
     AccountsLoaded(Result<serde_json::Value, String>),
+    /// #1059: the `U` overlay's `account.unfreeze` answered — raw
+    /// `AccountUnfreezeResult` plus a re-read `accountGates` (`Err` = the core
+    /// refused / transport died).
+    UnfreezeLoaded(Result<serde_json::Value, String>),
     /// The process received an external termination signal.
     Shutdown,
 }
@@ -624,6 +628,75 @@ pub async fn run_panel_with_dispatcher(
                             let _ = tx.send(Msg::AccountsLoaded(out));
                         });
                     }
+                    // #1059: `U` unfreeze — empty account_id means "fetch the gate
+                    // book" (populate the overlay); otherwise lift the named
+                    // account's gate, then re-read `accountGates` so the panel
+                    // never guesses that unfreeze "succeeded".
+                    Action::AccountUnfreeze { account_id } => {
+                        let socket = app.socket.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let out = tokio::task::spawn_blocking(move || {
+                                let mut client =
+                                    blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
+                                let mut gates: serde_json::Value = serde_json::json!([]);
+                                let result: String;
+                                if account_id.is_empty() {
+                                    // First press of `U`: populate the overlay.
+                                    match client.stats() {
+                                        Ok(stats) => {
+                                            gates = serde_json::json!(stats.account_gates);
+                                            result = "gate book re-read".to_string();
+                                        }
+                                        Err(e) => return Err(format!("gate book: {e}")),
+                                    }
+                                } else {
+                                    // Lift this account's gate, then re-read it.
+                                    match client.account_unfreeze(&account_id) {
+                                        Ok(receipt) => {
+                                            let unfrozen = receipt
+                                                .get("unfrozen")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(false);
+                                            let entries = receipt
+                                                .get("entriesAllowed")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(false);
+                                            let prev = receipt
+                                                .get("previousReason")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            if unfrozen && entries {
+                                                result =
+                                                    format!("unfroze `{account_id}` — entries re-admitted");
+                                            } else if unfrozen {
+                                                result =
+                                                    format!("unfroze `{account_id}` — entries still blocked by another gate");
+                                            } else {
+                                                result =
+                                                    format!("refused to unfreeze `{account_id}` (previous: {prev})");
+                                            }
+                                        }
+                                        Err(e) => return Err(format!("unfreeze `{account_id}`: {e}")),
+                                    }
+                                    match client.stats() {
+                                        Ok(stats) => {
+                                            gates = serde_json::json!(stats.account_gates);
+                                        }
+                                        Err(e) => return Err(format!("re-read gates: {e}")),
+                                    }
+                                }
+                                Ok::<_, String>(serde_json::json!({
+                                    "gates": gates,
+                                    "result": result,
+                                }))
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("unfreeze task: {e}")));
+                            let _ = tx.send(Msg::UnfreezeLoaded(out));
+                        });
+                    }
                     Action::None => {}
                 }
             }
@@ -819,6 +892,28 @@ pub async fn run_panel_with_dispatcher(
                     app.log(format!("accounts: {n} account(s), default {active}"));
                 }
                 Err(e) => app.log(format!("account list failed: {e}")),
+            },
+            Msg::UnfreezeLoaded(result) => match result {
+                Ok(doc) => {
+                    app.unfreeze_busy = false;
+                    app.unfreeze_doc = doc.get("gates").cloned();
+                    if let Some(text) = doc.get("result").and_then(|v| v.as_str()) {
+                        app.unfreeze_result = Some(text.to_string());
+                        app.log(format!("unfreeze: {text}"));
+                    }
+                    let n = app
+                        .unfreeze_doc
+                        .as_ref()
+                        .and_then(|g| g.as_array().map(|a| a.len()))
+                        .unwrap_or(0);
+                    if app.unfreeze_focus >= n {
+                        app.unfreeze_focus = 0;
+                    }
+                }
+                Err(e) => {
+                    app.unfreeze_busy = false;
+                    app.log(format!("unfreeze failed: {e}"));
+                }
             },
             Msg::PolicyLoaded(result) => match result {
                 Ok((accounts, section, preview, history)) => {

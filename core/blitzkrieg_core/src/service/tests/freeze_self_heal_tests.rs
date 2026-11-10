@@ -92,10 +92,10 @@ fn close_intent_insufficient_position_does_not_feed_freeze_streak() {
     );
     let stats = c.engine_stats();
     assert!(
-        stats["accountFreezes"]
-            .as_object()
-            .is_none_or(|m| m.is_empty()),
-        "the freeze book stays empty: {stats}"
+        stats["accountGates"]
+            .as_array()
+            .is_some_and(|arr| arr.is_empty()),
+        "the freeze book stays empty (and the key must be carried for the panel): {stats}"
     );
     // The intent still saw every rejection (per-strategy accounting unchanged).
     assert_eq!(stats["venueRejected"], FREEZE_ON_REJECTS as u64 + 2);

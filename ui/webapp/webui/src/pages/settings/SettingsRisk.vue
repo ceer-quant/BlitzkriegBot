@@ -103,23 +103,28 @@ async function switchAccount(id: string): Promise<void> {
 }
 
 // ── 账户冻结解冻（issue 943，红色横幅的另一半；issue 1044 呈现真相）─────────
-// 风控冻结（accountFreezes，内核 freeze book）：账户因 venue-rejection 连拒
+// 风控冻结（accountGates，内核 entry gate 簿）：账户因 venue-rejection 连拒
 // 或日内亏损熔断被冻结，拒开仓、平仓照放；解冻走 account.unfreeze（issue
 // 1069），内核先 persist 配置态再清闸门，回执带 entriesAllowed，面板必读
-  // 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
-  // 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
+// 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
+// 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
 // 配置态停用（account.status === 'frozen'）：来自 .env AccountStatus，与
 // 风控冻结是两回事，只读呈现「配置停用」，不提供内核解冻按钮（需改
 // .env 并重启）。
 const freezeOperateId = ref<string | null>(null)
 
-// 风控冻结账户（可解冻）：唯一来源是内核 freeze book stats.accountFreezes。
+// 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
+// 取 blocked === true 的条目。
 const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
-  const freezes = store.snapshot?.stats?.accountFreezes
-  return freezes
-    ? Object.entries(freezes)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([id, reason]) => ({ id, reason }))
+  const gates = store.snapshot?.stats?.accountGates
+  return gates
+    ? gates
+        .filter(
+          (g) =>
+            g.blocked === true && g.account && g.account !== 'global'
+        )
+        .sort((a, b) => a.account.localeCompare(b.account))
+        .map((g) => ({ id: g.account, reason: g.reason || '原因未上报' }))
     : []
 })
 
@@ -139,7 +144,7 @@ async function unfreeze(accountId: string): Promise<void> {
     const r = await api.accountUnfreeze({ accountId })
     if (r.error) throw new Error(r.error)
     // entriesAllowed 是内核的即时「可开新单」判断：全局 kill 期间它会为 false，
-    // 而 freeze book / dailyLoss 都盖不住全局 kill（issue 1062 回滚 F3 后 accountFreezes
+    // 而 freeze book / dailyLoss 都盖不住全局 kill（issue 1062 回滚 F3 后 accountGates
     // 已过滤 GLOBAL_KILL_ACCOUNT）。不得把请求发出当作「已解冻」。
     if (r.entriesAllowed === false) {
       policyErr.value = `解冻 ${accountId} 未生效：内核回报 entriesAllowed=false，仍有全局或其他闸门在，未恢复新单入场。`

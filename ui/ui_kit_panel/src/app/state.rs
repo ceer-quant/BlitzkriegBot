@@ -107,6 +107,13 @@ pub enum Action {
     /// overlay's read. A fresh client of its own (same reasoning as
     /// NetCheck/PolicyRefresh); the reply is the kernel's own book, raw.
     AccountsRefresh,
+    /// #1059: `account.unfreeze` off the render loop — the `U` overlay's write.
+    /// Fresh client of its own; the reply is the kernel's
+    /// `AccountUnfreezeResult` (`unfrozen`/`entriesAllowed`), re-read so the
+    /// panel never guesses that unfreeze "succeeded".
+    AccountUnfreeze {
+        account_id: String,
+    },
 }
 
 /// How far the self-check has got. Advances as snapshots finally arrive with
@@ -251,6 +258,15 @@ pub struct App {
     /// The overlay is visible (`A` toggles; Esc/A close). While it is up it
     /// takes the keys, exactly like the net-check overlay.
     pub accounts_visible: bool,
+    /// #1059: the `U` unfreeze overlay's state. `unfreeze_doc` is the last
+    /// `accountGates` read (raw, same discipline as accounts_doc); `focus`
+    /// moves the cursor over frozen rows; `busy` is set while a round-trip is
+    /// in flight; `result` holds the last outcome line to render.
+    pub unfreeze_visible: bool,
+    pub unfreeze_doc: Option<serde_json::Value>,
+    pub unfreeze_focus: usize,
+    pub unfreeze_busy: bool,
+    pub unfreeze_result: Option<String>,
 }
 
 /// #364: one rule mid-edit — the builder's state. Field/op move with ←/→,

@@ -3,9 +3,6 @@
  * RiskLimitsResult), the exit-discipline triple, and their write paths.
  */
 import { request } from './core.ts'
-import type { AccountFreezeSetDoc } from './accounts.ts'
-
-export type { AccountFreezeSetDoc }
 
 // ── E26 systemic risk readout (mirror ipc/schema.rs's RiskLimitsResult) ──────
 
@@ -170,15 +167,6 @@ export const riskApi = {
    */
   riskSetExit: (body: RiskSetExitBody) =>
     request<ExitSetUpdateDoc>('/risk/set-exit', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  /**
-   * 账户级急冻/解冻写（issue 927 / issue 943）：`{ accountId, frozen: false }`
-   * 为账户解锁恢复接新单。
-   */
-  accountFreezeSet: (body: { accountId: string; frozen: boolean; reason?: string }) =>
-    request<AccountFreezeSetDoc>('/account-freeze/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

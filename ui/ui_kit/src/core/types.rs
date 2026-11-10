@@ -480,11 +480,27 @@ pub struct EngineStatsView {
     /// Whether the kill switch is down. The panel's freeze banner reads this.
     #[serde(default)]
     pub trading_frozen: Option<TradingFrozenView>,
-    /// PR G: the account-scoped kill book (`account.freeze` and the automatic
-    /// venue-rejection freeze) — account id → why. Empty object when nothing
-    /// is frozen. Older cores omit the key entirely.
-    #[serde(default, deserialize_with = "de_null_default")]
-    pub account_freezes: std::collections::HashMap<String, String>,
+    /// #1059: per-account entry gates, mirroring the kernel's `accountGates`
+    /// stats array (`blocked` / `reason` / `reasonKind` / `sinceMs` /
+    /// `expiresAtMs` / `actor`). Replaces the retired `account_freeves` map
+    /// (`accountId → reason`) — the array carries the full gate metadata the
+    /// panel needs to render freeze banners correctly.
+    #[serde(default)]
+    pub account_gates: Vec<AccountGateView>,
+}
+
+/// #1059: one account's entry gate, mirroring the kernel's `accountGates`
+/// entry (`blocked`, `reason`, `reasonKind`, `sinceMs`, `expiresAtMs`, `actor`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountGateView {
+    pub account: String,
+    pub blocked: bool,
+    pub reason: Option<String>,
+    pub reason_kind: Option<String>,
+    pub since_ms: Option<i64>,
+    pub expires_at_ms: Option<i64>,
+    pub actor: Option<String>,
 }
 
 // ── trades.history ───────────────────────────────────────────────────────────

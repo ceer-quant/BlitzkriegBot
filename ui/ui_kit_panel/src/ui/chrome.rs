@@ -3,7 +3,7 @@
 //! kill banner, confirm bar, command bar and log pane.
 
 use super::evolution::render_evolution;
-use super::overlays::{render_accounts, render_help, render_net_check};
+use super::overlays::{render_accounts, render_help, render_net_check, render_unfreeze};
 use super::panes::{
     render_decisions, render_orders, render_overview, render_plugins, render_positions,
     render_trades,
@@ -51,6 +51,9 @@ pub fn render(f: &mut Frame, app: &App) {
     }
     if app.accounts_visible {
         render_accounts(f, app);
+    }
+    if app.unfreeze_visible {
+        render_unfreeze(f, app);
     }
     render_command_bar(f, chunks[3], app);
     if let Some(text) = &app.pending_confirmation {

@@ -67,14 +67,22 @@ const switchErr = ref<string | null>(null)
 const active = computed(() => store.displayAccount || '')
 /** 行数据的唯一源：store.refreshAccounts 的镜像（issue 781）。 */
 const rows = computed(() => store.accounts)
-/** 风控冻结账户 id 集（唯一来源是内核 freeze book stats.accountFreezes）。
+/** 风控冻结账户 id 集（唯一来源是内核 entry gate 簿 stats.accountGates，
+ *  取 blocked === true 的条目）。
  *  与 account.status === 'frozen'（配置态停用）是两回事：自动冻结的账户
- *  其 status 可能并非 'frozen'，故解冻入口必须读 accountFreezes，不能
+ *  其 status 可能并非 'frozen'，故解冻入口必须读 accountGates，不能
  *  读账户行 status（否则自动冻结的账户在行内看不到解冻入口，U2）。 */
 const snapshot = computed(() => store.snapshot)
 const frozenAccountIds = computed(() => {
-  const freezes = snapshot.value?.stats?.accountFreezes
-  return freezes ? Object.keys(freezes) : []
+  const gates = snapshot.value?.stats?.accountGates
+  return gates
+        ? gates
+            .filter(
+              (g) =>
+                g.blocked === true && g.account && g.account !== 'global'
+            )
+            .map((g) => g.account)
+    : []
 })
 const isFrozenAccount = (id: string) => frozenAccountIds.value.includes(id)
 
