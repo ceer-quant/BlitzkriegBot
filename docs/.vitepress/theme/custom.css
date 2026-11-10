@@ -247,6 +247,13 @@ body .VPNavBar.has-sidebar .content {
   border-bottom: none;
 }
 
+/* 文档页正文回到胶囊之下：scoped 基础 padding-top 已全局移除（含首页），
+   首页 hero 自带 padding 不受影响，但文档页正文会顶到视口顶端被胶囊遮住，
+   只给非首页文档页补回：胶囊块高 68px（56+12）+ 28px 呼吸 */
+body .VPContent.VPContent.has-sidebar:not(.is-home) {
+  padding-top: 96px;
+}
+
 /* 侧栏页布局中和成首页形态：
    scoped 把 .container 放宽到 100%、.title 绝对定位钉在最左（width:sidebar）、
    .content 填 padding-left:sidebar、.content-body 铺 nav 底色——全部压回，
