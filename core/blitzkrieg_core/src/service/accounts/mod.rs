@@ -109,29 +109,27 @@ impl Core {
             // account's opening equity — exactly once, never overwritten by
             // later reports. Persisted to the account file and mirrored into
             // runtime so `LEDGER_BALANCE` can compute cumulative net PnL.
-            #[allow(clippy::collapsible_if)]
             if self
                 .accounts
                 .account(&target)
                 .and_then(|a| a.opening_equity)
                 .is_none()
+                && let Some((env_path, toml_path)) = self.config.account_env_write_paths()
             {
-                if let Some((env_path, toml_path)) = self.config.account_env_write_paths() {
-                    if let Err(e) = crate::account::config::env_persist_account_opening_equity(
-                        &toml_path,
-                        &env_path,
-                        target.as_str(),
-                        b,
-                        ts,
-                    ) {
-                        tracing::warn!(
-                            account = %target.as_str(),
-                            %e,
-                            "failed to persist opening equity"
-                        );
-                    } else if let Some(a) = self.accounts.account_mut(&target) {
-                        a.opening_equity = Some(b);
-                    }
+                if let Err(e) = crate::account::config::env_persist_account_opening_equity(
+                    &toml_path,
+                    &env_path,
+                    target.as_str(),
+                    b,
+                    ts,
+                ) {
+                    tracing::warn!(
+                        account = %target.as_str(),
+                        %e,
+                        "failed to persist opening equity"
+                    );
+                } else if let Some(a) = self.accounts.account_mut(&target) {
+                    a.opening_equity = Some(b);
                 }
             }
             if previous != b {
