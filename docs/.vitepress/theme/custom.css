@@ -290,8 +290,11 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
 }
 
 /* container 是「标题列 | 内容体」两列 flex 布局，默认顶对齐导致
-   标题列（32px）贴顶偏上 11px；两列都改为在胶囊内垂直居中 */
-.VPNavBar .container {
+   标题列（32px）贴顶偏上 11px；两列都改为在胶囊内垂直居中。
+   注意必须用 .wrapper > .container 精确命中真胶囊：汉堡按钮内部的
+   三道杠容器恰好也叫 .container（VitePress 模板同名），后代选择器
+   会把玻璃样式/伪元素 leak 到它身上，让汉堡裹上一层气泡。 */
+.VPNavBar .wrapper > .container {
   align-items: center;
 }
 
@@ -326,8 +329,9 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
   content: none;
 }
 
-/* 容器 = WebUI 的 .glass-header：重玻璃、18px 圆角、金发丝线、镜面扫光 */
-.VPNavBar .container {
+/* 容器 = WebUI 的 .glass-header：重玻璃、18px 圆角、金发丝线、镜面扫光
+   （.wrapper > .container 子选择器：避免命中汉堡内部的同名 .container） */
+.VPNavBar .wrapper > .container {
   position: relative;
   max-width: 1280px;
   height: 56px;
@@ -346,7 +350,7 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
 }
 
 /* 金色折射发丝线沿顶边（= .glass-header::before） */
-.VPNavBar .container::before {
+.VPNavBar .wrapper > .container::before {
   content: '';
   position: absolute;
   inset: 0 0 auto 0;
@@ -362,7 +366,7 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
 }
 
 /* 镜面斜扫高光，垫在玻璃自身上、文字之下（= .glass-header::after） */
-.VPNavBar .container::after {
+.VPNavBar .wrapper > .container::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -622,7 +626,13 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
    这里等价落地：导航胶囊交给汉堡屏菜单承载，搜索收成纯图标圆钮，
    汉堡按钮按 ghost 圆钮重塑（默认 48×55px 的白块会戳出胶囊）。 */
 @media (max-width: 767px) {
-  .VPNavBar .container {
+  /* 汉堡/搜索对齐胶囊中轴：VitePress 内部高度都挂在 --vp-nav-height
+     （55px > 胶囊 48px），flex 行被撑高导致图标整体偏下——统一改 48px */
+  .VPNavBar {
+    --vp-nav-height: 48px;
+  }
+
+  .VPNavBar .wrapper > .container {
     height: 48px;
     margin: 8px 8px 0;
     border-radius: 14px;
@@ -639,7 +649,14 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
     font-size: 14px;
   }
 
-  /* 搜索 → 纯图标 ghost 圆钮：去边框去底色，只留 icon（对齐 WebUI ghost 按钮） */
+  /* 搜索 → 纯图标 ghost 圆钮：去边框去底色，只留 icon（对齐 WebUI ghost 按钮）。
+     wrapper 同步满高居中：pagefind 按钮曾整体偏上 6px（中心 26 vs 胶囊 32） */
+  .VPNavBar .blog-search {
+    display: flex;
+    align-items: center;
+    height: var(--vp-nav-height);
+  }
+
   .VPNavBar .blog-search .nav-search-btn-wait,
   .VPNavBar .blog-search .nav-search-btn {
     width: 34px;
@@ -669,19 +686,43 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
     border-radius: 50%;
   }
 
-  /* 汉堡：与其他右侧控件同径的 ghost 圆钮，居中对齐
+  /* 汉堡：与搜索按钮同款 ghost——不裹卡片，只留三道杠 icon
      （默认 48px 宽 / 55px 高会溢出胶囊） */
   .VPNavBar .VPNavBarHamburger {
     width: 34px;
     height: 34px;
-    border-radius: 50%;
+    padding: 0;
+    border: none;
+    background: none;
+    border-radius: 0;
     justify-content: center;
     align-items: center;
   }
 
+  .VPNavBar .VPNavBarHamburger:hover {
+    background: none;
+  }
+
+  .VPNavBar .VPNavBarHamburger:hover .top,
+  .VPNavBar .VPNavBarHamburger:hover .middle,
+  .VPNavBar .VPNavBarHamburger:hover .bottom {
+    background-color: var(--vp-c-brand-1);
+  }
+
+  /* 汉堡内部三道杠容器恰好也叫 .container，会被外层
+     `.VPNavBar .container` 玻璃胶囊规则命中——套出一枚 menu 同款
+     迷你气泡。在此剥掉全部胶囊外观，只留裸 icon。 */
   .VPNavBar .VPNavBarHamburger .container {
     width: 16px;
     height: 14px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: none;
+    background-image: none;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }
 
