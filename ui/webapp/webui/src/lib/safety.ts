@@ -160,7 +160,7 @@ export function lastErrorBanner(
         title: `${account}账户交易已经冻结`,
         body: structured.message,
         code: structured.code,
-        hint: '日内交易损失已经超过限额，内核冻结了此账户的交易。设置 · 风控可解锁。',
+        hint: '日内交易损失已经超过限额，内核冻结了此账户的交易。设置 · 风控可解冻。',
       }
     }
     return {
@@ -236,7 +236,7 @@ export function accountFreezeBanners(stats: EngineStats | null | undefined): Saf
       urgent: true,
       title: `账户已冻结（${id}）`,
       body: reason || '该账户已被冻结，原因未上报。',
-      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解锁（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
+      hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解冻（会话级冻结重启即清）。冻结只影响这一个账户，其他账户照常交易。',
     }))
 }
 

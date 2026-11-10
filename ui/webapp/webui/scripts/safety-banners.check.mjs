@@ -204,8 +204,8 @@ check('a per-account freeze is one urgent red line per frozen account (issue 943
   assert.match(many[0].body, /reason for a/, 'the kernel\'s freeze reason is DATA on screen')
   assert.match(many[1].body, /3 consecutive venue rejections/)
   assert.ok(
-    many.every((b) => b.hint && /解锁/.test(b.hint)),
-    'every banner names the unlock door (设置·风控)',
+    many.every((b) => b.hint && /解冻/.test(b.hint)),
+    'every banner names the unfreeze door (设置·风控)',
   )
 })
 

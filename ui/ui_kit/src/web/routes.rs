@@ -563,6 +563,13 @@ impl WebServer {
                 // 持久化（重启即清，重新探测）。网关零加工。
                 self.proxy_backtest_body("account.freeze", &req.body)
             }
+            ("POST", "/api/account-unfreeze") => {
+                // #1069：账户解冻入口 —— body 即 `account.unfreeze` 的 params
+                // 对象（`{accountId}`），逐字转发。内核回执带
+                // `entriesAllowed`（解冻后该账户是否可开新单），面板必读
+                // 该字段，不得把「发出请求」当作「已解冻」。网关零加工。
+                self.proxy_backtest_body("account.unfreeze", &req.body)
+            }
             ("GET", "/api/trades-summary") => {
                 // PR H (账户筛选修复)：钱包页的闭环统计 —— `trades.summary`
                 // 的薄代理（只读）。`?accountId=` 带上时内核按行过滤重算
