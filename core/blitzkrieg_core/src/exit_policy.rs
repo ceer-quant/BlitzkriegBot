@@ -981,13 +981,10 @@ pub fn update_exit_state_interval<B: BookScalarView + ?Sized>(
     // A usable quote was seen: stamps the age the protective stop's fallback is
     // bounded by (P0 #177).
     state.last_quote_at_ms = now_ms;
-    // `high_pnl_pct` 基于内核维护的高水位（best_bid 高水位，只升不降，用于止盈/给出判断，
-    // 不在判决阶段预扣 taker 费）；`low_pnl_pct` 基于实时 val（可升可降），避免因恒等于
-    // 高水位导致面板 MAE 假值（#1078 P1）。
     let pct = pnl_pct(val, entry_price);
-    let hwm_pct = pnl_pct(state.high_water_mark, entry_price);
-    if hwm_pct > state.high_pnl_pct {
-        state.high_pnl_pct = hwm_pct;
+
+    if pct > state.high_pnl_pct {
+        state.high_pnl_pct = pct;
     }
     if pct < state.low_pnl_pct {
         state.low_pnl_pct = pct;
