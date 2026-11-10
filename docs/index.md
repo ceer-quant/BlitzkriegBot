@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: BlitzkriegBot
-  text: 文档
-  tagline: 独立交易者的 TradingOS · 现金真相优先 · 单一语义入口
+  text: 独立交易者的 TradingOS
+  tagline: 现金真相优先 · 单一语义入口
   image:
     src: /logo.png
     alt: BlitzkriegBot
