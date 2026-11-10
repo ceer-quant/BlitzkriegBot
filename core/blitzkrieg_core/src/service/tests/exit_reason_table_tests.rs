@@ -480,6 +480,19 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
         ExitReason::StrategySignal,
         "merge never routes through the sell path; a stray tag must not resemble one"
     );
+    // #1072: the Lua momentum strategy's stop intents must stamp StopLoss,
+    // not the blanket StrategySignal — `stop_blocked_no_liquidity` is a stop
+    // that could not be placed for lack of a bid, still a stop event.
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("stop_loss"),
+        ExitReason::StopLoss,
+        "stop_loss 策略标签必须落在 StopLoss 变体"
+    );
+    assert_eq!(
+        super::risk_admission::exit_reason_from_strategy_tag("stop_blocked_no_liquidity"),
+        ExitReason::StopLoss,
+        "stop_blocked_no_liquidity（止损因无买盘未放单）也是止损事件"
+    );
 
     // End-to-end: the intent's tag lands on the closed row.
     let mut c = core();

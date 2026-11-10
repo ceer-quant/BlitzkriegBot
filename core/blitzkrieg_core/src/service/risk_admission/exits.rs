@@ -38,6 +38,12 @@ pub(crate) fn exit_reason_from_strategy_tag(reason: &str) -> ExitReason {
         "take_profit" | "take_profit_price" => ExitReason::TakeProfit,
         "trailing_stop" => ExitReason::TrailingStop,
         "time_exit" => ExitReason::TimeExit,
+        // #1072: the Lua momentum strategy emits these two stop intents
+        // (`stop_loss` on a breached stop, `stop_blocked_no_liquidity` when no
+        // fresh bid lets the stop sell be placed). Both are protective-stop
+        // events and must NOT fall into the blanket `StrategySignal` stamp —
+        // the ledger must show the real stop reason, not hide it as a signal.
+        "stop_loss" | "stop_blocked_no_liquidity" => ExitReason::StopLoss,
         // #961: the Lua runtime emits this tag ONLY for a forced thesis-death
         // close (the strategy's own exits table cannot mint it — the runtime
         // injects the row itself when the declared death predicate fires), so
