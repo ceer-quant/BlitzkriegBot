@@ -71,12 +71,19 @@
 
   /* 面板 / 玻璃 / 阴影 / 辉光（= WebUI 的 panel、glass-*、shadow-1/2、glow） */
   --bb-panel: oklch(0.2 0.016 268 / 0.72);
+  /* SegmentedControl 的 bg-panel-2（menu 胶囊底） */
+  --bb-menu-bg: oklch(0.24 0.016 268 / 0.6);
   --bb-sheen: oklch(1 0 0 / 0.06);
   --bb-sheen-hi: oklch(1 0 0 / 0.05);
   --bb-glass-edge: oklch(1 0 0 / 0.12);
   --bb-shadow-1: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px oklch(0 0 0 / 0.35);
   --bb-shadow-2: 0 2px 6px oklch(0 0 0 / 0.45), 0 18px 48px oklch(0 0 0 / 0.5);
   --bb-glow: 0 0 0 1px oklch(0.78 0.16 68 / 0.28), 0 6px 28px oklch(0.78 0.16 68 / 0.18);
+
+  /* header 重玻璃（= WebUI .glass-header 的 glass-*） */
+  --bb-glass-fill: oklch(0.22 0.016 268 / 0.42);
+  --bb-glass-hi: oklch(1 0 0 / 0.1);
+  --bb-glass-rim: oklch(0 0 0 / 0.4);
 
   /* 提示块：tip 用品牌金，info 用 WebUI 的 info，warning 用品牌亮金，danger 用 down 红 */
   --vp-custom-block-tip-border: oklch(0.78 0.16 68);
@@ -156,12 +163,19 @@ html:not(.dark) {
   --vp-local-search-bg: oklch(1 0 0);
 
   --bb-panel: oklch(1 0 0 / 0.72);
+  /* SegmentedControl 的 bg-panel-2（亮色） */
+  --bb-menu-bg: oklch(1 0 0 / 0.55);
   --bb-sheen: oklch(1 0 0 / 0.8);
   --bb-sheen-hi: oklch(1 0 0 / 0.55);
   --bb-glass-edge: oklch(0.2 0.02 268 / 0.09);
   --bb-shadow-1: 0 1px 2px oklch(0.2 0.02 268 / 0.06), 0 10px 30px oklch(0.2 0.02 268 / 0.08);
   --bb-shadow-2: 0 2px 8px oklch(0.2 0.02 268 / 0.08), 0 22px 56px oklch(0.2 0.02 268 / 0.12);
   --bb-glow: 0 0 0 1px oklch(0.66 0.17 58 / 0.3), 0 8px 30px oklch(0.66 0.17 58 / 0.16);
+
+  /* header 重玻璃（= WebUI .light .glass-header 的 glass-*） */
+  --bb-glass-fill: oklch(1 0 0 / 0.44);
+  --bb-glass-hi: oklch(1 0 0 / 0.72);
+  --bb-glass-rim: oklch(0.2 0.02 268 / 0.07);
 
   /* 提示块：亮底上用更深的 border 与更深的文字，保证 AA 对比度 */
   --vp-custom-block-tip-border: oklch(0.66 0.17 58);
@@ -184,14 +198,420 @@ html:not(.dark) {
 /* ── 品牌标识 ─────────────────────────────────────────────────────────── */
 
 .VPNavBar .logo {
-  height: 30px;
-  width: 30px;
-  border-radius: 8px;
+  height: 32px;
+  width: 32px;
+  border-radius: 50%;
+  /* WebUI 的 brand 图只有投影，没有描边圈 */
+  filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.35));
 }
 
+/* ── 顶栏：照 WebUI 的浮动玻璃胶囊 ─────────────────────────────────────
+   WebUI 的顶栏没有任何横向条线：VitePress 自带的 .VPNav 纱罩、
+   .content-body 滚动后铺的全宽底色（--vp-nav-bg-color）、条目之间的
+   1px 竖分隔线，全部关掉，只留悬浮胶囊本身。 */
+
 .VPNavBar {
-  backdrop-filter: blur(14px) saturate(1.2);
-  border-bottom: 1px solid var(--vp-c-divider);
+  background-color: transparent;
+  background-image: none;
+  border-bottom: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.VPNav {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.VPNavBar::after {
+  content: none;
+}
+
+/* 内容区顶栏占位 padding 移除：胶囊悬浮，正文直接从顶部开始
+   （scoped 规则 .VPContent[data-v] 为 (0,2,0)，用 div 双写类压过） */
+div.VPContent.VPContent {
+  padding-top: 0;
+}
+
+/* 非侧栏页顶栏的默认底色移除：顶栏就是悬浮胶囊本体
+   （scoped 规则含两个 :not，共 (0,4,0)，加 body 抬到 (0,5,0) 压过） */
+body .VPNav .VPNavBar:not(.has-sidebar):not(.home.top) {
+  background-color: transparent;
+}
+
+/* 侧栏页：标题列与内容区自带的白底色块清除（scoped (0,3,0)，body 抬到 (0,3,1)） */
+body .VPNavBar.has-sidebar .title,
+body .VPNavBar.has-sidebar .content {
+  background-color: transparent;
+  border-bottom: none;
+}
+
+/* 侧栏页布局中和成首页形态：
+   scoped 把 .container 放宽到 100%、.title 绝对定位钉在最左（width:sidebar）、
+   .content 填 padding-left:sidebar、.content-body 铺 nav 底色——全部压回，
+   让标题回到胶囊流内、胶囊恢复首页同款 1280px 居中。
+   scoped 规则含 [data-v] 属性选择器，共 (0,4,0)；
+   body+双写类抬到 (0,4,1) 压过 */
+@media (min-width: 960px) {
+  body .VPNavBar.VPNavBar.has-sidebar .container {
+    max-width: 1280px;
+  }
+
+  body .VPNavBar.VPNavBar.has-sidebar .title {
+    position: static;
+    width: auto;
+    padding: 0;
+  }
+
+  body .VPNavBar.VPNavBar.has-sidebar .content {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  body .VPNav .VPNavBar:not(.home.top) .content-body {
+    background-color: transparent;
+  }
+}
+
+/* 内容压回胶囊内部：默认内容条/标题高 --vp-nav-height(55px) > 胶囊 52px，
+   多出的 3px 让中轴线下坠（标题最明显），统一撑满胶囊高度居中 */
+.VPNavBar .container > .content,
+.VPNavBar .content-body,
+.VPNavBarTitle .title {
+  height: 100%;
+}
+
+/* container 是「标题列 | 内容体」两列 flex 布局，默认顶对齐导致
+   标题列（32px）贴顶偏上 11px；两列都改为在胶囊内垂直居中 */
+.VPNavBar .container {
+  align-items: center;
+}
+
+/* 标题列（.container > .title）自带 63px 高、比胶囊还高且上溢，
+   内部的 VPNavBarTitle 默认贴顶——列内居中，标题行才落在胶囊中轴 */
+.VPNavBar .container > .title {
+  display: flex;
+  align-items: center;
+}
+
+/* 自带的灰分隔线整根去掉（divider 是纯装饰条，直接 display:none） */
+.VPNavBar .divider,
+.VPNavBar.has-sidebar .divider,
+.VPNavBar .divider-line {
+  display: none;
+}
+
+/* 默认主题在滚动后给 content-body 铺一条全宽底色，就是那根「横线」 */
+.VPNavBar .content-body,
+.VPNavBar:not(.home.top) .content-body,
+.VPNavBar:not(.has-sidebar):not(.home.top) .content-body {
+  background-color: transparent;
+}
+
+/* 条目之间的 1px 竖分隔线（menu/appearance/social 之间自动插入） */
+.VPNavBar .menu + .translations::before,
+.VPNavBar .menu + .appearance::before,
+.VPNavBar .menu + .social-links::before,
+.VPNavBar .translations + .appearance::before,
+.VPNavBar .translations + .social-links::before,
+.VPNavBar .appearance + .social-links::before {
+  content: none;
+}
+
+/* 容器 = WebUI 的 .glass-header：重玻璃、18px 圆角、金发丝线、镜面扫光 */
+.VPNavBar .container {
+  position: relative;
+  max-width: 1280px;
+  height: 56px;
+  margin: 12px auto 0;
+  padding: 0 16px;
+  border: 1px solid var(--bb-glass-edge);
+  border-radius: 18px;
+  background-color: var(--bb-glass-fill);
+  background-image: linear-gradient(180deg, var(--bb-glass-hi), transparent 46%);
+  box-shadow:
+    var(--bb-shadow-2),
+    inset 0 1px 0 var(--bb-sheen),
+    inset 0 -1px 0 var(--bb-glass-rim);
+  -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
+  backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
+}
+
+/* 金色折射发丝线沿顶边（= .glass-header::before） */
+.VPNavBar .container::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 3%,
+    oklch(0.78 0.16 68 / 0.6) 50%,
+    transparent 97%
+  );
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* 镜面斜扫高光，垫在玻璃自身上、文字之下（= .glass-header::after） */
+.VPNavBar .container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(
+    104deg,
+    oklch(1 0 0 / 0.08) 0%,
+    transparent 38%,
+    transparent 64%,
+    oklch(1 0 0 / 0.045) 100%
+  );
+  pointer-events: none;
+}
+
+.VPNavBarTitle .title {
+  gap: 9px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  transition: color 0.2s ease;
+}
+
+.VPNavBarTitle .title:hover {
+  color: var(--vp-c-brand-1);
+}
+
+/* 导航项：复刻 WebUI SegmentedControl——
+   容器 inline-grid gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md */
+.VPNavBar.VPNavBar .VPNavBarMenu {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  padding: 4px;
+  border: 1px solid var(--bb-glass-edge);
+  border-radius: 999px;
+  background-color: var(--bb-menu-bg);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(12px) saturate(150%);
+}
+
+/* 导航项链接：h-7.5 px-4 text-[12.5px] font-semibold；scoped 的
+   .active[data-v] 是 (0,3,0)，双写类 (0,4,0) 压过；
+   未选中 hover 只变字色不起底；选中 = btn-gold 金渐变 + 墨字 */
+.VPNavBar.VPNavBar .VPNavBarMenuLink {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--vp-c-text-2);
+  transition: color 0.2s ease;
+}
+
+.VPNavBar.VPNavBar .VPNavBarMenuLink:hover {
+  color: var(--vp-c-text-1);
+}
+
+.VPNavBar.VPNavBar .VPNavBarMenuLink.active {
+  color: oklch(0.2 0.05 60);
+  background: linear-gradient(
+    135deg,
+    var(--vp-c-brand-2),
+    var(--vp-c-brand-1) 60%,
+    oklch(0.66 0.17 58)
+  );
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.25),
+    0 6px 20px oklch(0.78 0.16 68 / 0.28);
+}
+
+/* 内部按钮排列对齐 WebUI：标题 | tab 胶囊 ……(空隙)…… 搜索 主题 GitHub。
+   默认主题把搜索 flex-grow:1 撑满中段（贴着标题），主题/GitHub 在
+   768–1280px 还会被折叠成「⋯」，这里全部接管。 */
+.VPNavBar .content-body {
+  column-gap: 8px;
+}
+
+.VPNavBar .menu {
+  order: 0;
+  /* WebUI 的 nav 是 mx-auto：胶囊在标题与右侧按钮组之间居中 */
+  margin-inline: auto;
+}
+
+.VPNavBar .search {
+  order: 1;
+  flex-grow: 0;
+  margin-left: 12px;
+  padding-left: 0;
+}
+
+.VPNavBar .appearance {
+  order: 2;
+}
+
+.VPNavBar .social-links {
+  order: 3;
+}
+
+.VPNavBar .hamburger {
+  order: 4;
+}
+
+/* 「⋯」折叠菜单不再需要：主题/社交按钮改为大屏常显内联 */
+.VPNavBar .extra,
+.VPNavBar .translations {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .VPNavBar .appearance,
+  .VPNavBar .social-links {
+    display: flex;
+  }
+}
+
+/* 外观切换、GitHub：WebUI 的 ghost 按钮——无边框无底色，hover 才起淡底 */
+.VPNavBarAppearance .VPSwitchAppearance,
+.VPSocialLink {
+  border: none;
+  background-color: transparent;
+  box-shadow: none;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.VPNavBarAppearance .VPSwitchAppearance,
+.VPSocialLink {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+
+.VPNavBarAppearance .VPSwitchAppearance:hover,
+.VPSocialLink:hover {
+  color: var(--vp-c-brand-1);
+  background-color: color-mix(in oklab, var(--vp-c-text-1) 8%, transparent);
+  box-shadow: none;
+}
+
+/* 日夜切换：VPSwitch 默认是开关滑块（轨道+18px 滑块球+图标），这里全部
+   去形态化，只留当前主题图标居中，成为和 GitHub 同款的 ghost 圆钮 */
+.VPNavBar .appearance .VPSwitch {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background-color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.VPNavBar .appearance .VPSwitch:hover {
+  background-color: color-mix(in oklab, var(--vp-c-text-1) 8%, transparent);
+}
+
+.VPNavBar .appearance .VPSwitch .check {
+  position: static;
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+  transform: none !important;
+}
+
+.VPNavBar .appearance .VPSwitch .icon {
+  display: block;
+  position: relative;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  border-radius: 0;
+}
+
+.VPNavBar .appearance .VPSwitch .icon [class^='vpi-'] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--vp-c-text-2);
+}
+
+.VPNavBar .appearance .VPSwitch:hover .icon [class^='vpi-'] {
+  color: var(--vp-c-brand-1);
+}
+
+/* 搜索框：与导航菜单同款胶囊。
+   搜索按钮不是 DocSearch，是 vitepress-plugin-pagefind 的 nav-search-btn
+   （默认 8px 圆角 / 40px 高 / bg-alt 底）；插件样式带 scoped 属性，
+   这里用 .VPNavBar .blog-search 提高特异性稳定压过。 */
+.VPNavBar .blog-search .nav-search-btn-wait,
+.VPNavBar .blog-search .nav-search-btn {
+  height: 36px;
+  border: 1px solid var(--bb-glass-edge);
+  border-radius: 999px;
+  padding: 0 5px 0 13px;
+  background-color: color-mix(in oklab, var(--vp-c-bg) 42%, transparent);
+  color: var(--vp-c-text-2);
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.VPNavBar .blog-search .nav-search-btn-wait:hover,
+.VPNavBar .blog-search .nav-search-btn:hover {
+  border-color: color-mix(in oklab, var(--vp-c-brand-1) 45%, transparent);
+  background-color: color-mix(in oklab, var(--vp-c-text-1) 8%, transparent);
+}
+
+/* 插件 hover 自带 8px 圆角和 padding 变化（scoped (0,3,0) 平手注入更晚），
+   抬到 (0,4,1) 把 hover 状态钉回胶囊形态 */
+.VPNavBar.VPNavBar .blog-search button:hover {
+  border-radius: 999px;
+  padding: 0 5px 0 13px;
+}
+
+.VPNavBar .blog-search .search-tip {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ⌘ K 键帽：对齐菜单内的 pill 形态
+   （scoped 规则 .blog-search .nav-search-btn-wait .metaKey[data-v] 是
+   三个类+属性 = (0,4,0)，双写 .VPNavBar.VPNavBar 抬到 (0,4,1) 压过，
+   button 层级同时兼容水合前后的两种类名） */
+.VPNavBar.VPNavBar .blog-search button .metaKey {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  border: 1px solid var(--bb-glass-edge);
+  border-radius: 999px;
+  padding: 0 6px;
+  background-color: color-mix(in oklab, var(--vp-c-text-1) 6%, transparent);
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+@media (max-width: 767px) {
+  .VPNavBar .container {
+    height: 52px;
+    margin: 8px 8px 0;
+    border-radius: 14px;
+    padding: 0 10px;
+  }
 }
 
 .VPHero .name .clip {
@@ -231,6 +651,8 @@ html:not(.dark) {
 .VPFeature .icon {
   background: var(--vp-c-brand-soft);
   border-radius: 10px;
+  /* 内联 SVG 用 currentColor，这里给品牌金色，明暗两套主题自动跟随 */
+  color: var(--vp-c-brand-1);
 }
 
 /* 按钮：主按钮走金色渐变 + 内高光，hover 加辉光；次按钮是玻璃面板 */
@@ -289,4 +711,709 @@ div[class*='language-'] {
   font-size: 13px;
   letter-spacing: 0.02em;
   color: var(--vp-c-text-3);
+}
+
+/* ---------- 产品官网（首页） ---------- */
+
+.bb-landing {
+  --bb-max: 1152px;
+}
+
+.bb-landing .bb-sec,
+.bb-landing .bb-hero {
+  max-width: var(--bb-max);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.bb-landing .bb-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: 56px;
+  align-items: center;
+  padding-top: 88px;
+  padding-bottom: 72px;
+}
+
+.bb-landing .bb-sec {
+  padding-top: 64px;
+  padding-bottom: 64px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.bb-eyebrow {
+  margin: 0 0 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--vp-c-brand-1);
+}
+
+.bb-hero-title {
+  margin: 0;
+  font-size: clamp(40px, 6vw, 62px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--vp-c-text-1);
+}
+
+.bb-hero-tag {
+  margin: 16px 0 0;
+  font-size: clamp(20px, 2.6vw, 26px);
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+}
+
+.bb-hero-slogan {
+  margin: 10px 0 0;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  color: var(--vp-c-text-3);
+}
+
+.bb-hero-pitch {
+  margin: 22px 0 0;
+  font-size: 16px;
+  line-height: 1.75;
+  color: var(--vp-c-text-2);
+  max-width: 46ch;
+}
+
+.bb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 30px;
+}
+
+.bb-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--bb-glass-edge);
+  background-color: var(--bb-panel);
+  background-image: linear-gradient(180deg, var(--bb-sheen-hi), transparent 60%);
+  box-shadow: inset 0 1px 0 var(--bb-sheen);
+  color: var(--vp-c-text-1);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none !important;
+  transition:
+    background-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.bb-btn:hover {
+  border-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-text-1);
+  box-shadow: inset 0 1px 0 var(--bb-sheen), var(--bb-glow);
+}
+
+.bb-btn-brand {
+  background-image: linear-gradient(180deg, var(--vp-c-brand-2), var(--vp-c-brand-1));
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.32), var(--bb-shadow-1);
+  color: #17130a !important;
+}
+
+.bb-btn-brand:hover {
+  background-image: linear-gradient(180deg, var(--vp-c-brand-2), var(--vp-c-brand-1));
+  color: #17130a !important;
+  filter: brightness(1.06);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.32), var(--bb-glow);
+}
+
+.bb-h2 {
+  margin: 0 0 26px;
+  font-size: clamp(24px, 3vw, 32px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  border: none;
+  padding: 0;
+  color: var(--vp-c-text-1);
+}
+
+.bb-lede {
+  max-width: 68ch;
+  margin: 0 0 28px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--vp-c-text-2);
+}
+
+.bb-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.bb-cards-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.bb-card {
+  padding: 22px 20px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg-soft);
+}
+
+.bb-card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+}
+
+.bb-card-lead {
+  margin: 0 0 14px;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+.bb-card-foot {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px dashed var(--vp-c-divider);
+  font-size: 13px;
+  color: var(--vp-c-text-3);
+}
+
+.bb-brand-mark {
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 16px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.bb-brand-mark.is-song {
+  background-image: url('./icons/song.svg');
+}
+
+.bb-brand-mark.is-stone {
+  background-image: url('./icons/stone.svg');
+}
+
+.bb-brand-mark.is-ui {
+  background-image: url('./icons/ui.svg');
+}
+
+.bb-brand-card h3.bb-brand-name {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--vp-c-brand-1);
+}
+
+.bb-brand-role {
+  margin: 4px 0 12px;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: var(--vp-c-text-3);
+}
+
+.bb-brand-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+}
+
+.bb-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bb-list li {
+  position: relative;
+  padding-left: 16px;
+  margin: 7px 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+}
+
+.bb-list li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 9px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--vp-c-brand-1);
+}
+
+.bb-list.check li::before {
+  background: var(--vp-c-brand-1);
+}
+
+.bb-list.todo li::before {
+  background: transparent;
+  border: 1px solid var(--vp-c-divider);
+  width: 6px;
+  height: 6px;
+  top: 8px;
+}
+
+.bb-badge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.bb-badge.on {
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+}
+
+.bb-badge.off {
+  color: var(--vp-c-text-3);
+  background: var(--vp-c-bg-alt, var(--vp-c-bg-soft));
+  border: 1px solid var(--vp-c-divider);
+}
+
+.bb-note {
+  margin: 22px 0 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--vp-c-text-3);
+}
+
+.bb-arch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+
+.bb-arch-box {
+  width: min(420px, 100%);
+  padding: 14px 18px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.bb-arch-box strong {
+  display: block;
+  font-size: 15px;
+  color: var(--vp-c-text-1);
+}
+
+.bb-arch-box span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--vp-c-text-3);
+}
+
+.bb-arch-box.accent {
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+}
+
+.bb-arrow,
+.bb-flow-arrow {
+  color: var(--vp-c-text-3);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.bb-markets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: min(560px, 100%);
+  margin-top: 4px;
+}
+
+.bb-market {
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-2);
+  background: var(--vp-c-bg-soft);
+}
+
+.bb-market.on {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+.bb-market.off {
+  border-style: dashed;
+  color: var(--vp-c-text-3);
+}
+
+.bb-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.bb-step {
+  padding: 8px 14px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background: var(--vp-c-bg-soft);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.bb-step.accent {
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+}
+
+.bb-shot {
+  margin: 0;
+}
+
+.bb-shot img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+}
+
+.bb-shot figcaption {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--vp-c-text-3);
+}
+
+.bb-shots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.bb-shots .bb-shot:first-child {
+  grid-column: 1 / -1;
+}
+
+.bb-hero-shot .bb-shot img {
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.55);
+}
+
+.bb-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.bb-stat {
+  padding: 20px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.bb-stat b {
+  display: block;
+  font-size: clamp(26px, 3.4vw, 34px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--vp-c-brand-1);
+}
+
+.bb-stat span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--vp-c-text-3);
+}
+
+.bb-code {
+  margin: 0 0 20px;
+  padding: 16px 18px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+  overflow-x: auto;
+}
+
+.bb-code code {
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--vp-c-text-1);
+  background: transparent;
+  padding: 0;
+}
+
+.bb-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bb-tags span {
+  padding: 5px 12px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--vp-c-text-2);
+  background: var(--vp-c-bg-soft);
+}
+
+.bb-mission p {
+  max-width: 62ch;
+  font-size: 15px;
+  line-height: 1.85;
+  color: var(--vp-c-text-2);
+}
+
+.bb-quote {
+  margin: 22px 0 0;
+  padding-left: 16px;
+  border-left: 2px solid var(--vp-c-brand-1);
+  font-size: 17px !important;
+  line-height: 1.8 !important;
+  color: var(--vp-c-text-1) !important;
+}
+
+@media (max-width: 900px) {
+  .bb-landing .bb-hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 36px;
+    padding-top: 56px;
+    padding-bottom: 48px;
+  }
+
+  .bb-cards,
+  .bb-cards-2,
+  .bb-shots,
+  .bb-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bb-shots .bb-shot:first-child {
+    grid-column: auto;
+  }
+}
+
+/* ---------- 动效 ----------
+   初始隐藏态只在 <html class="bb-anim"> 时生效（由主题脚本添加），
+   脚本没跑或用户关掉动效时内容照常可见。 */
+
+.bb-anim .bb-sec {
+  opacity: 0;
+  transform: translateY(16px);
+  transition:
+    opacity 0.6s cubic-bezier(0.22, 0.61, 0.36, 1) var(--bb-delay, 0ms),
+    transform 0.6s cubic-bezier(0.22, 0.61, 0.36, 1) var(--bb-delay, 0ms);
+}
+
+.bb-anim .bb-sec.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+.bb-anim .bb-shot {
+  opacity: 0;
+  transform: scale(0.985);
+  transition:
+    opacity 0.55s ease var(--bb-delay, 0ms),
+    transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1) var(--bb-delay, 0ms),
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.bb-anim .bb-shot.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+.bb-anim .bb-stat {
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 0.5s ease var(--bb-delay, 0ms),
+    transform 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) var(--bb-delay, 0ms);
+}
+
+.bb-anim .bb-stat.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* Hero 入场：文案逐条落下，截图略晚一步 */
+.bb-hero-copy > * {
+  animation: bb-rise 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.bb-hero-copy > *:nth-child(1) {
+  animation-delay: 0.02s;
+}
+.bb-hero-copy > *:nth-child(2) {
+  animation-delay: 0.08s;
+}
+.bb-hero-copy > *:nth-child(3) {
+  animation-delay: 0.14s;
+}
+.bb-hero-copy > *:nth-child(4) {
+  animation-delay: 0.2s;
+}
+.bb-hero-copy > *:nth-child(5) {
+  animation-delay: 0.26s;
+}
+.bb-hero-copy > *:nth-child(6) {
+  animation-delay: 0.32s;
+}
+
+.bb-hero-shot > * {
+  animation: bb-rise 0.8s cubic-bezier(0.22, 0.61, 0.36, 1) 0.18s both;
+}
+
+/* Hero 背后的两团光，缓慢漂移 */
+.bb-hero {
+  position: relative;
+  isolation: isolate;
+}
+
+.bb-hero::before {
+  content: '';
+  position: absolute;
+  inset: -6% -18% 34%;
+  z-index: -1;
+  pointer-events: none;
+  filter: blur(30px);
+  background:
+    radial-gradient(46% 42% at 16% 24%, var(--bb-glow-warm), transparent 72%),
+    radial-gradient(40% 38% at 84% 10%, var(--bb-glow-cool), transparent 74%);
+  animation: bb-drift 18s ease-in-out infinite alternate;
+}
+
+.bb-landing {
+  --bb-glow-warm: color-mix(in oklab, var(--vp-c-brand-1) 26%, transparent);
+  --bb-glow-cool: color-mix(in oklab, #6ea8fe 16%, transparent);
+}
+
+/* 卡片悬停：抬起 + 金边 + 投影 */
+.bb-card,
+.bb-brand-card {
+  transition:
+    transform 0.25s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.bb-card:hover,
+.bb-brand-card:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in oklab, var(--vp-c-brand-1) 45%, var(--vp-c-divider));
+  box-shadow:
+    0 14px 34px -16px rgb(0 0 0 / 0.5),
+    0 0 0 1px color-mix(in oklab, var(--vp-c-brand-1) 22%, transparent);
+}
+
+/* 截图不加 hover 效果（用户要求），transition 一并去掉 */
+.bb-shot {
+  transition: none;
+}
+
+/* 按钮：一道高光扫过 */
+.bb-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.bb-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 32%,
+    rgb(255 255 255 / 0.32) 46%,
+    transparent 60%
+  );
+  transform: translateX(-130%);
+  transition: transform 0.75s cubic-bezier(0.22, 0.61, 0.36, 1);
+  pointer-events: none;
+}
+
+.bb-btn:hover::after {
+  transform: translateX(130%);
+}
+
+/* 标语后的闪烁光标 */
+.bb-hero-slogan::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-left: 6px;
+  vertical-align: -0.08em;
+  background: var(--vp-c-brand-1);
+  animation: bb-caret 1.1s steps(2, start) infinite;
+}
+
+/* 数字等宽，滚动时不抖动 */
+.bb-stat b {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes bb-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes bb-drift {
+  from {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, 2%, 0) scale(1.06);
+  }
+}
+
+@keyframes bb-caret {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-landing *,
+  .bb-landing *::before,
+  .bb-landing *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
