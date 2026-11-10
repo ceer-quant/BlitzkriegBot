@@ -248,10 +248,14 @@ body .VPNavBar.has-sidebar .content {
 }
 
 /* 文档页正文回到胶囊之下：scoped 基础 padding-top 已全局移除（含首页），
-   首页 hero 自带 padding 不受影响，但文档页正文会顶到视口顶端被胶囊遮住，
-   只给非首页文档页补回：胶囊块高 68px（56+12）+ 28px 呼吸 */
-body .VPContent.VPContent.has-sidebar:not(.is-home) {
-  padding-top: 96px;
+   首页 hero 自带 padding 不受影响，但桌面端文档页正文会顶到视口顶端被
+   胶囊遮住，只给非首页文档页补回：胶囊块高 68px（56+12）+ 28px 呼吸。
+   断点 960px（#1090）：<960 时 VPLocalNav 占位、H1 本就不被遮挡，
+   96px 在移动端是纯开销（375px 实测 gap +188）；960 与 menu/汉堡断点一致 */
+@media (min-width: 960px) {
+  body .VPContent.VPContent.has-sidebar:not(.is-home) {
+    padding-top: 96px;
+  }
 }
 
 /* 侧栏页布局中和成首页形态：
