@@ -122,6 +122,30 @@ export interface EngineStats {
    */
   accountFreezes?: Record<string, string> | null
   /**
+  * Per-account daily-loss breaker state (issue 1044). `tripped` = entries
+   * are frozen until the next UTC day; `resetAtMs` = that UTC day's start
+   * (when the DailyLoss gate auto-lifts, no operator action needed). Older
+   * cores omit the key entirely.
+   */
+  dailyLoss?: {
+    account: string
+    dayIndex: number | null
+    realizedPnlUsd: string
+    limitUsd: string
+    openingEquityUsd: string
+    equityBasis?: string | null
+    tripped: boolean
+    trippedAtMs: number
+    anyTripped: boolean
+    accounts: {
+      account: string
+      realizedPnlUsd: string
+      tripped: boolean
+      dayIndex: number | null
+      resetAtMs: number | null
+    }[]
+  } | null
+  /**
    * The market-data event archive's status (issue 669), mirrored from the
    * kernel's `ArchiveStatus` (data_source.rs, camelCase on the wire). `null` =
    * no archive configured, or an older core. The stopped-recording banner

@@ -596,12 +596,19 @@ impl Core {
                     .positions
                     .daily_states()
                     .iter()
-                    .map(|(id, s)| serde_json::json!({
-                        "account": id.as_str(),
-                        "realizedPnlUsd": s.realized_pnl_usd,
-                        "tripped": s.tripped,
-                        "dayIndex": s.day_index,
-                    }))
+                    .map(|(id, s)| {
+                        // 下一 UTC 日零点：DailyLoss 闸门在此自动到期、恢复入场权限
+                        //（daily_loss_gate.rs 同一公式），面板直接读，不做前端估算。
+                        let reset_at_ms =
+                            s.day_index.map(|d| (d + 1) * crate::position::DAY_MS);
+                        serde_json::json!({
+                            "account": id.as_str(),
+                            "realizedPnlUsd": s.realized_pnl_usd,
+                            "tripped": s.tripped,
+                            "dayIndex": s.day_index,
+                            "resetAtMs": reset_at_ms,
+                        })
+                    })
                     .collect::<Vec<_>>(),
                 // #177: protective stops the wick guard withheld — "should have
                 // triggered" is a number on the panel, not a silent no-op.

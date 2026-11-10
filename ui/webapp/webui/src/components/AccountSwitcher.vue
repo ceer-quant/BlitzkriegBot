@@ -67,6 +67,16 @@ const switchErr = ref<string | null>(null)
 const active = computed(() => store.displayAccount || '')
 /** 行数据的唯一源：store.refreshAccounts 的镜像（issue 781）。 */
 const rows = computed(() => store.accounts)
+/** 风控冻结账户 id 集（唯一来源是内核 freeze book stats.accountFreezes）。
+ *  与 account.status === 'frozen'（配置态停用）是两回事：自动冻结的账户
+ *  其 status 可能并非 'frozen'，故解冻入口必须读 accountFreezes，不能
+ *  读账户行 status（否则自动冻结的账户在行内看不到解冻入口，U2）。 */
+const snapshot = computed(() => store.snapshot)
+const frozenAccountIds = computed(() => {
+  const freezes = snapshot.value?.stats?.accountFreezes
+  return freezes ? Object.keys(freezes) : []
+})
+const isFrozenAccount = (id: string) => frozenAccountIds.value.includes(id)
 
 /**
  * issue 561（2026-10-20 操作者裁决）：display account 升格为面板唯一可信
@@ -507,7 +517,7 @@ onBeforeUnmount(() => {
               @click.stop="askTrading(a)"
             >{{ tradingLabel(a) }}</button>
             <button
-              v-if="a.status === 'frozen'"
+              v-if="isFrozenAccount(a.id)"
               class="shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors"
               :class="freezeBusy === a.id ? 'bg-down/15 text-down animate-pulse' : 'bg-up/15 text-up hover:bg-up/25'"
               :title="`解冻账户 ${a.id}，恢复新单入场权限（平仓照放）`"

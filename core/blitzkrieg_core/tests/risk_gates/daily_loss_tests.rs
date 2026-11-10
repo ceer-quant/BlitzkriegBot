@@ -223,6 +223,14 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
         stats["dailyLoss"]["dayIndex"].as_i64(),
         Some(utc_day_index(NOW))
     );
+    // #1044 U4: resetAtMs is authoritative — the next UTC day at 00:00:00Z,
+    // i.e. (day_index + 1) * DAY_MS, not a frontend estimate.
+    let d = utc_day_index(NOW);
+    assert_eq!(
+        stats["dailyLoss"]["accounts"][0]["resetAtMs"].as_i64(),
+        Some((d + 1) * DAY_MS),
+        "the daily-loss gate auto-lifts at the next UTC day 00:00:00Z",
+    );
 
     // A new entry is refused for the rest of the day…
     let err = c
