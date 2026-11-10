@@ -40,12 +40,17 @@ export default defineConfig({
   // 亮/暗双模式；首次访问默认深色（与 WebUI 一致），之后记住用户选择
   appearance: true,
   head: [
-    ['meta', { name: 'theme-color', content: '#0b0f14' }],
+    ['meta', { name: 'theme-color', content: '#11141b' }],
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
     [
       'script',
       {},
       "(function(){try{var k='vitepress-theme-appearance',v=localStorage.getItem(k);if(!v){localStorage.setItem(k,'dark');document.documentElement.classList.add('dark')}}catch(e){}})()",
+    ],
+    [
+      'script',
+      {},
+      "(function(){var d=document,el=null,light='#f6f6f8',dark='#11141b';function sync(){el=el||d.querySelector('meta[name=theme-color]');if(!el)return;el.setAttribute('content',d.documentElement.classList.contains('dark')?dark:light)}d.addEventListener('DOMContentLoaded',sync);new MutationObserver(sync).observe(d.documentElement,{attributes:true,attributeFilter:['class']})})()",
     ],
   ],
   vite: {

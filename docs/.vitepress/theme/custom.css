@@ -68,6 +68,23 @@
   --vp-nav-bg-color: oklch(0.145 0.014 268 / 0.72);
   --vp-sidebar-bg-color: oklch(0.145 0.014 268);
   --vp-local-search-bg: oklch(0.2 0.016 268);
+
+  /* 提示块：tip 用品牌金，info 用 WebUI 的 info，warning 用品牌亮金，danger 用 down 红 */
+  --vp-custom-block-tip-border: oklch(0.78 0.16 68);
+  --vp-custom-block-tip-text: oklch(0.9 0.05 70);
+  --vp-custom-block-tip-bg: oklch(0.78 0.16 68 / 0.1);
+  --vp-custom-block-info-border: oklch(0.72 0.13 240);
+  --vp-custom-block-info-text: oklch(0.85 0.06 240);
+  --vp-custom-block-info-bg: oklch(0.72 0.13 240 / 0.1);
+  --vp-custom-block-warning-border: oklch(0.84 0.13 72);
+  --vp-custom-block-warning-text: oklch(0.9 0.08 75);
+  --vp-custom-block-warning-bg: oklch(0.84 0.13 72 / 0.1);
+  --vp-custom-block-danger-border: oklch(0.68 0.2 22);
+  --vp-custom-block-danger-text: oklch(0.86 0.08 25);
+  --vp-custom-block-danger-bg: oklch(0.68 0.2 22 / 0.1);
+  --vp-custom-block-details-bg: oklch(0.2 0.016 268);
+  --vp-custom-block-details-border: oklch(1 0 0 / 0.09);
+  --vp-custom-block-details-text: oklch(0.97 0.004 268);
 }
 
 /* ── 亮色（= WebUI .light）─────────────────────────────────────────────
@@ -128,6 +145,23 @@ html:not(.dark) {
   --vp-nav-bg-color: oklch(0.975 0.004 268 / 0.72);
   --vp-sidebar-bg-color: oklch(0.975 0.004 268);
   --vp-local-search-bg: oklch(1 0 0);
+
+  /* 提示块：亮底上用更深的 border 与更深的文字，保证 AA 对比度 */
+  --vp-custom-block-tip-border: oklch(0.66 0.17 58);
+  --vp-custom-block-tip-text: oklch(0.45 0.12 55);
+  --vp-custom-block-tip-bg: oklch(0.66 0.17 58 / 0.09);
+  --vp-custom-block-info-border: oklch(0.6 0.15 240);
+  --vp-custom-block-info-text: oklch(0.42 0.12 245);
+  --vp-custom-block-info-bg: oklch(0.6 0.15 240 / 0.08);
+  --vp-custom-block-warning-border: oklch(0.74 0.16 64);
+  --vp-custom-block-warning-text: oklch(0.45 0.12 60);
+  --vp-custom-block-warning-bg: oklch(0.74 0.16 64 / 0.1);
+  --vp-custom-block-danger-border: oklch(0.58 0.2 22);
+  --vp-custom-block-danger-text: oklch(0.45 0.17 25);
+  --vp-custom-block-danger-bg: oklch(0.58 0.2 22 / 0.07);
+  --vp-custom-block-details-bg: oklch(0.945 0.006 268);
+  --vp-custom-block-details-border: oklch(0.2 0.02 268 / 0.1);
+  --vp-custom-block-details-text: oklch(0.21 0.02 268);
 }
 
 /* ── 品牌标识 ─────────────────────────────────────────────────────────── */
