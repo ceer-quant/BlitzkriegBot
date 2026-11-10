@@ -390,18 +390,23 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
 }
 
 /* 导航项：复刻 WebUI SegmentedControl——
-   容器 inline-grid gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md */
-.VPNavBar.VPNavBar .VPNavBarMenu {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 38px;
-  padding: 4px;
-  border: 1px solid var(--bb-glass-edge);
-  border-radius: 999px;
-  background-color: var(--bb-menu-bg);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
-  backdrop-filter: blur(12px) saturate(150%);
+   容器 inline-grid gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md。
+   必须包在 ≥768：否则本文件的 display:inline-flex 会压过 VitePress
+   scoped 的 <768 基础态 display:none（同特异性、加载更晚），menu 在
+   移动端死灰复燃挤占胶囊。 */
+@media (min-width: 768px) {
+  .VPNavBar.VPNavBar .VPNavBarMenu {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 38px;
+    padding: 4px;
+    border: 1px solid var(--bb-glass-edge);
+    border-radius: 999px;
+    background-color: var(--bb-menu-bg);
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
+    backdrop-filter: blur(12px) saturate(150%);
+  }
 }
 
 /* 导航项链接：h-7.5 px-4 text-[12.5px] font-semibold；scoped 的
@@ -612,12 +617,71 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
   font-weight: 600;
 }
 
+/* ── 移动端（<768）：对齐 WebUI App.vue 的响应式策略 ─────────────────────
+   WebUI：nav 在 <md 移出 header、右侧只留图标、标题 13px 截断。
+   这里等价落地：导航胶囊交给汉堡屏菜单承载，搜索收成纯图标圆钮，
+   汉堡按钮按 ghost 圆钮重塑（默认 48×55px 的白块会戳出胶囊）。 */
 @media (max-width: 767px) {
   .VPNavBar .container {
-    height: 52px;
+    height: 48px;
     margin: 8px 8px 0;
     border-radius: 14px;
-    padding: 0 10px;
+    padding: 0 6px 0 12px;
+  }
+
+  /* 导航胶囊隐藏 = WebUI 的 nav md:hidden，入口由汉堡屏菜单接管 */
+  .VPNavBar .VPNavBarMenu {
+    display: none;
+  }
+
+  /* 标题对齐 WebUI 移动端 13px 档 */
+  .VPNavBarTitle .title {
+    font-size: 14px;
+  }
+
+  /* 搜索 → 纯图标 ghost 圆钮：去边框去底色，只留 icon（对齐 WebUI ghost 按钮） */
+  .VPNavBar .blog-search .nav-search-btn-wait,
+  .VPNavBar .blog-search .nav-search-btn {
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    background: none;
+    justify-content: center;
+  }
+
+  .VPNavBar .blog-search .nav-search-btn-wait:hover,
+  .VPNavBar .blog-search .nav-search-btn:hover {
+    border: none;
+    background: none;
+    color: var(--vp-c-brand-1);
+  }
+
+  .VPNavBar .blog-search .search-tip,
+  .VPNavBar.VPNavBar .blog-search button .metaKey {
+    display: none;
+  }
+
+  /* 插件 hover 的 padding/圆角补丁在 ghost 形态下全部收回 */
+  .VPNavBar.VPNavBar .blog-search button:hover {
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  /* 汉堡：与其他右侧控件同径的 ghost 圆钮，居中对齐
+     （默认 48px 宽 / 55px 高会溢出胶囊） */
+  .VPNavBar .VPNavBarHamburger {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .VPNavBar .VPNavBarHamburger .container {
+    width: 16px;
+    height: 14px;
   }
 }
 
