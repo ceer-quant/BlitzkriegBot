@@ -139,6 +139,12 @@ const totals = computed(() => {
   }
 })
 
+/** 账本累计净 PnL − 逐笔归属净额。非零即不可归因资金流水；cumulativeNetPnl 为 null（未记录期初权益）时为 null。 */
+const ledgerMinusAttributed = computed(() => {
+  const c = store.cumulativeNetPnl
+  return c === null ? null : c - totals.value.net
+})
+
 const profile = (r: StrategyStatsRow) => refusalProfile(r)
 
 /**
@@ -416,16 +422,26 @@ onMounted(() => {
         </template>
       </StatTile>
       <StatTile
-        label="净 PnL（扣费）"
+        label="归属净额（逐笔加总）"
         :value="signedMoney(totals.net)"
         :tone="totals.net >= 0 ? 'up' : 'down'"
       >
         <template #sub>
-          <Tooltip content="分策略账本合计；胜率按已平仓计，盈 / 亏细目见下表「胜 / 负」列。">
+          <Tooltip content="逐笔 netPnlUsd 相加（成交口径）；不含手续费回填与未形成 trade row 的资金流水，不等于账本累计净 PnL。">
             <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
               平仓 <RollingNumber :value="totals.closed" /> · 胜率 <RollingNumber :value="pct(totals.winRate)" />（<RollingNumber :value="totals.wins" /> 盈 / <RollingNumber :value="totals.losses" /> 亏）
             </span>
           </Tooltip>
+        </template>
+      </StatTile>
+      <StatTile
+        label="账本 − 归属差额"
+        :value="ledgerMinusAttributed === null ? '未知' : signedMoney(ledgerMinusAttributed)"
+        :tone="ledgerMinusAttributed === null ? 'default' : (ledgerMinusAttributed >= 0 ? 'up' : 'down')"
+        :roll="false"
+      >
+        <template #sub>
+          已实现权益 − 期初权益，再减去逐笔归属净额；非零即不可归因资金流水。
         </template>
       </StatTile>
     </div>

@@ -110,7 +110,7 @@ const trades = computed(() => {
   if (scoped && (scoped.totalTrades ?? 0) > 0) {
     return {
       count: scoped.totalTrades ?? 0,
-      net: scoped.totalNetPnl ?? 0,
+      net: scoped.attributedNetPnl ?? 0,
       fees: scoped.totalFees ?? 0,
       winRate: winRatePct(scoped.winRate),
       win: scoped.wins ?? 0,
