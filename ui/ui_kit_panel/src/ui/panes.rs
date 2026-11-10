@@ -91,7 +91,7 @@ pub(super) fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         Some(net) => (
             blitzkrieg_ui_kit::web::money(net),
             format!(
-                "{} trades · {:.0}% WR · ledger (balance + reserved − opening_equity)",
+                "{} trades · {:.0}% WR · ledger (balance − opening_equity)",
                 s.trades.len(),
                 s.win_rate()
             ),

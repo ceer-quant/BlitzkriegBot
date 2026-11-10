@@ -102,9 +102,9 @@ pub struct BalanceView {
     /// as zero (issue #1046).
     #[serde(default, deserialize_with = "de_num_opt")]
     pub opening_equity: Option<f64>,
-    /// Cumulative net PnL = balance + reserved − opening_equity (the single
-    /// ledger truth, issue #1046). Absent when openingEquity is unknown — never
-    /// derived from trade folding.
+    /// Cumulative net PnL = balance − opening_equity (the single ledger truth,
+    /// issue #1046). Absent when openingEquity is unknown — never derived from
+    /// trade folding.
     #[serde(default, deserialize_with = "de_num_opt")]
     pub cumulative_net_pnl: Option<f64>,
 }
@@ -1107,7 +1107,7 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
-    /// Cumulative net PnL = balance + reserved − opening_equity (issue #1046),
+    /// Cumulative net PnL = balance − opening_equity (issue #1046),
     /// the single ledger truth. Never derived from trade folding.
     ///
     /// Returns `None` when `opening_equity` is absent (LIVE before the first
@@ -1118,9 +1118,9 @@ impl UiSnapshot {
     }
 
     /// Source label for the net PnL figure, surfaced so the panel never
-    /// presents trade-folding as ledger. `"ledger"` when computed from
-    /// balance + reserved − opening_equity, `"trade-fold"` when only trade
-    /// rows exist (display-only, not ledger).
+    /// presents trade-folding as ledger. `"ledger" when computed from
+    /// balance − opening_equity, `"trade-fold"` when only trade rows exist
+    /// (display-only, not ledger).
     pub fn net_pnl_source(&self) -> &'static str {
         if self
             .balance
