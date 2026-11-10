@@ -256,31 +256,35 @@ fn account_list_is_sorted_for_a_stable_wire_order() {
 }
 
 #[test]
-fn permits_order_enforces_gate_2_postures() {
+fn posture_permits_reflects_config_truth() {
     let mut book = two_accounts(); // default = Active, paper = ReadOnly
-    assert!(book.permits_order(&default_account_id(), false).is_ok());
-    assert!(book.permits_order(&default_account_id(), true).is_ok());
+    // Active + trading on: entries and closes pass.
+    assert!(book.posture_permits(&default_account_id(), false).is_ok());
+    assert!(book.posture_permits(&default_account_id(), true).is_ok());
     // ReadOnly refuses BOTH sides — the one full stop.
     let err = book
-        .permits_order(&AccountId("paper".into()), false)
+        .posture_permits(&AccountId("paper".into()), false)
         .expect_err("read_only refuses entries");
     assert_eq!(err.code, CoreErrorCode::AccountLimit);
     assert!(err.message.contains("is read_only"), "{}", err.message);
     let err = book
-        .permits_order(&AccountId("paper".into()), true)
+        .posture_permits(&AccountId("paper".into()), true)
         .expect_err("read_only refuses closes");
     assert_eq!(err.code, CoreErrorCode::AccountLimit);
     // Frozen refuses entries but must never trap a close.
     book.set_status(&AccountId("paper".into()), AccountStatus::Frozen, 2)
         .unwrap();
     assert!(
-        book.permits_order(&AccountId("paper".into()), false)
+        book.posture_permits(&AccountId("paper".into()), false)
             .is_err()
     );
-    assert!(book.permits_order(&AccountId("paper".into()), true).is_ok());
+    assert!(
+        book.posture_permits(&AccountId("paper".into()), true)
+            .is_ok()
+    );
     // An unknown account is refused explicitly, never created.
     let err = book
-        .permits_order(&AccountId("ghost".into()), false)
+        .posture_permits(&AccountId("ghost".into()), false)
         .expect_err("unknown account");
     assert_eq!(err.code, CoreErrorCode::InvalidParams);
     assert!(book.account(&AccountId("ghost".into())).is_none());
@@ -297,7 +301,7 @@ fn trading_switch_refuses_entries_passes_closes() {
         .expect("the default account takes the switch");
     // Entry refused, close allowed — the exact contract of the switch.
     let err = book
-        .permits_order(&default_account_id(), false)
+        .posture_permits(&default_account_id(), false)
         .expect_err("trading-off refuses entries");
     assert_eq!(err.code, CoreErrorCode::AccountLimit);
     assert!(
@@ -306,7 +310,7 @@ fn trading_switch_refuses_entries_passes_closes() {
         err.message
     );
     assert!(
-        book.permits_order(&default_account_id(), true).is_ok(),
+        book.posture_permits(&default_account_id(), true).is_ok(),
         "trading-off never traps a close"
     );
     // The status axis is untouched: the account is still Active.
@@ -316,7 +320,7 @@ fn trading_switch_refuses_entries_passes_closes() {
     ));
     // Re-open restores entries; the stamp rode the writes.
     book.set_trading(&default_account_id(), true, 9).unwrap();
-    assert!(book.permits_order(&default_account_id(), false).is_ok());
+    assert!(book.posture_permits(&default_account_id(), false).is_ok());
     assert_eq!(
         book.account(&default_account_id()).unwrap().updated_at_ms,
         9
@@ -326,6 +330,23 @@ fn trading_switch_refuses_entries_passes_closes() {
         book.set_trading(&AccountId("ghost".into()), false, 11)
             .is_err()
     );
+}
+
+#[test]
+fn entry_open_is_truthful_after_gate_cleared() {
+    // `entry_open` reads the live config posture, not a gate: an account that
+    // is trading-off stays non-entrant even if its runtime gate was cleared
+    // by `unfreeze` (unfreeze 不清配置态 — no fake success).
+    let mut book = two_accounts();
+    assert!(book.entry_open(&default_account_id()));
+    book.set_trading(&default_account_id(), false, 5).unwrap();
+    assert!(!book.entry_open(&default_account_id()));
+    // Closing still allowed per posture? trading-off never traps a close — but
+    // entry_open is entry-only by design (unfreeze reports entry permission).
+    assert!(!book.account(&default_account_id()).unwrap().trading_enabled);
+    book.set_trading(&default_account_id(), true, 9).unwrap();
+    assert!(book.entry_open(&default_account_id()));
+    assert!(!book.entry_open(&AccountId("ghost".into())));
 }
 
 /// The enablement write (`account.strategies.set` book half): names ride

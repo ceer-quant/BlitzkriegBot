@@ -95,7 +95,9 @@ fn daily_loss_trip_unfreeze_allows_entries_rest_of_day() {
     // Unfreeze clears the gate AND the session trip latch — entries allowed for
     // the rest of the day. Unfreeze never erases the realized loss, but the
     // daily-loss gate is not re-armed until the UTC day rolls.
-    let r = c.unfreeze_account("default", "op", t0 + 600);
+    let r = c
+        .unfreeze_account("default", "op", t0 + 600)
+        .expect("unfreeze");
     assert!(r.unfrozen, "gate was cleared");
     assert!(
         r.previous_reason.is_some(),

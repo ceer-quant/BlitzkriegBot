@@ -37,10 +37,10 @@ impl Core {
         // AT SUBMISSION, so the gate is handed the live balance here — the same
         // number the daily-loss breaker opens its day with. E28: the account
         // is the one the request names, and its posture gates the place too.
-        self.accounts
-            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
-        // Account-scoped kill switch, same contract as in `place_gated`:
-        // frozen account → new orders refused, closes pass. #1045: single gate.
+        // Gate 2: runtime account gate (single verb). Config posture is derived
+        // into AccountGates at boot and on every config write
+        // (`reconcile_config_gate_for`); `account_gate_permits` is the sole
+        // entry enforcement.
         self.account_gate_permits(&req, now_ms)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.

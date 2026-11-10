@@ -723,6 +723,10 @@ impl Core {
                 ),
             ));
         }
-        self.accounts.set_status(id, status, now_ms)
+        self.accounts.set_status(id, status, now_ms)?;
+        // 配置态 → gate 的推导不再是「仅启动」：set_status 写回后立即重算，
+        // 保证任何时刻 gate.blocked ⟺ 配置姿态非 Active。
+        crate::service::reconcile_config_gate_for(self, id, now_ms);
+        Ok(())
     }
 }

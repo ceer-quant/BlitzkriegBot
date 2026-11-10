@@ -1,6 +1,16 @@
 {
   "accountFreezes": {},
-  "accountGates": [],
+  "accountGates": [
+    {
+      "account": "global",
+      "blocked": true,
+      "reason": "trading self-check failed on polymarket: venue_balance: HTTP 401 unauthorized",
+      "reasonKind": "killSwitch",
+      "sinceMs": 1000000000005,
+      "expiresAtMs": null,
+      "actor": "system"
+    }
+  ],
   "accountingAudit": {
     "anchored": false,
     "failures": 0,

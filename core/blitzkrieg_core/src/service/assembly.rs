@@ -518,6 +518,10 @@ impl Core {
         if risk_state_corrupt {
             core.freeze_all_accounts_corrupt_boot();
         }
+        // #1057: 映射每个配置账户的耐久姿态（ReadOnly / Suspended / Frozen /
+        // 交易开关关）为 AccountGate，供面板与 stats 读出一套闸门模型；
+        // 执法在每条下单路径由 account_gate_permits + posture_permits 完成。
+        reconcile_config_gates(&mut core, now_ms());
         // File-first boot derivation (operator ruling 2026-11-08): the
         // cockpit working copies (exit discipline + systemic limits) are
         // derived from the `.env` FILE directly — the launcher's process-env

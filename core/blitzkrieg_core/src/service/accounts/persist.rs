@@ -544,6 +544,9 @@ impl Core {
             )
         })?;
         self.accounts.set_trading(id, enabled, now_ms)?;
+        // 配置态 → gate 的推导不再是「仅启动」：set_trading 写回后立即重算，
+        // 保证任何时刻 gate.blocked ⟺ 配置姿态非 Active（0.4.2 门禁验收规则）。
+        crate::service::reconcile_config_gate_for(self, id, now_ms);
         tracing::info!(
             target: "risk",
             actor = %actor,

@@ -1005,20 +1005,28 @@ impl AccountLedgers {
         }
     }
 
-    /// E28 Gate 2 (§9.1): the account's lifecycle status must PERMIT this
-    /// order — only `Active` places new entries; closes pass every posture
-    /// except `ReadOnly` (a freeze must never be the reason a position is
-    /// trapped — the kill-switch posture). An unknown account is refused with
-    /// the standard `unknown account` error, never implicitly created
-    /// (reverse acceptance C).
-    pub fn permits_order(&self, id: &AccountId, is_close: bool) -> CoreResult<()> {
+    /// E28 Gate 2 (§9.1): the account's durable CONFIG posture must PERMIT this
+    /// order — only `Active` with `trading_enabled` places new entries; closes
+    /// pass every posture except `ReadOnly` (a freeze must never be the reason a
+    /// position is trapped — the kill-switch posture).
+    ///
+    /// This is the runtime half of Gate 2: `trading_enabled` / `status` are read
+    /// LIVE from the account book on every order, so `account.trading.set` and a
+    /// tightened `status` take effect without a restart. The other half is
+    /// [`crate::Core::account_gate_permits`] (runtime gates: Manual / DailyLoss /
+    /// VenueRejection / TradingDisabled / KillSwitch). Both are applied at every
+    /// entry path — `permits_order` (the old parallel second door) is retired:
+    /// config posture is now expressed as AccountGates at boot
+    /// ([`crate::Core::reconcile_config_gates`]) instead of a separate check.
+    ///
+    /// An unknown account is refused with the standard `unknown account` error,
+    /// never implicitly created (reverse acceptance C).
+    #[allow(dead_code)]
+    pub(crate) fn posture_permits(&self, id: &AccountId, is_close: bool) -> CoreResult<()> {
         let Some(account) = self.accounts.get(id) else {
             return Err(unknown_account(id));
         };
         let allowed = if is_close {
-            // A closed trading switch never traps a position: exits flow on
-            // every posture and every trading_enabled value — 「关=拒开仓、
-            // 放平仓」 is exactly this line plus the entry arm below.
             account.status.allows_closes()
         } else {
             account.trading_enabled && account.status.allows_entries()
@@ -1031,13 +1039,21 @@ impl AccountLedgers {
             };
             return Err(CoreError::new(
                 CoreErrorCode::AccountLimit,
-                format!(
-                    "account `{id}` is {why} — {} refused at Gate 2",
-                    if is_close { "closes" } else { "new entries" },
-                ),
+                format!("account `{id}` is {why} — refused at config Gate 2",),
             ));
         }
         Ok(())
+    }
+
+    /// Config-truth entry read for [`crate::Core::unfreeze_account`]'s
+    /// `entries_allowed`: truthful even right after a runtime gate was cleared
+    /// — a config-frozen / trading-off account stays non-entrant until its
+    /// `.env` posture is changed and the core restarts (`unfreeze` 不清配置态).
+    #[allow(dead_code)]
+    pub(crate) fn entry_open(&self, id: &AccountId) -> bool {
+        self.accounts
+            .get(id)
+            .is_some_and(|a| a.trading_enabled && a.status.allows_entries())
     }
 }
 

@@ -2,6 +2,7 @@
 //! from `service/engine_cycle`.
 
 use super::*;
+use crate::service::GLOBAL_KILL_ACCOUNT;
 
 impl Core {
     /// Per-strategy accounting (P-1.1): open exposure (live) plus session order
@@ -371,6 +372,18 @@ impl Core {
             "usagePct": probe_fd.as_ref().and_then(|u| u.usage_pct()),
             "critical": probe_fd.as_ref().is_some_and(|u| u.critical()),
         });
+        // #1057 阻断3：全局熔断单点化 — tradingFrozen 只读 GLOBAL_KILL_ACCOUNT
+        // 闸门（与 accountGates 同一真相源），不再独立读 risk.is_killed()。
+        // unfreeze global 同时会 risk.resume()，两边保持一致。
+        let trading_frozen = {
+            let kill_gate = self.account_gate(GLOBAL_KILL_ACCOUNT);
+            let active = kill_gate
+                .is_some_and(|g| g.blocked && g.expires_at_ms.is_none_or(|exp| as_of_ms < exp));
+            match kill_gate.filter(|_| active) {
+                Some(g) => serde_json::json!({ "active": true, "reason": g.reason }),
+                None => serde_json::json!({ "active": false }),
+            }
+        };
         let mut confirmed = self
             .engine
             .as_ref()
@@ -495,14 +508,11 @@ impl Core {
                 }),
                 None => serde_json::Value::Null,
             },
-            "tradingFrozen": if self.risk.is_killed() {
-                serde_json::json!({
-                    "active": true,
-                    "reason": self.risk.kill_reason().unwrap_or("kill switch active"),
-                })
-            } else {
-                serde_json::json!({ "active": false })
-            },
+            // #1057 阻断3：全局熔断单点化 — tradingFrozen 只读 GLOBAL_KILL_ACCOUNT
+            // 闸门（与 accountGates 同一真相源），不再独立读 risk.is_killed()。
+            // unfreeze global 同时会 risk.resume()，两边保持一致。值在函数
+            // 开头（宏外部）已计算为 `trading_frozen`。
+            "tradingFrozen": trading_frozen,
             // #1045: the single in-memory entry gate per account
             // (blocked / reason / reasonKind / sinceMs / expiresAtMs / actor).
             // Pure in-memory, a restart starts clean; expired DailyLoss gates
@@ -533,7 +543,9 @@ impl Core {
             "accountFreezes": self
                 .account_gates()
                 .iter()
-                .filter(|(id, _)| self.account_gate_blocked(id, as_of_ms))
+                .filter(|(id, _)| {
+                    *id != GLOBAL_KILL_ACCOUNT && self.account_gate_blocked(id, as_of_ms)
+                })
                 .map(|(id, g)| (id.as_str().to_string(), serde_json::json!(g.reason)))
                 .collect::<serde_json::Map<_, _>>(),
             // In-kernel accounting audit (issue #189): the latest verdict, so the

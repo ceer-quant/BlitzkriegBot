@@ -137,10 +137,7 @@ fn consecutive_venue_rejections_freeze_trading() {
         "the legacy key keeps its pre-#180 rendering exactly"
     );
     let e = c.place_pending(pending_req("k9", "s1"), 6_000).unwrap_err();
-    assert_eq!(
-        e.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     // The escape hatch is per account, exactly as the global #174 hatch:
     // a CLOSING intent on the frozen account passes.
     let mut close = pending_req("k10", "s1");
@@ -183,13 +180,10 @@ fn a_venue_rejection_streak_freezes_only_that_account() {
     c.place_pending(pending_req("d1", "s1"), 6_000)
         .unwrap_or_else(|e| panic!("an unrelated account keeps trading: {e}"));
 
-    // paper's new orders are refused with KillSwitchActive naming the
+    // paper's new orders are refused with AccountLimit naming the
     // freeze.
     let e = c.place_pending(paper_key("p9"), 6_100).unwrap_err();
-    assert_eq!(
-        e.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     assert!(e.message.contains("frozen"), "naming the freeze: {e}");
 
     // paper's CLOSE still passes (#174 hatch, per account).
@@ -215,10 +209,7 @@ fn frozen_account_gate_refuses_entries_closes_flow() {
     let mut c = two_book_fixture();
     c.freeze_account("paper", "teeth: entries refused".into());
     let e = c.place(pending_req_for("paper", "x1"), 0, 1).unwrap_err();
-    assert_eq!(
-        e.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
 
     let mut close = pending_req_for("paper", "x2");
     close.side = Side::Sell;
@@ -424,12 +415,9 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
     );
 
     // Teeth at the gate: the frozen account's NEW entry is refused with
-    // KillSwitchActive while the sibling places happily.
+    // AccountLimit while the sibling places happily.
     let e = c.place_pending(polymarket_req("pk1"), 1_100).unwrap_err();
-    assert_eq!(
-        e.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     assert!(e.message.contains("poly-acct"), "naming the account: {e}");
     c.place_pending(polysim_req("ps1"), 1_200)
         .unwrap_or_else(|e| panic!("an unbound-by-failure sibling keeps trading: {e}"));
@@ -494,10 +482,7 @@ fn venue_scoped_freeze_does_not_touch_sibling_venues() {
         "two per-account freezes must not collapse into the global kill switch"
     );
     let e = c.place_pending(polysim_req("ps4"), 3_400).unwrap_err();
-    assert_eq!(
-        e.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    assert_eq!(e.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     let stats = c.engine_stats();
     assert_eq!(
         stats["tradingFrozen"]["active"], false,
