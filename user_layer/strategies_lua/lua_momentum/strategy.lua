@@ -326,7 +326,7 @@ end
 local DEC_0 = { m = 0, s = 0 }
 local DEC_100 = { m = 100, s = 0 }
 local DEFAULT_TP = { m = 40, s = 0 }
-local DEFAULT_ARM = { m = 20, s = 0 }
+local DEFAULT_ARM = { m = 22, s = 0 }
 local DEFAULT_GIVE = { m = 15, s = 0 }
 local DEFAULT_FEE = { m = 7, s = 2 } -- 0.07, the published crypto taker rate
 

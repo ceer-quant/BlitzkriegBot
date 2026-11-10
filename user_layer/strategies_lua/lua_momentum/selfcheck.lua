@@ -456,7 +456,7 @@ do
   ok(#evaluate().exits == 0, "exits disabled: the giveback to 0.26 is held to settlement")
 end
 
--- trailing only: arm after +20% net, sell on a 15 percentage-point giveback.
+-- trailing only: arm after +22% net, sell on a 15 percentage-point giveback.
 -- 0.42 arms and does not sell (no giveback yet); 0.26 gives back ~56pp.
 do
   reset()
@@ -474,8 +474,48 @@ do
     "a 15pp giveback from the 0.42 peak sells, got " .. exit_reasons(r))
 end
 
+-- #1071: trail_arm_pct 默认 22 — 钉死「>22% 才武装」。
+-- Case A：峰值净回报 ~21% (<22%) 从未武装，随后 15pp 回落也不触发 trailing_stop。
+-- Case B：峰值净回报 ~22.5% (≥22%) 武装，随后 15pp 回落触发 trailing_stop。
+-- trail_giveback_pct 保持 15，take_profit_pct/price 保持 0 关闭。
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", take_profit_price = "0",
+    trail_giveback_pct = "15",   -- trail_arm_pct 用默认值 22
+  }
+  state.time_left = 461
+  hold("down-1", "0.28")
+  -- 0.355 卖出后扣费净得约 0.339，入场 0.28 → 净回报约 21%，低于 22% 武装线
+  quote("down-1", "0.355", "0.365")
+  local r1 = evaluate()
+  ok(#r1.exits == 0, "峰值 ~21% 未达 22% 武装线，不发 exit，got " .. exit_reasons(r1))
+  -- 回落到 0.31，从峰值回撤约 15pp，但从未武装，必须不触发
+  quote("down-1", "0.310", "0.320")
+  local r2 = evaluate()
+  ok(#r2.exits == 0, "未武装时回落不得触发 trailing_stop，got " .. exit_reasons(r2))
+end
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", take_profit_price = "0",
+    trail_giveback_pct = "15",   -- trail_arm_pct 用默认值 22
+  }
+  state.time_left = 461
+  hold("down-1", "0.28")
+  -- 0.36 卖出后扣费净得约 0.344，入场 0.28 → 净回报约 22.8%，超过 22% 武装线
+  quote("down-1", "0.360", "0.370")
+  local r1 = evaluate()
+  ok(#r1.exits == 0, "武装 tick 本身不是回撤，不发 exit，got " .. exit_reasons(r1))
+  -- 回落到 0.31，从峰值回撤约 17pp (≥15)，已武装则触发 trailing_stop
+  quote("down-1", "0.310", "0.320")
+  local r2 = evaluate()
+  ok(#r2.exits == 1 and r2.exits[1].reason == "trailing_stop",
+    "峰值 ≥22% 武装后 15pp 回落触发 trailing_stop，got " .. exit_reasons(r2))
+end
+
 -- the mid is not the sell. mid would be 0.42 (+50%); the bid is 0.30 and
--- the fee-net gain is ~2%, under both the 40% target and the 20% arm.
+-- the fee-net gain is ~2%, under both the 40% target and the 22% arm.
 do
   reset()
   state.time_left = 461
