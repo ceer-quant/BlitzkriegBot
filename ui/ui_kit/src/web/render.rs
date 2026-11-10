@@ -114,11 +114,30 @@ pub fn render_html_full(
             st.books, st.signals, st.place_rejected, st.confirmed.len()
         ));
     }
-    let net = s.net_pnl();
+    // Net PnL — ledger口径 (balance − seed)。seed 缺失时显示 "—"，source 透出。
+    let (net_class, net_big, net_sub) = match s.net_pnl() {
+        Some(net) => (
+            if net >= 0.0 { "pos" } else { "neg" },
+            money(net),
+            format!(
+                "{} trades · {:.0}% WR · ledger (balance − seed)",
+                s.trades.len(),
+                s.win_rate()
+            ),
+        ),
+        None => (
+            "",
+            "—".into(),
+            format!(
+                "{} trades · {:.0}% WR · trade-fold (not ledger)",
+                s.trades.len(),
+                s.win_rate()
+            ),
+        ),
+    };
     rows.push_str(&format!(
-        "<div class=card><h2>Net PnL</h2><div class='big {}'>{}</div><div class=sub>{} trades · {:.0}% WR</div></div>",
-        if net >= 0.0 { "pos" } else { "neg" },
-        money(net), s.trades.len(), s.win_rate()
+        "<div class=card><h2>Net PnL</h2><div class='big {}'>{}</div><div class=sub>{}</div></div>",
+        net_class, net_big, net_sub
     ));
 
     let mut pos_rows = String::new();
@@ -439,7 +458,12 @@ pub fn render_json_full(
             // The order's venue tag (the account's binding; empty = untagged).
             "venue": o.venue,
             "roundSlot": o.round_slot })).collect::<Vec<_>>(),
-        "trades": { "count": s.trades.len(), "net": s.net_pnl(), "winRate": s.win_rate() },
+        "trades": {
+            "count": s.trades.len(),
+            "net": s.net_pnl(),
+            "netPnlSource": s.net_pnl_source(),
+            "winRate": s.win_rate()
+        },
         // All-time totals (trades.summary): cumulative order count + net profit
         // NOT capped by the windowed history above. Older cores omit → null.
         "tradeSummary": s.trade_summary,
