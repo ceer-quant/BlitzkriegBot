@@ -14,7 +14,7 @@
 //!  - `ipc`      UDS JSON-RPC 2.0 schema + transport
 
 // The engine.stats view (service.rs) is one huge `serde_json::json!` literal
-// — each new key deepens the macro's expansion, and the accountFreezes key
+// — each new key deepens the macro's expansion, and the accountGates key
 // (account-scoped kill switch) blew past the default 128.
 #![recursion_limit = "256"]
 

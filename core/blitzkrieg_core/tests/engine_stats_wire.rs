@@ -179,7 +179,7 @@ fn frozen_fixture_carries_the_panel_safety_keys() {
         "reconcile",
         "selfCheck",
         "tradingFrozen",
-        "accountFreezes",
+        "accountGates",
         "strategies",
     ] {
         assert!(

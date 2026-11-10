@@ -640,7 +640,7 @@ pub async fn run_panel_with_dispatcher(
                                 let mut client =
                                     blitzkrieg_ui_kit::core::ipc_client::IpcClient::new(socket);
                                 let mut gates: serde_json::Value = serde_json::json!([]);
-                                let mut result = String::new();
+                                let result: String;
                                 if account_id.is_empty() {
                                     // First press of `U`: populate the overlay.
                                     match client.stats() {

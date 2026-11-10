@@ -78,10 +78,15 @@ fn the_kernels_real_engine_stats_payload_deserializes_into_the_view() {
         .as_deref()
         .unwrap_or_default()
         .contains("self-check"));
-    assert!(
-        v.account_freezes.is_empty(),
-        "the fixture freeze is global, not per-account"
-    );
+    assert_eq!(v.account_gates.len(), 1);
+    assert_eq!(v.account_gates[0].account, "global");
+    assert!(v.account_gates[0].blocked);
+    assert!(v
+        .account_gates[0]
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("self-check"));
 
     // E9-g: the per-strategy accounting row.
     assert_eq!(v.strategies.len(), 1);

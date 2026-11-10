@@ -274,7 +274,7 @@ pub fn compose(ready: &Value, stats: &Value, account_list: Result<&Value, String
     // ── per-strategy rejections (engine.stats.strategies) ──
     compose_strategy_rejections(stats, &mut findings);
 
-    // ── account-scoped kill book (engine.stats.accountFreezes) ──
+    // ── account-scoped kill book (engine.stats.accountGates) ──
     compose_account_freezes(stats, &mut findings);
 
     // ── accounts (account.list) ──

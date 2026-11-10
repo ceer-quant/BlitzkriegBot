@@ -115,11 +115,14 @@ const freezeOperateId = ref<string | null>(null)
 
 // 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
 // 取 blocked === true 的条目。
-const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
+    const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   const gates = store.snapshot?.stats?.accountGates
   return gates
     ? gates
-        .filter((g) => g.blocked === true && g.account)
+        .filter(
+          (g) =>
+            g.blocked === true && g.account && g.account !== 'global'
+        )
         .sort((a, b) => a.account.localeCompare(b.account))
         .map((g) => ({ id: g.account, reason: g.reason || '原因未上报' }))
     : []
@@ -141,7 +144,7 @@ async function unfreeze(accountId: string): Promise<void> {
     const r = await api.accountUnfreeze({ accountId })
     if (r.error) throw new Error(r.error)
     // entriesAllowed 是内核的即时「可开新单」判断：全局 kill 期间它会为 false，
-    // 而 freeze book / dailyLoss 都盖不住全局 kill（issue 1062 回滚 F3 后 accountFreezes
+    // 而 freeze book / dailyLoss 都盖不住全局 kill（issue 1062 回滚 F3 后 accountGates
     // 已过滤 GLOBAL_KILL_ACCOUNT）。不得把请求发出当作「已解冻」。
     if (r.entriesAllowed === false) {
       policyErr.value = `解冻 ${accountId} 未生效：内核回报 entriesAllowed=false，仍有全局或其他闸门在，未恢复新单入场。`

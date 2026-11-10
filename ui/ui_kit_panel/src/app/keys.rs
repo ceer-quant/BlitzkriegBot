@@ -97,52 +97,52 @@ impl App {
 	                _ => Action::None,
 	            };
 	        }
-	        // #1059: the `U` unfreeze overlay owns the keys while up — ↑/↓ move
-	        // the cursor over frozen rows, Enter sends `account.unfreeze` for the
-	        // selected one, Esc/`U` close.
-	        if self.unfreeze_visible {
-	            return match key.code {
-	                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('U') => {
-	                    self.unfreeze_visible = false;
-	                    Action::None
-	                }
-	                KeyCode::Up => {
-	                    self.unfreeze_focus = self.unfreeze_focus.saturating_sub(1);
-	                    Action::None
-	                }
-	                KeyCode::Down => {
-	                    let n = self
-	                        .unfreeze_doc
-	                        .as_ref()
-	                        .and_then(|d| d.as_array().map(|a| a.len()))
-	                        .unwrap_or(0);
-	                    if self.unfreeze_focus + 1 < n {
-	                        self.unfreeze_focus += 1;
-	                    }
-	                    Action::None
-	                }
-	                KeyCode::Enter => {
-	                    let id = self
-	                        .unfreeze_doc
-	                        .as_ref()
-	                        .and_then(|d| d.as_array())
-	                        .and_then(|a| a.get(self.unfreeze_focus))
-	                        .and_then(|g| g.get("account").and_then(|v| v.as_str()))
-	                        .map(|s| s.to_string());
-	                    match id {
-	                        Some(id) if !id.is_empty() => {
-	                            self.unfreeze_visible = false;
-	                            Action::AccountUnfreeze { account_id: id }
-	                        }
-	                        _ => {
-	                            self.log("no frozen account selected".to_string());
-	                            Action::None
-	                        }
-	                    }
-	                }
-	                _ => Action::None,
-	            };
-	        }
+        // #1059: the `U` unfreeze overlay owns the keys while up — ↑/↓ move
+        // the cursor over frozen rows, Enter sends `account.unfreeze` for the
+        // selected one, Esc/`U` close.
+        if self.unfreeze_visible {
+            return match key.code {
+                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('U') => {
+                    self.unfreeze_visible = false;
+                    Action::None
+                }
+                KeyCode::Up => {
+                    self.unfreeze_focus = self.unfreeze_focus.saturating_sub(1);
+                    Action::None
+                }
+                KeyCode::Down => {
+                    let n = self
+                        .unfreeze_doc
+                        .as_ref()
+                        .and_then(|d| d.as_array().map(|a| a.len()))
+                        .unwrap_or(0);
+                    if self.unfreeze_focus + 1 < n {
+                        self.unfreeze_focus += 1;
+                    }
+                    Action::None
+                }
+                KeyCode::Enter => {
+                    let id = self
+                        .unfreeze_doc
+                        .as_ref()
+                        .and_then(|d| d.as_array())
+                        .and_then(|a| a.get(self.unfreeze_focus))
+                        .and_then(|g| g.get("account").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string());
+                    match id {
+                        Some(id) if !id.is_empty() => {
+                            self.unfreeze_visible = false;
+                            Action::AccountUnfreeze { account_id: id }
+                        }
+                        _ => {
+                            self.log("no frozen account selected".to_string());
+                            Action::None
+                        }
+                    }
+                }
+                _ => Action::None,
+            };
+        }
 	        // Command bar owns input while focused.
         if self.input_active {
             match key.code {

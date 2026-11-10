@@ -76,7 +76,12 @@ const snapshot = computed(() => store.snapshot)
 const frozenAccountIds = computed(() => {
   const gates = snapshot.value?.stats?.accountGates
   return gates
-    ? gates.filter((g) => g.blocked === true && g.account).map((g) => g.account)
+        ? gates
+            .filter(
+              (g) =>
+                g.blocked === true && g.account && g.account !== 'global'
+            )
+            .map((g) => g.account)
     : []
 })
 const isFrozenAccount = (id: string) => frozenAccountIds.value.includes(id)

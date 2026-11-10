@@ -353,8 +353,10 @@ pub(super) fn render_unfreeze(f: &mut Frame, app: &App) {
         .unwrap_or_default();
     let mut frozen: Vec<serde_json::Value> = Vec::new();
     for g in gates.iter() {
-        if g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false) {
-            frozen.push(g.clone().clone());
+        if g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false)
+            && g.get("account").and_then(|v| v.as_str()).unwrap_or("") != "global"
+        {
+            frozen.push(serde_json::Value::clone(g));
         }
     }
     match app.unfreeze_doc.as_ref() {
@@ -410,7 +412,7 @@ pub(super) fn render_unfreeze(f: &mut Frame, app: &App) {
     }
     if let Some(text) = &app.unfreeze_result {
         lines.push(Line::from(Span::styled(
-            format!("{text}"),
+            text.to_string(),
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
         )));
     }
