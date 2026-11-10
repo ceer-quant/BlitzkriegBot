@@ -88,7 +88,7 @@ PF 路径全部伴随 net 大幅恶化：entry_price=0.50（train PF +43.4% 但 
 ## 6. 复算路径
 
 - 工件根：`/Volumes/Hard Disk/bk-agentopt/`（split-corpus.cjs、gen-train-jobs.py、poolrun.py/poolrun2.py、jobs-*.tsv、reports/*.json、logs/*.log、bin/core-opt-base）。
-- 每个数字 = `reports/<name>.json` 的 `trades` 块字段；命令模板见 bk-session/README.md；回放前必须 `rm -f data/strategy-state.json data/positions.daily-loss.json`。
+- 每个数字 = `reports/&lt;name&gt;.json` 的 `trades` 块字段；命令模板见 bk-session/README.md；回放前必须 `rm -f data/strategy-state.json data/positions.daily-loss.json`。
 - PROGRESS.md 是完整审计日志（含失败尝试与诊断）。
 
 ## 7. 本 PR 的 default 变更声明

@@ -12,8 +12,8 @@
 ```json
 { "jsonrpc": "2.0", "version": "1.1", "id": <any>, "method": "<name>", "params": { ... } }
 ```
-成功响应：`{ "jsonrpc": "2.0", "id": <any>, "result": { ... } }`
-失败响应：`{ "jsonrpc": "2.0", "id": <any>, "error": { "code": <int>, "message": "...", "data": { "coreCode": "<CODE>", "raw": "<venue text>" } } }`
+成功响应：`{ "jsonrpc": "2.0", "id": &lt;any&gt;, "result": { ... } }`
+失败响应：`{ "jsonrpc": "2.0", "id": &lt;any&gt;, "error": { "code": &lt;int&gt;, "message": "...", "data": { "coreCode": "&lt;CODE&gt;", "raw": "<venue text>" } } }`
 事件推送：`{ "jsonrpc": "2.0", "method": "core.event", "params": { "kind": "...", ... } }`
 
 错误码：`-32700` 解析 / `-32600` 非法请求 / `-32601` 未知方法 / `-32602` 参数错 / `-32000` 应用错误（详见 `data.coreCode`）。
@@ -42,7 +42,7 @@
 ### 2.1 基础
 | method | params | result |
 |:---|:---|:---|
-| `core.ping` | `{}` | `{ "pong": true, "ts": <ms> }` |
+| `core.ping` | `{}` | `{ "pong": true, "ts": &lt;ms&gt; }` |
 | `core.ready` | `{}` | `{ "version", "mode", "authenticated", "signer", "funder" }` |
 | `system.version` | `{}` | `{ "version", "gitHash", "gitDirty", "buildDate", "target", "updateAvailable", "latestVersion", "autoUpdate", "checkEnabled", "lastCheckMs", "releaseUrl" }` —— 版本 + 构建来源 + 更新状态。`updateAvailable`/`latestVersion`/`lastCheckMs`/`releaseUrl` 可空；`updateAvailable` 是**三态**：`null` = 尚未检查（更新检查默认关闭）≠ `false` = 已是最新，消费方不得把 `null` 画成「已是最新」。只读、无副作用、**不取 Core 锁**（数据锁未就绪时也必须能回答）。逐字段契约见 `docs/VERSIONING.md` §5.3 |
 
@@ -51,22 +51,22 @@
 |:---|:---|:---|
 | `orders.place` | `{ tokenId, conditionId, side, mode, price, size, internalKey, strategy, asset, direction, roundSlot, makerTimeoutMs? }` | `{ "orderId", "status" }` |
 | `orders.cancel` | `{ orderId }` | `{ "success": true }` |
-| `orders.cancel_all` | `{ tokenId? }` | `{ "cancelled": <n> }` |
+| `orders.cancel_all` | `{ tokenId? }` | `{ "cancelled": &lt;n&gt; }` |
 | `orders.list` | `{}` | `{ "orders": [TrackedOrder...] }` |
 | `orders.reconcile` | `{ openOrderIds?, trades? }` | `{ filled, markedFilled, markedCancelled, ghostIds }` |
 | `positions.list` | `{}` | `{ "positions": [PositionView...] }` |
-| `positions.exit` | `{ positionId? }` —— **省略整个 params 键等价于 `"params": null`**，typed 方法按客户端错误拒（`-32602`，持仓一个不动，#894/#895）；需要缺省全平语义必须显式传 `{}`（`"all"` 是全平的显式拼法） | `{ "closed": <n> }` |
+| `positions.exit` | `{ positionId? }` —— **省略整个 params 键等价于 `"params": null`**，typed 方法按客户端错误拒（`-32602`，持仓一个不动，#894/#895）；需要缺省全平语义必须显式传 `{}`（`"all"` 是全平的显式拼法） | `{ "closed": &lt;n&gt; }` |
 | `positions.force_close` | `{ positionId }` | `{ "positionId", "price" }` —— #684：清除**已过期市场**的幽灵持仓（裁决查询从未被场地应答——updown 列表只载未来轮次，过期 conditionId 永远等不到裁决）。内核三道门：持仓存在 / 已真正过期（活轮拒 `INVALID_ORDER_STATE`，提示走 `positions.exit`）/ `manual_ops_audit_path` 已配置（无审计不下药，拒 `INVALID_PARAMS`）。按兜底价平账入历史（最后已知 mid，为 0 则入场价=成本回收），exit reason = `unverifiable_expiry`，**不建 redemption claim**（裁决未经验证，现金真值由既有 reconcile/realign sweep 跟平）；manual-ops 审计行记 op/actor/position/价格 |
-| `positions.unverified_exposure` | `{}` | `{ "version": "1.1", "report": <UnverifiedExposureReport> }` —— issue 991：**未核实敞口**报表（只读）。列出所有退场价仍是记账估算值的平仓行（`source == "fallback"` 无场地音讯，或 `"reconciled"` 场地现金真值已到但价格仍是兜底估算；`"venue"` 行永不出现），含聚合计数/股数/成本/占全部平仓成本的百分比。与已实现 PnL 天然分离，永不并入；UI 展示另单（gemini 车道） |
+| `positions.unverified_exposure` | `{}` | `{ "version": "1.1", "report": &lt;UnverifiedExposureReport&gt; }` —— issue 991：**未核实敞口**报表（只读）。列出所有退场价仍是记账估算值的平仓行（`source == "fallback"` 无场地音讯，或 `"reconciled"` 场地现金真值已到但价格仍是兜底估算；`"venue"` 行永不出现），含聚合计数/股数/成本/占全部平仓成本的百分比。与已实现 PnL 天然分离，永不并入；UI 展示另单（gemini 车道） |
 | `trades.history` | `{ limit? }` —— 缺省 50 | `{ "version": "1.1", "trades": [TradeRecord...] }` —— 已平仓历史（Node 兼容记录；`--trade-log` 在时优先读记录文件尾部，否则内存平仓簿尾部），最旧 → 最新 |
-| `trades.summary` | `{ accountId? }` —— 缺省 = 全局累计 | `{ "version": "1.1", "summary": <TradeSummary> }` —— 持久化 `summary.json` 的**全期**累计（与窗口式 history 不同）；带 `accountId` 时把该账户行现场折叠成同形状汇总（pre-E28 行 accountId 为空归 default），旧核忽略该字段 |
+| `trades.summary` | `{ accountId? }` —— 缺省 = 全局累计 | `{ "version": "1.1", "summary": &lt;TradeSummary&gt; }` —— 持久化 `summary.json` 的**全期**累计（与窗口式 history 不同）；带 `accountId` 时把该账户行现场折叠成同形状汇总（pre-E28 行 accountId 为空归 default），旧核忽略该字段 |
 | `ledger.balance` | `{}` | `{ balance, reserved, available }` |
 
 ### 2.2.1 账户（E28 · v1.1）
 | method | params | result |
 |:---|:---|:---|
 | `account.list` | `{}` | `{ "version": "1.1", "active", "accounts": [{ id, name, marketType, status, statusReason?, balance, available, reserved, credentialsLoaded, openPositions, dayRealizedUsd, updatedAtMs }] }` —— `active` 是**本连接**的默认账户（§9.5：无会话切换时 = 进程级）；`credentialsLoaded` 只是布尔存在事实（§9.4：凭证值永不过线） |
-| `account.switch` | `{ accountId }` | `{ "active": <id> }` —— **会话级**：只改本连接的默认账户，其他连接与进程级 active 不动（§9.5）；未知 id 拒 `INVALID_PARAMS` |
+| `account.switch` | `{ accountId }` | `{ "active": &lt;id&gt; }` —— **会话级**：只改本连接的默认账户，其他连接与进程级 active 不动（§9.5）；未知 id 拒 `INVALID_PARAMS` |
 | `account.status` | `{ accountId, status, reason? }` | `{ id, status, statusReason? }` —— **只能收紧**（tighten-only）：loosen（如 `frozen→active`）一律拒 `INVALID_PARAMS`；`status` 走 wire 词表 `active`/`read_only`/`frozen`/`suspended`，裸 `suspended` 由 `reason` 兜底为 `statusReason` |
 
 ### 2.3 行情 / 引擎
@@ -78,14 +78,14 @@
 | `spot.price` | `{ asset, price }` | `{ ok: true }` |
 | `engine.markets` | `{ markets: [CryptoMarket...] }` | `{ ok: true }` |
 | `engine.round` | `{}` | `{ slot, ageSec, timeLeftSec, markets, canTrade, marketPrices:[{asset,up,down}] }` |
-| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum,byStrategy,declaredExemptions}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`；E2-b 增 `gateExemptions:string[]`（声明豁免的入场闸门，`[]`=全保留）、`blockedTiming`/`blockedMomentum`、`gateExemptedTiming`/`gateExemptedMomentum`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。`blocked.byStrategy` 把每次 timing/momentum 拦截归属到候选单所属策略（`{<name>:{timing,momentum}}`，全 0 省略），`blocked.declaredExemptions` 列出当前生效的全部豁免声明 `[{strategy,gates}]`；原 `timing`/`momentum` 全局总数语义不变。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff。E29 增 `kline`（聚合器计数器 `{symbols, liveBars, closedBars, droppedOutOfOrder, noDataBars, intervals[]}`，无引擎为 `null`——§10.3 的丢弃必须可见） |
+| `engine.stats` | `{}` | `{ books, tops, spots, rounds, evaluations, signals, placeRejected, strategyLimitRejected, blocked:{timing,momentum,byStrategy,declaredExemptions}, confirmed:[...], confirmedDetail:[{token,mid,entry,cap,inBand}], strategies:[...]（P-1.1 按策略分账；E2-a 增 `maxOpenPositions`/`maxOpenNotionalUsd`（未配置为 null）、`sizingSource:"global"|"strategy"`、`effectiveSizeUsd`/`effectiveMinShares`/`effectiveMaxShares`；E2-b 增 `gateExemptions:string[]`（声明豁免的入场闸门，`[]`=全保留）、`blockedTiming`/`blockedMomentum`、`gateExemptedTiming`/`gateExemptedMomentum`）, archive:{ path, events, bytes, dropped, recording, rotateBytes, segmentBytes, segments, freeBytes, stoppedReason:"cap"\|"disk"\|"io"\|"locked"\|null }\|null（P-1.3 归档状态；**内核默认常开**，`--no-event-archive` 关闭 + 分段轮转 + 单写者锁） }`。`blocked.byStrategy` 把每次 timing/momentum 拦截归属到候选单所属策略（`{&lt;name&gt;:{timing,momentum}}`，全 0 省略），`blocked.declaredExemptions` 列出当前生效的全部豁免声明 `[{strategy,gates}]`；原 `timing`/`momentum` 全局总数语义不变。诊断列表按 token 排序、按调用时刻计算（回测报告内用虚拟钟），因此可复现、可 diff。E29 增 `kline`（聚合器计数器 `{symbols, liveBars, closedBars, droppedOutOfOrder, noDataBars, intervals[]}`，无引擎为 `null`——§10.3 的丢弃必须可见） |
 
 ### 2.4 策略（P0.5）
 | method | params | result |
 |:---|:---|:---|
 | `strategy.list` | `{}` | `{ "version": "1.1", "strategies": [{ "name", "enabled" }] }` |
 | `strategy.enable` | `{ name, enabled }` | `{ name, enabled, found }` |
-| `strategy.load` | `{ path }` | 成功 `"<name>@<version> registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
+| `strategy.load` | `{ path }` | 成功 `"&lt;name&gt;@&lt;version&gt; registered into the engine dispatch (disabled)"`（注册后默认禁用，需再 `strategy.enable`；E2-b 起若该库导出可选符号 `bk_strategy_gate_exemptions`，回执在启用前显式追加 `; declares gate exemptions: timing[,momentum]`）；失败返回 `"Rejected { path, reason }"`（路径策略）/ `"Failed { path, reason }"`（dlopen/协商/`create` 失败）。走 **C ABI v2**：`bk_strategy_abi_version()` 必须为 2（无 v1 兼容层）；新能力一律以「按名字解析的可选符号」追加、vtable 结构体冻结，故 E2-b 不需要 ABI v3。`strategy-loading` 自 E7 起默认开启 |
 
 **内核自身不注册任何策略**，因此出厂状态下 `strategy.list` 返回空数组，`engine.stats` 的
 `strategies[]` 也是空的。曾经自带的三个（`spread_arb` / `trend_follow` / `mean_reversion`，
@@ -94,7 +94,7 @@
 门禁豁免声明因此不再是常驻项：`engine.stats.blocked.declaredExemptions` 只在某个已加载库
 声明了豁免时才出现（曾经的 `mean_reversion` 条目随之消失）。
 
-开机态也可由 CLI 决定：`--enable-strategy <name>` / `--disable-strategy <name>`
+开机态也可由 CLI 决定：`--enable-strategy &lt;name&gt;` / `--disable-strategy &lt;name&gt;`
 （可重复，`--disable-strategy` 优先），走的是与 `strategy.enable` **同一个** `set_strategy_enabled`，
 因此开机选择与运行期切换行为一致；回测/回放复用同一份 `CoreConfig`，同样吃这两个开关。
 未知名只记警告日志并忽略（不会让进程失败）——但**一个库都没解析到**时 `--enable-strategy`
@@ -170,10 +170,10 @@
 | method | params | result |
 |:---|:---|:---|
 | `strategy.params.get` | `{ name }` | `{ name, found, tunables: [{name, type?, value, min, max}], evolvable, paramsAttached, note? }` —— schema 源是策略**自己的**旋钮声明（Lua manifest `tunables`），内核不发明域；数字全部 decimal-STRING；`tunables: []` = 该策略不可进化（不是错误状态）；`paramsAttached: false` = 写路径仍可用但值要等内核下次 set 的 attach 才上台 |
-| `strategy.params.set` | `{ name, params: { <knob>: <decimal-string>, … }, reason? }` | `{ name, applied: [{knob, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 逐旋钮对照声明域校验（plan first, write later）；多旋钮 patch **原子**（一个坏值整体拒绝、什么都不动）；热生效：策略下个 evaluate 周期合并 registry cell；重启回落 manifest 缺省（+已采纳的进化晋升） |
-| `strategy.unload` | `{ name }` | 文本回执：`"<name> unloaded (engine dispatch removed); library freed"` / `"not found: …"` / `"rejected: …"`（仍启用、in-tree 或仍有持仓时拒绝） |
+| `strategy.params.set` | `{ name, params: { &lt;knob&gt;: &lt;decimal-string&gt;, … }, reason? }` | `{ name, applied: [{knob, from, to, effect: "live"}], atMs, actor, reason?, persisted: false, note }` —— 逐旋钮对照声明域校验（plan first, write later）；多旋钮 patch **原子**（一个坏值整体拒绝、什么都不动）；热生效：策略下个 evaluate 周期合并 registry cell；重启回落 manifest 缺省（+已采纳的进化晋升） |
+| `strategy.unload` | `{ name }` | 文本回执：`"&lt;name&gt; unloaded (engine dispatch removed); library freed"` / `"not found: …"` / `"rejected: …"`（仍启用、in-tree 或仍有持仓时拒绝） |
 | `strategy.reload` | `{ name, path }` | 文本回执（E9-b 原子换装）：先装新库、同名字解析成功才卸旧实例；失败旧实例原样活着 —— 坏构建永远不能把在跑的 dispatch 洗白 |
-| `strategy.packages.reload` | `{}` | `{ "loaded": [<name>…], "note": "re-scanned user_layer/strategies_lua and registered packages not already in the engine dispatch" }` —— 重扫 Lua 策略目录，把还未在引擎分发表里的包注册进来（issue #975 的非重启恢复路径）。`params: {}`（无参数）。返回刚加载的包名，以便 `strategy.list` 再列出它们。 |
+| `strategy.packages.reload` | `{}` | `{ "loaded": [&lt;name&gt;…], "note": "re-scanned user_layer/strategies_lua and registered packages not already in the engine dispatch" }` —— 重扫 Lua 策略目录，把还未在引擎分发表里的包注册进来（issue #975 的非重启恢复路径）。`params: {}`（无参数）。返回刚加载的包名，以便 `strategy.list` 再列出它们。 |
 
 #### 2.5.5 统一映射确认面（RFC 568 · ④ 操作员裁决，2026-10-26 补册）
 
@@ -182,7 +182,7 @@
 | `unified.list` | `{}` | `{ version, events: [<已确认映射>...] }` —— 每事件：`id`/`title`/`status`/`settlementSource`/`venues`（持腿方）/偏差标记。只读快照，面板配对视图数据源 |
 | `unified.candidates` | `{}` | `{ version, candidates: [{a, b, score, expiryDeltaMs}] }` —— 本轮跨所配对候选（自动匹配提议、操作员裁决），只读；`a`/`b` 是 `PlatformListing` 原样（confirm 往返不改字节） |
 | `unified.confirm` | `{ title, listings: [PlatformListing…≥2], actor? }` —— `listings` 必须来自**不同** venue；`actor` 缺省 `"panel"` | `{ version, event: {id, title, status, venues[]} }` —— 账本侧全部重校验（标题、资产、一挂牌一事件）；被拒的 confirm 原样报错、不动任何东西 |
-| `unified.revoke` | `{ eventId, actor? }` | `{ version, revoked: "<eventId>" }` —— 撤回已确认映射（账本审计 + Engine 副本同步移除，策略立即看不见） |
+| `unified.revoke` | `{ eventId, actor? }` | `{ version, revoked: "&lt;eventId&gt;" }` —— 撤回已确认映射（账本审计 + Engine 副本同步移除，策略立即看不见） |
 
 #### 2.5.6 跨所套利腿配置：arb.config.set / arb.config.get（Wire contract v1，2026-10-26 补册）
 
@@ -217,7 +217,7 @@
 | `execution_policy.get` | `{ accountId }` | 生效 section 视图（`{budgetRatio?, minBudgetUsd?, maxBudgetUsd?, minEquityUsd?, maxPositionsPerAsset, rules?}`，decimal 走 string 最短规则）；无 section 且无 policy → `INVALID_PARAMS` |
 | `execution_policy.set` | `{ accountId, budgetRatio?, minBudgetUsd?, maxBudgetUsd?, minEquityUsd?, maxPositionsPerAsset?, rules? }` —— `null` 字段继承 globals；`rules` 出现即**整组替换**（`[]` = 清空）；`cooldownSec` 是账户常备冷却 | `{ accountId }` —— section-replace 写 TOML（不重写其他账户）→ 内存 full-reload → 一行审计。文件 re-parse 失败时内存保**最后好策略**（fail-closed：坏写永不裸奔交易）并答 `INVALID_PARAMS` |
 | `execution_policy.reset` | `{ accountId }` | `{ accountId }` —— 移除该账户 section（回落 globals）、full-reload、审计 |
-| `execution_policy.history` | `{ accountId? }` —— 缺省 = 全部 | `[<PolicyAuditRecord>...]`：`[{tsMs, actor, action, accountId, before?, after?, error?}]` |
+| `execution_policy.history` | `{ accountId? }` —— 缺省 = 全部 | `[&lt;PolicyAuditRecord&gt;...]`：`[{tsMs, actor, action, accountId, before?, after?, error?}]` |
 | `execution_policy.preview` | `{ accountId }` | `{ considered, skipped, avgBudgetUsd?, rows: [{tsMs, symbol, balance, price, verdict, detail?}] }` —— #364：当前 section 在该账户近 100 笔已平仓上重放（`evaluate` 本尊裁决，预览永不与内核分歧）；`verdict` ∈ `place`/`skip`/`cooldown`/`refused`。只读、无审计行 |
 
 ### 2.12 回测作业面 #353（backtest jobs，2026-10-26 补册）
@@ -226,12 +226,12 @@
 
 | method | params | result |
 |:---|:---|:---|
-| `backtest.onchain.pull` | `{ wallet, start, end, assets?, market? }` —— `start`/`end` 是 `YYYY-MM-DD`（UTC，end 含）或 epoch 秒；空 `assets` = 该钱包全部交易（一个 pull）；点名资产各扇出一个**可续传、缓存寻址**的 pull（每资产一个 jobId） | `{ jobIds: [<id>…] }` —— 异步起作业；输出根是内核数据集目录，**不是调用方参数**（WebUI 可达面无任意路径写） |
+| `backtest.onchain.pull` | `{ wallet, start, end, assets?, market? }` —— `start`/`end` 是 `YYYY-MM-DD`（UTC，end 含）或 epoch 秒；空 `assets` = 该钱包全部交易（一个 pull）；点名资产各扇出一个**可续传、缓存寻址**的 pull（每资产一个 jobId） | `{ jobIds: [&lt;id&gt;…] }` —— 异步起作业；输出根是内核数据集目录，**不是调用方参数**（WebUI 可达面无任意路径写） |
 | `backtest.onchain.list` | `{}` | `{ outDir, datasets: [{dataset, eventsPath, manifest}] }` —— 数据集根全量清单（CLI pull 同布局同根），最旧在前；半写 manifest 跳过 |
 | `backtest.run` | `{ archive, mode?, verifyLatencyMs?, slippageTicks?, tickMs?, tailMs?, strategies? }` —— `archive` 必须是 pull 产出的数据集（内核数据集目录下）；`mode` ∈ `mine`（缺省）\|`verify`\|`sweep`（#351 阶梯）；`slippageTicks` 低于 1 拒绝（诚实摩擦下限）；`strategies` 只收**名字**（未知名是作业失败信息，永不 shell） | `{ jobId }` —— 回放用活内核 config 的**快照**驱动独立 replay 实例（交易侧继续跑，无 #199 ledger-dir 争用） |
 | `backtest.status` | `{ id }` | `JobView`（`{jobId, kind, state, phase, detail, progress, startedAtMs, finishedAtMs?, error?}`）+ 完成时附 `result` —— `state` ∈ `running`/`done`/`failed`；pull 的 `phase` ∈ trades/markets/prices/convert/done，回放恒 `replay` |
 | `backtest.result` | `{ id }` | 完整结果文档（pull：`{asset, trades, events, cacheHit, tradesPath, eventsPath, manifestPath}`；回测：含 `archive` 的报告 JSON）；未完成作业报错并提示轮询 status。sweep verdict 只读首尾档（sweep 下即 0ms 与最高延迟档），50ms 档仅展示 |
-| `backtest.export` | `{ id }` | `{ fileName: "<stem>.report.json", content: <pretty JSON 字符串> }` —— 命名报告文档，浏览器负责保存（WebUI 本身不碰文件系统） |
+| `backtest.export` | `{ id }` | `{ fileName: "&lt;stem&gt;.report.json", content: <pretty JSON 字符串> }` —— 命名报告文档，浏览器负责保存（WebUI 本身不碰文件系统） |
 
 ### 2.13 蓝图编辑器面 #362/#393（blueprint，2026-10-26 补册）
 
@@ -260,10 +260,10 @@ WebUI 画布产出蓝图 JSON，一切碰盘的动作都请内核做——UI 永
 | method | params | result |
 |:---|:---|:---|
 | `core.feeQuote` | `{ price? }` —— 缺省 0.5（费率表最宽处） | `{ model, rate, exponent, price, feePerShare, feePctOfPrice, makerFeePerShare: 0, modelMatches }` —— #182：内核实收 taker 费率表的只读报价；门禁脚本不再自带费率公式副本（副本察觉不到内核换默认）；`modelMatches: false` = 仓库钉死的参数与实收曲线分裂（分裂是**上报**的，不静默糊掉） |
-| `engine.books` | `{}` | `[<AssetBooksView>…]`：`[{venue, asset, upTokenId, downTokenId, up: <BookSideView>, down: <BookSideView>}]`，`BookSideView = {bids[], asks[], bestBid?, bestAsk?, midPrice?, obi?, spread?, spreadPct?}` —— 引擎实盘同款 L2 深度读数（纯观察、零副作用，盘口深度卡数据源）；全部指标无盘口时 `null`（从不假装 0）；行带 venue 标签（含镜像盘合成行） |
-| `shadow_evolution.proposals` | `{ limit? }` —— 缺省 100 | `{ version, proposals: [<EvolutionProposal>…] }` —— E13：全部已知提案的最新态（UI 对比表数据源） |
+| `engine.books` | `{}` | `[&lt;AssetBooksView&gt;…]`：`[{venue, asset, upTokenId, downTokenId, up: &lt;BookSideView&gt;, down: &lt;BookSideView&gt;}]`，`BookSideView = {bids[], asks[], bestBid?, bestAsk?, midPrice?, obi?, spread?, spreadPct?}` —— 引擎实盘同款 L2 深度读数（纯观察、零副作用，盘口深度卡数据源）；全部指标无盘口时 `null`（从不假装 0）；行带 venue 标签（含镜像盘合成行） |
+| `shadow_evolution.proposals` | `{ limit? }` —— 缺省 100 | `{ version, proposals: [&lt;EvolutionProposal&gt;…] }` —— E13：全部已知提案的最新态（UI 对比表数据源） |
 | `shadow_evolution.decide` | `{ id, decision }` —— `decision` ∈ `accept`/`reject`/`defer` | `{ decision: "accepted"\|"rejected"\|"deferred", proposal }` —— 操作员对单个被 HOLD 提案的裁决；热路径零改动 |
-| `shadow_evolution.set_auto` | `{ enabled: <bool> }` | `{ autoEvolve: <bool> }` —— 自动进化开关（**持久化**，重启保持所择模式） |
+| `shadow_evolution.set_auto` | `{ enabled: &lt;bool&gt; }` | `{ autoEvolve: &lt;bool&gt; }` —— 自动进化开关（**持久化**，重启保持所择模式） |
 
 ### 2.16 版本对账门禁（2026-10-26，Issue #644）
 
@@ -283,7 +283,7 @@ PR 直接红。接入 `.github/workflows/ci.yml` 的 `core-gates`（§A.4 反向
 | `market.list` | `{}` | `{ "version": "1.1", "active": "polymarket", "plugins": [{ "name", "type", "hasDataFeed", "hasDiscovery", "hasExecutor", "enabled", "active" }] }` |
 
 `extension.*` = 通用审计/生命周期扩展（`Extension`，无交易能力）；
-`market.list` = 市场插件（`MarketPlugin`，驱动下单/行情/发现）。市场选择用内核 CLI `--market-plugin <name>`。
+`market.list` = 市场插件（`MarketPlugin`，驱动下单/行情/发现）。市场选择用内核 CLI `--market-plugin &lt;name&gt;`。
 
 ### 2.7 影子进化（Shadow Evolution，opt-in）
 
@@ -318,7 +318,7 @@ strategies[] = {
 单步超过 `max_gradient`，一律返回 error 且**不改动任何值**（多策略袋子也是全有或全无）。
 
 新增事件：`EVOLUTION_SIGNAL`、`EVOLUTION_APPLIED`、`EVOLUTION_REJECTED`（均带 `strategy`）。
-审计分文件：`data/evolution/<strategy>.jsonl`。
+审计分文件：`data/evolution/&lt;strategy&gt;.jsonl`。
 详见 `SHADOW_EVOLUTION.md`、`STRATEGY_GUIDE.md §3.6`。
 
 ### 2.8 网络诊断（Net Check）
@@ -377,7 +377,7 @@ NetCheckReport = {
 
 | 界面 | 入口 |
 |:---|:---|
-| CLI | `blitzkrieg net-check [--json] [--socket <path>]`（走运行中的内核 IPC）；无内核时 `blitzkrieg-core --net-check`（一次性、输出 JSON、退出码 0=全通过 / 1=有失败） |
+| CLI | `blitzkrieg net-check [--json] [--socket &lt;path&gt;]`（走运行中的内核 IPC）；无内核时 `blitzkrieg-core --net-check`（一次性、输出 JSON、退出码 0=全通过 / 1=有失败） |
 | TUI | `n` 键覆盖层；命令行 `netcheck` |
 | WebUI | 设置页「网络诊断」卡片；`GET /api/netcheck`（读缓存，过期后台起探测）、`POST /api/netcheck/probe`（丢弃时间戳强制重探） |
 
@@ -489,7 +489,7 @@ core.set_strategy_enabled("my_strategy", false);
 | 1.1 | Shadow Evolution（opt-in）：`shadow_evolution.enable/disable/status/history/rollback` + `EVOLUTION_*` 事件 |
 | 1.1 | E2-a：`engine.stats.strategies[]` 增 per-strategy 配额与生效定寸字段（协议加项，向后兼容，版本号不变） |
 | 1.1 | E2-b：`engine.stats.blocked` 增 `byStrategy`/`declaredExemptions`，`strategies[]` 增 `gateExemptions`/blocked/gateExempted 字段；`strategy.load` 回执追加豁免声明。外挂新增可选符号 `bk_strategy_gate_exemptions`（未导出=不声明），vtable 与 `BK_ABI_VERSION=2` 冻结 |
-| 1.1 | E2-c：`shadow_evolution.status` 增 `strategies[]`（每策略 status/params/knobs/计数），`history` 增可选 `strategy`，新增 `shadow_evolution.apply`，`rollback` 改为**必需** `strategy`；热参改为按策略命名空间（`ParamRegistry`），关闭进化时覆盖层**摘除**；审计分文件 `data/evolution/<strategy>.jsonl`。外挂新增可选符号 `bk_strategy_evolvable_knobs`（未导出=不可进化），vtable 与 `BK_ABI_VERSION=2` 仍冻结 |
+| 1.1 | E2-c：`shadow_evolution.status` 增 `strategies[]`（每策略 status/params/knobs/计数），`history` 增可选 `strategy`，新增 `shadow_evolution.apply`，`rollback` 改为**必需** `strategy`；热参改为按策略命名空间（`ParamRegistry`），关闭进化时覆盖层**摘除**；审计分文件 `data/evolution/&lt;strategy&gt;.jsonl`。外挂新增可选符号 `bk_strategy_evolvable_knobs`（未导出=不可进化），vtable 与 `BK_ABI_VERSION=2` 仍冻结 |
 | 1.1 | D-31：`timing` 豁免增可选**剩余时间下限**。`engine.stats.strategies[]` 增 `gateExemptionTimingFloorSec`（未声明为 `null`）；`blocked.declaredExemptions[]` 在声明了下限时增 `timingFloorSec`；`strategy.load` 回执在同一行打印 `(timing floor Ns)`。外挂侧复用**既有**可选符号 `bk_strategy_gate_exemptions` 的 JSON 增键 `timing_min_time_left_sec`（旧库不写=沿用内核默认），vtable 与 `BK_ABI_VERSION=2` 仍冻结 |
 | 1.1 | E7：策略接口全功能化，C ABI v2 全量钩子（含出场意图/多 tick 盘口/热参数/孪生工厂）；`strategy-loading` 默认开启（Issue #38） |
 | 1.1 | E4-a：`Engine::new` 注册第三个内建策略 `trend_follow`（默认关闭）；CLI 增 `--enable-strategy`/`--disable-strategy`，回测/回放同吃（Issue #30） |

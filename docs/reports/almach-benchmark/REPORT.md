@@ -165,7 +165,7 @@ sweep 串行（5 档 × ~2.5h）不可行，已改为逐档并行 verify 进程�
 ## 附录：产物与复现
 
 - 事件集：`data/onchain/3725d52f…_{5m,15m}-act-4bf06519abf5.{trades.jsonl,jsonl,manifest.json}`
-- 回放命令（15m mine 例）：`target/release/blitzkrieg-core --mode dry --engine … --round-sec 900 --max-positions 5000 --backtest <events> --backtest-report <out> --backtest-tick-ms 50 --backtest-mode mine --slippage-ticks 1 --fee-model official`
+- 回放命令（15m mine 例）：`target/release/blitzkrieg-core --mode dry --engine … --round-sec 900 --max-positions 5000 --backtest &lt;events&gt; --backtest-report &lt;out&gt; --backtest-tick-ms 50 --backtest-mode mine --slippage-ticks 1 --fee-model official`
 - 完整 mine 报告 JSON（5m 1.8MB / 15m 172KB）不入库，可由下述命令复现。
 - GT：`node scripts/almach-ground-truth.mjs data/almach/activity-full.jsonl 2026-08-05 2026-09-30 15m`
 - Overlay：`node scripts/almach-overlay.mjs data/almach/activity-full.jsonl <report.json> 2026-08-05 2026-09-30 15m`

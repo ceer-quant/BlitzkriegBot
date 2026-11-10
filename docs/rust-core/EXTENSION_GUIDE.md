@@ -76,7 +76,7 @@ pub trait MarketPlugin: Send + Sync {
 
 **装配与选择**：扩展是 workspace 成员，用 Cargo feature 静态链接进**组合根**
 `core/blitzkrieg_launcher`（#841 起内核不再链接任何插件）；仓库里**唯一**点名市场的
-地方是 launcher 的 `boot::builtin_registry()`。运行时用 `--market-plugin <name>` 选择（未注册则回退
+地方是 launcher 的 `boot::builtin_registry()`。运行时用 `--market-plugin &lt;name&gt;` 选择（未注册则回退
 第一个并告警）。
 
 ## 2.6 模式声明（`declare_modes`，E27）
@@ -150,14 +150,14 @@ discovered → installed → enabled → (running) → disabled → uninstalled
 ## 5. 配置
 
 > **状态：`[meta]` 已生效（KI-11 / `MIGRATION_LOG` §59）。**
-> 内核启动时读取 `extensions/<name>/config.toml` 的 `[meta]`，并与已链接的扩展做
+> 内核启动时读取 `extensions/&lt;name&gt;/config.toml` 的 `[meta]`，并与已链接的扩展做
 > 漂移校验（`name` / `version` / `extension_type` 任一不符都会报告）。
 > `[market]` / `[risk]` / `[dependencies]` 会被**识别但不生效**，各自带原因打印为
 > `declared_only`：市场装配走 Cargo feature + `--market-plugin`、风控限额的来源是
 > `RiskConfig`（第二个来源会与它静默矛盾）、依赖在构建期由 Cargo 解析。
 > 文件缺失不是错误；**无热加载**——改配置需重启内核。
 
-每个扩展一个目录 `extensions/<name>/config.toml`：
+每个扩展一个目录 `extensions/&lt;name&gt;/config.toml`：
 
 ```toml
 [meta]

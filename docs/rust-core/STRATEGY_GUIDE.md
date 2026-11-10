@@ -288,8 +288,8 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy my_strateg
 - **每个 token 每个评估周期至多一单**（按注册顺序，先到先得），避免多策略抢同一 token；
 - 仓位/名义金额仍受全局风控与 `--max-positions`（全局总容量）约束；
 - 可选的 **per-strategy 限额与定寸**（`--strategy-limit`，可重复；`-` 或空段 = 该维度继承全局值）：
-  - 旧格式（P-1.1，逐位兼容）：`<name>:<max_open_positions>:<max_notional_usd>`
-  - 扩展格式（E2-a）：`<name>:<max_open_positions>:<max_notional_usd>:<size_usd>:<min_shares>:<max_shares>`
+  - 旧格式（P-1.1，逐位兼容）：`&lt;name&gt;:&lt;max_open_positions&gt;:&lt;max_notional_usd&gt;`
+  - 扩展格式（E2-a）：`&lt;name&gt;:&lt;max_open_positions&gt;:&lt;max_notional_usd&gt;:&lt;size_usd&gt;:&lt;min_shares&gt;:&lt;max_shares&gt;`
   - 生产由环境变量 **`HFT_STRATEGY_LIMITS`**（逗号分隔）透传到内核。
 - **定寸与配额**：每个策略可自带目标名义额与张数区间（`size_usd`/`min_shares`/`max_shares`），
   未配置的维度沿用全局 `--size-usd`/`--min-shares`/`--max-shares`。**全局值既是兜底也是硬上限**：
@@ -374,7 +374,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy my_strateg
 
 **豁免必须显性且可审计**（不允许静默挖洞）：
 - 每次被兑现的豁免产生一条中文审计日志（`tracing` target `strategy`）：
-  `本单因策略 <name> 豁免门禁 timing（Round too young (12s < 10000s)，token=up）`；
+  `本单因策略 &lt;name&gt; 豁免门禁 timing（Round too young (12s < 10000s)，token=up）`；
 - `strategy.load` 的回执会在**启用前**写明声明了哪些闸门：
   `… registered … (disabled; declares gate exemptions: timing)`；
 - `engine.stats.strategies[]` 增加 `gateExemptions`（声明的闸门）、`blockedTiming`/
@@ -441,7 +441,7 @@ blitzkrieg-core --backtest <archive.jsonl> --engine --enable-strategy my_strateg
 - 风控参数（硬止损/连亏熔断/日亏上限/单笔名义上限）**不在任何** `StrategyParams` 里，
   结构上就读不到、写不进。
 
-审计按策略分文件：`data/evolution/<strategy>.jsonl`；`apply`/`rollback` 走 IPC
+审计按策略分文件：`data/evolution/&lt;strategy&gt;.jsonl`；`apply`/`rollback` 走 IPC
 且**都要求 `strategy` 参数**。门禁：`core/blitzkrieg_core/tests/shadow_evolution_per_strategy.rs`
 （每策略独立单元、互不串扰、进化关闭时逐位回到原行为）。端到端的
 `scripts/strategy-evolution-check.mjs` 随被删策略一起退役了。
@@ -642,7 +642,7 @@ target/release/blitzkrieg-core --backtest data/archives/events.jsonl --engine \
   报告 `fillModel` 块与渲染行自报档位（`maker rule trade-through, taker latency 150+150 ms`），
   `tradeLines` 每笔携带 canonical regime 标签（复用 `strategy_logic::market_regime` 单一口径）。
 - **#862 影子盘逐笔对账**：`node scripts/replay-shadow-reconcile.mjs --replay <report.json>... \
-  --shadow data/trades/trades-live.jsonl [--from-ms N --to-ms N] --out <dir>`——仅
+  --shadow data/trades/trades-live.jsonl [--from-ms N --to-ms N] --out &lt;dir&gt;`——仅
   同 conditionId+direction 配对（跨 venue 的同 slot 是 venue basis，不是执行模型误差），
   按 Up/Down/日(UTC)/regime 分桶输出均价差/平均绝对差/最大绝对差；判据 **平均 |回放入场−影子入场|
   ≤1¢ = PASS，超差 = FAIL（回测不可用）**，脚本只算差值并如实输出分布（无任何"修正"）。

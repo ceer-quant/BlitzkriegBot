@@ -6,7 +6,7 @@
 > ⚠️ **2026-09-23 起本文的实证对象已不存在**：`spread_arb` 与 `trend_follow` 两个
 > 被扫的策略随内核自带的 5 个策略一起删除（见 [CHANGELOG.md](../CHANGELOG.md)）。
 > 方法论与工具（`walk-forward-sweep.mjs`、档案导出器）仍然有效，但**现在必须显式
-> `--strategy <name>`**——内核自身不再注册任何策略，空着扫只会得到一份全是零的报告。
+> `--strategy &lt;name&gt;`**——内核自身不再注册任何策略，空着扫只会得到一份全是零的报告。
 > 下面的数字保留为当时的记录；那些旋钮（`--spread-arb-*` / `--trend-*`）仍在，
 > 因为算法还在 `user_layer/strategy_logic/`。
 

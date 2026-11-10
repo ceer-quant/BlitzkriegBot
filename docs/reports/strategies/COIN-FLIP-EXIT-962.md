@@ -54,7 +54,7 @@ primary 出场原因直方图：ThesisDeathExit 1,991 / TakeProfit 2,270 / Strat
 
 | 产物 | 路径 |
 |---|---|
-| 18 臂原始回放报告 | `/tmp/bk-coin-flip-lab/<arm>.json`（36MB；summary.json 含全臂聚合+确定性记录） |
+| 18 臂原始回放报告 | `/tmp/bk-coin-flip-lab/&lt;arm&gt;.json`（36MB；summary.json 含全臂聚合+确定性记录） |
 | 实验脚本（预声明坐标+网格+对照+双跑） | `scripts/coin-flip-lab-replay.mjs` |
 | JS 哈希交叉核对实现 | `scripts/lib/coin-flip.mjs`（每笔已实现方向逐一复核） |
 | 处理后语料（gitignored） | `data/corpus/coin-flip-962/onchain-15m-act-official.jsonl`（sha 钉在脚本） |

@@ -532,7 +532,7 @@ end
 | 发现 | `--strategy-dir` 扫描 dylib | `--lua-strategy-dir` 扫描 `manifest.json` |
 | 校验 | `bk_strategy_abi_version() == 2` + 可选符号 | `manifest.sha256` 匹配 + 必需函数存在 |
 | 注册 | `strategy.load` 回执含 API 1.0 | `strategy.load` 回执含 `(lua)` 标记 |
-| 启用 | `strategy.enable` | 同左（0.3：同一个开关，同一条状态持久化 `data/strategy-state.json`。**0.4.1 起语义已变**：`strategy.enable` 是默认 scope 的全局总闸（master power）；启用真值是「账户 × 策略」复合键——每个账户的启用集（`.env` 的 `ACCOUNT_<ID>_STRATEGIES` 列表，`account.strategies.set` / 面板按账户启停写入，issue 751 单源），空集 = 显式不跑（INHERIT 已废除）。见 README「策略状态与进入条件」） |
+| 启用 | `strategy.enable` | 同左（0.3：同一个开关，同一条状态持久化 `data/strategy-state.json`。**0.4.1 起语义已变**：`strategy.enable` 是默认 scope 的全局总闸（master power）；启用真值是「账户 × 策略」复合键——每个账户的启用集（`.env` 的 `ACCOUNT_&lt;ID&gt;_STRATEGIES` 列表，`account.strategies.set` / 面板按账户启停写入，issue 751 单源），空集 = 显式不跑（INHERIT 已废除）。见 README「策略状态与进入条件」） |
 | 隔离 | `catch_unwind` 兜策略 panic（既有） | 投毒 + 错误捕获兜 Lua 异常（新） |
 | 影子进化 | 既有 `bk_strategy_evolvable_knobs` | `manifest.tunables` + 热参（复用同一 `ParamRegistry`） |
 
@@ -690,7 +690,7 @@ pub enum ModeError {
 | 启动扫描 | 只在日志记录「声明了什么」，**不做拒绝** | 无（列表出厂为空，不改变状态） |
 | `strategy.load { path }` | 相容性判定 | **拒绝注册**，回执 `Rejected { path, reason }`，`reason` 形如 `incompatible modes: strategy wants [futures/clob] but active plugin 'polymarket' offers [prediction/binary_outcome_wheel]` |
 | `strategy.enable { name }` | 相容性判定 | **拒绝启用**，返回 `{ name, enabled: false, found: true, reason }` |
-| 启动时 `--enable-strategy <name>` | 相容性判定 | 该策略被跳过并记录 ERROR 日志；若这次启动因此 live 模式下**一个策略都没有**，沿用既有规则（`--allow-zero-strategies` 之外的场景 exit 1）。这是既有纪律的复用，不是新规则 |
+| 启动时 `--enable-strategy &lt;name&gt;` | 相容性判定 | 该策略被跳过并记录 ERROR 日志；若这次启动因此 live 模式下**一个策略都没有**，沿用既有规则（`--allow-zero-strategies` 之外的场景 exit 1）。这是既有纪律的复用，不是新规则 |
 
 **错误信息必须说出来两边**（策略要什么、插件给什么、差在哪一位）。这是可诊断性门禁的断言对象：反向测试里比对的是**错误信息的字段**，不是「返回了 false」。
 
@@ -834,7 +834,7 @@ ACCOUNT_PAPER_STATUS=read_only      # 只读：能看不能下单
 |:---|:---|
 | 默认 | `ACCOUNT_LIST` 缺失且 legacy toml 不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量）→ **0.2 部署零改动** |
 | 优先级 | `ACCOUNT_*` 键：进程环境先、`.env` 文件后（12-factor，启动时显式导出者优先）＞ legacy `accounts.toml`（迁移回退）＞ 单一 default。env 与文件永不合并——`ACCOUNT_LIST` 在场时 toml 被忽略并告警 |
-| 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（upsert `ACCOUNT_LIST` / `ACCOUNT_<ID>_*` 进 `.env`）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
+| 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（upsert `ACCOUNT_LIST` / `ACCOUNT_&lt;ID&gt;_*` 进 `.env`）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
 | 活跃账户 | `account.switch` 是**会话级**（按 UDS 连接），不是进程级全局：两个客户端可以看两个账户。切换只影响**该连接后续请求的默认 account_id**，不影响内核调度 |
 | 显示账户 | **display_account（0.4.1，#559/#561/#562）**：`.env` 键 `ACCOUNT_DISPLAY="<账户id>"`，回答「**面板行情页显示哪个账户的交易所**」。缺省 = 第一个 `status = active` 的账户；命名了不存在的 id → 内核拒绝启动（fail-closed，与账户簿同姿态）。运行时动词 `display.account.set`（payload `{accountId}`）：校验存在 + active → **persist 先行** → 运行时指针 + `.env` 一次写齐；面板切换器在 `account.switch` 成功后顺手调用。快照顶层带 `displayAccount` / `displayVenue`（venue 空串 = 未绑定）。**纯展示指针**：不接记账/下单/策略启用语义（那些跟着会话 activeAccount 走）；`account.remove` 删掉被指账户时内核修复指针（回落第一个 active）。面板身份唯一源 = `displayVenue` 优先，回落 `activeAccountVenue`（老内核零字段 → 原回落链，#561） |
 | 升级不覆盖 | **操作员状态已迁出升级携带面（issue 751）**：账户簿的运行期写（venue 绑定 / strategies 启用集 / display 指针）全部 upsert `.env` 的 `ACCOUNT_*` 键，shadow_evolution 的开关同样迁到 `SHADOW_*`——`UA_OPERATOR_STATE_CONFIGS` 已清空，升级携带面只含工厂 toml，而操作员状态所在的 `.env` 根本不在携带面上，不存在被覆盖的路径。（历史：0.4.1 #565 的「运行副本永远赢」规则与 2026-10-20 三次同日升级洗掉操作员策略集的事故，随写目标迁移一并退役） |
@@ -1205,7 +1205,7 @@ BlitzkriegBot/
 
 ### 13.3 账户切换器（`AccountSwitcher.vue`）
 
-位置：WebUI 顶部导航右侧（与既有 `LoginView` 的状态区并列）。TUI 对应：命令栏 `account <id>` 动词（新增 gateway 命令）+ Status tab 显示当前账户。
+位置：WebUI 顶部导航右侧（与既有 `LoginView` 的状态区并列）。TUI 对应：命令栏 `account &lt;id&gt;` 动词（新增 gateway 命令）+ Status tab 显示当前账户。
 
 ```
 ┌──────────────────────────────┐
@@ -1424,7 +1424,7 @@ docs/rust-core/ARCHITECTURE.md
 **关键任务**
 
 1. `market_api/src/modes.rs` 补实现：`parse_modes` / `parse_strategy_modes` / `capability_by_name()` / `satisfies` 使用点（类型来自 Wave 0）。
-2. `market_api/src/types.rs`：`PluginInfo` 加 `structure: Option<MarketStructure>` 与 `capabilities: MarketCapabilities`。
+2. `market_api/src/types.rs`：`PluginInfo` 加 `structure: Option&lt;MarketStructure&gt;` 与 `capabilities: MarketCapabilities`。
 3. `market/MarketPlugin` trait 加 `declare_modes()`（**带默认实现**返回空 `Vec`，既有第三方插件不破）。
 4. `extensions/polymarket`：实现 `declare_modes()`，如实申报自己支持的能力位（**不代它猜**）。
 5. 兼容性握手：`strategy.load` / `strategy.enable` / `--enable-strategy` 三处（§8.2）。
@@ -1477,7 +1477,7 @@ docs/rust-core/EXTENSION_GUIDE.md
 4. `AccountLedgers` 接入 `service.rs`（热点）：`ledger` 单例 → 按账户查表；**既有 `Ledger` 方法体零改动**。
 5. 三个持久化 DB 加行级 `account_id`（读旧行 → `default`，不写迁移脚本）。
 6. IPC：`account.list` / `account.switch` / `account.status`（**只能收紧**）。
-7. UI：`AccountSwitcher.vue` + 全页数据按账户重取；TUI 命令栏 `account <id>`。
+7. UI：`AccountSwitcher.vue` + 全页数据按账户重取；TUI 命令栏 `account &lt;id&gt;`。
 8. 门禁：`account-cross-isolation-check.mjs`、`account-credential-check.mjs`，并**扩展** `account-parity.mjs`（每账户各自 bit-identical）。
 9. 文档：`ARCHITECTURE.md` 多账户章节 + `INTERFACES.md` 账户方法。
 
@@ -1718,8 +1718,8 @@ node scripts/cycle-check.mjs
 
 | 项 | 决议 |
 |:---|:---|
-| worktree 位置 | `/Volumes/Hard Disk/bk-wt-e<NN>`（与仓库同卷，避免 `/tmp` 上的 APFS/权限差异；仓库已有 `/private/tmp/bk-socket-wt` 的前例，说明 worktree 是既有实践） |
-| `CARGO_TARGET_DIR` | 每 worktree 用 `<worktree>/target`（即默认）。**不要**共享一个 target 目录：并发 cargo 会互相等待锁，把并行变成串行 |
+| worktree 位置 | `/Volumes/Hard Disk/bk-wt-e&lt;NN&gt;`（与仓库同卷，避免 `/tmp` 上的 APFS/权限差异；仓库已有 `/private/tmp/bk-socket-wt` 的前例，说明 worktree 是既有实践） |
+| `CARGO_TARGET_DIR` | 每 worktree 用 `&lt;worktree&gt;/target`（即默认）。**不要**共享一个 target 目录：并发 cargo 会互相等待锁，把并行变成串行 |
 | 构建范围 | 日常只 `cargo test -p blitzkrieg-core --locked --features test-support`（快；集成测试/bench 需要该 feature，#825 起不在 default 里）；**PR 前必须** `cargo build --release --workspace --locked` + `cargo clippy --workspace --all-targets --locked --features blitzkrieg-core/test-support -- -D warnings`（CI 就是这么卡的：`-D warnings`） |
 | 提交署名 | 按 `dev-docs/GITHUB_GOVERNANCE.md`：逐次 `git -c user.name=ceer_quant -c user.email=ceer_quant@users.noreply.github.com commit`，**不落地全局 config** |
 | PR 模板必填 | ① 领地声明（白名单 + `git diff --name-only` 全文）② 热点文件改动清单（文件/行数/用途）③ 反向验收证据（`--teeth` 原始输出）④ 未完成项与依赖（如「依赖 E29 合并」） |

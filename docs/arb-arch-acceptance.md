@@ -12,7 +12,7 @@
   `ledger.rs` = `core/market_api/src/unified/ledger.rs`；`live.rs` = `extensions/polymarket/src/live.rs`；
   `executor.rs` = `extensions/kalshi/src/executor.rs`；订单日志默认 `data/orders/orders.jsonl`
   （service.rs:202/:883），成交 `data/trades/trades.jsonl`（service.rs:882），持仓
-  `data/positions/positions.jsonl`（service.rs:884），账本流水 `data/ledger/<account>.journal.{live,dry}.jsonl`（issue 941 双账本拆分）
+  `data/positions/positions.jsonl`（service.rs:884），账本流水 `data/ledger/&lt;account&gt;.journal.{live,dry}.jsonl`（issue 941 双账本拆分）
   （service.rs:302），对账审计 `reconcile.jsonl`（service.rs:286，audit_interval_sec 默认 30s）。
 - 订单日志行是 `TrackedOrder` 的 camelCase JSON（model.rs:204-205）：关键字段
   `internalKey` / `submittedAtMs` / `avgFillPrice` / `filledSize` / `status` / `accountId` / `venue` / `mode`。
@@ -44,7 +44,7 @@ host.rs:461-494 → `set_balance` service.rs:2774-2796，:2795-2796 只写 `acti
 
 | # | 升格判据 | 可执行核对方法 | 状态 |
 |---|---------|---------------|------|
-| R-⑥a | 出现第一笔「风控读到错误 venue 余额而放行的超额订单」（对账/工单证据） | ① 从工单/告警拿订单号 O，取提交时刻与名义价值：`jq 'select(.orderId=="O") \| {internalKey,accountId,submittedAtMs,price,size,status,avgFillPrice}' data/orders/orders.jsonl`；② 找 O 提交前 ~10s 的余额覆盖现场：stderr `grep 'core: venue cash reconcile'`（host.rs:480）与 `grep 'ledger cash set from the venue'`（service.rs:2787-2792）；③ 取审计面同窗记录：`jq 'select(.ledgerRealigned != null)' <audit 文件>`（reconcile.jsonl，service.rs:8267，30s 间隔）；④ 用 `data/ledger/<account>.journal.<live|dry>.jsonl`（按 mode 取对应侧）复原 O 所落 venue 的真实余额 | 核对方法就绪；触发与否待生产数据（有据即升格 P0） |
+| R-⑥a | 出现第一笔「风控读到错误 venue 余额而放行的超额订单」（对账/工单证据） | ① 从工单/告警拿订单号 O，取提交时刻与名义价值：`jq 'select(.orderId=="O") \| {internalKey,accountId,submittedAtMs,price,size,status,avgFillPrice}' data/orders/orders.jsonl`；② 找 O 提交前 ~10s 的余额覆盖现场：stderr `grep 'core: venue cash reconcile'`（host.rs:480）与 `grep 'ledger cash set from the venue'`（service.rs:2787-2792）；③ 取审计面同窗记录：`jq 'select(.ledgerRealigned != null)' <audit 文件>`（reconcile.jsonl，service.rs:8267，30s 间隔）；④ 用 `data/ledger/&lt;account&gt;.journal.<live|dry>.jsonl`（按 mode 取对应侧）复原 O 所落 venue 的真实余额 | 核对方法就绪；触发与否待生产数据（有据即升格 P0） |
 | R-⑥b | `ledger.rs:181-185` 的 asset 冲突静默放行**被修复后**，仍出现映射错误导致的结算不收敛工单 | 当前静默分支已核：`asset_conflict = match (&ids[i].asset, &ids[j].asset) { (Some(x), Some(y)) => !x.eq_ignore_ascii_case(y), _ => false }`（ledger.rs:181-185，任一侧 None ⇒ false 放行）；工单侧判据 = 同一 unified 映射两腿结算合计 ≠ $1。修复 PR 合入时间戳之后的第一笔 ⇒ 命中 | 静态核对绿；触发待修复后生产数据 |
 
 **R-⑥a 判定规则**：journal 复原的「O 所落 venue 真实余额」< O 名义价值（price×size），且 O 提交前
@@ -107,7 +107,7 @@ host.rs:487-489 只报 drift **不改簿**，那类区间不构成「读数被�
 
 | 通道 | 落点 | executor 读到的时点 | 批校验（2a-i 挂钩 B）读到的时点 |
 |------|------|--------------------|--------------------------------|
-| **真实 env**（`.env` 或导出） | 进程环境变量：launcher 每次启动自加载 `<cwd>/.env`（`ui/ui_kit_panel/src/bin/blitzkrieg.rs:318-338`，已导出的 env 永远赢文件） | **boot 一次**：`spawn_if_configured` 读入并固化 client（polymarket `live.rs:46-57`；kalshi `executor.rs:53-61/:173-180`，`Credentials` 被 `Arc<KalshiRest>` 固化到 executor 生命周期结束） | **每批现查**：`virtual_batch_fits` 的 `std::env::var_os`（`market/mod.rs:624`，service.rs:6993-7011）——env 改动对新批**即时生效**（但已固化的 executor client 不受影响） |
+| **真实 env**（`.env` 或导出） | 进程环境变量：launcher 每次启动自加载 `&lt;cwd&gt;/.env`（`ui/ui_kit_panel/src/bin/blitzkrieg.rs:318-338`，已导出的 env 永远赢文件） | **boot 一次**：`spawn_if_configured` 读入并固化 client（polymarket `live.rs:46-57`；kalshi `executor.rs:53-61/:173-180`，`Credentials` 被 `Arc&lt;KalshiRest&gt;` 固化到 executor 生命周期结束） | **每批现查**：`virtual_batch_fits` 的 `std::env::var_os`（`market/mod.rs:624`，service.rs:6993-7011）——env 改动对新批**即时生效**（但已固化的 executor client 不受影响） |
 | **持久格**（`market.credentials.set`，面板「添加账户」凭证卡） | `data/runtime/config.json` 顶层 `credentials` 键（`ipc/runtime_config.rs:52-60/:257-296`，tmp 先 `chmod 600` 再 rename；值只下行、从不回显） | **下一会话**：boot 把格注入进程 env——只补 env 里没有的名字（`main.rs:3454-3485`，"next-session by construction"） | **每批重读格**（service.rs:6999 "loaded once per batch here"）——格改动对新批即时可见，但真实 env 仍然 outrank 格（"the cell loses to the environment"，`schema.rs:1335-1338`） |
 
 **窗口错位（裁决指认的边界，2a-i 不能消除）**：批校验看到持久格已就绪 ⇒ 放行；

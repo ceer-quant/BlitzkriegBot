@@ -129,8 +129,8 @@ node scripts/equity-drawdown-check.mjs --self-test
   mid 0.545 的代表（B）只能显式指定。这一条已写进 §6。
 
 **这些数字测的是哪次提交**：下表的数字**首次产出**在二进制 `0.2.0+g655faf9260a4`
-（git HEAD `655faf92`）上；脚本每次运行都打印 `bin … -> 0.2.0+g<sha>` 与
-`want git HEAD=<sha>`，所以「测的是哪次提交」不靠记忆（提交后在同一批 fixture 上重跑，
+（git HEAD `655faf92`）上；脚本每次运行都打印 `bin … -> 0.2.0+g&lt;sha&gt;` 与
+`want git HEAD=&lt;sha&gt;`，所以「测的是哪次提交」不靠记忆（提交后在同一批 fixture 上重跑，
 曲线逐行一致，见下）。A 的抽取读到 67,108,846 字节 / 391,766 行 / 35,918 个 book 事件
 （窗口内该快照比最新事件旧 712.6 s），B 读同一个窗口（扫描字节/行数相同）。
 
@@ -143,7 +143,7 @@ checkout；抽取脚本只对「本 checkout 自己的 `data/archive`」做相�
 否则 fixture 会声称一个自己没读过的来源。
 
 **归档里混着门禁自己的 scratch 簿**：实测该窗口有 **1 条** `cap-BTC` book 事件
-（`at = 2026-09-21T02:59:19.450Z`）——`capacity-check.mjs` 用 `cap-<ASSET>` 发布它自己的
+（`at = 2026-09-21T02:59:19.450Z`）——`capacity-check.mjs` 用 `cap-&lt;ASSET&gt;` 发布它自己的
 fixture 镜像簿，内核把它归档了进来。抽取脚本按 token 前缀 `cap-` 排除这类簿子
 （fixture meta 里 `syntheticEvents: 1` 就是被排掉的那条），自检里有一条断言覆盖「一本
 其它条件全过、只有 token 前缀是 `cap-` 的簿子必须被拒」。理由是本文的目标本身：测到它
@@ -153,7 +153,7 @@ fixture 镜像簿，内核把它归档了进来。抽取脚本按 token 前缀 `
 **抽取重跑过**：首次抽取（提交前）与修正 provenance 后的重跑选中了**同一个 token、
 同一个瞬间**，`asks`/`bids` 数组逐字节相同（只有 meta 多出 `archiveDir`/`syntheticEvents`
 且 `command` 改为绝对路径）；再用本文所在 commit 构建的二进制
-（`0.2.0+g<sha>`，sha 见 `git log -1 --format=%h -- docs/CAPACITY_AND_EQUITY.md`）
+（`0.2.0+g&lt;sha&gt;`，sha 见 `git log -1 --format=%h -- docs/CAPACITY_AND_EQUITY.md`）
 把四条曲线重跑，**逐行与下表一致**。
 
 复现命令（本文所有数字都由这几条产生；`--max-slippage-bps` 取默认 100）：
@@ -180,7 +180,7 @@ node scripts/capacity-check.mjs --side sell --book docs/reports/data/capacity-ga
      --sizes 10,20,50,60,70,75,80,90,100,150,200
 ```
 
-注意「可复现」的边界：**已被 commit 的快照 fixture 本身**是复现的输入（`--book <fixture>`
+注意「可复现」的边界：**已被 commit 的快照 fixture 本身**是复现的输入（`--book &lt;fixture&gt;`
 在两台机器上给出同一条曲线）；再跑一次**抽取**则会取「当下窗口里最新的那个 token」，
 归档往前走了，选出来的 snapshot 就会不同——所以 provenance 记在 fixture 的 `meta` 里
 （token / `at` / 扫描字节数与行数 / 来源段名），而不是靠重跑抽取脚本对齐。
@@ -571,7 +571,7 @@ worst trade   -0.64% of the equity it was taken on
 `FAIL max drawdown 0.92% exceeds the 0.50% budget`——门禁的失败路径是在真实日志上
 验证过的，不只是 fixture。
 
-`--capacity <json>` 会追加一条**归因**（不是重放）：按每笔的股数在实测曲线上插值，
+`--capacity &lt;json&gt;` 会追加一条**归因**（不是重放）：按每笔的股数在实测曲线上插值，
 得到该笔的自我冲击；超出阶梯的尺寸截断到最后一个测点并计数。曲线可以是 fixture 阶梯，
 也可以是 §2b 的真实盘口（报告里的 `side` 说明它测的是哪一侧，`bestPrice` 是该侧最优价；
 旧报告里这个字段叫 `bestAsk`，两种都读）。它是「一笔一条腿、只算报告测过的那一侧」的
@@ -669,5 +669,5 @@ node scripts/fee-model-sensitivity-check.mjs --out /tmp/fee-sensitivity.json
 node scripts/fee-model-sensitivity-check.mjs --trades data/trades/trades.jsonl --out /tmp/fee-trades.json
 ```
 
-三者均先打印被测二进制的 `--version`（`0.2.0+g<sha>`）与 `core.ready` 的 commit，
+三者均先打印被测二进制的 `--version`（`0.2.0+g&lt;sha&gt;`）与 `core.ready` 的 commit，
 所以「这份数字测的是哪次提交」不靠记忆。

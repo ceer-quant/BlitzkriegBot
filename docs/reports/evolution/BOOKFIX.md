@@ -146,7 +146,7 @@ base 二进制 vs 修复版二进制，单开回放，trades JSON 全等对比�
 
 - base 二进制（修复前，fb74c65f 干净构建）：`/Volumes/Hard Disk/bk-session/bin/core-bookfix-base`
 - 修复版二进制：`/Volumes/Hard Disk/bk-session/bin/core-bookfix-fixed`
-- 报告 JSON：`/Volumes/Hard Disk/bk-agentbookfix/reports/{base,fixed}-<strategy>.json`
+- 报告 JSON：`/Volumes/Hard Disk/bk-agentbookfix/reports/{base,fixed}-&lt;strategy&gt;.json`
   （复活普查 + 逐位回归），组合表 `combo4-{train,val}-c{0..7|0..4}.json`
 - 分块语料：`/Volumes/Hard Disk/bk-agentbookfix/probe/`
   （`full-part{1..8}.jsonl` 全量切 8；`train-combo-c{0..7}.jsonl`、

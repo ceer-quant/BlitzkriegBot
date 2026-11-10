@@ -191,7 +191,7 @@ blitzkrieg-core --shadow-evolution \
 - Units register when strategies load (`rewire_hot_params`); each unit gets a shadow
   twin set under `VariantSet`. `--se-auto-evolve false` (default) holds every
   qualifying variant as an E13 proposal for operator accept/reject/defer.
-- Audit trail: `<audit_dir>/<strategy>.jsonl` per strategy (default
+- Audit trail: `&lt;audit_dir&gt;/&lt;strategy&gt;.jsonl` per strategy (default
   `data/evolution/`), plus `proposals.jsonl` / `promotions.jsonl` there.
 - The persisted runtime switch (state.json / IPC `shadow_evolution.set_auto`) wins
   over the startup flag where they disagree — the startup report names the source.
