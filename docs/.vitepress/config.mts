@@ -37,7 +37,12 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
   ignoreDeadLinks: true,
-  head: [['meta', { name: 'theme-color', content: '#0b0f14' }]],
+  // 深色终端是产品默认身份（见 webui theme.css），文档站保持一致
+  appearance: 'dark',
+  head: [
+    ['meta', { name: 'theme-color', content: '#0b0f14' }],
+    ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
+  ],
   vite: {
     plugins: [
       pagefindPlugin({
@@ -51,6 +56,8 @@ export default defineConfig({
     ],
   },
   themeConfig: {
+    logo: '/logo.png',
+    siteTitle: 'BlitzkriegBot',
     outline: { level: [2, 3], label: '本页目录' },
     docFooter: { prev: '上一篇', next: '下一篇' },
     sidebar: [

@@ -1,0 +1,128 @@
+/*
+ * BlitzkriegBot 设计体系 → VitePress
+ * 令牌取自 ui/webapp/webui/src/styles/theme.css（gold-orange 品牌坡 + 深色终端为默认身份）。
+ * 改色只改这里，不要在页面里写死颜色。
+ */
+
+:root {
+  --vp-font-family-base: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  --vp-font-family-mono: 'SF Mono', 'JetBrains Mono', ui-monospace, 'Menlo', monospace;
+
+  /* 背景：bg / bg-deep / panel-solid */
+  --vp-c-bg: oklch(0.145 0.014 268);
+  --vp-c-bg-alt: oklch(0.115 0.014 268);
+  --vp-c-bg-soft: oklch(0.2 0.016 268);
+  --vp-c-bg-elv: oklch(0.2 0.016 268);
+
+  /* 文字：fg / muted-fg / faint-fg */
+  --vp-c-text-1: oklch(0.97 0.004 268);
+  --vp-c-text-2: oklch(0.68 0.018 268);
+  --vp-c-text-3: oklch(0.52 0.016 268);
+
+  /* 分隔线与描边 */
+  --vp-c-divider: oklch(1 0 0 / 0.09);
+  --vp-c-gutter: oklch(1 0 0 / 0.09);
+  --vp-c-border: oklch(1 0 0 / 0.16);
+
+  /* 品牌：gold-500 / gold-400 / gold-600 */
+  --vp-c-brand-1: oklch(0.78 0.16 68);
+  --vp-c-brand-2: oklch(0.84 0.13 72);
+  --vp-c-brand-3: oklch(0.7 0.17 62);
+  --vp-c-brand-soft: oklch(0.78 0.16 68 / 0.14);
+
+  /* 语义色：up / down / info */
+  --vp-c-tip-1: oklch(0.72 0.13 240);
+  --vp-c-tip-soft: oklch(0.72 0.13 240 / 0.14);
+  --vp-c-warning-1: oklch(0.84 0.13 72);
+
+  --vp-code-block-bg: oklch(0.115 0.014 268);
+  --vp-code-line-highlight-color: oklch(0.78 0.16 68 / 0.08);
+
+  --vp-button-brand-bg: oklch(0.78 0.16 68);
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-hover-bg: oklch(0.86 0.14 74);
+  --vp-button-brand-active-bg: oklch(0.7 0.17 62);
+  --vp-button-brand-text: oklch(0.2 0.05 60);
+  --vp-button-brand-hover-text: oklch(0.2 0.05 60);
+
+  --vp-nav-bg-color: oklch(0.145 0.014 268 / 0.72);
+  --vp-sidebar-bg-color: oklch(0.145 0.014 268);
+  --vp-local-search-bg: oklch(0.2 0.016 268);
+}
+
+/* ── 品牌标识 ─────────────────────────────────────────────────────────── */
+
+.VPNavBar .logo {
+  height: 30px;
+  width: 30px;
+  border-radius: 8px;
+}
+
+.VPNavBar {
+  backdrop-filter: blur(14px) saturate(1.2);
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+/* 首页主标题走品牌渐变，副标题与正文保持中性色 */
+.VPHero .name .clip {
+  background: linear-gradient(120deg, oklch(0.97 0.03 80), oklch(0.78 0.16 68) 55%, oklch(0.7 0.17 62));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.VPHero .image-bg {
+  background: radial-gradient(circle at 50% 40%, oklch(0.78 0.16 68 / 0.22), transparent 68%);
+}
+
+.VPHero .image-container .image-src {
+  max-width: 240px;
+  max-height: 240px;
+  filter: drop-shadow(0 18px 48px oklch(0 0 0 / 0.55));
+}
+
+/* 特性卡：面板 + 细描边，hover 只提亮描边，不做位移 */
+.VPFeature {
+  background: oklch(0.2 0.016 268 / 0.72);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  transition: border-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.VPFeature:hover {
+  border-color: oklch(0.78 0.16 68 / 0.45);
+}
+
+.VPFeature .icon {
+  background: oklch(0.78 0.16 68 / 0.12);
+  border-radius: 10px;
+}
+
+/* 侧边栏当前项：品牌色 + 柔和底色 */
+.VPSidebarItem.is-active > .item > .link > .text {
+  color: var(--vp-c-brand-1);
+}
+
+/* 代码块与表格的圆角统一到 12px */
+div[class*='language-'] {
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc table {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.vp-doc th {
+  background: oklch(0.2 0.016 268);
+  color: var(--vp-c-text-1);
+}
+
+/* 页脚品牌行 */
+.VPFooter .message {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: var(--vp-c-text-3);
+}

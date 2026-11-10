@@ -4,7 +4,10 @@ layout: home
 hero:
   name: BlitzkriegBot
   text: 文档
-  tagline: 现金真相优先 · 单一语义入口 · 拒绝静默降级
+  tagline: 独立交易者的 TradingOS · 现金真相优先 · 单一语义入口
+  image:
+    src: /logo.png
+    alt: BlitzkriegBot
   actions:
     - theme: brand
       text: 从零跑起来
