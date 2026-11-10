@@ -86,8 +86,9 @@ export default defineConfig({
     ],
     socialLinks: [{ icon: 'github', link: 'https://github.com/ceer-quant/BlitzkriegBot' }],
     footer: {
-      message: 'OME · Song　|　backtest · Stone　|　UI · PonyYiDan',
-      copyright: 'BlitzkriegBot',
+      message:
+        '🎵Song Engine | 🪨 Stone Backtester | 🦄 PonyYiDan UI Kit<br />Build Once, Trade Everywhere. 让个人拥有机构级的交易能力。',
+      copyright: 'BlitzkriegBot，Built with ❤️ by fancer',
     },
   },
 })
