@@ -73,6 +73,11 @@ export default defineConfig({
     logo: '/logo.png',
     siteTitle: 'BlitzkriegBot',
     outline: { level: [2, 3], label: '本页目录' },
+    nav: [
+      { text: '开始', link: '/getting-started' },
+      { text: '文档', link: '/FEATURES' },
+      { text: '术语表', link: '/glossary' },
+    ],
     docFooter: { prev: '上一篇', next: '下一篇' },
     sidebar: [
       {

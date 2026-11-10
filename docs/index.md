@@ -35,20 +35,20 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
     <article class="bb-card bb-brand-card">
       <span class="bb-brand-mark is-song" aria-hidden="true"></span>
       <h3 class="bb-brand-name">Song</h3>
-      <p class="bb-brand-role">Song Engine · 订单管理</p>
-      <p class="bb-brand-desc">订单簿、挂单撤单改价、成交与账本，全部由它一个人管。</p>
+      <p class="bb-brand-role">超强性能 · 订单管理</p>
+      <p class="bb-brand-desc">Rust 原生，没有 GC、没有虚拟机。参数热路径用 ArcSwap 锁自由读，结构变更只发生在装配时；挂单、改价、撤单、成交与记账走同一条同步路径。</p>
     </article>
     <article class="bb-card bb-brand-card">
       <span class="bb-brand-mark is-stone" aria-hidden="true"></span>
       <h3 class="bb-brand-name">Stone</h3>
-      <p class="bb-brand-role">Stone Backtester · 回测</p>
-      <p class="bb-brand-desc">同一份策略、同一套撮合与费用，把交易所换成历史盘口重放。</p>
+      <p class="bb-brand-role">与实盘完全一致 · 回测</p>
+      <p class="bb-brand-desc">回测跑的就是实盘那个内核：同一份策略包、同一套撮合与费用、同一本账，只把交易所换成历史盘口重放。回测与实盘，不会各说各话。</p>
     </article>
     <article class="bb-card bb-brand-card">
       <span class="bb-brand-mark is-ui" aria-hidden="true"></span>
       <h3 class="bb-brand-name">PonyYiDan</h3>
-      <p class="bb-brand-role">PonyYiDan UI Kit · 界面</p>
-      <p class="bb-brand-desc">WebUI 与 TUI 两套界面，读同一份内核快照、同一套口径。</p>
+      <p class="bb-brand-role">现代好看 · 开箱易用</p>
+      <p class="bb-brand-desc">Vue 3 + TypeScript 的 WebUI：玻璃质感、亮暗双主题，鼠标键盘都顺手；服务器上没有图形界面时，纯 Rust 的 TUI 读同一份内核快照。</p>
     </article>
   </div>
   <p class="bb-note">三个名字，一条内核 —— 不是三套系统拼起来的外壳。</p>
@@ -187,10 +187,10 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
   <p class="bb-eyebrow">Numbers</p>
   <h2 class="bb-h2">Built Fast. Built Real.</h2>
   <div class="bb-stats">
-    <div class="bb-stat"><b>783</b><span>Commits</span></div>
-    <div class="bb-stat"><b>710</b><span>Pull Requests</span></div>
-    <div class="bb-stat"><b>100%</b><span>Rust Core</span></div>
-    <div class="bb-stat"><b>4</b><span>已接入市场</span></div>
+    <div class="bb-stat"><b data-count="783">783</b><span>Commits</span></div>
+    <div class="bb-stat"><b data-count="710">710</b><span>Pull Requests</span></div>
+    <div class="bb-stat"><b data-count="100" data-suffix="%">100%</b><span>Rust Core</span></div>
+    <div class="bb-stat"><b data-count="4">4</b><span>已接入市场</span></div>
   </div>
   <p class="bb-note">Dry → Simulation → Live，同一条链路。</p>
 </section>
