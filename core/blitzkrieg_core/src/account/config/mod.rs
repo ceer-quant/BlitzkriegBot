@@ -260,6 +260,7 @@ impl AccountFileEntry {
             trading_enabled: self.trading_enabled.unwrap_or(true),
             strategies: self.strategies.unwrap_or_default(),
             rounds: validate_rounds(self.rounds, allowed)?,
+            opening_equity: None,
             updated_at_ms: now_ms,
         })
     }

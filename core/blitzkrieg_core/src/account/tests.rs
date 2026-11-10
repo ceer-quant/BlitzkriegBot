@@ -14,6 +14,7 @@ fn two_accounts() -> AccountLedgers {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 1,
             },
             Account {
@@ -26,6 +27,7 @@ fn two_accounts() -> AccountLedgers {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 1,
             },
         ],
@@ -173,6 +175,7 @@ fn bound_account(id: &str, venue: &str, status: AccountStatus) -> Account {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: 1,
     }
 }
@@ -367,6 +370,7 @@ fn fresh_account(id: &str, now_ms: i64) -> Account {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: now_ms,
     }
 }

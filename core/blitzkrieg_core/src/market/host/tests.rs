@@ -190,6 +190,7 @@ async fn mirror_tokens_drain_to_the_placing_account_venue() {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: 0,
     };
     c.accounts_mut().insert(book).unwrap();

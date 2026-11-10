@@ -105,6 +105,35 @@ impl Core {
             // the seeding report matched the book, and the next real delta
             // was then judged against nothing.
             self.report_venue_cash_move(venue, &target, previous, b, ts);
+            // issue 1046: record the venue's first reported equity as this
+            // account's opening equity — exactly once, never overwritten by
+            // later reports. Persisted to the account file and mirrored into
+            // runtime so `LEDGER_BALANCE` can compute cumulative net PnL.
+            #[allow(clippy::collapsible_if)]
+            if self
+                .accounts
+                .account(&target)
+                .and_then(|a| a.opening_equity)
+                .is_none()
+            {
+                if let Some((env_path, toml_path)) = self.config.account_env_write_paths() {
+                    if let Err(e) = crate::account::config::env_persist_account_opening_equity(
+                        &toml_path,
+                        &env_path,
+                        target.as_str(),
+                        b,
+                        ts,
+                    ) {
+                        tracing::warn!(
+                            account = %target.as_str(),
+                            %e,
+                            "failed to persist opening equity"
+                        );
+                    } else if let Some(a) = self.accounts.account_mut(&target) {
+                        a.opening_equity = Some(b);
+                    }
+                }
+            }
             if previous != b {
                 // The move is recorded PER VENUE so the audit's trade-leg check
                 // can name the venue's own correction on ITS book only — a

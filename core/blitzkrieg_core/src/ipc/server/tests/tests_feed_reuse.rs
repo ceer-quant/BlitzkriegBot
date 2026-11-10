@@ -99,6 +99,7 @@ async fn reuse_fixture(
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: now,
         }],
         AccountId::from("paper"),

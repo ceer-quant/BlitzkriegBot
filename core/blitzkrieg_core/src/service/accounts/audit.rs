@@ -59,7 +59,7 @@ impl Core {
         let (realized, seen_trades, has_trade_log) = match self.trade_db.as_ref() {
             Some(db) => {
                 let s = db.summary_for(active_id.as_str());
-                (f64_to_decimal(s.total_net_pnl), s.total_trades, true)
+                (f64_to_decimal(s.attributed_net_pnl), s.total_trades, true)
             }
             None => (Decimal::ZERO, 0, false),
         };

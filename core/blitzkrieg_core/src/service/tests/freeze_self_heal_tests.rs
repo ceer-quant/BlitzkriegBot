@@ -353,6 +353,7 @@ fn venue_bound_fixture() -> Core {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         }],
         crate::account::AccountId::from("poly-acct"),

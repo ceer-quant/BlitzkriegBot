@@ -23,6 +23,7 @@ fn two_account_reset_fixture(tag: &str) -> (Core, std::path::PathBuf) {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -35,6 +36,7 @@ fn two_account_reset_fixture(tag: &str) -> (Core, std::path::PathBuf) {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],
@@ -211,6 +213,7 @@ fn audit_venue_report_scopes_to_the_active_accounts_venue() {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -223,6 +226,7 @@ fn audit_venue_report_scopes_to_the_active_accounts_venue() {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],
@@ -298,7 +302,7 @@ fn audit_identity_scopes_to_the_active_account() {
             .as_ref()
             .unwrap()
             .summary_for("paper")
-            .total_net_pnl,
+            .attributed_net_pnl,
     );
     assert!(expected_realized < Decimal::ZERO);
     assert_eq!(input.identity.realized, expected_realized);
@@ -335,6 +339,7 @@ fn audit_skips_the_venue_leg_for_a_simulated_venue() {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         }],
         crate::account::AccountId::from("default"),
@@ -639,7 +644,7 @@ fn account_scoped_reset_leaves_other_accounts_untouched() {
         "default's trade history survives a paper reset"
     );
     assert_eq!(
-        c.trade_summary(Some("default"))["totalNetPnl"],
+        c.trade_summary(Some("default"))["attributedNetPnl"],
         serde_json::json!(7.0)
     );
     assert!(
@@ -765,7 +770,7 @@ fn account_scoped_reset_breaks_the_balance_revival_chain() {
     );
     // The pre-reset panel reading: 1000 + (−8.69) = 991.31.
     let pre = c.trade_summary(Some("default"));
-    assert_eq!(pre["totalNetPnl"], serde_json::json!(-8.69));
+    assert_eq!(pre["attributedNetPnl"], serde_json::json!(-8.69));
 
     c.reset_trading(&reset_params("RESET"), "uid:t", 3).unwrap();
 
@@ -773,7 +778,7 @@ fn account_scoped_reset_breaks_the_balance_revival_chain() {
     // AND the in-memory closed fallback no longer names the account.
     let post = c.trade_summary(Some("default"));
     assert_eq!(
-        post["totalNetPnl"],
+        post["attributedNetPnl"],
         serde_json::json!(0.0),
         "net stays zero after the reset — the balance reads seed, not seed + revived net"
     );
@@ -809,6 +814,7 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
             crate::account::Account {
@@ -821,6 +827,7 @@ fn account_scoped_reset_rewrites_only_the_target_journal() {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: 0,
             },
         ],

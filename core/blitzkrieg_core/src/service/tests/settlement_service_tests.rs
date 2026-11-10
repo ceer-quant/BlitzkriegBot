@@ -482,7 +482,7 @@ fn a_redelivered_resolution_does_not_settle_twice() {
     assert_eq!(c.positions().closed_positions().len(), 1, "one close only");
     let trades = c.trade_summary(None);
     assert_eq!(trades["totalTrades"], serde_json::json!(1));
-    assert_eq!(trades["totalNetPnl"], serde_json::json!(2.916));
+    assert_eq!(trades["attributedNetPnl"], serde_json::json!(2.916));
     let stats = settlement_json(&c);
     assert_eq!(
         stats["receivableUsd"],
@@ -1403,7 +1403,7 @@ fn an_interrupted_settlement_recovers_once_on_restart() {
     );
     assert_eq!(c.trade_summary(None)["totalTrades"], serde_json::json!(1));
     assert_eq!(
-        c.trade_summary(None)["totalNetPnl"],
+        c.trade_summary(None)["attributedNetPnl"],
         serde_json::json!(2.916)
     );
     let stats = settlement_json(&c);

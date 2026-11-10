@@ -105,7 +105,10 @@ fn failed_status_after_full_close_restores_inventory_and_reverses_profit() {
         assert_eq!(acc.net_pnl_usd, dec!(4));
     }
     assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 1);
-    assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, 4.0);
+    assert_eq!(
+        c.trade_db.as_ref().unwrap().summary().attributed_net_pnl,
+        4.0
+    );
 
     // FAILED arrives for the same trade → the rollback must unwind it all.
     c.ingest_fill(
@@ -151,7 +154,10 @@ fn failed_status_after_full_close_restores_inventory_and_reverses_profit() {
     }
     // TradeDb: record withdrawn, summary back to zero.
     assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 0);
-    assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, 0.0);
+    assert_eq!(
+        c.trade_db.as_ref().unwrap().summary().attributed_net_pnl,
+        0.0
+    );
     assert!(
         std::fs::read_to_string(&log)
             .unwrap_or_default()
@@ -197,7 +203,10 @@ fn manual_venue_loss_reaches_the_trade_ledger() {
     // TradeDb received the manual close (audit F10: it used to be missed).
     assert_eq!(c.trade_db.as_ref().unwrap().summary().total_trades, 1);
     assert_eq!(c.trade_db.as_ref().unwrap().summary().losses, 1);
-    assert_eq!(c.trade_db.as_ref().unwrap().summary().total_net_pnl, -2.0);
+    assert_eq!(
+        c.trade_db.as_ref().unwrap().summary().attributed_net_pnl,
+        -2.0
+    );
 
     // Strategy accounting: the loss IS in the strategy's net PnL.
     let acc = c
@@ -436,6 +445,7 @@ fn a_mirror_bound_account_places_orders_on_mirror_tokens() {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         })
         .unwrap();
@@ -553,6 +563,7 @@ fn a_polysimulator_executed_polymarket_token_stamps_execution_identity_end_to_en
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         })
         .unwrap();
@@ -685,6 +696,7 @@ async fn a_mirror_order_cancel_queues_to_the_mirror_executor() {
             trading_enabled: true,
             strategies: Vec::new(),
             rounds: Vec::new(),
+            opening_equity: None,
             updated_at_ms: 0,
         })
         .unwrap();

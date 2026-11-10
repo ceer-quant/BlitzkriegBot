@@ -321,6 +321,7 @@ fn a_sibling_venues_facts_do_not_explain_this_venues_residual() {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: 0,
     };
     let mut c = Core::with_account_book(
@@ -456,6 +457,7 @@ fn a_sibling_venues_fills_do_not_mute_this_venues_ghost_alert() {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: 0,
     };
     let mut c = Core::with_account_book(

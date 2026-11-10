@@ -66,6 +66,7 @@ fn book(ids: &[&str]) -> AccountLedgers {
                 trading_enabled: true,
                 strategies: Vec::new(),
                 rounds: Vec::new(),
+                opening_equity: None,
                 updated_at_ms: now,
             })
             .collect(),

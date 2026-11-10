@@ -159,9 +159,9 @@ pub struct TradeSummary {
     pub wins: u64,
     pub losses: u64,
     pub win_rate: f64,
-    pub total_gross_pnl: f64,
+    pub attributed_gross_pnl: f64,
     pub total_fees: f64,
-    pub total_net_pnl: f64,
+    pub attributed_net_pnl: f64,
     pub avg_hold_time_sec: f64,
     pub best_trade_pnl: f64,
     pub worst_trade_pnl: f64,
@@ -291,9 +291,9 @@ impl TradeDb {
         } else {
             0.0
         };
-        summary.total_gross_pnl += f64_of(rec.gross_pnl_usd);
+        summary.attributed_gross_pnl += f64_of(rec.gross_pnl_usd);
         summary.total_fees += f64_of(rec.fees_usd);
-        summary.total_net_pnl += net;
+        summary.attributed_net_pnl += net;
         let n = summary.total_trades as f64;
         summary.avg_hold_time_sec =
             ((summary.avg_hold_time_sec * (n - 1.0)) + rec.hold_time_sec as f64) / n;
@@ -633,10 +633,10 @@ mod tests {
             default_view.total_trades, 1,
             "sibling's row leaked into default's slice"
         );
-        assert_eq!(default_view.total_net_pnl, 1.97);
+        assert_eq!(default_view.attributed_net_pnl, 1.97);
         let poly_view = db.summary_for("poly");
         assert_eq!(poly_view.total_trades, 1);
-        assert_eq!(poly_view.total_net_pnl, -2.0);
+        assert_eq!(poly_view.attributed_net_pnl, -2.0);
         // 全局口径仍是两行（面板的合计语义不变）。
         assert_eq!(db.summary().total_trades, 2);
 

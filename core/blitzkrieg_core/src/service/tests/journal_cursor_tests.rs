@@ -243,6 +243,7 @@ fn an_account_remove_kills_only_its_own_venues_cursors() {
         trading_enabled: true,
         strategies: Vec::new(),
         rounds: Vec::new(),
+        opening_equity: None,
         updated_at_ms: 0,
     };
     let mut c = Core::with_account_book(

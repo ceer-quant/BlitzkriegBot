@@ -882,7 +882,11 @@ pub struct CloseFilledResult {
     pub closed: usize,
 }
 
+/// Ledger balance readout. Wire = camelCase; every Decimal travels as a string
+/// via `crate::decimal` (no f64 precision loss), optional fields are omitted
+/// when absent so older cores read "unknown", never zero.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BalanceResult {
     #[serde(with = "crate::decimal")]
     pub balance: Decimal,
@@ -890,13 +894,23 @@ pub struct BalanceResult {
     pub reserved: Decimal,
     #[serde(with = "crate::decimal")]
     pub available: Decimal,
-    /// Starting principal in DRY mode (`--seed-balance`), so a UI can show the
-    /// `principal + realized net − reserved` reconciliation rather than merely
-    /// asserting it. `None` in LIVE, where the principal is whatever the venue
-    /// reported at start and is not a number the core fixed itself. Absent on
-    /// older cores, which the reader must treat as "unknown", not zero.
+    /// Starting principal in DRY mode (`--seed-balance`). `None` in LIVE / on
+    /// older cores — treat as "unknown", not zero. Semantically this is the
+    /// DRY opening equity; LIVE opening equity travels in `opening_equity`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<Decimal>,
+    /// Account opening equity — the one-time principal the cumulative net PnL
+    /// is measured against. DRY: equals `seed`. LIVE: the venue's first
+    /// reported equity, persisted to the account file exactly once (never
+    /// overwritten). `None` until known → `cumulative_net_pnl` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_equity: Option<Decimal>,
+    /// Cumulative net PnL = balance + reserved − opening_equity (the single
+    /// ledger truth, §1046). `None` when `opening_equity` is unknown (LIVE
+    /// before the first venue report, or an older core). Never derived from
+    /// trade folding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_net_pnl: Option<Decimal>,
 }
 
 // ── Limited hot reload of the entry limits (#191) ────────────────────────────
