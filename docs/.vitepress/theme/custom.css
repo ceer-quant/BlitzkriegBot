@@ -69,6 +69,15 @@
   --vp-sidebar-bg-color: oklch(0.145 0.014 268);
   --vp-local-search-bg: oklch(0.2 0.016 268);
 
+  /* 面板 / 玻璃 / 阴影 / 辉光（= WebUI 的 panel、glass-*、shadow-1/2、glow） */
+  --bb-panel: oklch(0.2 0.016 268 / 0.72);
+  --bb-sheen: oklch(1 0 0 / 0.06);
+  --bb-sheen-hi: oklch(1 0 0 / 0.05);
+  --bb-glass-edge: oklch(1 0 0 / 0.12);
+  --bb-shadow-1: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px oklch(0 0 0 / 0.35);
+  --bb-shadow-2: 0 2px 6px oklch(0 0 0 / 0.45), 0 18px 48px oklch(0 0 0 / 0.5);
+  --bb-glow: 0 0 0 1px oklch(0.78 0.16 68 / 0.28), 0 6px 28px oklch(0.78 0.16 68 / 0.18);
+
   /* 提示块：tip 用品牌金，info 用 WebUI 的 info，warning 用品牌亮金，danger 用 down 红 */
   --vp-custom-block-tip-border: oklch(0.78 0.16 68);
   --vp-custom-block-tip-text: oklch(0.9 0.05 70);
@@ -146,6 +155,14 @@ html:not(.dark) {
   --vp-sidebar-bg-color: oklch(0.975 0.004 268);
   --vp-local-search-bg: oklch(1 0 0);
 
+  --bb-panel: oklch(1 0 0 / 0.72);
+  --bb-sheen: oklch(1 0 0 / 0.8);
+  --bb-sheen-hi: oklch(1 0 0 / 0.55);
+  --bb-glass-edge: oklch(0.2 0.02 268 / 0.09);
+  --bb-shadow-1: 0 1px 2px oklch(0.2 0.02 268 / 0.06), 0 10px 30px oklch(0.2 0.02 268 / 0.08);
+  --bb-shadow-2: 0 2px 8px oklch(0.2 0.02 268 / 0.08), 0 22px 56px oklch(0.2 0.02 268 / 0.12);
+  --bb-glow: 0 0 0 1px oklch(0.66 0.17 58 / 0.3), 0 8px 30px oklch(0.66 0.17 58 / 0.16);
+
   /* 提示块：亮底上用更深的 border 与更深的文字，保证 AA 对比度 */
   --vp-custom-block-tip-border: oklch(0.66 0.17 58);
   --vp-custom-block-tip-text: oklch(0.45 0.12 55);
@@ -194,21 +211,59 @@ html:not(.dark) {
   filter: drop-shadow(0 18px 48px oklch(0 0 0 / 0.35));
 }
 
-/* 特性卡：面板 + 细描边，hover 只提亮描边，不做位移 */
+/* 特性卡：玻璃面板 + 顶部高光 + 双层阴影，hover 只加品牌辉光，不做位移 */
 .VPFeature {
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
-  transition: border-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+  background-color: var(--bb-panel);
+  background-image: linear-gradient(180deg, var(--bb-sheen-hi), transparent 46%);
+  border: 1px solid var(--bb-glass-edge);
+  border-radius: 14px;
+  box-shadow: var(--bb-shadow-1), inset 0 1px 0 var(--bb-sheen);
+  transition:
+    border-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .VPFeature:hover {
-  border-color: var(--vp-button-alt-hover-border);
+  border-color: var(--vp-c-brand-soft);
+  box-shadow: var(--bb-shadow-2), inset 0 1px 0 var(--bb-sheen), var(--bb-glow);
 }
 
 .VPFeature .icon {
   background: var(--vp-c-brand-soft);
   border-radius: 10px;
+}
+
+/* 按钮：主按钮走金色渐变 + 内高光，hover 加辉光；次按钮是玻璃面板 */
+.VPButton {
+  border-radius: 10px;
+  transition:
+    background-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.VPButton.brand {
+  background-image: linear-gradient(180deg, var(--vp-c-brand-2), var(--vp-c-brand-1));
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.32), var(--bb-shadow-1);
+}
+
+.VPButton.brand:hover {
+  background-image: linear-gradient(180deg, var(--vp-c-brand-2), var(--vp-c-brand-1));
+  filter: brightness(1.06);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.32), var(--bb-glow);
+}
+
+.VPButton.alt {
+  background-color: var(--bb-panel);
+  background-image: linear-gradient(180deg, var(--bb-sheen-hi), transparent 60%);
+  border: 1px solid var(--bb-glass-edge);
+  box-shadow: inset 0 1px 0 var(--bb-sheen);
+}
+
+.VPButton.alt:hover {
+  border-color: var(--vp-c-brand-soft);
+  box-shadow: inset 0 1px 0 var(--bb-sheen), var(--bb-glow);
 }
 
 .VPSidebarItem.is-active > .item > .link > .text {
