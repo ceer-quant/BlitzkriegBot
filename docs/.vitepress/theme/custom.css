@@ -394,51 +394,53 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
 }
 
 /* 导航项：复刻 WebUI SegmentedControl——
-   容器 inline-grid gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md */
-.VPNavBar.VPNavBar .VPNavBarMenu {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 38px;
-  padding: 4px;
-  border: 1px solid var(--bb-glass-edge);
-  border-radius: 999px;
-  background-color: var(--bb-menu-bg);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
-  backdrop-filter: blur(12px) saturate(150%);
-}
+   容器 inline-grid gap-0.5 rounded-full border border-line bg-panel-2 p-1 backdrop-blur-md。
+   断点用 VitePress 原生的 960px（与汉堡按钮 <960 显示互补）：
+   这组 display:inline-flex 若全局生效，(0,3,0) 会压过 VitePress scoped
+   的移动端 display:none，menu 在汉堡模式下挤占胶囊（已踩坑）。 */
+@media (min-width: 960px) {
+  .VPNavBar.VPNavBar .VPNavBarMenu {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 38px;
+    padding: 4px;
+    border: 1px solid var(--bb-glass-edge);
+    border-radius: 999px;
+    background-color: var(--bb-menu-bg);
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
+    backdrop-filter: blur(12px) saturate(150%);
+  }
 
-/* 导航项链接：h-7.5 px-4 text-[12.5px] font-semibold；scoped 的
-   .active[data-v] 是 (0,3,0)，双写类 (0,4,0) 压过；
-   未选中 hover 只变字色不起底；选中 = btn-gold 金渐变 + 墨字 */
-.VPNavBar.VPNavBar .VPNavBarMenuLink {
-  display: inline-flex;
-  align-items: center;
-  height: 30px;
-  padding: 0 16px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--vp-c-text-2);
-  transition: color 0.2s ease;
-}
+  .VPNavBar.VPNavBar .VPNavBarMenuLink {
+    display: inline-flex;
+    align-items: center;
+    height: 30px;
+    padding: 0 16px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--vp-c-text-2);
+    transition: color 0.2s ease;
+  }
 
-.VPNavBar.VPNavBar .VPNavBarMenuLink:hover {
-  color: var(--vp-c-text-1);
-}
+  .VPNavBar.VPNavBar .VPNavBarMenuLink:hover {
+    color: var(--vp-c-text-1);
+  }
 
-.VPNavBar.VPNavBar .VPNavBarMenuLink.active {
-  color: oklch(0.2 0.05 60);
-  background: linear-gradient(
-    135deg,
-    var(--vp-c-brand-2),
-    var(--vp-c-brand-1) 60%,
-    oklch(0.66 0.17 58)
-  );
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.25),
-    0 6px 20px oklch(0.78 0.16 68 / 0.28);
+  .VPNavBar.VPNavBar .VPNavBarMenuLink.active {
+    color: oklch(0.2 0.05 60);
+    background: linear-gradient(
+      135deg,
+      var(--vp-c-brand-2),
+      var(--vp-c-brand-1) 60%,
+      oklch(0.66 0.17 58)
+    );
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 0.25),
+      0 6px 20px oklch(0.78 0.16 68 / 0.28);
+  }
 }
 
 /* 内部按钮排列对齐 WebUI：标题 | tab 胶囊 ……(空隙)…… 搜索 主题 GitHub。
@@ -616,7 +618,7 @@ body .VPContent.VPContent.has-sidebar:not(.is-home) {
   font-weight: 600;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 959px) {
   /* 汉堡/搜索对齐胶囊中轴：VitePress 内部高度都挂在 --vp-nav-height
      （55px > 胶囊 48px），flex 行被撑高导致图标整体偏下——统一改 48px */
   .VPNavBar {
