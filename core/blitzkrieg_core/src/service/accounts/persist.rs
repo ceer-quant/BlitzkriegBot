@@ -561,16 +561,20 @@ impl Core {
     }
 
     /// The lifecycle-status write (`account.unfreeze` writes back `status =
-    /// Active`): memory AND the operator's `.env`/accounts.toml in one
-    /// transaction — persist FIRST (a failure leaves both stores untouched),
-    /// memory after. `default` is settable like any account.
+    /// Active`): memory AND the operator's `.env` in one transaction — persist
+    /// FIRST (a failure leaves both the file and the memory untouched), memory
+    /// after. `default` is settable like any account.
     ///
-    /// Write order matters for atomicity: `accounts.toml` is written FIRST.
-    /// If it fails, `.env` is untouched and the gate stays. Only after the
-    /// toml write succeeds do we touch `.env` (removing STATUS, and TRADING_ENABLED
-    /// when activating). Since `.env` spells "active/trading" by key absence,
-    /// a partial `.env` write (one key removed, the other present) still leaves
-    /// a config gate on restart — never a fully-open account.
+    /// `.env` is the ONLY durable carrier (issue 751 / 923): the legacy
+    /// `accounts.toml` is never written — while it exists the write REFUSES
+    /// ([`crate::account::config::refuse_while_legacy_toml`]'s rule, shared by
+    /// every other ACCOUNT_* writer). An earlier revision wrote the toml first,
+    /// which could never succeed: production's `accounts_config_path` is a
+    /// write-refusal basis that does not exist on disk.
+    ///
+    /// Activating is ONE rewrite: `active` and `trading` are both spelled by
+    /// key absence, so [`crate::account::config::env_persist_account_active`]
+    /// drops `STATUS` and `TRADING_ENABLED` in a single `remove_env_vars`.
     pub fn set_account_status_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -581,7 +585,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::schema::ACCOUNT_TRADING_SET_NOTE;
         self.accounts.require(id)?;
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some((env_path, legacy_toml)) = self.config.account_env_write_paths() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.status.set: no accounts config path configured — \
@@ -590,56 +594,35 @@ impl Core {
                     .to_string(),
             ));
         };
-        // 1. toml FIRST — if this fails, .env is completely untouched.
-        crate::account::config::persist_account_status(
-            &legacy,
-            id.as_str(),
-            &status,
-        )
-        .map_err(|e| {
+        let persist_err = |e: CoreError| {
             CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
-                    "account.status.set: accounts.toml persist failed, nothing changed: {}",
+                    "account.status.set: persist failed, nothing changed: {}",
                     e.message
                 ),
             )
-        })?;
-        // 2. .env second. STATUS key always; TRADING_ENABLED too when activating.
-        crate::account::config::env_persist_account_status(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &status,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.status.set: .env status persist failed: {}",
-                    e.message
-                ),
-            )
-        })?;
-        if matches!(status, crate::account::AccountStatus::Active) {
-            // trading_enabled=true is spelled by absence of the key.
-            crate::account::config::env_persist_account_trading(
-                &legacy,
-                &env_path,
-                id.as_str(),
-                true,
-            )
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "account.status.set: .env trading persist failed: {}",
-                        e.message
-                    ),
+        };
+        match &status {
+            crate::account::AccountStatus::Active => {
+                crate::account::config::env_persist_account_active(
+                    &legacy_toml,
+                    &env_path,
+                    id.as_str(),
                 )
-            })?;
+                .map_err(persist_err)?;
+            }
+            other => {
+                crate::account::config::env_persist_account_status(
+                    &legacy_toml,
+                    &env_path,
+                    id.as_str(),
+                    other,
+                )
+                .map_err(persist_err)?;
+            }
         }
-        // 3. Memory last — only after all disk writes succeeded.
+        // Memory last — only after the disk write succeeded.
         let status_for_log = status.clone();
         self.accounts.set_status(id, status, now_ms)?;
         if matches!(status_for_log, crate::account::AccountStatus::Active) {

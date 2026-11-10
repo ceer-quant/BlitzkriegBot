@@ -346,17 +346,15 @@ impl Core {
         now_ms: i64,
     ) -> CoreResult<UnfreezeResult> {
         let id = crate::model::AccountId::from(account);
-        let previous = self.account_gate(account).cloned();
 
         // #1057 阻断 3：全局熔断解冻同时清 risk 标志。
-        if account == GLOBAL_KILL_ACCOUNT && previous.is_some() {
+        if account == GLOBAL_KILL_ACCOUNT && self.account_gate(account).is_some() {
             self.risk.resume();
         }
 
         // #1057 阻断 1 & 4：先 persist 配置态（unfreeze 写回 Active /
-        // trading_enabled=true 并落盘到 .env 和 accounts.toml），失败则
-        // 什么都不变、不 clear gate。toml 先于 .env，保证部分写入时
-        // 重启后仍保有配置闸门，绝不假成功。
+        // trading_enabled=true 到 `.env`——唯一事实源；遗留 accounts.toml
+        // 存在时写入被拒，issue 751），失败则什么都不变、不 clear gate。
         if account != GLOBAL_KILL_ACCOUNT
             && let Some(acct) = self.accounts.account(&id)
             && (!acct.trading_enabled || !acct.status.allows_entries())

@@ -1045,10 +1045,10 @@ impl AccountLedgers {
         Ok(())
     }
 
-    /// Config-truth entry read for [`crate::Core::unfreeze_account`]'s
-    /// `entries_allowed`: truthful even right after a runtime gate was cleared
-    /// — a config-frozen / trading-off account stays non-entrant until its
-    /// `.env` posture is changed and the core restarts (`unfreeze` 不清配置态).
+    /// Config-truth entry read (tests only since #1057): `unfreeze` writes the
+    /// config posture back to `.env` before clearing the gate and reports
+    /// `entries_allowed` from the gate alone, so production no longer consults
+    /// this. Removal is tracked under #1061 (single-point implementation).
     #[allow(dead_code)]
     pub(crate) fn entry_open(&self, id: &AccountId) -> bool {
         self.accounts
