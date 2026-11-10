@@ -43,18 +43,18 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// The global kill switch, present only while it is engaged (an absent cell
-/// is "not killed" — the same absent-means-quiet posture the round-duration
-/// cell uses).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct KillCell {
-    pub reason: String,
-}
-
 /// The persisted envelope. Every map is keyed the way the kernel already
 /// names things: limits by their wire (camelCase) field name — the same
-/// spelling the `risk.setLimits` audit rows carry — freezes by account id.
+/// spelling the `risk.setLimits` audit rows carry.
+///
+/// #1045: `account_freezes` / `auto_frozen` retired from this file — account
+/// entry gates are pure in-memory (`Core.account_gates`) and a restart starts
+/// clean. #1056: the global kill switch is pure in-memory too — nothing in
+/// this file survives as freeze posture, so a restart never replays a kill
+/// and no account is frozen at boot by a stale file. An OLD file that still
+/// carries `account_freezes` / `auto_frozen` / `kill` keys deserializes fine
+/// here (serde ignores unknown keys); the boot restore ignores them, and the
+/// next `save` rewrites the file without those stale rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct RiskStateFile {
@@ -66,15 +66,6 @@ pub(crate) struct RiskStateFile {
     /// boot-governed.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) limits: BTreeMap<String, String>,
-    /// The global kill switch, engaged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) kill: Option<KillCell>,
-    // #1045: `account_freezes` / `auto_frozen` retired from this file — account
-    // entry gates are pure in-memory (`Core.account_gates`) and a restart starts
-    // clean. An OLD file that still carries those keys deserializes fine here
-    // (serde ignores unknown keys); the boot restore ignores them, so no freeze
-    // is ever replayed and no account is frozen at boot. (The next `save`
-    // rewrites the file without those stale rows.)
 }
 
 fn is_zero(v: &i64) -> bool {
@@ -245,22 +236,19 @@ impl Core {
     /// ruling, issue #928): the freeze book on the disk is the only freeze
     /// that survives a restart.
     pub(crate) fn restore_risk_state_at_boot(&mut self, state_file_present: bool) {
-        // Snapshot everything the restore needs out of the cell FIRST — the
-        // restore itself runs the freeze paths, which take `&mut self`.
-        let (kill, _path) = {
-            let Some(cell) = &self.risk_state else {
-                return;
-            };
-            if !state_file_present {
-                return;
-            }
-            (cell.file.kill.clone(), cell.path.display().to_string())
+        let Some(_cell) = &self.risk_state else {
+            return;
         };
-        // 1) the global kill switch: a kernel that went down killed stays
-        //    killed — the reason on the file is the one the operator saw.
-        if let Some(k) = kill {
-            self.freeze_trading(format!("restored across restart: {}", k.reason), now_ms());
+        if !state_file_present {
+            return;
         }
+        // Nothing to restore: the global kill switch is pure in-memory (#1056)
+        // and account entry gates are pure in-memory (#1045), so a restart
+        // comes up clear — no kill is ever replayed and no account is frozen
+        // by a stale file. Limits were restored into `config` by the boot
+        // loader; `state_file_present` gates only the corrupt-boot
+        // fail-closed freeze (`freeze_all_accounts_corrupt_boot`), not here.
+        let _ = state_file_present;
         // #1045: account entry gates are pure in-memory and a restart starts
         // clean. An OLD risk-state file that still carries `account_freezes` /
         // `auto_frozen` keys is read without error (serde ignores unknown keys)

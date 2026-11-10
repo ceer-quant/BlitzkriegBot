@@ -37,10 +37,10 @@ impl Core {
         // AT SUBMISSION, so the gate is handed the live balance here — the same
         // number the daily-loss breaker opens its day with. E28: the account
         // is the one the request names, and its posture gates the place too.
-        self.accounts
-            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
-        // Account-scoped kill switch, same contract as in `place_gated`:
-        // frozen account → new orders refused, closes pass. #1045: single gate.
+        // Gate 2: runtime account gate (single verb). Config posture is derived
+        // into AccountGates at boot and on every config write
+        // (`reconcile_config_gate_for`); `account_gate_permits` is the sole
+        // entry enforcement.
         self.account_gate_permits(&req, now_ms)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.
@@ -112,7 +112,14 @@ impl Core {
             // only after FREEZE_AUTO_LIFT_MIN_MS (#867) — an in-flight close
             // ack is not evidence the outage is over. Manual freezes never
             // lift here.
-            self.auto_lift_if_venue_healthy(o.account_id.as_str(), "venue accepted order", now_ms);
+            // 只解冻该账户被该 venue 冻结的闸门，避免 sibling venue 的自愈
+            // 误解本账户的冻结。
+            let venue_opt: Option<String> = self
+                .accounts
+                .account(&AccountId::from(o.account_id.as_str()))
+                .map(|a| a.venue.clone());
+            let venue = venue_opt.as_deref().filter(|v| !v.is_empty());
+            self.auto_lift_if_venue_healthy(o.account_id.as_str(), venue, now_ms);
             self.place_cooldowns.remove(&o.internal_key);
             // A `maker_then_taker` order rests as GTC; the escalation clock
             // starts on the venue's acceptance (the submit path cannot arm it
@@ -422,12 +429,19 @@ impl Core {
         // survives for the legacy readout; the trip decision is the
         // account-scoped one.
         if account_streak >= FREEZE_ON_REJECTS {
+            let venue_opt: Option<String> = self
+                .accounts
+                .account(&crate::model::AccountId::from(account_id))
+                .map(|a| a.venue.clone())
+                .filter(|v| !v.is_empty());
+            let venue = venue_opt.as_deref();
             self.freeze_account_auto(
                 account_id,
                 format!(
                     "{account_streak} consecutive venue rejections on account {account_id}; last: {}",
                     err.message
                 ),
+                venue,
                 now_ms,
             );
         } else if attempts >= MAX_PLACE_ATTEMPTS {

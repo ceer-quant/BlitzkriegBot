@@ -40,12 +40,13 @@ pub(crate) use exits::{
 // integration tree's handle.
 pub(crate) use freeze::FreezeBook;
 // #1045: the single in-memory per-account entry gate.
-pub(crate) use freeze::{AccountGate, GateReason};
+pub(crate) use freeze::{AccountGate, GLOBAL_KILL_ACCOUNT, GateReason};
 
 // #861: the runtime risk state's durable side file (hot entry caps, systemic
-// bounds, kill switch, freeze book) — the cell type `service.rs`'s Core
-// struct holds, the kill cell the freeze writers stamp, and the boot-restore
-// half `assembly.rs` drives.
+// bounds, freeze book) — the cell type `service.rs`'s Core struct holds, and
+// the boot-restore half `assembly.rs` drives. #1056: the kill switch no longer
+// has a durable cell — it is pure in-memory (`Core.account_gates` at
+// `GLOBAL_KILL_ACCOUNT`).
 pub(crate) use persist::{
-    KillCell, RiskStateCell, RiskStateLoad, apply_restored_limits, load_risk_state_file,
+    RiskStateCell, RiskStateLoad, apply_restored_limits, load_risk_state_file,
 };

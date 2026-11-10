@@ -579,12 +579,14 @@ impl Core {
             // the active one. The posture is judged before the request moves
             // into the intent.
             let account_id = req.account_id.clone();
-            let is_close = crate::risk::is_close_intent(&req.internal_key);
-            let account_entry_block = self
-                .accounts
-                .permits_order(&account_id, is_close)
-                .err()
-                .map(|e| e.message);
+            // Gate 2: runtime account gate (single verb). `permits_order` is
+            // retired; config posture is derived into AccountGates at boot and
+            // on every config write (`reconcile_config_gate_for`), so
+            // `account_gate_permits` is the sole entry enforcement.
+            if self.account_gate_permits(&req, now_ms).is_err() {
+                self.stats.place_rejected += 1;
+                continue;
+            }
             let intent = crate::arbitration::StrategyIntent::from_request(req);
             let outcome = {
                 let round_tokens = self
@@ -634,7 +636,6 @@ impl Core {
                             time_left_sec,
                             now_ms,
                             equity,
-                            account_entry_block,
                             strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)
@@ -1061,12 +1062,17 @@ impl Core {
             // cycle's (the gates reuse the existing implementations, so no
             // threshold has two truths).
             let account_id = req.account_id.clone();
-            let is_close = crate::risk::is_close_intent(&req.internal_key);
-            let account_entry_block = self
-                .accounts
-                .permits_order(&account_id, is_close)
-                .err()
-                .map(|e| e.message);
+            // Gate 2: runtime account gate (single verb). `permits_order` is
+            // retired; config posture is derived into AccountGates at boot and
+            // on every config write (`reconcile_config_gate_for`), so
+            // `account_gate_permits` is the sole entry enforcement.
+            if let Err(e) = self.account_gate_permits(&req, now_ms) {
+                tracing::warn!(target: "strategy",
+                    "entry refused: account={} gate refusal: {}",
+                    account_id, e.message);
+                self.stats.place_rejected += 1;
+                continue;
+            }
             let intent = crate::arbitration::StrategyIntent::from_request(req);
             let outcome = {
                 let round_tokens = self
@@ -1104,7 +1110,6 @@ impl Core {
                             time_left_sec: policy_time_left_sec,
                             now_ms,
                             equity,
-                            account_entry_block,
                             strategy_holds_to_settlement,
                         };
                         crate::arbitration::process_intent(&intent, &mut ctx)

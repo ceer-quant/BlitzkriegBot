@@ -544,6 +544,9 @@ impl Core {
             )
         })?;
         self.accounts.set_trading(id, enabled, now_ms)?;
+        // 配置态 → gate 的推导不再是「仅启动」：set_trading 写回后立即重算，
+        // 保证任何时刻 gate.blocked ⟺ 配置姿态非 Active（0.4.2 门禁验收规则）。
+        crate::service::reconcile_config_gate_for(self, id, now_ms);
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -553,6 +556,93 @@ impl Core {
             "account trading switch written — {} re-reads at next boot \
              ({ACCOUNT_TRADING_SET_NOTE})",
             if enabled { "entries re-open; " } else { "new entries refused (exits flow); " },
+        );
+        Ok(())
+    }
+
+    /// The lifecycle-status write (`account.unfreeze` writes back `status =
+    /// Active`): memory AND the operator's `.env` in one transaction — persist
+    /// FIRST (a failure leaves both the file and the memory untouched), memory
+    /// after. `default` is settable like any account.
+    ///
+    /// `.env` is the ONLY durable carrier (issue 751 / 923): the legacy
+    /// `accounts.toml` is never written — while it exists the write REFUSES
+    /// ([`crate::account::config::refuse_while_legacy_toml`]'s rule, shared by
+    /// every other ACCOUNT_* writer). An earlier revision wrote the toml first,
+    /// which could never succeed: production's `accounts_config_path` is a
+    /// write-refusal basis that does not exist on disk.
+    ///
+    /// Activating is ONE rewrite: `active` and `trading` are both spelled by
+    /// key absence, so [`crate::account::config::env_persist_account_active`]
+    /// drops `STATUS` and `TRADING_ENABLED` in a single `remove_env_vars`.
+    pub fn set_account_status_persisting(
+        &mut self,
+        id: &crate::account::AccountId,
+        status: crate::account::AccountStatus,
+        actor: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        use crate::schema::ACCOUNT_TRADING_SET_NOTE;
+        self.accounts.require(id)?;
+        let Some((env_path, legacy_toml)) = self.config.account_env_write_paths() else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "account.status.set: no accounts config path configured — \
+                 persistence is disabled for this core (backtests and \
+                 in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        let persist_err = |e: CoreError| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.status.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        };
+        match &status {
+            crate::account::AccountStatus::Active => {
+                crate::account::config::env_persist_account_active(
+                    &legacy_toml,
+                    &env_path,
+                    id.as_str(),
+                )
+                .map_err(persist_err)?;
+            }
+            other => {
+                crate::account::config::env_persist_account_status(
+                    &legacy_toml,
+                    &env_path,
+                    id.as_str(),
+                    other,
+                )
+                .map_err(persist_err)?;
+            }
+        }
+        // Memory last — only after the disk write succeeded.
+        let status_for_log = status.clone();
+        self.accounts.set_status(id, status, now_ms)?;
+        if matches!(status_for_log, crate::account::AccountStatus::Active) {
+            self.accounts.set_trading(id, true, now_ms)?;
+        }
+        // 配置态 → gate 的推断不再是「仅启动」：set_status 写回后立即重算，
+        // 保证任何时刻 gate.blocked ⟺ 配置姿态非 Active（0.4.2 门禁验收规则）。
+        crate::service::reconcile_config_gate_for(self, id, now_ms);
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %id,
+            status = %status_for_log,
+            reason = %reason,
+            "account status written back — {} re-reads at next boot \
+             ({ACCOUNT_TRADING_SET_NOTE})",
+            match status_for_log {
+                crate::account::AccountStatus::Active => "entries re-open; ",
+                _ => "new entries refused (exits flow); ",
+            },
         );
         Ok(())
     }

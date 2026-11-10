@@ -328,12 +328,10 @@ impl Core {
         // position). This is the submission-path enforcement point; the
         // arbitration pipeline carries the same check earlier for strategy
         // intents (defense in depth, one vocabulary: ACCOUNT_LIMIT).
-        self.accounts
-            .permits_order(&req.account_id, is_close_intent(&req.internal_key))?;
-        // Account-scoped kill switch: a frozen account refuses NEW orders at
-        // the submission gate (closes pass — the #174 hatch, per account).
-        // Manual-orders enforcement point; strategy entries were already
-        // dropped in the engine (the frozen-scope filter). #1045: single gate.
+        // Gate 2: runtime account gate (single verb). Config posture is derived
+        // into AccountGates at boot and on every config write
+        // (`reconcile_config_gate_for`); `account_gate_permits` is the sole
+        // entry enforcement.
         self.account_gate_permits(&req, now_ms)?;
         // G5: a close settles into the book that PAID for the shares — a
         // close order naming another account is refused, never re-routed.

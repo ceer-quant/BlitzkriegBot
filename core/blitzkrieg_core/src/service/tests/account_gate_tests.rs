@@ -95,7 +95,9 @@ fn daily_loss_trip_unfreeze_allows_entries_rest_of_day() {
     // Unfreeze clears the gate AND the session trip latch — entries allowed for
     // the rest of the day. Unfreeze never erases the realized loss, but the
     // daily-loss gate is not re-armed until the UTC day rolls.
-    let r = c.unfreeze_account("default", "op", t0 + 600);
+    let r = c
+        .unfreeze_account("default", "op", t0 + 600)
+        .expect("unfreeze");
     assert!(r.unfrozen, "gate was cleared");
     assert!(
         r.previous_reason.is_some(),
@@ -218,5 +220,172 @@ fn legacy_risk_state_freezes_are_ignored_at_boot() {
     );
 
     drop(c);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #1062 阻断 1：unfreeze persist 失败 → gate 仍在，绝不假成功。
+/// 当没有 `accounts_config_path`（无法落盘 .env/accounts.toml），解冻必须
+/// 返回错误，运行时闸门不动，账户仍拒新单。
+#[test]
+fn unfreeze_persist_failure_keeps_gate() {
+    use crate::account::{Account, AccountId, AccountLedgers, AccountStatus, CredentialKeys};
+    use crate::model::Mode;
+
+    let now = now_ms();
+    let book = AccountLedgers::new(
+        vec![Account {
+            id: AccountId::from("default"),
+            name: "default".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: AccountStatus::ReadOnly,
+            credential_keys: CredentialKeys::default(),
+            venue: String::new(),
+            trading_enabled: false,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            opening_equity: None,
+            updated_at_ms: now,
+        }],
+        AccountId::from("default"),
+    );
+
+    // No accounts_config_path → account_env_write_paths() returns None → persist
+    // refuses. The account starts non-trading so the unfreeze persist branch is
+    // entered (not skipped).
+    let mut c = crate::service::Core::with_account_book(
+        crate::service::CoreConfig {
+            mode: Mode::Dry,
+            risk: crate::risk::RiskConfig::default(),
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            ..Default::default()
+        },
+        book,
+    );
+
+    // A Manual gate on top of the config posture.
+    c.freeze_account("default", "operator: investigating".into());
+    assert!(
+        c.account_gate_blocked("default", now),
+        "precondition: account is gated"
+    );
+
+    // Unfreeze must fail because persist cannot write (no config path).
+    let r = c.unfreeze_account("default", "operator", now);
+    assert!(r.is_err(), "unfreeze must refuse when persist cannot write");
+
+    // The gate is still there — nothing cleared, nothing assumed.
+    assert!(
+        c.account_gate_blocked("default", now),
+        "persist failure leaves the gate in place"
+    );
+    assert!(
+        c.account_freeze_reason("default", now).is_some(),
+        "freeze reason still readable"
+    );
+}
+
+/// #1062 阻断 1 的成功半边：unfreeze 把配置态写回 `.env`（唯一事实源），
+/// `STATUS` 与 `TRADING_ENABLED` 在一次重写里同时摘除；用同一份 `.env`
+/// 重建内核后闸门不复活。生产形态是 `accounts.toml` 不存在（它只是
+/// write-refusal basis，不是可写载体，issue 751/923）。
+#[test]
+fn unfreeze_writes_env_back_and_entries_stay_open_after_rebuild() {
+    use crate::account::{Account, AccountId, AccountLedgers, AccountStatus, CredentialKeys};
+    use crate::model::Mode;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "test-1062-unfreeze-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    std::fs::create_dir_all(&root).expect("temp root");
+    let env_path = root.join(".env");
+    let accounts_path = root.join("accounts.toml"); // deliberately ABSENT
+    std::fs::write(
+        &env_path,
+        "ACCOUNT_LIST=default\nACCOUNT_DEFAULT_STATUS=frozen\nACCOUNT_DEFAULT_TRADING_ENABLED=false\n",
+    )
+    .expect("env fixture");
+
+    let now = now_ms();
+    let book = AccountLedgers::new(
+        vec![Account {
+            id: AccountId::from("default"),
+            name: "default".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: AccountStatus::Frozen,
+            credential_keys: CredentialKeys::default(),
+            venue: String::new(),
+            trading_enabled: false,
+            strategies: Vec::new(),
+            rounds: Vec::new(),
+            opening_equity: None,
+            updated_at_ms: now,
+        }],
+        AccountId::from("default"),
+    );
+    let cfg = || crate::service::CoreConfig {
+        mode: Mode::Dry,
+        risk: crate::risk::RiskConfig::default(),
+        dry_seed_balance: dec!(1000),
+        auto_exits_enabled: false,
+        accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+        env_file_path: Some(env_path.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
+    let mut c = crate::service::Core::with_account_book(cfg(), book);
+    crate::service::reconcile_config_gates(&mut c, now);
+    assert!(
+        c.account_gate_blocked("default", now),
+        "precondition: the config posture gates entries"
+    );
+
+    let r = c
+        .unfreeze_account("default", "operator", now)
+        .expect("unfreeze must persist to .env and succeed");
+    assert!(r.entries_allowed, "entries open at the unfreeze instant");
+    assert!(!c.account_gate_blocked("default", now));
+
+    let text = std::fs::read_to_string(&env_path).expect("env readable");
+    assert!(
+        !text.contains("ACCOUNT_DEFAULT_STATUS"),
+        "STATUS must be gone (active = key absence): {text}"
+    );
+    assert!(
+        !text.contains("ACCOUNT_DEFAULT_TRADING_ENABLED"),
+        "TRADING_ENABLED must be gone (trading = key absence): {text}"
+    );
+    assert!(
+        text.contains("ACCOUNT_LIST=default"),
+        "the rest of the .env survives the rewrite: {text}"
+    );
+
+    // Restart from the same .env: no config gate comes back.
+    let rebuilt = crate::account::config::load_account_ledgers_single_source(
+        &accounts_path,
+        Some(&env_path),
+        now,
+        crate::account::config::TEST_ALLOWED_ROUNDS,
+    )
+    .expect("reload");
+    let acct = rebuilt
+        .account(&AccountId::from("default"))
+        .expect("account present");
+    assert!(acct.trading_enabled, "trading re-reads as on");
+    assert!(acct.status.allows_entries(), "status re-reads as active");
+
+    let mut c2 = crate::service::Core::with_account_book(cfg(), rebuilt);
+    crate::service::reconcile_config_gates(&mut c2, now);
+    assert!(
+        !c2.account_gate_blocked("default", now),
+        "a rebuild from the written .env must not resurrect the gate"
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }

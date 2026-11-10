@@ -620,7 +620,7 @@ pub(crate) async fn handle_account(
                                 .unwrap_or_else(|| "manual freeze".to_string()),
                         );
                     } else {
-                        c.unfreeze_account(id.as_str(), "panel", now_ms);
+                        let _ = c.unfreeze_account(id.as_str(), "panel", now_ms)?;
                     }
                     Ok(serde_json::to_value(AccountFreezeResult {
                         account_id: id.as_str().to_string(),
@@ -641,7 +641,7 @@ pub(crate) async fn handle_account(
                     let mut c = core.lock().await;
                     c.require_account(&id)?;
                     let now_ms = blitzkrieg_market_api::net::now_ms();
-                    let r = c.unfreeze_account(id.as_str(), "ipc", now_ms);
+                    let r = c.unfreeze_account(id.as_str(), "ipc", now_ms)?;
                     Ok(serde_json::to_value(AccountUnfreezeResult {
                         account_id: id.as_str().to_string(),
                         unfrozen: r.unfrozen,

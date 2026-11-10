@@ -521,9 +521,9 @@ fn entry_is_blocked_by_daily_loss_limit() {
         )
         .unwrap_err();
     // #1045: entry blocking now lives in Core's single account gate
-    // (`account_gate_permits`), which answers KillSwitchActive naming the
+    // (`account_gate_permits`), which answers AccountLimit naming the
     // DailyLoss gate until the UTC day rolls.
-    assert_eq!(e.code, CoreErrorCode::KillSwitchActive);
+    assert_eq!(e.code, CoreErrorCode::AccountLimit);
     assert!(
         e.message.to_lowercase().contains("daily"),
         "got {}",

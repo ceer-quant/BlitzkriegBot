@@ -1,4 +1,5 @@
 use super::*;
+use crate::account::AccountStatus;
 use serde::Serialize;
 
 /// 账户入场闸门（#1045）：每账户一份，**纯内存、永不落盘**，进程重启即清，
@@ -8,7 +9,7 @@ use serde::Serialize;
 /// 取代旧 `FreezeBook` 里的 `account_freezes` + `auto_frozen` 两张持久表：
 /// 不再有任何冻结姿态随进程重启而重播。`realized_pnl_usd` 继续持久化（资金
 /// 真相），重启只清闸门；重启后若账本里的已实现亏损仍超当日上限，会在
-/// 下一次 `emit_daily_trip` 时按账本重新上 `DailyLoss` 闸门——这是「按账本
+/// 下一次 `emit_daily_trip` 时按账本重新上 `DailyLoss` 闸门--这是「按账本
 /// 推导」，不是「回放冻结」。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,18 +26,24 @@ pub(crate) struct AccountGate {
     /// 操作或配置改写清除（`Manual`、`ConfigReadOnly`、`ConfigSuspended`）。
     pub(crate) expires_at_ms: Option<i64>,
     pub(crate) actor: String,
+    /// 导致该闸门的场地（VenueRejection 时有值，其他闸门为 None）。
+    /// 用于场地自愈时只解除该场地造成的冻结，避免误解除其他场地导致的冻结。
+    pub(crate) venue: Option<String>,
 }
 
 /// 闸门原因，声明顺序即优先级从低到高：
-/// `VenueRejection < DailyLoss < ConfigReadOnly < ConfigSuspended < Manual`。
+/// `VenueRejection < DailyLoss < ConfigReadOnly < ConfigSuspended <
+/// TradingDisabled < Manual < KillSwitch`。
 ///
 /// 更高优先级的闸门可覆盖更低的；较低优先级的路由永远不会静默解除更高
-/// 优先级的闸门（场地健康探针只解 `VenueRejection`，碰不着 `Manual`/`DailyLoss`）。
+/// 优先级的闸门（场地健康探针只解 `VenueRejection`，碰不着 `Manual`/`DailyLoss`/`KillSwitch`）。
 ///
-/// `ConfigReadOnly` / `ConfigSuspended` 由账户配置态（`account.trading.set` 的
-/// read_only / suspended）产生，由 #1044 的 WebUI/TUI 呈现层消费；本单
-/// 只声明它们以统一闸门模型，优先级高于 `DailyLoss`/`VenueRejection`，低
-/// 于 `Manual`，且不被任何自愈路由碰触。
+/// `ConfigReadOnly` / `ConfigSuspended` 由账户配置态（read_only /
+/// suspended）产生；`TradingDisabled` 由交易开关 `trading_enabled = false`
+/// 产生；`Manual` 由操作员 `account.freeze {frozen: true}` 产生；
+/// `KillSwitch` 是进程级全局熔断（`risk.kill` / `risk.resume`）。配置态
+/// 闸门只在启动时从 `.env` 再推导（#1057），`unfreeze` 只清运行时
+/// 路由设置的闸门（Manual / DailyLoss / VenueRejection），不清配置态。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,9 +56,15 @@ pub(crate) enum GateReason {
     ConfigReadOnly,
     /// 账户配置为 suspended：同上，且带运营原因。
     ConfigSuspended,
+    /// 账户交易开关关闭：新单拒、平仓放行；由 `account.trading.set` 写
+    /// 回 `.env` 后重启再生，运行时仅反映当前开关状态。
+    TradingDisabled,
     /// 操作员 `account.freeze {frozen: true}` 手动冻结：仅 `account.unfreeze`
     /// / 手动解冻可解，健康探针与日内熔断均不得碰。
     Manual,
+    /// 进程级全局熔断（`risk.kill`）：对全账户拒新单、放平仓，纯内存、
+    /// 重启即清，`risk.resume` 或 `unfreeze {target: "global"}` 解除。
+    KillSwitch,
 }
 
 impl GateReason {
@@ -61,22 +74,30 @@ impl GateReason {
             GateReason::DailyLoss => 1,
             GateReason::ConfigReadOnly => 2,
             GateReason::ConfigSuspended => 3,
-            GateReason::Manual => 4,
+            GateReason::TradingDisabled => 4,
+            GateReason::Manual => 5,
+            GateReason::KillSwitch => 6,
         }
     }
 
     /// 统一措辞，供面板与回执文案；前端不得据此推断 `kind` 之外的语义，
-    /// 也不得编造恢复时间——恢复时间只读内核 `expires_at_ms`。
+    /// 也不得编造恢复时间--恢复时间只读内核 `expires_at_ms`。
     pub(crate) fn label(&self) -> &'static str {
         match self {
             GateReason::VenueRejection => "venue rejection",
             GateReason::DailyLoss => "daily loss limit",
             GateReason::ConfigReadOnly => "account read-only",
             GateReason::ConfigSuspended => "account suspended",
+            GateReason::TradingDisabled => "trading disabled",
             GateReason::Manual => "manual freeze",
+            GateReason::KillSwitch => "kill switch",
         }
     }
 }
+
+/// 进程级全局熔断闸门的账户键：不与任何配置账户 id 冲突，仅供
+/// `risk.kill` / `risk.resume` / `unfreeze {target: "global"}` 使用。
+pub(crate) const GLOBAL_KILL_ACCOUNT: &str = "global";
 
 /// 解冻操作的内核回执（#1045 API：`account.unfreeze`）。
 #[derive(Debug, Clone, Serialize)]
@@ -104,7 +125,7 @@ pub(crate) struct FreezeBook {
 impl FreezeBook {
     /// 单账户重置（`trading_reset` 路径）：该账户的按账户拒单 streak 移除；
     /// 全局拒单与 sweep streak 归零（一次账户级重置视为一次新鲜的开始）。
-    /// by_venue sweep streak 不在此清——场地维的失败事实不属于账户重置。
+    /// by_venue sweep streak 不在此清--场地维的失败事实不属于账户重置。
     /// 账户入场闸门由 `Core` 同步清除（`reset_for_account` 调用方自行决定）。
     pub(crate) fn reset_for_account(&mut self, account_id: &str) {
         self.consecutive_venue_rejects = 0;
@@ -138,6 +159,7 @@ impl Core {
     ///（如场地自愈）静默解除高优先级闸门（`Manual`/`DailyLoss`）。已过期
     /// 的闸门（DailyLoss 过 UTC 日翻界）不阻挡新闸门：过期的 DailyLoss(1)
     /// 不得吞掉随后的 VenueRejection(0)。返回是否写入。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_account_gate(
         &mut self,
         account: &str,
@@ -146,6 +168,7 @@ impl Core {
         expires_at_ms: Option<i64>,
         actor: &str,
         now_ms: i64,
+        venue: Option<&str>,
     ) -> bool {
         let should_set = match self.account_gates.get(account) {
             None => true,
@@ -170,6 +193,7 @@ impl Core {
                 since_ms: now_ms,
                 expires_at_ms,
                 actor: actor.to_string(),
+                venue: venue.map(|v| v.to_string()),
             },
         );
         true
@@ -195,8 +219,14 @@ impl Core {
     /// 入场闸判定：账户被闸门阻断，且意图不是平仓（平仓腿永远放行，#174
     /// 逃生舱，按账户独立计）。新单拒、平仓放行。
     ///
-    /// 唯一依据是 `account_gates` 内存表（由 `emit_daily_trip`、手动冻结、
-    /// 场地自愈设置）。**不**回退到持久化的 `daily_loss_tripped_for` 闩锁：
+    /// 两条依据：
+    /// 1. `account_gates` 内存表（由 `emit_daily_trip`、手动冻结、
+    ///    场地自愈、进程级熔断设置） - 运行时闸门；
+    /// 2. 进程级全局熔断闸门 `GLOBAL_KILL_ACCOUNT` - 对全账户生效。
+    ///
+    /// `ConfigReadOnly` 是唯一也拦平仓的姿态（`ReadOnly` 配置态映射其上；
+    /// `Frozen`/`TradingDisabled`/`Manual`/`KillSwitch` 均放行平仓，绝不
+    /// 困住仓位）。**不**回退到持久化的 `daily_loss_tripped_for` 闩锁：
     /// 重启后 `tripped` 不持久化，故重启不自动重触发日内熔断；解冻后
     /// 当日余下时间可交易。这是 #1045 裁决 v3：「删除 tripped* 落盘字段、
     /// 删读时重闩、重启/解冻后当日不再自动重触发」。
@@ -204,24 +234,49 @@ impl Core {
         let account_id = req.account_id.as_str();
         let is_close = crate::risk::is_close_intent(&req.internal_key);
 
-        if let Some(gate) = self.account_gate(account_id)
+        // 进程级全局熔断：对每个账户的新单都拒，平仓永远放行。
+        if let Some(gate) = self.account_gate(GLOBAL_KILL_ACCOUNT)
             && gate.blocked
             && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
             && !is_close
         {
-            let message = match gate.reason_kind {
-                GateReason::DailyLoss => format!(
-                    "Daily loss limit for account {} — entries frozen until the next UTC day (exits keep flowing)",
-                    account_id
-                ),
-                _ => format!(
-                    "account `{}` is frozen (account-scoped gate, {}): {} — new orders refused, exits keep flowing",
-                    account_id,
-                    gate.reason_kind.label(),
+            return Err(CoreError::new(
+                CoreErrorCode::KillSwitchActive,
+                format!(
+                    "kill switch active ({}) - new orders refused on all accounts, exits keep flowing",
                     gate.reason
                 ),
-            };
-            return Err(CoreError::new(CoreErrorCode::KillSwitchActive, message));
+            ));
+        }
+
+        if let Some(gate) = self.account_gate(account_id)
+            && gate.blocked
+            && gate.expires_at_ms.is_none_or(|expires| now_ms < expires)
+        {
+            // ConfigReadOnly 是唯一也拦平仓的姿态；其余闸门（Frozen /
+            // TradingDisabled / Manual / VenueRejection / DailyLoss / KillSwitch）
+            // 均放行平仓，绝不因闸门而困仓。
+            let blocks_closes = matches!(gate.reason_kind, GateReason::ConfigReadOnly);
+            if !is_close || blocks_closes {
+                let message = match gate.reason_kind {
+                    GateReason::DailyLoss => format!(
+                        "Daily loss limit for account {} - entries frozen until the next UTC day (exits keep flowing)",
+                        account_id
+                    ),
+                    _ => format!(
+                        "account `{}` is frozen (account-scoped gate, {}): {} - {}",
+                        account_id,
+                        gate.reason_kind.label(),
+                        gate.reason,
+                        if is_close {
+                            "closes refused too (read_only)"
+                        } else {
+                            "new orders refused, exits keep flowing"
+                        }
+                    ),
+                };
+                return Err(CoreError::new(CoreErrorCode::AccountLimit, message));
+            }
         }
 
         Ok(())
@@ -239,6 +294,7 @@ impl Core {
             None,
             &format!("operator:{account}"),
             now_ms,
+            None,
         );
         tracing::error!(account = %account, reason = %reason, "account frozen (manual gate, in-memory only, restart-clear)");
     }
@@ -247,7 +303,13 @@ impl Core {
     /// 闸门，优先级最低，仅在账户当前无同等或更高优先级闸门时上锁；场地
     /// 健康探针可解（仅此一条），`Manual`/`DailyLoss` 绝不自解。不登记任何
     /// 持久态。
-    pub(crate) fn freeze_account_auto(&mut self, account: &str, reason: String, now_ms: i64) {
+    pub(crate) fn freeze_account_auto(
+        &mut self,
+        account: &str,
+        reason: String,
+        venue: Option<&str>,
+        now_ms: i64,
+    ) {
         let _ = self.set_account_gate(
             account,
             reason.clone(),
@@ -255,8 +317,9 @@ impl Core {
             None,
             &format!("auto:{account}"),
             now_ms,
+            venue,
         );
-        tracing::warn!(account = %account, reason = %reason, "account auto-frozen (venue rejection gate, in-memory only)");
+        tracing::warn!(account = %account, reason = %reason, venue = ?venue, "account auto-frozen (venue rejection gate, in-memory only)");
     }
 
     /// `account.freeze {frozen: true}` 的显式运营路由：`Manual` 闸门，与
@@ -273,42 +336,78 @@ impl Core {
 
     /// #1045 API: 解冻一账户并返回内核回执 `{unfrozen, previousReason, entriesAllowed}`，
     /// 并写审计日志（actor/reason/时间）。解冻只放行入场，不碰账本任何数字。
+    ///
+    /// #1057（裁决 A 真单门）：
+    /// - 阻断 1：先 persist 配置态（把 `trading_enabled` 置 true、`status`
+    ///   置 `Active`，落盘到 `.env`），**再** clear gate。persist 失败则
+    ///   什么都不变，gate 仍在，绝不假成功。
+    /// - 阻断 3：全局熔断键 `"global"` 解冻时同时 `risk.resume()`，使
+    ///   tradingFrozen 与 accountGates 单点化。
+    /// - 阻断 6：`entries_allowed` 仅由 gate 得出（clear 后读
+    ///   `account_gate_blocked`），不再并读 `entry_open`。
     pub(crate) fn unfreeze_account(
         &mut self,
         account: &str,
         actor: &str,
         now_ms: i64,
-    ) -> UnfreezeResult {
+    ) -> CoreResult<UnfreezeResult> {
+        let id = crate::model::AccountId::from(account);
+
+        // #1057 阻断 3：全局熔断解冻同时清 risk 标志。
+        if account == GLOBAL_KILL_ACCOUNT && self.account_gate(account).is_some() {
+            self.risk.resume();
+        }
+
+        // #1057 阻断 1 & 4：先 persist 配置态（unfreeze 写回 Active /
+        // trading_enabled=true 到 `.env`——唯一事实源；遗留 accounts.toml
+        // 存在时写入被拒，issue 751），失败则什么都不变、不 clear gate。
+        if account != GLOBAL_KILL_ACCOUNT
+            && let Some(acct) = self.accounts.account(&id)
+            && (!acct.trading_enabled || !acct.status.allows_entries())
+        {
+            self.set_account_status_persisting(
+                &id,
+                AccountStatus::Active,
+                actor,
+                "unfreeze",
+                now_ms,
+            )?;
+        }
+
+        // 然后 clear gate：先 persist 后 clear，失败则 gate 仍在。
         let previous = self.clear_account_gate(account);
         let previous_reason = previous.as_ref().map(|g| g.reason.clone());
+
         // 清 session trip latch：解冻后当日余下时间可交易，不再被旧 latch 重拒。
-        self.positions
-            .clear_daily_tripped_for(&crate::model::AccountId::from(account));
-        // 解冻后立即复读：单闸门模型下本账户无其他并行闸门。
+        self.positions.clear_daily_tripped_for(&id);
+
+        // 阻断 6：entries_allowed 仅由 gate 得出（clear 后复读），显示
+        // 与执行同源，不再并读 entry_open。
         let entries_allowed = !self.account_gate_blocked(account, now_ms);
+
         if previous.is_some() {
             tracing::info!(
                 actor = %actor,
                 account = %account,
                 previous_reason = ?previous_reason,
                 entries_allowed,
-                "account unfrozen (gate cleared, in-memory only; realized ledger untouched)"
+                "account unfrozen (config written back first, then gate cleared; realized ledger untouched)"
             );
             self.emit(Event::RiskAlert {
                 code: blitzkrieg_market_api::CoreErrorCode::RiskRejected,
                 message: format!(
-                    "account {account} unfrozen by {actor} — previous gate: {}",
+                    "account {account} unfrozen by {actor} - previous gate: {}",
                     previous_reason
                         .as_ref()
                         .map_or_else(|| "none".to_string(), |r| r.clone())
                 ),
             });
         }
-        UnfreezeResult {
+        Ok(UnfreezeResult {
             unfrozen: previous.is_some(),
             previous_reason,
             entries_allowed,
-        }
+        })
     }
 
     /// 冻结自愈的解冻半边（#1045：只清 `VenueRejection`，不得清 `Manual`/`DailyLoss`。
@@ -316,11 +415,25 @@ impl Core {
     ///
     /// 每个调用方（reconcile sweep、venue ack）先等出 `FREEZE_AUTO_LIFT_MIN_MS`
     /// (#867) 再来，避免波动期内的反复解锁。
-    pub(crate) fn auto_lift_if_venue_healthy(&mut self, account: &str, trigger: &str, now_ms: i64) {
+    ///
+    /// `venue` 是导致冻结的场地。只有当闸门的 venue 与 `venue` 匹配（或闸门
+    /// 未记录 venue，即未知来源）时才会解冻，避免场地 A 的冻结被场地 B 的
+    /// 自愈误解。
+    pub(crate) fn auto_lift_if_venue_healthy(
+        &mut self,
+        account: &str,
+        venue: Option<&str>,
+        now_ms: i64,
+    ) {
         let Some(gate) = self.account_gate(account) else {
             return;
         };
         if gate.reason_kind != GateReason::VenueRejection {
+            return;
+        }
+        // 只解除该场地导致的冻结。闸门未记录 venue（历史数据 / 未绑定 venue 的账户 / 遗留全局冻结）时仍按旧逻辑解冻；
+        // 只有两边都有值且不匹配时才拒绝，避免场地 A 的冻结被场地 B 的自愈误解。
+        if gate.venue.is_some() && gate.venue.as_deref() != venue {
             return;
         }
         if now_ms - gate.since_ms < crate::service::FREEZE_AUTO_LIFT_MIN_MS {
@@ -332,20 +445,21 @@ impl Core {
         tracing::warn!(
             account = %account,
             frozen_duration_ms = now_ms - since_ms,
-            trigger = %trigger,
-            "venue-rejection gate auto-lifted — venue proved healthy"
+            venue = ?venue,
+            "venue-rejection gate auto-lifted - venue proved healthy"
         );
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
             message: format!(
-                "自动冻结已解除（{trigger}）：账户 {account} 场地拒单闸门 {minutes} 分钟后场地恢复"
+                "自动冻结已解除（{}）：账户 {account} 场地拒单闸门 {minutes} 分钟后场地恢复",
+                venue.unwrap_or("unknown"),
             ),
         });
     }
 
     /// Freeze trading (kill switch) with a reason the panel can show. A
     /// restart or an explicit `risk.resume` clears it; the startup self-check
-    /// re-probes either way. The freeze is logged at error level (#184) — a kill
+    /// re-probes either way. The freeze is logged at error level (#184) - a kill
     /// switch is the loudest thing this kernel does, and every path that can
     /// reach it (venue-refusal streak, failed self-check, failed sweep, audit
     /// halt) must be countable in a run log.
@@ -357,18 +471,21 @@ impl Core {
     /// show a paraphrase instead of the error an operator has to act on.
     pub(crate) fn freeze_trading(&mut self, reason: String, now_ms: i64) {
         if self.risk.is_killed() {
-            return; // already frozen — do not re-alarm on every rejection
+            return; // already frozen - do not re-alarm on every rejection
         }
-        let _ = now_ms;
         self.risk.kill(reason.clone());
-        // #861: the kill switch outlives the process — the reason an operator
-        // must see travels with it.
-        if let Some(c) = &mut self.risk_state {
-            c.file.kill = Some(KillCell {
-                reason: reason.clone(),
-            });
-            c.file.saved_at_ms = now_ms;
-        }
+        // #1056: the kill switch is pure in-memory - it never outlives the
+        // process; a restart comes up clear and the operator re-arms it via
+        // `risk.resume` / `unfreeze {target: "global"}`.
+        let _ = self.set_account_gate(
+            GLOBAL_KILL_ACCOUNT,
+            reason.clone(),
+            GateReason::KillSwitch,
+            None,
+            "system",
+            now_ms,
+            None,
+        );
         self.persist_risk_state();
         self.emit(Event::RiskAlert {
             code: blitzkrieg_market_api::CoreErrorCode::KillSwitchActive,
@@ -403,7 +520,7 @@ impl Core {
 
     pub(crate) fn new_order_id(&mut self) -> String {
         // "live" is reserved for orders that can actually reach a venue. A
-        // read-only order is not live — stamping it `live_` would put a
+        // read-only order is not live - stamping it `live_` would put a
         // misleading label on the one field an operator reads to decide what is
         // real, so it is named for what it is.
         let prefix = match self.config.mode {
@@ -419,15 +536,19 @@ impl Core {
     // ── Risk ───────────────────────────────────────────────────────────────
     pub fn kill(&mut self, reason: String) {
         self.risk.kill(reason.clone());
-        // #861: same durable kill as freeze_trading — the direct path (no
-        // freeze_trading alarm) still must not die with the process.
-        if let Some(c) = &mut self.risk_state {
-            c.file.kill = Some(KillCell {
-                reason: reason.clone(),
-            });
-            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
-        }
+        // #1056: the kill switch is pure in-memory - it never outlives the
+        // process; a restart comes up clear and the operator re-arms it.
+        let _ = self.set_account_gate(
+            GLOBAL_KILL_ACCOUNT,
+            reason.clone(),
+            GateReason::KillSwitch,
+            None,
+            "system",
+            blitzkrieg_market_api::net::now_ms(),
+            None,
+        );
         self.persist_risk_state();
+        tracing::error!(reason = %reason, "kill switch engaged (in-memory, restart-clear)");
         self.emit(Event::RiskAlert {
             code: CoreErrorCode::KillSwitchActive,
             message: reason,
@@ -453,11 +574,11 @@ impl Core {
 
     pub fn resume(&mut self) {
         self.risk.resume();
-        // #861: a lifted kill stays lifted across the restart.
-        if let Some(c) = &mut self.risk_state {
-            c.file.kill = None;
-            c.file.saved_at_ms = blitzkrieg_market_api::net::now_ms();
-        }
+        // #1056: the kill switch never outlives the process - resume clears the
+        // in-memory risk gate AND the global `GLOBAL_KILL_ACCOUNT` gate. Nothing
+        // is persisted, so a restart comes up clear and the operator must
+        // explicitly re-arm.
+        self.account_gates.remove(GLOBAL_KILL_ACCOUNT);
         self.persist_risk_state();
     }
 
@@ -466,9 +587,9 @@ impl Core {
     }
 
     /// TEST SEAM ONLY (test cfg or feature `test-support`; #780/#825 boundary
-    /// hygiene — the same gate [`Core::ledger_mut`] carries): blunt access to
+    /// hygiene - the same gate [`Core::ledger_mut`] carries): blunt access to
     /// the live risk gate configuration. The runtime-config path does NOT come
-    /// through here — it applies audited, hot-reload-checked limits via
+    /// through here - it applies audited, hot-reload-checked limits via
     /// [`Core::apply_risk_limits`] / [`Core::apply_systemic_limits`]
     /// (`place()` reads the config on every check).
     #[cfg(any(test, feature = "test-support"))]
@@ -487,7 +608,7 @@ impl Core {
         self.virtual_accounts = crate::risk::virtual_account::VirtualAccounts::new(&limits);
     }
 
-    /// The live risk gate config — the read side of
+    /// The live risk gate config - the read side of
     /// [`Self::risk_config_mut`]: a `risk.setLimits`/`risk.setSystemic` write
     /// is visible here immediately, which is what keeps the `risk.limits`
     /// readout honest after a hot edit.

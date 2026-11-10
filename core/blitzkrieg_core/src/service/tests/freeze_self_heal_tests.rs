@@ -230,7 +230,12 @@ fn manual_freeze_not_lifted_by_venue_health() {
 #[test]
 fn manual_freeze_after_an_auto_freeze_is_never_self_healed() {
     let mut c = core();
-    c.freeze_account_auto("default", "venue rejecting (3)".into(), 1_000_000);
+    c.freeze_account_auto(
+        "default",
+        "venue rejecting (3)".into(),
+        Some("venue-A"),
+        1_000_000,
+    );
     assert!(
         c.account_freeze_reason("default", now_ms()).is_some(),
         "auto-frozen"
@@ -262,6 +267,7 @@ fn reconcile_lift_respects_debounce() {
     c.freeze_account_auto(
         "default",
         "reconciliation sweep failed (3): x".into(),
+        Some(""),
         1_000_000,
     );
     assert!(c.account_freeze_reason("default", now_ms()).is_some());
@@ -297,12 +303,53 @@ fn reconcile_lift_respects_debounce() {
 fn auto_lift_still_works_seventy_two_hours_later() {
     let mut c = core();
     let t0 = 1_700_000_000_000;
-    c.freeze_account_auto("default", "venue rejecting".into(), t0);
+    c.freeze_account_auto("default", "venue rejecting".into(), Some("venue-A"), t0);
     let later = t0 + 72 * 60 * 60 * 1000;
-    c.auto_lift_if_venue_healthy("default", "venue accepted order", later);
+    c.auto_lift_if_venue_healthy("default", Some("venue-A"), later);
     assert!(
         c.account_freeze_reason("default", now_ms()).is_none(),
         "a 72h-old auto freeze must still lift once the venue is healthy"
+    );
+}
+
+/// #1058 T19：场地 A 的冻结必须不被场地 B 的自愈误解。闸门
+/// venue=Some("venue-A")，即使过了 debounce，传入 Some("venue-B") 也必须
+/// 保持冻结——两边都有值且不匹配时拒绝解冻。
+#[test]
+fn auto_lift_venue_mismatch_does_not_lift() {
+    let mut c = core();
+    let t0 = 1_700_000_000_000;
+    c.freeze_account_auto("default", "venue rejecting".into(), Some("venue-A"), t0);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "auto-frozen on venue-A"
+    );
+    c.auto_lift_if_venue_healthy(
+        "default",
+        Some("venue-B"),
+        t0 + FREEZE_AUTO_LIFT_MIN_MS + 60_000,
+    );
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "venue-B 的自愈必须不碰 venue-A 的冻结"
+    );
+}
+
+/// #1058 T20：未绑定 venue 的自动冻结（gate.venue=None）仍可自愈。调用方
+/// 传 None 时不做场地等值比较，过了 debounce 即解除。
+#[test]
+fn auto_lift_unbound_venue_still_heals() {
+    let mut c = core();
+    let t0 = 1_700_000_000_000;
+    c.freeze_account_auto("default", "venue rejecting".into(), None, t0);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_some(),
+        "auto-frozen without a bound venue"
+    );
+    c.auto_lift_if_venue_healthy("default", None, t0 + FREEZE_AUTO_LIFT_MIN_MS + 60_000);
+    assert!(
+        c.account_freeze_reason("default", now_ms()).is_none(),
+        "未绑定 venue 的闸门在 venue 健康时仍可自愈"
     );
 }
 
@@ -311,25 +358,31 @@ fn auto_lift_still_works_seventy_two_hours_later() {
 #[test]
 fn re_freeze_after_auto_lift_carries_new_reason() {
     let mut c = core();
-    c.freeze_account_auto("default", "cause A: sweep failed".into(), 1_000);
+    c.freeze_account_auto(
+        "default",
+        "cause A: sweep failed".into(),
+        Some("venue-A"),
+        1_000,
+    );
     assert!(c.account_freeze_reason("default", now_ms()).is_some());
     c.auto_lift_if_venue_healthy(
         "default",
-        "venue accepted order",
+        Some("venue-A"),
         1_000 + FREEZE_AUTO_LIFT_MIN_MS - 1,
     );
     assert!(
         c.account_freeze_reason("default", now_ms()).is_some(),
         "one millisecond short of the window must not lift"
     );
-    c.auto_lift_if_venue_healthy(
-        "default",
-        "venue accepted order",
-        1_000 + FREEZE_AUTO_LIFT_MIN_MS,
-    );
+    c.auto_lift_if_venue_healthy("default", Some("venue-A"), 1_000 + FREEZE_AUTO_LIFT_MIN_MS);
     assert!(c.account_freeze_reason("default", now_ms()).is_none());
 
-    c.freeze_account_auto("default", "cause B: self-check failed".into(), 3_000);
+    c.freeze_account_auto(
+        "default",
+        "cause B: self-check failed".into(),
+        Some("venue-A"),
+        3_000,
+    );
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("cause B: self-check failed"),

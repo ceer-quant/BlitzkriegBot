@@ -227,14 +227,15 @@ fn a_migrated_file_loads_clean_without_the_retirement_warning() {
     );
 
     // The same boot path the legacy shape takes: the load is Ok (not Corrupt),
-    // the entry cap restores, the kill switch and the freeze book re-land —
-    // the migration retired the cells, not the posture.
+    // the entry cap restores; #1056 retired the `kill` cell from the file, so
+    // the kill switch does NOT re-arm across restart — the migration retired
+    // the posture, not just the cells.
     assert!(matches!(load_risk_state_file(&path), RiskStateLoad::Ok(_)));
     let c = core_with(&path, &["default"]);
     assert_eq!(c.risk.config().max_order_notional, dec!(250));
     assert!(
-        c.is_killed(),
-        "the kill switch still restores across restart"
+        !c.is_killed(),
+        "the kill switch does not restore across restart (#1056)"
     );
     assert!(
         c.account_freeze_reason("default", now_ms()).is_none(),
@@ -308,7 +309,7 @@ fn manual_freeze_never_self_lifts_and_clears_on_restart() {
         "manual freeze is in force this session"
     );
     // Venue health past the debounce must NOT lift a manual gate.
-    c.auto_lift_if_venue_healthy("default", "venue healthy", now_ms() + 86_400_000);
+    c.auto_lift_if_venue_healthy("default", Some("venue healthy"), now_ms() + 86_400_000);
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("operator pause"),
@@ -342,6 +343,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     c.freeze_account_auto(
         "default",
         "5 consecutive venue rejections".to_string(),
+        Some("venue-A"),
         frozen_at,
     );
     assert_eq!(
@@ -350,7 +352,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
         "the circumstantial freeze is in force this session"
     );
     // Inside the debounce window a healthy venue must NOT lift.
-    c.auto_lift_if_venue_healthy("default", "venue healthy", frozen_at + 1_000);
+    c.auto_lift_if_venue_healthy("default", Some("venue-A"), frozen_at + 1_000);
     assert_eq!(
         c.account_freeze_reason("default", now_ms()).as_deref(),
         Some("5 consecutive venue rejections"),
@@ -358,7 +360,7 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     // Past the debounce the self-heal lifts it — same session, no restart needed.
     c.auto_lift_if_venue_healthy(
         "default",
-        "venue healthy",
+        Some("venue-A"),
         frozen_at + crate::service::FREEZE_AUTO_LIFT_MIN_MS,
     );
     assert!(c.account_freeze_reason("default", now_ms()).is_none());
@@ -372,31 +374,30 @@ fn venue_rejection_gate_lifts_after_debounce_and_clears_on_restart() {
     );
 }
 
-/// (d) The global kill switch outlives the process — with the reason an
-/// operator must see — and an explicit resume stays lifted across the next
-/// boot (the corrupt-boot freeze is an ACCOUNT-level posture; it does not
-/// re-arm a killed kernel's switch).
+/// (d) The global kill switch is PURE IN-MEMORY — a kernel that went down
+/// killed comes up CLEAR: #1045 v3 retires replaying freeze posture across a
+/// restart, so nothing is re-armed automatically. An explicit resume stays
+/// lifted across the next boot (the corrupt-boot freeze is an ACCOUNT-level
+/// posture; it does not re-arm a killed kernel's switch).
 #[test]
-fn kill_switch_survives_restart_and_resume_stays_lifted() {
+fn kill_switch_clears_on_restart_and_resume_stays_lifted() {
     let root = TempRoot::new("kill");
     let path = root.file();
 
     let mut c = core_with(&path, &["default"]);
-    c.kill("ops halt before maintenance".to_string());
+    c.freeze_trading("ops halt before maintenance".to_string(), now_ms());
     assert!(c.is_killed());
+    // The global gate is visible in the single gate model while the session lives.
+    assert!(c.account_gates().get("global").is_some());
     drop(c);
 
+    // Restart: kill is NOT replayed — the account comes up trading.
     let mut c2 = core_with(&path, &["default"]);
     assert!(
-        c2.is_killed(),
-        "a kernel that went down killed stays killed"
+        !c2.is_killed(),
+        "restart clears the kill switch — no freeze posture is replayed"
     );
-    assert!(
-        c2.risk
-            .kill_reason()
-            .is_some_and(|r| r.contains("ops halt before maintenance")),
-        "the operator's reason survives, not a paraphrase"
-    );
+    assert!(c2.account_gates().get("global").is_none());
     c2.resume();
     assert!(!c2.is_killed());
     drop(c2);
@@ -406,6 +407,36 @@ fn kill_switch_survives_restart_and_resume_stays_lifted() {
         !c3.is_killed(),
         "a resumed kill stays resumed across a restart"
     );
+}
+
+/// #1057 阻断3：全局熔断解冻同时清 risk 标志，使 tradingFrozen 与 accountGates
+/// 单点化（stats_views 只读 GLOBAL_KILL_ACCOUNT 闸门）。
+#[test]
+fn global_unfreeze_clears_risk_flag_and_gate() {
+    let root = TempRoot::new("gunf");
+    let path = root.file();
+    let mut c = core_with(&path, &["default"]);
+    c.freeze_trading("global halt".to_string(), now_ms());
+    assert!(c.is_killed(), "freeze_trading sets risk kill flag");
+    assert!(
+        c.account_gates().get("global").is_some(),
+        "global gate present while killed"
+    );
+    let r = c
+        .unfreeze_account("global", "operator", now_ms())
+        .expect("global unfreeze succeeds");
+    assert!(r.unfrozen, "global gate cleared");
+    assert!(
+        !c.is_killed(),
+        "risk kill flag cleared on global unfreeze (single source of truth)"
+    );
+    assert!(
+        c.account_gates().get("global").is_none(),
+        "global gate removed on unfreeze"
+    );
+    // A fresh core boots clear (no restart replay of the kill).
+    let c2 = core_with(&path, &["default"]);
+    assert!(!c2.is_killed(), "restart boots clear, no kill replay");
 }
 
 /// A core without a risk-state path (the backtester, most in-process tests)

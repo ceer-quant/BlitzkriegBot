@@ -240,11 +240,8 @@ fn a_trip_reaches_the_panel_and_the_audit_trail() {
         )
         .expect_err("the day's cap is spent");
     // #1045: entry blocking lives in Core's single account gate, which answers
-    // KillSwitchActive naming the DailyLoss gate until the UTC day rolls.
-    assert_eq!(
-        err.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    // AccountLimit naming the DailyLoss gate until the UTC day rolls.
+    assert_eq!(err.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     assert!(err.message.contains("Daily loss limit"), "{}", err.message);
 
     // …and a restart does not re-arm the DailyLoss gate: tripped is not
@@ -1098,11 +1095,8 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
         )
         .expect_err("a spent, tightened cap must refuse entries");
     // #1045: entry blocking lives in Core's single account gate, which answers
-    // KillSwitchActive naming the DailyLoss gate until the UTC day rolls.
-    assert_eq!(
-        err.code,
-        blitzkrieg_market_api::CoreErrorCode::KillSwitchActive
-    );
+    // AccountLimit naming the DailyLoss gate until the UTC day rolls.
+    assert_eq!(err.code, blitzkrieg_market_api::CoreErrorCode::AccountLimit);
     assert!(err.message.contains("Daily loss limit"), "{}", err.message);
 
     // (5) …and the position that was already open still gets out.

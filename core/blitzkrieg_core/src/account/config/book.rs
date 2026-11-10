@@ -417,6 +417,64 @@ pub fn env_persist_account_trading(
     Ok(())
 }
 
+/// `account.status` persist — `ACCOUNT_<ID>_STATUS`:
+/// `Active` REMOVES the key (the env grammar spells "active" by absence),
+/// any other posture writes the status string verbatim.
+pub fn env_persist_account_status(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+    status: &AccountStatus,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "status")?;
+    let key = account_env_keys(account_id)
+        .into_iter()
+        .find(|k| k.ends_with("_STATUS"))
+        .unwrap();
+    match status {
+        AccountStatus::Active => {
+            crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(".env status remove failed: {e}"),
+                )
+            })?;
+        }
+        other => {
+            let mut vars = std::collections::BTreeMap::new();
+            vars.insert(key, other.to_string());
+            env_upsert(env_path, &vars, "status")?;
+        }
+    }
+    Ok(())
+}
+
+/// `account.unfreeze`'s persisted half: `status = Active` AND
+/// `trading_enabled = true` are BOTH spelled by key absence in `.env`, so the
+/// honest write is ONE [`crate::env_file::remove_env_vars`] over both keys —
+/// a single rewrite with no half-state. Two separate removals would leave a
+/// window where `STATUS` is gone but `TRADING_ENABLED=false` is still on
+/// disk; one rewrite cannot.
+pub fn env_persist_account_active(
+    toml_path: &Path,
+    env_path: &Path,
+    account_id: &str,
+) -> Result<(), CoreError> {
+    refuse_while_legacy_toml(toml_path, "status")?;
+    let keys: Vec<String> = account_env_keys(account_id)
+        .into_iter()
+        .filter(|k| k.ends_with("_STATUS") || k.ends_with("_TRADING_ENABLED"))
+        .collect();
+    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    crate::env_file::remove_env_vars(env_path, &refs).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(".env status/trading remove failed: {e}"),
+        )
+    })?;
+    Ok(())
+}
+
 /// `account.opening_equity` persist — the LIVE venue's first reported equity,
 /// written exactly once (an already-present key is never overwritten) together
 /// with its source ("venue") and a timestamp. This is the account's principal
