@@ -578,13 +578,13 @@ pub fn render_json_full(
                 "reconcile": reconcile,
                 "selfCheck": self_check,
                 "tradingFrozen": trading_frozen,
-                // PR G 的账户级冻结簿：account id → 原因。内核 `stats_views` 一直
-                // 在生产这个字段（`EngineStatsView::account_freezes`），ui 类型也有，
-                // 但**这层 stats 组装从没透传**——于是面板的 `lib/safety.ts` 永远读到
-                // null：红横幅不弹、HFT 倒计时不停、人工解锁按钮不出现。2026-11-09
-                // 操作员实报「冻结发生了面板却看不见」定谳于此（与 venue 被类型化重组
-                // 剥掉同族）。空对象 = 无冻结，与内核语义逐字一致。
-                "accountFreezes": st.account_freezes,
+                // #1059:  per-account entry gates (`blocked` / `reason` /
+                // `reasonKind` / `sinceMs` / `expiresAtMs` / `actor`), mirroring
+                // the kernel's `accountGates` stats array. Replaces the retired
+                // `accountFreeves` compatibility map — frontends must read
+                // `accountGates` instead (see WebUI App.vue / lib/safety.ts /
+                // SettingsRisk.vue).
+                "accountGates": st.account_gates,
                 "strategies": strategies,
             })
         }),

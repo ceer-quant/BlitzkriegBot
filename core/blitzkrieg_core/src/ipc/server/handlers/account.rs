@@ -620,7 +620,14 @@ pub(crate) async fn handle_account(
                                 .unwrap_or_else(|| "manual freeze".to_string()),
                         );
                     } else {
-                        let _ = c.unfreeze_account(id.as_str(), "panel", now_ms)?;
+                        // #1059: `account.freeze {frozen: false}` is retired — the
+                        // single unfreeze entry point is `account.unfreeze`. Return
+                        // an error instead of silently lifting the gate here, so
+                        // there is exactly ONE write path for unfreeze.
+                        return Err(CoreError::new(
+                            CoreErrorCode::InvalidParams,
+                            "account.freeze {frozen: false} is retired; use `account.unfreeze` instead",
+                        ));
                     }
                     Ok(serde_json::to_value(AccountFreezeResult {
                         account_id: id.as_str().to_string(),
@@ -641,7 +648,16 @@ pub(crate) async fn handle_account(
                     let mut c = core.lock().await;
                     c.require_account(&id)?;
                     let now_ms = blitzkrieg_market_api::net::now_ms();
-                    let r = c.unfreeze_account(id.as_str(), "ipc", now_ms)?;
+                    // #1059: actor is derived from the real peer, not hardcoded.
+                    // Same/Other uid → the caller's uid (traceable to the real
+                    // process); unavailable credentials → raw ipc connection.
+                    let actor = match peer {
+                        PeerAuth::SameUid { uid } | PeerAuth::OtherUid { uid } => {
+                            format!("uid:{uid}")
+                        }
+                        PeerAuth::Unavailable { .. } => "ipc".to_string(),
+                    };
+                    let r = c.unfreeze_account(id.as_str(), &actor, now_ms)?;
                     Ok(serde_json::to_value(AccountUnfreezeResult {
                         account_id: id.as_str().to_string(),
                         unfrozen: r.unfrozen,

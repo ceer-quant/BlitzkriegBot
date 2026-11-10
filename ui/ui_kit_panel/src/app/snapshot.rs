@@ -50,6 +50,11 @@ impl App {
             accounts_doc: None,
             accounts_focus: 0,
             accounts_visible: false,
+            unfreeze_visible: false,
+            unfreeze_doc: None,
+            unfreeze_focus: 0,
+            unfreeze_busy: false,
+            unfreeze_result: None,
         }
     }
 

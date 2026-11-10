@@ -537,17 +537,6 @@ impl Core {
                     })
                 })
                 .collect::<Vec<_>>(),
-            // `accountFreezes` 由 account_gates 衍生的只读快照（被阻断账户 → 原因）。
-            // #1045 BLOCK-3: only gates that are effectively blocked now.
-            // #1045: 只读派生，不再单独落盘；前端应切 accountGates，此字段仅过渡保留。
-            "accountFreezes": self
-                .account_gates()
-                .iter()
-                .filter(|(id, _)| {
-                    *id != GLOBAL_KILL_ACCOUNT && self.account_gate_blocked(id, as_of_ms)
-                })
-                .map(|(id, g)| (id.as_str().to_string(), serde_json::json!(g.reason)))
-                .collect::<serde_json::Map<_, _>>(),
             // In-kernel accounting audit (issue #189): the latest verdict, so the
             // panel shows what the kernel itself concluded about the books.
             "accountingAudit": self.accounting_audit_view(),

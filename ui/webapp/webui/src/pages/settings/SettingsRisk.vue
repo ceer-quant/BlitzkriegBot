@@ -103,23 +103,25 @@ async function switchAccount(id: string): Promise<void> {
 }
 
 // ── 账户冻结解冻（issue 943，红色横幅的另一半；issue 1044 呈现真相）─────────
-// 风控冻结（accountFreezes，内核 freeze book）：账户因 venue-rejection 连拒
+// 风控冻结（accountGates，内核 entry gate 簿）：账户因 venue-rejection 连拒
 // 或日内亏损熔断被冻结，拒开仓、平仓照放；解冻走 account.unfreeze（issue
 // 1069），内核先 persist 配置态再清闸门，回执带 entriesAllowed，面板必读
-  // 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
-  // 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
+// 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
+// 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
 // 配置态停用（account.status === 'frozen'）：来自 .env AccountStatus，与
 // 风控冻结是两回事，只读呈现「配置停用」，不提供内核解冻按钮（需改
 // .env 并重启）。
 const freezeOperateId = ref<string | null>(null)
 
-// 风控冻结账户（可解冻）：唯一来源是内核 freeze book stats.accountFreezes。
+// 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
+// 取 blocked === true 的条目。
 const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
-  const freezes = store.snapshot?.stats?.accountFreezes
-  return freezes
-    ? Object.entries(freezes)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([id, reason]) => ({ id, reason }))
+  const gates = store.snapshot?.stats?.accountGates
+  return gates
+    ? gates
+        .filter((g) => g.blocked === true && g.account)
+        .sort((a, b) => a.account.localeCompare(b.account))
+        .map((g) => ({ id: g.account, reason: g.reason || '原因未上报' }))
     : []
 })
 

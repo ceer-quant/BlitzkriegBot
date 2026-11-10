@@ -521,22 +521,27 @@ fn compose_accounts(list: &Value, out: &mut Vec<Finding>) {
     }
 }
 
-/// The account-scoped kill book (`engine.stats.accountFreezes`): one BAD
-/// finding per frozen account, naming the reason. BAD, not WARN — a freeze
-/// is the kernel's own verdict that something on this venue went wrong; the
-/// operator is expected to look NOW (unlike a trading switch, which is a
-/// deliberate operator act).
+/// The account-scoped entry gates (`engine.stats.accountGates`): one BAD
+/// finding per account whose entry gate is currently blocked, naming the
+/// reason. BAD, not WARN — a freeze is the kernel's own verdict that something
+/// on this venue went wrong; the operator is expected to look NOW (unlike a
+/// trading switch, which is a deliberate operator act).
 fn compose_account_freezes(stats: &Value, out: &mut Vec<Finding>) {
-    let Some(book) = stats.get("accountFreezes").and_then(|v| v.as_object()) else {
+    let Some(gates) = stats.get("accountGates").and_then(|v| v.as_array()) else {
         return; // old core without the surface — silent, like other seams
     };
-    if book.is_empty() {
-        return;
-    }
-    for (id, reason) in book {
+    for gate in gates {
+        let Some(account) = gate.get("account").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let blocked = gate.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !blocked {
+            continue;
+        }
+        let reason = gate.get("reason").and_then(|v| v.as_str()).unwrap_or("frozen");
         out.push(Finding {
             section: "accounts",
-            label: id.clone(),
+            label: account.to_string(),
             detail: format!(
                 "FROZEN (account-scoped kill switch) — {reason}; new orders refused, exits flow"
             ),
@@ -644,29 +649,37 @@ mod tests {
     /// kernel's own reason. An empty freeze book stays quiet.
     #[test]
     fn a_frozen_account_is_bad_with_reason() {
-        let mut stats = quiet_stats();
-        stats["accountFreezes"] = json!({
-            "probe2": "5 consecutive venue rejections on account probe2; last: auth failed",
-        });
-        let r = compose_now(stats, accounts(json!({ "accounts": [] })));
-        assert!(!r.ok());
-        assert_eq!(r.bad_count(), 1, "{:#?}", r.findings);
-        let f = r
-            .findings
-            .iter()
-            .find(|f| f.section == "accounts" && f.label == "probe2")
-            .unwrap();
-        assert_eq!(f.level, Level::Bad);
-        assert!(f.detail.contains("FROZEN"), "{}", f.detail);
-        assert!(
-            f.detail.contains("5 consecutive venue rejections"),
-            "the kernel's reason rides along: {}",
-            f.detail
-        );
-        // An empty book (or an old core without the key) stays quiet.
-        let mut stats = quiet_stats();
-        stats["accountFreezes"] = json!({});
-        assert!(compose_now(stats, accounts(json!({ "accounts": [] }))).ok());
+    let mut stats = quiet_stats();
+    stats["accountGates"] = json!([
+        {
+            "account": "probe2",
+            "blocked": true,
+            "reason": "5 consecutive venue rejections on account probe2; last: auth failed",
+            "reasonKind": "VenueRejection",
+            "sinceMs": 1_000,
+            "expiresAtMs": null,
+            "actor": "uid:1000"
+        }
+    ]);
+    let r = compose_now(stats, accounts(json!({ "accounts": [] })));
+    assert!(!r.ok());
+    assert_eq!(r.bad_count(), 1, "{:#?}", r.findings);
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.section == "accounts" && f.label == "probe2")
+        .unwrap();
+    assert_eq!(f.level, Level::Bad);
+    assert!(f.detail.contains("FROZEN"), "{}", f.detail);
+    assert!(
+        f.detail.contains("5 consecutive venue rejections"),
+        "the kernel's reason rides along: {}",
+        f.detail
+    );
+    // An empty gate list (or an old core without the key) stays quiet.
+    let mut stats = quiet_stats();
+    stats["accountGates"] = json!([]);
+    assert!(compose_now(stats, accounts(json!({ "accounts": [] }))).ok());
     }
 
     /// A silent token (zero ticks in the window) is a WARN naming the token.

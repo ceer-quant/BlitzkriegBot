@@ -211,38 +211,39 @@ export function selfCheckBanner(stats: EngineStats | null | undefined): SafetyBa
 }
 
 /**
- * Per-account freezes (issue 943, red banner #2): the kernel freezes ONE
+ * Per-account entry gates (#1059, red banner #2): the kernel freezes ONE
  * account on its venue-rejection streak while every other account keeps
  * trading — the global `tradingFrozen` banner above stays dark, and without
  * this the panel looks perfectly normal to the operator of the frozen
- * account. Reads `stats.accountFreezes` (`{accountId: reason}`): one urgent
- * banner per frozen account, so a two-account freeze means two red lines.
+ * account. Reads `stats.accountGates` (array of `{account, blocked, reason,
+ * reasonKind, sinceMs, expiresAtMs, actor}`): one urgent banner per account
+ * whose gate is `blocked`, so a two-account freeze means two red lines.
  * Absent/empty on the wire (older core, or nothing frozen) renders nothing —
- * never an invented freeze. The lift lives on 设置·风险 (account.freeze
- * `{frozen:false}`) — the banner names that door instead of pretending the
- * operator must restart the kernel.
+ * never an invented freeze. The lift lives on 设置·风控 (account.unfreeze) —
+ * the banner names that door instead of pretending the operator must restart
+ * the kernel.
  */
 export function accountFreezeBanners(stats: EngineStats | null | undefined): SafetyBanner[] {
-  const freezes = stats?.accountFreezes
-  if (!freezes) return []
-  return Object.entries(freezes)
-    .filter(([id]) => id !== '')
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([id, reason]) => ({
+  const gates = stats?.accountGates
+  if (!gates) return []
+  return gates
+    .filter((g) => g.blocked && g.account)
+    .sort((a, b) => a.account.localeCompare(b.account))
+    .map((g) => ({
       // Urgent per the 2026-10-28 operator call: while THIS account is frozen
       // its trading is down right now — red, pinned, no ✕, no auto-dismiss.
       // Urgent banners carry no identity: they cannot be dismissed away.
       tone: 'error' as const,
       urgent: true,
-      title: `账户已冻结（${id}）`,
-      body: reason || '该账户已被冻结，原因未上报。',
+      title: `账户已冻结（${g.account}）`,
+      body: g.reason || '该账户已被冻结，原因未上报。',
       hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解冻（持久冻结，需运营人员解冻，仅自动冻结可被健康探针自愈）。冻结只影响这一个账户，其他账户照常交易。',
     }))
 }
 
 /**
  * Is this account currently frozen (issue 943 ③, the countdown pause)? A thin
- * predicate over the same `accountFreezes` read: the HFT page stops
+ * predicate over the same `accountGates` read: the HFT page stops
  * interpolating its countdown while the DISPLAYED account is frozen — the
  * clock the kernel keeps running says nothing about trading being down, and
  * a countdown that keeps ticking reads as "everything is fine".
@@ -252,7 +253,9 @@ export function accountFrozen(
   accountId: string | null | undefined,
 ): boolean {
   if (!accountId) return false
-  return Boolean(stats?.accountFreezes && accountId in stats.accountFreezes)
+  return Boolean(
+    stats?.accountGates?.some((g) => g.account === accountId && g.blocked === true),
+  )
 }
 
 /**

@@ -189,40 +189,44 @@ check('a recording or absent archive raises no archive banner', () => {
 // perfectly normal to the operator of the frozen account. One urgent red line
 // per frozen account, nothing for an old core or an empty map, and the
 // countdown predicate (`accountFrozen`) gates the HFT page's clock.
-check('a per-account freeze is one urgent red line per frozen account (issue 943)', () => {
-  const many = accountFreezeBanners({
-    accountFreezes: { 'b-another': '3 consecutive venue rejections', aSome: 'reason for a' },
-    tradingFrozen: { active: false },
-  })
-  assert.equal(many.length, 2, 'two frozen accounts = two red lines')
-  for (const b of many) {
-    assert.equal(b.tone, 'error', 'a frozen account is red, not a warning')
-    assert.equal(b.urgent, true, 'its trading is down right now — pinned, no ✕')
-    assert.equal(b.identity, undefined, 'urgent banners carry no dismissal identity')
-  }
-  assert.match(many[0].title, /aSome/, 'the account id is in the title')
-  assert.match(many[0].body, /reason for a/, 'the kernel\'s freeze reason is DATA on screen')
-  assert.match(many[1].body, /3 consecutive venue rejections/)
-  assert.ok(
-    many.every((b) => b.hint && /解冻/.test(b.hint)),
-    'every banner names the unfreeze door (设置·风控)',
-  )
-})
+	check('a per-account freeze is one urgent red line per frozen account (issue 943)', () => {
+	  const many = accountFreezeBanners({
+	    accountGates: [
+	      { account: 'b-another', blocked: true, reason: '3 consecutive venue rejections' },
+	      { account: 'aSome', blocked: true, reason: 'reason for a' },
+	    ],
+	    tradingFrozen: { active: false },
+	  })
+	  assert.equal(many.length, 2, 'two frozen accounts = two red lines')
+	  for (const b of many) {
+	    assert.equal(b.tone, 'error', 'a frozen account is red, not a warning')
+	    assert.equal(b.urgent, true, 'its trading is down right now — pinned, no ✕')
+	    assert.equal(b.identity, undefined, 'urgent banners carry no dismissal identity')
+	  }
+	  // accountGates is sorted by account id ascending: 'aSome' < 'b-another'
+	  assert.match(many[0].title, /aSome/, 'the account id is in the title')
+	  assert.match(many[0].body, /reason for a/, 'the kernel\'s freeze reason is DATA on screen')
+	  assert.match(many[1].body, /3 consecutive venue rejections/)
+	  assert.ok(
+	    many.every((b) => b.hint && /解冻/.test(b.hint)),
+	    'every banner names the unfreeze door (设置·风控)',
+	  )
+	})
 
-check('no per-account freezes renders nothing — old core, empty map, null stats', () => {
-  assert.deepEqual(accountFreezeBanners({ accountFreezes: {} }), [])
-  assert.deepEqual(accountFreezeBanners({ accountFreezes: null }), [])
-  assert.deepEqual(accountFreezeBanners({}), [])
-  assert.deepEqual(accountFreezeBanners(null), [])
-})
+	check('no per-account freezes renders nothing — old core, empty map, null stats', () => {
+	  assert.deepEqual(accountFreezeBanners({ accountGates: [] }), [])
+	  assert.deepEqual(accountFreezeBanners({ accountGates: null }), [])
+	  assert.deepEqual(accountFreezeBanners({}), [])
+	  assert.deepEqual(accountFreezeBanners(null), [])
+	})
 
-check('the countdown pause predicate answers for the DISPLAYED account only', () => {
-  const stats = { accountFreezes: { 'acct-b': 'streak' } }
-  assert.equal(accountFrozen(stats, 'acct-b'), true, 'the frozen displayed account pauses')
-  assert.equal(accountFrozen(stats, 'acct-a'), false, 'another account keeps its clock')
-  assert.equal(accountFrozen(stats, null), false, 'no displayed account never freezes')
-  assert.equal(accountFrozen({}, 'acct-b'), false, 'a core without the map cannot freeze')
-  assert.equal(accountFrozen(null, 'acct-b'), false)
+	check('the countdown pause predicate answers for the DISPLAYED account only', () => {
+	  const stats = { accountGates: [ { account: 'acct-b', blocked: true, reason: 'streak' } ] }
+	  assert.equal(accountFrozen(stats, 'acct-b'), true, 'the frozen displayed account pauses')
+	  assert.equal(accountFrozen(stats, 'acct-a'), false, 'another account keeps its clock')
+	  assert.equal(accountFrozen(stats, null), false, 'no displayed account never freezes')
+	  assert.equal(accountFrozen({}, 'acct-b'), false, 'a core without the map cannot freeze')
+	  assert.equal(accountFrozen(null, 'acct-b'), false)
 })
 
 // Issue #991: a fallback receivable aged past the operator's budget. Amber +

@@ -241,20 +241,17 @@ pub(super) fn wrapped_rows(lines: &[Line], width: u16) -> usize {
 pub(super) fn render_accounts(f: &mut Frame, app: &App) {
     let area = f.area();
     let mut lines: Vec<Line> = Vec::new();
-    let active = app
-        .accounts_doc
+    let rows: Vec<serde_json::Value> = app
+        .unfreeze_doc
         .as_ref()
-        .and_then(|d| d.get("active"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("")
-        .to_string();
-    let rows: Vec<&serde_json::Value> = app
-        .accounts_doc
-        .as_ref()
-        .and_then(|d| d.get("accounts"))
-        .and_then(|a| a.as_array())
-        .map(|a| a.iter().collect())
+        .and_then(|d| d.as_array())
+        .cloned()
         .unwrap_or_default();
+    let frozen: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|g| g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false))
+        .cloned()
+        .collect();
     match app.accounts_doc.as_ref() {
         None => {
             lines.push(Line::from(Span::styled(
@@ -262,73 +259,60 @@ pub(super) fn render_accounts(f: &mut Frame, app: &App) {
                 Style::default().fg(ACCENT),
             )));
         }
-        Some(_) if rows.is_empty() => {
+        Some(_) if frozen.is_empty() => {
             lines.push(Line::from(Span::styled(
-                "the account book is empty (this should not happen — `default` always exists)",
-                Style::default().fg(RED),
+                "no account is currently frozen — nothing to unfreeze",
+                Style::default().fg(GREEN),
             )));
         }
         Some(_) => {
             lines.push(Line::from(Span::styled(
-                format!("session default: {active}"),
+                "frozen accounts — ↑/↓ select, Enter unfreeze",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
-            for (i, row) in rows.iter().enumerate() {
-                let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                let venue = row.get("venue").and_then(|v| v.as_str()).unwrap_or("");
-                let cursor = if i == app.accounts_focus.min(rows.len().saturating_sub(1)) {
+            for (i, g) in frozen.iter().enumerate() {
+                let id = g.get("account").and_then(|v| v.as_str()).unwrap_or("?");
+                let reason = g.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                let since = g
+                    .get("sinceMs")
+                    .and_then(|v| v.as_i64())
+                    .map(|ms| format!("since {ms}ms"))
+                    .unwrap_or_else(|| "since ?".to_string());
+                let cursor = if i == app.unfreeze_focus.min(frozen.len().saturating_sub(1)) {
                     Span::styled("▸ ", Style::default().fg(ACCENT))
                 } else {
                     Span::raw("  ")
                 };
-                let is_active = id == active;
-                let mark = if is_active {
-                    Span::styled("● ", Style::default().fg(GREEN))
-                } else {
-                    Span::raw("  ")
-                };
-                let status_span = if status == "active" {
-                    Span::styled(format!("{status:<9}"), Style::default().fg(GREEN))
-                } else {
-                    Span::styled(format!("{status:<9}"), Style::default().fg(WARN))
-                };
-                let mut spans = vec![
+                lines.push(Line::from(vec![
                     cursor,
-                    mark,
                     Span::styled(
-                        format!("{id:<12}"),
+                        format!("{id:<16}"),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!("{name:<14}")),
-                    status_span,
-                ];
-                // The venue binding: 空 = 未绑定（可交易任意交易所）— rendered
-                // as the dash, never as a fake venue name.
-                spans.push(Span::styled(
-                    format!("venue: {}", if venue.is_empty() { "—" } else { venue }),
-                    Style::default().fg(DIM),
-                ));
-                let strategies: Vec<&str> = row
-                    .get("strategies")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
-                spans.push(Span::styled(
-                    if strategies.is_empty() {
-                        " · strategies: 全局继承".to_string()
-                    } else {
-                        format!(" · strategies: {}", strategies.join(","))
-                    },
-                    Style::default().fg(DIM),
-                ));
-                lines.push(Line::from(spans));
+                    Span::raw(format!("{reason:<28}")),
+                    Span::styled(format!("({since})"), Style::default().fg(DIM)),
+                ]));
             }
         }
     }
     lines.push(Line::from(""));
+    if app.unfreeze_busy {
+        lines.push(Line::from(Span::styled(
+            "…",
+            Style::default().fg(ACCENT),
+        )));
+    }
+    if let Some(text) = &app.unfreeze_result {
+        lines.push(Line::from(Span::styled(
+            text.clone(),
+            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter unfreeze (asks y/n) · U or Esc closes",
+        Style::default().fg(DIM),
+    )));
     lines.push(Line::from(Span::styled(
         "↑/↓ select · Enter switch (asks y/n) · A or Esc closes",
         Style::default().fg(DIM),
@@ -348,6 +332,108 @@ pub(super) fn render_accounts(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Accounts — switch this session's default (A / Esc to close)")
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        rect,
+    );
+}
+
+/// #1059: the `U` unfreeze overlay — frozen accounts from `accountGates`, one
+/// row per frozen account. Enter on a row sends `account.unfreeze` for it, then
+/// the panel re-reads `accountGates` so the overlay never shows a stale "ready".
+/// Esc/`U` closes; `q` also closes (the overlay is modal while up).
+pub(super) fn render_unfreeze(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let mut lines: Vec<Line> = Vec::new();
+    let gates: Vec<&serde_json::Value> = app
+        .unfreeze_doc
+        .as_ref()
+        .and_then(|d| d.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    let mut frozen: Vec<serde_json::Value> = Vec::new();
+    for g in gates.iter() {
+        if g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false) {
+            frozen.push(g.clone().clone());
+        }
+    }
+    match app.unfreeze_doc.as_ref() {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "loading the gate book… (or the core refused — check the log pane)",
+                Style::default().fg(ACCENT),
+            )));
+        }
+        Some(_) if frozen.is_empty() => {
+            lines.push(Line::from(Span::styled(
+                "no account is currently frozen — nothing to unfreeze",
+                Style::default().fg(GREEN),
+            )));
+        }
+        Some(_) => {
+            lines.push(Line::from(Span::styled(
+                "frozen accounts — ↑/↓ select, Enter unfreeze",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for (i, g) in frozen.iter().enumerate() {
+                let id = g.get("account").and_then(|v| v.as_str()).unwrap_or("?");
+                let reason = g.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                let since = g
+                    .get("sinceMs")
+                    .and_then(|v| v.as_i64())
+                    .map(|ms| format!("since {ms}ms"))
+                    .unwrap_or_else(|| "since ?".to_string());
+                let cursor = if i == app.unfreeze_focus.min(frozen.len().saturating_sub(1)) {
+                    Span::styled("▸ ", Style::default().fg(ACCENT))
+                } else {
+                    Span::raw("  ")
+                };
+                let since_span = Span::styled(format!("({since})"), Style::default().fg(DIM));
+                lines.push(Line::from(vec![
+                    cursor,
+                    Span::styled(
+                        format!("{id:<16}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("{reason:<28}")),
+                    since_span,
+                ]));
+            }
+        }
+    }
+    if app.unfreeze_busy {
+        lines.push(Line::from(Span::styled(
+            "…",
+            Style::default().fg(ACCENT),
+        )));
+    }
+    if let Some(text) = &app.unfreeze_result {
+        lines.push(Line::from(Span::styled(
+            format!("{text}"),
+            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter unfreeze (asks y/n) · U or Esc closes",
+        Style::default().fg(DIM),
+    )));
+
+    let pct_x = 86u16;
+    let inner_w = (area.width * pct_x / 100).saturating_sub(2);
+    let body_rows = wrapped_rows(&lines, inner_w);
+    let rect = centered_rect(
+        area,
+        pct_x,
+        (body_rows as u16).saturating_add(2).min(area.height),
+    );
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Unfreeze — entry gates (U / Esc to close)")
                 .border_style(Style::default().fg(ACCENT)),
         ),
         rect,

@@ -114,13 +114,22 @@ export interface EngineStats {
   /** Trading freeze (kill switch) state. Older cores omit. */
   tradingFrozen?: { active: boolean; reason?: string } | null
   /**
-   * Per-account freezes (issue 943): `accountId → freeze reason`. The kernel
-   * freezes an account on a venue-rejection streak (session-scoped, survives
-   * as long as the process does); entries are absent once lifted. An older
-   * core omits the key entirely — absence renders nothing, never an invented
-   * freeze. The account-freeze banner and the HFT countdown pause read this.
+   * Per-account entry gates (#1059): mirroring the kernel's `accountGates`
+   * stats array (`blocked` / `reason` / `reasonKind` / `sinceMs` /
+   * `expiresAtMs` / `actor`). Replaces the retired `accountFreeves` map
+   * (`accountId → reason`) — the array carries the full gate metadata the
+   * panel needs to render freeze banners correctly. Absent on older cores;
+   * absence renders nothing, never an invented freeze.
    */
-  accountFreezes?: Record<string, string> | null
+  accountGates?: {
+    account: string
+    blocked: boolean
+    reason?: string | null
+    reasonKind?: string | null
+    sinceMs?: number | null
+    expiresAtMs?: number | null
+    actor?: string | null
+  }[] | null
   /**
   * Per-account daily-loss breaker state (issue 1044). `tripped` = entries
    * are frozen until the next UTC day; `resetAtMs` = that UTC day's start

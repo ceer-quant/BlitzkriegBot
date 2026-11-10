@@ -102,6 +102,10 @@ pub(crate) mod method {
     // main session's next move; `IpcClient::display_account_set` is the
     // ready-made call.
     pub const DISPLAY_ACCOUNT_SET: &str = "display.account.set";
+    /// #1059: lift the named account's entry gate (`account.unfreeze`). Returns
+    /// `{ accountId, unfrozen, previousReason, entriesAllowed }`. Must mirror
+    /// the core's `schema::method::ACCOUNT_UNFREEZE`.
+    pub const ACCOUNT_UNFREEZE: &str = "account.unfreeze";
     /// #363/#364: the execution policy surface the settings faces read/write.
     /// The TUI and the webui BOTH go through these methods — neither reads the
     /// TOML file itself (the file is the kernel's, written only by its `set`).
@@ -510,6 +514,17 @@ impl IpcClient {
     pub fn account_switch(&mut self, account_id: &str) -> Result<serde_json::Value, IpcError> {
         self.call(
             method::ACCOUNT_SWITCH,
+            serde_json::json!({ "accountId": account_id }),
+        )
+    }
+
+    /// `account.unfreeze` (#1059): lift the named account's entry gate.
+    /// Returns the kernel's `AccountUnfreezeResult` verbatim
+    /// (`{accountId, unfrozen, previousReason, entriesAllowed}`) so the panel
+    /// can re-read the gate and report honestly.
+    pub fn account_unfreeze(&mut self, account_id: &str) -> Result<serde_json::Value, IpcError> {
+        self.call(
+            method::ACCOUNT_UNFREEZE,
             serde_json::json!({ "accountId": account_id }),
         )
     }
