@@ -37,14 +37,16 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
   ignoreDeadLinks: true,
-  // 深色终端是产品默认身份（见 webui theme.css），文档站保持一致
-  appearance: 'dark',
+  // 亮/暗双模式；首次访问默认深色（与 WebUI 一致），之后记住用户选择
+  appearance: true,
   head: [
     ['meta', { name: 'theme-color', content: '#0b0f14' }],
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
-    // appearance: 'dark' 只锁定主题，不保证 <html> 带上 dark 类；
-    // VitePress 的自定义容器等样式依赖该类，这里显式补上。
-    ['script', {}, "document.documentElement.classList.add('dark')"],
+    [
+      'script',
+      {},
+      "(function(){try{var k='vitepress-theme-appearance',v=localStorage.getItem(k);if(!v){localStorage.setItem(k,'dark');document.documentElement.classList.add('dark')}}catch(e){}})()",
+    ],
   ],
   vite: {
     plugins: [
