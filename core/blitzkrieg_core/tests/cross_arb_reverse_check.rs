@@ -202,6 +202,14 @@ fn arb_core(pot: Option<Decimal>) -> Core {
         .expect("cross_venue_arb registers under its package name");
     assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     c.enable_engine(eng);
+    // Issue #1127: `default` is born bound to polymarket; this fixture wires
+    // both legs onto `default` and is venue-agnostic, so keep `default`
+    // unbound here (the production binding is exercised by account/mod.rs
+    // tests, not by this reverse-check acceptance file).
+    c.accounts_mut()
+        .account_mut(&default_account_id())
+        .unwrap()
+        .venue = "".into();
     // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
     // adapter's params bag). The fixture wires the same two venues the market
     // data carries — without it the strategy pairs nothing (fail-closed).
