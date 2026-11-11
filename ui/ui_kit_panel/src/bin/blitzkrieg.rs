@@ -16,7 +16,7 @@ use blitzkrieg_ui_kit::core::net_check::{render_json, render_text};
 use blitzkrieg_ui_kit::gateway::{
     discover_binary, Dispatcher, StartOutcome, Supervisor, SupervisorConfig,
 };
-use blitzkrieg_ui_kit::web::WebServer;
+use blitzkrieg_ui_kit::web::{WebServer, PANEL_CREDENTIALS_MISSING};
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 use blitzkrieg_ui_panel::{
     parse_args_from, run_panel, run_panel_with_dispatcher, stop_stack, PanelArgs, Tab,
@@ -999,6 +999,22 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
 
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, lifecycle_enabled)));
 
+    // Web panel credentials are operator-chosen and live in `.env` (self-loaded
+    // by the launcher in `main`). Nothing starts without the pair: not the
+    // core, not the panel — no defaults, no read-only fallback.
+    if !cli.use_tui {
+        let user = std::env::var("BLITZKRIEG_PANEL_USER").ok();
+        let pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok();
+        if user.is_none() || pass.is_none() {
+            eprintln!(
+                "blitzkrieg: {PANEL_CREDENTIALS_MISSING}.\n  Fix: cp .env.example .env, \
+                 then set BLITZKRIEG_PANEL_USER and BLITZKRIEG_PANEL_PASSWORD in it \
+                 (no default credentials are ever invented), then rerun 'blitzkrieg run'."
+            );
+            std::process::exit(1);
+        }
+    }
+
     // The signal task is registered BEFORE the core is spawned. Between the
     // spawn and a late registration there is a window where SIGTERM/SIGINT
     // would take the default action — instant launcher death, with the freshly
@@ -1083,34 +1099,14 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         res
     } else {
         let client = IpcClient::new(socket.clone());
-        let user = std::env::var("BLITZKRIEG_PANEL_USER").ok();
-        let pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok();
+        // Credentials were validated above before anything started.
+        let user = std::env::var("BLITZKRIEG_PANEL_USER").expect("panel credentials checked above");
+        let pass =
+            std::env::var("BLITZKRIEG_PANEL_PASSWORD").expect("panel credentials checked above");
 
-        let server = if user.is_some() && pass.is_some() {
-            // Share the dispatcher that OWNS the core — not a fresh one. The
-            // panel's 停止 button and the "内核由其他进程启动" notice both read
-            // `managed = supervisor.owns()` from THIS dispatcher; a second
-            // dispatcher would own nothing and the panel would disown a core
-            // this very process spawned.
-            let mut s = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
-            s.set_panel_credentials(user, pass);
-            s.set_allowed_origins(allowed_origins);
-            s
-        } else {
-            if lifecycle_enabled {
-                println!(
-                    "blitzkrieg: note: BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD are \
-                     not set — the web panel runs in read-only mode. Set both to enable the \
-                     web command verbs."
-                );
-            }
-            let mut s = WebServer::new(client, 0);
-            // Even the read-only surface is behind the origin gate; a server
-            // deployment that serves it on a LAN address needs the same-origin
-            // and allowlist rules to know about that address.
-            s.set_allowed_origins(allowed_origins);
-            s
-        };
+        let mut server = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
+        server.set_panel_credentials(Some(user), Some(pass));
+        server.set_allowed_origins(allowed_origins);
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let addr_clone = addr.clone();

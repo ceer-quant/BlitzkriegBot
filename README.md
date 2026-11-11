@@ -122,10 +122,12 @@ Polymarket、Kalshi、predict.fun、PolySimulator 连接器各自验证范围见
 
 ```bash
 cd <解压目录>
+cp .env.example .env
+# 编辑 .env，填入 BLITZKRIEG_PANEL_USER 与 BLITZKRIEG_PANEL_PASSWORD（不出厂默认凭证）
 bin/blitzkrieg run
 ```
 
-浏览器打开 **<http://127.0.0.1:51888/panel>**。先核对运行模式为 dry，再配置账户与策略；启用前不会自动运行策略。
+浏览器打开 **<http://127.0.0.1:51888/panel>** 并用 `.env` 里的凭证登录。先核对运行模式为 dry，再配置账户与策略；启用前不会自动运行策略。
 
 **路线 B：源码构建（开发者）**
 
@@ -136,7 +138,7 @@ bash scripts/install-blitzkrieg-shim.sh   # 可选：把 blitzkrieg 装进 PATH
 blitzkrieg run
 ```
 
-**下一步**：首次配置时参考 `.env.example` 设置 `BLITZKRIEG_PANEL_USER` / `BLITZKRIEG_PANEL_PASSWORD`，让面板具备操作权限。然后创建或选择策略，确认账户绑定及 dry 模式，再按账户启用。
+**下一步**：创建或选择策略，确认账户绑定及 dry 模式，再按账户启用。
 
 <details>
 <summary><b>Windows 用户：用 WSL2 安装</b>（本平台原生不支持 Windows，依赖 Unix 域套接字）</summary>
