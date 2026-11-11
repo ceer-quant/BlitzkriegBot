@@ -99,11 +99,6 @@ pub(crate) async fn handle_misc(
                 Mode::Dry | Mode::ReadOnly => seed,
                 Mode::Live => c.accounts().account(&active).and_then(|a| a.opening_equity),
             };
-            eprintln!(
-                "[DEBUG misc] opening_equity={:?} balance={:?}",
-                opening_equity,
-                ledger.balance()
-            );
             // issue 787 + issue 749: same projection as `account_views` — a
             // live core whose ACTIVE book no venue has ever reported has no
             // venue number behind it, so whatever sits there is leftover (a
