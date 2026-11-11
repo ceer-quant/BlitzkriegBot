@@ -828,7 +828,7 @@ do
   state.params = {
     unverifiable_window_sec = "120",
     take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
-    stop_loss_pct = "0", take_profit_price = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
   }
   state.time_left = 100 -- 进入不可验证窗口
   hold("down-1", "0.28")
@@ -844,7 +844,7 @@ do
   state.params = {
     unverifiable_window_sec = "120",
     take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
-    stop_loss_pct = "0", take_profit_price = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
   }
   state.time_left = 200
   hold("down-1", "0.28")
