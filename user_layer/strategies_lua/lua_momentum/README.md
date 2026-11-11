@@ -109,7 +109,7 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 | `take_profit_price` | `0` | `0` | `0.99` | sell when the best bid reaches this price AND the fee-net proceeds still beat the entry. `0` disables |
 | `trail_arm_pct` | `22` | `0` | `500` | arm the trailing stop once peak net PnL reaches this. `0` disables the trail |
 | `trail_arm_pct_tight` | `0` | `0` | `500` | `trail_arm_pct`'s end-of-round value (linear slide, same clock). `0` keeps the flat band |
-| `trail_giveback_pct` | `15` | `0` | `500` | once armed, sell when net PnL has fallen this many percentage points from the peak. `0` disables |
+| `trail_giveback_pct` | `15` | `0` | `500` | once armed, sell when the best bid has fallen this many percentage points from the high water mark bid (the same 口径 the kernel measures 让回). `0` disables |
 | `trail_giveback_pct_tight` | `0` | `0` | `500` | `trail_giveback_pct`'s end-of-round value (linear slide, same clock). `0` keeps the flat band |
 | `exit_time_left_sec` | `0` | `0` | `900` | sell whatever is held once this many seconds remain, even at a loss. `0` disables (hold to settlement) |
 | `allow_both_sides` | `0` | `0` | `1` | `1` permits an entry while the opposite token of the same condition is held. Default refuses it |
