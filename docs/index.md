@@ -227,6 +227,7 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
   <p class="bb-eyebrow">For developers</p>
   <h2 class="bb-h2">For Developers</h2>
   <pre class="bb-code"><code>cargo build --release
+(cd ui/webapp/webui && npm ci && npm run build)
 blitzkrieg run</code></pre>
   <div class="bb-tags">
     <span>Blueprint</span><span>Lua</span><span>Market API</span><span>Plugin System</span><span>WebUI</span><span>TUI</span>

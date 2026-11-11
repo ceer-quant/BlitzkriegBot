@@ -371,6 +371,12 @@ pub(super) fn render_unfreeze(f: &mut Frame, app: &App) {
     for g in gates.iter() {
         if g.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false)
             && g.get("account").and_then(|v| v.as_str()).unwrap_or("") != "global"
+            // 配置态闸门（read_only / suspended / trading disabled）不可由
+            // account.unfreeze 解除，不列入 U overlay。改 .env 并重启。
+            && !matches!(
+                g.get("reasonKind").and_then(|v| v.as_str()),
+                Some("ConfigReadOnly") | Some("ConfigSuspended") | Some("TradingDisabled")
+            )
         {
             frozen.push(serde_json::Value::clone(g));
         }

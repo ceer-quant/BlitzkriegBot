@@ -132,7 +132,8 @@ bin/blitzkrieg run
 ```bash
 git clone https://github.com/ceer-quant/BlitzkriegBot.git
 cd BlitzkriegBot && cargo build --release --workspace --locked
-bash scripts/install-blitzkrieg-shim.sh   # 可选：把 blitzkrieg 装进 PATH
+(cd ui/webapp/webui && npm ci && npm run build)   # 必需：Vue 面板产物 dist 不入库
+bash scripts/install-blitzkrieg-shim.sh          # 可选：把 blitzkrieg 装进 PATH
 blitzkrieg run
 ```
 
@@ -171,7 +172,7 @@ blitzkrieg run
 
 **Q：我要装 Node.js 吗？** 运行预编译发行包不需要。前端开发与构建需要 Node 和相应 npm 依赖；交易核心使用 Rust，Lua 运行时内嵌在策略宿主中。
 
-**Q：面板打不开？** 先 `blitzkrieg stop` 再 `blitzkrieg run`（端口被旧栈占着时新栈绑不上）；地址是 `http://127.0.0.1:51888/panel`。
+**Q：面板打不开？** 先 `blitzkrieg stop` 再 `blitzkrieg run`（端口被旧栈占着时新栈绑不上）；地址是 `http://127.0.0.1:51888/panel`。源码克隆若从没跑过前端构建（`cd ui/webapp/webui && npm ci && npm run build`），面板其实打得开，但会退化成内置 HTML 面板（旧版界面）——浏览器里看不到 `/panel/assets/*.js` 就是这个原因，补跑构建再 `blitzkrieg stop && blitzkrieg run` 即可。
 
 **Q：策略装了为什么不动？** 三道门：包在 `user_layer/strategies_lua/`（安装）→ 面板策略页按账户打开开关（启用）→ 请求了策略但一个都没加载成功时内核拒绝启动（保护）。启动日志逐包打印装载与启用状态。
 
@@ -237,7 +238,7 @@ blitzkrieg run
 core/blitzkrieg_core   交易内核（市场无关 = 稳定层）   core/market_api        市场扩展契约（可换层接缝）
 extensions/*           polymarket/kalshi/predictfun/polysimulator（可换层：一个场地一个 crate）
 user_layer/            strategy_api · lua_runtime · strategies_lua（官方 11 包，可换层：策略迭代区）· configs
-ui/                    ui_kit（Web 网关）· ui_kit_panel（TUI + 单二进制启动器）· webapp（Vue）
+ui/                    ui_kit（Web 网关）· ui_kit_panel（TUI + 单二进制启动器）· webapp/webui（WebUI，Vue 3 + Vite）
 scripts/               门禁与运维脚本（零 npm 依赖）
 docs/ · dev-docs/      公开文档 · 内部文档（不入库）
 ```

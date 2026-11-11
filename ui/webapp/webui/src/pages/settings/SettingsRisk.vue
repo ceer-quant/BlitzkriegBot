@@ -25,6 +25,7 @@ import {
   type ExecutionPolicySetParams, type PolicyRuleView,
 } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
+import { isConfigGate } from '@/lib/safety'
 import Button from '@/components/ui/button/Button.vue'
 import Input from '@/components/ui/input/Input.vue'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
@@ -114,17 +115,45 @@ async function switchAccount(id: string): Promise<void> {
 const freezeOperateId = ref<string | null>(null)
 
 // 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
-// 取 blocked === true 的条目。
+// 取 blocked === true 的条目。配置态闸门（read_only / suspended / trading
+// disabled）不列在此处——它们不提供内核解冻，只在配置卡下方以配置语义
+// 提示呈现。
 const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   const gates = store.snapshot?.stats?.accountGates
   return gates
     ? gates
         .filter(
           (g) =>
-            g.blocked === true && g.account && g.account !== 'global'
+            g.blocked === true &&
+            g.account &&
+            g.account !== 'global' &&
+            // 配置态闸门不出现在可解冻列表：改 .env 并重启，面板无解冻门
+            !isConfigGate(g.reasonKind)
         )
         .sort((a, b) => a.account.localeCompare(b.account))
         .map((g) => ({ id: g.account, reason: g.reason || '原因未上报' }))
+    : []
+})
+
+// 配置态闸门（read_only / suspended / trading disabled）：来自 accountGates 的
+// reasonKind，不可从面板解冻，只读呈现配置语义提示。
+const configGateAccounts = computed<{ id: string; reason: string; kind: string }[]>(() => {
+  const gates = store.snapshot?.stats?.accountGates
+  return gates
+    ? gates
+        .filter(
+          (g) =>
+            g.blocked === true &&
+            g.account &&
+            g.account !== 'global' &&
+            isConfigGate(g.reasonKind)
+        )
+        .sort((a, b) => a.account.localeCompare(b.account))
+        .map((g) => ({
+          id: g.account,
+          reason: g.reason || '原因未上报',
+          kind: g.reasonKind ?? '',
+        }))
     : []
 })
 
@@ -331,6 +360,33 @@ async function rollbackPolicy(): Promise<void> {
           {{ fa.reason || '原因未上报' }}
         </span>
         <span class="text-[10px] text-muted-fg">配置停用 · 无面板解冻入口</span>
+      </div>
+    </Card>
+
+    <!-- 配置态闸门（read_only / suspended / trading disabled）：来自内核 accountGates，
+         不可从面板解冻，只读呈现配置语义提示；改 .env 并重启即可恢复。 -->
+    <Card v-if="configGateAccounts.length" class="mt-3.5 mb-4">
+      <CardHeader label="配置态闸门（不可面板解冻）">
+        <template #title>
+          <Minus class="size-4 shrink-0 text-muted-fg" />
+        </template>
+      </CardHeader>
+      <p class="mt-3 text-[11px] leading-snug text-muted-fg">
+        配置态闸门由 .env AccountStatus / trading_enabled 派生，由配置决定、
+        重启后生效。面板不提供内核解冻：改 .env 并重启内核即可恢复。平仓照放，
+        仅新单被拒。
+      </p>
+      <div
+        v-for="cg in configGateAccounts"
+        :key="`${cg.id}-${cg.kind}`"
+        class="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel-2/40 px-3 py-2.5"
+      >
+        <Minus class="size-3.5 shrink-0 text-muted-fg" />
+        <span class="text-[12.5px] font-semibold text-fg truncate min-w-[80px]">{{ cg.id }}</span>
+        <span class="min-w-0 flex-1 truncate text-[11px] text-muted-fg" :title="cg.reason">
+          {{ cg.reason || '原因未上报' }}
+        </span>
+        <span class="text-[10px] text-muted-fg">{{ cg.kind === 'ConfigReadOnly' ? 'read_only' : cg.kind === 'ConfigSuspended' ? 'suspended' : 'trading disabled' }} · 无面板解冻入口</span>
       </div>
     </Card>
 

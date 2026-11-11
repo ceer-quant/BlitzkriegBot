@@ -375,6 +375,24 @@ impl Core {
         }
 
         // 然后 clear gate：先 persist 后 clear，失败则 gate 仍在。
+        // 配置态闸门（read_only / suspended / trading disabled）不可由
+        // account.unfreeze 解除：改 .env 并重启。明确拒绝，不得假成功。
+        if let Some(g) = self.account_gate(account)
+            && matches!(
+                g.reason_kind,
+                GateReason::ConfigReadOnly
+                    | GateReason::ConfigSuspended
+                    | GateReason::TradingDisabled
+            )
+        {
+            return Err(CoreError::new(
+                blitzkrieg_market_api::CoreErrorCode::AccountLimit,
+                format!(
+                    "account {account} gate is {}: configuration posture, not a risk freeze; edit .env and restart instead",
+                    g.reason_kind.label()
+                ),
+            ));
+        }
         let previous = self.clear_account_gate(account);
         let previous_reason = previous.as_ref().map(|g| g.reason.clone());
 
