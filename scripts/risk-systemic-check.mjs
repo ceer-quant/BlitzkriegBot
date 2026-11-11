@@ -646,9 +646,15 @@ async function main() {
 
         // Entry 1: dip UP — the 10-share suggestion must come back MODIFIED at 2.
         await feedBooks(client, { UP: [0.38, 0.40] });
-        const rec1 = await waitFor('MODIFIED record', 15000, 100, async () => {
+        // Only a SIZE_REDUCED record is the shrink: a PRICE_CLAMPED record
+        // carries the approved PRICE in `.modification.approved`, and matching
+        // against it made the placed-size check below compare 2 shares with a
+        // price — the recurring CI flake (seen on 1075 and 1064 heads).
+        const rec1 = await waitFor('SIZE_REDUCED record', 15000, 100, async () => {
           const rs = await readAudit(tempArmed);
-          return rs.find((r) => r.strategy === NAME && r.decision?.status === 'MODIFIED') ?? null;
+          return rs.find((r) => r.strategy === NAME
+              && r.decision?.status === 'MODIFIED'
+              && r.decision?.modification?.kind === 'SIZE_REDUCED') ?? null;
         });
         check('the shrink is real: 10-share suggestion came back MODIFIED', Boolean(rec1));
         if (rec1) {
@@ -662,7 +668,9 @@ async function main() {
           const mine = placed.find((o) => o.strategy === NAME);
           check('the PLACED order carries the reduced size (2, not 10)',
             mine && num(mine.size) === num(rec1.decision.modification.approved),
-            mine ? `placed size ${mine.size}` : 'no order');
+            mine
+              ? `placed size ${mine.size}, approved ${JSON.stringify(rec1.decision.modification.approved)}`
+              : 'no order');
         }
 
         // ── two consecutive LOSSES, manufactured by HAND ──
