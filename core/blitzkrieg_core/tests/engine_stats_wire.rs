@@ -19,6 +19,7 @@
 //! The fixture path is read through `CARGO_MANIFEST_DIR`, so the freeze stays
 //! one artifact even though the two halves live in different crates.
 
+use blitzkrieg_core::account::AccountLedgers;
 use blitzkrieg_core::model::{CoreError, CoreErrorCode, FillPolicy, OrderRequest, Side};
 use blitzkrieg_core::service::{Core, CoreConfig};
 use blitzkrieg_market_api::{SelfCheckItem, SelfCheckReport};
@@ -35,15 +36,26 @@ const FROZEN: &str = include_str!("../../../ui/ui_kit/tests/fixtures/engine_stat
 /// A dry kernel with no durable state at all: `trade_log_path`/`order_log_path`/
 /// `position_log_path` are cleared so a test run cannot touch an operator's data
 /// directory (`CoreConfig::default()` points them at `data/…`).
+/// A dry kernel with no durable state at all, and with `default` kept unbound
+/// (issue #1127 binds `default` to polymarket in production; this wire fixture
+/// predates that binding and asserts the legacy "no bound account ⇒ global
+/// freeze" self-check behaviour).
 fn dry_core() -> Core {
-    let mut c = Core::new(CoreConfig {
-        dry_seed_balance: dec!(1000),
-        auto_exits_enabled: false,
-        trade_log_path: None,
-        order_log_path: None,
-        position_log_path: None,
-        ..Default::default()
-    });
+    let mut book = AccountLedgers::single_default(0);
+    book.account_mut(&blitzkrieg_core::model::default_account_id())
+        .unwrap()
+        .venue = "".into();
+    let mut c = Core::with_account_book(
+        CoreConfig {
+            dry_seed_balance: dec!(1000),
+            auto_exits_enabled: false,
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        },
+        book,
+    );
     c.set_balance(dec!(1000));
     c
 }
