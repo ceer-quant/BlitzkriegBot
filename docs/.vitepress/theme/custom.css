@@ -1403,6 +1403,7 @@ div[class*='language-'] {
 .bb-hero {
   position: relative;
   isolation: isolate;
+  overflow-x: clip;
 }
 
 .bb-hero::before {
