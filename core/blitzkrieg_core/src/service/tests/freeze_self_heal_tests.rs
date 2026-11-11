@@ -459,13 +459,16 @@ fn expired_account_gate_does_not_appear_in_stats() {
         .iter()
         .filter_map(|g| g.get("account").and_then(|a| a.as_str()))
         .collect();
+    // The gate ids are account identifiers, so the failure messages carry only
+    // the boolean verdicts (CodeQL rust/cleartext-logging: account names must
+    // not be interpolated into logs, tests included).
     assert!(
         !accounts.contains(&"stale-acct"),
-        "expired DailyLoss gate must not appear in stats: {accounts:?}"
+        "expired DailyLoss gate must not appear in stats"
     );
     assert!(
         accounts.contains(&"default"),
-        "non-expired Manual gate must still appear in stats: {accounts:?}"
+        "non-expired Manual gate must still appear in stats"
     );
 }
 
