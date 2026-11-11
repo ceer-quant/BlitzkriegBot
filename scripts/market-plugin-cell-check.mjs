@@ -66,6 +66,10 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
 try {
   const core = makeCore('main');
   await core.start();
+  // issue #1127: zero-config `default` is born bound to polymarket; this gate
+  // asserts the legacy plugin-cell behaviour (empty enablement set), so keep
+  // `default` unbound here — the production binding is exercised elsewhere.
+  await core.request('account.venue.set', { accountId: 'default', venue: '', reason: 'panel-check gate isolation' });
 
   // 1. The pre-write readout: first-registered active, the full registry,
   //    nothing persisted.
