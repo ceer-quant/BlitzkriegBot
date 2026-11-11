@@ -8,9 +8,8 @@ use serde::Serialize;
 ///
 /// 取代旧 `FreezeBook` 里的 `account_freezes` + `auto_frozen` 两张持久表：
 /// 不再有任何冻结姿态随进程重启而重播。`realized_pnl_usd` 继续持久化（资金
-/// 真相），重启只清闸门；重启后若账本里的已实现亏损仍超当日上限，会在
-/// 下一次 `emit_daily_trip` 时按账本重新上 `DailyLoss` 闸门--这是「按账本
-/// 推导」，不是「回放冻结」。
+/// 真相），重启只清闸门；`tripped` 故不持久化，重启不自动重触发日内
+/// 熔断，下一笔使亏损超限的成交才会重新上 `DailyLoss` 闸门。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountGate {
@@ -65,6 +64,10 @@ pub(crate) enum GateReason {
     /// 进程级全局熔断（`risk.kill`）：对全账户拒新单、放平仓，纯内存、
     /// 重启即清，`risk.resume` 或 `unfreeze {target: "global"}` 解除。
     KillSwitch,
+    /// 启动时风险态文件不可读，按失败关闭冻结全部账户：系统级 fail-closed，
+    /// 绝不由操作员/场地自愈自解，需 `risk.resume` 或下次文件可读的 boot
+    /// 恢复（issue #861 的 corrupt-boot 条款，不复用 `Manual`）。
+    BootUnverifiable,
 }
 
 impl GateReason {
@@ -77,6 +80,7 @@ impl GateReason {
             GateReason::TradingDisabled => 4,
             GateReason::Manual => 5,
             GateReason::KillSwitch => 6,
+            GateReason::BootUnverifiable => 7,
         }
     }
 
@@ -91,6 +95,7 @@ impl GateReason {
             GateReason::TradingDisabled => "trading disabled",
             GateReason::Manual => "manual freeze",
             GateReason::KillSwitch => "kill switch",
+            GateReason::BootUnverifiable => "risk state unverifiable",
         }
     }
 }
@@ -393,15 +398,6 @@ impl Core {
                 entries_allowed,
                 "account unfrozen (config written back first, then gate cleared; realized ledger untouched)"
             );
-            self.emit(Event::RiskAlert {
-                code: blitzkrieg_market_api::CoreErrorCode::RiskRejected,
-                message: format!(
-                    "account {account} unfrozen by {actor} - previous gate: {}",
-                    previous_reason
-                        .as_ref()
-                        .map_or_else(|| "none".to_string(), |r| r.clone())
-                ),
-            });
         }
         Ok(UnfreezeResult {
             unfrozen: previous.is_some(),
