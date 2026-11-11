@@ -1,14 +1,16 @@
 /**
- * 轮次时间周期切换的共享状态（next_session 语义，issue 474）。
+ * 轮次时间周期切换的共享状态。
  *
  * 原住民是设置 · 通用 的「轮次时间周期」卡；2026-10-24 操作者指令把它
  * 带到行情页倒计时卡 —— 操作者在盯盘时要切周期，跑去设置页断了监视语境。
  * 两处消费同一份读数与同一条写路径（round_duration.get / round_duration.set，
- * 写入成功后 10s 自动重启内核），抽成 composable 让两个卡面共享一份逻辑、
- * 各自一份 restart 倒计时（restart-core 的组件级约定原样保留）。
+ * 写入后立即生效，无需重启），抽成 composable 让两个卡面共享一份逻辑、
+ * 各自一份 restart 倒计时（restart-core 的组件级约定原样保留，但不再为
+ * 轮次切换调度重启）。
  *
- * 语义不变（轮次网格是坐标系）：切换写入持久格、本会话网格不动、重启后
- * 生效；cli_or_env 显式参数在场时写入仍会保存但不会赢 —— 卡面照旧提示。
+ * 语义（轮次网格是坐标系）：切换写入持久格，本会话立即按新周期运行，
+ * 在途轮保持原网格结算；cli_or_env 显式参数在场时写入仍会保存但不会赢
+ * —— 卡面照旧提示。
  */
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
@@ -35,8 +37,7 @@ export function useRoundDuration() {
     return out
   })
   const value = computed<string>({
-    // 预填「下次会话将跑的值」（持久格优先），不是本会话生效值 —— 卡片承诺
-    // 的是「重启后是什么」。
+    // 预填当前轮长（持久格优先），即本会话生效值。
     get: () => String(pending.value ?? doc.value?.nextSessionSec ?? ''),
     set: (v) => { pending.value = Number(v) },
   })
@@ -80,9 +81,8 @@ export function useRoundDuration() {
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已保存：重启后按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
+        msg.value = `已生效：本会话按 ${res.nextSessionSec}s 轮次运行；在途轮保持原网格结算。`
         await load()
-        restart.schedule()
       }
     } catch (e) {
       err.value = e instanceof Error ? e.message : String(e)
@@ -104,9 +104,8 @@ export function useRoundDuration() {
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已清除面板设置：重启后回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。`
+        msg.value = `已生效：面板设置已清除，本会话回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）；在途轮不变。`
         await load()
-        restart.schedule()
       }
     } catch (e) {
       err.value = e instanceof Error ? e.message : String(e)

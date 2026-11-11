@@ -292,11 +292,13 @@ impl WebServer {
                 self.proxy_read("round_duration.get", serde_json::json!({}))
             }
             ("POST", "/api/round-duration/set") => {
-                // 轮次时间周期设置卡的写路径（next_session）：the body IS the
+                // 轮次时间周期设置卡的写路径（当前会话即生效）：the body IS the
                 // `round_duration.set` params object (`{durationSec?, reset?,
                 // reason?}`), forwarded verbatim. The kernel validates the
-                // whitelist and writes the durable cell; the reply names the
-                // next session's value and the running grid never moves.
+                // whitelist and writes the durable cell; `round_duration.set`
+                // takes effect in the running session immediately — wheels
+                // already in transit keep their birth grid, and an explicit
+                // `--round-sec` still outranks the cell value.
                 self.proxy_backtest_body("round_duration.set", &req.body)
             }
             ("GET", "/api/market-plugin") => {

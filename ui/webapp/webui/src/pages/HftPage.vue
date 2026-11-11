@@ -950,7 +950,7 @@ const journalOpen = ref(false)
             v-if="!switcherLocked"
             :content="roundSwitch.flagLocked.value
               ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
-              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换写入下次会话（重启生效，改动影响历史回测的 slot 索引）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
+              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换立即作用于本会话（改动影响历史回测的 slot 索引；在途轮保持原网格）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
           >
             <div class="flex items-center gap-1.5">
               <Timer class="size-3.5 text-faint-fg" />

@@ -629,8 +629,8 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         let c = core.lock().await;
         assert_eq!(
             c.config().round_duration_sec,
-            900,
-            "next-session semantics: the running grid does not move"
+            300,
+            "issue 1129: the running grid moves in-session immediately"
         );
     }
     // The cell content, read back through the SAME loader a restart
@@ -642,8 +642,8 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     .expect("the cell must load");
     assert_eq!(cell.duration_sec, 300);
 
-    // The readout now reports the cell as the next session's value while
-    // the effective value stays this session's.
+    // The readout now reports the cell as both the in-session effective
+    // value and the next session's value.
     let read2 = rpc(
         &core,
         &registry,
@@ -651,7 +651,11 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         r#"{"jsonrpc":"2.0","id":3,"method":"round_duration.get","params":{}}"#.to_string(),
     )
     .await;
-    assert_eq!(read2["result"]["effectiveSec"], serde_json::json!(900));
+    assert_eq!(
+        read2["result"]["effectiveSec"],
+        serde_json::json!(300),
+        "the live grid runs the new value in-session: {read2}"
+    );
     assert_eq!(read2["result"]["nextSessionSec"], serde_json::json!(300));
     assert_eq!(read2["result"]["persisted"], serde_json::json!(true));
 
@@ -712,8 +716,8 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     assert_eq!(reset["result"]["reset"], serde_json::json!(true));
     assert_eq!(
         reset["result"]["nextSessionSec"],
-        serde_json::json!(900),
-        "after a reset the next session re-resolves to the effective value: {reset}"
+        serde_json::json!(300),
+        "the cell cleared; next session re-resolves to the effective value that now runs in-session: {reset}"
     );
     assert_eq!(
         crate::runtime_config::load_round_duration_from(
@@ -731,7 +735,11 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     )
     .await;
     assert_eq!(read3["result"]["persisted"], serde_json::json!(false));
-    assert_eq!(read3["result"]["nextSessionSec"], serde_json::json!(900));
+    assert_eq!(
+        read3["result"]["nextSessionSec"],
+        serde_json::json!(300),
+        "after a reset the next session re-resolves to the (moved) effective value: {read3}"
+    );
 
     // A core with NO runtime config path (backtests, in-process tests)
     // refuses the write instead of dropping a file into whatever
@@ -751,6 +759,94 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
             .unwrap_or_default()
             .contains("persistence is disabled"),
         "a path-less core refuses the write: {refused}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #1129: `round_duration.set` moves the LIVE grid in-session
+/// (`effective_sec` flips immediately, not only `next_session_sec`) and
+/// persists the same value for the next session.
+#[tokio::test]
+async fn round_duration_set_takes_effect_in_session_immediately() {
+    let dir = std::env::temp_dir().join(format!("bk-round-dur-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cell_path = dir.join("config.json");
+    let cell_str = cell_path.to_string_lossy().into_owned();
+
+    let (core, registry, peer) = {
+        let cfg = CoreConfig {
+            runtime_config_path: Some(cell_str.clone()),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+            round_labels: [
+                (300, "5m"),
+                (900, "15m"),
+                (3600, "1h"),
+                (14400, "4h"),
+                (86400, "daily"),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let mut c = Core::new(cfg.clone());
+        c.set_balance(cfg.dry_seed_balance);
+        (
+            Arc::new(AsyncMutex::new(c)),
+            crate::market::registry::MarketPluginRegistry::new(),
+            PeerAuth::SameUid { uid: own_uid() },
+        )
+    };
+
+    let read = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.get","params":{}}"#.to_string(),
+    )
+    .await;
+    assert!(read.get("error").is_none(), "readout must answer: {read}");
+    let before = read["result"]["effectiveSec"].as_i64().unwrap();
+    let after = if before == 900 { 300 } else { 900 }; // any DIFFERENT whitelisted value
+
+    let set = rpc(
+        &core,
+        &registry,
+        &peer,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{{"durationSec":{},"reason":"in-session move"}}}}"#,
+            after
+        ),
+    )
+    .await;
+    assert!(set.get("error").is_none(), "the set must land: {set}");
+    assert_eq!(
+        set["result"]["nextSessionSec"],
+        serde_json::json!(after),
+        "the cell names the next session's value: {set}"
+    );
+
+    // In-session: the running grid moves NOW, not at restart.
+    let read2 = rpc(
+        &core,
+        &registry,
+        &peer,
+        r#"{"jsonrpc":"2.0","id":3,"method":"round_duration.get","params":{}}"#.to_string(),
+    )
+    .await;
+    assert_eq!(
+        read2["result"]["effectiveSec"],
+        serde_json::json!(after),
+        "effective_sec must flip in-session immediately: {read2}"
+    );
+    assert_eq!(
+        read2["result"]["nextSessionSec"],
+        serde_json::json!(after),
+        "next_session_sec persists the new value: {read2}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
