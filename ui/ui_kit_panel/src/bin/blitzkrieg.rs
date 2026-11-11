@@ -16,12 +16,13 @@ use blitzkrieg_ui_kit::core::net_check::{render_json, render_text};
 use blitzkrieg_ui_kit::gateway::{
     discover_binary, Dispatcher, StartOutcome, Supervisor, SupervisorConfig,
 };
-use blitzkrieg_ui_kit::web::WebServer;
+use blitzkrieg_ui_kit::web::{WebServer, PANEL_CREDENTIALS_MISSING};
 use blitzkrieg_ui_kit::{resolve_socket_path, IpcClient};
 use blitzkrieg_ui_panel::{
     parse_args_from, run_panel, run_panel_with_dispatcher, stop_stack, PanelArgs, Tab,
 };
 use std::io::IsTerminal;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -335,8 +336,174 @@ fn main() -> std::process::ExitCode {
         println!("{}", blitzkrieg_build_info::BUILD_INFO.version_string());
         return std::process::ExitCode::SUCCESS;
     }
+    // #1108/#1113: the file load MUST come before the auto-create pass — the
+    // completeness check in `ensure_env_file_and_credentials` reads the process
+    // environment, which only knows about an existing `.env` after
+    // `load_cwd_env`. Reading first means a legitimate `.env` never gets the
+    // spurious "incomplete credentials" warning on every boot.
     blitzkrieg_ui_panel::env_file::load_cwd_env();
+    // #1108: on `run` (also the default with no subcommand), check `.env`;
+    // missing → auto-create from `.env.example` with one-shot random panel
+    // credentials. An existing `.env` is never overwritten; a half-configured
+    // one only gets a complete-it hint, never a silent rebuild. Other subcommands
+    // (`stop`, `doctor`, `version`, …) must not touch the operator's `.env`.
+    let runs_the_stack = argv
+        .first()
+        .is_none_or(|a| a == "run" || a.starts_with('-'));
+    if runs_the_stack {
+        ensure_env_file_and_credentials();
+    }
     tokio_main()
+}
+
+/// #1108: 确保 `.env` 存在；不存在时从 `.env.example` 自动创建并生成一次性随机面板凭证。
+/// `.env` 已存在时绝不覆盖；半配置只提示补齐，不静默重建。`.env` 权限设为 0600。
+fn ensure_env_file_and_credentials() {
+    use std::path::Path;
+
+    let env_path = Path::new(".env");
+    let example_path = Path::new(".env.example");
+
+    // .env 已存在：不覆盖；只检查是否半配置（只提示补齐，不静默重建）
+    if env_path.exists() {
+        let has_user = std::env::var("BLITZKRIEG_PANEL_USER").is_ok();
+        let has_pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").is_ok();
+        if !has_user || !has_pass {
+            eprintln!(
+                "blitzkrieg: .env exists but panel credentials are incomplete.\n\
+                 Set BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD in .env or environment,\n\
+                 then restart."
+            );
+        }
+        return;
+    }
+
+    // .env 不存在：从 .env.example 创建
+    let example_content = match std::fs::read_to_string(example_path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("blitzkrieg: .env not found and .env.example not available");
+            return;
+        }
+    };
+
+    // 生成随机凭证
+    let user = format!("bk_panel_{}", random_alphanum(8));
+    let password = random_alphanum(24);
+
+    // Fill the template's EMPTY credential keys IN PLACE (#1113). The loader
+    // (`env_file::load_env_file`) is first-wins: if the template's blank
+    // `BLITZKRIEG_PANEL_USER=` stayed above an appended real pair, every boot
+    // AFTER the first would load the empty strings and filter out the real
+    // values — the random credentials would be dead on arrival. A template
+    // without the keys falls back to appending the pair.
+    let (new_content, filled) = fill_credential_keys(&example_content, &user, &password);
+
+    // 写入文件（权限 0600）
+    if let Err(e) = std::fs::write(env_path, &new_content) {
+        eprintln!("blitzkrieg: failed to write .env: {e}");
+        return;
+    }
+    if !filled {
+        eprintln!(
+            "blitzkrieg: warning: .env.example had no BLITZKRIEG_PANEL_USER/PASSWORD \
+             keys to fill; the pair was appended to the end of .env."
+        );
+    }
+    if let Err(e) = std::fs::set_permissions(env_path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("blitzkrieg: failed to set .env permissions to 0600: {e}");
+    }
+
+    // 设置环境变量（供本进程及子进程使用）
+    std::env::set_var("BLITZKRIEG_PANEL_USER", &user);
+    std::env::set_var("BLITZKRIEG_PANEL_PASSWORD", &password);
+
+    // Output a clear notice. The password itself is NEVER printed (#1113):
+    // a terminal is not the credential store, and scrollback outlives the
+    // session. The operator reads the real values from the 0600 `.env`.
+    eprintln!(
+        "\
+================================================================================
+⚠  Panel credentials auto-created in .env (permissions 0600)
+
+  BLITZKRIEG_PANEL_USER={user}
+  BLITZKRIEG_PANEL_PASSWORD=********  (random — read .env for the value)
+
+  The file is a dotfile: `cat .env` from a terminal, or press Cmd+Shift+.
+  in Finder to reveal hidden files.
+Change these in .env or set BLITZKRIEG_PANEL_USER/PASSWORD env vars.
+Do NOT commit .env — it contains real credentials.
+================================================================================
+",
+        user = user
+    );
+}
+
+/// Fill the template's blank `BLITZKRIEG_PANEL_USER=` / `BLITZKRIEG_PANEL_PASSWORD=`
+/// lines with the generated values, in place. Returns `(new_content, filled)`:
+/// `filled` is true only when BOTH keys existed to fill. Only an EMPTY value is
+/// replaced — a template carrying a pre-set value is operator intent, never
+/// overwritten.
+fn fill_credential_keys(template: &str, user: &str, password: &str) -> (String, bool) {
+    let mut filled_user = false;
+    let mut filled_pass = false;
+    let mut out = String::with_capacity(template.len() + user.len() + password.len());
+    for line in template.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !filled_user && trimmed.starts_with("BLITZKRIEG_PANEL_USER=") {
+            let value = trimmed["BLITZKRIEG_PANEL_USER=".len()..].trim();
+            if value.is_empty() {
+                out.push_str(&format!("BLITZKRIEG_PANEL_USER={user}\n"));
+                filled_user = true;
+                continue;
+            }
+        } else if !filled_pass && trimmed.starts_with("BLITZKRIEG_PANEL_PASSWORD=") {
+            let value = trimmed["BLITZKRIEG_PANEL_PASSWORD=".len()..].trim();
+            if value.is_empty() {
+                out.push_str(&format!("BLITZKRIEG_PANEL_PASSWORD={password}\n"));
+                filled_pass = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    if !filled_user {
+        out.push_str(&format!("\nBLITZKRIEG_PANEL_USER={user}\n"));
+    }
+    if !filled_pass {
+        out.push_str(&format!("BLITZKRIEG_PANEL_PASSWORD={password}\n"));
+    }
+    (out, filled_user && filled_pass)
+}
+
+/// One-shot random alphanumeric string for the auto-created panel credentials.
+/// Drawn from the OS CSPRNG (`/dev/urandom`) with rejection sampling, so every
+/// character is equiprobable — a time-seeded LCG or a modulo bias here would
+/// make the auto-created password guessable (#1113). The OS entropy source is
+/// mandatory: an unreadable `/dev/urandom` aborts credential creation loudly
+/// instead of falling back to something predictable.
+fn random_alphanum(len: usize) -> String {
+    use std::io::Read;
+
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    // 62 characters do not divide 256, so raw `byte % 62` is biased. Bytes
+    // below 62*4=248 cover exactly four full character cycles — accept only
+    // those and redraw the rest (rejection sampling).
+    const FAIR_MAX: u8 = 248;
+
+    let mut out = String::with_capacity(len);
+    let mut byte = [0u8; 1];
+    let mut urandom = std::fs::File::open("/dev/urandom")
+        .expect("open /dev/urandom: the OS CSPRNG is required for credential generation");
+    while out.len() < len {
+        urandom
+            .read_exact(&mut byte)
+            .expect("read /dev/urandom: the OS CSPRNG is required for credential generation");
+        if byte[0] < FAIR_MAX {
+            out.push(CHARS[(byte[0] % CHARS.len() as u8) as usize] as char);
+        }
+    }
+    out
 }
 
 /// Map one subcommand's result onto the process exit code, reporting the failure
@@ -999,6 +1166,23 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
 
     let dispatcher = Arc::new(Mutex::new(Dispatcher::new(cfg, lifecycle_enabled)));
 
+    // Web panel credentials are operator-chosen and live in `.env` (self-loaded
+    // by the launcher in `main`). Nothing starts without the pair: not the
+    // core, not the panel — no defaults, no read-only fallback.
+    if !cli.use_tui {
+        let user = std::env::var("BLITZKRIEG_PANEL_USER").ok();
+        let pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok();
+        if user.is_none() || pass.is_none() {
+            eprintln!(
+                "blitzkrieg: {PANEL_CREDENTIALS_MISSING}.\n  Fix: run 'blitzkrieg run' from a \
+                 directory that has .env.example — the launcher then auto-creates .env with \
+                 one-shot random credentials — or set BLITZKRIEG_PANEL_USER and \
+                 BLITZKRIEG_PANEL_PASSWORD in .env, then rerun."
+            );
+            std::process::exit(1);
+        }
+    }
+
     // The signal task is registered BEFORE the core is spawned. Between the
     // spawn and a late registration there is a window where SIGTERM/SIGINT
     // would take the default action — instant launcher death, with the freshly
@@ -1083,34 +1267,14 @@ async fn run_unified(args: Vec<String>) -> std::io::Result<()> {
         res
     } else {
         let client = IpcClient::new(socket.clone());
-        let user = std::env::var("BLITZKRIEG_PANEL_USER").ok();
-        let pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").ok();
+        // Credentials were validated above before anything started.
+        let user = std::env::var("BLITZKRIEG_PANEL_USER").expect("panel credentials checked above");
+        let pass =
+            std::env::var("BLITZKRIEG_PANEL_PASSWORD").expect("panel credentials checked above");
 
-        let server = if user.is_some() && pass.is_some() {
-            // Share the dispatcher that OWNS the core — not a fresh one. The
-            // panel's 停止 button and the "内核由其他进程启动" notice both read
-            // `managed = supervisor.owns()` from THIS dispatcher; a second
-            // dispatcher would own nothing and the panel would disown a core
-            // this very process spawned.
-            let mut s = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
-            s.set_panel_credentials(user, pass);
-            s.set_allowed_origins(allowed_origins);
-            s
-        } else {
-            if lifecycle_enabled {
-                println!(
-                    "blitzkrieg: note: BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD are \
-                     not set — the web panel runs in read-only mode. Set both to enable the \
-                     web command verbs."
-                );
-            }
-            let mut s = WebServer::new(client, 0);
-            // Even the read-only surface is behind the origin gate; a server
-            // deployment that serves it on a LAN address needs the same-origin
-            // and allowlist rules to know about that address.
-            s.set_allowed_origins(allowed_origins);
-            s
-        };
+        let mut server = WebServer::with_shared_gateway(client, 0, dispatcher.clone());
+        server.set_panel_credentials(Some(user), Some(pass));
+        server.set_allowed_origins(allowed_origins);
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let addr_clone = addr.clone();

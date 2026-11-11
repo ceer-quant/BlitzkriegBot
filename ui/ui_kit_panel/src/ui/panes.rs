@@ -84,7 +84,8 @@ pub(super) fn render_overview(f: &mut Frame, area: Rect, s: &UiSnapshot) {
         cards[2],
     );
 
-    // Net PnL — ledger口径 = balance + reserved − opening_equity（issue #1046）。
+    // Net PnL — ledger口径 = balance − opening_equity（issue #1046/#1063，
+    // 读内核 cumulative_net_pnl，reserved 抵押金不计入）。
     // opening_equity 缺失（LIVE 未首次上报 venue equity，或老内核）时
     // 显式显示 "unknown"，不得以成交折叠冒充净利；source 透出到子行。
     let (net_big, net_sub, net_style) = match s.net_pnl() {

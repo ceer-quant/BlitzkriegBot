@@ -480,9 +480,10 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
         ExitReason::StrategySignal,
         "merge never routes through the sell path; a stray tag must not resemble one"
     );
-    // #1072: the Lua momentum strategy's stop intents must stamp StopLoss,
-    // not the blanket StrategySignal — `stop_blocked_no_liquidity` is a stop
-    // that could not be placed for lack of a bid, still a stop event.
+    // #1075: the Lua momentum strategy's stop intents stamp separate variants —
+    // `stop_loss` (a real stop fill) is StopLoss, while `stop_blocked_no_liquidity`
+    // (a stop that could not be placed for lack of a fresh bid) is its own
+    // variant; both are protective (never profit-side) events.
     assert_eq!(
         super::risk_admission::exit_reason_from_strategy_tag("stop_loss"),
         ExitReason::StopLoss,
@@ -490,8 +491,8 @@ fn a_strategy_exit_carrying_a_known_reason_is_stamped_with_it() {
     );
     assert_eq!(
         super::risk_admission::exit_reason_from_strategy_tag("stop_blocked_no_liquidity"),
-        ExitReason::StopLoss,
-        "stop_blocked_no_liquidity（止损因无买盘未放单）也是止损事件"
+        ExitReason::StopBlockedNoLiquidity,
+        "stop_blocked_no_liquidity（止损因无买盘未放单）是自身变体，不与 StopLoss 合并"
     );
 
     // End-to-end: the intent's tag lands on the closed row.

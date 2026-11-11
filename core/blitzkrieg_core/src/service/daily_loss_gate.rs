@@ -5,6 +5,7 @@
 
 use crate::model::*;
 use blitzkrieg_market_api::net::now_ms;
+use rust_decimal::Decimal;
 
 use super::{Core, GateReason};
 
@@ -23,16 +24,44 @@ impl Core {
         // 下一个 UTC 日零点：日内熔断闸门在此自动到期（DailyLoss 到期自动清，
         // 无需操作员手动解冻）。
         let expires_at_ms = (crate::position::utc_day_index(now_ms) + 1) * crate::position::DAY_MS;
+        let unrealized_enabled = self.config.positions.daily_loss_marks_unrealized;
         for (account, t) in self.positions.take_daily_trips() {
+            let realized = t.realized_pnl_usd;
+            let unrealized = self.positions.unrealized_pnl_usd_for(account.as_str());
+            // Trigger口径：unrealized marks がオンなら realized + unrealized、オフなら realized のみ。
+            let drawdown = if unrealized_enabled {
+                realized + unrealized
+            } else {
+                realized
+            };
+            // Effective cap：実際に拘束する規則のみを報告（絶対額と equity 比を混在させない）。
+            let abs = self.config.positions.max_daily_loss_usd;
+            let pct = self.config.positions.max_daily_loss_equity_pct;
+            let opening = t.opening_equity_usd;
+            let rel = if pct > Decimal::ZERO && opening > Decimal::ZERO {
+                opening * pct / Decimal::from(100)
+            } else {
+                Decimal::ZERO
+            };
+            let (cap, rule_desc) = match (abs > Decimal::ZERO, rel > Decimal::ZERO) {
+                (true, true) => {
+                    if abs <= rel {
+                        (abs, "absolute".to_string())
+                    } else {
+                        (rel, format!("{}% of opening equity ${:.2}", pct, opening))
+                    }
+                }
+                (true, false) => (abs, "absolute".to_string()),
+                (false, true) => (rel, format!("{}% of opening equity ${:.2}", pct, opening)),
+                (false, false) => (Decimal::ZERO, "absolute".to_string()),
+            };
+
+            // Gate message — the freeze reason shown to the operator.
             self.set_account_gate(
                 account.as_str(),
                 format!(
-                    "Daily loss limit for account {} — net ${} against a ${} cap ({}% of the day's opening equity ${})",
-                    account,
-                    t.realized_pnl_usd,
-                    t.limit_usd,
-                    self.config.positions.max_daily_loss_equity_pct,
-                    t.opening_equity_usd,
+                    "Daily loss limit for account {} — drawdown ${:.2} vs cap ${:.2} ({})",
+                    account, drawdown, cap, rule_desc
                 ),
                 GateReason::DailyLoss,
                 Some(expires_at_ms),
@@ -40,20 +69,29 @@ impl Core {
                 now_ms,
                 None,
             );
+
+            // Kernel log + risk alert — full trigger口径, English only.
+            let detail = if unrealized_enabled {
+                format!(
+                    "(realized ${:.2} + unrealized ${:.2})",
+                    realized, unrealized
+                )
+            } else {
+                format!("(realized ${:.2}, realized only)", realized)
+            };
             let message = format!(
-                "DAILY LOSS LIMIT REACHED for account {account}: realized ${} + unrealized ${} = net ${} against a ${} cap ({}% of the day's opening equity ${}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",
-                t.realized_pnl_usd,
-                self.positions.unrealized_pnl_usd_for(account.as_str()),
-                t.realized_pnl_usd + self.positions.unrealized_pnl_usd_for(account.as_str()),
-                t.limit_usd,
-                self.config.positions.max_daily_loss_equity_pct,
-                t.opening_equity_usd
+                "DAILY LOSS LIMIT REACHED for account {}: drawdown ${:.2} {} vs cap ${:.2} ({}) — new entries for this account are frozen until the next UTC day (positions still exit normally)",
+                account.as_str(),
+                drawdown,
+                detail,
+                cap,
+                rule_desc
             );
             tracing::warn!(
                 day = t.day_index,
                 account = %account.as_str(),
-                realized = %t.realized_pnl_usd,
-                limit = %t.limit_usd,
+                realized = %realized,
+                limit = %cap,
                 "{}",
                 message
             );

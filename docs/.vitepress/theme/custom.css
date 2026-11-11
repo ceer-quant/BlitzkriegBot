@@ -250,9 +250,9 @@ body .VPNavBar.has-sidebar .content {
 /* 文档页正文回到胶囊之下：scoped 基础 padding-top 已全局移除（含首页），
    首页 hero 自带 padding 不受影响，但桌面端文档页正文会顶到视口顶端被
    胶囊遮住，只给非首页文档页补回：胶囊块高 68px（56+12）+ 28px 呼吸。
-   断点 960px（#1090）：<960 时 VPLocalNav 占位、H1 本就不被遮挡，
-   96px 在移动端是纯开销（375px 实测 gap +188）；960 与 menu/汉堡断点一致 */
-@media (min-width: 960px) {
+   断点 768px（#1090）：<768 时 VPLocalNav 占位、H1 本就不被遮挡，
+   96px 在移动端是纯开销（375px 实测 gap +188）；768 与 menu/汉堡断点一致 */
+@media (min-width: 768px) {
   body .VPContent.VPContent.has-sidebar:not(.is-home) {
     padding-top: 96px;
   }
@@ -634,6 +634,8 @@ body .VPNavBar.has-sidebar .content {
     margin: 8px 8px 0;
     border-radius: 14px;
     padding: 0 6px 0 12px;
+    /* #1091：375px 视口下胶囊内子项（搜索按钮 / 导航菜单）不得横向溢出视口 */
+    overflow-x: hidden;
   }
 
   /* 导航胶囊隐藏 = WebUI 的 nav md:hidden，入口由汉堡屏菜单接管 */
@@ -1412,6 +1414,7 @@ div[class*='language-'] {
 .bb-hero {
   position: relative;
   isolation: isolate;
+  overflow-x: clip;
 }
 
 .bb-hero::before {

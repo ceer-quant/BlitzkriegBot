@@ -905,10 +905,11 @@ pub struct BalanceResult {
     /// overwritten). `None` until known → `cumulative_net_pnl` is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_equity: Option<Decimal>,
-    /// Cumulative net PnL = balance + reserved − opening_equity (the single
-    /// ledger truth, §1046). `None` when `opening_equity` is unknown (LIVE
-    /// before the first venue report, or an older core). Never derived from
-    /// trade folding.
+    /// Cumulative net PnL = balance − opening_equity (the single ledger
+    /// truth, §1046/#1063: `reserved` collateral is NOT part of it — the
+    /// pure function structurally excludes it). `None` when `opening_equity`
+    /// is unknown (LIVE before the first venue report, or an older core).
+    /// Never derived from trade folding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_net_pnl: Option<Decimal>,
 }

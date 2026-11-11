@@ -271,6 +271,15 @@ pub(super) fn bearer_or_basic(value: &str) -> Option<String> {
         .and_then(|d| d.split(':').next().map(String::from))
 }
 
+/// The credential-missing diagnosis, one wording for both entry points:
+/// `WebServer::require_credentials` (gateway mode) and the `blitzkrieg run`
+/// launcher, which appends the `.env` remedy before refusing to start.
+pub const PANEL_CREDENTIALS_MISSING: &str =
+    "gateway mode requires panel credentials, but BLITZKRIEG_PANEL_USER and \
+     BLITZKRIEG_PANEL_PASSWORD are not both set. A half-configured pair counts as \
+     unconfigured, on purpose: guessing which half was meant is how a panel ends up \
+     open";
+
 impl WebServer {
     /// Guarantee the panel has credentials before it serves anything.
     ///
@@ -289,13 +298,9 @@ impl WebServer {
         if self.panel_user.is_some() && self.panel_password.is_some() {
             return Ok(());
         }
-        Err(
-            "gateway mode requires panel credentials, but BLITZKRIEG_PANEL_USER and \
-             BLITZKRIEG_PANEL_PASSWORD are not both set. A half-configured pair counts as \
-             unconfigured, on purpose: guessing which half was meant is how a panel ends up \
-             open. Export both and restart."
-                .to_string(),
-        )
+        Err(format!(
+            "{PANEL_CREDENTIALS_MISSING}. Export both and restart."
+        ))
     }
 
     /// True when a usable user/password pair is configured.

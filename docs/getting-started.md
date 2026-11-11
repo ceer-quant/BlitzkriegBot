@@ -41,17 +41,15 @@ cargo build --release
 
 **预期输出**：最后一行类似 `Finished release [optimized] target(s) in ...`。首次编译需要一些时间。
 
-### 4.1 构建面板前端
-
-如需使用 WebUI 面板（而非 TUI），需预先构建前端资源：
+## 4.1 构建面板前端（源码克隆必需）
 
 ```bash
-cd ui/webapp/webui
-pnpm install
-pnpm run build
+cd ui/webapp/webui && npm ci && npm run build
 ```
 
-构建产物输出至 `ui/webapp/webui/dist`，后续 `cargo run --release -- ui` 会自动嵌入。
+**预期输出**：`✓ built in ...s`。Vue 面板产物 `ui/webapp/webui/dist/` 不入库；缺这一步 `/panel` 会退化为内置 HTML 面板，不报错。
+
+> 需要 Node.js 与 npm。预编译发行包不需要。
 
 ## 5. 启动
 

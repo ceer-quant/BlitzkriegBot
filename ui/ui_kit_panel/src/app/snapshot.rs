@@ -86,5 +86,23 @@ impl App {
                 }
             }
         };
+        // Kill switch: engine.stats.tradingFrozen is the current source of
+        // truth. The banner used to react only to async RiskAlert events, so a
+        // freeze that predated the session (or an event the stream dropped)
+        // left the TUI with no indication that trading is halted (#1038).
+        // Reflect the snapshot's tradingFrozen on every poll so the banner
+        // matches the core's own verdict. `None` (old core without the key)
+        // and `active == false` both read as "not frozen", never as frozen.
+        self.kill_banner = self
+            .snap
+            .stats
+            .as_ref()
+            .and_then(|s| s.trading_frozen.as_ref())
+            .filter(|f| f.active)
+            .map(|f| {
+                f.reason
+                    .clone()
+                    .unwrap_or_else(|| "no reason given".to_string())
+            });
     }
 }

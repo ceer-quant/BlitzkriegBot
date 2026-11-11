@@ -1372,3 +1372,33 @@ fn a_long_outage_escalates_through_the_existing_alert_channel() {
     );
     assert_eq!(pm.suppressed_stop_count(), 1);
 }
+
+/// #1060: carried_trip 在真正的 UTC 日边界（previous_day_index.is_some()）
+/// 必须无条件清零 tripped 状态。只有在账户第一次 stamp（previous_day_index
+/// 为 None）且之前已 tripped 时，tripped 才会 carry over；否则新一天必须
+/// 从干净状态开始，不得携带昨日冻结。
+#[test]
+fn carried_trip_cleared_at_real_utc_day_boundary() {
+    let mut pm = PositionManager::new(PositionConfig::default());
+    let acct = AccountId::from("test-acct");
+    let acct_str = acct.as_str();
+    let day1_ms = 1_700_000_000_000;
+    let day2_ms = day1_ms + DAY_MS;
+
+    // Day 1: first stamp (previous_day_index = None, tripped = false)
+    pm.roll_daily(acct_str, day1_ms, dec!(1000), EquityBasis::Dry);
+    assert!(!pm.daily_loss_tripped_for(acct_str));
+
+    // Manually trip the account (simulating a prior day's loss breaker)
+    pm.set_daily_tripped_for_test(&acct, day1_ms + 1000, dec!(5));
+    assert!(pm.daily_loss_tripped_for(acct_str));
+
+    // Day 2: real UTC day boundary (previous_day_index = Some(day1),
+    // previous_tripped = true). carried_trip MUST be false: tripped is
+    // unconditionally cleared at a real day boundary.
+    pm.roll_daily(acct_str, day2_ms, dec!(1000), EquityBasis::Dry);
+    assert!(
+        !pm.daily_loss_tripped_for(acct_str),
+        "carried_trip must be false at a real UTC day boundary; tripped must not carry over"
+    );
+}

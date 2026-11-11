@@ -28,7 +28,7 @@ import Button from './components/ui/button/Button.vue'
 import AlertBanner from './components/ui/alert/AlertBanner.vue'
 import {
   connectionBanner, freezeBanner, lastErrorBanner, selfCheckBanner, archiveStoppedBanner,
-  accountFreezeBanners, overdueReceivableBanner,
+  accountFreezeBanners, configGateBanners, overdueReceivableBanner,
 } from '@/lib/safety'
 
 const store = usePanelStore()
@@ -101,12 +101,15 @@ const stats = computed(() => store.snapshot?.stats ?? null)
 const connBanner = computed(() => connectionBanner(store.snapshot))
 const freeze = computed(() => freezeBanner(stats.value))
 	// 风控冻结（issue 943 / issue 1044）：唯一来源是内核 freeze book stats.accountFreezes。
-	// 配态停用（account.status === 'frozen'）与风控冻结是两回事，不得混入同一 red
-	// banner；配态停用在设置页单独呈现为「配置停用」，不提供面板解冻。
-	const accountFreezes = computed(() => accountFreezeBanners(stats.value))
-const lastError = computed(
-  () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
-)
+		// 配态停用（account.status === 'frozen'）与风控冻结是两回事，不得混入同一 red
+		// banner；配态停用在设置页单独呈现为「配置停用」，不提供面板解冻。
+		const accountFreezes = computed(() => accountFreezeBanners(stats.value))
+		// 配置态闸门（read_only / suspended / trading disabled）：由 .env 派生，
+		// 不提供面板解冻，呈现为可关闭的 amber 提示，不钉死在 cockpit。
+		const configGates = computed(() => configGateBanners(stats.value))
+	const lastError = computed(
+	  () => lastErrorBanner(stats.value, freeze.value !== null || accountFreezes.value.length > 0),
+	)
 const selfCheck = computed(() => selfCheckBanner(stats.value))
 const archiveStopped = computed(() => archiveStoppedBanner(stats.value))
 const overdueReceivable = computed(() =>
@@ -328,8 +331,9 @@ onMounted(() => {
         >{{ store.error }}</AlertBanner>
       </div>
 
-      <!-- trading-safety banners — 顶部，任何页面均可见：红色紧急（冻结/自检/RISK_REJECTED）
-           钉住、无 ✕、不自动消失；琥珀（连接/归档/应收账款/其余拒单）可关 + 40s 自动消失 -->
+	      <!-- trading-safety banners — 顶部，任何页面均可见：红色紧急（冻结/自检）
+	           钉住、无 ✕、不自动消失；琥珀（连接/归档/应收账款/其余拒单，含 RISK_REJECTED
+	           等瞬时拒单）可关 + 40s 自动消失，不出冻结文案、不指路解冻 -->
       <div v-if="connBanner && connBannerVisible" class="mb-3.5">
         <AlertBanner
           tone="warn"
@@ -346,8 +350,9 @@ onMounted(() => {
         <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
       </div>
       <div v-else-if="lastError && lastErrorVisible" class="mb-3.5">
-        <!-- RISK_REJECTED（如日损失限额）由 safety.ts 升为 urgent：tone=error、不 dismissible、
-             不自动消失、无 ✕；其余拒单保持琥珀 warn + 可关 + 40s 自动消失 -->
+        <!-- 仅 accountGates[acct].blocked 的账户才出冻结红横幅（accountFreeze
+             循环下方）；RISK_REJECTED 等瞬时拒单在此处走普通琥珀警告，不出
+             冻结文案、不指路解冻。 -->
         <AlertBanner
           :tone="lastError.tone"
           :title="lastError.title"
@@ -363,6 +368,14 @@ onMounted(() => {
       <div v-for="af in accountFreezes" :key="`account-freeze-${af.title}`" class="mb-3.5">
         <!-- 紧急：单账户冻结不设全局 kill，藏掉它就是把事故说成正常。每冻结户一条红横幅 -->
         <AlertBanner tone="error" :title="af.title" :hint="af.hint">{{ af.body }}</AlertBanner>
+      </div>
+      <div v-for="cg in configGates" :key="cg.identity" class="mb-3.5">
+        <!-- 配置态闸门：amber、可关、自动消失，无解冻门；改 .env 并重启即可恢复 -->
+        <AlertBanner tone="warn" :title="cg.title" :hint="cg.hint" dismissible :auto-dismiss-ms="AUTO_DISMISS_MS"
+          :auto-key="`config-${cg.identity}`" @dismiss="cg.identity && dismiss(cg.identity)"
+        >
+          {{ cg.body }}
+        </AlertBanner>
       </div>
       <div v-if="selfCheck" class="mb-3.5">
         <!-- 紧急：自检失败伴随冻结面 —— 同冻结一样钉住 -->

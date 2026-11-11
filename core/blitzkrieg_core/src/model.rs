@@ -345,6 +345,12 @@ fn is_zero_i64(v: &i64) -> bool {
 pub enum ExitReason {
     TakeProfit,
     StopLoss,
+    /// #1075: the Lua momentum strategy emitted a stop-loss intent but the
+    /// kernel could not place a sell because no fresh executable bid existed
+    /// (`stop_blocked_no_liquidity`). Distinct from a real StopLoss fill so the
+    /// ledger can tell "stop was breached" apart from "stop could not be
+    /// executed"; both are protective (never profit-side) events.
+    StopBlockedNoLiquidity,
     RatchetFloor,
     TrailingStop,
     BreakevenLock,

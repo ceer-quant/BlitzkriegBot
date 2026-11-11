@@ -9,8 +9,10 @@
 
 use super::*;
 use crate::risk::RiskConfig;
+use crate::service::risk_admission::GateReason;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal_macros::dec;
+use tokio::sync::mpsc;
 
 fn core() -> Core {
     Core::new(CoreConfig {
@@ -427,4 +429,70 @@ fn venue_bound_fixture() -> Core {
         ..Default::default()
     };
     Core::with_account_book(cfg, book)
+}
+
+/// #1060 Finding 3: expired account gates are dropped from stats — a DailyLoss
+/// gate past its UTC expiry must not linger as a stale `blocked=false` row.
+#[test]
+fn expired_account_gate_does_not_appear_in_stats() {
+    let mut c = core();
+    let now = now_ms();
+    // Expired DailyLoss gate on an account that need not even exist in the book.
+    c.set_account_gate(
+        "stale-acct",
+        "Daily loss limit for account stale-acct ...".into(),
+        GateReason::DailyLoss,
+        Some(now - 1_000),
+        "daily-loss breaker",
+        now,
+        None,
+    );
+    // Non-expiring Manual gate must still show.
+    c.freeze_account_manual("default", "operator: paused".into());
+
+    let stats = c.engine_stats();
+    let gates = stats
+        .get("accountGates")
+        .and_then(|v| v.as_array())
+        .expect("accountGates array is always present");
+    let accounts: Vec<&str> = gates
+        .iter()
+        .filter_map(|g| g.get("account").and_then(|a| a.as_str()))
+        .collect();
+    // The gate ids are account identifiers, so the failure messages carry only
+    // the boolean verdicts (CodeQL rust/cleartext-logging: account names must
+    // not be interpolated into logs, tests included).
+    assert!(
+        !accounts.contains(&"stale-acct"),
+        "expired DailyLoss gate must not appear in stats"
+    );
+    assert!(
+        accounts.contains(&"default"),
+        "non-expired Manual gate must still appear in stats"
+    );
+}
+
+/// #1060 Finding 4: unfreeze must not emit a RiskRejected RiskAlert (that
+/// triggers false front-end red banners); it is an info-level event only.
+#[test]
+fn unfreeze_does_not_emit_risk_rejected_alert() {
+    let mut c = core();
+    c.freeze_account_manual("default", "operator: paused".into());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    c.set_event_sink(tx);
+    let r = c
+        .unfreeze_account("default", "operator", now_ms())
+        .expect("unfreeze succeeds");
+    assert!(r.unfrozen, "default gate cleared");
+    let codes: Vec<_> = std::iter::from_fn(|| match rx.try_recv() {
+        Ok(Event::RiskAlert { code, .. }) => Some(code),
+        Ok(_) => None,
+        Err(_) => None,
+    })
+    .take(8)
+    .collect();
+    assert!(
+        !codes.contains(&blitzkrieg_market_api::CoreErrorCode::RiskRejected),
+        "unfreeze must not emit RiskRejected: {codes:?}"
+    );
 }

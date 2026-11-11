@@ -285,6 +285,14 @@ fn a_corrupt_risk_state_file_boots_fail_closed() {
                       (fail-closed, issue #861)"
         )
     );
+    // #1060: the corrupt-boot freeze carries a dedicated, independent
+    // reasonKind/actor — never `Manual` + `operator:{id}`.
+    let gate = c2
+        .account_gates()
+        .get("default")
+        .expect("default account frozen on corrupt boot");
+    assert_eq!(gate.reason_kind, GateReason::BootUnverifiable);
+    assert_eq!(gate.actor, "system");
     // The boot's persist rewrote a valid file (the frozen boot state).
     assert!(
         matches!(load_risk_state_file(&path), RiskStateLoad::Ok(_)),

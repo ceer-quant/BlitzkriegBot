@@ -145,24 +145,10 @@ export function lastErrorBanner(
   const structured = stats?.lastError
   if (structured) {
     if (SUPPRESSED_BANNER_CODES.has(structured.code)) return null
-    // RISK_REJECTED 表示内核的风控系统拒绝了交易——日损失限额、持仓上限、
-    // 安全网熔断等都是“交易此刻停了”的冻结级条件，不是可忽略的瞬态拒绝。
-    // 渲染为红色紧急横幅，钉住、无 ✕、不自动消失；与 WOULD_CROSS 这种
-    // 市场正常结果的拒单（已在 SUPPRESSED_BANNER_CODES 里屏蔽）严格区分。
-    if (structured.code === 'RISK_REJECTED') {
-      // 日损失限额触发 = 该账户交易已停 = 冻结。标题写账户名 + 冻结，
-      // 第三行（hint）用操作者能读懂的中文：日内损失已超限额，内核冻结了此账户的交易。
-      const accountMatch = structured.message.match(/account\s+(\S+)/)
-      const account = accountMatch ? accountMatch[1] : ''
-      return {
-        tone: 'error',
-        urgent: true,
-        title: `${account}账户交易已经冻结`,
-        body: structured.message,
-        code: structured.code,
-        hint: '日内交易损失已经超过限额，内核冻结了此账户的交易；日内熔断至下一 UTC 日自动恢复，或到 设置 · 风控卡片解冻。',
-      }
-    }
+    // 任何拒绝记录（含 RISK_REJECTED：日损失限额、持仓上限等）都不再升
+    // 为「账户冻结」：冻结横幅 + 解冻入口只来自
+    // stats.accountGates[acct].blocked === true（accountFreezeBanners / accountFrozen）。
+    // 瞬时拒单只走下面的普通警告横幅，不出冻结文案，不指路解冻。
     return {
       tone: 'warn',
       urgent: false,
@@ -227,7 +213,15 @@ export function accountFreezeBanners(stats: EngineStats | null | undefined): Saf
   const gates = stats?.accountGates
   if (!gates) return []
   return gates
-    .filter((g) => g.blocked && g.account)
+    .filter(
+      (g) =>
+        g.blocked &&
+        g.account &&
+        // Configuration-posture gates (read_only / suspended / trading
+        // disabled) are NOT risk freezes: no red banner, no unfreeze door.
+        // They render via configGateBanners instead.
+        !isConfigGate(g.reasonKind)
+    )
     .sort((a, b) => a.account.localeCompare(b.account))
     .map((g) => ({
       // Urgent per the 2026-10-28 operator call: while THIS account is frozen
@@ -239,6 +233,48 @@ export function accountFreezeBanners(stats: EngineStats | null | undefined): Saf
       body: g.reason || '该账户已被冻结，原因未上报。',
       hint: '该账户拒一切新单（手动 + 策略开仓），平仓照放。核对原因后到 设置 · 风控卡片解冻（持久冻结，需运营人员解冻，仅自动冻结可被健康探针自愈）。冻结只影响这一个账户，其他账户照常交易。',
     }))
+}
+
+/**
+ * Configuration-posture gate banners (read_only / suspended / trading
+ * disabled): amber, dismissible, auto-fade. No unfreeze door — the operator
+ * must edit .env and restart. One banner per account whose gate is a config
+ * gate.
+ */
+export function configGateBanners(stats: EngineStats | null | undefined): SafetyBanner[] {
+  const gates = stats?.accountGates
+  if (!gates) return []
+  return gates
+    .filter(
+      (g) =>
+        g.blocked &&
+        g.account &&
+        isConfigGate(g.reasonKind)
+    )
+    .sort((a, b) => a.account.localeCompare(b.account))
+    .map((g) => {
+      const kind = g.reasonKind ?? ''
+      const title =
+        kind === 'ConfigReadOnly'
+          ? `账户配置为只读（${g.account}）`
+          : kind === 'ConfigSuspended'
+            ? `账户已配置停用（${g.account}）`
+            : `账户交易已关闭（${g.account}）`
+      const hint =
+        kind === 'ConfigReadOnly'
+          ? 'read_only 派生自 .env AccountStatus，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。平仓照放，仅新单被拒。'
+          : kind === 'ConfigSuspended'
+            ? 'suspended 派生自 .env AccountStatus，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。'
+            : 'trading_enabled=false 派生自 .env，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。'
+      return {
+        tone: 'warn' as const,
+        urgent: false,
+        identity: `config-gate:${g.account}:${kind}`,
+        title,
+        body: g.reason || '该账户由配置态停用新单入场。',
+        hint,
+      }
+    })
 }
 
 /**
@@ -254,19 +290,40 @@ export function accountFrozen(
 ): boolean {
   if (!accountId) return false
   return Boolean(
-    stats?.accountGates?.some((g) => g.account === accountId && g.blocked === true),
+    stats?.accountGates?.some(
+      (g) =>
+        g.account === accountId &&
+        g.blocked === true &&
+        // Configuration-posture gates are not "frozen" for HFT countdown
+        // purposes — they block entries via config, not via the risk freeze
+        // path, and the HFT page should not treat them as a risk freeze.
+        !isConfigGate(g.reasonKind),
+    ),
   )
 }
 
 /**
- * The market-data archive stopped recording (issue 669 ②). The kernel's own
- * stop is a single journal warn line — an external operator found FIVE DAYS of
- * silently missing backtest corpus with a manual `df`. The kernel also emits
- * one risk alert on the stop edge; this banner is the CONTINUOUS face: it reads
- * `stats.archive` (recording/stoppedReason) every snapshot, so a panel opened
- * days after the stop still shows it. Older cores send `archive: null` —
- * absence renders nothing, never an invented outage.
+ * Configuration-derived gate kinds: the account is blocked because its .env /
+ * config posture says so (read_only / suspended / trading disabled), NOT because
+ * the risk system froze it. These gates are NOT liftable via account.unfreeze —
+ * the operator must edit the config and restart. They must never render as a
+ * red "account frozen" banner with an unfreeze door.
  */
+const CONFIG_GATE_KINDS = new Set([
+  'ConfigReadOnly',
+  'ConfigSuspended',
+  'TradingDisabled',
+])
+
+/**
+ * Is this gate kind a configuration posture (read_only / suspended / trading
+ * disabled) rather than a risk event (venue rejection / daily loss / manual /
+ * kill switch)? Configuration gates are informational only: no unfreeze door,
+ * no red freeze banner — just a "read the config" hint.
+ */
+export function isConfigGate(kind: string | null | undefined): boolean {
+  return kind != null && CONFIG_GATE_KINDS.has(kind)
+}
 export function archiveStoppedBanner(stats: EngineStats | null | undefined): SafetyBanner | null {
   const archive = stats?.archive
   if (!archive || archive.recording !== false) return null

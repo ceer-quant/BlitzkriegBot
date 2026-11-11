@@ -514,6 +514,27 @@ do
     "峰值 ≥22% 武装后 15pp 回落触发 trailing_stop，got " .. exit_reasons(r2))
 end
 
+-- 给back口径：回撤按高水位 GROSS best_bid 计算（与内核 highPnlPct−netPnlPct
+-- 同一 口径），而非净 proceeds。在入场 0.28、峰值 bid 0.40（已武装）时，
+-- bid 回落到 0.358：自最高价回落 (0.40−0.358)/0.28 = 15pp，触发；同一时点
+-- 的净-proceeds 回撤约 14.75pp (<15)，旧 net 基准在此处不会触发。
+do
+  reset()
+  state.params = {
+    take_profit_pct = "0", take_profit_price = "0", trail_giveback_pct = "15",
+  }
+  state.time_left = 461
+  hold("down-1", "0.28")
+  -- 0.40 扣费净约 0.383，入场 0.28 → 净回报约 37% ≥ 22% 武装线
+  quote("down-1", "0.400", "0.410")
+  local r1 = evaluate()
+  ok(#r1.exits == 0, "武装 tick 本身不是回撤，不发 exit，got " .. exit_reasons(r1))
+  quote("down-1", "0.358", "0.368")
+  local r2 = evaluate()
+  ok(#r2.exits == 1 and r2.exits[1].reason == "trailing_stop",
+    "高水位 GROSS bid 回撤 15pp 触发 trailing_stop（净口径约 14.75pp 不触发），got " .. exit_reasons(r2))
+end
+
 -- the mid is not the sell. mid would be 0.42 (+50%); the bid is 0.30 and
 -- the fee-net gain is ~2%, under both the 40% target and the 22% arm.
 do

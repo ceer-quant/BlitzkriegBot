@@ -254,11 +254,10 @@ impl Core {
         // `auto_frozen` keys is read without error (serde ignores unknown keys)
         // and those keys are deliberately NOT replayed: no freeze is restored,
         // no account is frozen at boot, and the file's stale rows are simply
-        // ignored (the next `save` rewrites the file without them). The daily
-        // loss breaker is re-derived from the persisted daily budget on the
-        // first tick (`emit_daily_trip` re-lifts the `DailyLoss` gate for any
-        // account whose realized loss still exceeds the cap)—"按账本推导",
-        // 不是「回放冻结」。
+        // ignored (the next `save` rewrites the file without them). `tripped`
+        // is not persisted, so `emit_daily_trip` only publicizes THIS session's
+        // newly-latched trips — the daily breaker re-triggers on the next loss
+        // that breaches the cap, never from a remembered latch.
     }
 
     /// The corrupt-boot fail-closed freeze (issue #861's surviving clause):
@@ -271,6 +270,7 @@ impl Core {
         let reason = "risk-state file unreadable — risk posture unverifiable until resumed \
                       (fail-closed, issue #861)"
             .to_string();
+        let now_ms = now_ms();
         let accounts: Vec<String> = self
             .accounts
             .account_list()
@@ -278,7 +278,23 @@ impl Core {
             .map(|a| a.id.as_str().to_string())
             .collect();
         for id in &accounts {
-            self.freeze_account(id, reason.clone());
+            // #861 corrupt-boot: a dedicated, independent reason/actor — never
+            // `Manual` + `operator:{id}`, which would look like an operator
+            // verdict and be wrongly attributable/self-healable.
+            let _ = self.set_account_gate(
+                id,
+                reason.clone(),
+                GateReason::BootUnverifiable,
+                None,
+                "system",
+                now_ms,
+                None,
+            );
+            tracing::error!(
+                account = %id,
+                reason = %reason,
+                "corrupt-boot fail-closed freeze (risk state unverifiable, restart-clear)"
+            );
         }
         self.persist_risk_state();
     }

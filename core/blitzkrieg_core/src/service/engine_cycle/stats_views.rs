@@ -516,10 +516,12 @@ impl Core {
             // #1045: the single in-memory entry gate per account
             // (blocked / reason / reasonKind / sinceMs / expiresAtMs / actor).
             // Pure in-memory, a restart starts clean; expired DailyLoss gates
-            // read as not-blocked automatically.
+            // are dropped from stats entirely rather than shown as stale
+            // blocked=false rows.
             "accountGates": self
                 .account_gates()
                 .iter()
+                .filter(|(_, g)| g.expires_at_ms.is_none_or(|expires| as_of_ms < expires))
                 .map(|(id, g)| {
                     // #1045 BLOCK-3: report the EFFECTIVE blocked state (expired
                     // DailyLoss gates read as not-blocked), not the stale stored

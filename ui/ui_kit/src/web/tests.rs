@@ -161,6 +161,49 @@ fn render_json_reports_gateway_capabilities() {
     assert_eq!(doc["gateway"]["lifecycleEnabled"], serde_json::json!(false));
 }
 
+/// #1064: the JSON wire carries the ledger-truth cumulative net PnL keys
+/// (issue #1046) verbatim — `null` when the kernel hasn't reported them
+/// (unknown ≠ 0, never derived locally).
+#[test]
+fn render_json_balance_carries_the_ledger_net_pnl_keys() {
+    let bal = |opening: Option<f64>, net: Option<f64>| UiSnapshot {
+        balance: Some(crate::core::types::BalanceView {
+            balance: 1015.0,
+            reserved: 4.0,
+            available: 1011.0,
+            seed: Some(1000.0),
+            opening_equity: opening,
+            cumulative_net_pnl: net,
+        }),
+        ..UiSnapshot::default()
+    };
+
+    // Both keys carried: the values travel verbatim, never re-derived.
+    let doc: serde_json::Value =
+        serde_json::from_str(&render_json(&bal(Some(1000.0), Some(15.0)), None)).unwrap();
+    assert_eq!(doc["balance"]["openingEquity"], serde_json::json!(1000.0));
+    assert_eq!(doc["balance"]["cumulativeNetPnl"], serde_json::json!(15.0));
+    assert_eq!(doc["balance"]["seed"], serde_json::json!(1000.0));
+
+    // Unknown stays null on the wire, never 0 (issue #1046 red line); and a
+    // default snapshot (no balance at all) keeps the whole block null.
+    let doc: serde_json::Value =
+        serde_json::from_str(&render_json(&bal(None, None), None)).unwrap();
+    assert_eq!(
+        doc["balance"]["openingEquity"],
+        serde_json::Value::Null,
+        "opening equity unknown → null, not 0"
+    );
+    assert_eq!(
+        doc["balance"]["cumulativeNetPnl"],
+        serde_json::Value::Null,
+        "cumulative net unknown → null, not 0"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&render_json(&UiSnapshot::default(), None)).unwrap();
+    assert_eq!(doc["balance"], serde_json::Value::Null);
+}
+
 /// The update half of the snapshot contract: `stageState` is ON the wire
 /// (it never was — the WebUI's staging badge read a key the gateway never
 /// wrote), and `systemVersion` carries the failure reason + the staging
