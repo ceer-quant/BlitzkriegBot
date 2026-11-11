@@ -854,14 +854,16 @@ impl WebServer {
                     None => {
                         // #1107: panel assets missing — fail-closed with an
                         // explicit message, never fall back to a fake HTML panel.
-                        let body = "<!DOCTYPE html><html><head><title>Panel unavailable</title></head>\
+                        let body =
+                            "<!DOCTYPE html><html><head><title>Panel unavailable</title></head>\
                              <body><h1>Panel unavailable</h1>\
                              <p>The Vue frontend assets (`ui/webapp/webui/dist/`) were not built.\
                              The panel is intentionally not serving a substitute page.</p>\
                              <p>Fix: <code>cd ui/webapp/webui && npm ci && npm run build</code>,\
                              then <code>blitzkrieg stop && blitzkrieg run</code>.</p>\
                              <p>Or use a pre-built release archive (the `webui/` dir ships\
-                             next to the binary).</p></body></html>".to_string();
+                             next to the binary).</p></body></html>"
+                                .to_string();
                         (503, "text/html; charset=utf-8", body.into_bytes())
                     }
                 }

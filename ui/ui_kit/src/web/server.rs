@@ -185,7 +185,8 @@ impl WebServer {
         // the core running (TUI still works), but the panel must never silently
         // fall back to an in-page HTML facade — it must say "not available".
         if super::vue_panel_dir().is_none() {
-            eprintln!("\
+            eprintln!(
+                "\
 ======================================================================\
 ⚠  Panel asset root missing: Vue frontend not built.\
 \
@@ -195,7 +196,8 @@ the probe locations. `/panel` will return 503 instead of a blank/legacy page.\
 Fix: `cd ui/webapp/webui && npm ci && npm run build`, then restart `blitzkrieg run`.\
 Or use a pre-built release archive (the `webui/` dir ships next to the binary).\
 ======================================================================\
-");
+"
+            );
         }
 
         let listener = TcpListener::bind(addr)?;
