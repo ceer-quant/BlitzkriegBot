@@ -152,6 +152,7 @@ end
 -- an UP-token spike arms the UP leg: ONE entry rests at ITS best_bid.
 do
   reset()
+  state.params = { max_entry_price = "0" } -- 禁用 0.50 筹码上限，此处只验证 UP leg 入场
   feed("down-1", 0.50, 0)
   feed("up-1", 0.50, 0)
   feed("up-1", 0.60, 1000) -- +20%: ≥ threshold
@@ -159,7 +160,7 @@ do
   ok(#r.entries == 1, "a rising UP leg fires exactly one entry, got " .. #r.entries)
   local e = r.entries[1]
   ok(e ~= nil and e.token == "up-1", "the UP premise buys the UP leg (up-1)")
-  ok(e ~= nil and e.price == "0.59", "UP entry rests at its own best_bid 0.59")
+  ok(e ~= nil and tonumber(e.price) == 0.59, "UP entry rests at its own best_bid 0.59 (mid 0.60 − 0.01), got " .. tostring(e.price))
 end
 
 -- a falling UP leg is the wrong direction for that token: the DOWN premise
@@ -687,7 +688,7 @@ end
 
 do
   reset()
-  state.params = { allow_both_sides = "1" }
+  state.params = { allow_both_sides = "1", max_entry_price = "0", max_entries_per_round = "2" }
   feed("down-1", 0.50, 0)
   feed("down-1", 0.45, 1000)
   state.holdings = {
@@ -784,6 +785,88 @@ do
   local r = evaluate()
   ok(#r.entries == 1, "at the cooldown boundary the second entry is offered, got "
     .. #r.entries)
+end
+
+-- ── #1123 入场门：min_time_left_for_entry ──────────────────────────────────
+
+-- time_left_sec 低于安全余量时不开新仓（fail-closed：读不到时间也不开仓）。
+do
+  reset()
+  state.params = { min_time_left_for_entry = "120" }
+  state.time_left = 100 -- 不足安全余量
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000) -- −10% ≥ 4% threshold, premise confirmed
+  local r = evaluate()
+  ok(#r.entries == 0, "time_left 100 < min_time_left_for_entry 120: no new entry, got " .. #r.entries)
+end
+
+do
+  reset()
+  state.params = { min_time_left_for_entry = "120" }
+  state.time_left = 200 -- 余量充足
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  local r = evaluate()
+  ok(#r.entries == 1, "time_left 200 ≥ min_time_left_for_entry 120: entry offered, got " .. #r.entries)
+end
+
+-- 0 禁用入场门：余量充足时也仍出价（60s force-exit 窗口另行收口，故此处用 100s）。
+do
+  reset()
+  state.params = { min_time_left_for_entry = "0" }
+  state.time_left = 100
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  local r = evaluate()
+  ok(#r.entries == 1, "min_time_left_for_entry 0: entry offered at time_left 100, got " .. #r.entries)
+end
+
+-- ── #1123 持仓门：unverifiable_window_sec ───────────────────────────────────
+
+-- 进入最后可验证窗口时主动离场，按 best bid − taker fee 落袋。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "120",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
+  }
+  state.time_left = 100 -- 进入不可验证窗口
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "time_exit",
+    "time_left 100 <= unverifiable_window_sec 120: forced exit, got " .. exit_reasons(r))
+end
+
+-- 窗口外不主动离场（其他 exit 规则不满足时持有至 settlement）。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "120",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
+  }
+  state.time_left = 200
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 0, "time_left 200 > unverifiable_window_sec 120: no forced exit, got " .. exit_reasons(r))
+end
+
+-- 0 禁用持仓门：极少剩余时间也不主动离场。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "0",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
+  }
+  state.time_left = 10
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 0, "unverifiable_window_sec 0: no forced exit even at time_left 10, got " .. exit_reasons(r))
 end
 
 -- ── verdict ─────────────────────────────────────────────────────────────────
