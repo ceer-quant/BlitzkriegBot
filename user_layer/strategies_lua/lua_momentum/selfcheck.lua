@@ -152,6 +152,7 @@ end
 -- an UP-token spike arms the UP leg: ONE entry rests at ITS best_bid.
 do
   reset()
+  state.params = { max_entry_price = "0" } -- 禁用 0.50 筹码上限，此处只验证 UP leg 入场
   feed("down-1", 0.50, 0)
   feed("up-1", 0.50, 0)
   feed("up-1", 0.60, 1000) -- +20%: ≥ threshold
@@ -159,7 +160,7 @@ do
   ok(#r.entries == 1, "a rising UP leg fires exactly one entry, got " .. #r.entries)
   local e = r.entries[1]
   ok(e ~= nil and e.token == "up-1", "the UP premise buys the UP leg (up-1)")
-  ok(e ~= nil and e.price == "0.59", "UP entry rests at its own best_bid 0.59")
+  ok(e ~= nil and tonumber(e.price) == 0.59, "UP entry rests at its own best_bid 0.59 (mid 0.60 − 0.01), got " .. tostring(e.price))
 end
 
 -- a falling UP leg is the wrong direction for that token: the DOWN premise
@@ -687,7 +688,7 @@ end
 
 do
   reset()
-  state.params = { allow_both_sides = "1" }
+  state.params = { allow_both_sides = "1", max_entry_price = "0", max_entries_per_round = "2" }
   feed("down-1", 0.50, 0)
   feed("down-1", 0.45, 1000)
   state.holdings = {
