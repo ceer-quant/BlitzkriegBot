@@ -86,6 +86,7 @@ pub struct ReadyView {
 // ── ledger.balance ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BalanceView {
     #[serde(deserialize_with = "de_num")]
     pub balance: f64,
