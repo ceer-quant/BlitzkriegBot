@@ -380,7 +380,9 @@ impl Core {
         if let Some(g) = self.account_gate(account)
             && matches!(
                 g.reason_kind,
-                GateReason::ConfigReadOnly | GateReason::ConfigSuspended | GateReason::TradingDisabled
+                GateReason::ConfigReadOnly
+                    | GateReason::ConfigSuspended
+                    | GateReason::TradingDisabled
             )
         {
             return Err(CoreError::new(
