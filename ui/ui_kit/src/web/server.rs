@@ -180,6 +180,26 @@ impl WebServer {
 
     /// Serve until the process is stopped. `addr` e.g. `127.0.0.1:51888`.
     pub fn serve(&self, addr: &str) -> std::io::Result<()> {
+        // #1107: probe the panel asset root before binding.  If the Vue dist is
+        // absent, log a loud error with an executable fix instruction and keep
+        // the core running (TUI still works), but the panel must never silently
+        // fall back to an in-page HTML facade — it must say "not available".
+        if super::vue_panel_dir().is_none() {
+            eprintln!(
+                "\
+======================================================================\
+⚠  Panel asset root missing: Vue frontend not built.\
+\
+The Vue panel assets (`ui/webapp/webui/dist/index.html`) were not found at any of\
+the probe locations. `/panel` will return 503 instead of a blank/legacy page.\
+\
+Fix: `cd ui/webapp/webui && npm ci && npm run build`, then restart `blitzkrieg run`.\
+Or use a pre-built release archive (the `webui/` dir ships next to the binary).\
+======================================================================\
+"
+            );
+        }
+
         let listener = TcpListener::bind(addr)?;
         // Classify the address that was ACTUALLY bound, not the string we were
         // given: `localhost` can resolve either way, and a hostname says nothing
