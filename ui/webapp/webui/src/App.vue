@@ -331,8 +331,9 @@ onMounted(() => {
         >{{ store.error }}</AlertBanner>
       </div>
 
-      <!-- trading-safety banners — 顶部，任何页面均可见：红色紧急（冻结/自检/RISK_REJECTED）
-           钉住、无 ✕、不自动消失；琥珀（连接/归档/应收账款/其余拒单）可关 + 40s 自动消失 -->
+	      <!-- trading-safety banners — 顶部，任何页面均可见：红色紧急（冻结/自检）
+	           钉住、无 ✕、不自动消失；琥珀（连接/归档/应收账款/其余拒单，含 RISK_REJECTED
+	           等瞬时拒单）可关 + 40s 自动消失，不出冻结文案、不指路解冻 -->
       <div v-if="connBanner && connBannerVisible" class="mb-3.5">
         <AlertBanner
           tone="warn"
@@ -349,8 +350,9 @@ onMounted(() => {
         <AlertBanner tone="error" :title="freeze.title" :hint="freeze.hint">{{ freeze.body }}</AlertBanner>
       </div>
       <div v-else-if="lastError && lastErrorVisible" class="mb-3.5">
-        <!-- RISK_REJECTED（如日损失限额）由 safety.ts 升为 urgent：tone=error、不 dismissible、
-             不自动消失、无 ✕；其余拒单保持琥珀 warn + 可关 + 40s 自动消失 -->
+        <!-- 仅 accountGates[acct].blocked 的账户才出冻结红横幅（accountFreeze
+             循环下方）；RISK_REJECTED 等瞬时拒单在此处走普通琥珀警告，不出
+             冻结文案、不指路解冻。 -->
         <AlertBanner
           :tone="lastError.tone"
           :title="lastError.title"

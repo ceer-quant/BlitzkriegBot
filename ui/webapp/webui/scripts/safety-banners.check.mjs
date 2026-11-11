@@ -67,22 +67,47 @@ check('the refusal banner reads the structured record and shows its code', () =>
   assert.equal(b.code, 'NOT_AUTHENTICATED', 'the kernel\'s code is DATA on screen')
 })
 
-check('the refusal banner title claims no source (#232)', () => {
-  const structured = lastErrorBanner({
-    lastError: { tsMs: 1, code: 'RISK_REJECTED', message: 'position cap reached' },
-  })
-  const legacy = lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'RiskRejected: position cap' } })
-  // RISK_REJECTED 结构化记录渲染为冻结标题（不命名来源，也不含 venue）
-  assert.ok(structured)
-  assert.equal(structured.title, '账户交易已经冻结', 'RISK_REJECTED title is the freeze title')
-  assert.doesNotMatch(structured.title, /venue/i, `title must not pin a source: ${structured.title}`)
-  assert.doesNotMatch(structured.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
-  // legacy 字段走普通 refuse 分支，标题不变，也不命名来源
-  assert.ok(legacy)
-  assert.equal(legacy.title, '最近交易错误', 'legacy title unchanged')
-  assert.doesNotMatch(legacy.title, /venue/i, `title must not pin a source: ${legacy.title}`)
-  assert.doesNotMatch(legacy.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
-})
+	check('the refusal banner title claims no source (#232)', () => {
+	  const structured = lastErrorBanner({
+	    lastError: { tsMs: 1, code: 'RISK_REJECTED', message: 'position cap reached' },
+	  })
+	  const legacy = lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'RiskRejected: position cap' } })
+	  // RISK_REJECTED 是瞬时拒单（非 frozen 类），只走普通警告横幅：不出冻结文案，
+	  // 不指路解冻，带可关闭 + 稳定身份；结构化与 legacy 字段同一对待。
+	  assert.ok(structured)
+	  assert.equal(structured.tone, 'warn', 'RISK_REJECTED is amber, not red')
+	  assert.equal(structured.urgent, false)
+	  assert.equal(structured.title, '最近交易错误', 'refusal banner title claims no source')
+	  assert.ok(structured.identity, 'refusal carries a dismiss-memory identity')
+	  assert.doesNotMatch(structured.title, /venue/i, `title must not pin a source: ${structured.title}`)
+	  assert.doesNotMatch(structured.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
+	  assert.match(structured.hint, /最近交易错误|安全网/, 'hint describes the refusal, not an unfreeze path')
+	  // legacy 字段走普通 refuse 分支，标题不变，也不命名来源
+	  assert.ok(legacy)
+	  assert.equal(legacy.title, '最近交易错误', 'legacy title unchanged')
+	  assert.doesNotMatch(legacy.title, /venue/i, `title must not pin a source: ${legacy.title}`)
+	  assert.doesNotMatch(legacy.body, /^引擎/, 'and the body is the kernel\'s message, not a claim')
+	})
+
+	check('an instant refusal never renders the freeze banner or unfreeze path (#1067)', () => {
+	  const structured = lastErrorBanner({
+	    lastError: { tsMs: 1, code: 'RISK_REJECTED', message: 'positions.max_positions: account acct-1 over cap' },
+	  })
+	  assert.ok(structured)
+	  assert.equal(structured.tone, 'warn')
+	  assert.equal(structured.urgent, false)
+	  assert.doesNotMatch(structured.title, /冻结/, 'instant refusal is not labelled frozen')
+	  assert.doesNotMatch(structured.hint || '', /解冻/, 'instant refusal does not point at the unfreeze door')
+	  // 真冻结（accountGates blocked）仍出红横幅 + 解冻入口
+	  const frozen = accountFreezeBanners({
+	    accountGates: [{ account: 'acct-1', blocked: true, reason: 'positions.max_positions' }],
+	    tradingFrozen: { active: false },
+	  })
+	  assert.equal(frozen.length, 1)
+	  assert.equal(frozen[0].tone, 'error')
+	  assert.equal(frozen[0].urgent, true)
+	  assert.match(frozen[0].hint, /解冻/)
+	})
 
 check('an old core falls back to lastVenueError, and only then', () => {
   const b = lastErrorBanner({ lastVenueError: { tsMs: 1, message: 'NotAuthenticated: auth failed' } })
