@@ -24,6 +24,7 @@ use blitzkrieg_ui_panel::{
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::os::unix::fs::PermissionsExt;
 
 const HELP_TEXT: &str = "\
 blitzkrieg — Unified quant trading engine & UI launcher
@@ -335,8 +336,113 @@ fn main() -> std::process::ExitCode {
         println!("{}", blitzkrieg_build_info::BUILD_INFO.version_string());
         return std::process::ExitCode::SUCCESS;
     }
+    // #1108: 检查 .env 是否存在；不存在则从 .env.example 自动创建并生成一次性随机面板凭证。
+    // .env 已存在时绝不覆盖；半配置只提示补齐，不静默重建。
+    ensure_env_file_and_credentials();
     blitzkrieg_ui_panel::env_file::load_cwd_env();
     tokio_main()
+}
+
+/// #1108: 确保 `.env` 存在；不存在时从 `.env.example` 自动创建并生成一次性随机面板凭证。
+/// `.env` 已存在时绝不覆盖；半配置只提示补齐，不静默重建。`.env` 权限设为 0600。
+fn ensure_env_file_and_credentials() {
+    use std::path::Path;
+
+    let env_path = Path::new(".env");
+    let example_path = Path::new(".env.example");
+
+    // .env 已存在：不覆盖；只检查是否半配置（只提示补齐，不静默重建）
+    if env_path.exists() {
+        let has_user = std::env::var("BLITZKRIEG_PANEL_USER").is_ok();
+        let has_pass = std::env::var("BLITZKRIEG_PANEL_PASSWORD").is_ok();
+        if !has_user || !has_pass {
+            eprintln!(
+                "blitzkrieg: .env exists but panel credentials are incomplete.\n\
+                 Set BLITZKRIEG_PANEL_USER / BLITZKRIEG_PANEL_PASSWORD in .env or environment,\n\
+                 then restart."
+            );
+        }
+        return;
+    }
+
+    // .env 不存在：从 .env.example 创建
+    let example_content = match std::fs::read_to_string(example_path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("blitzkrieg: .env not found and .env.example not available");
+            return;
+        }
+    };
+
+    // 生成随机凭证
+    let user = format!("bk_panel_{}", random_alphanum(8));
+    let password = random_alphanum(24);
+
+    // 构建新内容：在模板末尾追加凭证
+    let mut new_content = example_content;
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    new_content.push_str(&format!(
+        "\n\
+# =============================================================================\n\
+# Panel credentials — auto-created by `blitzkrieg run` on first start.\n\
+# Change these in .env or set BLITZKRIEG_PANEL_USER/PASSWORD env vars.\n\
+# Do NOT commit .env — it contains real credentials.\n\
+# =============================================================================\n\
+BLITZKRIEG_PANEL_USER={}\n\
+BLITZKRIEG_PANEL_PASSWORD={}\n\
+",
+        user, password
+    ));
+
+    // 写入文件（权限 0600）
+    if let Err(e) = std::fs::write(env_path, &new_content) {
+        eprintln!("blitzkrieg: failed to write .env: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::set_permissions(env_path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("blitzkrieg: failed to set .env permissions to 0600: {e}");
+    }
+
+    // 设置环境变量（供本进程及子进程使用）
+    std::env::set_var("BLITZKRIEG_PANEL_USER", &user);
+    std::env::set_var("BLITZKRIEG_PANEL_PASSWORD", &password);
+
+    // 输出明确提示
+    eprintln!(
+        "\
+================================================================================\
+⚠  Panel credentials auto-created in .env
+
+  BLITZKRIEG_PANEL_USER={}
+  BLITZKRIEG_PANEL_PASSWORD={}
+
+Change these in .env or set BLITZKRIEG_PANEL_USER/PASSWORD env vars.
+Do NOT commit .env — it contains real credentials.
+================================================================================\
+",
+        user, password
+    );
+}
+
+/// 生成指定长度的随机字母数字字符串（不引入 rand crate，使用系统时间作为种子）
+fn random_alphanum(len: usize) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let mut s = String::with_capacity(len);
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    while s.len() < len {
+        ns = ns
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let idx = (ns >> 32) % CHARS.len() as u64;
+        s.push(CHARS[idx as usize] as char);
+    }
+    s
 }
 
 /// Map one subcommand's result onto the process exit code, reporting the failure
