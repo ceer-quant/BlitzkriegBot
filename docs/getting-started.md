@@ -41,6 +41,16 @@ cargo build --release
 
 **预期输出**：最后一行类似 `Finished release [optimized] target(s) in ...`。首次编译需要一些时间。
 
+## 4.1 构建面板前端（源码克隆必需）
+
+```bash
+cd ui/webapp/webui && npm ci && npm run build
+```
+
+**预期输出**：`✓ built in ...s`。Vue 面板产物 `ui/webapp/webui/dist/` 不入库；缺这一步 `/panel` 会退化为内置 HTML 面板，不报错。
+
+> 需要 Node.js 与 npm。预编译发行包不需要。
+
 ## 5. 启动
 
 ```bash
