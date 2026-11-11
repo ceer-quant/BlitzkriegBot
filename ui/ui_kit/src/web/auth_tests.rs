@@ -181,8 +181,20 @@ fn api_without_session_is_rejected_when_creds_armed() {
         request(addr, "GET /api/snapshot?token=NOPE HTTP/1.1\r\n\r\n"),
         401
     );
-    // The static panel itself stays reachable (logged-in gate lives in the UI).
-    assert_eq!(request(addr, "GET /panel HTTP/1.1\r\n\r\n"), 200);
+    // The static panel itself stays reachable (logged-in gate lives in the UI) —
+    // but only when the Vue assets are actually built (#1107): without them
+    // /panel fails closed with 503 and an explicit fix message, never a
+    // substitute page.
+    let panel_code = request(addr, "GET /panel HTTP/1.1\r\n\r\n");
+    let want = if super::server::vue_panel_dir().is_some() {
+        200
+    } else {
+        503
+    };
+    assert_eq!(
+        panel_code, want,
+        "panel serves real assets when built, fails closed when not"
+    );
 }
 
 #[test]
