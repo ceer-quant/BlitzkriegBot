@@ -489,9 +489,7 @@ fn unfreeze_does_not_emit_risk_rejected_alert() {
     .take(8)
     .collect();
     assert!(
-        !codes
-            .iter()
-            .any(|code| *code == blitzkrieg_market_api::CoreErrorCode::RiskRejected),
+        !codes.contains(&blitzkrieg_market_api::CoreErrorCode::RiskRejected),
         "unfreeze must not emit RiskRejected: {codes:?}"
     );
 }
