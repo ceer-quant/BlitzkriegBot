@@ -123,26 +123,12 @@ async function toggle(r: StrategyStatsRow, next: boolean): Promise<void> {
 
 const totals = computed(() => {
   const rs = rows.value
-  const sum = (f: (r: StrategyStatsRow) => number) => rs.reduce((a, r) => a + (Number(f(r)) || 0), 0)
-  const wins = sum((r) => r.wins)
-  const losses = sum((r) => r.losses)
   return {
     count: rs.length,
     enabled: rs.filter((r) => (isAccountEnabled(r) ?? r.enabled)).length,
     /** Refusal attribution — two disjoint families, see `lib/rejections.ts`. */
     refusal: refusalTotals(rs),
-    closed: sum((r) => r.closedTrades),
-    wins,
-    losses,
-    net: sum((r) => Number(r.netPnlUsd) || 0),
-    winRate: wins + losses ? (wins / (wins + losses)) * 100 : 0,
   }
-})
-
-/** 账本累计净 PnL − 逐笔归属净额。非零即不可归因资金流水；cumulativeNetPnl 为 null（未记录期初权益）时为 null。 */
-const ledgerMinusAttributed = computed(() => {
-  const c = store.cumulativeNetPnl
-  return c === null ? null : c - totals.value.net
 })
 
 const profile = (r: StrategyStatsRow) => refusalProfile(r)
@@ -401,7 +387,7 @@ onMounted(() => {
 <template>
   <div v-if="rows.length" class="rise-in">
     <!-- fleet KPIs — 3 tiles（重设计：拦截三计数本就是表格三列，胜负并进净 PnL sub） -->
-    <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-3">
+    <div class="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-2">
       <StatTile label="策略规模" :value="String(totals.count)" tone="gold">
         <template #sub>运行中 <RollingNumber :value="totals.enabled" /> · 共 <RollingNumber :value="totals.count" /> 个已注册</template>
       </StatTile>
@@ -419,29 +405,6 @@ onMounted(() => {
               <RollingNumber :value="pct(totals.refusal.refuseRate)" />
             </span>
           </Tooltip>
-        </template>
-      </StatTile>
-      <StatTile
-        label="归属净额（逐笔加总）"
-        :value="signedMoney(totals.net)"
-        :tone="totals.net >= 0 ? 'up' : 'down'"
-      >
-        <template #sub>
-          <Tooltip content="逐笔 netPnlUsd 相加（成交口径）；不含手续费回填与未形成 trade row 的资金流水，不等于账本累计净 PnL。">
-            <span class="cursor-help underline decoration-dotted decoration-line underline-offset-2">
-              平仓 <RollingNumber :value="totals.closed" /> · 胜率 <RollingNumber :value="pct(totals.winRate)" />（<RollingNumber :value="totals.wins" /> 盈 / <RollingNumber :value="totals.losses" /> 亏）
-            </span>
-          </Tooltip>
-        </template>
-      </StatTile>
-      <StatTile
-        label="账本 − 归属差额"
-        :value="ledgerMinusAttributed === null ? '未知' : signedMoney(ledgerMinusAttributed)"
-        :tone="ledgerMinusAttributed === null ? 'default' : (ledgerMinusAttributed >= 0 ? 'up' : 'down')"
-        :roll="false"
-      >
-        <template #sub>
-          已实现权益 − 期初权益，再减去逐笔归属净额；非零即不可归因资金流水。
         </template>
       </StatTile>
     </div>

@@ -811,7 +811,13 @@ fn status_json(disp: &Dispatcher, s: &UiSnapshot) -> serde_json::Value {
             "balance": b.balance, "reserved": b.reserved, "available": b.available,
             // Starting principal (dry only), so the text UI can show the same
             // `principal + realized net` reconciliation the panel does.
-            "seed": b.seed })),
+            "seed": b.seed,
+            // #1064: same ledger-truth keys the WebUI wire carries — `null`
+            // when the kernel hasn't reported them (unknown ≠ 0, never
+            // derived locally), so the TUI's 累计净 PnL goes unknown for
+            // exactly the accounts the kernel calls unknown.
+            "openingEquity": b.opening_equity,
+            "cumulativeNetPnl": b.cumulative_net_pnl })),
         "stats": s.stats.as_ref().map(|st| serde_json::json!({
             "books": st.books, "spots": st.spots, "signals": st.signals,
             "confirmed": st.confirmed.len(), "placeRejected": st.place_rejected,
@@ -1024,5 +1030,50 @@ fn status_json_carries_the_per_venue_round_rows() {
         doc["round"]["venueRounds"],
         serde_json::json!([]),
         "no rows → empty array, never a missing key"
+    );
+}
+
+/// #1064: the TUI's status balance block carries the ledger-truth cumulative
+/// net PnL keys (issue #1046) — the same wire keys the WebUI emits — verbatim
+/// from the kernel, `null` when unknown (unknown ≠ 0, never derived locally),
+/// so the TUI's 累计净 PnL goes unknown for exactly the accounts the kernel
+/// calls unknown.
+#[test]
+fn status_json_balance_carries_the_ledger_net_pnl_keys() {
+    use crate::core::types::BalanceView;
+
+    let disp = Dispatcher::new(
+        SupervisorConfig::from_env("/tmp/none-such.sock".into()),
+        false,
+    );
+    let bal = |opening: Option<f64>, net: Option<f64>| UiSnapshot {
+        balance: Some(BalanceView {
+            balance: 1015.0,
+            reserved: 4.0,
+            available: 1011.0,
+            seed: Some(1000.0),
+            opening_equity: opening,
+            cumulative_net_pnl: net,
+        }),
+        ..UiSnapshot::default()
+    };
+
+    // Both keys carried: the values travel verbatim, never re-derived.
+    let doc = status_json(&disp, &bal(Some(1000.0), Some(15.0)));
+    assert_eq!(doc["balance"]["openingEquity"], serde_json::json!(1000.0));
+    assert_eq!(doc["balance"]["cumulativeNetPnl"], serde_json::json!(15.0));
+    assert_eq!(doc["balance"]["seed"], serde_json::json!(1000.0));
+
+    // Unknown stays null on the wire, never 0 (issue #1046 red line).
+    let doc = status_json(&disp, &bal(None, None));
+    assert_eq!(
+        doc["balance"]["openingEquity"],
+        serde_json::Value::Null,
+        "opening equity unknown → null, not 0"
+    );
+    assert_eq!(
+        doc["balance"]["cumulativeNetPnl"],
+        serde_json::Value::Null,
+        "cumulative net unknown → null, not 0"
     );
 }

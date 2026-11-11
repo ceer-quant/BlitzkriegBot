@@ -395,7 +395,12 @@ pub fn render_json_full(
             "balance": b.balance, "reserved": b.reserved, "available": b.available,
             // Starting principal (dry only) so the panel can show the
             // `principal + realized net` reconciliation instead of asserting it.
-            "seed": b.seed })),
+            "seed": b.seed,
+            // #1064: the ledger-truth cumulative net PnL (issue #1046) rides
+            // the wire verbatim from the kernel — `null` when the kernel
+            // hasn't reported it (unknown ≠ 0, never derived locally).
+            "openingEquity": b.opening_equity,
+            "cumulativeNetPnl": b.cumulative_net_pnl })),
         // Wallet identity for the live-mode balance card (dry cores leave
         // these null — their cash is the local dry seed, not venue funds).
         "wallet": {

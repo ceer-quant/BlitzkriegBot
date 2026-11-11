@@ -6,6 +6,10 @@
  *   1. `blitzkrieg --help` discloses `core`, `tui`, `web`, `run` subcommands and
  *      the part-launch flags (`--tui`/`-tui`, `--web`, `--interval-ms`, `--manage`).
  *   2. `blitzkrieg run` launches core + UI in one command with `lifecycle: on` by default.
+ *   2b. #1108: with only `.env.example` present and no credentials in the
+ *       environment, the first boot auto-creates a 0600 `.env` with one-shot
+ *       random panel credentials; the password is never printed (#1113) and
+ *       the auto-created pair logs into a managed (not read-only) panel.
  *   3. Child core process is owned by the launcher (PPID equals launcher PID).
  *   4. Core answers real JSON-RPC over the isolated UDS socket.
  *   5. `blitzkrieg run --readonly` structurally passes `--readonly` to core (mode = "readonly").
@@ -23,7 +27,7 @@ import { execSync, execFileSync } from 'node:child_process';
 // core behind. The guard reaps the launcher's whole process group, which includes
 // that core, and does it with SIGTERM first so the core still unlinks its socket.
 import { spawn, reapAllChildren } from './lib/child-guard.mjs';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, statSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
@@ -136,16 +140,21 @@ async function main() {
   assert(helpOut.includes('--round-sec'), 'help documents --round-sec');
   assert(helpOut.includes('Part launches'), 'help lists the part-launch recipes');
 
-  // ── 2. Unified Launch (core + UI in one command) ───────────────────────────
+  // ── 2. Unified Launch (core + UI in one command) + first-boot auto-create ──
   console.log('');
-  console.log('[2] Unified launch (blitzkrieg run / default)');
+  console.log('[2] Unified launch (blitzkrieg run / default) + #1108 .env auto-create');
 
-  // The gate shell may carry panel credentials; strip them so the launcher's
-  // stdout assertions below are deterministic (no .env exists in WORK yet, so
-  // the read-only note MUST appear here).
+  // The gate shell may carry panel credentials; strip them so the ONLY possible
+  // source of credentials is the auto-created `.env`. The release bundle ships
+  // `.env.example`; the first `blitzkrieg run` must turn it into a working 0600
+  // `.env` with one-shot random credentials (#1108) — and never print the
+  // password (#1113).
   const credlessEnv = { ...process.env, TMPDIR: WORK };
   delete credlessEnv.BLITZKRIEG_PANEL_USER;
   delete credlessEnv.BLITZKRIEG_PANEL_PASSWORD;
+
+  copyFileSync(join(ROOT, '.env.example'), join(WORK, '.env.example'));
+  assert(!existsSync(join(WORK, '.env')), 'no .env exists before the first boot');
 
   const child = spawn(
     BIN,
@@ -168,8 +177,10 @@ async function main() {
     }
   );
   let phase2Stdout = '';
+  let phase2Stderr = '';
   child.stdout.on('data', (d) => { phase2Stdout += d.toString(); });
   child.stderr.on('data', (d) => {
+    phase2Stderr += d.toString();
     if (process.env.DEBUG) process.stderr.write(d);
   });
 
@@ -184,18 +195,35 @@ async function main() {
     { timeoutMs: 4000 },
   ));
   assert(connected, `unified launcher started core and serves socket on ${SOCK}`);
-  // The note prints after the core is up; without credentials (env stripped
-  // and no .env in WORK yet) the panel must be announced as read-only. The
-  // socket can answer BEFORE the launcher reaches the print, so poll briefly
-  // instead of asserting a snapshot.
-  let noteSeen = false;
-  for (let i = 0; i < 30 && !noteSeen; i++) {
-    await sleep(100);
-    noteSeen = phase2Stdout.includes('read-only mode');
-  }
+
+  // #1108 end-to-end: the first boot auto-created `.env` from the bundled
+  // `.env.example`, with one-shot random credentials that actually log in.
+  const envFile = join(WORK, '.env');
+  assert(existsSync(envFile), 'the first boot auto-created .env beside the binary');
+  const envText = readFileSync(envFile, 'utf8');
+  const autoUser = envText.match(/^BLITZKRIEG_PANEL_USER=(.+)$/m)?.[1]?.trim();
+  const autoPass = envText.match(/^BLITZKRIEG_PANEL_PASSWORD=(.+)$/m)?.[1]?.trim();
+  assert(Boolean(autoUser && autoPass), 'the auto-created .env carries both panel credentials');
+  const envMode = statSync(envFile).mode & 0o777;
+  assert(envMode === 0o600, `the auto-created .env is chmod 600 (got ${envMode.toString(8)})`);
   assert(
-    noteSeen,
-    'without credentials (env or .env) the launcher says the panel is read-only'
+    phase2Stderr.includes('auto-created'),
+    'the launcher announces the auto-creation on stderr'
+  );
+  assert(
+    !phase2Stdout.includes(autoPass) && !phase2Stderr.includes(autoPass),
+    'the auto-created password is never printed (#1113)'
+  );
+  let autoSnap = null;
+  for (let i = 0; i < 30 && autoSnap === null; i++) {
+    await sleep(100);
+    autoSnap = await gatewaySnapshot(PORT1, autoUser, autoPass);
+  }
+  assert(autoSnap !== null, 'the auto-created credentials log into the panel');
+  assert(autoSnap?.gateway?.lifecycleEnabled === true, 'lifecycle verbs are enabled with the auto-created credentials');
+  assert(
+    autoSnap?.gateway?.managed === true,
+    `the panel is managed (not read-only) after auto-create: ${JSON.stringify(autoSnap?.gateway)}`
   );
 
   // Verify process table: core is child of launcher
@@ -481,12 +509,15 @@ async function main() {
   const tuiChildClosed = new Promise((resolve) => tuiChild.on('close', (code) => resolve(code)));
   let tuiStderr = '';
   tuiChild.stderr.on('data', (d) => { tuiStderr += d.toString(); });
-  let tuiReady = false;
-  for (let i = 0; i < 40 && !tuiReady; i++) {
-    await sleep(100);
-    if (existsSync(TUI_SOCK)) tuiReady = (await rpc(TUI_SOCK, 'core.ping')) !== null;
-  }
-  assert(tuiReady, `run --tui spawned the core on ${TUI_SOCK}`);
+  const t0 = Date.now();
+  const tuiReady = await pollUntil(
+    async () => existsSync(TUI_SOCK) && (await rpc(TUI_SOCK, 'core.ping')) !== null,
+    { timeoutMs: 10_000 },
+  );
+  assert(
+    tuiReady,
+    `run --tui spawned the core on ${TUI_SOCK} (stderr tail: ${tuiStderr.slice(-2000)}, exitCode: ${tuiChild.exitCode}, elapsed: ${Date.now() - t0} ms)`,
+  );
   // THE partial-launch assertion: the TUI path must never listen on the web
   // address, even though --addr was supplied.
   await sleep(700);

@@ -13,6 +13,11 @@ use super::*;
 use crate::position::{EquityBasis, PositionConfig};
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal_macros::dec;
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing::{Level, Subscriber};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{Layer, layer::Context, registry};
 
 const SEED: rust_decimal::Decimal = dec!(1000);
 
@@ -388,4 +393,165 @@ fn unfreeze_writes_env_back_and_entries_stay_open_after_rebuild() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #1070: `emit_daily_trip` の報文検証。
+///
+/// 金額は 2 桁小数、報告するのは有効 cap 規則のみ（absolute または
+/// pct of opening equity、混在しない）、trigger 口径は完整 drawdown
+///（realized + unrealized、unrealized なし時は realized only）。
+fn daily_core(positions: PositionConfig) -> Core {
+    Core::new(CoreConfig {
+        mode: Mode::Dry,
+        risk: RiskConfig {
+            max_order_notional: dec!(10_000),
+            ..Default::default()
+        },
+        dry_seed_balance: SEED,
+        auto_exits_enabled: false,
+        positions,
+        ..Default::default()
+    })
+}
+
+/// 捕捉 `emit_daily_trip` の kernel warn（`drawdown … (realized … + unrealized …) vs cap …`）。
+fn capture_kernel_warn<F>(f: F) -> String
+where
+    F: FnOnce(),
+{
+    let captured = Arc::new(Mutex::new(None::<String>));
+    let layer = WarnCapture(captured.clone());
+    let subscriber = registry().with(layer);
+    tracing::subscriber::with_default(subscriber, f);
+    captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("emit_daily_trip must log a warn")
+}
+
+struct WarnCapture(Arc<Mutex<Option<String>>>);
+impl<S: Subscriber> Layer<S> for WarnCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if *event.metadata().level() != Level::WARN {
+            return;
+        }
+        let mut visitor = Message(&self.0);
+        event.record(&mut visitor);
+    }
+}
+
+struct Message<'a>(&'a Arc<Mutex<Option<String>>>);
+impl Visit for Message<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            *self.0.lock().unwrap() = Some(format!("{:?}", value));
+        }
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            *self.0.lock().unwrap() = Some(value.to_string());
+        }
+    }
+}
+
+/// 絶対 cap が有効：`cap $5.00 (absolute)`。
+#[test]
+fn emit_daily_trip_reports_absolute_cap() {
+    let mut c = daily_core(PositionConfig {
+        max_daily_loss_usd: dec!(5),
+        max_daily_loss_equity_pct: dec!(50),
+        ..Default::default()
+    });
+    let acct = crate::model::default_account_id();
+    let t0 = 1_700_000_000_000;
+    c.positions
+        .roll_daily(acct.as_str(), t0, dec!(1000), EquityBasis::Dry);
+    c.positions.set_daily_realized_for_test(&acct, dec!(-3.344));
+    c.positions.set_daily_tripped_for_test(&acct, t0, dec!(5));
+    c.emit_daily_trip();
+
+    let gate = c.account_gate(acct.as_str()).expect("daily loss gate set");
+    assert!(
+        gate.reason
+            .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
+        "unexpected gate message"
+    );
+}
+
+/// 百分比 cap が有効：`cap $50.00 (5% of opening equity $1000.00)`、absolute は混在しない。
+#[test]
+fn emit_daily_trip_reports_percentage_cap() {
+    let mut c = daily_core(PositionConfig {
+        max_daily_loss_usd: dec!(100), // 絶対 cap は非結合
+        max_daily_loss_equity_pct: dec!(5),
+        ..Default::default()
+    });
+    let acct = crate::model::default_account_id();
+    let t0 = 1_700_000_000_000;
+    c.positions
+        .roll_daily(acct.as_str(), t0, dec!(1000), EquityBasis::Dry);
+    c.positions.set_daily_realized_for_test(&acct, dec!(-3.344));
+    c.positions.set_daily_tripped_for_test(&acct, t0, dec!(50));
+    c.emit_daily_trip();
+
+    let gate = c.account_gate(acct.as_str()).expect("daily loss gate set");
+    assert!(
+        gate.reason
+            .contains("drawdown $-3.34 vs cap $50.00 (5% of opening equity $1000.00)"),
+        "unexpected gate message"
+    );
+}
+
+/// opening equity が不明（0）の時、パーセント cap は算出できず absolute に降級。
+#[test]
+fn emit_daily_trip_degrades_to_absolute_when_opening_equity_unknown() {
+    let mut c = daily_core(PositionConfig {
+        max_daily_loss_usd: dec!(5),
+        max_daily_loss_equity_pct: dec!(5),
+        ..Default::default()
+    });
+    let acct = crate::model::default_account_id();
+    let t0 = 1_700_000_000_000;
+    c.positions
+        .roll_daily(acct.as_str(), t0, dec!(0), EquityBasis::Dry); // opening 未知
+    c.positions.set_daily_realized_for_test(&acct, dec!(-3.344));
+    c.positions.set_daily_tripped_for_test(&acct, t0, dec!(5));
+    c.emit_daily_trip();
+
+    let gate = c.account_gate(acct.as_str()).expect("daily loss gate set");
+    assert!(
+        gate.reason
+            .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
+        "unexpected gate message"
+    );
+}
+
+/// unrealized が null（marks off）の時、kernel は realized only を報告。
+#[test]
+fn emit_daily_trip_reports_realized_only_when_unrealized_null() {
+    let mut c = daily_core(PositionConfig {
+        max_daily_loss_usd: dec!(5),
+        max_daily_loss_equity_pct: dec!(50),
+        daily_loss_marks_unrealized: false,
+        ..Default::default()
+    });
+    let acct = crate::model::default_account_id();
+    let t0 = 1_700_000_000_000;
+    c.positions
+        .roll_daily(acct.as_str(), t0, dec!(1000), EquityBasis::Dry);
+    c.positions.set_daily_realized_for_test(&acct, dec!(-3.344));
+    c.positions.set_daily_tripped_for_test(&acct, t0, dec!(5));
+    let kernel = capture_kernel_warn(|| c.emit_daily_trip());
+    assert!(
+        kernel.contains("(realized $-3.34, realized only)"),
+        "unexpected kernel message: {:?}",
+        kernel
+    );
+    let gate = c.account_gate(acct.as_str()).expect("daily loss gate set");
+    assert!(
+        gate.reason
+            .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
+        "unexpected gate message"
+    );
 }

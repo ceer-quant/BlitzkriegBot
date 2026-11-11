@@ -33,6 +33,7 @@ mod routes;
 mod server;
 mod sse;
 
+pub use auth::PANEL_CREDENTIALS_MISSING;
 use auth::*;
 use checks::*;
 use http::*;
