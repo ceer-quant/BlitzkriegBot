@@ -290,15 +290,6 @@ impl WebServer {
     /// print it to a terminal makes the terminal — not the credential store —
     /// the source of truth for who can stop the trading core.
     ///
-    /// The credential-missing diagnosis, one wording for both entry points:
-    /// `WebServer::require_credentials` (gateway mode) and the `blitzkrieg run`
-    /// launcher, which appends the `.env` remedy before refusing to start.
-    pub const PANEL_CREDENTIALS_MISSING: &str =
-        "gateway mode requires panel credentials, but BLITZKRIEG_PANEL_USER and \
-         BLITZKRIEG_PANEL_PASSWORD are not both set. A half-configured pair counts as \
-         unconfigured, on purpose: guessing which half was meant is how a panel ends up \
-         open";
-
     /// Returns the reason the panel must not start, when it must not.
     pub fn require_credentials(&self) -> Result<(), String> {
         if !self.auth_required {
