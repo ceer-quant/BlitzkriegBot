@@ -228,7 +228,8 @@ local last_mid = {}       -- token -> last mid seen (string)
 local confirmed = {}      -- token -> true while a momentum premise holds
 local direction = {}      -- token -> "up" | "down" (which premise is armed)
 local armed_dir = {}      -- token -> direction THIS position entered under (#961)
-local peak_proceeds = {}  -- token -> best (bid − taker fee) seen while held
+local peak_proceeds = {}  -- token -> best (bid − taker fee) seen while held (arm reference)
+local peak_bid = {}       -- token -> best gross best_bid seen while held (trailing giveback = drawdown from the high water mark bid, kernel口径)
 local entry_time = {}     -- token -> entry timestamp (ms), set on first observe of a held position
 local sl_triggered = {}   -- token -> { ms, price } stop-loss trigger state (confirm window)
 -- (round slot, condition) -> { count, open, last_exit_ms }. `open` means a
@@ -548,6 +549,11 @@ local function forget_unheld(held)
             peak_proceeds[tok] = nil
         end
     end
+    for tok in pairs(peak_bid) do
+        if held[tok] == nil then
+            peak_bid[tok] = nil
+        end
+    end
     -- The entry-direction anchor (#961) lives exactly as long as the
     -- position: a closed leg forgets which premise it entered under.
     for tok in pairs(armed_dir) do
@@ -567,10 +573,19 @@ local function forget_unheld(held)
     end
 end
 
-local function note_peak(token, proceeds)
+local function note_peak(token, proceeds, bid)
     local prev = peak_proceeds[token]
     if prev == nil or dec_cmp(proceeds, prev) > 0 then
         peak_proceeds[token] = proceeds
+    end
+    -- High water mark of the GROSS executable bid: the trailing giveback is
+    -- judged as a drawdown from this high water mark, in the same 口径 the
+    -- kernel measures 让回 (highPnlPct − netPnlPct over the executable bid),
+    -- so the trigger and the bookkeeping use one number — no net-vs-gross
+    -- understatement that would let a 15pp giveback read as 20pp+.
+    local prev_bid = peak_bid[token]
+    if prev_bid == nil or dec_cmp(bid, prev_bid) > 0 then
+        peak_bid[token] = bid
     end
 end
 
@@ -600,8 +615,9 @@ local function consider_exit(out, row, round)
         return
     end
     local proceeds = dec_sub(bid, fee)
-    note_peak(token, proceeds)
+    note_peak(token, proceeds, bid)
     local peak = peak_proceeds[token]
+    local peak_px = peak_bid[token]
     local params = bk.params()
     local now_ms = bk.now_ms()
 
@@ -686,9 +702,9 @@ local function consider_exit(out, row, round)
         dec_param(params, "trail_arm_pct_tight", DEC_0), round)
     local give = tighten(dec_param(params, "trail_giveback_pct", DEFAULT_GIVE),
         dec_param(params, "trail_giveback_pct_tight", DEC_0), round)
-    if arm.m > 0 and give.m > 0 and peak ~= nil
+    if arm.m > 0 and give.m > 0 and peak_px ~= nil
         and net_reaches(peak, entry, arm)
-        and gave_back(peak, proceeds, entry, give) then
+        and gave_back(peak_px, bid, entry, give) then
         out.exits[#out.exits + 1] = { token = token, reason = "trailing_stop", use_maker = true }
         return
     end
