@@ -7,6 +7,7 @@
 import { computed, ref } from 'vue'
 import {
   ShieldCheck, ArrowUpRight, ArrowDownRight,
+  CircleDot,
 } from 'lucide-vue-next'
 import { usePanelStore } from '@/stores/panel'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
