@@ -130,6 +130,9 @@ try {
   //    cwd — a restart re-runs in place) and activates kalshi.
   const core2 = makeCore('restart', [], core.cwd);
   await core2.start();
+  // issue #1127: core2 boots with default bound to polymarket; unbind it so the
+  // persisted cell (not the account venue binding) drives the readout.
+  await core2.request('account.venue.set', { accountId: 'default', venue: '', reason: 'panel-check restart isolation' });
   const after = await core2.request('market.plugin.get', {});
   check('a restart activates the persisted plugin',
     after.activePlugin === 'kalshi' && after.persisted === true
