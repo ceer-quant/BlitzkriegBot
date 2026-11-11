@@ -748,7 +748,13 @@ mod set_tests {
             position_log_path: None,
             ..Default::default()
         };
-        tokio::sync::Mutex::new(crate::service::Core::new(cfg))
+        let mut core = crate::service::Core::new(cfg);
+        // market set_tests do not exercise venue binding: keep `default`
+        // unbound so plugin enablement follows the legacy single-account
+        // posture (issue #1127 binds `default` to polymarket in production;
+        // that business behaviour is not under test here).
+        core.set_account_venue_for_test(&crate::account::default_account_id(), "");
+        tokio::sync::Mutex::new(core)
     }
 
     fn cell_in(dir: &std::path::Path) -> String {

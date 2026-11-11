@@ -378,6 +378,13 @@ fn two_venue_book_fixture() -> Core {
 #[test]
 fn failed_self_check_freezes_trading() {
     let mut c = core();
+    // issue #1127: `default` is born bound to polymarket; this test asserts the
+    // legacy "no bound accounts → global freeze" path, so keep `default`
+    // unbound here (the production binding is exercised by account/mod.rs tests).
+    c.accounts
+        .account_mut(&crate::account::default_account_id())
+        .unwrap()
+        .venue = "".into();
     c.on_venue_self_check(
         "polymarket",
         blitzkrieg_market_api::SelfCheckReport {

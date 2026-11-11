@@ -20,7 +20,9 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-pub use blitzkrieg_market_api::account::{AccountId, DEFAULT_ACCOUNT_ID, default_account_id};
+pub use blitzkrieg_market_api::account::{
+    AccountId, DEFAULT_ACCOUNT_ID, DEFAULT_SEED_VENUE, default_account_id,
+};
 
 /// Account lifecycle state (DEV_V0_3 §9.1). Wire = `snake_case`.
 ///
@@ -374,9 +376,10 @@ impl AccountLedgers {
                 market_type: MarketType::Prediction,
                 status: AccountStatus::Active,
                 credential_keys: CredentialKeys::default(),
-                // Zero-config deployment: unbound — trades whatever venue is
-                // active, exactly the 0.2 behaviour.
-                venue: String::new(),
+                // Zero-config deployment: born bound to DEFAULT_SEED_VENUE
+                // (polymarket, issue #1127 §9.5) — the zero-config default
+                // account only subscribes to that venue's round family.
+                venue: DEFAULT_SEED_VENUE.into(),
                 trading_enabled: true,
                 // Zero-config deployment: no enablement key — an EMPTY set,
                 // which is the explicit "run nothing here" reading (per-account

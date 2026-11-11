@@ -161,6 +161,7 @@ fn single_default_matches_the_zero_config_deployment() {
     let a = book.account(&default_account_id()).unwrap();
     assert!(matches!(a.status, AccountStatus::Active));
     assert!(!a.credential_keys.loaded, "no keys named, nothing loaded");
+    assert_eq!(a.venue, DEFAULT_SEED_VENUE, "zero-config default is born bound to polymarket");
 }
 
 /// An ACTIVE/inactive account bound to one venue — #778's collision input.

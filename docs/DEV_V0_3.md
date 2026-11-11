@@ -832,7 +832,7 @@ ACCOUNT_PAPER_STATUS=read_only      # 只读：能看不能下单
 
 | 项 | 决议 |
 |:---|:---|
-| 默认 | `ACCOUNT_LIST` 缺失且 legacy toml 不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量）→ **0.2 部署零改动** |
+| 默认 | `ACCOUNT_LIST` 缺失且 legacy toml 不存在 → 单一 `default` 账户（`status = active`，凭证键名沿用既有单账户环境变量，**venue 缺省 = `polymarket`，issue #1127 §9.5 零配置形态）→ **0.2 部署零改动**（无需额外 `.env`，`account.create` 显式创建的其他账户保持 `venue` 缺省 unbound） |
 | 优先级 | `ACCOUNT_*` 键：进程环境先、`.env` 文件后（12-factor，启动时显式导出者优先）＞ legacy `accounts.toml`（迁移回退）＞ 单一 default。env 与文件永不合并——`ACCOUNT_LIST` 在场时 toml 被忽略并告警 |
 | 新增/删除账户 | **0.3 决议：不做运行期增删**。**已被 #517（0.4.1）推翻**：`account.create` / `account.remove` 已落地，面板弹窗即可增删账户（upsert `ACCOUNT_LIST` / `ACCOUNT_&lt;ID&gt;_*` 进 `.env`）；default 不再拦截删除（绑定只在建户时设定，删户重建是改绑定的唯一出口）。以下历史决议保留作 0.3 语义的记录 |
 | 活跃账户 | `account.switch` 是**会话级**（按 UDS 连接），不是进程级全局：两个客户端可以看两个账户。切换只影响**该连接后续请求的默认 account_id**，不影响内核调度 |

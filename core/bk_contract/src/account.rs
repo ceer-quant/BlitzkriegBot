@@ -24,6 +24,13 @@ pub struct AccountId(pub String);
 /// readable without a migration (§9.2: read old, write new).
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
 
+/// Zero-config deployment: the single `default` account seeded by
+/// `AccountLedgers::single_default()` is born bound to this venue (issue #1127,
+/// §9.5). `account.create` keeps `venue: String::new()` (unbound) as its
+/// default — this constant only seeds the zero-config default account, explicit
+/// creation is an unchanged, separate decision.
+pub const DEFAULT_SEED_VENUE: &str = "polymarket";
+
 /// `serde(default = ...)` target for every `account_id` field added in 0.3 —
 /// the wire default equals the old behaviour.
 pub fn default_account_id() -> AccountId {

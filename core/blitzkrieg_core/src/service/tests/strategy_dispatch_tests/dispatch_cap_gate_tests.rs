@@ -756,6 +756,17 @@ fn core_with_cross_venue_arb(virtual_cap: Option<Decimal>) -> Core {
         .expect("cross_venue_arb registers");
     assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     c.enable_engine(eng);
+    // Issue #1127: the zero-config `default` account is born bound to
+    // polymarket (DEFAULT_SEED_VENUE). These dispatch/cap-gate fixtures,
+    // however, judge the pre-v2 single-account batch shape (pot accounting,
+    // orphan sweep, naked-leg degradation) and are venue-agnostic, so restore
+    // `default` to unbound here — both legs (polymarket + kalshi) can then
+    // ride the same account and the pot is computed exactly as before. This
+    // only affects the test fixture, not the #1127 business behaviour.
+    c.accounts
+        .account_mut(&blitzkrieg_market_api::default_account_id())
+        .unwrap()
+        .venue = "".into();
     // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` →
     // the adapter's params bag); unconfigured ⇒ the strategy pairs
     // nothing (fail-closed). The fixture wires both legs onto the
@@ -864,6 +875,10 @@ fn feed_cross_venue_books(c: &mut Core, now: i64) {
 
 #[test]
 fn cross_venue_arb_over_pot_refuses_the_whole_pair_through_the_real_package() {
+    // Two legs at 0.44 / 0.42 × 250 declared shares ≈ 215 notional. A pot
+    // of 200 covers neither pair whole... it refuses the WHOLE batch:
+    // zero legs reach the OME, and the refusal rides the existing
+    // StrategyLimit accounting (`limit.virtualCap`, one per leg).
     // Two legs at 0.44 / 0.42 × 250 declared shares ≈ 215 notional. A pot
     // of 200 covers neither pair whole... it refuses the WHOLE batch:
     // zero legs reach the OME, and the refusal rides the existing
