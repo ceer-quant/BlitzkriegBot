@@ -404,10 +404,10 @@ export interface Snapshot {
      */
     openingEquity?: number | null
     /**
-     * Cumulative net PnL = balance + reserved − openingEquity (the single
-     * ledger truth, issue #1046). Absent when openingEquity is unknown — never
-     * derived from trade folding. Render "未知" when null, never fall back to
-     * a trade-fold sum.
+     * Cumulative net PnL = balance − openingEquity (the single ledger truth,
+     * issue #1046/#1063: reserved collateral is NOT part of it). Absent when
+     * openingEquity is unknown — never derived from trade folding. Render
+     * "未知" when null, never fall back to a trade-fold sum.
      */
     cumulativeNetPnl?: number | null
   } | null

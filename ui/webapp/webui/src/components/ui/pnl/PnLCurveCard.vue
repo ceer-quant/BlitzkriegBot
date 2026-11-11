@@ -22,8 +22,9 @@ const props = defineProps<{
 
 const store = usePanelStore()
 
-/** 累计净 PnL（账本口径 = balance + reserved − openingEquity，issue #1046）。
- * 唯一读取入口：老内核/未上报期初权益时为 null，页面显示「未知」。 */
+/** 累计净 PnL（账本口径 = balance − openingEquity，issue #1046/#1063，
+ * reserved 抵押金不计入）。唯一读取入口：老内核/未上报期初权益时为
+ * null，页面显示「未知」。 */
 const net: number | null = store.cumulativeNetPnl
 
 /** 已平仓笔数 + 权益曲线行：按显示账户 + 显示账户绑定的 venue 过滤，两页保持一致 */

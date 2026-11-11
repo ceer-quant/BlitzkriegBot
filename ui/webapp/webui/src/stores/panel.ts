@@ -211,10 +211,11 @@ export const usePanelStore = defineStore('panel', () => {
   const connected = computed(() => snapshot.value?.connected ?? plugins.value?.connected ?? false)
 
   /**
-   * 累计净 PnL（账本口径 = balance + reserved − openingEquity），issue #1046。
-   * 唯一读取入口：老内核/未上报期初权益时为 null，页面须显示「未知」，
-   * 禁止回退到成交折叠。所有页面（PnLCurveCard、StatsRow、HftPage 累计头
-   * 卡、TUI）都从此处读，天然四处相等。
+   * 累计净 PnL（账本口径 = balance − openingEquity，issue #1046/#1063，
+   * reserved 抵押金不计入）。唯一读取入口：老内核/未上报期初权益时为
+   * null，页面须显示「未知」，禁止回退到成交折叠。所有页面
+   * （PnLCurveCard、StatsRow、HftPage 累计头卡、TUI）都从此处读，
+   * 天然四处相等。
    */
   const cumulativeNetPnl = computed(() => snapshot.value?.balance?.cumulativeNetPnl ?? null)
 
