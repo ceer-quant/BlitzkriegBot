@@ -475,8 +475,7 @@ fn emit_daily_trip_reports_absolute_cap() {
     assert!(
         gate.reason
             .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
-        "unexpected gate message: {:?}",
-        gate.reason
+        "unexpected gate message"
     );
 }
 
@@ -500,8 +499,7 @@ fn emit_daily_trip_reports_percentage_cap() {
     assert!(
         gate.reason
             .contains("drawdown $-3.34 vs cap $50.00 (5% of opening equity $1000.00)"),
-        "unexpected gate message: {:?}",
-        gate.reason
+        "unexpected gate message"
     );
 }
 
@@ -525,8 +523,7 @@ fn emit_daily_trip_degrades_to_absolute_when_opening_equity_unknown() {
     assert!(
         gate.reason
             .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
-        "unexpected gate message: {:?}",
-        gate.reason
+        "unexpected gate message"
     );
 }
 
@@ -555,7 +552,6 @@ fn emit_daily_trip_reports_realized_only_when_unrealized_null() {
     assert!(
         gate.reason
             .contains("drawdown $-3.34 vs cap $5.00 (absolute)"),
-        "unexpected gate message: {:?}",
-        gate.reason
+        "unexpected gate message"
     );
 }
