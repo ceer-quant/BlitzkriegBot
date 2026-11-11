@@ -859,7 +859,7 @@ do
   state.params = {
     unverifiable_window_sec = "0",
     take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
-    stop_loss_pct = "0", take_profit_price = "0",
+    ["stop_loss_pct"] = "0", take_profit_price = "0",
   }
   state.time_left = 10
   hold("down-1", "0.28")
