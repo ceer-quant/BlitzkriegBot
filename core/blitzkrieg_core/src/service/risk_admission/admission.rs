@@ -389,12 +389,24 @@ impl Core {
                     .engine
                     .as_ref()
                     .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy));
+                // Use the same `time_left_sec` the arbitration pipeline used (from
+                // `engine.last_time_left_sec()`), so the submission gate's shrink
+                // matches the pipeline's audit. Passing `i64::MAX` here always
+                // resolves to the base stop %, while the pipeline may tighten the
+                // stop when `time_left_sec < stop_tighten_start_sec` — that split
+                // made `place_gated` re-shrink an already-shrunk entry, so the
+                // audit's `approved` no longer matched the placed order's `size`.
+                let time_left_sec = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.last_time_left_sec())
+                    .unwrap_or(i64::MAX);
                 let bound_stop_pct = if holder {
-                    crate::exit_policy::holder_effective_stop_pct(0, &self.config.positions.exit)
+                    crate::exit_policy::holder_effective_stop_pct(time_left_sec, &self.config.positions.exit)
                 } else {
                     crate::exit_policy::effective_stop_pct(
                         self.config.positions.exit.stop_loss_pct,
-                        i64::MAX,
+                        time_left_sec,
                         &self.config.positions.exit,
                     )
                 };
