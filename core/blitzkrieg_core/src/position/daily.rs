@@ -184,21 +184,14 @@ impl PositionManager {
             // day starts from zero.
             Decimal::ZERO
         };
-        let carried_trip = previous_day_index.is_none() && previous_tripped;
-        let carried_at = daily.tripped_at_ms;
-        let carried_limit = daily.tripped_limit_usd;
         *daily = DailyLossState {
             day_index: Some(today),
             realized_pnl_usd: carried_pnl,
             opening_equity_usd: equity_usd.max(Decimal::ZERO),
             equity_basis: Some(basis),
-            tripped: carried_trip,
-            tripped_at_ms: if carried_trip { carried_at } else { 0 },
-            tripped_limit_usd: if carried_trip {
-                carried_limit
-            } else {
-                Decimal::ZERO
-            },
+            tripped: false,
+            tripped_at_ms: 0,
+            tripped_limit_usd: Decimal::ZERO,
             tripped_reported: false,
             opened_at_ms: now_ms,
         };
