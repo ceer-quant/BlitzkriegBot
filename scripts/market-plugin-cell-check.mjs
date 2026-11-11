@@ -66,14 +66,15 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
 try {
   const core = makeCore('main');
   await core.start();
+  // issue #1127: `default` is born bound to polymarket in production; this gate
+  // asserts the legacy plugin-cell write path (unregistered name / ambiguous
+  // write refused, cell read/write/reset), so temporarily unbind `default` here
+  // for test isolation only — production `single_default()` keeps polymarket.
+  await core.request('account.venue.set', { accountId: 'default', venue: '', reason: 'panel-check gate isolation' });
 
-  // issue #1127: zero-config `default` is born bound to polymarket, so the
-  // active plugin is the bound venue (polymarket) and the market-plugin cell
-  // is not persisted to the operator's `.env` (venue binding is the source of
-  // truth for launch; the cell only holds a next-session intent). This gate
-  // verifies the cell's read/write/reset semantics inside one process rather
-  // than across a restart (the cell intentionally does not survive a reboot
-  // once an account is venue-bound — see account.venue.set).
+  // issue #1127: with `default` restored to unbound (test isolation), the active
+  // plugin resolves via the first-registered fallback (polymarket) and the
+  // market-plugin cell is read/written in-memory within this one process.
   // 1. The pre-write readout: first-registered active, the full registry,
   //    nothing persisted.
   const before = await core.request('market.plugin.get', {});
