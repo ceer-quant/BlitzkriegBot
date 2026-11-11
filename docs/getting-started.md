@@ -41,6 +41,18 @@ cargo build --release
 
 **预期输出**：最后一行类似 `Finished release [optimized] target(s) in ...`。首次编译需要一些时间。
 
+### 4.1 构建面板前端
+
+如需使用 WebUI 面板（而非 TUI），需预先构建前端资源：
+
+```bash
+cd ui/webapp/webui
+pnpm install
+pnpm run build
+```
+
+构建产物输出至 `ui/webapp/webui/dist`，后续 `cargo run --release -- ui` 会自动嵌入。
+
 ## 5. 启动
 
 ```bash

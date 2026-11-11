@@ -723,6 +723,17 @@ body .VPNavBar.has-sidebar .content {
   }
 }
 
+/* #1109：768–959px 导航死区修复
+   #1092 将桌面菜单断点移至 960，VitePress 原生在 ≥768 隐藏汉堡，
+   导致该区间无任何导航入口。在此断点强制显示汉堡（覆盖 scoped 规则），
+   VPNavScreen 断点对齐 960（overlay 由 JS 状态控制，此处仅保证 CSS
+   不在 ≥768 时将其 display:none）。 */
+@media (min-width: 768px) and (max-width: 959px) {
+  body .VPNavBar.VPNavBar .VPNavBarHamburger {
+    display: flex;
+  }
+}
+
 .VPHero .name .clip {
   background: linear-gradient(120deg, var(--vp-c-brand-2), var(--vp-c-brand-1) 55%, var(--vp-c-brand-3));
   -webkit-background-clip: text;
