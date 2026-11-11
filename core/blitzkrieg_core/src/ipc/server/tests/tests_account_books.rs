@@ -1267,3 +1267,50 @@ async fn ledger_balance_follows_the_session_account_switch() {
     let scratch = env_path.parent().expect("fixture parent").to_path_buf();
     let _ = std::fs::remove_dir_all(scratch);
 }
+
+/// #1064: ledger.balance wire carries openingEquity/cumulativeNetPnl —
+/// `null` when unknown (never 0, never trade-folded).
+#[tokio::test]
+async fn ledger_balance_carries_opening_equity_and_net_pnl() {
+    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let mut session = SessionState::default();
+    let reply = rpc_with_subs(
+        &core,
+        &registry,
+        &peer,
+        &mut session,
+        r#"{"jsonrpc":"2.0","id":1,"method":"ledger.balance","params":{}}"#.to_string(),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "balance read lands: {reply}");
+    let result = &reply["result"];
+    // Both keys must exist on the wire (camelCase from serde rename_all).
+    assert!(
+        result.get("openingEquity").is_some(),
+        "openingEquity key present: {result}"
+    );
+    assert!(
+        result.get("cumulativeNetPnl").is_some(),
+        "cumulativeNetPnl key present: {result}"
+    );
+    // DRY: openingEquity == seed; cumulativeNetPnl = balance − openingEquity.
+    // Decimal wire: balance/reserved/available serialize as f64 (crate::decimal);
+    // seed/openingEquity/cumulativeNetPnl serialize as Decimal string ("10000.0").
+    let to_f64 = |v: &serde_json::Value| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .expect("value is a number or numeric string")
+    };
+    let balance = to_f64(&result["balance"]);
+    let seed = to_f64(&result["seed"]);
+    let opening_equity = to_f64(&result["openingEquity"]);
+    let cumulative_net_pnl = to_f64(&result["cumulativeNetPnl"]);
+    assert_eq!(opening_equity, seed, "DRY openingEquity equals the seed");
+    assert_eq!(
+        cumulative_net_pnl,
+        balance - opening_equity,
+        "cumulativeNetPnl = balance − openingEquity (never trade-folded)"
+    );
+    let scratch = env_path.parent().expect("fixture parent").to_path_buf();
+    let _ = std::fs::remove_dir_all(scratch);
+}
