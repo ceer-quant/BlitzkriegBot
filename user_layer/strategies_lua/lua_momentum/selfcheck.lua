@@ -786,6 +786,88 @@ do
     .. #r.entries)
 end
 
+-- ── #1123 入场门：min_time_left_for_entry ──────────────────────────────────
+
+-- time_left_sec 低于安全余量时不开新仓（fail-closed：读不到时间也不开仓）。
+do
+  reset()
+  state.params = { min_time_left_for_entry = "120" }
+  state.time_left = 100 -- 不足安全余量
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000) -- −10% ≥ 4% threshold, premise confirmed
+  local r = evaluate()
+  ok(#r.entries == 0, "time_left 100 < min_time_left_for_entry 120: no new entry, got " .. #r.entries)
+end
+
+do
+  reset()
+  state.params = { min_time_left_for_entry = "120" }
+  state.time_left = 200 -- 余量充足
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  local r = evaluate()
+  ok(#r.entries == 1, "time_left 200 ≥ min_time_left_for_entry 120: entry offered, got " .. #r.entries)
+end
+
+-- 0 禁用入场门：余量充足时也仍出价（60s force-exit 窗口另行收口，故此处用 100s）。
+do
+  reset()
+  state.params = { min_time_left_for_entry = "0" }
+  state.time_left = 100
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  local r = evaluate()
+  ok(#r.entries == 1, "min_time_left_for_entry 0: entry offered at time_left 100, got " .. #r.entries)
+end
+
+-- ── #1123 持仓门：unverifiable_window_sec ───────────────────────────────────
+
+-- 进入最后可验证窗口时主动离场，按 best bid − taker fee 落袋。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "120",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    stop_loss_pct = "0", take_profit_price = "0",
+  }
+  state.time_left = 100 -- 进入不可验证窗口
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 1 and r.exits[1].reason == "time_exit",
+    "time_left 100 <= unverifiable_window_sec 120: forced exit, got " .. exit_reasons(r))
+end
+
+-- 窗口外不主动离场（其他 exit 规则不满足时持有至 settlement）。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "120",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    stop_loss_pct = "0", take_profit_price = "0",
+  }
+  state.time_left = 200
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 0, "time_left 200 > unverifiable_window_sec 120: no forced exit, got " .. exit_reasons(r))
+end
+
+-- 0 禁用持仓门：极少剩余时间也不主动离场。
+do
+  reset()
+  state.params = {
+    unverifiable_window_sec = "0",
+    take_profit_pct = "0", trail_arm_pct = "0", trail_giveback_pct = "0",
+    stop_loss_pct = "0", take_profit_price = "0",
+  }
+  state.time_left = 10
+  hold("down-1", "0.28")
+  quote("down-1", "0.20", "0.21")
+  local r = evaluate()
+  ok(#r.exits == 0, "unverifiable_window_sec 0: no forced exit even at time_left 10, got " .. exit_reasons(r))
+end
+
 -- ── verdict ─────────────────────────────────────────────────────────────────
 if #failures > 0 then
   real_io.stderr:write(string.format("selfcheck FAILED: %d/%d rows\n", #failures, checks))

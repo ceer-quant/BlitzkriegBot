@@ -610,6 +610,15 @@ local function consider_exit(out, row, round)
         out.exits[#out.exits + 1] = { token = token, reason = "stop_blocked_no_liquidity" }
         return
     end
+    local params = bk.params()
+    -- #1123 持仓门：进入最后可验证窗口时主动离场，按 best bid − taker fee 落袋，
+    -- 优先于赌到期结算（unverifiable_expiry），无论盈亏。fail-closed：读不到
+    -- round/time_left_sec 时不主动离场（让已有规则继续评估）。
+    local unverifiable_win = int_param(params, "unverifiable_window_sec", 0)
+    if unverifiable_win > 0 and round.time_left_sec ~= nil and round.time_left_sec <= unverifiable_win then
+        out.exits[#out.exits + 1] = { token = token, reason = "time_exit" }
+        return
+    end
     local fee = decision_fee(bid)
     if not fee then
         return
@@ -618,7 +627,6 @@ local function consider_exit(out, row, round)
     note_peak(token, proceeds, bid)
     local peak = peak_proceeds[token]
     local peak_px = peak_bid[token]
-    local params = bk.params()
     local now_ms = bk.now_ms()
 
     -- Duration seed: the largest time_left seen this round IS the round
@@ -815,6 +823,13 @@ function bk_evaluate()
     local allow_both = int_param(bk.params(), "allow_both_sides", 0) == 1
     local floor = min_entry_price()
     local params = bk.params()
+    -- #1123 入场门：剩余时间不足安全余量时不开新仓，fail-closed。
+    -- 读不到 time_left_sec 时一律不开仓；已持仓的 exits 已在上面评估完毕，
+    -- 这里只阻止新的 entries，不拦截出场。
+    local min_entry_left = int_param(params, "min_time_left_for_entry", 120)
+    if min_entry_left > 0 and round.time_left_sec ~= nil and round.time_left_sec < min_entry_left then
+        return out
+    end
     local exiting = {}
     for i = 1, #out.exits do
         exiting[out.exits[i].token] = true
