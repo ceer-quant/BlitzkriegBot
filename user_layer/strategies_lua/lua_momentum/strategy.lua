@@ -672,7 +672,14 @@ local function consider_exit(out, row, round)
     -- Z15-6: confirm 仅用于反弹取消（窗口内反弹超过 rebound_pct 则取消止损）
     local st = sl_triggered[token]
     if st ~= nil then
-        local confirm = int_param(params, "stop_loss_confirm_sec", DEFAULT_CONFIRM)
+        local confirm_sec = int_param(params, "stop_loss_confirm_sec", DEFAULT_CONFIRM)
+        local confirm_pct = int_param(params, "stop_loss_confirm_pct", 0)
+        local confirm = confirm_sec
+        if confirm_pct > 0 and round_duration_cache ~= nil and round_duration_cache > 0 then
+            confirm = math.floor(round_duration_cache * confirm_pct / 100)
+        end
+        -- #1124: stop_loss_confirm_pct (>0) overrides the absolute confirm_sec
+        -- with a round-duration percentage; 0 keeps the absolute value.
         local rebound = dec_param(params, "stop_loss_rebound_pct", DEFAULT_REBOUND)
         local in_window = confirm > 0 and (now_ms - st.ms) < confirm * 1000
         if in_window and rebound.m > 0 then
@@ -717,7 +724,14 @@ local function consider_exit(out, row, round)
         return
     end
 
-    local tleft = int_param(params, "exit_time_left_sec", 0)
+    local tleft_sec = int_param(params, "exit_time_left_sec", 0)
+    local tleft_pct = int_param(params, "exit_time_left_pct", 0)
+    local tleft = tleft_sec
+    if tleft_pct > 0 and round_duration_cache ~= nil and round_duration_cache > 0 then
+        tleft = math.floor(round_duration_cache * tleft_pct / 100)
+    end
+    -- #1124: exit_time_left_pct (>0) overrides exit_time_left_sec with a
+    -- round-duration percentage; 0 keeps the absolute value.
     if tleft > 0 and round.time_left_sec <= tleft then
         out.exits[#out.exits + 1] = { token = token, reason = "time_exit" }
     end
@@ -816,7 +830,15 @@ function bk_evaluate()
     -- Entries stay outside the force-exit window. Exits above do not: a
     -- winner can still be banked in the last minute, and the time rule is
     -- only meaningful there.
-    if round.time_left_sec <= 60 then
+    -- #1124: entry_cutoff_pct (>0) overrides the fixed 60s cutoff with a
+    -- round-duration percentage; 0 keeps the absolute 60s. Fail toward
+    -- tightening: missing round duration falls back to 60s.
+    local entry_cutoff = 60
+    local entry_cutoff_pct = int_param(bk.params(), "entry_cutoff_pct", 0)
+    if entry_cutoff_pct > 0 and round_duration_cache ~= nil and round_duration_cache > 0 then
+        entry_cutoff = math.floor(round_duration_cache * entry_cutoff_pct / 100)
+    end
+    if round.time_left_sec ~= nil and round.time_left_sec <= entry_cutoff then
         return out
     end
 
