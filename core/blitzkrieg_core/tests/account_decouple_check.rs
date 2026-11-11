@@ -348,6 +348,15 @@ fn decouple_core(accounts_path: Option<&Path>, pot: Option<Decimal>, enable_defa
         assert!(eng.set_strategy_enabled("cross_venue_arb", true));
     }
     c.enable_engine(eng);
+    // Issue #1127: `default` is born bound to polymarket; this fixture wires
+    // both legs onto `default` (the pre-v2 single-account shape) and is
+    // venue-agnostic, so keep `default` unbound here — the production binding
+    // is exercised by account/mod.rs tests, not by this data-plane/chase
+    // acceptance file.
+    c.accounts_mut()
+        .account_mut(&default_account_id())
+        .unwrap()
+        .venue = "".into();
     // 跨所套利弹窗 v2: the pairing is CONFIG-DRIVEN (`arb.config.set` → the
     // adapter's params bag); unconfigured ⇒ the strategy pairs nothing
     // (fail-closed). The fixture wires both legs onto `default` — the

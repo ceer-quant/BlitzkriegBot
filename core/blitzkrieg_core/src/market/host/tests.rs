@@ -28,6 +28,11 @@ fn two_venue_live_core() -> Core {
         position_log_path: None,
         ..Default::default()
     });
+    // market host tests do not exercise venue binding: keep `default`
+    // unbound so orders can route to both venues (issue #1127 binds `default`
+    // to polymarket in production; not under test here).
+    c.set_account_venue_for_test(&crate::account::default_account_id(), "");
+
     c.set_balance(dec!(10));
     c.enable_engine(crate::engine::Engine::new(crate::engine::EngineConfig {
         scanner: crate::scanner::ScannerConfig {

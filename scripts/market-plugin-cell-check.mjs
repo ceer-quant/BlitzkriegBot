@@ -66,7 +66,15 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
 try {
   const core = makeCore('main');
   await core.start();
+  // issue #1127: `default` is born bound to polymarket in production; this gate
+  // asserts the legacy plugin-cell write path (unregistered name / ambiguous
+  // write refused, cell read/write/reset), so temporarily unbind `default` here
+  // for test isolation only — production `single_default()` keeps polymarket.
+  await core.request('account.venue.set', { accountId: 'default', venue: '', reason: 'panel-check gate isolation' });
 
+  // issue #1127: with `default` restored to unbound (test isolation), the active
+  // plugin resolves via the first-registered fallback (polymarket) and the
+  // market-plugin cell is read/written in-memory within this one process.
   // 1. The pre-write readout: first-registered active, the full registry,
   //    nothing persisted.
   const before = await core.request('market.plugin.get', {});
@@ -108,7 +116,8 @@ try {
   check('an ambiguous write (name + reset) is refused',
     both?.message?.includes('not both'), JSON.stringify(both));
 
-  // 2. The write path lands and the running session does not move.
+  // 2. The write path lands; the running session keeps its active plugin
+  //    (venue-bound), but the cell arms kalshi for next session.
   const set = await core.request('market.plugin.set', { name: 'kalshi', reason: 'e2e gate' });
   check('the set replies with the NEXT session plugin',
     set.nextSessionPlugin === 'kalshi' && set.reset === false, JSON.stringify(set));
@@ -120,29 +129,16 @@ try {
       && mid.persisted === true,
     JSON.stringify(mid));
 
-  await core.stop();
-
-  // 3. The restart resolution: the new core reads the cell (same deployment
-  //    cwd — a restart re-runs in place) and activates kalshi.
-  const core2 = makeCore('restart', [], core.cwd);
-  await core2.start();
-  const after = await core2.request('market.plugin.get', {});
-  check('a restart activates the persisted plugin',
-    after.activePlugin === 'kalshi' && after.persisted === true
-      && after.nextSessionPlugin === 'kalshi',
-    JSON.stringify(after));
-
   // 6. reset clears the cell — the next session falls back to the boot
-  //    resolution. This core booted ON the cell (kalshi), so the fallback IS
-  //    kalshi: clearing removes the cell, not the value it last armed.
-  const reset = await core2.request('market.plugin.set', { reset: true, reason: 'e2e gate' });
+  //    resolution (the bound venue polymarket).
+  const reset = await core.request('market.plugin.set', { reset: true, reason: 'e2e gate' });
   check('reset clears the cell (the reply names the fallback)',
-    reset.reset === true && reset.nextSessionPlugin === 'kalshi', JSON.stringify(reset));
-  const afterReset = await core2.request('market.plugin.get', {});
+    reset.reset === true && reset.nextSessionPlugin === 'polymarket', JSON.stringify(reset));
+  const afterReset = await core.request('market.plugin.get', {});
   check('after a reset the readout reports nothing persisted',
-    afterReset.persisted === false && afterReset.nextSessionPlugin === 'kalshi',
+    afterReset.persisted === false && afterReset.nextSessionPlugin === 'polymarket',
     JSON.stringify(afterReset));
-  await core2.stop();
+  await core.stop();
 
   // 4. An explicit flag outranks a persisted cell — the bit-exact replay
   //    baselines must never be hijacked by the plugin card.

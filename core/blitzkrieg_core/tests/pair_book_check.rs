@@ -805,6 +805,15 @@ fn a_pair_declaration_with_identical_leg_accounts_is_refused() {
         credentials_ready();
 
         let mut c = arb_core_live(dec!(1000));
+        // issue #1127: default  born bound to polymarket; this test remaps both
+        // legs onto the same (default) account to exercise the declaration
+        // (A=B) gate, so keep default unbound here — set validation only
+        // rejects a bound account whose venue differs from the leg venue, and
+        // an unbound account rides any leg venue.
+        c.accounts_mut()
+            .account_mut(&default_account_id())
+            .unwrap()
+            .venue = "".into();
         // 重映射：两腿同账户（A=B 的构造 —— set 校验的维度是 venue 不同 +
         // 账户存在，同账户映射合法落地）。
         c.arb_config_set(&blitzkrieg_core::account::CrossVenueArbConfig {

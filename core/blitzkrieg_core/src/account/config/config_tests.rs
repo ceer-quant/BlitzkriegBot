@@ -855,11 +855,12 @@ rounds = [3600, 900, 3600, 86_400]
             unbound.account(&AccountId("solo".into())).unwrap().venue,
             ""
         );
-        // …and the zero-config default account is unbound too.
+        // …and the zero-config default account is born bound to polymarket
+        // (issue #1127, §9.5), not unbound.
         let default_book = AccountLedgers::single_default(1);
         assert_eq!(
             default_book.account(&default_account_id()).unwrap().venue,
-            ""
+            crate::account::DEFAULT_SEED_VENUE
         );
     }
 

@@ -1036,6 +1036,15 @@ impl Core {
         self.positions.unverified_exposure_report()
     }
 
+    /// Test-only: rebind an account's venue. Market host/set tests keep
+    /// `default` unbound so they are not affected by issue #1127's production
+    /// binding (default -> polymarket); that business behaviour is exercised
+    /// by account/mod.rs tests instead.
+    #[cfg(test)]
+    pub fn set_account_venue_for_test(&mut self, id: &AccountId, venue: &str) {
+        let _ = self.accounts.set_venue(id, venue, 0);
+    }
+
     /// #987, issue 991: reconcile backfill — mark fallback-closed positions on
     /// `condition_id` `source == "reconciled"` when venue cash truth arrives,
     /// keeping the fallback exit price (issue 991: a price that was estimated
