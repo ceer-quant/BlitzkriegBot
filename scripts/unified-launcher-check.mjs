@@ -481,12 +481,16 @@ async function main() {
   const tuiChildClosed = new Promise((resolve) => tuiChild.on('close', (code) => resolve(code)));
   let tuiStderr = '';
   tuiChild.stderr.on('data', (d) => { tuiStderr += d.toString(); });
-  let tuiReady = false;
-  for (let i = 0; i < 40 && !tuiReady; i++) {
-    await sleep(100);
-    if (existsSync(TUI_SOCK)) tuiReady = (await rpc(TUI_SOCK, 'core.ping')) !== null;
-  }
-  assert(tuiReady, `run --tui spawned the core on ${TUI_SOCK}`);
+  const t0 = Date.now();
+  const tuiReady = await pollUntil(
+    async () => existsSync(TUI_SOCK) && (await rpc(TUI_SOCK, 'core.ping')) !== null,
+    { timeoutMs: 10_000 },
+  );
+  const tuiElapsed = Date.now() - t0;
+  assert(
+    tuiReady,
+    `run --tui spawned the core on ${TUI_SOCK} — tuiStderr tail: ${tuiStderr.slice(-2000)}, tuiChild.exitCode: ${tuiChild.exitCode}, elapsed: ${tuiElapsed} ms`,
+  );
   // THE partial-launch assertion: the TUI path must never listen on the web
   // address, even though --addr was supplied.
   await sleep(700);
