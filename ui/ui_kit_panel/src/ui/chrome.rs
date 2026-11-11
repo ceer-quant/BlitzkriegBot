@@ -368,7 +368,10 @@ mod tests {
             reason: None,
         }));
         let text = render_header_text(&app);
-        assert!(text.contains("[FROZEN: reason unknown]"), "header text: {text}");
+        assert!(
+            text.contains("[FROZEN: reason unknown]"),
+            "header text: {text}"
+        );
     }
 
     #[test]
