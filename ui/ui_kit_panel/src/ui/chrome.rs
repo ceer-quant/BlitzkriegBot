@@ -173,7 +173,32 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("lifecycle:off", Style::default().fg(DIM))
     };
 
-    let line1 = Line::from(vec![
+    // #1038: a global auto freeze (`stats.tradingFrozen`) is the operator's
+    // must-see signal on EVERY tab. The manual kill-switch banner
+    // (`app.kill_banner`, painted over the body by `render_kill_banner`)
+    // coexists with this top-bar tag. This tag is state-driven from
+    // `stats.trading_frozen`, so a core that was already frozen before the TUI
+    // started still shows red on the first frame — no missed RiskAlert needed.
+    // It clears as soon as `active=false`, shows `[FROZEN: reason unknown]`
+    // when the reason is absent, and stays hidden when older kernels omit the
+    // key (`None`) — never an invented freeze, never a green "normal" tag.
+    let frozen = s
+        .stats
+        .as_ref()
+        .and_then(|st| st.trading_frozen.as_ref())
+        .filter(|f| f.active)
+        .map(|f| {
+            let reason = f.reason.as_deref().unwrap_or("reason unknown");
+            Span::styled(
+                format!("  [FROZEN: {reason}]"),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(RED)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+
+    let mut line1_spans: Vec<Span> = vec![
         Span::styled(
             "Blitzkrieg Panel",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -186,7 +211,11 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         owner,
         Span::raw("  "),
         gate,
-    ]);
+    ];
+    if let Some(fz) = frozen {
+        line1_spans.push(fz);
+    }
+    let line1 = Line::from(line1_spans);
     let line2 = Line::from(vec![
         Span::styled("socket: ", Style::default().fg(DIM)),
         Span::raw(app.socket.clone()),
@@ -277,4 +306,84 @@ fn render_log(f: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blitzkrieg_ui_kit::core::types::{EngineStatsView, TradingFrozenView};
+    use blitzkrieg_ui_kit::UiSnapshot;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn render_header_text(app: &App) -> String {
+        let backend = TestBackend::new(120, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_header(
+                    f,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 120,
+                        height: 3,
+                    },
+                    app,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn frozen_snapshot(frozen: Option<TradingFrozenView>) -> UiSnapshot {
+        UiSnapshot {
+            stats: Some(EngineStatsView {
+                trading_frozen: frozen,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn header_shows_frozen_when_trading_frozen_active() {
+        let mut app = App::new("/tmp/x.sock".into(), false);
+        app.snap = frozen_snapshot(Some(TradingFrozenView {
+            active: true,
+            reason: Some("daily loss budget spent".into()),
+        }));
+        let text = render_header_text(&app);
+        assert!(
+            text.contains("[FROZEN: daily loss budget spent]"),
+            "header text: {text}"
+        );
+    }
+
+    #[test]
+    fn header_shows_reason_unknown_when_reason_missing() {
+        let mut app = App::new("/tmp/x.sock".into(), false);
+        app.snap = frozen_snapshot(Some(TradingFrozenView {
+            active: true,
+            reason: None,
+        }));
+        let text = render_header_text(&app);
+        assert!(text.contains("[FROZEN: reason unknown]"), "header text: {text}");
+    }
+
+    #[test]
+    fn header_hides_frozen_when_key_absent_or_inactive() {
+        for frozen in [
+            None,
+            Some(TradingFrozenView {
+                active: false,
+                reason: Some("stale".into()),
+            }),
+        ] {
+            let mut app = App::new("/tmp/x.sock".into(), false);
+            app.snap = frozen_snapshot(frozen);
+            let text = render_header_text(&app);
+            assert!(!text.contains("[FROZEN:"), "header text: {text}");
+        }
+    }
 }
