@@ -1352,6 +1352,12 @@ pub struct SetRoundDurationParams {
     pub reset: bool,
     /// Audit trail only — echoed in the reply and the log line.
     pub reason: Option<String>,
+    /// #1154: `true` 要求「立即结束当前轮」：撤销该账户在途轮市场上的全部
+    /// 挂单、按市价真实强平其在途仓位（PnL 按真实成交价），再把扫描器
+    /// 网格切入新周期；任一步骤失败 fail-closed，网格不切。`false`（默认）
+    /// 保持原有 next_session 语义——只落持久格，在途轮按出生网格自然结算。
+    #[serde(default)]
+    pub immediate: bool,
 }
 
 /// `round_duration.set` result.

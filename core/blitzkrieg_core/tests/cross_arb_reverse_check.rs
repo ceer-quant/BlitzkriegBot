@@ -35,7 +35,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use blitzkrieg_core::engine::DataEvent;
-use blitzkrieg_core::model::{CryptoMarket, Mode, OrderRequest, Side, default_account_id};
+use blitzkrieg_core::model::{
+    CryptoMarket, ExitReason, Mode, OrderRequest, Side, default_account_id,
+};
 use blitzkrieg_core::position::OpenParams;
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::schema::Event;
@@ -449,7 +451,7 @@ fn orphan_sweep_flattens_a_naked_leg_after_the_grace_window() {
         .expect("precondition: the DOWN leg filled into a position")
         .id
         .clone();
-    c.flatten(Some(&down_id), now + 3_000)
+    c.flatten(Some(&down_id), ExitReason::Manual, now + 3_000)
         .expect("flattening the second leg succeeds");
 
     let naked = c
@@ -561,7 +563,7 @@ fn dry_run_precheck_never_holds_the_pot() {
 fn flatten_of_an_unknown_position_moves_nothing() {
     let mut c = arb_core(None);
     let moved = c
-        .flatten(Some("hft-999999"), NOW)
+        .flatten(Some("hft-999999"), ExitReason::Manual, NOW)
         .expect("flatten of an unknown position is a no-op, not an error");
     assert_eq!(
         moved, 0,

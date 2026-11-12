@@ -294,7 +294,7 @@ impl Core {
                 // the sweep's own skip posture: the position stays in the
                 // book and the next tick re-judges it, so the result is
                 // honestly dropped rather than swallowed.
-                let _ = self.flatten(Some(&id), now_ms);
+                let _ = self.flatten(Some(&id), ExitReason::Manual, now_ms);
                 // RFC 568 阶段一（观察者写点）：flatten 已处置 ⇒ 配对落
                 // Closed 终态（判定链零改动 —— sweep 的 orphan 判定照旧直读
                 // OME 与持仓，这里只落账）。寻址按 token 形（close_by_token）：

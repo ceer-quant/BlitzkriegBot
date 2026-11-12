@@ -52,7 +52,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use blitzkrieg_core::account::config::TEST_ALLOWED_ROUNDS;
 use blitzkrieg_core::account::{Account, AccountStatus, CredentialKeys};
 use blitzkrieg_core::engine::DataEvent;
-use blitzkrieg_core::model::{Mode, default_account_id};
+use blitzkrieg_core::model::{ExitReason, Mode, default_account_id};
 use blitzkrieg_core::risk::RiskConfig;
 use blitzkrieg_core::schema::Event;
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
@@ -634,7 +634,7 @@ fn the_pair_book_never_feeds_back_into_judgment_paths() {
         .expect("the DOWN leg filled into a position")
         .id
         .clone();
-    c.flatten(Some(&down_id), now + 3_000)
+    c.flatten(Some(&down_id), ExitReason::Manual, now + 3_000)
         .expect("flattening the second leg succeeds");
 
     // 落地宽限（5s）后 tick ⇒ sweep 警报 + flatten 裸腿。配对簿此刻有账

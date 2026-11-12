@@ -231,7 +231,7 @@ impl Core {
                     format!("no open position behind order {order_id}"),
                 )
             })?;
-        self.flatten(Some(&position), now_ms)
+        self.flatten(Some(&position), ExitReason::Manual, now_ms)
     }
 
     pub fn cancel_all(&mut self, token_id: Option<&str>, now_ms: i64) -> CoreResult<usize> {
@@ -251,7 +251,14 @@ impl Core {
     /// Force-close positions: a specific id, or all when id is None. Returns how
     /// many were closed. Exits are SELL orders; in dry mode they cross at the
     /// latest book bid, in live mode the venue bridge submits them.
-    pub fn flatten(&mut self, position_id: Option<&str>, now_ms: i64) -> CoreResult<usize> {
+    /// `reason` 落在该仓位的平仓记录里（`on_position_closed` → `trade_db`），
+    /// 与强平动作一同审计；手动平仓/撤单残余平仓传 `ExitReason::Manual`。
+    pub fn flatten(
+        &mut self,
+        position_id: Option<&str>,
+        reason: ExitReason,
+        now_ms: i64,
+    ) -> CoreResult<usize> {
         let targets: Vec<FlattenTarget> = self
             .positions
             .open_positions()
@@ -297,7 +304,7 @@ impl Core {
                 .map(|(_, worst)| worst)
                 .filter(|p| *p > Decimal::ZERO)
                 .unwrap_or(Decimal::new(1, 2));
-            self.note_exit_reason(&token, ExitReason::Manual);
+            self.note_exit_reason(&token, reason);
             let order = OrderRequest {
                 token_id: token,
                 condition_id: condition,
@@ -322,6 +329,77 @@ impl Core {
             }
         }
         Ok(closed)
+    }
+
+    /// #1154: 轮次切换立即生效的前两步——撤单 → 市价强平，fail-closed。
+    /// 1. 撤销该账户在途轮市场上的全部 live 挂单（任一失败即中止）；
+    /// 2. 逐仓位市价卖出强平，实际成交按真实价入账（`on_position_closed` →
+    ///    trades 流水，`exit_reason = operator_grid_switch`）；任何仓位未能
+    ///    强平如实返回错误，此时网格**尚未切换**。
+    ///
+    /// 返回被强平的仓位数。
+    pub(crate) fn cancel_and_flatten_account(
+        &mut self,
+        account_id: &str,
+        now_ms: i64,
+        actor: &str,
+    ) -> CoreResult<usize> {
+        use blitzkrieg_market_api::AccountId;
+        let acct = AccountId::from(account_id);
+        let positions: Vec<crate::position::OpenPosition> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == acct)
+            .cloned()
+            .collect();
+        let tokens: std::collections::HashSet<String> =
+            positions.iter().map(|p| p.token_id.clone()).collect();
+
+        // ① 撤单：该账户在途轮市场上的全部 resting 挂单。
+        let order_ids: Vec<String> = self
+            .ome
+            .live_orders()
+            .iter()
+            .filter(|o| {
+                o.account_id == acct && o.status.is_live() && tokens.contains(o.token_id.as_str())
+            })
+            .map(|o| o.order_id.clone())
+            .collect();
+        for id in &order_ids {
+            self.cancel(id, now_ms)?;
+        }
+
+        // ② 强平：各仓位按市价卖出，实际成交如实入账；未全部平掉如实报错，
+        //    网格不切（fail-closed，不静默）。
+        for position in &positions {
+            self.flatten(Some(&position.id), ExitReason::OperatorGridSwitch, now_ms)?;
+        }
+        let still_open: Vec<String> = self
+            .positions
+            .open_positions()
+            .iter()
+            .filter(|p| p.account_id == acct)
+            .map(|p| p.id.clone())
+            .collect();
+        if !still_open.is_empty() {
+            return Err(CoreError::new(
+                CoreErrorCode::Internal,
+                format!(
+                    "round_duration.set(immediate): 强平未全部成交，已按实际成交入账，网格未切换；未平仓位：{}",
+                    still_open.join(", ")
+                ),
+            ));
+        }
+        tracing::info!(
+            target: "risk",
+            actor = %actor,
+            account = %account_id,
+            cancelled = order_ids.len(),
+            closed = positions.len(),
+            "round duration immediate switch: 撤单+市价强平完成，可切入新网格",
+        );
+        Ok(positions.len())
     }
 
     // ── Maintenance: pending-fill retry + maker→taker escalation + exits ────

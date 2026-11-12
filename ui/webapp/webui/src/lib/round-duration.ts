@@ -85,7 +85,8 @@ export function useRoundDuration() {
     }
   }
 
-  async function save(accountId: string = 'default'): Promise<void> {
+  /** `immediate: true` 时随请求下发立即切换标志；内核会先撤在途单、市价强平仓位，再切网格。 */
+  async function save(accountId: string = 'default', { immediate }: { immediate?: boolean } = {}): Promise<void> {
     if (pending.value === null) return
     busy.value = true
     err.value = null
@@ -94,6 +95,7 @@ export function useRoundDuration() {
       const res = await api.roundDurationSet({
         durationSec: pending.value,
         accountId,
+        immediate,
         reason: 'webui 面板编辑（轮次时间周期）',
       })
       if (res.error) {

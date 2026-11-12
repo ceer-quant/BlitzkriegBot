@@ -1,9 +1,7 @@
-//! The risk knobs' IPC writers and the kernel's error/daily-budget
-//! emitters, moved verbatim from `service.rs`'s risk-admission column
-//! (pure code motion, no logic edits): `system.reset_trading`'s three-gate
-//! reset, `risk.limits` / `systemic.limits` / `exit.set` /
-//! `round_duration.set`, the intent-decision audit and the daily-loss trip
-//! with its suppressed-stop reports.
+//! The risk knobs' IPC writers and the kernel's error/daily-budget emitters:
+//! `system.reset_trading`, `risk.limits`, `systemic.limits`, `exit.set`,
+//! `round_duration.set`, the intent-decision audit and the daily-loss trip.
+//! Moved verbatim from `service.rs` (pure code motion).
 
 use crate::model::*;
 use crate::position::EquityBasis;
@@ -17,24 +15,12 @@ use super::{Core, GateReason};
 impl Core {
     /// Apply a hot update of the ENTRY limits (#191) — the whole safe subset
     /// ([`crate::risk::HOT_RELOADABLE`]), in memory, with an audit record.
-    ///
-    /// What makes this safe enough to offer at runtime is what the whitelist
-    /// selects for: the order path reads every one of these LIVE (the risk gate
-    /// on each check, the engine's own config on each ticket), they bound NEW
-    /// exposure only — a close is exempt by construction (#174), so tightening a
-    /// limit can never trap an open position — and none of them carries
-    /// accumulated state, so a change cannot retroactively decide something the
-    /// day's book of events already decided.
-    ///
-    /// Atomic: the patch is validated in full (non-negative, coherent band)
-    /// before anything is written, so a refused patch leaves NO trace. Nothing is
-    /// persisted — a restart re-applies the startup flags (#191: "hot" must never
-    /// be read as "permanent"), and the audit says so in the same breath.
-    ///
-    /// The audit is one `tracing::info!` line per changed field (`target: "risk"`,
-    /// old → new + actor + instant) in the run log every deployment already
-    /// writes; the same facts are returned to the caller, so the reply and the log
-    /// cannot tell two different stories.
+    /// Whitelist entries are read LIVE by the order path, bound NEW exposure
+    /// only, and a close is exempt (#174), so tightening can never trap an open
+    /// position; the patch is validated fully before anything is written, so a
+    /// refusal leaves NO trace. Nothing is persisted — a restart re-applies the
+    /// startup flags; one `tracing::info!` per changed field (`target: "risk"`,
+    /// old → new + actor + instant) goes to the run log and the reply.
     pub fn apply_risk_limits(
         &mut self,
         patch: &crate::schema::SetRiskLimitsParams,
@@ -600,18 +586,18 @@ impl Core {
         })
     }
 
-    /// 轮次时间周期的运行时写路径（`round_duration.set`，UI 设置卡）：
-    /// **per-account** —— 白名单校验通过后把 `ACCOUNT_<ID>_ROUND_DURATION_SEC`
-    /// 写入 `.env`（原子 upsert），并在内存中更新
-    /// `config.account_round_durations`，立即生效。
+    /// 轮次时间周期的运行时写路径（`round_duration.set`，UI 设置卡）：per-account
+    /// 白名单校验后把 `ACCOUNT_<ID>_ROUND_DURATION_SEC` 原子 upsert 进 `.env`
+    /// 并更新内存，立即生效。红线：在途轮/单保留出生网格；`reset` 清
+    /// 覆盖回落默认网格；`durationSec` 与 `reset` 恰二选一；缺少
+    /// `env_file_path`（回测器/进程内测试）如实拒绝。
     ///
-    /// 红线：在途轮/单保留出生网格（不重槽、不重算 PnL）。热切 duration
-    /// 只对新轮生效；旧 slot 的存量订单/仓位不重新解析。
-    ///
-    /// `reset: true` 清该账户的覆盖 —— 下次会话该账户回落到默认网格。
-    /// `durationSec` 与 `reset` 恰好给一个，都给或都不给拒绝。
-    /// `account_id` 必须指定；对不存在的账户拒绝。
-    /// `runtime_config_path: None`（回测器/进程内测试）拒绝写并如实回报。
+    /// #1154: `patch.immediate` 要求「立即结束当前轮」：先撤该账户在途轮
+    /// 市场的全部挂单，再按市价真实强平其仓位（PnL 按真实成交价，台账写
+    /// `operator_grid_switch`，审计日志带 actor），最后切入新网格。
+    /// 任一步骤 fail-closed：撤单失败中止；强平不全如实入账并报错，
+    /// 网格不切；`round_duration_source == "cli_or_env"`（flagLocked）时
+    /// 破坏性切换被如实拒绝。
     pub fn apply_round_duration_set(
         &mut self,
         patch: &crate::schema::SetRoundDurationParams,
@@ -642,6 +628,48 @@ impl Core {
                     format!("round_duration.set: no such account `{account_id}`"),
                 )
             })?;
+        // #1154: flagLocked（显式启动参数在管）时破坏性切换不赢，如实拒绝——
+        // 在任何账簿动作之前判定。
+        if patch.immediate && self.config.round_duration_source == "cli_or_env" {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "round_duration.set(immediate): 当前网格由 --round-sec / BK_ROUND_SEC \
+                 显式锁定，立即切换会平掉在途仓位，被拒绝——去掉该启动参数后重试"
+                    .to_string(),
+            ));
+        }
+        // duration_sec 的白名单与该账户 ROUNDS 订阅允许列表：先于一切账簿动作
+        // 校验，这样 immediate 的撤单/强平绝不会在随后被拒而留下半边天。
+        if let Some(sec) = sec {
+            if !self.config.allowed_round_secs.contains(&sec) {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "round_duration.set: {sec} is not declared by any market plugin \
+                         (declared union: {:?}) — nothing was applied",
+                        self.config.allowed_round_secs
+                    ),
+                ));
+            }
+            let acc = self
+                .accounts
+                .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
+                .unwrap();
+            if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "round_duration.set: {sec} is not in account `{account_id}`'s subscribed \
+                         round families ({:?}) — nothing was applied",
+                        acc.rounds
+                    ),
+                ));
+            }
+        }
+        // #1154: 撤单 → 市价强平 → 切网格的前两步，fail-closed。
+        if patch.immediate {
+            self.cancel_and_flatten_account(account_id, now_ms, actor)?;
+        }
         // reset: remove the account's override from .env and memory.
         if patch.reset {
             let sfx: String = account_id
@@ -698,33 +726,6 @@ impl Core {
         }
         // Write path: duration_sec is Some (guaranteed by validation above).
         let sec = sec.unwrap();
-        // Validate against allowed_round_secs whitelist.
-        if !self.config.allowed_round_secs.contains(&sec) {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "round_duration.set: {sec} is not declared by any market plugin \
-                     (declared union: {:?}) — nothing was applied",
-                    self.config.allowed_round_secs
-                ),
-            ));
-        }
-
-        // Validate against the account's ROUNDS subscription allow-list (if declared).
-        let acc = self
-            .accounts
-            .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
-            .unwrap();
-        if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "round_duration.set: {sec} is not in account `{account_id}`'s subscribed \
-                     round families ({:?}) — nothing was applied",
-                    acc.rounds
-                ),
-            ));
-        }
 
         // Persist to .env only (atomic upsert), not the retired JSON cell.
         let env_path = self

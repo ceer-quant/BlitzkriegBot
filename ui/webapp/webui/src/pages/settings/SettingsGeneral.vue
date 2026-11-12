@@ -8,7 +8,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw, FileKey } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
-import type { ResetTradingResultDoc } from '@/api/client'
+import type { Position, ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
 import { useRoundDuration } from '@/lib/round-duration'
@@ -138,6 +138,42 @@ const {
   configSec: roundConfigSec, split: roundSplit, roundLabel,
   save: saveRound, reset: resetRound,
 } = useRoundDuration()
+
+// 本单（「立即结束当前轮」）：有在途仓位时必弹确认框（N 仓位 + 滑点警告），
+// 无仓位直接切；flagLocked（启动参数在管）时整条路径禁用。
+const roundConfirmOpen = ref(false)
+const roundConfirmN = ref(0)
+const roundConfirmSec = ref(0)
+const roundImmediate = ref(false)
+
+async function doSave(): Promise<void> {
+  if (!roundImmediate.value) {
+    await saveRound('default')
+    return
+  }
+  // 立即切换：先查在途仓位，有则必弹确认框，不静默；无仓位则直接切。
+  try {
+    const snap = await api.snapshot()
+    const n = (snap.positions ?? []).filter(
+      (p: Position) => (p.accountId ?? 'default') === 'default' && (p.shares ?? 0) > 0,
+    ).length
+    if (n > 0) {
+      roundConfirmN.value = n
+      roundConfirmSec.value = Number(roundValue.value)
+      roundConfirmOpen.value = true
+      return
+    }
+  } catch (e) {
+    roundErr.value = e instanceof Error ? e.message : String(e)
+    return
+  }
+  await saveRound('default', { immediate: true })
+}
+
+async function doSaveImmediate(): Promise<void> {
+  roundConfirmOpen.value = false
+  await saveRound('default', { immediate: true })
+}
 
 // ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
 // issue 561（裁决 2）：重置按账户隔离 —— 显式携带面板 display 账户（唯一可
@@ -287,6 +323,11 @@ async function doResetTrading(): Promise<void> {
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
+            <Switch
+              v-model="roundImmediate"
+              :disabled="roundBusy || roundFlagLocked || !roundDirty"
+              label="立即结束当前轮（市价平掉在途仓位）"
+            />
             <Button
               variant="ghost"
               size="sm"
@@ -299,8 +340,8 @@ async function doResetTrading(): Promise<void> {
             <Button
               size="sm"
               :disabled="roundBusy || !roundDirty"
-              title="把选中的轮次周期写入持久格（立即生效，无需重启）"
-              @click="saveRound('default')"
+              title="把选中的轮次周期写入持久格；开启「立即结束当前轮」时会先平掉在途仓位再切网格"
+              @click="doSave"
             >
               <Check class="size-3.5" />保存
             </Button>
@@ -359,6 +400,21 @@ async function doResetTrading(): Promise<void> {
       :busy="resetBusy"
       :error="resetErr"
       @confirm="doResetTrading"
+    />
+
+    <!-- 本单：立即切换轮次的确认框——有在途仓位时必弹，N 仓位 + 滑点警告。 -->
+    <ConfirmWordDialog
+      v-model:open="roundConfirmOpen"
+      word="YES"
+      title="立即切换轮次"
+      :lines="[
+        `将立即平掉 ${roundConfirmN} 个在途仓位，并按 ${roundLabel(roundConfirmSec)}s 开新轮，`,
+        '强平按市价成交，可能产生滑点损失；已成交部分如实入账，不静默。',
+      ]"
+      action-label="确认立即切换"
+      :busy="roundBusy"
+      :error="roundErr"
+      @confirm="doSaveImmediate"
     />
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->
