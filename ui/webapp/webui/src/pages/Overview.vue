@@ -368,7 +368,7 @@ const needsStrategyHint = computed(() => {
 <template>
   <template v-if="snap">
     <!-- beginner hint: the panel is live but the robot is not yet allowed to act -->
-    <AlertBanner v-if="needsStrategyHint" tone="info">
+    <AlertBanner v-if="needsStrategyHint" tone="info" class="mb-3.5">
       机器人还没有启用任何策略 —— 到
       <span class="font-semibold text-fg">策略</span>
       页内打开开关后，成交与裁决会出现在这里。
