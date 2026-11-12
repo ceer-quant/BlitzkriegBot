@@ -696,6 +696,43 @@ const roundDurLabel = computed(() => {
  */
 const roundSwitch = useRoundDuration()
 
+// 本单（「立即结束当前轮」）：有在途仓位时必弹确认框（N 仓位 + 滑点警告），
+// 无仓位直接切；flagLocked 时整条路径禁用。
+const hftRoundImmediate = ref(false)
+const hftRoundConfirmOpen = ref(false)
+const hftRoundConfirmN = ref(0)
+const hftRoundConfirmSec = ref(0)
+
+async function doSaveRound(): Promise<void> {
+  const accountId = store.activeAccount ?? 'default'
+  if (!hftRoundImmediate.value) {
+    await roundSwitch.save(accountId)
+    return
+  }
+  // 立即切换：先查当前账户在途仓位，有则必弹确认框，不静默；无仓位直接切。
+  try {
+    const snap = await api.snapshot()
+    const n = (snap.positions ?? []).filter(
+      (p: Position) => (p.accountId ?? accountId) === accountId && (p.shares ?? 0) > 0,
+    ).length
+    if (n > 0) {
+      hftRoundConfirmN.value = n
+      hftRoundConfirmSec.value = Number(roundSwitch.value.value)
+      hftRoundConfirmOpen.value = true
+      return
+    }
+  } catch (e) {
+    roundSwitch.err.value = e instanceof Error ? e.message : String(e)
+    return
+  }
+  await roundSwitch.save(accountId, { immediate: true })
+}
+
+async function doSaveRoundImmediate(): Promise<void> {
+  hftRoundConfirmOpen.value = false
+  await roundSwitch.save(store.activeAccount ?? 'default', { immediate: true })
+}
+
 // 倒计时卡的周期切换按当前账户 venue 的插件声明筛档（2026-10-26 操作者
 // 指令，与账户卡 AccountSwitcher.declaredRoundSecs 同一声明面、同一宽容
 // 语义）：未声明（predictfun / 寄生 polysimulator / 老内核缺字段）不筛，
@@ -971,15 +1008,37 @@ const journalOpen = ref(false)
               <span class="text-[12px] font-medium tabular-nums text-faint-fg">{{ roundDurLabel }}</span>
             </div>
           </Tooltip>
+          <Switch
+            v-if="roundSwitch.dirty.value && !roundSwitch.flagLocked.value"
+            v-model="hftRoundImmediate"
+            :disabled="roundSwitch.busy.value"
+            label="立即结束当前轮（市价平掉在途仓位）"
+          />
           <Button
             v-if="roundSwitch.dirty.value"
             size="sm"
             :disabled="roundSwitch.busy.value"
-            title="把选中的轮次周期写入当前账户（立即生效；其他账户在账户卡配置）"
-            @click="roundSwitch.save(store.activeAccount ?? 'default')"
+            title="把选中的轮次周期写入当前账户；开启「立即结束当前轮」时会先平掉在途仓位再切网格"
+            @click="doSaveRound"
           >
             <Check class="size-3.5" />保存
           </Button>
+
+          <!-- 本单：立即切换轮次的确认框——有在途仓位时必弹，N 仓位 + 滑点警告。 -->
+          <ConfirmWordDialog
+            v-model:open="hftRoundConfirmOpen"
+            word="YES"
+            title="立即切换轮次"
+            :lines="[
+              `将立即平掉 ${hftRoundConfirmN} 个在途仓位，并按 ${roundSwitch.roundLabel(hftRoundConfirmSec)}s 开新轮，`,
+              '强平按市价成交，可能产生滑点损失；已成交部分如实入账，不静默。',
+            ]"
+            action-label="确认立即切换"
+            :busy="roundSwitch.busy.value"
+            :error="roundSwitch.err.value"
+            @confirm="doSaveRoundImmediate"
+          />
+
           <Tooltip :content="sound ? '关闭提示音' : '开启提示音'">
             <Button variant="ghost" size="icon" @click="toggleSound">
               <Bell v-if="sound" /><BellOff v-else class="opacity-60" />

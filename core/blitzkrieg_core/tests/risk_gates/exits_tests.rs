@@ -53,7 +53,7 @@ fn the_kill_switch_freezes_entries_but_never_the_exit() {
         NOW + 3_000,
     );
     assert_eq!(
-        c.flatten(None, NOW + 3_000).unwrap(),
+        c.flatten(None, ExitReason::Manual, NOW + 3_000).unwrap(),
         1,
         "the closing sell must be submitted"
     );

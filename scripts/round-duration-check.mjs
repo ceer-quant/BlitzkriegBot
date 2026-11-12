@@ -134,6 +134,81 @@ try {
   check('an ambiguous write (value + reset) is refused',
     both?.message?.includes('not both'), JSON.stringify(both));
 
+  // #1154: `round_duration.set {immediate: true}` — 撤单 → 市价强平 → 切网格，
+  // fail-closed；成交按真实账簿价入账，台账写 operator_grid_switch。
+  await core.request('books.snapshot', {
+    tokenId: 'tok',
+    bids: [{ price: 0.39, size: 100 }],
+    asks: [{ price: 0.40, size: 100 }],
+  });
+  await core.request('orders.place', {
+    tokenId: 'tok',
+    conditionId: 'cond',
+    side: 'buy',
+    mode: 'taker',
+    price: 0.40,
+    size: 5,
+    internalKey: 'immediate-probe',
+    strategy: 's',
+    asset: 'BTC',
+    direction: 'up',
+    roundSlot: Math.floor(Date.now() / 1000 / 900),
+  });
+  const beforePos = await core.request('positions.list', {});
+  check('immediate probe: 一笔在途仓位',
+    beforePos.positions?.length === 1, JSON.stringify(beforePos));
+
+  const immediate = await core.request('round_duration.set',
+    { accountId: 'default', durationSec: 300, immediate: true, reason: 'gate immediate' });
+  check('immediate set 回执新网格',
+    immediate.nextSessionSec === 300 && immediate.reset === false, JSON.stringify(immediate));
+
+  const afterPos = await core.request('positions.list', {});
+  check('immediate switch 平掉在途仓位',
+    afterPos.positions?.length === 0, JSON.stringify(afterPos));
+
+  const mid2 = await core.request('round_duration.get', {});
+  check('引擎扫描器立即跟入新网格（无 split-brain）',
+    mid2.engineActiveSec === 300 && mid2.perAccount?.default === 300, JSON.stringify(mid2));
+
+  const trades = await core.request('trades.history', { limit: 10 });
+  const earlyExit = trades.trades?.some((t) => t.exitReason === 'operator_grid_switch'
+    && Number(t.exitPrice) === 0.39 && t.accountId === 'default');
+  check('台账写 operator_grid_switch 且出场价是真实 bid 0.39',
+    earlyExit === true, JSON.stringify(trades));
+
+  // flagLocked：显式 --round-sec 在管时即时切换被如实拒绝。
+  const core5 = makeCore('flaglocked', ['--round-sec', '3600']);
+  await core5.start();
+  let flaglocked = null;
+  try {
+    await core5.request('round_duration.set',
+      { accountId: 'default', durationSec: 300, immediate: true });
+  } catch (e) {
+    flaglocked = { message: e?.message ?? String(e) };
+  }
+  check('flagLocked 拒绝即时切换',
+    flaglocked && (flaglocked.message.includes('锁定') || flaglocked.message.includes('拒绝')),
+    JSON.stringify(flaglocked));
+  await core5.stop();
+
+  // 非 immediate 写入不得动在途仓位（出生网格保护，next_session 语义不动）。
+  await core.request('books.snapshot', {
+    tokenId: 'tok2', bids: [{ price: 0.39, size: 100 }], asks: [{ price: 0.40, size: 100 }],
+  });
+  await core.request('orders.place', {
+    tokenId: 'tok2', conditionId: 'cond2', side: 'buy', mode: 'taker',
+    price: 0.40, size: 5, internalKey: 'next-probe', strategy: 's', asset: 'ETH',
+    direction: 'up', roundSlot: Math.floor(Date.now() / 1000 / 900),
+  });
+  const stillPos = await core.request('positions.list', {});
+  check('next_session 写入前有一笔在途仓位',
+    stillPos.positions?.length === 1, JSON.stringify(stillPos));
+  await core.request('round_duration.set', { accountId: 'default', durationSec: 300 });
+  const stillPos2 = await core.request('positions.list', {});
+  check('非 immediate 写入不平在途仓位',
+    stillPos2.positions?.length === 1, JSON.stringify(stillPos2));
+
   await core.stop();
 
   // 4. The restart resolution: the new core reads the .env override back

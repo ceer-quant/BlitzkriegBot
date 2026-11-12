@@ -34,6 +34,9 @@ export interface RoundDurationSetBody {
   reason?: string
   /** 目标账号（内核 account_id，必填）。 */
   accountId: string
+  /** #1154: true = 立即结束当前轮：撤该账户在途单、市价强平其仓位，再切入新网格。
+   *  false（默认）= 原有 next_session 语义，在途仓位不动。 */
+  immediate?: boolean
 }
 
 /** `round_duration.set` 回执：下次会话将跑的值 + 是否为清格操作。 */

@@ -360,6 +360,11 @@ pub enum ExitReason {
     TimeExit,
     ForceExit,
     Manual,
+    /// #1154: 算子指令「立即切换轮次」导致的强平：该仓位被按市价真实
+    /// 平仓以退出当前轮，PnL 按真实成交价结算，不入任何估算/影子价。
+    /// Wire label `operator_grid_switch`；审计回执、台账 reason 与 actor
+    /// 三处如实，不静默。
+    OperatorGridSwitch,
     /// Explicit close requested by a hosted (in-tree or external) strategy via
     /// an exit *intent*. The kernel still prices, sizes, risk-checks and
     /// submits it — the strategy never places anything itself.

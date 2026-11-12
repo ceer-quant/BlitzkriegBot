@@ -50,8 +50,8 @@ use blitzkrieg_core::account::config::{
 };
 use blitzkrieg_core::engine::DataEvent;
 use blitzkrieg_core::model::{
-    AccountId, CoreError, CoreErrorCode, CryptoMarket, FillPolicy, Mode, OrderRequest, OrderStatus,
-    Side, default_account_id,
+    AccountId, CoreError, CoreErrorCode, CryptoMarket, ExitReason, FillPolicy, Mode, OrderRequest,
+    OrderStatus, Side, default_account_id,
 };
 use blitzkrieg_core::schema::Event;
 use blitzkrieg_core::service::{Core, CoreConfig, VirtualAccountLimit};
@@ -416,7 +416,7 @@ fn flatten_down_leg(c: &mut Core, now: i64) -> String {
         .expect("precondition: the DOWN leg filled into a position")
         .id
         .clone();
-    c.flatten(Some(&down_id), now)
+    c.flatten(Some(&down_id), ExitReason::Manual, now)
         .expect("flattening the second leg succeeds");
     down_id
 }

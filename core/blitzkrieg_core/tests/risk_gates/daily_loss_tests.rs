@@ -1115,7 +1115,7 @@ fn a_dry_to_live_rebase_trips_the_day_and_still_lets_the_position_out() {
         NOW + 62_000,
     );
     assert_eq!(
-        c.flatten(None, NOW + 62_000).unwrap(),
+        c.flatten(None, ExitReason::Manual, NOW + 62_000).unwrap(),
         1,
         "the closing sell must be submitted while the day is tripped"
     );

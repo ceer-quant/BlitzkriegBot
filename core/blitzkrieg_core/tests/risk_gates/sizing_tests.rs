@@ -72,7 +72,7 @@ fn the_relative_cap_bounds_any_order_but_never_the_way_out() {
         NOW + 5_000,
     );
     assert_eq!(
-        c.flatten(None, NOW + 5_000).unwrap(),
+        c.flatten(None, ExitReason::Manual, NOW + 5_000).unwrap(),
         1,
         "the closing sell must be submitted"
     );

@@ -1,5 +1,6 @@
 use super::super::{PeerAuth, typed};
 use super::prelude::*;
+use crate::model::ExitReason;
 use crate::schema::*;
 
 // The `position` family verbs, moved verbatim out of `handle_line`'s dispatch match (issue 699).
@@ -30,7 +31,10 @@ pub(crate) async fn handle_position(
                     // client error — it must never decay into "flatten all"
                     // (issue 894).
                     let target = p.position_id.as_deref().filter(|id| *id != "all");
-                    let closed = core.lock().await.flatten(target, now_ms())?;
+                    let closed = core
+                        .lock()
+                        .await
+                        .flatten(target, ExitReason::Manual, now_ms())?;
                     Ok::<_, CoreError>(
                         serde_json::to_value(PositionExitResult { closed }).unwrap_or(Value::Null),
                     )
