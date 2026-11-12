@@ -950,7 +950,7 @@ const journalOpen = ref(false)
             v-if="!switcherLocked"
             :content="roundSwitch.flagLocked.value
               ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
-              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换写入下次会话（重启生效，改动影响历史回测的 slot 索引）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
+              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换立即作用于本会话（在途轮保持原网格）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
           >
             <div class="flex items-center gap-1.5">
               <Timer class="size-3.5 text-faint-fg" />
@@ -975,8 +975,8 @@ const journalOpen = ref(false)
             v-if="roundSwitch.dirty.value"
             size="sm"
             :disabled="roundSwitch.busy.value"
-            title="把选中的全局轮次坐标系写入持久格（重启生效；账户实时周期在账户卡配置）"
-            @click="roundSwitch.save()"
+            title="把选中的全局轮次坐标系写入持久格（立即生效；账户实时周期在账户卡配置）"
+            @click="roundSwitch.save(store.activeAccount ?? 'default')"
           >
             <Check class="size-3.5" />保存
           </Button>
@@ -1031,23 +1031,6 @@ const journalOpen = ref(false)
            写入后 10s 自动重启，可立即/取消 —— useRestartCore 组件级约定）。 -->
       <AlertBanner v-if="roundSwitch.err.value" class="mt-3" tone="warn">{{ roundSwitch.err.value }}</AlertBanner>
       <AlertBanner v-if="roundSwitch.msg.value" class="mt-3" tone="info">{{ roundSwitch.msg.value }}</AlertBanner>
-      <div v-if="roundSwitch.restart.counting.value" class="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
-        <span class="text-[12px] font-semibold text-gold">{{ roundSwitch.restart.countdown.value }}s 后自动重启内核（轮次周期切换生效）</span>
-        <Button size="sm" variant="outline" :disabled="roundSwitch.restart.restarting.value" @click="roundSwitch.restart.now">立即重启</Button>
-        <Button size="sm" variant="ghost" :disabled="roundSwitch.restart.restarting.value" @click="roundSwitch.restart.cancel">取消</Button>
-      </div>
-      <AlertBanner
-        v-if="roundSwitch.restart.restarting.value"
-        class="mt-3"
-        tone="info"
-        title="内核重启中…"
-      >轮次周期切换需要重启生效；本页读数会短暂断开，内核重新上线后自动恢复。</AlertBanner>
-      <AlertBanner
-        v-if="roundSwitch.restart.restartErr.value"
-        class="mt-3"
-        tone="error"
-        :title="roundSwitch.restart.restartErr.value"
-      />
 
       <!--
         A crash is stated in the panel rather than left to be inferred from a

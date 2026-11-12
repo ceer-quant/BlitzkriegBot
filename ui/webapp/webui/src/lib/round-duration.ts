@@ -13,7 +13,6 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import type { RoundDurationDoc } from '@/api/client'
-import { useRestartCore } from '@/lib/restart-core'
 
 export function useRoundDuration() {
   const doc = ref<RoundDurationDoc | null>(null)
@@ -21,7 +20,6 @@ export function useRoundDuration() {
   const msg = ref<string | null>(null)
   const busy = ref(false)
   const pending = ref<number | null>(null)
-  const restart = useRestartCore()
 
   const segments = computed(() => {
     const allowed = doc.value?.allowed ?? []
@@ -35,9 +33,9 @@ export function useRoundDuration() {
     return out
   })
   const value = computed<string>({
-    // 预填「下次会话将跑的值」（持久格优先），不是本会话生效值 —— 卡片承诺
-    // 的是「重启后是什么」。
-    get: () => String(pending.value ?? doc.value?.nextSessionSec ?? ''),
+    // 预填「本会话生效值」（即时生效），持久格/下次会话值不再预填 ——
+    // 卡片承诺的是「现在就是这个」。
+    get: () => String(pending.value ?? doc.value?.effectiveSec ?? ''),
     set: (v) => { pending.value = Number(v) },
   })
   const dirty = computed(
@@ -67,7 +65,7 @@ export function useRoundDuration() {
     }
   }
 
-  async function save(): Promise<void> {
+  async function save(accountId: string = 'default'): Promise<void> {
     if (pending.value === null) return
     busy.value = true
     err.value = null
@@ -75,14 +73,14 @@ export function useRoundDuration() {
     try {
       const res = await api.roundDurationSet({
         durationSec: pending.value,
+        accountId,
         reason: 'webui 面板编辑（轮次时间周期）',
       })
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已保存：重启后按 ${res.nextSessionSec}s 轮次运行；本会话网格不变。`
+        msg.value = `已生效：本会话按 ${res.nextSessionSec}s 轮次运行；在途轮保持原网格结算。`
         await load()
-        restart.schedule()
       }
     } catch (e) {
       err.value = e instanceof Error ? e.message : String(e)
@@ -92,21 +90,21 @@ export function useRoundDuration() {
   }
 
   /** 清除面板设置（回落启动参数解析）——设置卡独有的退化路径，同一写单源。 */
-  async function reset(): Promise<void> {
+  async function reset(accountId: string = 'default'): Promise<void> {
     busy.value = true
     err.value = null
     msg.value = null
     try {
       const res = await api.roundDurationSet({
         reset: true,
+        accountId,
         reason: 'webui 面板清除（轮次时间周期卡）',
       })
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已清除面板设置：重启后回落到启动参数解析（命令行 > 环境变量 > 配置文件 > 出厂默认）。`
+        msg.value = `已生效：面板设置已清除，本会话回落到启动参数解析；在途轮不变。`
         await load()
-        restart.schedule()
       }
     } catch (e) {
       err.value = e instanceof Error ? e.message : String(e)
@@ -117,5 +115,5 @@ export function useRoundDuration() {
 
   onMounted(load)
 
-  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, sourceLabel, load, save, reset, restart }
+  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, sourceLabel, load, save, reset }
 }

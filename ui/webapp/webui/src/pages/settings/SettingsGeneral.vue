@@ -135,7 +135,7 @@ const {
   doc: roundDoc, err: roundErr, msg: roundMsg, busy: roundBusy,
   segments: roundSegments, value: roundValue, dirty: roundDirty,
   flagLocked: roundFlagLocked, sourceLabel: roundSourceLabel,
-  save: saveRound, reset: resetRound, restart,
+  save: saveRound, reset: resetRound,
 } = useRoundDuration()
 
 // ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
@@ -264,10 +264,10 @@ async function doResetTrading(): Promise<void> {
       <template v-else>
         <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
           <div class="min-w-0 sm:min-w-auto">
-            <div class="text-[12.5px] font-semibold">下次会话的全局轮长</div>
+            <div class="text-[12.5px] font-semibold">当前全局轮长</div>
             <p class="mt-0.5 text-[11px] text-faint-fg">
               这是复盘坐标系与未配置账户的回落，不是各账户的交易周期 —— 账户各跑各的周期族在账户卡配置（热生效）。
-              本格改动影响历史回测的 round_slot 索引，重启后生效。
+              改动立即作用于本会话；在途轮保持原网格结算。
             </p>
           </div>
           <SegmentedControl
@@ -286,10 +286,10 @@ async function doResetTrading(): Promise<void> {
               当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
             </span>
             <span v-else-if="roundDoc.persisted">
-              已有面板设置：下次会话按 {{ roundDoc.nextSessionSec }}s 运行。清除后回落到启动参数解析。
+              已有面板设置：本会话按 {{ roundDoc.perAccount?.['default'] ?? roundDoc.effectiveSec }}s 运行。清除后回落到启动参数解析。
             </span>
             <span v-else>
-              尚无面板设置：下次会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
+              尚无面板设置：本会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
@@ -297,16 +297,16 @@ async function doResetTrading(): Promise<void> {
               variant="ghost"
               size="sm"
               :disabled="roundBusy || !roundDoc.persisted"
-              title="清除面板设置，下次会话回落到启动参数解析"
-              @click="resetRound"
+              title="清除面板设置，本会话回落到启动参数解析"
+              @click="resetRound('default')"
             >
               <RefreshCw class="size-3.5" />清除
             </Button>
             <Button
               size="sm"
               :disabled="roundBusy || !roundDirty"
-              title="把选中的轮次周期写入持久格（重启内核后生效）"
-              @click="saveRound"
+              title="把选中的轮次周期写入持久格（立即生效，无需重启）"
+              @click="saveRound('default')"
             >
               <Check class="size-3.5" />保存
             </Button>
@@ -315,31 +315,6 @@ async function doResetTrading(): Promise<void> {
 
         <AlertBanner v-if="roundErr" class="mt-3" tone="warn">{{ roundErr }}</AlertBanner>
         <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
-
-        <!-- issue 488：倒计时条（写入成功后出现）。10s 自动重启；可立即执行或取消。 -->
-        <div v-if="restart.counting.value" class="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
-          <span class="text-[12px] font-semibold text-gold">{{ restart.countdown.value }}s 后自动重启内核</span>
-          <Button size="sm" variant="outline" :disabled="restart.restarting.value" @click="restart.now">立即重启</Button>
-          <Button size="sm" variant="ghost" :disabled="restart.restarting.value" @click="restart.cancel">取消</Button>
-        </div>
-        <AlertBanner
-          v-if="restart.restarting.value"
-          class="mt-3"
-          tone="info"
-          title="内核重启中…"
-        >本页读数会短暂断开，内核重新上线后自动恢复。</AlertBanner>
-        <AlertBanner
-          v-if="restart.restartErr.value"
-          class="mt-3"
-          tone="error"
-          :title="restart.restartErr.value"
-        />
-        <AlertBanner
-          v-if="restart.restartMsg.value && !restart.counting.value"
-          class="mt-3"
-          tone="info"
-          :title="restart.restartMsg.value"
-        />
       </template>
     </Card>
 
