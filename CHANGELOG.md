@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com); versioning: semver.
 
 ## [0.4.2] - 2026-11-08
 
+> **延迟发布说明（2026-11-13 重打 tag）**：首版 `v0.4.2` tag（`32ab6dde` →
+> `1fd2ec6a`，2026-11-09）在发布前撤回 —— lua_momentum 多周期适配暴露
+> 后遗症，需 debug 收口后重发（#1047 发布门禁）。收口链：
+> #1169 classify threshold 单位 bug（分数比分数，0.04% 噪声不再武装）、
+> #1167 网格生命周期契约统一（#1165）+ stats_views 未启用策略零输出与
+> WARN 限频（#1164）、#1171 策略实例绑交易族（#1170）、#1172 panel-check
+> PTY 补全/回呼断言改 settle 帧轮询（#1168）。
+> 相对首版 tag 的增量共 92 个提交（`1fd2ec6a..3856e5d6`）：除上述收口链
+> 外，还含 #1030–#1161（账本现金真相续作、lua_momentum 多周期兼容与
+> 止损/入场窗、轮次周期账户级化与轮切立即生效、webUI 启动骨架/冻结真相/
+> 移动端适配）、**late_favorite** 新策略（#1174，Polymarket BTC 近结算
+> 45–120s 吃单持有到结算，决策窗 97.72% WR / 6.74 PF，holdout 预注册
+> 报告随 docs 交付）与 docs 站公告/导航更新（#1173/#1175/#1177）。
+> 版本号不变（workspace `0.4.2`），CHANGELOG 主体为 11-08 定稿内容。
+
 0.4.1 → 0.4.2 的 ~100 条提交，六大主线：**微内核化与契约冻结**（0.4.2 epic
 收官）、**双账本绝对独立**、**风控现金真相**、**策略出场栈一代目**
 （thesis_death + maker-first + 时间加权带）、**config 单源 .env**、
