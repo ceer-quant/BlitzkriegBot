@@ -6,7 +6,7 @@
 //! Polymarket extension's `gamma` module.
 
 use crate::model::CryptoMarket;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The clock bucket for markets (and corpora) that carry no venue tag — the
 /// pre-multi-plugin behaviour. Empty string == this bucket everywhere the
@@ -155,6 +155,10 @@ pub struct Scanner {
     /// venue's clock property, not a family's: the same venue's wall clock
     /// serves every round duration it lists.
     clock_offset_ms: HashMap<String, i64>,
+    /// #1157: `(token, active grid)` pairs already logged at INFO. The guard is
+    /// `&self` (every tick), so the set is interior mutability. Repeats are
+    /// debug; the refusal does not read this set.
+    off_grid_refusal_logged: std::sync::Mutex<HashSet<(String, i64)>>,
 }
 
 impl Scanner {
@@ -167,6 +171,7 @@ impl Scanner {
             actual_end_time_ms: HashMap::new(),
             clock_offset_ms: HashMap::new(),
             grid_override: false,
+            off_grid_refusal_logged: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -490,17 +495,37 @@ impl Scanner {
         // settlement timing (`family_duration` above feeds `round_timing_for`),
         // but it no longer governs which round a market may be traded in.
         if self.grid_override && family_duration != self.cfg.round_duration_sec {
-            // #1157 evidence: the candidate's family resolution vs the active
-            // grid, so an operator can confirm off-grid selection in the run log.
-            tracing::info!(
-                target: "engine",
-                market = %market.asset,
-                token = %market.up_token_id,
-                declared = %market.round_duration_sec,
-                grid = %self.cfg.round_duration_sec,
-                family = %family_duration,
-                "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
-            );
+            // #1157: INFO once per (token, active grid); repeats are debug.
+            // Drop the lock before logging so a subscriber cannot re-enter.
+            let grid = self.cfg.round_duration_sec;
+            let first = {
+                let mut seen = self
+                    .off_grid_refusal_logged
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                seen.insert((market.up_token_id.clone(), grid))
+            };
+            if first {
+                tracing::info!(
+                    target: "engine",
+                    market = %market.asset,
+                    token = %market.up_token_id,
+                    declared = market.round_duration_sec,
+                    grid,
+                    family = family_duration,
+                    "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "engine",
+                    market = %market.asset,
+                    token = %market.up_token_id,
+                    declared = market.round_duration_sec,
+                    grid,
+                    family = family_duration,
+                    "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
+                );
+            }
             return Err(TimingBlock::NoMarkets);
         }
         let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
@@ -618,6 +643,7 @@ impl Scanner {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn slot_and_round_state_math() {
@@ -1309,5 +1335,158 @@ mod tests {
             s.is_live_round_row(&m1h, now),
             "override: 1h row live on 1h grid"
         );
+    }
+
+    /// #1157: repeated evaluations of one `(token, grid)` emit INFO once
+    /// (further hits are DEBUG). A new token or grid logs again.
+    #[test]
+    fn off_grid_refusal_info_is_once_per_token_and_grid() {
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::registry;
+
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 300,
+            min_round_age_sec: 0,
+            min_time_left_sec: 0,
+            ..Default::default()
+        });
+        s.set_grid_override(true);
+        let now = 1_000_000i64;
+        let mut sol = gate_market(1_800_000, "polymarket");
+        sol.asset = "SOL".into();
+        sol.up_token_id = "sol-up".into();
+        sol.down_token_id = "sol-down".into();
+        sol.round_duration_sec = 900;
+        s.set_markets(vec![sol.clone()]);
+
+        let (capture, got) = OffGridLogCapture::new();
+        tracing::subscriber::with_default(registry().with(capture), || {
+            for _ in 0..3 {
+                assert_eq!(
+                    s.can_trade_reason_for(&sol, now),
+                    Err(TimingBlock::NoMarkets),
+                    "off-grid entry stays refused on every tick"
+                );
+            }
+        });
+        let levels = got.lock().expect("capture").clone();
+        assert_eq!(
+            levels.iter().filter(|l| **l == Level::INFO).count(),
+            1,
+            "INFO once for the repeated (token, grid): {levels:?}"
+        );
+        assert_eq!(
+            levels.iter().filter(|l| **l == Level::DEBUG).count(),
+            2,
+            "the two repeats are debug, not info: {levels:?}"
+        );
+        assert_eq!(
+            s.off_grid_refusal_logged.lock().expect("set").len(),
+            1,
+            "the dedupe set grows once for the repeated market"
+        );
+
+        let mut eth = sol.clone();
+        eth.asset = "ETH".into();
+        eth.up_token_id = "eth-up".into();
+        let (capture, got) = OffGridLogCapture::new();
+        tracing::subscriber::with_default(registry().with(capture), || {
+            assert_eq!(
+                s.can_trade_reason_for(&eth, now),
+                Err(TimingBlock::NoMarkets)
+            );
+            assert_eq!(
+                s.can_trade_reason_for(&eth, now),
+                Err(TimingBlock::NoMarkets)
+            );
+        });
+        let levels = got.lock().expect("capture").clone();
+        assert_eq!(
+            levels.iter().filter(|l| **l == Level::INFO).count(),
+            1,
+            "a different token on the same grid logs INFO once: {levels:?}"
+        );
+        assert_eq!(s.off_grid_refusal_logged.lock().expect("set").len(), 2);
+
+        s.cfg.round_duration_sec = 3600;
+        let (capture, got) = OffGridLogCapture::new();
+        tracing::subscriber::with_default(registry().with(capture), || {
+            assert_eq!(
+                s.can_trade_reason_for(&sol, now),
+                Err(TimingBlock::NoMarkets)
+            );
+            assert_eq!(
+                s.can_trade_reason_for(&sol, now),
+                Err(TimingBlock::NoMarkets)
+            );
+        });
+        let levels = got.lock().expect("capture").clone();
+        assert_eq!(
+            levels.iter().filter(|l| **l == Level::INFO).count(),
+            1,
+            "the same token on a new active grid logs INFO once more: {levels:?}"
+        );
+        assert_eq!(s.off_grid_refusal_logged.lock().expect("set").len(), 3);
+
+        let mut on_grid = sol.clone();
+        on_grid.round_duration_sec = 3600;
+        assert!(
+            s.can_trade_reason_for(&on_grid, now).is_ok(),
+            "a family that matches the active grid is not an off-grid refusal"
+        );
+        assert_eq!(
+            s.off_grid_refusal_logged.lock().expect("set").len(),
+            3,
+            "an on-grid row does not join the dedupe set"
+        );
+    }
+
+    /// `target = "engine"` events for the #1157 line. Thread-local subscriber.
+    #[derive(Clone)]
+    struct OffGridLogCapture(Arc<Mutex<Vec<tracing::Level>>>);
+
+    impl OffGridLogCapture {
+        fn new() -> (Self, Arc<Mutex<Vec<tracing::Level>>>) {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            (Self(buf.clone()), buf)
+        }
+    }
+
+    struct OffGridMessage<'a>(&'a mut String);
+
+    impl tracing::field::Visit for OffGridMessage<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0.push_str(&format!("{value:?}"));
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.0.push_str(value);
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for OffGridLogCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "engine" {
+                return;
+            }
+            let mut msg = String::new();
+            event.record(&mut OffGridMessage(&mut msg));
+            if !msg.contains("round grid override") {
+                return;
+            }
+            self.0
+                .lock()
+                .expect("capture")
+                .push(*event.metadata().level());
+        }
     }
 }
