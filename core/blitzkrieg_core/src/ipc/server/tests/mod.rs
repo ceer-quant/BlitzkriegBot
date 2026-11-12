@@ -817,6 +817,7 @@ mod tests_feed_reuse;
 mod tests_hot_reload;
 mod tests_read_envelopes;
 mod tests_risk_rounds;
+mod tests_risk_rounds_immediate;
 mod tests_snapshot_dedupe;
 mod tests_strategy_verbs;
 mod tests_update_verbs;

@@ -628,8 +628,7 @@ impl Core {
                     format!("round_duration.set: no such account `{account_id}`"),
                 )
             })?;
-        // #1154: flagLocked（显式启动参数在管）时破坏性切换不赢，如实拒绝——
-        // 在任何账簿动作之前判定。
+        // #1154: flagLocked（显式启动参数在管）时破坏性切换不赢，如实拒绝——在任何账簿动作之前判定。
         if patch.immediate && self.config.round_duration_source == "cli_or_env" {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
