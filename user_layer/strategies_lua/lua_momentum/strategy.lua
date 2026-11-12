@@ -852,6 +852,21 @@ function bk_evaluate()
     if min_entry_left > 0 and round.time_left_sec ~= nil and round.time_left_sec < min_entry_left then
         return out
     end
+    -- #1130 轮首禁入窗：入场后前 entry_open_after_pct% 时间不开新仓。
+    -- duration 用 round_duration_cache 动态种子；读不到时不拒（与 tighten()
+    -- 同一 fail-open 模式：缺少轮长时不凭空增设入场限制）。只挡新开仓，
+    -- 不动已持仓退出逻辑。
+    local entry_open_after_pct = int_param(params, "entry_open_after_pct", 20)
+    if entry_open_after_pct > 0 and round_duration_cache ~= nil and round_duration_cache > 0 then
+        if round.time_left_sec ~= nil then
+            local dur = { m = round_duration_cache, s = 0 }
+            local left = { m = round.time_left_sec, s = 0 }
+            local frac = dec_div(dec_sub(dur, left), dur) -- elapsed 0..1
+            if frac ~= nil and dec_cmp(frac, { m = entry_open_after_pct, s = 2 }) < 0 then
+                return out
+            end
+        end
+    end
     local exiting = {}
     for i = 1, #out.exits do
         exiting[out.exits[i].token] = true
@@ -896,18 +911,18 @@ function bk_evaluate()
                                     skip_entry = true
                                 end
                             end
-                            if not skip_entry then
-                                begin_attempt(round.slot, market.condition_id)
-                                -- #961: anchor the direction this position
-                                -- enters under — the thesis-death predicate
-                                -- reads it to detect a premise flip while held.
-                                armed_dir[token] = leg.want
-                                out.entries[#out.entries + 1] = {
-                                    token = token,
-                                    price = book.best_bid,
-                                    reason = "lua momentum " .. leg.want,
-                                }
-                            end
+                    if not skip_entry then
+                        begin_attempt(round.slot, market.condition_id)
+                        -- #961: anchor the direction this position
+                        -- enters under — the thesis-death predicate
+                        -- reads it to detect a premise flip while held.
+                        armed_dir[token] = leg.want
+                        out.entries[#out.entries + 1] = {
+                            token = token,
+                            price = book.best_bid,
+                            reason = "lua momentum " .. leg.want,
+                        }
+                    end
                         end
                     end
                 end
