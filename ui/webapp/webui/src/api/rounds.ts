@@ -12,12 +12,6 @@ export interface RoundDurationOption {
   label?: string
 }
 
-/** 账号级轮次周期：account_id → seconds 的映射中的单条（内核 per_account 条目）。 */
-export interface AccountRoundDuration {
-  accountId: string
-  durationSec: number
-}
-
 /** `round_duration.get` 回执：本会话生效值 + 来源 + 白名单 + 下次会话将解析到什么，以及 per-account 周期。 */
 export interface RoundDurationDoc {
   effectiveSec: number

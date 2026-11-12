@@ -950,7 +950,7 @@ const journalOpen = ref(false)
             v-if="!switcherLocked"
             :content="roundSwitch.flagLocked.value
               ? `轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板切换不会赢。当前档位 ${roundDurLabel}。`
-              : `全局轮次坐标系（复盘/回落用）：本会话 ${roundDurLabel}，切换立即作用于本会话（在途轮保持原网格）。各账户的实时交易周期请在账户卡配置周期族 —— 那里是热生效的。`"
+              : `轮次周期坐标系：切换立即作用于当前账户（在途轮保持原网格结算）；其他账户的周期族在账户卡配置。`"
           >
             <div class="flex items-center gap-1.5">
               <Timer class="size-3.5 text-faint-fg" />
@@ -975,7 +975,7 @@ const journalOpen = ref(false)
             v-if="roundSwitch.dirty.value"
             size="sm"
             :disabled="roundSwitch.busy.value"
-            title="把选中的全局轮次坐标系写入持久格（立即生效；账户实时周期在账户卡配置）"
+            title="把选中的轮次周期写入当前账户（立即生效；其他账户在账户卡配置）"
             @click="roundSwitch.save(store.activeAccount ?? 'default')"
           >
             <Check class="size-3.5" />保存

@@ -285,7 +285,7 @@ async function doResetTrading(): Promise<void> {
             <span v-if="roundFlagLocked">
               当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
             </span>
-            <span v-else-if="roundDoc.persisted">
+            <span v-else-if="roundDoc.perAccount?.['default'] !== undefined">
               已有面板设置：本会话按 {{ roundDoc.perAccount?.['default'] ?? roundDoc.effectiveSec }}s 运行。清除后回落到启动参数解析。
             </span>
             <span v-else>
@@ -296,7 +296,7 @@ async function doResetTrading(): Promise<void> {
             <Button
               variant="ghost"
               size="sm"
-              :disabled="roundBusy || !roundDoc.persisted"
+              :disabled="roundBusy || roundDoc.perAccount?.['default'] === undefined"
               title="清除面板设置，本会话回落到启动参数解析"
               @click="resetRound('default')"
             >

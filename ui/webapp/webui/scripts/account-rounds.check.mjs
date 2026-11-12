@@ -154,19 +154,21 @@ check('HftPage 挂单过期轮长走 durationSec → round_duration.get → 900 
 // lib/round-duration.ts 一份读数与写路径，语义零改动。牙钉四点：
 //   · composable 是唯一写路径（两页面都消费它，不许各自再摸 roundDurationSet）；
 //   · 行情页倒计时卡必须挂 SegmentedControl（入口在场）；
-//   · next_session 语义钉死：写入后走 useRestartCore 重启链（不许热切幻觉）；
+//   · #1140 per-account 语义钉死：写入立即生效（重启链不许回来 —— 重启幻觉），
+//     accountId 必填（内核 #1141 起拒绝无账户写入）；
 //   · flagLocked（cli_or_env 显式参数在管）必须禁用切换控件。
 check('轮次周期切换入口在行情页倒计时卡（共享 composable 单一写路径）', () => {
   const lib = read('src', 'lib', 'round-duration.ts')
   assert.match(lib, /roundDurationSet/, 'composable 缺 roundDurationSet 写路径')
-  assert.match(lib, /useRestartCore/, 'composable 缺重启链 —— next_session 写入必须 10s 自动重启')
+  assert.match(lib, /accountId/, 'composable 写路径缺 accountId —— 内核必填（per-account）')
+  assert.doesNotMatch(lib, /useRestartCore/, 'composable 出现重启链 —— 写入立即生效，重启幻觉不许回来')
   assert.match(lib, /onMounted\(load\)/, 'composable 缺装载 —— 卡面挂着就要读数')
   // 行情页：入口在场 + 消费 composable + 语义钉死。
   assert.match(hft, /useRoundDuration\(\)/, 'HftPage 缺 useRoundDuration —— 周期切换入口没进倒计时卡')
   assert.match(hft, /v-model="roundSwitch\.value\.value"[\s\S]*?:segments="switcherSegments"/, '倒计时卡缺 SegmentedControl 切换控件（档位绑定必须走声明筛 switcherSegments）')
   assert.match(hft, /switcherLocked/, '倒计时卡缺声明唯一档锁定分支 —— 交易所只声明一档时切换器必须退化为静态标签（venue 是数据不是逻辑）')
   assert.match(hft, /roundSwitch\.flagLocked\.value/, '倒计时卡未消费 flagLocked —— 显式启动参数在管时必须禁用切换')
-  assert.match(hft, /roundSwitch\.restart\.counting\.value/, '倒计时卡缺重启倒计时条 —— next_session 写入后无生效路径可见')
+  assert.match(hft, /roundSwitch\.save\(store\.activeAccount \?\? 'default'\)/, '倒计时卡写入必须钉当前账户 —— per-account 写路径不许静默丢 accountId')
   // 设置页保留同源卡面（第二入口），且不许再私藏一份独立写路径。
   const settings = read('src', 'pages', 'settings', 'SettingsGeneral.vue')
   assert.match(settings, /useRoundDuration\(\)/, '设置页轮次卡未接 composable —— 两卡必须共享一份逻辑')
