@@ -17,6 +17,10 @@ pub async fn run(
     shutdown: oneshot::Receiver<()>,
     registry: crate::market::registry::MarketPluginRegistry,
 ) -> anyhow::Result<()> {
+    // 任务二 1-3: 启动时间线 — 从 server::run 入口到 IPC 监听就绪，用于定位
+    // 面板首屏空白是否在内核 boot 阶段。
+    let boot_start = now_ms();
+    eprintln!("blitzkrieg-core: boot start t={boot_start}");
     // Event plumbing: Core -> mpsc -> broadcast -> every session.
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<Event>();
     let (bus_tx, _) = broadcast::channel::<Event>(512);
@@ -30,6 +34,11 @@ pub async fn run(
     }
 
     let mut core = Core::new(config.clone());
+    eprintln!(
+        "blitzkrieg-core: core constructed t={} dt={} ms",
+        now_ms(),
+        now_ms().saturating_sub(boot_start)
+    );
     core.set_event_sink(evt_tx);
     // Crash recovery FIRST: rebuild tracked orders from the durable log so any
     // order still resting at the venue is known (and thus cancellable) rather
@@ -617,14 +626,15 @@ pub async fn run(
         }
     };
     eprintln!(
-        "blitzkrieg-core listening on {socket_path} mode={:?} version={} socketMode={mode} peerAuth={} logLevel={}",
+        "blitzkrieg-core listening on {socket_path} mode={:?} version={} socketMode={mode} peerAuth={} logLevel={} dt={} ms",
         config.mode,
         crate::CORE_VERSION,
         peer_auth_support(),
         // #184: the level this process actually records, on the same banner as the
         // socket mode — "was this run quiet by design or by accident?" is
         // answerable from the run log alone.
-        crate::logging::effective_level()
+        crate::logging::effective_level(),
+        now_ms().saturating_sub(boot_start)
     );
     // Log the EFFECTIVE risk/exit tuning at boot: a stale binary silently ran the
     // old wide stop for a whole soak; this makes the deployed parameters visible

@@ -54,6 +54,9 @@ const themeTitle = computed(() => {
  * staring at a 网关连接异常 alert with no route back to the form.
  */
 const authed = ref(hasToken())
+// 首屏前内核尚未可达：壳与骨架立即渲染，authed 只门禁数据区；连接期间显示
+// 「正在连接内核…」，而非全页空白。
+const connecting = computed(() => authed.value && !store.connected)
 const tab = ref<TabId>('overview')
 
 /**
@@ -324,7 +327,12 @@ onMounted(() => {
       (40px) clears the sticky offset plus the shadow.
     -->
     <main class="mx-auto max-w-[1280px] px-4 pt-8 pb-20 md:pt-10">
-      <div v-if="store.error" class="mb-3.5">
+      <!-- 首屏骨架：首次快照到达前不留白，数据区显示连接中 -->
+      <div v-if="connecting" class="flex flex-col items-center justify-center min-h-[320px] pt-20">
+        <p class="text-sm text-faint-fg">正在连接内核…</p>
+      </div>
+      <div v-else>
+        <div v-if="store.error" class="mb-3.5">
         <AlertBanner
           title="网关连接异常"
           hint="检查网关进程与端口；网关恢复后本面板会自动重连，无需刷新页面。"
@@ -415,6 +423,7 @@ onMounted(() => {
         <SegmentedControl v-model="tab" :segments="activeGroup.children" />
       </nav>
       <component :is="activePage" />
+      </div>
     </main>
 
     <OnboardingTour @navigate="goOnboard" />
