@@ -90,6 +90,68 @@ impl Core {
             }
         }
         drop(env_lookup);
+        // #1170 (方案 A): per-strategy round-family bindings. The
+        // STRATEGY_<NAME>_ROUND_DURATION_SEC grammar (issue 1140's ACCOUNT_
+        // grammar applied to strategies) binds a package to ONE round family:
+        // the env cell's middle section is the package name through
+        // `crate::engine::strategy_env_fold` (uppercase alphanumeric, the rest
+        // folded to `_` — the SAME fold registration stamps with, so a reload
+        // or scope rebuild re-finds its binding without another push). Sources
+        // are the SAME two the account parser reads — process env first, then
+        // the `.env` file, process beating file per key (12-factor). A
+        // non-i64 value refuses the boot (fail-closed, the account anchor's
+        // posture); a value outside the plugins' declared round union refuses
+        // while a union exists.
+        {
+            const PREFIX: &str = "STRATEGY_";
+            const SUFFIX: &str = "_ROUND_DURATION_SEC";
+            let mid_of = |key: &str| -> Option<String> {
+                if key.len() > PREFIX.len() + SUFFIX.len()
+                    && key.starts_with(PREFIX)
+                    && key.ends_with(SUFFIX)
+                {
+                    Some(key[PREFIX.len()..key.len() - SUFFIX.len()].to_string())
+                } else {
+                    None
+                }
+            };
+            let mut cells: Vec<(String, String)> = std::env::vars()
+                .filter_map(|(k, v)| mid_of(&k).map(|mid| (mid, v)))
+                .collect();
+            if let Some(env_path) = config.env_file_path.as_deref()
+                && let Ok(text) = std::fs::read_to_string(env_path)
+            {
+                for line in text.lines().filter_map(crate::env_file::parse_line) {
+                    if let Some(mid) = mid_of(&line.0) {
+                        // Process env beats the file line for the SAME
+                        // key — the rule `env_lookup_from_sources` runs.
+                        cells.retain(|(existing, _)| *existing != mid);
+                        cells.push((mid, line.1));
+                    }
+                }
+            }
+            let mut families = std::collections::HashMap::new();
+            for (mid, sec_str) in cells {
+                let sec = match sec_str.trim().parse::<i64>() {
+                    Ok(s) => s,
+                    Err(_) => panic!(
+                        "refusing to boot: STRATEGY_{mid}_ROUND_DURATION_SEC=`{sec_str}` \
+                         is not an i64 (fail-closed: fix the cell and restart)"
+                    ),
+                };
+                if !config.allowed_round_secs.is_empty()
+                    && !config.allowed_round_secs.contains(&sec)
+                {
+                    panic!(
+                        "refusing to boot: STRATEGY_{mid}_ROUND_DURATION_SEC={sec}s is not a \
+                         declared round family (declared: {:?}; fail-closed: fix the value)",
+                        config.allowed_round_secs
+                    );
+                }
+                families.insert(mid, sec);
+            }
+            config.strategy_round_families = families;
+        }
         // Honor the deprecated `round_duration_sec` field for backward
         // compatibility with existing test constructors. If it differs from
         // the Default value (900), propagate it to `default_round_duration_sec`

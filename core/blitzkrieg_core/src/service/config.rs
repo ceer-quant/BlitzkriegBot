@@ -47,6 +47,16 @@ pub struct CoreConfig {
     /// single source of truth for timing math (slot derivation, expiry, stop
     /// tightening) — replacing the old global `round_duration_sec`.
     pub account_round_durations: std::collections::HashMap<String, i64>,
+    /// #1170 (方案 A): per-strategy round-family bindings — the strategy name
+    /// (in [`crate::engine::strategy_env_fold`] spelling) → the round duration
+    /// (sec) the package trades. Populated at boot from the
+    /// `STRATEGY_<NAME>_ROUND_DURATION_SEC` env cells (the ACCOUNT_ grammar
+    /// applied to strategies); a bound strategy hears only ITS family's
+    /// rollover, reads ITS family's round clock, and sees only its family's
+    /// market rows — the multi-family cache poisoning #1170 diagnosed becomes
+    /// structurally impossible. Empty map = every strategy unbound: the
+    /// historic dispatch, byte-identical.
+    pub strategy_round_families: std::collections::HashMap<String, i64>,
     /// Fallback round length for accounts without an explicit
     /// `ACCOUNT_<ID>_ROUND_DURATION_SEC`. Populated from
     /// `ACCOUNT_DEFAULT_ROUND_DURATION_SEC` env key (default 900), or from
@@ -596,6 +606,11 @@ impl CoreConfig {
     /// [`CoreConfig::allow_zero_strategies`] is the acknowledged opt-out.
     pub fn install_engine(&self, core: &mut Core) -> Result<(), String> {
         core.enable_engine(crate::engine::Engine::new(self.engine_config()));
+        // #1170 (方案 A): push the parsed family bindings into the engine
+        // BEFORE the strategy packages load — registration stamps each scope
+        // from the engine's table, so every load/reload/rebuild inherits the
+        // binding without another push.
+        core.apply_strategy_round_families(&self.strategy_round_families);
         self.load_strategy_dir(core);
         self.load_lua_strategy_dir(core);
         for name in &self.enabled_strategies {
@@ -1025,6 +1040,9 @@ impl Default for CoreConfig {
             breaker_cooldown_sec: 300,
             round_duration_source: "default",
             account_round_durations: std::collections::HashMap::new(),
+            // #1170 (方案 A): empty = every strategy unbound (the historic
+            // whole-table dispatch).
+            strategy_round_families: std::collections::HashMap::new(),
             default_round_duration_sec: 900,
             round_duration_sec: 900,
             allowed_round_secs: Vec::new(),

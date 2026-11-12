@@ -325,6 +325,37 @@ pub struct HostedStrategy {
     /// flat, then the next enablement write (or boot) drops the scope.
     /// `false` on every normally-registered instance.
     pub exits_only: bool,
+    /// #1170 (方案 A): the round FAMILY this instance trades — the declared
+    /// round duration (sec) binding, or `None` = unbound (the legacy
+    /// whole-table posture). A bound instance is family-scoped three ways:
+    /// `on_round` fires only on ITS family's rollover, its evaluation ctx
+    /// carries ITS family's round clock, and `ctx.markets()` holds only its
+    /// family's rows — so a 15m-bound package can never read a 1h sibling's
+    /// `bk.round()` numbers (the multi-family cache poisoning #1170
+    /// diagnosed). The value comes from the host's
+    /// `STRATEGY_<NAME>_ROUND_DURATION_SEC` cell through
+    /// [`Engine::set_strategy_round_families`]; `None` on every unconfigured
+    /// deployment — byte-identical with the pre-#1170 dispatch.
+    pub round_family_sec: Option<i64>,
+}
+
+/// The env-cell name fold (`STRATEGY_<NAME>_ROUND_DURATION_SEC`, issue 1140's
+/// account grammar applied to strategies): uppercase alphanumeric, everything
+/// else folded to `_`. The SAME fold runs on the parse side (assembly, env key
+/// → map key) and the stamp side (registration, strategy name → map lookup),
+/// so a package name that survives the fold unambiguously is bindable and one
+/// that collides with a sibling binds BOTH (the operator sees one cell for one
+/// value — documented, not hidden).
+pub fn strategy_env_fold(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// The scope-instantiation factory the host passes to
@@ -414,6 +445,13 @@ pub struct Engine {
     /// own book. Empty until the host pushes — every diagnostic path keeps
     /// today's shape.
     positions_view: Vec<HeldPosition>,
+    /// #1170 (方案 A): the strategy→round-family bindings in force, keyed by
+    /// [`strategy_env_fold`] of the package name (the same fold the env-cell
+    /// parse side uses). Registration stamps every scope of the name from
+    /// here, so reloads and scope rebuilds inherit the binding without the
+    /// host re-pushing. Empty = every instance unbound (the historic
+    /// whole-table dispatch).
+    strategy_families: HashMap<String, i64>,
     /// RFC 568 阶段一：本周期的配对簿视图快照（`set_pair_views_snapshot`
     /// 的 host push，形状同 `positions_view`）。一条平铺所有策略的列表：
     /// `evaluate` 按 owner 策略切片进各自的 ctx，跨策略/跨账户不可见已由
@@ -521,6 +559,41 @@ impl Engine {
     /// `note_scoped_order_placed`; tests and legacy callers use this.
     pub fn note_order_placed(&mut self, token_id: &str) {
         self.note_scoped_order_placed(blitzkrieg_market_api::DEFAULT_ACCOUNT_ID, token_id);
+    }
+
+    /// #1170 (方案 A): replace the strategy→round-family binding table (keys
+    /// are [`strategy_env_fold`]ed package names) and re-stamp every hosted
+    /// scope of each named strategy. The host calls this at engine install
+    /// from the parsed `STRATEGY_<NAME>_ROUND_DURATION_SEC` cells; a later
+    /// registration, reload or scope rebuild stamps itself from the same map.
+    /// An empty map clears every binding (all instances back to the unbound,
+    /// whole-table dispatch).
+    pub fn set_strategy_round_families(&mut self, families: HashMap<String, i64>) {
+        self.strategy_families = families;
+        for s in &mut self.strategies {
+            s.round_family_sec = self
+                .strategy_families
+                .get(&strategy_env_fold(s.strategy.name()))
+                .copied();
+        }
+    }
+
+    /// The family binding in force for one strategy name (folded lookup), for
+    /// diagnostics and tests.
+    pub fn strategy_round_family(&self, strategy: &str) -> Option<i64> {
+        self.strategy_families
+            .get(&strategy_env_fold(strategy))
+            .copied()
+    }
+
+    /// The family binding stamped on one strategy's FIRST hosted scope (the
+    /// per-instance fact the dispatch reads). Diagnostics/tests read this; the
+    /// default-scope deployment has exactly one scope per name.
+    pub fn hosted_round_family(&self, strategy: &str) -> Option<i64> {
+        self.strategies
+            .iter()
+            .find(|s| s.strategy.name() == strategy)
+            .and_then(|s| s.round_family_sec)
     }
 
     /// Mark a (scope, token) pair as having a live entry order this round
@@ -1326,5 +1399,8 @@ mod tests {
     mod dispatch_settlement_tests;
     mod gate_exemptions_tests;
     mod round_rollover_tests;
+    // #1170 family-binding tests — split out of round_rollover_tests by the
+    // #780 file-size ratchet (that file's binding block pushed it past 1500).
+    mod round_family_binding_tests;
     mod sizing_tests;
 }

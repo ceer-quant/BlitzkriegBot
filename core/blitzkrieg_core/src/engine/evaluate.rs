@@ -27,6 +27,7 @@ impl Engine {
             package_sources: std::collections::BTreeMap::new(),
             strategy_exits: Vec::new(),
             positions_view: Vec::new(),
+            strategy_families: HashMap::new(),
             pair_views_snapshot: Vec::new(),
             cfg,
             equity_usd: Decimal::ZERO,
@@ -837,6 +838,16 @@ impl Engine {
                     .round_timing_for(&venue, feed_duration, now_ms)
                     .time_left_sec;
                 for s in &mut self.strategies {
+                    // #1170 (方案 A): a family-bound instance only hears ITS
+                    // family's rollover — a sibling family's transition is not
+                    // its clock change, and delivering the sibling's (slot,
+                    // time_left) zeroed/shifted the package's round-duration
+                    // cache mid-round (the lua_momentum poisoning). Unbound
+                    // instances keep the historic every-rollover dispatch,
+                    // byte-identical.
+                    if s.round_family_sec.is_some_and(|f| f != feed_duration) {
+                        continue;
+                    }
                     s.strategy.on_round(slot, time_left_sec, now_ms);
                 }
                 // ── B1c：rollover 只重置 feeding (venue, duration) 族 ──
@@ -1143,6 +1154,32 @@ impl Engine {
             let fresh = |token: &str| {
                 fresh_book(&self.books, token, now_ms, self.cfg.max_orderbook_stale_ms)
             };
+            // #1170 (方案 A): per-bound-family ctx views, precomputed BEFORE the
+            // strategy loop (which borrows `self.strategies` mutably). A family
+            // instance's ctx carries ITS family's clock and ONLY its family's
+            // market rows — the table-wide clock (`table_round_timing`, first
+            // row's family) and the whole market list stay the UNBOUND read.
+            // Single-family tables (every corpus) resolve both shapes to the
+            // same numbers.
+            let global = self.cfg.scanner.round_duration_sec;
+            let mut family_views: HashMap<i64, (RoundTiming, Vec<crate::model::CryptoMarket>)> =
+                HashMap::new();
+            for f in self
+                .strategy_families
+                .values()
+                .copied()
+                .collect::<HashSet<_>>()
+            {
+                let markets: Vec<crate::model::CryptoMarket> = self
+                    .scanner
+                    .markets()
+                    .iter()
+                    .filter(|m| row_family_duration(m.round_duration_sec, global) == f)
+                    .cloned()
+                    .collect();
+                let clock = self.scanner.round_timing_legacy_at(f, now_ms);
+                family_views.insert(f, (clock, markets));
+            }
             // The host-pushed position snapshot, sliced per scope inside the
             // loop: each scope's ctx carries ONLY its own positions — same
             // strategy on two accounts is two independent books, and neither
@@ -1180,16 +1217,20 @@ impl Engine {
                         .filter(|p| p.owner_strategy == s.strategy.name())
                         .cloned()
                         .collect();
-                    let ctx = StrategyCtx::new(
-                        self.scanner.markets(),
-                        round.slot,
-                        round.time_left_sec,
-                        now_ms,
-                        &fresh,
-                    )
-                    .with_positions(&held)
-                    .with_unified_events(&unified_snapshot)
-                    .with_pair_views(&pair_views);
+                    // #1170: the bound instance's clock and markets come from
+                    // ITS family's precomputed view; the unbound instance keeps
+                    // the table-wide read (`round` above).
+                    let (slot, tleft, markets_ref) = match s
+                        .round_family_sec
+                        .and_then(|f| family_views.get(&f))
+                    {
+                        Some((clock, markets)) => (clock.slot, clock.time_left_sec, &markets[..]),
+                        None => (round.slot, round.time_left_sec, self.scanner.markets()),
+                    };
+                    let ctx = StrategyCtx::new(markets_ref, slot, tleft, now_ms, &fresh)
+                        .with_positions(&held)
+                        .with_unified_events(&unified_snapshot)
+                        .with_pair_views(&pair_views);
                     candidates.extend(s.strategy.find_candidates(&ctx));
                     // Close intents accumulate regardless of the entry timing
                     // gate: an open position's exit is never round-timing-gated.

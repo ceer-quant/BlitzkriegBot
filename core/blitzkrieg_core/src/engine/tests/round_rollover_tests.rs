@@ -724,7 +724,7 @@ fn a_legacy_untagged_row_still_admits_every_bound_scope_next_to_dual_key_rows() 
 /// [`venue_market`], but the row stamps its own `round_duration_sec` and
 /// its slot is computed on ITS OWN grid (a 1h row's slot numbers and a
 /// 15m row's slot numbers are drawn from different rulers).
-fn family_market(end_ms: i64, venue: &str, duration_sec: i64) -> CryptoMarket {
+pub(super) fn family_market(end_ms: i64, venue: &str, duration_sec: i64) -> CryptoMarket {
     let asset = if duration_sec == 900 { "BTC" } else { "ETH" };
     CryptoMarket {
         asset: asset.into(),

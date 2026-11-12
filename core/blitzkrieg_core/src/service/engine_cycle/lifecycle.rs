@@ -118,6 +118,20 @@ impl Core {
         self.engine.is_some()
     }
 
+    /// #1170 (方案 A): install the strategy→round-family bindings (keys are
+    /// `strategy_env_fold`ed package names) into the driving engine. A no-op
+    /// without an engine (a hostless replay has nothing to bind). Called by
+    /// `CoreConfig::install_engine` before the strategy packages load, so every
+    /// registration stamps its scope from this table.
+    pub fn apply_strategy_round_families(
+        &mut self,
+        families: &std::collections::HashMap<String, i64>,
+    ) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_strategy_round_families(families.clone());
+        }
+    }
+
     /// Read view of the driving engine for readers OUTSIDE `service` (the IPC
     /// view assembly, market-host diagnostics). The field itself is private
     /// (#780 boundary hygiene): every mutation goes through
