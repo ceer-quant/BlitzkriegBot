@@ -1,0 +1,370 @@
+{
+  "question": "On a window not used in the November study, does lua_momentum reach WR>=0.80 and PF>=1.2 after taker fees?",
+  "answer": "No. The maker baseline is about 26% WR and PF 0.34. No predeclared taker band hit both targets in-sample. The closest band is 0.80-0.90 with 45-120s left: IS PF 1.198, OOS PF 1.182.",
+  "windows": {
+    "in_sample": "2026-10-12 00:00Z <= slot < 2026-10-19 00:00Z",
+    "out_of_sample": "2026-10-19 00:00Z <= slot < 2026-10-26 00:00Z",
+    "markets_each": 10752,
+    "assets": [
+      "btc",
+      "eth",
+      "sol",
+      "xrp"
+    ],
+    "durations_sec": [
+      300,
+      900
+    ],
+    "not_used": "2026-11-05..2026-11-12 was already inspected and is not this run's OOS"
+  },
+  "execution": {
+    "shares": 10,
+    "favorite_entry": "first trade in the time-left window whose implied ask is inside the band; BUY print is the ask, SELL print plus 0.01 is the ask; fee shares*0.07*ask*(1-ask); hold to settlement; one entry per round",
+    "momentum_entry": "maker bid one tick under a 4% print-to-print move; fill when a later print trades through; exits TP 40 / trail 22/15 / stop 30 up 50 down",
+    "settlement": "gamma outcomePrices {0,1}",
+    "tape": "data-api v2 /trades limit 200 newest"
+  },
+  "selection_reason": "best_robust_below_target",
+  "selected": "fav_45_120_0.80_0.90",
+  "shipped": "no parameter change",
+  "in_sample_grid": [
+    {
+      "name": "momentum_baseline",
+      "n": 5415,
+      "wr": 0.2598,
+      "pf": 0.3392,
+      "net": -4746.2176,
+      "max_dd": 4746.2176
+    },
+    {
+      "name": "fav_45_120_0.70_0.80",
+      "n": 3405,
+      "wr": 0.7677,
+      "pf": 1.0368,
+      "net": 220.1469,
+      "max_dd": 361.6968
+    },
+    {
+      "name": "fav_45_120_0.72_0.82",
+      "n": 3589,
+      "wr": 0.7877,
+      "pf": 1.0416,
+      "net": 245.7855,
+      "max_dd": 315.1131
+    },
+    {
+      "name": "fav_45_120_0.75_0.85",
+      "n": 3962,
+      "wr": 0.8213,
+      "pf": 1.0905,
+      "net": 514.0962,
+      "max_dd": 147.1384
+    },
+    {
+      "name": "fav_45_120_0.78_0.88",
+      "n": 4383,
+      "wr": 0.854,
+      "pf": 1.1463,
+      "net": 776.069,
+      "max_dd": 174.981
+    },
+    {
+      "name": "fav_45_120_0.80_0.90",
+      "n": 4768,
+      "wr": 0.8758,
+      "pf": 1.1983,
+      "net": 992.5556,
+      "max_dd": 136.8611
+    },
+    {
+      "name": "fav_45_120_0.65_0.78",
+      "n": 3284,
+      "wr": 0.7381,
+      "pf": 1.0527,
+      "net": 327.0035,
+      "max_dd": 407.4915
+    },
+    {
+      "name": "fav_60_180_0.70_0.80",
+      "n": 4647,
+      "wr": 0.7639,
+      "pf": 1.0274,
+      "net": 227.0967,
+      "max_dd": 443.7664
+    },
+    {
+      "name": "fav_60_180_0.72_0.82",
+      "n": 4820,
+      "wr": 0.7863,
+      "pf": 1.0474,
+      "net": 378.0072,
+      "max_dd": 313.8384
+    },
+    {
+      "name": "fav_60_180_0.75_0.85",
+      "n": 5240,
+      "wr": 0.8189,
+      "pf": 1.0902,
+      "net": 684.3289,
+      "max_dd": 263.4462
+    },
+    {
+      "name": "fav_60_180_0.78_0.88",
+      "n": 5622,
+      "wr": 0.847,
+      "pf": 1.1092,
+      "net": 775.4471,
+      "max_dd": 209.5766
+    },
+    {
+      "name": "fav_60_180_0.80_0.90",
+      "n": 6005,
+      "wr": 0.8691,
+      "pf": 1.1536,
+      "net": 1018.3109,
+      "max_dd": 168.1735
+    },
+    {
+      "name": "fav_60_180_0.65_0.78",
+      "n": 4575,
+      "wr": 0.7307,
+      "pf": 1.0251,
+      "net": 222.6077,
+      "max_dd": 397.6137
+    },
+    {
+      "name": "fav_30_90_0.70_0.80",
+      "n": 2583,
+      "wr": 0.7704,
+      "pf": 1.0562,
+      "net": 251.6335,
+      "max_dd": 168.7035
+    },
+    {
+      "name": "fav_30_90_0.72_0.82",
+      "n": 2762,
+      "wr": 0.7896,
+      "pf": 1.056,
+      "net": 252.2769,
+      "max_dd": 140.9402
+    },
+    {
+      "name": "fav_30_90_0.75_0.85",
+      "n": 3095,
+      "wr": 0.822,
+      "pf": 1.0885,
+      "net": 391.3978,
+      "max_dd": 168.2321
+    },
+    {
+      "name": "fav_30_90_0.78_0.88",
+      "n": 3490,
+      "wr": 0.8536,
+      "pf": 1.1295,
+      "net": 550.1439,
+      "max_dd": 153.3881
+    },
+    {
+      "name": "fav_30_90_0.80_0.90",
+      "n": 3869,
+      "wr": 0.8775,
+      "pf": 1.1944,
+      "net": 782.0529,
+      "max_dd": 141.0151
+    },
+    {
+      "name": "fav_30_90_0.65_0.78",
+      "n": 2505,
+      "wr": 0.7353,
+      "pf": 1.0355,
+      "net": 169.7283,
+      "max_dd": 308.3184
+    },
+    {
+      "name": "fav_90_240_0.70_0.80",
+      "n": 5593,
+      "wr": 0.7577,
+      "pf": 1.0152,
+      "net": 154.0578,
+      "max_dd": 251.3641
+    },
+    {
+      "name": "fav_90_240_0.72_0.82",
+      "n": 5661,
+      "wr": 0.7834,
+      "pf": 1.049,
+      "net": 463.3342,
+      "max_dd": 244.4904
+    },
+    {
+      "name": "fav_90_240_0.75_0.85",
+      "n": 5904,
+      "wr": 0.8088,
+      "pf": 1.0436,
+      "net": 392.1091,
+      "max_dd": 271.8469
+    },
+    {
+      "name": "fav_90_240_0.78_0.88",
+      "n": 6147,
+      "wr": 0.8388,
+      "pf": 1.074,
+      "net": 603.2179,
+      "max_dd": 294.1825
+    },
+    {
+      "name": "fav_90_240_0.80_0.90",
+      "n": 6314,
+      "wr": 0.8578,
+      "pf": 1.0912,
+      "net": 687.7172,
+      "max_dd": 261.2705
+    },
+    {
+      "name": "fav_90_240_0.65_0.78",
+      "n": 5584,
+      "wr": 0.7163,
+      "pf": 0.9744,
+      "net": -289.5174,
+      "max_dd": 516.6318
+    }
+  ],
+  "detail": {
+    "momentum_baseline": {
+      "IS": {
+        "n": 5415,
+        "wins": 1407,
+        "losses": 4008,
+        "wr": 0.2598,
+        "pf": 0.3392,
+        "net": -4746.2176,
+        "max_dd": 4746.2176
+      },
+      "OOS": {
+        "n": 5304,
+        "wins": 1364,
+        "losses": 3940,
+        "wr": 0.2572,
+        "pf": 0.3376,
+        "net": -4852.3139,
+        "max_dd": 4854.1414
+      },
+      "IS_complete_tape": {
+        "markets": 6996,
+        "n": 4453,
+        "wr": 0.2481,
+        "pf": 0.3258,
+        "net": -4184.244,
+        "max_dd": 4184.244
+      },
+      "OOS_complete_tape": {
+        "markets": 7282,
+        "n": 4466,
+        "wr": 0.2519,
+        "pf": 0.3293,
+        "net": -4319.6788,
+        "max_dd": 4321.5063
+      }
+    },
+    "fav_45_120_0.80_0.90": {
+      "IS": {
+        "n": 4768,
+        "wins": 4176,
+        "losses": 592,
+        "wr": 0.8758,
+        "pf": 1.1983,
+        "net": 992.5556,
+        "max_dd": 136.8611,
+        "by_asset": {
+          "btc": {
+            "n": 779,
+            "wr": 0.9987,
+            "pf": 124.8239,
+            "net": 1039.9684
+          },
+          "eth": {
+            "n": 1460,
+            "wr": 0.861,
+            "pf": 1.0882,
+            "net": 150.5295
+          },
+          "sol": {
+            "n": 1345,
+            "wr": 0.8431,
+            "pf": 0.9337,
+            "net": -118.1393
+          },
+          "xrp": {
+            "n": 1184,
+            "wr": 0.8505,
+            "pf": 0.9471,
+            "net": -79.803
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 769,
+            "wr": 0.8908,
+            "pf": 1.3924,
+            "net": 279.4799
+          },
+          "5m": {
+            "n": 3999,
+            "wr": 0.873,
+            "pf": 1.1661,
+            "net": 713.0757
+          }
+        }
+      },
+      "OOS": {
+        "n": 4579,
+        "wins": 4016,
+        "losses": 563,
+        "wr": 0.877,
+        "pf": 1.1815,
+        "net": 869.3029,
+        "max_dd": 149.4066,
+        "by_asset": {
+          "btc": {
+            "n": 731,
+            "wr": 0.9973,
+            "pf": 59.1266,
+            "net": 976.3505
+          },
+          "eth": {
+            "n": 1475,
+            "wr": 0.8536,
+            "pf": 0.9874,
+            "net": -23.0779
+          },
+          "sol": {
+            "n": 1302,
+            "wr": 0.8548,
+            "pf": 0.9823,
+            "net": -28.4682
+          },
+          "xrp": {
+            "n": 1071,
+            "wr": 0.8543,
+            "pf": 0.9582,
+            "net": -55.5015
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 749,
+            "wr": 0.8919,
+            "pf": 1.3881,
+            "net": 268.1108
+          },
+          "5m": {
+            "n": 3830,
+            "wr": 0.8742,
+            "pf": 1.1467,
+            "net": 601.1921
+          }
+        }
+      }
+    }
+  }
+}
