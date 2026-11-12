@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// #1154: `round_duration.set {immediate: true}`，有在途仓位——「撤单 →
+/// 秒切秒换（2026-11-13 操作者指令）：`round_duration.set`，有在途仓位——「撤单 →
 /// 市价强平 → 切网格」全链。出场价必须来自账簿真实 bid（0.39），不是
 /// 估算；trades 流水写 exit_reason=operator_grid_switch，扫描器网格立即
 /// 随新周期，.env 持久化。
@@ -69,10 +69,10 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"immediate":true,"reason":"e2e immediate switch"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reason":"e2e switch"}}"#.to_string(),
     )
     .await;
-    assert!(set.get("error").is_none(), "immediate set must land: {set}");
+    assert!(set.get("error").is_none(), "switch must land: {set}");
     assert_eq!(
         set["result"]["nextSessionSec"],
         serde_json::json!(300),
@@ -135,7 +135,7 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
     );
 }
 
-/// #1154: 无在途仓位时 `immediate: true` 直接切网格，不触碰任何仓位。
+/// 无在途仓位时切换直接切网格，不触碰任何仓位。
 #[tokio::test]
 async fn round_duration_immediate_no_position_switches_grid_directly() {
     let dir = std::env::temp_dir().join(format!("bk-round-dur-imm-none-{}", std::process::id()));
@@ -177,7 +177,7 @@ async fn round_duration_immediate_no_position_switches_grid_directly() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"immediate":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300}}"#.to_string(),
     )
     .await;
     assert!(
@@ -268,7 +268,7 @@ async fn round_duration_immediate_refused_when_flag_locked() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"immediate":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300}}"#.to_string(),
     )
     .await;
     assert!(
@@ -359,7 +359,7 @@ async fn round_duration_immediate_unfilled_close_refuses_and_keeps_grid() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"immediate":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300}}"#.to_string(),
     )
     .await;
     assert!(
@@ -402,7 +402,7 @@ async fn round_duration_immediate_unfilled_close_refuses_and_keeps_grid() {
     );
 }
 
-/// #1154: `reset` 分支同语义——immediate + reset 先平掉在途仓位，再清
+/// `reset` 分支同语义——先平掉在途仓位，再清
 /// 格回落默认网格。
 #[tokio::test]
 async fn round_duration_immediate_reset_closes_positions_and_clears_grid() {
@@ -469,7 +469,7 @@ async fn round_duration_immediate_reset_closes_positions_and_clears_grid() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","reset":true,"immediate":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","reset":true}}"#.to_string(),
     )
     .await;
     assert!(
@@ -578,7 +578,7 @@ async fn round_duration_immediate_refuses_off_whitelist_before_touching_position
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":60,"immediate":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":60}}"#.to_string(),
     )
     .await;
     assert!(

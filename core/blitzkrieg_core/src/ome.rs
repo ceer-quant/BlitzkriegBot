@@ -890,6 +890,14 @@ impl Ome {
 
     /// Resolve an inbound fill to a tracked order: exact core/venue id, else
     /// same token+side live order (SDK user events sometimes only carry token).
+    ///
+    /// The token+side fallback is deliberately account-scoped when the fill
+    /// carries an explicit account: after the operator switches account/round/
+    /// strategy, an old order's late fill (the network-delay window) must still
+    /// land on the account that placed it — never on a sibling account's new
+    /// live order on the same token+side. Venue reports default the account, so
+    /// a default-account fill keeps the legacy newest-live binding (its order id
+    /// nearly always wins the exact match above).
     fn resolve(&self, fill: &Fill) -> Option<OrderId> {
         if let Some(o) = self.by_venue_or_id(&fill.order_id) {
             return Some(o.order_id.clone());
@@ -899,7 +907,15 @@ impl Ome {
             .into_iter()
             .collect();
         cands.sort_by_key(|o| std::cmp::Reverse(o.submitted_at_ms));
-        cands.first().map(|o| o.order_id.clone())
+        let acct = &fill.account_id;
+        if acct == &default_account_id() {
+            cands.first().map(|o| o.order_id.clone())
+        } else {
+            cands
+                .iter()
+                .find(|o| o.account_id == *acct)
+                .map(|o| o.order_id.clone())
+        }
     }
 
     /// Apply one inbound fill event. Returns a canonical delta when position
