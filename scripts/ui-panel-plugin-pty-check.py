@@ -249,19 +249,26 @@ try:
 
     # Command bar: Tab completes an unambiguous prefix.
     p1.send(b':', settle=0.4)
-    p1.clear()
-    text = p1.send(b'pos', settle=0.3)
-    text = p1.send(b'\t', settle=0.6)
-    # ratatui paints spans around the cursor, so the tail may arrive split with
-    # cursor blocks and diff noise in between; project to letters and match.
-    letters = ''.join(re.findall(r'[A-Za-z]', text))
-    check('Tab completes pos→positions', 'positions' in letters, re.sub(r'\s+', ' ', text[-120:]))
-    # Executed commands are recallable with ↑ in a fresh bar.
+    p1.send(b'pos', settle=0.3)
+    p1.send(b'\t', settle=0.6)
+    # #1168: judge the completion on a SETTLED frame, not on the fixed-settle
+    # snapshot above. ratatui's periodic status-line repaint (100s old · 800s
+    # left · TRADING) can land mid-word inside one snapshot and split the
+    # completed word (`p█o█s█100s old…itions█`) — a PTY frame race, read as a
+    # false FAIL on main 6f97d97e (run 43242199002). Poll with the same
+    # wait_for redraw-forcer the network overlay uses below. The assertion is
+    # NOT relaxed: the completed word must appear in a settled frame; a real
+    # completion failure still times out and FAILs.
+    completed = p1.wait_for('positions', timeout=5.0)
+    check('Tab completes pos→positions', completed, 'completed word never settled into a frame')
+    # Executed commands are recallable with ↑ in a fresh bar — same settled-frame
+    # rule as the Tab check above (#1168): the recall is judged on a full redraw,
+    # not on one snapshot a periodic repaint can split.
     p1.send(b'\r', settle=1.2)
     p1.send(b':', settle=0.4)
-    p1.clear()
-    text = p1.send(b'\x1b[A', settle=0.7)
-    check('↑ recalls last command', 'positions' in text, re.sub(r'\s+', ' ', text[-120:]))
+    p1.send(b'\x1b[A', settle=0.7)
+    recalled = p1.wait_for('positions', timeout=5.0)
+    check('↑ recalls last command', recalled, 'recalled word never settled into a frame')
 
     # ── E11 (#260): the `n` network self-check overlay ────────────────────────
     # The command bar is still open from the recall test above, and while it owns
