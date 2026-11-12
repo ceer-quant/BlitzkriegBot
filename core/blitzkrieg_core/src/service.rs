@@ -558,12 +558,12 @@ pub(super) const EXIT_REPORT_BEAT_MS: i64 = 1_000;
 
 impl Core {
     /// B1b: the round-length family a token belongs to — the market's declared
-    /// duration when it carries one (#354), else the configured global grid.
-    /// `0` = the token belongs to no live market AND the grid is unset (no
-    /// family fact anywhere); every B1b write path stamps this, and the B1a
-    /// readers (`effective_round_duration_sec`) treat a 0 as "no clock fact".
-    fn round_family_of_token(&self, token_id: &str) -> i64 {
-        let global = self.config.round_duration_sec;
+    /// duration when it carries one (#354), else the account's own grid
+    /// (`ACCOUNT_<ID>_ROUND_DURATION_SEC`), else the default grid.
+    /// `0` = the token belongs to no live market AND no grid is set anywhere;
+    /// B1b readers (`effective_round_duration_sec`) treat a 0 as "no clock fact".
+    fn round_family_of_token(&self, account_id: &str, token_id: &str) -> i64 {
+        let account_dur = self.account_round_duration(account_id);
         match self
             .engine
             .as_ref()
@@ -571,42 +571,52 @@ impl Core {
             .map(|m| m.round_duration_sec)
         {
             Some(d) if d > 0 => d,
-            _ => global,
+            _ => account_dur,
         }
+    }
+
+    /// Resolve the round duration for a specific account: the account's own
+    /// `ACCOUNT_<ID>_ROUND_DURATION_SEC` if set, else `default_round_duration_sec`.
+    fn account_round_duration(&self, account_id: &str) -> i64 {
+        self.config
+            .account_round_durations
+            .get(account_id)
+            .copied()
+            .unwrap_or(self.config.default_round_duration_sec)
     }
 
     /// B1b: the round-length family ONE order was admitted under, resolved
     /// three-state through B1a's `effective_round_duration_sec` (read only):
     /// the order's OWN stamp when it carries one, else the market's declared
     /// duration while the engine still names the token's market, else the
-    /// configured global grid. `0` = no clock fact at all — the caller's gate
+    /// account's grid. `0` = no clock fact at all — the caller's gate
     /// decides what that means.
     ///
     /// Single-family discipline: with every stamp 0 (pre-B1b archives) and
     /// every market declaring the configured grid (or 0, the legacy corpora),
-    /// this folds to `self.config.round_duration_sec` — the value every
-    /// consumer read before B1b, byte-for-byte.
-    fn order_eff_round_sec(&self, o: &TrackedOrder) -> i64 {
+    /// this folds to the account's grid — the value every consumer read
+    /// before B1b, byte-for-byte.
+    fn order_eff_round_sec(&self, account_id: &str, o: &TrackedOrder) -> i64 {
         let market_decl = self
             .engine
             .as_ref()
             .and_then(|e| e.market_for_token(&o.token_id))
             .map(|m| m.round_duration_sec);
-        o.effective_round_duration_sec(market_decl, self.config.round_duration_sec)
+        o.effective_round_duration_sec(market_decl, self.account_round_duration(account_id))
     }
 
     /// B1b: the round-length family ONE position was opened under — the
     /// position-shaped twin of [`Core::order_eff_round_sec`]: same tri-state
     /// fold through B1a's `effective_round_duration_sec`, same single-family
-    /// equivalence (eff == `self.config.round_duration_sec` when every stamp
-    /// is 0 and no market contradicts the grid).
-    fn position_eff_round_sec(&self, p: &OpenPosition) -> i64 {
+    /// equivalence (eff == the account's grid when every stamp is 0 and no
+    /// market contradicts the grid).
+    fn position_eff_round_sec(&self, account_id: &str, p: &OpenPosition) -> i64 {
         let market_decl = self
             .engine
             .as_ref()
             .and_then(|e| e.market_for_token(&p.token_id))
             .map(|m| m.round_duration_sec);
-        p.effective_round_duration_sec(market_decl, self.config.round_duration_sec)
+        p.effective_round_duration_sec(market_decl, self.account_round_duration(account_id))
     }
 
     /// The open-position snapshot strategies see through `bk.holdings()`,
@@ -626,7 +636,7 @@ impl Core {
             .open_positions()
             .iter()
             .map(|p| {
-                let duration = self.position_eff_round_sec(p).max(1);
+                let duration = self.position_eff_round_sec(&p.account_id.to_string(), p).max(1);
                 crate::strategies::HeldPosition {
                     strategy: p.strategy.clone(),
                     account_id: p.account_id.to_string(),

@@ -76,8 +76,8 @@ impl Core {
             // `confirm_live` falls back to the default clock when it arms.
             maker_timeout_ms: 0,
             // B1b: the order's round-length family, resolved three-state off
-            // the token's market and the global grid.
-            round_duration_sec: self.round_family_of_token(&req_token),
+            // the token's market and the account's grid.
+            round_duration_sec: self.round_family_of_token(req_account.as_str(), &req_token),
         }) {
             // #537: a submit refusal happens AFTER the notional reservation —
             // leaving it on the books strands cash on an order that does not
@@ -912,9 +912,9 @@ impl Core {
                         let eff_sec = self
                             .ome
                             .get(&d.order_id)
-                            .map(|o| self.order_eff_round_sec(o))
+                            .map(|o| self.order_eff_round_sec(account.as_str(), o))
                             .filter(|eff| *eff > 0)
-                            .unwrap_or(self.config.round_duration_sec);
+                            .unwrap_or(self.account_round_duration(account.as_str()));
                         // Segment 2 of the wiring template: the lazy stamp —
                         // the order's family is written from the resolution
                         // this projection just made (idempotent; a non-0

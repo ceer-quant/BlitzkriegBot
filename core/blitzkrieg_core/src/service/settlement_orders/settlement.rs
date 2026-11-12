@@ -810,7 +810,7 @@ impl Core {
         // snapshot without a slot fact — fall back to the expires_at_ms
         // countdown the open path anchored to (slot+1)·dur anyway.
         let expired = if pos.round_slot > 0 {
-            let eff = pos.effective_round_duration_sec(None, self.config.round_duration_sec);
+            let eff = pos.effective_round_duration_sec(None, self.account_round_duration(pos.account_id.as_str()));
             now_ms >= (pos.round_slot + 1) * eff * 1000
         } else {
             now_ms > pos.expires_at_ms

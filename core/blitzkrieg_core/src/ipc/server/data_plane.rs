@@ -79,7 +79,7 @@ impl DataPlaneRuntime {
         accounts: &[crate::account::Account],
         registry: &crate::market::registry::MarketPluginRegistry,
     ) -> Self {
-        let global = config.round_duration_sec;
+        let global = config.default_round_duration_sec;
         let mut pairs = std::collections::BTreeSet::new();
         for p in actives {
             pairs.insert((p.name().to_string(), global));

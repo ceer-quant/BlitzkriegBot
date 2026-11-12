@@ -120,22 +120,20 @@ pub(crate) fn fee_quote_at(
 }
 
 /// `round_duration.get` readout (`round_duration_readout`): assembled from the
-/// LIVE config and the persisted cell on every call — the boot resolution
-/// wrote `source` into the config's twin fields at startup, so a read answers
-/// "what is running" and "what will the restart run" without any cached
-/// snapshot that a write could make a lie. A core with no runtime config path
-/// (backtests, in-process tests) reports `persisted: false` — there is no cell
-/// to read, and the effective value is the truth for the next session too.
+/// LIVE config. Returns the default effective duration plus a per-account map
+/// of `account_id → seconds`. Accounts absent from the map fall back to the
+/// default. The `source` field reports the boot resolution of the default
+/// grid; per-account overrides come from `ACCOUNT_<ID>_ROUND_DURATION_SEC`
+/// env keys and are not separately sourced.
 pub fn round_duration_readout(core: &Core) -> crate::schema::RoundDurationResult {
     use crate::schema::{RoundDurationOption, RoundDurationResult};
-    let effective = core.config().round_duration_sec;
-    let cell = core.config().runtime_config_path.as_deref().and_then(|p| {
-        crate::runtime_config::load_round_duration_from(
-            std::path::Path::new(p),
-            &core.config().allowed_round_secs,
-        )
-    });
-    let next_session = cell.map(|c| c.duration_sec).unwrap_or(effective);
+    let effective = core.config().default_round_duration_sec;
+    let per_account: std::collections::BTreeMap<String, i64> = core
+        .config()
+        .account_round_durations
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     // The declared union the plugins own — the kernel hardcodes nothing
     // (whichever durations appear are exactly what the plugins claimed) and
     // the labels travel the same road (issue 648): the readout renders the
@@ -163,9 +161,10 @@ pub fn round_duration_readout(core: &Core) -> crate::schema::RoundDurationResult
     RoundDurationResult {
         effective_sec: effective,
         source: core.config().round_duration_source,
+        per_account,
         allowed,
-        next_session_sec: next_session,
-        persisted: cell.is_some(),
+        next_session_sec: effective,
+        persisted: false,
     }
 }
 

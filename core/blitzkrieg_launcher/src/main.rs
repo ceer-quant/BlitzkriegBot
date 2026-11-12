@@ -677,7 +677,7 @@ async fn main() -> anyhow::Result<()> {
         spread_arb_entry_bounce_window_sec: args.spread_arb_bounce_window_sec,
         feed_ws_enabled: args.feed_ws,
         market_plugin: args.market_plugin,
-        round_duration_sec: args.round_sec,
+        default_round_duration_sec: args.round_sec,
         // The round-duration UI card's persisted cell (data/runtime/config.json)
         // outranks the factory TOML and the compiled default; only an explicit
         // CLI flag or BK_* env var beats it (the bit-exact gate baselines run
@@ -1204,36 +1204,33 @@ async fn main() -> anyhow::Result<()> {
         config.allowed_round_secs
     );
 
-    // Issue 751: RUNTIME_ROUND_DURATION_SEC env key outranks the JSON cell.
-    // The JSON cell (data/runtime/config.json) is kept as a migration fallback.
-    if config.round_duration_source != "cli_or_env" {
-        if let Some(sec) = std::env::var("RUNTIME_ROUND_DURATION_SEC")
-            .ok()
-            .and_then(|v| v.trim().parse::<i64>().ok())
-        {
-            if sec != config.round_duration_sec {
-                eprintln!(
-                    "blitzkrieg-core: round duration {}s -> {}s (RUNTIME_ROUND_DURATION_SEC env)",
-                    config.round_duration_sec, sec
-                );
-                config.round_duration_sec = sec;
-                config.round_duration_source = "runtime";
-            }
-        } else if let Some(cell) = config.runtime_config_path.as_deref().and_then(|p| {
-            blitzkrieg_core::runtime_config::load_round_duration_from(
-                std::path::Path::new(p),
-                &config.allowed_round_secs,
-            )
-        }) && cell.duration_sec != config.round_duration_sec
-        {
-            eprintln!(
-                "blitzkrieg-core: round duration {}s -> {}s (persisted UI setting, \
-                 data/runtime/config.json; an explicit --round-sec or BK_ROUND_SEC outranks it)",
-                config.round_duration_sec, cell.duration_sec
-            );
-            config.round_duration_sec = cell.duration_sec;
-            config.round_duration_source = "runtime";
-        }
+    // Issue 1140: per-account round duration. `ACCOUNT_DEFAULT_ROUND_DURATION_SEC`
+    // sets the default grid (falls back to the CLI --round-sec value above).
+    // `RUNTIME_ROUND_DURATION_SEC` is deprecated: it still sets the engine default
+    // with a deprecation warning, but will be removed in a later release.
+    // Per-account `ACCOUNT_<ID>_ROUND_DURATION_SEC` keys are applied in
+    // `Core::with_account_book` after the account book loads.
+    if let Some(sec) = std::env::var("ACCOUNT_DEFAULT_ROUND_DURATION_SEC")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        && sec != config.default_round_duration_sec
+    {
+        eprintln!(
+            "blitzkrieg-core: default round duration {}s -> {}s (ACCOUNT_DEFAULT_ROUND_DURATION_SEC env)",
+            config.default_round_duration_sec, sec
+        );
+        config.default_round_duration_sec = sec;
+    }
+    if let Some(sec) = std::env::var("RUNTIME_ROUND_DURATION_SEC")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        && sec != config.default_round_duration_sec
+    {
+        eprintln!(
+            "blitzkrieg-core: WARNING: RUNTIME_ROUND_DURATION_SEC is deprecated, use ACCOUNT_DEFAULT_ROUND_DURATION_SEC instead; engine default {}s -> {}s",
+            config.default_round_duration_sec, sec
+        );
+        config.default_round_duration_sec = sec;
     }
 
     // Issue 751: RUNTIME_MARKET_PLUGIN env key outranks the JSON cell.

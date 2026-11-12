@@ -176,7 +176,7 @@ impl Core {
                 // bit-identical with the pre-B1c slot-only check. The kill arm
                 // below gains the same family scope: an in-flight leg dies only
                 // when its OWN family rolled over.
-                let global_duration_sec = self.config.round_duration_sec;
+                let global_duration_sec = self.config.default_round_duration_sec;
                 let feed_duration = crate::engine::row_family_duration(
                     markets.first().map(|m| m.round_duration_sec).unwrap_or(0),
                     global_duration_sec,

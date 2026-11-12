@@ -431,6 +431,38 @@ impl Core {
                     }
                 }
             }
+            // Issue 1140: market_decl vs account grid conflict — a market that
+            // declares a duration family different from the account's anchor
+            // grid (`ACCOUNT_<ID>_ROUND_DURATION_SEC`, explicitly set) must not
+            // be entered. This prevents the grid pollution that caused #1139's
+            // losses (config said 15m, execution traded 5m). Only applies when
+            // the account has an explicit anchor; falling back to the default
+            // grid is not a conflict — the market's declaration is used for
+            // the family stamp (B1b three-state). Reject with both values so
+            // the operator can see the mismatch.
+            if req.side == Side::Buy
+                && let Some(engine) = self.engine.as_ref()
+                && let Some(market) = engine.market_for_token(&req.token_id)
+                && let market_decl = market.round_duration_sec
+                && market_decl > 0
+                && let Some(account_grid) = self
+                    .config
+                    .account_round_durations
+                    .get(&req.account_id.to_string())
+                && *account_grid > 0
+                && market_decl != *account_grid
+            {
+                return Err(CoreError::new(
+                    CoreErrorCode::RiskRejected,
+                    format!(
+                        "round duration conflict: market `{}` declares {market_decl}s \
+                         but account `{}` anchors on {account_grid}s — \
+                         refuse entry (fail-closed: align the account's \
+                         ACCOUNT_<ID>_ROUND_DURATION_SEC with the market's family)",
+                        req.token_id, req.account_id, account_grid = *account_grid
+                    ),
+                ));
+            }
             // The pair-cost cap: a BUY whose condition already has a
             // counterpart position may not push the pair's PER-SHARE cost
             // past the $1.00 a share-pair redeems (a fresh pair is the
@@ -599,6 +631,8 @@ impl Core {
         let execute_at = now_ms.saturating_add(self.config.fill_model.taker_latency_ms.max(0));
         let report_at = execute_at.saturating_add(self.config.fill_model.taker_rtt_ms.max(0));
 
+        let req_account_str = req.account_id.as_str().to_string();
+
         if let Err(e) = self.ome.submit(SubmitParams {
             decision_at_ms: now_ms,
             execute_at_ms: execute_at,
@@ -608,8 +642,8 @@ impl Core {
             submitted_at_ms: now_ms,
             maker_timeout_ms,
             // B1b: the order's round-length family, resolved three-state off
-            // the token's market and the global grid.
-            round_duration_sec: self.round_family_of_token(&req_token),
+            // the token's market and the account's grid.
+            round_duration_sec: self.round_family_of_token(&req_account_str, &req_token),
         }) {
             // #537: same rollback contract as the pre-submit path — a submit
             // refusal must not strand the notional it just reserved.

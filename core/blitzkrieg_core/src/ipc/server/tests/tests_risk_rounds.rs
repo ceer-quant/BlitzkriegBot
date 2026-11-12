@@ -531,25 +531,21 @@ async fn risk_set_exit_writes_the_triple_and_names_each_change() {
 /// 本会话的 `round_duration_sec` 一个字节不动。
 #[tokio::test]
 async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
-    // The cell's test path lives in a scratch dir the test owns (Hard
-    // Disk per the repo's write policy); the fixture core points at it.
+    // Per-account round duration: `round_duration.set` now names an account
+    // and writes `ACCOUNT_<ID>_ROUND_DURATION_SEC` to `.env`. The readout
+    // reports `perAccount` plus the default effective duration.
     let dir = std::env::temp_dir().join(format!("bk-round-dur-wire-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let cell_path = dir.join("config.json");
-    let cell_str = cell_path.to_string_lossy().into_owned();
+    let env_path = dir.join(".env");
+    let env_str = env_path.to_string_lossy().into_owned();
 
     let (core, registry, peer) = {
         let cfg = CoreConfig {
-            runtime_config_path: Some(cell_str.clone()),
+            env_file_path: Some(env_str.clone()),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
-            // The plugins' declared union as a test fixture (the values
-            // the shipped plugins declare): the readout's label check
-            // below judges against it. The labels travel the same road
-            // (issue 648: the fixture states the plugins' declared
-            // vocabulary itself — the shape boot aggregates).
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
             round_labels: [
                 (300, "5m"),
@@ -571,8 +567,8 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         )
     };
 
-    // The readout before any write: effective 900 from the compiled
-    // default, nothing persisted, the declared union with its labels.
+    // The readout before any write: effective 900 from the compiled default,
+    // empty per-account map, the declared union with its labels.
     let read = rpc(
         &core,
         &registry,
@@ -583,11 +579,15 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     assert!(read.get("error").is_none(), "readout must answer: {read}");
     assert_eq!(read["result"]["effectiveSec"], serde_json::json!(900));
     assert_eq!(read["result"]["source"], serde_json::json!("default"));
-    assert_eq!(read["result"]["persisted"], serde_json::json!(false));
+    assert_eq!(
+        read["result"]["perAccount"],
+        serde_json::json!({}),
+        "no per-account overrides yet: {read}"
+    );
     assert_eq!(
         read["result"]["nextSessionSec"],
         serde_json::json!(900),
-        "no cell means the next session re-resolves to the effective value: {read}"
+        "next session re-resolves to the effective value: {read}"
     );
     let labels: Vec<(i64, &str)> = read["result"]["allowed"]
         .as_array()
@@ -599,51 +599,52 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
                 o["label"].as_str().unwrap_or(""),
             )
         })
-        .collect();
+    .collect();
     assert!(
         labels.contains(&(300, "5m")) && labels.contains(&(900, "15m")),
         "the whitelist carries the plugins' declared labels: {labels:?}"
     );
 
-    // The write path: 5m lands in the cell, the reply names the NEXT
-    // session's value, and the RUNNING session is untouched.
+    // The write path: set account "default" to 300s. Immediate effect — the
+    // running grid for that account moves now, not at restart.
     let set = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"durationSec":300,"reason":"faster rounds"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reason":"faster rounds"}}"#.to_string(),
     )
     .await;
     assert!(set.get("error").is_none(), "the set must land: {set}");
     assert_eq!(
+        set["result"]["accountId"],
+        serde_json::json!("default"),
+        "the reply names the account: {set}"
+    );
+    assert_eq!(
         set["result"]["nextSessionSec"],
         serde_json::json!(300),
-        "the reply names what the restart will run: {set}"
+        "the reply names the account's value: {set}"
     );
     assert_eq!(set["result"]["reset"], serde_json::json!(false));
     assert_eq!(
         set["result"]["actor"],
         serde_json::json!(format!("uid:{}", own_uid()))
     );
+    // In-memory map reflects the write immediately.
     {
         let c = core.lock().await;
         assert_eq!(
-            c.config().round_duration_sec,
-            900,
-            "next-session semantics: the running grid does not move"
+            c.config()
+                .account_round_durations
+                .get("default")
+                .copied(),
+            Some(300),
+            "in-memory per-account map updated immediately: {:?}",
+            c.config().account_round_durations
         );
     }
-    // The cell content, read back through the SAME loader a restart
-    // would use — the write and the boot read agree by construction.
-    let cell = crate::runtime_config::load_round_duration_from(
-        std::path::Path::new(&cell_str),
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the cell must load");
-    assert_eq!(cell.duration_sec, 300);
 
-    // The readout now reports the cell as the next session's value while
-    // the effective value stays this session's.
+    // The readout now reports the per-account override.
     let read2 = rpc(
         &core,
         &registry,
@@ -651,16 +652,23 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         r#"{"jsonrpc":"2.0","id":3,"method":"round_duration.get","params":{}}"#.to_string(),
     )
     .await;
-    assert_eq!(read2["result"]["effectiveSec"], serde_json::json!(900));
-    assert_eq!(read2["result"]["nextSessionSec"], serde_json::json!(300));
-    assert_eq!(read2["result"]["persisted"], serde_json::json!(true));
+    assert_eq!(
+        read2["result"]["perAccount"]["default"],
+        serde_json::json!(300),
+        "per-account map shows the override: {read2}"
+    );
+    assert_eq!(
+        read2["result"]["effectiveSec"],
+        serde_json::json!(900),
+        "default effective stays 900 (the account override is separate): {read2}"
+    );
 
-    // An off-whitelist value is refused and the cell is untouched.
+    // An off-whitelist value is refused.
     let bad = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":4,"method":"round_duration.set","params":{"durationSec":60}}"#
+        r#"{"jsonrpc":"2.0","id":4,"method":"round_duration.set","params":{"accountId":"default","durationSec":60}}"#
             .to_string(),
     )
     .await;
@@ -671,23 +679,13 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
             .contains("not declared by any market plugin"),
         "an off-whitelist value is refused by name: {bad}"
     );
-    assert_eq!(
-        crate::runtime_config::load_round_duration_from(
-            std::path::Path::new(&cell_str),
-            crate::account::config::TEST_ALLOWED_ROUNDS,
-        )
-        .unwrap()
-        .duration_sec,
-        300,
-        "a refused write leaves the cell exactly as it was"
-    );
 
     // durationSec + reset together is refused.
     let both = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":5,"method":"round_duration.set","params":{"durationSec":300,"reset":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reset":true}}"#.to_string(),
     )
     .await;
     assert!(
@@ -698,42 +696,38 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         "an ambiguous write is refused: {both}"
     );
 
-    // reset clears the cell: the next session falls back to the boot
-    // resolution, and the readout reports nothing persisted.
+    // reset clears the account's override.
     let reset = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":6,"method":"round_duration.set","params":{"reset":true}}"#
+        r#"{"jsonrpc":"2.0","id":6,"method":"round_duration.set","params":{"accountId":"default","reset":true}}"#
             .to_string(),
     )
     .await;
     assert!(reset.get("error").is_none(), "the reset must land: {reset}");
     assert_eq!(reset["result"]["reset"], serde_json::json!(true));
     assert_eq!(
-        reset["result"]["nextSessionSec"],
-        serde_json::json!(900),
-        "after a reset the next session re-resolves to the effective value: {reset}"
+        reset["result"]["accountId"],
+        serde_json::json!("default"),
+        "the reply names the account: {reset}"
     );
     assert_eq!(
-        crate::runtime_config::load_round_duration_from(
-            std::path::Path::new(&cell_str),
-            crate::account::config::TEST_ALLOWED_ROUNDS,
-        ),
-        None,
-        "the cell holds nothing after a reset"
+        reset["result"]["nextSessionSec"],
+        serde_json::json!(900),
+        "after a reset the account falls back to the default: {reset}"
     );
-    let read3 = rpc(
-        &core,
-        &registry,
-        &peer,
-        r#"{"jsonrpc":"2.0","id":7,"method":"round_duration.get","params":{}}"#.to_string(),
-    )
-    .await;
-    assert_eq!(read3["result"]["persisted"], serde_json::json!(false));
-    assert_eq!(read3["result"]["nextSessionSec"], serde_json::json!(900));
+    // In-memory map no longer has the account's override.
+    {
+        let c = core.lock().await;
+        assert!(
+            !c.config().account_round_durations.contains_key("default"),
+            "in-memory per-account map cleared after reset: {:?}",
+            c.config().account_round_durations
+        );
+    }
 
-    // A core with NO runtime config path (backtests, in-process tests)
+    // A core with NO env file path (backtests, in-process tests)
     // refuses the write instead of dropping a file into whatever
     // checkout the caller runs from.
     let (bare, registry2, peer2) = hot_reload_fixture().await;
@@ -741,7 +735,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         &bare,
         &registry2,
         &peer2,
-        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"durationSec":300}}"#
+        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300}}"#
             .to_string(),
     )
     .await;

@@ -950,7 +950,7 @@ impl Core {
                 // duration, which is a different family under multi-family
                 // deployment (issue 733).
                 round_duration_sec: p
-                    .effective_round_duration_sec(None, self.config.round_duration_sec),
+                    .effective_round_duration_sec(None, self.account_round_duration(p.account_id.as_str())),
                 // Cash actually moved on this position, so an external monitor
                 // can check the ledger identity without waiting for a flat book.
                 // `entry_cost_usd` is the TOTAL entry notional (what left the
