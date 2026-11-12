@@ -32,9 +32,9 @@ export function useRoundDuration() {
     return out
   })
   const value = computed<string>({
-    // 预填「本会话生效值」（即时生效），持久格/下次会话值不再预填 ——
-    // 卡片承诺的是「现在就是这个」。
-    get: () => String(pending.value ?? doc.value?.effectiveSec ?? ''),
+    // 预填「执行真相」（default 账户 per-account 覆盖，缺省回落 default 网格），
+    // 即卡片打开时的当前轮长；持久格/下次会话值不再预填 —— 卡片承诺的是「现在就是这个」。
+    get: () => String(pending.value ?? doc.value?.perAccount?.['default'] ?? doc.value?.effectiveSec ?? ''),
     set: (v) => { pending.value = Number(v) },
   })
   const dirty = computed(
@@ -99,7 +99,7 @@ export function useRoundDuration() {
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已生效：本会话按 ${res.nextSessionSec}s 轮次运行；在途轮保持原网格结算。`
+        msg.value = `下一轮起按 ${res.nextSessionSec}s 运行；当前轮保持出生网格结算。`
         await load()
       }
     } catch (e) {
@@ -123,7 +123,7 @@ export function useRoundDuration() {
       if (res.error) {
         err.value = res.error
       } else {
-        msg.value = `已生效：面板设置已清除，本会话回落到启动参数解析；在途轮不变。`
+        msg.value = `面板设置已清除，下一轮起回落到启动参数解析；当前轮保持出生网格结算。`
         await load()
       }
     } catch (e) {

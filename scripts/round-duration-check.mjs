@@ -56,8 +56,10 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
     noTradeLog: true,
     noOrderLog: true,
     noPositionLog: true,
-    extraArgs,
-  });
+    // 门禁要断言“引擎侧实际变化”，必须让核安装扫描引擎（--engine），
+    // 否则 round_duration.set 的 engine 同步无对象可写。
+    extraArgs: [...(extraArgs ?? []), '--engine'],
+});
 }
 
 try {
@@ -88,10 +90,13 @@ try {
     typeof set.actor === 'string' && set.actor.startsWith('uid:'), JSON.stringify(set));
 
   // 3. Live semantics: the per-account map reflects the write immediately;
-  //    the global default grid is untouched (the override is a separate tier).
+  //    the global default grid is untouched (the override is a separate tier),
+  //    and crucially the ENGINE scanner clock is synced so the live countdown
+  //    matches the account grid — no split-brain (#1151).
   const mid = await core.request('round_duration.get', {});
-  check('the write lands in the running session immediately',
-    mid.perAccount?.default === 300 && mid.effectiveSec === 900, JSON.stringify(mid));
+  check('the write lands in the running session immediately and the engine clock synced',
+    mid.perAccount?.default === 300 && mid.effectiveSec === 900 && mid.engineActiveSec === 300,
+    JSON.stringify(mid));
 
   // 5. A value outside the plugins' declared union is refused and the
   //    override is untouched.

@@ -22,6 +22,8 @@ export interface RoundDurationDoc {
   persisted: boolean
   /** account_id → seconds（内核 per_account）；effective_sec 为默认账号的周期。 */
   perAccount: Record<string, number>
+  /** 引擎扫描器当前实际运行的轮长（倒计时钟真实跑的值，与 per-account 写入同步）。 */
+  engineActiveSec: number
   error?: string
 }
 

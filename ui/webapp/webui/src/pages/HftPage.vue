@@ -940,7 +940,7 @@ const journalOpen = ref(false)
                lib/round-duration.ts 同一份读数与写路径）。next_session 语义
                不变：写入持久格、本会话网格不动、重启生效；显式启动参数在管
                （flagLocked）时写入不赢，title 里如实说明。 -->
-          <!-- 全局复盘坐标系（不是账户的交易周期！）：账户各跑各的周期族在
+          <!-- 复盘坐标系（不是账户的交易周期！）：账户各跑各的周期族在
                账户卡配置（account.rounds.set，热生效）；这个单值只服务复盘
                坐标系与未配置账户的回落 —— 语义剥离防「切换交易周期」误用。 -->
           <!-- 2026-10-26：档位集合按当前账户 venue 的插件声明筛（与账户卡
@@ -964,7 +964,7 @@ const journalOpen = ref(false)
           </Tooltip>
           <Tooltip
             v-else
-            :content="`该交易所（${activeVenue}）只支持 ${roundDurLabel} 轮次，已锁定 —— 全局轮次坐标系与账户实时周期族由声明面决定，无档可切。`"
+            :content="`该交易所（${activeVenue}）只支持 ${roundDurLabel} 轮次，已锁定 —— 轮次网格与账户实时周期族由声明面决定，无档可切。`"
           >
             <div class="flex items-center gap-1.5">
               <Timer class="size-3.5 text-faint-fg" />

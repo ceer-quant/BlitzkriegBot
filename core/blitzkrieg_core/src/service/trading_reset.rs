@@ -680,6 +680,10 @@ impl Core {
                 )
             })?;
             self.config.account_round_durations.remove(account_id);
+            // reset 同样同步引擎网格，让倒计时钟回落到默认网格（#1151）。
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_scanner_round_duration(self.config.default_round_duration_sec);
+            }
             tracing::info!(
                 target: "risk",
                 actor = %actor,
@@ -768,6 +772,10 @@ impl Core {
         self.config
             .account_round_durations
             .insert(account_id.clone(), sec);
+        // 写入后同步引擎扫描器轮长网格，使倒计时钟与账户 per-account 网格对齐（#1151）。
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_scanner_round_duration(sec);
+        }
         tracing::info!(
             target: "risk",
             actor = %actor,

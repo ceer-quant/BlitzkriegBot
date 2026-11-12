@@ -232,6 +232,7 @@ fn family_08_strategy_params_get_params() {
 fn family_09_round_duration_result() {
     let v = RoundDurationResult {
         effective_sec: 900,
+        engine_active_sec: 300,
         source: "cli",
         per_account: std::collections::BTreeMap::new(),
         allowed: vec![
@@ -250,7 +251,7 @@ fn family_09_round_duration_result() {
     // `label` is skipped when None — a non-standard value renders unnamed.
     assert_eq!(
         wire(&v),
-        r#"{"effectiveSec":900,"source":"cli","perAccount":{},"allowed":[{"sec":300,"label":"5m"},{"sec":900}],"nextSessionSec":900,"persisted":false}"#
+        r#"{"effectiveSec":900,"engineActiveSec":300,"source":"cli","perAccount":{},"allowed":[{"sec":300,"label":"5m"},{"sec":900}],"nextSessionSec":900,"persisted":false}"#
     );
 }
 
