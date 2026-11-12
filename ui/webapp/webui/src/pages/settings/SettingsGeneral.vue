@@ -135,6 +135,8 @@ const {
   doc: roundDoc, err: roundErr, msg: roundMsg, busy: roundBusy,
   segments: roundSegments, value: roundValue, dirty: roundDirty,
   flagLocked: roundFlagLocked, sourceLabel: roundSourceLabel,
+  configSec: roundConfigSec, execSec: roundExecSec, split: roundSplit,
+  roundLabel,
   save: saveRound, reset: resetRound,
 } = useRoundDuration()
 
@@ -310,6 +312,21 @@ async function doResetTrading(): Promise<void> {
             >
               <Check class="size-3.5" />保存
             </Button>
+          </div>
+        </div>
+
+        <!-- issue 1139：配置真相与执行真相并列；分裂时红条告警，不静默 -->
+        <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
+            <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
+            <span class="block">
+              配置值 {{ roundLabel(roundConfigSec) }}（{{ roundSourceLabel }}，启动解析出的默认网格）
+              · 执行值 {{ roundLabel(roundExecSec) }}（default 账户实际轮长，per-account 覆盖优先）
+            </span>
+            <AlertBanner v-if="roundSplit" class="mt-1.5" tone="error">
+              轮次配置与执行分裂：配置 {{ roundLabel(roundConfigSec) }} / 实际 {{ roundLabel(roundExecSec) }}
+              —— 不静默。请核对 default 账户的 per-account 覆盖与市场声明族；在途轮保持原网格结算。
+            </AlertBanner>
           </div>
         </div>
 

@@ -1,14 +1,13 @@
 /**
- * 轮次时间周期切换的共享状态（next_session 语义，issue 474）。
+ * 轮次时间周期切换的共享状态（即时生效，issue 474；#1129/#1141 已取消
+ * “下次会话重启生效”的重启链）。
  *
- * 原住民是设置 · 通用 的「轮次时间周期」卡；2026-10-24 操作者指令把它
+ * 原住民是设置 · 通用的「轮次时间周期」卡；2026-10-24 操作者指令把它
  * 带到行情页倒计时卡 —— 操作者在盯盘时要切周期，跑去设置页断了监视语境。
- * 两处消费同一份读数与同一条写路径（round_duration.get / round_duration.set，
- * 写入成功后 10s 自动重启内核），抽成 composable 让两个卡面共享一份逻辑、
- * 各自一份 restart 倒计时（restart-core 的组件级约定原样保留）。
- *
- * 语义不变（轮次网格是坐标系）：切换写入持久格、本会话网格不动、重启后
- * 生效；cli_or_env 显式参数在场时写入仍会保存但不会赢 —— 卡面照旧提示。
+ * 两处消费同一份读数与同一条写路径（round_duration.get / round_duration.set），
+ * 写入立即生效、本会话网格不动、在途轮保持原网格结算；不再有重启倒计时
+ * 与“下次会话才生效”的幻觉。cli_or_env 显式参数在场时写入仍会保存但不会
+ * 赢 —— 卡面照旧提示。抽成 composable 让两个卡面共享一份逻辑。
  */
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
@@ -51,6 +50,27 @@ export function useRoundDuration() {
       default: return '出厂默认'
     }
   })
+
+  // ── 配置真相 vs 执行真相（issue 1139）──────────────────────────────
+  // wire 的 effective_sec 等于启动解析出的默认网格 = 配置真相（source 字段如实
+  // 说明来源：cli/env/runtime/toml/default）。default 账户的执行真相取 per-account
+  // 覆盖（round_duration.set 立即写入 .env + 内存，立即生效），缺省回落到
+  // 配置网格。二者分裂时卡面必须红条告警，不静默。
+  const configSec = computed(() => doc.value?.effectiveSec ?? null)
+  const execSec = computed(() => {
+    const pa = doc.value?.perAccount?.['default']
+    return pa !== undefined ? pa : doc.value?.effectiveSec ?? null
+  })
+  const split = computed(() =>
+    configSec.value !== null && execSec.value !== null && configSec.value !== execSec.value,
+  )
+
+  /** 5m/15m/1h/4h/daily，非标档位回落「Xs」。 */
+  const roundLabel = (sec: number | null): string => {
+    if (sec === null) return '—'
+    const labels: Record<number, string> = { 300: '5m', 900: '15m', 3600: '1h', 14400: '4h', 86400: 'daily' }
+    return labels[sec] ?? `${sec}s`
+  }
 
   async function load(): Promise<void> {
     busy.value = true
@@ -115,5 +135,5 @@ export function useRoundDuration() {
 
   onMounted(load)
 
-  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, sourceLabel, load, save, reset }
+  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, sourceLabel, configSec, execSec, split, roundLabel, load, save, reset }
 }
