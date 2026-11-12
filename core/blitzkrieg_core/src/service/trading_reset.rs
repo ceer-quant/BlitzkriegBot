@@ -108,7 +108,6 @@ impl Core {
                 ),
             ));
         }
-
         let band_moved = changes
             .iter()
             .any(|c| c.field == "minShares" || c.field == "maxShares");
@@ -484,7 +483,6 @@ impl Core {
                 effect: "live",
             });
         }
-
         if changes.is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -621,7 +619,6 @@ impl Core {
         now_ms: i64,
     ) -> CoreResult<crate::schema::RoundDurationUpdate> {
         use crate::schema::{ROUND_DURATION_SET_NOTE, RoundDurationUpdate};
-
         let account_id = &patch.account_id;
         if patch.reset && patch.duration_sec.is_some() {
             return Err(CoreError::new(
@@ -636,7 +633,6 @@ impl Core {
                 "round_duration.set needs durationSec (one of {:?}) or reset: true".to_string(),
             ));
         }
-
         // Validate the account exists in the book.
         self.accounts
             .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
@@ -646,7 +642,6 @@ impl Core {
                     format!("round_duration.set: no such account `{account_id}`"),
                 )
             })?;
-
         // reset: remove the account's override from .env and memory.
         if patch.reset {
             let sfx: String = account_id
@@ -680,7 +675,6 @@ impl Core {
                 )
             })?;
             self.config.account_round_durations.remove(account_id);
-            // reset 同样同步引擎网格，让倒计时钟回落到默认网格（#1151）。
             if let Some(engine) = self.engine.as_mut() {
                 engine.set_scanner_round_duration(self.config.default_round_duration_sec);
             }
@@ -702,7 +696,6 @@ impl Core {
                 note: ROUND_DURATION_SET_NOTE,
             });
         }
-
         // Write path: duration_sec is Some (guaranteed by validation above).
         let sec = sec.unwrap();
         // Validate against allowed_round_secs whitelist.
@@ -772,7 +765,6 @@ impl Core {
         self.config
             .account_round_durations
             .insert(account_id.clone(), sec);
-        // 写入后同步引擎扫描器轮长网格，使倒计时钟与账户 per-account 网格对齐（#1151）。
         if let Some(engine) = self.engine.as_mut() {
             engine.set_scanner_round_duration(sec);
         }
