@@ -75,6 +75,7 @@ export default defineConfig({
     outline: { level: [2, 3], label: '本页目录' },
     nav: [
       { text: '开始', link: '/getting-started' },
+      { text: 'late_favorite', link: '/late-favorite' },
       { text: '文档', link: '/FEATURES' },
       { text: '术语表', link: '/glossary' },
     ],

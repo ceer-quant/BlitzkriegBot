@@ -772,10 +772,11 @@ impl Core {
             // `escalation_delay_ms`); an unfilled quote rests to the round's
             // own end-of-life. Every other strategy keeps the configured
             // maker→taker window, byte-identically.
-            let maker_timeout = if self
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.strategy_entry_maker(&name))
+            let maker_timeout = if req.mode == crate::model::FillPolicy::Maker
+                || self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.strategy_entry_maker(&name))
             {
                 -1
             } else {
@@ -1230,10 +1231,11 @@ impl Core {
             // `escalation_delay_ms`); an unfilled quote rests to the round's
             // own end-of-life. Every other strategy keeps the configured
             // maker→taker window, byte-identically.
-            let maker_timeout = if self
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.strategy_entry_maker(&name))
+            let maker_timeout = if req.mode == crate::model::FillPolicy::Maker
+                || self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.strategy_entry_maker(&name))
             {
                 -1
             } else {
