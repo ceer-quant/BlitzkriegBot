@@ -156,6 +156,54 @@ try {
     JSON.stringify(flagged));
   await core4.stop();
 
+  // 9. 绑定即启用的守卫拒绝分支：账户 venue 绑定派生生效期间，
+  //    market.plugin.set（写与 reset）一律被拒，错误点名账户绑定。
+  const core6 = makeCore('guard');
+  await core6.start();
+  await core6.request('account.venue.set', { accountId: 'default', venue: 'polymarket', reason: 'panel-check guard' });
+  const roBeforeGuard = await core6.request('market.plugin.get', {});
+  check('guard pre-check: source is accounts with derived venues',
+    roBeforeGuard.source === 'accounts' && roBeforeGuard.derivedVenues.includes('polymarket'),
+    JSON.stringify(roBeforeGuard));
+  let guardRefused = null;
+  try {
+    await core6.request('market.plugin.set', { name: 'kalshi', reason: 'panel-check guard' });
+  } catch (e) {
+    guardRefused = { message: e?.message ?? String(e) };
+  }
+  check('market.plugin.set is refused while bindings derive',
+    guardRefused?.message?.includes('账户绑定派生'), JSON.stringify(guardRefused));
+  let guardResetRefused = null;
+  try {
+    await core6.request('market.plugin.set', { reset: true, reason: 'panel-check guard' });
+  } catch (e) {
+    guardResetRefused = { message: e?.message ?? String(e) };
+  }
+  check('market.plugin.set reset is refused while bindings derive',
+    guardResetRefused?.message?.includes('账户绑定派生'), JSON.stringify(guardResetRefused));
+  await core6.stop();
+
+  // 10. 重启派生激活 e2e：账户 venue 绑定持久化到 .env，重启后同一 cwd
+  //     重新启动的内核仍从账户绑定派生启用集合，source 如实为 accounts。
+  const cwd10 = mkdtempSync(join(tmpdir(), 'blitzkrieg-mkplugin-restart-'));
+  cleanup.push(cwd10);
+  const core10a = makeCore('restart-a', [], cwd10);
+  await core10a.start();
+  await core10a.request('account.venue.set', { accountId: 'default', venue: 'polymarket', reason: 'panel-check restart' });
+  const ro10a = await core10a.request('market.plugin.get', {});
+  check('restart pre-check: source=accounts, active=polymarket',
+    ro10a.source === 'accounts' && ro10a.activePlugin === 'polymarket',
+    JSON.stringify(ro10a));
+  await core10a.stop();
+
+  const core10b = makeCore('restart-b', [], cwd10);
+  await core10b.start();
+  const ro10b = await core10b.request('market.plugin.get', {});
+  check('restart post-check: source still accounts, active still polymarket',
+    ro10b.source === 'accounts' && ro10b.activePlugin === 'polymarket',
+    JSON.stringify(ro10b));
+  await core10b.stop();
+
   // 8. Extension enable/disable: the SAME verbs the panel buttons drive,
   //    run for real (on_load / on_unload).
   const core5 = makeCore('extension');

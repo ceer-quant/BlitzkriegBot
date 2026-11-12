@@ -1131,6 +1131,42 @@ mod derive_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 第二层迁移的守旧分支：持久格里命名了「未注册」插件 → 格不是可启动格，
+    /// `stale` 为 false，迁移**不清格**；留在原处，下次会话照样读不到（因为
+    /// 解析层同样会过滤掉未注册名），不静默重槽、不把死格当活格。
+    #[test]
+    fn non_bootable_cell_is_not_cleared_during_migration() {
+        let dir = scratch("ghostcell");
+        let cell = cell_in(&dir);
+        // 格里只写一个未注册的名 "ghost" —— 不是可启动格。
+        crate::runtime_config::persist_market_plugin_to_with_env(
+            std::path::Path::new(&cell),
+            Some("ghost"),
+            "uid:old",
+            0,
+            None,
+        )
+        .expect("seed the unbootable cell");
+        let loaded = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
+        assert_eq!(loaded.as_ref().unwrap().plugin, "ghost", "the cell is on disk");
+
+        // 两个账户绑定已注册的 beta/gamma，派生非空，迁移层要启动。
+        let reg = registry_with(&["alpha", "beta", "gamma"]);
+        let core = core_with_bindings(
+            &[("a", "beta"), ("b", "gamma")],
+            Some(cell.clone()),
+        );
+
+        let (resolved, source) = boot_enablement(&core, &reg, None, loaded.as_ref());
+        assert_eq!(source, PluginEnableSource::Accounts);
+        assert_eq!(resolved.as_deref(), Some("beta,gamma"));
+
+        // 迁移没有清格：ghost 格依然在盘上（不可启动格不清）。
+        let still = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
+        assert_eq!(still.unwrap().plugin, "ghost", "non-bootable cell must survive migration");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 第三层：无旗标无绑定 → 回落旧格（source=persisted）；旧格也空 →
     /// 首个注册者（source=fallback）。绑定全空（venue="" 是解绑，不是绑定）
     /// 不触发派生 —— 旧部署逐字不变。
