@@ -14,7 +14,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useIntervalFn, useIntersectionObserver } from '@vueuse/core'
-import { Activity, Play, Square, Bell, BellOff, X, Clock, Filter, Info, Timer, Check } from 'lucide-vue-next'
+import { Activity, Play, Square, Bell, BellOff, X, Clock, Filter, Info, Timer, Check, RefreshCw } from 'lucide-vue-next'
 import { api, marketTypeLabel, type MarketPrice, type Position, type TradeRow, type AssetBook, type OrderRow, type NetCheckDoc } from '@/api/client'
 import { accountFrozen, lastErrorBanner } from '@/lib/safety'
 import { usePanelStore } from '@/stores/panel'
@@ -733,6 +733,12 @@ async function doSaveRoundImmediate(): Promise<void> {
   await roundSwitch.save(store.activeAccount ?? 'default', { immediate: true })
 }
 
+// 清除该账户的轮次设置，回落到启动参数解析（issue 1155：设置页轮次卡删除后，
+// 行情页保留唯一的清除入口，不让 reset 沦为仅 API 可达）。
+async function doClearRound(): Promise<void> {
+  await roundSwitch.reset(store.activeAccount ?? 'default')
+}
+
 // 倒计时卡的周期切换按当前账户 venue 的插件声明筛档（2026-10-26 操作者
 // 指令，与账户卡 AccountSwitcher.declaredRoundSecs 同一声明面、同一宽容
 // 语义）：未声明（predictfun / 寄生 polysimulator / 老内核缺字段）不筛，
@@ -1022,6 +1028,15 @@ const journalOpen = ref(false)
             @click="doSaveRound"
           >
             <Check class="size-3.5" />保存
+          </Button>
+          <Button
+            v-if="!roundSwitch.flagLocked.value"
+            size="sm"
+            :disabled="roundSwitch.busy.value || roundSwitch.doc.value?.perAccount?.[store.activeAccount ?? 'default'] === undefined"
+            title="清除该账户的轮次设置，回落到启动参数解析"
+            @click="doClearRound"
+          >
+            <RefreshCw class="size-3.5" />清除
           </Button>
 
           <!-- 本单：立即切换轮次的确认框——有在途仓位时必弹，N 仓位 + 滑点警告。 -->
