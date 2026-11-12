@@ -61,7 +61,12 @@ const LIMIT = 1500;
 // tree. An entry here is a debt marker — the file may shrink or die, never
 // grow into a bigger exception, and once it is ≤ LIMIT the entry must be
 // pruned (rule 3 above).
-const ALLOW = [];
+const ALLOW = [
+  // #1140: per-account round duration grew trading_reset.rs past the limit
+  // (the round_duration.set write path lives here). Debt marker — the file
+  // may shrink or die, never grow past atAuthoring.
+  { path: 'core/blitzkrieg_core/src/service/trading_reset.rs', atAuthoring: 1541 },
+];
 
 const checks = [];
 const check = (name, ok, detail = '') => {
