@@ -68,6 +68,11 @@ impl Engine {
     pub fn set_scanner_round_duration(&mut self, sec: i64) {
         self.cfg.scanner.round_duration_sec = sec;
         self.scanner.set_config(self.cfg.scanner.clone());
+        // #1157: a runtime grid write makes the active grid the selection
+        // authority (off-grid declared markets are no longer entered). This is
+        // only set by the runtime write path — boot leaves it false, so a
+        // default/no-write boot keeps the historic per-market declared clock.
+        self.scanner.set_grid_override(true);
     }
 
     /// RFC 568 阶段一：排空本周期收集的配对声明（Core 在 arb_precheck 过闸
