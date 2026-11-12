@@ -402,7 +402,10 @@ impl Core {
                     .map(|e| e.last_time_left_sec())
                     .unwrap_or(i64::MAX);
                 let bound_stop_pct = if holder {
-                    crate::exit_policy::holder_effective_stop_pct(time_left_sec, &self.config.positions.exit)
+                    crate::exit_policy::holder_effective_stop_pct(
+                        time_left_sec,
+                        &self.config.positions.exit,
+                    )
                 } else {
                     crate::exit_policy::effective_stop_pct(
                         self.config.positions.exit.stop_loss_pct,
