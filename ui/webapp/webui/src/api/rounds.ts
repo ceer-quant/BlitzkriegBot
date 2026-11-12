@@ -12,7 +12,7 @@ export interface RoundDurationOption {
   label?: string
 }
 
-/** `round_duration.get` 回执：本会话生效值 + 来源 + 白名单 + 下次会话将解析到什么。 */
+/** `round_duration.get` 回执：本会话生效值 + 来源 + 白名单 + 下次会话将解析到什么，以及 per-account 周期。 */
 export interface RoundDurationDoc {
   effectiveSec: number
   /** cli_or_env = 显式旗标/环境变量在管（本卡写入不会赢）；default/runtime/toml/env。 */
@@ -20,14 +20,18 @@ export interface RoundDurationDoc {
   allowed: RoundDurationOption[]
   nextSessionSec: number
   persisted: boolean
+  /** account_id → seconds（内核 per_account）；effective_sec 为默认账号的周期。 */
+  perAccount: Record<string, number>
   error?: string
 }
 
-/** `round_duration.set` 请求体：`durationSec`（白名单档位）或 `reset`（清格）。 */
+/** `round_duration.set` 请求体：`durationSec`（白名单档位）或 `reset`（清格）。`account_id` 为必填，指定写入哪个账号的周期。 */
 export interface RoundDurationSetBody {
   durationSec?: number
   reset?: boolean
   reason?: string
+  /** 目标账号（内核 account_id，必填）。 */
+  accountId: string
 }
 
 /** `round_duration.set` 回执：下次会话将跑的值 + 是否为清格操作。 */
