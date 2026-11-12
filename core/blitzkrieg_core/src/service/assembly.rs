@@ -71,11 +71,14 @@ impl Core {
                     config.account_round_durations.insert(id.to_string(), sec);
                     // Validation: the anchor must be in the account's ROUNDS allow-list.
                     if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
+                        // Note: the message names the env suffix and the value
+                        // only — the allow-list body itself is not echoed back
+                        // (CodeQL cleartext-logging: no account payload lands
+                        // in the log).
                         panic!(
-                            "refusing to boot: account `{id}` has ACCOUNT_{sfx}_ROUND_DURATION_SEC={sec}s \
-                             but ACCOUNT_{sfx}_ROUNDS={:?} does not include it \
-                             (fail-closed: fix the value or add it to ROUNDS)",
-                            acc.rounds
+                            "refusing to boot: ACCOUNT_{sfx}_ROUND_DURATION_SEC={sec}s \
+                             is not in the account's ACCOUNT_{sfx}_ROUNDS allow-list \
+                             (fail-closed: fix the value or add it to ROUNDS)"
                         );
                     }
                 } else {

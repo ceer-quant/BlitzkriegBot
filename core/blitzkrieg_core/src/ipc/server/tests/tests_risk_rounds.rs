@@ -636,8 +636,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         assert_eq!(
             c.config().account_round_durations.get("default").copied(),
             Some(300),
-            "in-memory per-account map updated immediately: {:?}",
-            c.config().account_round_durations
+            "in-memory per-account map updated immediately",
         );
     }
 
@@ -719,8 +718,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         let c = core.lock().await;
         assert!(
             !c.config().account_round_durations.contains_key("default"),
-            "in-memory per-account map cleared after reset: {:?}",
-            c.config().account_round_durations
+            "in-memory per-account map cleared after reset",
         );
     }
 
