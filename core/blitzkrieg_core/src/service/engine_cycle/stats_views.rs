@@ -201,18 +201,29 @@ impl Core {
                 // fold 已经是该策略的全口径合计，原样再报一遍专名字段，前端
                 // 不必知道键形状；`arbActivePairs` 读配对簿的在册（非
                 // Closed）配对数。未受理行不带这些键。
-                let arb_accepted = self
-                    .engine
-                    .as_ref()
-                    .map(|e| e.pair_book_stats_accepted(&name, &self.pair_book))
-                    .unwrap_or(false);
+                // #1165 (L6 契约)：the arb face is evaluated for ENABLED
+                // strategies only — a disabled row keeps its plain counters
+                // (history never vanishes), but the acceptance verdict, the
+                // rejection reason and the arb* fields stop being rebuilt
+                // every cycle. A master-power-off arb can still be installed;
+                // pre-#1165 it re-printed the declared-but-NOT-accepted WARN
+                // per readout per cycle (live: 4+ lines per cycle).
+                let arb_evaluated = enabled.contains(&name);
+                let arb_accepted = if arb_evaluated {
+                    self.engine
+                        .as_ref()
+                        .map(|e| e.pair_book_stats_accepted(&name, &self.pair_book))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
                 // M2 deprecation bridge: the NAME branch (an exact
                 // ARB_STRATEGY match) stays authoritative for one release
                 // cycle. A row that rides the name instead of an accepted
                 // declaration gets a one-shot (per process) deprecation warn;
                 // a row whose declaration IS accepted rides the new path
                 // silently.
-                let name_bridge = name == ARB_STRATEGY && !arb_accepted;
+                let name_bridge = arb_evaluated && name == ARB_STRATEGY && !arb_accepted;
                 if name_bridge {
                     arb_name_branch_warn_once(&name);
                 }
@@ -222,14 +233,7 @@ impl Core {
                         .as_ref()
                         .and_then(|e| e.pair_book_stats_rejection_reason(&name, &self.pair_book))
                     {
-                        tracing::warn!(
-                            strategy = name.as_str(),
-                            reason,
-                            "consumes_pair_book_stats declared but NOT accepted — the arb* face \
-                             rides the deprecated name branch (ARB_STRATEGY match) or is omitted \
-                             entirely; a pair consumer must also declare atomic_batch and hold at \
-                             least one live PairBook entry"
-                        );
+                        arb_declared_unaccepted_warn_on_change(&name, reason);
                     }
                     row["arbNetPnlUsd"] = dec_json(acc.net_pnl_usd);
                     row["arbWins"] = serde_json::json!(acc.wins);
