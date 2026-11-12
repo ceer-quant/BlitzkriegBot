@@ -371,15 +371,10 @@ impl Engine {
                 // `late-taker` is late_favorite's crossing entry. A post-only
                 // quote at the ask is rejected, and MakerThenTaker would
                 // rest before it crossed, so this reason is a taker fill.
-                mode: if sig.reason.starts_with("late-taker") {
-                    crate::model::FillPolicy::Taker
-                } else if sig.reason.starts_with("late-maker")
-                    || self.strategy_entry_maker(&sig.strategy)
-                {
-                    crate::model::FillPolicy::Maker
-                } else {
-                    crate::model::FillPolicy::MakerThenTaker
-                },
+                // Pinned by `entry_fill_policy_tests` below — the routing is
+                // reason-prefix driven, so a rename in the Lua package or a
+                // new strategy reusing the prefix must trip this gate first.
+                mode: entry_fill_policy(&sig.reason, self.strategy_entry_maker(&sig.strategy)),
                 price: sig.price,
                 size,
                 internal_key: if sig.account_id == blitzkrieg_market_api::DEFAULT_ACCOUNT_ID {
@@ -1331,5 +1326,78 @@ impl Engine {
             }
         }
         kept_exits_only
+    }
+}
+
+/// Entry fill-policy routing (`late_favorite` delivery). Three regimes:
+/// - a reason starting with `late-taker` crosses as a TAKER — late_favorite's
+///   default entry buys the 0.80-0.90 touch in the last 45-120s; a post-only
+///   quote at the ask is rejected, and MakerThenTaker would REST before it
+///   crossed, so this reason must submit as a crossing taker fill;
+/// - a reason starting with `late-maker` OR a manifest-`entry_maker` package
+///   rests pure Maker (never escalates — the submission site answers
+///   `maker_timeout_ms = -1`);
+/// - everything else keeps the `MakerThenTaker` entry byte-identically.
+///
+/// The `late-` prefixes are strategy-owned reason strings (see the Lua
+/// package's entry emission) — they route BEFORE the `entry_maker` doctrine
+/// so the taker variant cannot be silently overridden by a manifest flag.
+fn entry_fill_policy(reason: &str, entry_maker: bool) -> crate::model::FillPolicy {
+    if reason.starts_with("late-taker") {
+        crate::model::FillPolicy::Taker
+    } else if reason.starts_with("late-maker") || entry_maker {
+        crate::model::FillPolicy::Maker
+    } else {
+        crate::model::FillPolicy::MakerThenTaker
+    }
+}
+
+#[cfg(test)]
+mod entry_fill_policy_tests {
+    use super::entry_fill_policy;
+    use crate::model::FillPolicy;
+
+    #[test]
+    fn late_favorite_reasons_route_their_own_fill_policy() {
+        assert!(matches!(
+            entry_fill_policy("late-taker", false),
+            FillPolicy::Taker
+        ));
+        assert!(matches!(
+            entry_fill_policy("late-maker", false),
+            FillPolicy::Maker
+        ));
+        // 前缀派发压过 entry_maker 声明：taker 变体不被 manifest 标志静默改写。
+        assert!(matches!(
+            entry_fill_policy("late-taker", true),
+            FillPolicy::Taker
+        ));
+        assert!(matches!(
+            entry_fill_policy("late-maker", true),
+            FillPolicy::Maker
+        ));
+    }
+
+    #[test]
+    fn every_other_reason_keeps_the_existing_doctrine() {
+        // lua_momentum / mad_dog / …: MakerThenTaker, byte-identically.
+        assert!(matches!(
+            entry_fill_policy("lua momentum up", false),
+            FillPolicy::MakerThenTaker
+        ));
+        assert!(matches!(
+            entry_fill_policy("strategy entry", false),
+            FillPolicy::MakerThenTaker
+        ));
+        // `entry_maker` doctrine unchanged.
+        assert!(matches!(
+            entry_fill_policy("strategy entry", true),
+            FillPolicy::Maker
+        ));
+        // 近似词不是前缀：`xlate-taker` 不劫持（starts_with 锚定在 reason 头部）。
+        assert!(matches!(
+            entry_fill_policy("xlate-taker", false),
+            FillPolicy::MakerThenTaker
+        ));
     }
 }

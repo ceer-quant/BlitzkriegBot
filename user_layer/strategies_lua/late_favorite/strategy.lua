@@ -190,14 +190,9 @@ end
 local quoted = {}
 local slot_seen = nil
 
-local function int_param(params, name, fallback)
-    local raw = params[name]
-    local n = tonumber(raw)
-    if n == nil then
-        return fallback
-    end
-    return math.floor(n)
-end
+-- int_param comes from the embedded common/decimal.lua block above (strict
+-- integral-string parse, fallback on anything else). Only num_param is new
+-- here: a plain-float read for the price-band tunables.
 
 local function num_param(params, name, fallback)
     local n = tonumber(params[name])
