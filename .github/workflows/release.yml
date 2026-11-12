@@ -98,6 +98,12 @@ jobs:
       # out of blitzkrieg-core's default set, so the feature is named here.
       - run: cargo clippy --workspace --all-targets --locked --features blitzkrieg-core/test-support -- -D warnings
       - run: (cd user_layer/parity_strategy && cargo build --release --locked)
+      # foreign_optional_symbols_check loads BOTH cdylibs (parity + the
+      # optional-capability fixture) and BK_REQUIRE_DYLIB=1 makes a missing
+      # fixture a hard panic — the v0.4.2 release run red on exactly that
+      # (the fixture dependency postdates the withdrawn first tag). Build it
+      # here, same as parity.
+      - run: (cd user_layer/optional_capability_fixture && cargo build --release --locked)
       - run: cargo build --release --workspace --locked
       # --features blitzkrieg-core/test-support (#825): the test targets that
       # drive the blunt test mutators opt in explicitly; the release build
