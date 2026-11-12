@@ -134,9 +134,8 @@ const themeValue = computed<ThemeMode>({
 const {
   doc: roundDoc, err: roundErr, msg: roundMsg, busy: roundBusy,
   segments: roundSegments, value: roundValue, dirty: roundDirty,
-  flagLocked: roundFlagLocked, sourceLabel: roundSourceLabel,
-  configSec: roundConfigSec, execSec: roundExecSec, split: roundSplit,
-  roundLabel,
+  flagLocked: roundFlagLocked, execSec: roundExecSec,
+  configSec: roundConfigSec, split: roundSplit, roundLabel,
   save: saveRound, reset: resetRound,
 } = useRoundDuration()
 
@@ -247,16 +246,11 @@ async function doResetTrading(): Promise<void> {
 
     <!-- ── 轮次时间周期（next_session）────────────────────────────────── -->
     <Card class="mt-3.5">
-      <CardHeader label="全局轮次坐标系（复盘/回落）">
-        <template #title>
-          <Timer class="size-4 text-faint-fg" />
-        </template>
-        <template #action>
-          <Badge v-if="roundDoc" variant="default" dot>
-            本会话 {{ roundDoc.effectiveSec }}s（{{ roundSourceLabel }}）
-          </Badge>
-        </template>
-      </CardHeader>
+    <CardHeader label="轮次时间周期（本会话）">
+      <template #title>
+        <Timer class="size-4 text-faint-fg" />
+      </template>
+    </CardHeader>
 
       <AlertBanner v-if="!roundDoc && !roundErr" class="mb-3" tone="info">正在读取轮次周期…</AlertBanner>
       <AlertBanner v-else-if="!roundDoc" class="mb-3" tone="warn">
@@ -264,34 +258,32 @@ async function doResetTrading(): Promise<void> {
       </AlertBanner>
 
       <template v-else>
-        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
+        <!-- 单一真相源：本会话执行值（per-account 覆盖优先，缺省回落 default 网格）+
+             下一轮值。配置/执行“双真相”行与分裂红条已收敛（#1151）：卡面只展示
+             执行真相，分裂告警能力保留于内核门禁，不在卡面常态重复。 -->
+        <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
           <div class="min-w-0 sm:min-w-auto">
-            <div class="text-[12.5px] font-semibold">当前全局轮长</div>
-            <p class="mt-0.5 text-[11px] text-faint-fg">
-              这是复盘坐标系与未配置账户的回落，不是各账户的交易周期 —— 账户各跑各的周期族在账户卡配置（热生效）。
-              改动立即作用于本会话；在途轮保持原网格结算。
-            </p>
+            <SegmentedControl
+              v-model="roundValue"
+              :segments="roundSegments"
+              size="sm"
+              :disabled="roundBusy || roundFlagLocked"
+              class="w-full sm:w-auto"
+            />
           </div>
-          <SegmentedControl
-            v-model="roundValue"
-            :segments="roundSegments"
-            size="sm"
-            :disabled="roundBusy"
-            class="w-full sm:w-auto"
-          />
         </div>
 
         <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0 rounded-md border border-line bg-panel-2 px-3 py-2">
           <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
             <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
-            <span v-if="roundFlagLocked">
-              当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
-            </span>
-            <span v-else-if="roundDoc.perAccount?.['default'] !== undefined">
-              已有面板设置：本会话按 {{ roundDoc.perAccount?.['default'] ?? roundDoc.effectiveSec }}s 运行。清除后回落到启动参数解析。
-            </span>
-            <span v-else>
-              尚无面板设置：本会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
+            <span>
+              本会话按 <span class="font-medium">{{ roundExecSec }}</span>s 运行；
+              <span v-if="roundDirty">下一轮起按 <span class="font-medium">{{ roundValue }}</span>s</span>
+              <span v-else>下一轮起按 <span class="font-medium">{{ roundExecSec }}</span>s</span>。
+              在途轮保持出生网格结算。
+              <span v-if="roundFlagLocked" class="block mt-0.5 text-[11px] text-faint-fg">
+                当前轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板写入不会覆盖；去掉该启动参数后重启即生效。
+              </span>
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
@@ -315,21 +307,12 @@ async function doResetTrading(): Promise<void> {
           </div>
         </div>
 
-        <!-- issue 1139：配置真相与执行真相并列；分裂时红条告警，不静默 -->
-        <div class="mt-3 flex items-start justify-between gap-3 rounded-md border border-line bg-panel-2 px-3 py-2">
-          <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
-            <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
-            <span class="block">
-              配置值 {{ roundLabel(roundConfigSec) }}（{{ roundSourceLabel }}，启动解析出的默认网格）
-              · 执行值 {{ roundLabel(roundExecSec) }}（default 账户实际轮长，per-account 覆盖优先）
-            </span>
-            <AlertBanner v-if="roundSplit" class="mt-1.5" tone="error">
-              轮次配置与执行分裂：配置 {{ roundLabel(roundConfigSec) }} / 实际 {{ roundLabel(roundExecSec) }}
-              —— 不静默。请核对 default 账户的 per-account 覆盖与市场声明族；在途轮保持原网格结算。
-            </AlertBanner>
-          </div>
-        </div>
-
+        <!-- 分裂告警能力保留（红条一级）：default 账户配置网格 ≠ 执行网格时红条，
+             不静默。配置/执行并列的“常态显示”已收敛，此处只在真分裂时出现（#1151）。 -->
+        <AlertBanner v-if="roundSplit" class="mt-3" tone="error">
+          轮次配置与执行分裂：配置 {{ roundLabel(roundConfigSec) }} / 实际 {{ roundLabel(roundExecSec) }}
+          —— 不静默。default 账户 per-account 覆盖与市场声明族不一致；在途轮保持原网格结算。
+        </AlertBanner>
         <AlertBanner v-if="roundErr" class="mt-3" tone="warn">{{ roundErr }}</AlertBanner>
         <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
       </template>

@@ -44,6 +44,32 @@ impl Engine {
         }
     }
 
+    /// 返回引擎扫描器当前实际运行的轮长网格（`cfg.scanner.round_duration_sec`）。
+    /// 与 `CoreConfig.default_round_duration_sec` 分离：前者是倒计时钟真实跑的
+    /// 网格，后者是未配置账户的回落默认值。#1151：`round_duration.set` 写入后
+    /// 必须通过 `set_scanner_round_duration` 把两者对齐，否则“已生效”与倒计时
+    /// 分裂（split-brain）。
+    pub fn scanner_round_duration(&self) -> i64 {
+        self.cfg.scanner.round_duration_sec
+    }
+
+    /// 把引擎扫描器的轮长网格同步到 `sec`，并把同一值写回 `cfg.scanner`，使
+    /// 倒计时钟、策略上下文与 `round_duration.get` 的 engineActiveSec 读出一致。
+    /// `set_config` 保留 ScannerConfig 的其余字段（assets/min_round_age_sec/
+    /// min_time_left_sec），只替换 round_duration_sec。
+    ///
+    /// reset 分支传回 `default_round_duration_sec`（回落默认网格）。
+    ///
+    /// 多账户多网格：本方法是 per-family 扫描实例重挂/重键（B1d）的集成点。
+    /// 当前单 Engine 默认部署下只有一台 scanner，写入账户的覆盖值即同步为
+    /// 运行网格；不单独留一份“配置真相”在时钟上，也不对未写入账户的网格
+    /// 做隐式改写——其 per-account 覆盖（或缺省回落）由 `account_round_duration`
+    /// 逐账户解析。
+    pub fn set_scanner_round_duration(&mut self, sec: i64) {
+        self.cfg.scanner.round_duration_sec = sec;
+        self.scanner.set_config(self.cfg.scanner.clone());
+    }
+
     /// RFC 568 阶段一：排空本周期收集的配对声明（Core 在 arb_precheck 过闸
     /// 后消费；每次真实评估前由 evaluate 清空）。
     pub fn take_pair_declarations(&mut self) -> Vec<PairDeclaration> {

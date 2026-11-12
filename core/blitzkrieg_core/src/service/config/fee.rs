@@ -160,6 +160,14 @@ pub fn round_duration_readout(core: &Core) -> crate::schema::RoundDurationResult
     }
     RoundDurationResult {
         effective_sec: effective,
+        // 引擎扫描器实际运行的轮长：per-account 覆盖写入后已通过
+        // `Engine::set_scanner_round_duration` 同步，故这里反映倒计时钟
+        // 真实跑的网格，与 effective_sec 的 default 网格分离（#1151）。
+        engine_active_sec: core
+            .engine
+            .as_ref()
+            .map(|e| e.scanner_round_duration())
+            .unwrap_or(effective),
         source: core.config().round_duration_source,
         per_account,
         allowed,

@@ -1299,6 +1299,11 @@ pub struct RoundDurationResult {
     /// The effective seconds the DEFAULT account runs on (fallback for
     /// accounts without an explicit `ACCOUNT_<ID>_ROUND_DURATION_SEC`).
     pub effective_sec: i64,
+    /// 引擎扫描器当前实际运行的轮长网格（倒计时钟真实跑的值）。与
+    /// `effective_sec` 的 default 网格分离：per-account 覆盖写入后通过
+    /// `Engine::set_scanner_round_duration` 同步到引擎时钟，故本字段反映
+    /// 执行真相；无引擎时回落到 effective_sec。
+    pub engine_active_sec: i64,
     /// One of `cli` / `env` / `runtime` / `toml` / `default` — the boot
     /// resolution's own report for the default grid.
     pub source: &'static str,

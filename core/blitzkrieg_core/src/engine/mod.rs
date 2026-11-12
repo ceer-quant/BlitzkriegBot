@@ -1226,6 +1226,26 @@ mod tests {
         }
     }
 
+    /// #1151：`set_scanner_round_duration` 必须把 `Engine.cfg.scanner` 和
+    /// `Engine.scanner.cfg` 两边都同步，且双向可逆（900→300→900），
+    /// 否则 `round_duration.set` 写入后倒计时钟与账户网格分裂。
+    #[test]
+    fn set_scanner_round_duration_syncs_engine_clock_both_ways() {
+        let mut e = Engine::new(cfg());
+        assert_eq!(e.scanner_round_duration(), 900);
+        // 900s 网格：now=1_000_000ms → slot 1（边界 900_000）。
+        assert_eq!(e.scanner.current_slot(1_000_000), 1);
+
+        e.set_scanner_round_duration(300);
+        assert_eq!(e.scanner_round_duration(), 300);
+        // 300s 网格：now=1_000_000ms → slot 3（边界 300_000/600_000/900_000）。
+        assert_eq!(e.scanner.current_slot(1_000_000), 3);
+
+        e.set_scanner_round_duration(900);
+        assert_eq!(e.scanner_round_duration(), 900);
+        assert_eq!(e.scanner.current_slot(1_000_000), 1);
+    }
+
     fn market(end_ms: i64) -> CryptoMarket {
         CryptoMarket {
             asset: "BTC".into(),
