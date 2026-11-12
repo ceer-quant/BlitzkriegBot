@@ -193,11 +193,12 @@ impl Engine {
             // key's round segment) reads numbers from the candidate's clock,
             // not the global grid. Single-family tables resolve every row to
             // the configured grid, byte-identical with the pre-E3 read.
-            let cand_round = match self.scanner.market_for_token(&sig.token_id) {
+            let market = self.scanner.market_for_token(&sig.token_id).cloned();
+            let cand_round = match &market {
                 Some(m) => self.family_round_timing(m, now_ms),
                 None => round,
             };
-            let timing = match self.scanner.market_for_token(&sig.token_id) {
+            let timing = match &market {
                 Some(m) => self.scanner.can_trade_reason_for(m, now_ms).err(),
                 None => self.scanner.can_trade_reason(now_ms).err(),
             };

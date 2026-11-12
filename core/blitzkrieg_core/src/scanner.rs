@@ -123,6 +123,12 @@ pub struct Scanner {
     /// preserved — "无写入场景维持现行为", so a dry/default boot with declared
     /// markets behaves exactly as before.
     grid_override: bool,
+    /// #1182: last (token, active grid) pair logged at INFO by
+    /// `can_trade_reason_for`'s off-grid guard — a duplicate refusal for the
+    /// same token on the same grid degrades to `debug!` so a stale grid does
+    /// not flush the terminal with one INFO per tick per market. Reset on
+    /// grid override so a grid switch yields fresh evidence lines.
+    last_offgrid_info: Option<(String, i64)>,
     /// RFC-661 M1: the `(venue, token)` dual-key index over `markets` —
     /// every row lands under its OWN venue's token keys, so the same
     /// byte-identical token under two venues is TWO independent instruments
@@ -167,6 +173,7 @@ impl Scanner {
             actual_end_time_ms: HashMap::new(),
             clock_offset_ms: HashMap::new(),
             grid_override: false,
+            last_offgrid_info: None,
         }
     }
 
@@ -179,6 +186,10 @@ impl Scanner {
     /// `can_trade_reason_for` / `is_live_round_row`).
     pub fn set_grid_override(&mut self, overridden: bool) {
         self.grid_override = overridden;
+        // #1182: a grid switch must yield fresh evidence lines — forget the
+        // last logged (token, grid) so the new grid's first off-grid refusal
+        // prints at INFO again.
+        self.last_offgrid_info = None;
     }
 
     pub fn markets(&self) -> &[CryptoMarket] {
@@ -470,7 +481,7 @@ impl Scanner {
     /// the family's own. Single-family tables resolve every row to
     /// `cfg.round_duration_sec` — the projection is identical, byte for byte.
     pub fn can_trade_reason_for(
-        &self,
+        &mut self,
         market: &CryptoMarket,
         local_now_ms: i64,
     ) -> Result<(), TimingBlock> {
@@ -490,17 +501,33 @@ impl Scanner {
         // settlement timing (`family_duration` above feeds `round_timing_for`),
         // but it no longer governs which round a market may be traded in.
         if self.grid_override && family_duration != self.cfg.round_duration_sec {
-            // #1157 evidence: the candidate's family resolution vs the active
-            // grid, so an operator can confirm off-grid selection in the run log.
-            tracing::info!(
-                target: "engine",
-                market = %market.asset,
-                token = %market.up_token_id,
-                declared = %market.round_duration_sec,
-                grid = %self.cfg.round_duration_sec,
-                family = %family_duration,
-                "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
-            );
+            // #1182: dedup the evidence log — one INFO per (token, active
+            // grid), duplicates degrade to debug! so a stale grid cannot flush
+            // the terminal with one INFO per tick per market. A new INFO only
+            // prints when the token or the active grid changes.
+            let key = (market.up_token_id.clone(), self.cfg.round_duration_sec);
+            if self.last_offgrid_info.as_ref() != Some(&key) {
+                // #1157 evidence: the candidate's family resolution vs the active
+                // grid, so an operator can confirm off-grid selection in the run log.
+                tracing::info!(
+                    target: "engine",
+                    market = %market.asset,
+                    token = %market.up_token_id,
+                    declared = %market.round_duration_sec,
+                    grid = %self.cfg.round_duration_sec,
+                    family = %family_duration,
+                    "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
+                );
+                self.last_offgrid_info = Some(key);
+            } else {
+                tracing::debug!(
+                    target: "engine",
+                    market = %market.asset,
+                    token = %market.up_token_id,
+                    grid = %self.cfg.round_duration_sec,
+                    "round grid override: duplicate off-grid refusal — see earlier INFO for this token/grid"
+                );
+            }
             return Err(TimingBlock::NoMarkets);
         }
         let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
@@ -1308,6 +1335,86 @@ mod tests {
         assert!(
             s.is_live_round_row(&m1h, now),
             "override: 1h row live on 1h grid"
+        );
+    }
+
+    /// #1182: `can_trade_reason_for` dedupes the off-grid evidence log — one
+    /// `tracing::info!` per (token, active grid), duplicates degrade to
+    /// `tracing::debug!`, and `set_grid_override` resets the dedup state so a
+    /// grid switch yields fresh INFO lines. The dedup state (not a log
+    /// subscriber) is the assertion point: it exactly gates INFO vs debug,
+    /// and `NoMarkets` behavior is preserved on every call.
+    #[test]
+    fn offgrid_refusal_info_dedups_per_token_and_grid() {
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 3600,
+            min_round_age_sec: 0,
+            min_time_left_sec: 0,
+            ..Default::default()
+        });
+        s.set_grid_override(true);
+        let now = 1_000_000i64;
+
+        // Market A: 5m-declared (300s) on the 3600s active grid → off-grid.
+        let mut a = gate_market(1_800_000, "polymarket");
+        a.round_duration_sec = 300;
+        a.up_token_id = "polymarket-ABC".into();
+        s.set_markets(vec![a.clone()]);
+
+        // Call 1: first refusal for (ABC, 3600) records the INFO evidence.
+        assert_eq!(
+            s.can_trade_reason_for(&a, now),
+            Err(TimingBlock::NoMarkets),
+            "off-grid market is refused"
+        );
+        assert_eq!(
+            s.last_offgrid_info,
+            Some(("polymarket-ABC".into(), 3600)),
+            "first call records the (token, grid) at INFO"
+        );
+
+        // Call 2: duplicate refusal for the same token/grid — debug only,
+        // the dedup state is unchanged.
+        assert_eq!(
+            s.can_trade_reason_for(&a, now),
+            Err(TimingBlock::NoMarkets),
+            "duplicate off-grid refusal is still NoMarkets"
+        );
+        assert_eq!(
+            s.last_offgrid_info,
+            Some(("polymarket-ABC".into(), 3600)),
+            "duplicate did not re-record (stayed on the debug path)"
+        );
+
+        // Market B: same grid, new token — INFO prints again for the new token.
+        let mut b = gate_market(1_800_000, "polymarket");
+        b.round_duration_sec = 300;
+        b.up_token_id = "polymarket-XYZ".into();
+        s.set_markets(vec![b.clone()]);
+        assert_eq!(
+            s.can_trade_reason_for(&b, now),
+            Err(TimingBlock::NoMarkets),
+            "off-grid market B is refused"
+        );
+        assert_eq!(
+            s.last_offgrid_info,
+            Some(("polymarket-XYZ".into(), 3600)),
+            "a new token on the same grid re-records at INFO"
+        );
+
+        // Grid switch to 900s resets the dedup state; A is off-grid again
+        // (300 != 900) and the new grid gets its own fresh INFO line.
+        s.cfg.round_duration_sec = 900;
+        s.set_grid_override(true);
+        assert_eq!(
+            s.can_trade_reason_for(&a, now),
+            Err(TimingBlock::NoMarkets),
+            "market A is off-grid on the new grid too"
+        );
+        assert_eq!(
+            s.last_offgrid_info,
+            Some(("polymarket-ABC".into(), 900)),
+            "grid switch resets dedup: new grid re-records at INFO"
         );
     }
 }
