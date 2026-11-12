@@ -1148,14 +1148,15 @@ mod derive_tests {
         )
         .expect("seed the unbootable cell");
         let loaded = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
-        assert_eq!(loaded.as_ref().unwrap().plugin, "ghost", "the cell is on disk");
+        assert_eq!(
+            loaded.as_ref().unwrap().plugin,
+            "ghost",
+            "the cell is on disk"
+        );
 
         // 两个账户绑定已注册的 beta/gamma，派生非空，迁移层要启动。
         let reg = registry_with(&["alpha", "beta", "gamma"]);
-        let core = core_with_bindings(
-            &[("a", "beta"), ("b", "gamma")],
-            Some(cell.clone()),
-        );
+        let core = core_with_bindings(&[("a", "beta"), ("b", "gamma")], Some(cell.clone()));
 
         let (resolved, source) = boot_enablement(&core, &reg, None, loaded.as_ref());
         assert_eq!(source, PluginEnableSource::Accounts);
@@ -1163,7 +1164,11 @@ mod derive_tests {
 
         // 迁移没有清格：ghost 格依然在盘上（不可启动格不清）。
         let still = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
-        assert_eq!(still.unwrap().plugin, "ghost", "non-bootable cell must survive migration");
+        assert_eq!(
+            still.unwrap().plugin,
+            "ghost",
+            "non-bootable cell must survive migration"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

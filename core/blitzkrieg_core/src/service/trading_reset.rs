@@ -633,8 +633,7 @@ impl Core {
         if !patch.reset && sec.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "round_duration.set needs durationSec (one of {:?}) or reset: true"
-                    .to_string(),
+                "round_duration.set needs durationSec (one of {:?}) or reset: true".to_string(),
             ));
         }
 

@@ -599,7 +599,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
                 o["label"].as_str().unwrap_or(""),
             )
         })
-    .collect();
+        .collect();
     assert!(
         labels.contains(&(300, "5m")) && labels.contains(&(900, "15m")),
         "the whitelist carries the plugins' declared labels: {labels:?}"
@@ -634,10 +634,7 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     {
         let c = core.lock().await;
         assert_eq!(
-            c.config()
-                .account_round_durations
-                .get("default")
-                .copied(),
+            c.config().account_round_durations.get("default").copied(),
             Some(300),
             "in-memory per-account map updated immediately: {:?}",
             c.config().account_round_durations

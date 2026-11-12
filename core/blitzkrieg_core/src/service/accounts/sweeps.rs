@@ -54,7 +54,12 @@ impl Core {
             .open_positions()
             .iter()
             .filter(|p| p.round_duration_sec == 0)
-            .map(|p| (p.token_id.clone(), self.round_family_of_token(p.account_id.as_str(), &p.token_id)))
+            .map(|p| {
+                (
+                    p.token_id.clone(),
+                    self.round_family_of_token(p.account_id.as_str(), &p.token_id),
+                )
+            })
             .collect();
         self.positions
             .backfill_round_families(|tok| families.get(tok).copied().unwrap_or(0));

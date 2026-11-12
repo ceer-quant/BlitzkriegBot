@@ -459,7 +459,9 @@ impl Core {
                          but account `{}` anchors on {account_grid}s — \
                          refuse entry (fail-closed: align the account's \
                          ACCOUNT_<ID>_ROUND_DURATION_SEC with the market's family)",
-                        req.token_id, req.account_id, account_grid = *account_grid
+                        req.token_id,
+                        req.account_id,
+                        account_grid = *account_grid
                     ),
                 ));
             }

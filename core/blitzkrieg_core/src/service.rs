@@ -636,7 +636,9 @@ impl Core {
             .open_positions()
             .iter()
             .map(|p| {
-                let duration = self.position_eff_round_sec(&p.account_id.to_string(), p).max(1);
+                let duration = self
+                    .position_eff_round_sec(&p.account_id.to_string(), p)
+                    .max(1);
                 crate::strategies::HeldPosition {
                     strategy: p.strategy.clone(),
                     account_id: p.account_id.to_string(),

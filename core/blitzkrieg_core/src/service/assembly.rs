@@ -68,9 +68,7 @@ impl Core {
             let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
             if let Some(sec_str) = env_lookup(&key) {
                 if let Ok(sec) = sec_str.trim().parse::<i64>() {
-                    config
-                        .account_round_durations
-                        .insert(id.to_string(), sec);
+                    config.account_round_durations.insert(id.to_string(), sec);
                     // Validation: the anchor must be in the account's ROUNDS allow-list.
                     if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
                         panic!(
