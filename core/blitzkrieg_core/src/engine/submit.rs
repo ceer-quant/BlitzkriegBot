@@ -368,7 +368,14 @@ impl Engine {
                 // never-escalate clock). Every other strategy keeps the
                 // `MakerThenTaker` entry (maker first, taker chase at
                 // `entry_maker_timeout_ms`), byte-identically.
-                mode: if self.strategy_entry_maker(&sig.strategy) {
+                // `late-taker` is late_favorite's crossing entry. A post-only
+                // quote at the ask is rejected, and MakerThenTaker would
+                // rest before it crossed, so this reason is a taker fill.
+                mode: if sig.reason.starts_with("late-taker") {
+                    crate::model::FillPolicy::Taker
+                } else if sig.reason.starts_with("late-maker")
+                    || self.strategy_entry_maker(&sig.strategy)
+                {
                     crate::model::FillPolicy::Maker
                 } else {
                     crate::model::FillPolicy::MakerThenTaker

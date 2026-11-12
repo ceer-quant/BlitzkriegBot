@@ -28,6 +28,19 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
   </div>
 </section>
 
+<section class="bb-sec" id="late-favorite">
+  <p class="bb-eyebrow">First strategy we will recommend for live</p>
+  <h2 class="bb-h2">late_favorite</h2>
+  <p class="bb-card-lead">Polymarket BTC 5 分钟和 15 分钟，结算前 45–120 秒，用 taker 买入卖价 0.80–0.90 的一边，持有到结算。这是目前唯一一组在未看过的窗口上同时达到胜率 ≥ 80% 和盈亏比 ≥ 1.2 的出厂参数。</p>
+  <ul class="bb-list">
+    <li>决策窗口 2026-09-26 至 09-30：351 笔，胜率 97.72%，盈亏比 6.74，净利 +382.40 美元，最大回撤 15.67 美元</li>
+    <li>同一规则在已经看过的 2026-10-12 至 10-26：1,510 笔，胜率 99.8% 左右，盈亏比远高于 1.2</li>
+    <li>四个资产一起做，在 09-26 至 09-30 也过线（2,740 笔，87.88%，1.208），但在 10-19 至 10-26 是 1.182，没过</li>
+    <li>挂买一的 maker 版本在决策窗口盈亏比 0.83，没有采用</li>
+  </ul>
+  <p class="bb-card-foot">数字来自结算真值回放，不是实盘。每个市场只用最新 200 笔成交，卖价按打印加最多 1 美分，每笔 10 股。实盘结果会不同。进程的 <code>DRY_RUN</code> 默认是 true；启用 <code>late_favorite</code> 不会把它关掉。先在 dry-run 里打开：<code>--enable-strategy late_favorite</code>。详见 <a href="./late-favorite">late_favorite</a>。</p>
+</section>
+
 <section class="bb-sec bb-brands">
   <p class="bb-eyebrow">The stack</p>
   <h2 class="bb-h2">三件法宝</h2>

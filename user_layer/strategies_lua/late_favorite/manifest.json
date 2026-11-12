@@ -1,0 +1,54 @@
+{
+  "name": "late_favorite",
+  "version": "0.1.0",
+  "api": "1.0",
+  "entry": "strategy.lua",
+  "sha256": "16e7a1d7142f7c3455e249cd3fba62cae5ea0a0b07e530074fdf38d830eea187",
+  "author": "BlitzkriegBot",
+  "description": "Near-settlement favorite. With 45-120 seconds left, buy the side whose touch is inside 0.80-0.90 and hold it to settlement. One attempt per condition per round; a fill or a cancel is not re-entered. maker_entry 0 (default) crosses the ask as a taker (order reason late-taker). maker_entry 1 rests a post-only bid at the touch and cancels it once time_left falls below min_time_left. Not in the default enabled set. The strategy loader does not require a lua_ prefix; the registry id is the directory name late_favorite.",
+  "holds_to_settlement": true,
+  "entry_maker": false,
+  "gate_exemptions": {
+    "timing": true,
+    "momentum": true,
+    "timing_min_time_left_sec": 45
+  },
+  "tunables": {
+    "min_px": {
+      "type": "decimal",
+      "default": "0.80",
+      "min": "0.50",
+      "max": "0.95"
+    },
+    "max_px": {
+      "type": "decimal",
+      "default": "0.90",
+      "min": "0.55",
+      "max": "0.99"
+    },
+    "min_time_left": {
+      "type": "int",
+      "default": "45",
+      "min": "0",
+      "max": "300"
+    },
+    "max_time_left": {
+      "type": "int",
+      "default": "120",
+      "min": "30",
+      "max": "600"
+    },
+    "maker_entry": {
+      "type": "int",
+      "default": "0",
+      "min": "0",
+      "max": "1"
+    },
+    "btc_only": {
+      "type": "int",
+      "default": "1",
+      "min": "0",
+      "max": "1"
+    }
+  }
+}
