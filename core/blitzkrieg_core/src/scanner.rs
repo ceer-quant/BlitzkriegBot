@@ -114,6 +114,15 @@ pub struct RoundTiming {
 pub struct Scanner {
     cfg: ScannerConfig,
     markets: Vec<CryptoMarket>,
+    /// #1157: true once `set_scanner_round_duration` has been called at runtime,
+    /// i.e. the operator overrode the boot grid. Once overridden, the active
+    /// grid (`cfg.round_duration_sec`) is the SELECTION authority: a market is
+    /// only tradable in the round its family matches the active grid, and
+    /// `market_decl` keeps governing settlement timing only. Before any
+    /// override (boot default grid) the historic per-market declared clock is
+    /// preserved — "无写入场景维持现行为", so a dry/default boot with declared
+    /// markets behaves exactly as before.
+    grid_override: bool,
     /// RFC-661 M1: the `(venue, token)` dual-key index over `markets` —
     /// every row lands under its OWN venue's token keys, so the same
     /// byte-identical token under two venues is TWO independent instruments
@@ -157,11 +166,19 @@ impl Scanner {
             token_venues: HashMap::new(),
             actual_end_time_ms: HashMap::new(),
             clock_offset_ms: HashMap::new(),
+            grid_override: false,
         }
     }
 
     pub fn set_config(&mut self, cfg: ScannerConfig) {
         self.cfg = cfg;
+    }
+
+    /// #1157: mark the runtime grid as overridden by `set_scanner_round_duration`.
+    /// From this point on the active grid is the selection authority (see
+    /// `can_trade_reason_for` / `is_live_round_row`).
+    pub fn set_grid_override(&mut self, overridden: bool) {
+        self.grid_override = overridden;
     }
 
     pub fn markets(&self) -> &[CryptoMarket] {
@@ -465,6 +482,27 @@ impl Scanner {
         } else {
             self.cfg.round_duration_sec
         };
+        // #1157: once the runtime grid has been overridden, the active grid is
+        // the selection authority — a market whose family does not match the
+        // active grid is not in this round and cannot be entered. This is a
+        // structural precondition (NoMarkets is never waivable), so a strategy
+        // exemption cannot force an off-grid entry. market_decl keeps governing
+        // settlement timing (`family_duration` above feeds `round_timing_for`),
+        // but it no longer governs which round a market may be traded in.
+        if self.grid_override && family_duration != self.cfg.round_duration_sec {
+            // #1157 evidence: the candidate's family resolution vs the active
+            // grid, so an operator can confirm off-grid selection in the run log.
+            tracing::info!(
+                target: "engine",
+                market = %market.asset,
+                token = %market.up_token_id,
+                declared = %market.round_duration_sec,
+                grid = %self.cfg.round_duration_sec,
+                family = %family_duration,
+                "round grid override: market family does not match the active grid — entry refused (market_decl keeps governing settlement timing only)"
+            );
+            return Err(TimingBlock::NoMarkets);
+        }
         let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
         if t.age_sec < self.cfg.min_round_age_sec {
             return Err(TimingBlock::TooYoung {
@@ -510,6 +548,11 @@ impl Scanner {
         } else {
             self.cfg.round_duration_sec
         };
+        // #1157: under a runtime grid override, only the active grid's family is
+        // the current round — off-grid rows are not live read views.
+        if self.grid_override && family_duration != self.cfg.round_duration_sec {
+            return false;
+        }
         let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
         market.round_slot == t.slot + 1
     }
@@ -1184,6 +1227,73 @@ mod tests {
                 min_time_left_sec: 180
             }),
             "undeclared rows ride the configured grid, exactly as before"
+        );
+    }
+
+    /// #1157: once `set_scanner_round_duration` has been called at runtime, the
+    /// active grid is the selection authority — a market whose declared family
+    /// does not match the active grid is not tradable in this round
+    /// (`NoMarkets`, not waivable), while `market_decl` still governs settlement
+    /// timing only. Before any override the historic per-market declared clock
+    /// is preserved.
+    #[test]
+    fn runtime_grid_override_makes_active_grid_the_selection_authority() {
+        let mut s = Scanner::new(ScannerConfig {
+            round_duration_sec: 900,
+            min_round_age_sec: 0,
+            min_time_left_sec: 0,
+            ..Default::default()
+        });
+        let now = 1_000_000i64;
+        s.set_markets(vec![gate_market(1_800_000, "polymarket")]);
+
+        // Before any override: a 5m-declared market trades on its own declared
+        // clock even though the boot grid is 900s — historic behavior preserved
+        // ("无写入场景维持现行为").
+        let mut m5 = gate_market(1_800_000, "polymarket");
+        m5.round_duration_sec = 300;
+        assert!(
+            s.can_trade_reason_for(&m5, now).is_ok(),
+            "no override: declared market trades its own clock"
+        );
+
+        // Runtime override to 1h: mirror Engine::set_scanner_round_duration.
+        s.cfg.round_duration_sec = 3600;
+        s.set_grid_override(true);
+
+        // A 5m-declared market is no longer in the active 1h round → blocked,
+        // and the block is structural (NoMarkets, never waivable).
+        assert_eq!(
+            s.can_trade_reason_for(&m5, now),
+            Err(TimingBlock::NoMarkets),
+            "override: 5m market not in the 1h round"
+        );
+
+        // A 1h-declared market IS in the active round (slot 1 of the 3600s grid).
+        let mut m1h = gate_market(3_600_000, "polymarket");
+        m1h.round_duration_sec = 3600;
+        m1h.round_slot = 1;
+        assert!(
+            s.can_trade_reason_for(&m1h, now).is_ok(),
+            "override: 1h market in the 1h round"
+        );
+
+        // An undeclared market falls back to the active grid → in the active round.
+        let mut m0 = gate_market(3_600_000, "polymarket");
+        m0.round_duration_sec = 0;
+        assert!(
+            s.can_trade_reason_for(&m0, now).is_ok(),
+            "override: undeclared market rides the active grid"
+        );
+
+        // Off-grid rows are not live read views either.
+        assert!(
+            !s.is_live_round_row(&m5, now),
+            "override: 5m row not live on 1h grid"
+        );
+        assert!(
+            s.is_live_round_row(&m1h, now),
+            "override: 1h row live on 1h grid"
         );
     }
 }
