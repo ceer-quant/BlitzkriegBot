@@ -1,6 +1,8 @@
 import DefaultTheme from 'vitepress/theme'
 import { inBrowser, useRoute } from 'vitepress'
-import { watch, nextTick } from 'vue'
+import { h, watch, nextTick } from 'vue'
+import ReleaseBanner from './ReleaseBanner.vue'
+import RepoStat from './RepoStat.vue'
 import './custom.css'
 
 /**
@@ -67,6 +69,14 @@ function setupLanding() {
 
 export default {
   extends: DefaultTheme,
+  Layout() {
+    return h(DefaultTheme.Layout, null, {
+      'layout-top': () => h(ReleaseBanner),
+    })
+  },
+  enhanceApp({ app }) {
+    app.component('RepoStat', RepoStat)
+  },
   setup() {
     if (!inBrowser) return
     // 在首帧之前就打上标记，避免内容先亮一下再隐藏

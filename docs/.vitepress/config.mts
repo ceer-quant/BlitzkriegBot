@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitepress'
+import { loadReleaseBanner } from './load-release.mts'
 import { chineseSearchOptimize, pagefindPlugin } from 'vitepress-plugin-pagefind'
 import { readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -33,7 +34,9 @@ for (const rel of collect(docsRoot).sort()) {
 // head 里的资源路径不会被 VitePress 自动加 base，必须自己拼，否则 favicon 会指向根域名而 404。
 const base = process.env.DOCS_BASE || '/'
 
-export default defineConfig({
+export default defineConfig(async () => {
+  const release = await loadReleaseBanner()
+  return {
   base,
   title: 'BlitzkriegBot',
   description: 'BlitzkriegBot 文档：入门、概念、任务、参考、排障、决策',
@@ -58,6 +61,9 @@ export default defineConfig({
     ],
   ],
   vite: {
+    define: {
+      __BB_RELEASE__: JSON.stringify(release),
+    },
     plugins: [
       pagefindPlugin({
         forceLanguage: 'zh-cn',
@@ -97,4 +103,5 @@ export default defineConfig({
       copyright: 'BlitzkriegBot，Built with ❤️ by fancer',
     },
   },
+  }
 })
