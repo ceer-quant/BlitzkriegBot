@@ -1399,5 +1399,8 @@ mod tests {
     mod dispatch_settlement_tests;
     mod gate_exemptions_tests;
     mod round_rollover_tests;
+    // #1170 family-binding tests — split out of round_rollover_tests by the
+    // #780 file-size ratchet (that file's binding block pushed it past 1500).
+    mod round_family_binding_tests;
     mod sizing_tests;
 }

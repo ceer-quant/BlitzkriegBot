@@ -118,15 +118,15 @@ impl Core {
             let mut cells: Vec<(String, String)> = std::env::vars()
                 .filter_map(|(k, v)| mid_of(&k).map(|mid| (mid, v)))
                 .collect();
-            if let Some(env_path) = config.env_file_path.as_deref() {
-                if let Ok(text) = std::fs::read_to_string(env_path) {
-                    for line in text.lines().filter_map(crate::env_file::parse_line) {
-                        if let Some(mid) = mid_of(&line.0) {
-                            // Process env beats the file line for the SAME
-                            // key — the rule `env_lookup_from_sources` runs.
-                            cells.retain(|(existing, _)| *existing != mid);
-                            cells.push((mid, line.1));
-                        }
+            if let Some(env_path) = config.env_file_path.as_deref()
+                && let Ok(text) = std::fs::read_to_string(env_path)
+            {
+                for line in text.lines().filter_map(crate::env_file::parse_line) {
+                    if let Some(mid) = mid_of(&line.0) {
+                        // Process env beats the file line for the SAME
+                        // key — the rule `env_lookup_from_sources` runs.
+                        cells.retain(|(existing, _)| *existing != mid);
+                        cells.push((mid, line.1));
                     }
                 }
             }
