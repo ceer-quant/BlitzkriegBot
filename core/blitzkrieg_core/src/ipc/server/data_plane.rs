@@ -35,6 +35,9 @@ pub(super) struct DataPlaneRuntime {
     /// reported `runtimeEnabled: true` while zero kalshi events ever landed.
     pub(super) discovery_assets: Vec<String>,
     pub(super) discovery_round_duration_sec: i64,
+    /// #1165 L3 (发现层全族覆盖): every boot-active plugin's DECLARED round
+    /// family table (`supported_round_secs`), venue → families. The soft-unload
+    /// active set unions these in: a multi-family discovery instance feeds one
     /// Every (venue, duration) discovery family the deployment declares —
     /// boot actives on the global value, plus every account `rounds` row
     /// (B1d). The idempotence guard: an instance whose pair is already here
@@ -200,6 +203,7 @@ impl DataPlaneRuntime {
     fn active_families(
         &self,
         accounts: &[crate::account::Account],
+        overrides: &std::collections::HashMap<String, i64>,
         pairs: &std::collections::BTreeSet<(String, i64)>,
     ) -> std::collections::BTreeSet<(String, i64)> {
         let mut active: std::collections::BTreeSet<(String, i64)> = pairs
@@ -218,6 +222,26 @@ impl DataPlaneRuntime {
                 } else {
                     active.insert((a.venue.clone(), dur));
                 }
+            }
+            // #1165 (L2 契约): a live per-account override IS the grid the
+            // account's scanner runs (the selection authority) — its family
+            // is ACTIVE even though no `rounds` row declares it (the
+            // override write path never touches the declaration). Without
+            // this row, a runtime-mounted instance for the overridden family
+            // would feed batches that this gate then drops as soft-unloaded
+            // — the exact live starvation the override caused pre-#1165.
+            // No override → resolved falls back to the global family, a row
+            // the pairs filter above already carries (no behavioural change).
+            let resolved = overrides
+                .get(a.id.as_str())
+                .copied()
+                .unwrap_or(self.discovery_round_duration_sec);
+            if a.venue.is_empty() {
+                for (v, _) in pairs.iter() {
+                    active.insert((v.clone(), resolved));
+                }
+            } else {
+                active.insert((a.venue.clone(), resolved));
             }
         }
         active
@@ -257,15 +281,13 @@ impl DataPlaneRuntime {
                 .lock()
                 .expect("data plane mounted set poisoned")
                 .clone();
-            let accounts: Vec<crate::account::Account> = core
-                .lock()
-                .await
-                .accounts()
-                .account_list()
-                .into_iter()
-                .cloned()
-                .collect();
-            self.active_families(&accounts, &pairs)
+            let c = core.lock().await;
+            let accounts: Vec<crate::account::Account> =
+                c.accounts().account_list().into_iter().cloned().collect();
+            // #1165: the live overrides ride the SAME lock — the gate reads
+            // one coherent snapshot of (accounts, overrides).
+            let overrides = c.config().account_round_durations.clone();
+            self.active_families(&accounts, &overrides, &pairs)
         };
         if active.contains(&(venue.to_string(), dur)) {
             return true;
@@ -478,7 +500,14 @@ pub(super) async fn enable_venue_at_runtime(
         // registrar. Fall through — the historical mounts below are skipped.
         return;
     }
-    if feed_ws_enabled {
+    // #1165 (L2 契约): the feed is venue-anchored and duration-blind — an
+    // already-mounted venue must never restart it. The historical callers
+    // (venue.set/create) pre-checked `venue_mounted` outside; the
+    // round_duration.set path calls this function to add a NEW FAMILY on a
+    // venue whose feed is already live, so the guard moves inside where
+    // every caller shares it. The boot shape is unchanged: boot never
+    // enters this function.
+    if feed_ws_enabled && !data_plane.venue_mounted(name) {
         match plugin.data_feed() {
             Some(feed) => {
                 let cfg = blitzkrieg_market_api::DataFeedConfig::default();

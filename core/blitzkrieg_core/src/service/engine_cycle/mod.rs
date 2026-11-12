@@ -26,8 +26,8 @@ use super::Core;
 use super::FAST_EVAL_FALLBACK_MS;
 use super::config::StrategyLimit;
 use super::helpers::{
-    ARB_STRATEGY, SWEEP_FAILURE_FREEZE, arb_name_branch_warn_once, budget_to_shares,
-    classify_rejection, strategy_acc_key,
+    ARB_STRATEGY, SWEEP_FAILURE_FREEZE, arb_declared_unaccepted_warn_on_change,
+    arb_name_branch_warn_once, budget_to_shares, classify_rejection, strategy_acc_key,
 };
 use super::helpers::{
     CycleLeg, StrategyAccounting, dec_json, per_account_shares, virtual_batch_commit_impl,

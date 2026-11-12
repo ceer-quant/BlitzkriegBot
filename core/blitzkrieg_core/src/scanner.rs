@@ -539,6 +539,13 @@ impl Scanner {
     /// the configured grid, offsets 0) resolve the family clock to exactly the
     /// global grid — the verdict is bit-identical with the pre-E2
     /// `current_slot(now) + 1` comparison.
+    ///
+    /// #1165 L4 (读视图真相): the grid override is a SELECTION authority only
+    /// (`can_trade_reason_for`) — it never filters the read views. An in-flight
+    /// off-grid round stays visible until its natural settlement (#1129
+    /// semantics): the override write must not blank the round a position is
+    /// currently held in, and the engine clock must never be synthesized into
+    /// a fake countdown for a family whose rows have not landed yet.
     pub fn is_live_round_row(&self, market: &CryptoMarket, local_now_ms: i64) -> bool {
         if market.round_slot == 0 {
             return true;
@@ -548,11 +555,6 @@ impl Scanner {
         } else {
             self.cfg.round_duration_sec
         };
-        // #1157: under a runtime grid override, only the active grid's family is
-        // the current round — off-grid rows are not live read views.
-        if self.grid_override && family_duration != self.cfg.round_duration_sec {
-            return false;
-        }
         let t = self.round_timing_for(&market.venue, family_duration, local_now_ms);
         market.round_slot == t.slot + 1
     }
@@ -1286,10 +1288,22 @@ mod tests {
             "override: undeclared market rides the active grid"
         );
 
-        // Off-grid rows are not live read views either.
+        // #1165 L4: the override is a SELECTION authority only — the read views
+        // keep every row's own family clock. The in-flight 5m round (the round
+        // a position is held in when the grid was overridden: its expiry slot
+        // is the 5m family's current slot + 1, expiry 1350 s → slot 4 at
+        // now=1000 s) stays a live read row until natural settlement, even
+        // though entries into its family are refused.
+        let mut m5_inflight = gate_market(1_350_000, "polymarket");
+        m5_inflight.round_duration_sec = 300;
+        m5_inflight.round_slot = 4;
         assert!(
             !s.is_live_round_row(&m5, now),
-            "override: 5m row not live on 1h grid"
+            "override: a 5m row whose family round already settled is not live"
+        );
+        assert!(
+            s.is_live_round_row(&m5_inflight, now),
+            "override: the in-flight 5m round stays visible until natural settlement"
         );
         assert!(
             s.is_live_round_row(&m1h, now),

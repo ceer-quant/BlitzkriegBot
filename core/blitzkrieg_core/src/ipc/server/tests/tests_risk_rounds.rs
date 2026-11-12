@@ -1033,3 +1033,272 @@ async fn risk_set_limits_refuses_a_forbidden_field_and_applies_nothing() {
         "the probe must be a real, filled order: {probe}"
     );
 }
+
+/// #1165 (L2/L3 契约，验收用例 A)：`round_duration.set` 切到一个本会话
+/// 从未挂载 discovery 实例的族时，写路径必须当场把该族挂进来 —— 只有
+/// scanner 网格变了而数据面没跟上，账户就吃不到新族的任何行情（live
+/// 事故的「no live PairBook entry」刷屏正是这条链）。重写同族幂等零新
+/// 挂载；reset 落回 boot 全局族同样零新挂载。挂载收到的 config 必须
+/// 是 boot 快照（assets 不是零）—— kalshi 按 (asset, round_duration_sec)
+/// 选 series，零配置永远发现不了任何东西（#535 的形状）。
+///
+/// 并行安全（CI rust-check 的教训）：`VENUE_LIVE_DISCOVERY_CFG` 是进程级
+/// 静态，挂载测试们并行运行——本用例的计数窗口曾被别的用例的挂载插入
+/// （本地绿 CI 红的调度差），且 assert 时的持锁 panic 毒化了静态互斥、
+/// 级联放倒三个无辜测试。修法：本用例的插件/发现 tag 用进程内唯一名，
+/// 所有计数按该 tag 过滤——并行插入的条目带别的 tag，天然不可见；锁卫
+/// 全部 `into_inner` 去毒，计数先绑定后断言，panic 不持锁。
+#[tokio::test]
+async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
+    // Unique in-process: every cfg entry THIS test produces carries it, and
+    // no parallel test can append an entry with it (their plugins use their
+    // own tags) — the counting below is interference-free by construction.
+    let tag = "venuelive-mount-idem";
+    let cfg_of_tag = |v: &Vec<(String, blitzkrieg_market_api::DiscoveryConfig)>| {
+        v.iter()
+            .filter(|(t, _)| t == tag)
+            .map(|(_, cfg)| cfg.clone())
+            .collect::<Vec<_>>()
+    };
+    let dir = std::env::temp_dir().join(format!("bk-round-dur-mount-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let env_path = dir.join(".env");
+    let env_str = env_path.to_string_lossy().into_owned();
+
+    let (core, registry, peer) = {
+        let now = now_ms();
+        let book = crate::account::AccountLedgers::new(
+            vec![crate::account::Account {
+                id: crate::account::AccountId::from("default"),
+                name: "main".into(),
+                market_type: blitzkrieg_market_api::MarketType::Prediction,
+                status: crate::account::AccountStatus::Active,
+                credential_keys: crate::account::CredentialKeys::default(),
+                venue: String::new(), // unbound: speaks for every mounted venue
+                trading_enabled: true,
+                strategies: Vec::new(),
+                rounds: Vec::new(),
+                opening_equity: None,
+                updated_at_ms: now,
+            }],
+            crate::account::AccountId::from("default"),
+        );
+        let cfg = CoreConfig {
+            env_file_path: Some(env_str.clone()),
+            engine_enabled: true,
+            round_duration_sec: 900,
+            allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+            trade_log_path: None,
+            order_log_path: None,
+            position_log_path: None,
+            ..Default::default()
+        };
+        let registry = crate::market::registry::MarketPluginRegistry::new();
+        registry.register(Box::new(VenueLivePlugin {
+            name: tag.to_string(),
+            discovery: VenueLiveDiscovery {
+                tag: tag.to_string(),
+            },
+        }));
+        (
+            Arc::new(AsyncMutex::new(Core::with_account_book(cfg, book))),
+            registry,
+            PeerAuth::SameUid { uid: own_uid() },
+        )
+    };
+    // Boot shape: the venue active on the GLOBAL family only — 300s has no
+    // instance polling it, exactly the live incident's pre-state.
+    let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
+        Arc::new(crate::market::host::CoreHost::new(core.clone()));
+    let mut mounted = std::collections::BTreeSet::new();
+    mounted.insert((tag.to_string(), 900));
+    let data_plane = DataPlaneRuntime {
+        feed_ws_enabled: true,
+        discovery_enabled: true,
+        discovery_assets: vec!["BTC".to_string()],
+        discovery_round_duration_sec: 900,
+        discovery_mounted: Arc::new(std::sync::Mutex::new(mounted)),
+        soft_unloaded_polling_instances: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        feed_reuse: None,
+    };
+
+    // Override to the unmounted family: the write must mount it live.
+    let set = rpc_with_data_plane(
+        &core,
+        &registry,
+        &peer,
+        &host,
+        &data_plane,
+        r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(set.get("error").is_none(), "the set must land: {set}");
+    assert_eq!(set["result"]["nextSessionSec"], serde_json::json!(300));
+    assert!(
+        data_plane.discovery_mounted_at(tag, 300),
+        "the override family's discovery must be mounted: {:?}",
+        data_plane
+            .discovery_mounted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    );
+    let starts = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    assert_eq!(
+        starts.len(),
+        1,
+        "exactly one discovery start for the unique tag: {starts:?}"
+    );
+    assert_eq!(
+        starts[0].round_duration_sec, 300,
+        "the new instance polls the OVERRIDE family, not the global one"
+    );
+    assert_eq!(
+        starts[0].assets,
+        vec!["BTC".to_string()],
+        "the mount hands the boot's asset set, never zeroes"
+    );
+
+    // Idempotence: re-writing the SAME family starts nothing new.
+    let again = rpc_with_data_plane(
+        &core,
+        &registry,
+        &peer,
+        &host,
+        &data_plane,
+        r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reason":"idempotence"}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(
+        again.get("error").is_none(),
+        "the re-write must land: {again}"
+    );
+    let after_rewrite = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    assert_eq!(
+        after_rewrite.len(),
+        1,
+        "an already-mounted family must not restart: {after_rewrite:?}"
+    );
+
+    // Reset → back to the global family, mounted since boot: still no new
+    // start, and the runtime grid the account resolves to is 900 again.
+    let reset = rpc_with_data_plane(
+        &core,
+        &registry,
+        &peer,
+        &host,
+        &data_plane,
+        r#"{"jsonrpc":"2.0","id":3,"method":"round_duration.set","params":{"accountId":"default","reset":true}}"#
+            .to_string(),
+    )
+    .await;
+    assert!(reset.get("error").is_none(), "the reset must land: {reset}");
+    let after_reset = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    assert_eq!(
+        after_reset.len(),
+        1,
+        "the boot-mounted global family must not restart on reset: {after_reset:?}"
+    );
+}
+
+/// #1165 (L2 契约，验收用例 B)：软卸闸认账 per-account override —— override
+/// 族的 discovery 批次必须到达引擎（它正是 scanner 现在跑的网格），没有
+/// override 时同族批次照旧被软卸丢弃（B2 语义不变）。live 事故里 override
+/// 后连数据面都起不来；即使起了实例，没有这条改动闸也会把批次吞掉。
+#[tokio::test]
+async fn the_soft_unload_gate_admits_the_overridden_familys_batches() {
+    let now = now_ms();
+    let book = crate::account::AccountLedgers::new(
+        vec![crate::account::Account {
+            id: crate::account::AccountId::from("default"),
+            name: "main".into(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status: crate::account::AccountStatus::Active,
+            credential_keys: crate::account::CredentialKeys::default(),
+            venue: "venuelive".to_string(), // bound: the family keys on ITS venue
+            trading_enabled: true,
+            strategies: Vec::new(),
+            rounds: Vec::new(), // no declaration — the override IS the only grid
+            opening_equity: None,
+            updated_at_ms: now,
+        }],
+        crate::account::AccountId::from("default"),
+    );
+    let cfg = CoreConfig {
+        engine_enabled: true,
+        round_duration_sec: 900,
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        ..Default::default()
+    };
+    let mut c = Core::with_account_book(cfg, book);
+    c.config_mut()
+        .account_round_durations
+        .insert("default".to_string(), 3600);
+    let core = Arc::new(AsyncMutex::new(c));
+    let mut mounted = std::collections::BTreeSet::new();
+    mounted.insert(("venuelive".to_string(), 900));
+    let data_plane = DataPlaneRuntime {
+        feed_ws_enabled: true,
+        discovery_enabled: true,
+        discovery_assets: vec!["BTC".to_string()],
+        discovery_round_duration_sec: 900,
+        discovery_mounted: Arc::new(std::sync::Mutex::new(mounted)),
+        soft_unloaded_polling_instances: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        feed_reuse: None,
+    };
+
+    // A 3600s batch — the family the override runs. The span derivation the
+    // gate uses (expires/slot) must reproduce 3600: fixed constants keep it
+    // deterministic (4_000_000s / slot 1111 → 3600).
+    let batch = blitzkrieg_market_api::MarketDescriptor {
+        asset: "BTC".to_string(),
+        condition_id: "c".to_string(),
+        question_id: "q".to_string(),
+        up_token_id: "u".to_string(),
+        down_token_id: "d".to_string(),
+        up_price: rust_decimal::Decimal::new(5, 1),
+        down_price: rust_decimal::Decimal::new(5, 1),
+        expires_at_ms: 4_000_000_000,
+        round_slot: 4_000_000_000 / 1000 / 3600,
+        round_duration_sec: 3600,
+        venue: "venuelive".to_string(),
+        neg_risk: false,
+        question: "override family".to_string(),
+    };
+    assert!(
+        data_plane
+            .admit_poll_batch(&core, std::slice::from_ref(&batch))
+            .await,
+        "the override family is ACTIVE — its batches must reach the engine"
+    );
+    assert_eq!(data_plane.soft_unloaded_count(), 0);
+
+    // Without the override the same batch is soft-unloaded (B2 unchanged):
+    // no account declares 3600 any more, the gate drops it and counts.
+    core.lock()
+        .await
+        .config_mut()
+        .account_round_durations
+        .clear();
+    assert!(
+        !data_plane.admit_poll_batch(&core, &[batch]).await,
+        "an undeclared, un-overridden family stays soft-unloaded"
+    );
+    assert_eq!(data_plane.soft_unloaded_count(), 1);
+}

@@ -279,6 +279,34 @@ pub(super) fn arb_name_branch_warn_once(strategy: &str) {
     }
 }
 
+/// #1165 (L6 契约)：the declared-but-NOT-accepted warn, rate-limited to the
+/// verdict — one line per strategy per DISTINCT reason CHANGE. `strategy_stats`
+/// is a read path re-built every cycle (and from several readouts per cycle);
+/// the same missing-leg verdict must not re-print per cycle (live: 4+ WARN
+/// lines per cycle). The memo keeps the LAST warned reason: a repeat of the
+/// current verdict is silence, a CHANGED verdict prints once (the operator is
+/// told on first sight and on every actual flip — #1164 acceptance: 首次 +
+/// 状态变化各一条).
+pub(super) fn arb_declared_unaccepted_warn_on_change(strategy: &str, reason: &str) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let map = LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut m) = map.lock() {
+        let fresh = m.get(strategy).map(|r| r != reason).unwrap_or(true);
+        if fresh {
+            tracing::warn!(
+                strategy = strategy,
+                reason = reason,
+                "consumes_pair_book_stats declared but NOT accepted — the arb* face \
+                 rides the deprecated name branch (ARB_STRATEGY match) or is omitted \
+                 entirely; a pair consumer must also declare atomic_batch and hold at \
+                 least one live PairBook entry"
+            );
+            m.insert(strategy.to_string(), reason.to_string());
+        }
+    }
+}
+
 /// RFC #541 挂钩 B (c)：one declared-atomic strategy's cycle leg, captured by
 /// value so the judges can read `&self` while the wholesale rejection mutates
 /// the token list (the borrow split `arb_precheck_filter` lives inside).

@@ -145,12 +145,16 @@ impl MarketDiscovery for PolymarketDiscovery {
         config: DiscoveryConfig,
     ) -> BoxFuture<'a, CoreResult<()>> {
         Box::pin(async move {
-            crate::discovery::spawn(
-                host,
-                config.assets,
-                config.round_duration_sec,
-                config.poll_sec,
-            );
+            // #1165 L3 (发现层全族覆盖): the discovery walks the plugin's own
+            // DECLARED family table (`supported_round_secs`, the same face the
+            // rounds editor offers) — never a single boot-grid family. The
+            // config's `round_duration_sec` stays the boot's anchor family, but
+            // discovery no longer narrows to it: a runtime grid override
+            // selects among families whose rows are already in the table.
+            let families = PolymarketPlugin
+                .supported_round_secs()
+                .unwrap_or_else(|| vec![config.round_duration_sec]);
+            crate::discovery::spawn(host, config.assets, families, config.poll_sec);
             Ok(())
         })
     }
