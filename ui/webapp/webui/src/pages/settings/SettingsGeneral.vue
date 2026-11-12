@@ -259,7 +259,7 @@ async function doResetTrading(): Promise<void> {
 
       <template v-else>
         <!-- 单一真相源：本会话执行值（per-account 覆盖优先，缺省回落 default 网格）+
-             下一轮值。配置/执行“双真相”行与分裂红条已收敛（#1151）：卡面只展示
+             下一轮值。配置/执行“双真相”行与分裂红条已收敛（issue 1151）：卡面只展示
              执行真相，分裂告警能力保留于内核门禁，不在卡面常态重复。 -->
         <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
           <div class="min-w-0 sm:min-w-auto">
@@ -308,7 +308,7 @@ async function doResetTrading(): Promise<void> {
         </div>
 
         <!-- 分裂告警能力保留（红条一级）：default 账户配置网格 ≠ 执行网格时红条，
-             不静默。配置/执行并列的“常态显示”已收敛，此处只在真分裂时出现（#1151）。 -->
+             不静默。配置/执行并列的“常态显示”已收敛，此处只在真分裂时出现（issue 1151）。 -->
         <AlertBanner v-if="roundSplit" class="mt-3" tone="error">
           轮次配置与执行分裂：配置 {{ roundLabel(roundConfigSec) }} / 实际 {{ roundLabel(roundExecSec) }}
           —— 不静默。default 账户 per-account 覆盖与市场声明族不一致；在途轮保持原网格结算。
