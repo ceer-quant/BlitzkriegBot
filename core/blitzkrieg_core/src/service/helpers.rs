@@ -280,12 +280,13 @@ pub(super) fn arb_name_branch_warn_once(strategy: &str) {
 }
 
 /// #1165 (L6 契约)：the declared-but-NOT-accepted warn, rate-limited to the
-/// verdict — one line per strategy per DISTINCT reason. `strategy_stats` is a
-/// read path re-built every cycle (and from several readouts per cycle); the
-/// same missing-leg verdict must not re-print per cycle (live: 4+ WARN lines
-/// per cycle). The memo keeps the LAST warned reason: the same reason never
-/// prints again (a flip-back to a once-warned state is noise — the operator
-/// has already been told), a CHANGED reason prints once.
+/// verdict — one line per strategy per DISTINCT reason CHANGE. `strategy_stats`
+/// is a read path re-built every cycle (and from several readouts per cycle);
+/// the same missing-leg verdict must not re-print per cycle (live: 4+ WARN
+/// lines per cycle). The memo keeps the LAST warned reason: a repeat of the
+/// current verdict is silence, a CHANGED verdict prints once (the operator is
+/// told on first sight and on every actual flip — #1164 acceptance: 首次 +
+/// 状态变化各一条).
 pub(super) fn arb_declared_unaccepted_warn_on_change(strategy: &str, reason: &str) {
     static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
