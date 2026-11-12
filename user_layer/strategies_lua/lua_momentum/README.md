@@ -1,33 +1,44 @@
-# lua_momentum — the official Lua example strategy (E30 / #336), down-leg only, configurable exits
+# lua_momentum — the official Lua example strategy (E30 / #336)
 
-> **⚠️ EXAMPLE / SINGLE-EDGE PACKAGE.** The v2-corpus census after the #419
-> locked-top fix (90h replay, official fees + 1 tick slippage, 10-share lot)
-> measured the OLD both-legs taker shape at **20,038 closed trades / net
-> −$17,575.78 / PF 0.43** (`docs/reports/evolution/RETEST-2026-10-10.md` §4).
-> That verdict still describes everything this package no longer does. What
-> the 2026-11-01 direction surgery kept is the one entry shape that priced
-> positive in the unmanaged live window (2026-10-24→26), maker-ized per
-> issue 742. It remains the sandbox/example teaching fixture the §6.3 gate
-> pins (`lua-sandbox-check.mjs`).
+> **⚠️ Example package. Not a measured production edge.** A settlement-truth
+> replay of the parameters in this package (BTC/ETH/SOL/XRP, 5m and 15m,
+> 2026-11-05 through 2026-11-12, official 0/1 outcomes, taker fee
+> `shares * 0.07 * p * (1-p)`, one-cent spread, no same-round re-entry)
+> did not reach win rate ≥ 80% and profit factor ≥ 1.2 on the held-out
+> window. Defaults were not retuned. Full table:
+> `docs/reports/lua-momentum-oos-2026-11-12.md`.
+> The v2-corpus census after the #419 locked-top fix still stands for the
+> old both-legs taker shape: **20,038 closed / net −$17,575.78 / PF 0.43**
+> (`docs/reports/evolution/RETEST-2026-10-10.md` §4).
 
-A small momentum follower that demonstrates the Lua strategy surface inside
-the 5.4 sandbox: observe books, confirm the falling DOWN leg, emit maker
-entry INTENTS. It never places an order — every return value is adjudicated
-by the kernel (entry gates, sizing, risk, signing, submission).
+A momentum follower that demonstrates the Lua strategy surface inside the
+5.4 sandbox. It never places an order — every return value is adjudicated
+by the kernel (entry gates, sizing, risk, signing, submission). Both legs
+are live: a rising leg buys the UP token, a falling leg buys the DOWN token,
+each only while its own mid has moved by at least `threshold`. Entries rest
+post-only at that leg's best bid. After a sell, the condition is not
+re-entered in the same round (`max_entries_per_round` defaults to 1).
 
-## What it does (after the direction surgery)
+## What it does
 
-* `bk_on_book(update)` — tracks each token's mid; when a token's mid FALLS
-  by at least `threshold` percent in one tick the DOWN-leg premise is
-  confirmed. An up-move — or any smaller move — clears it. There is no
-  "up" state anymore.
-* `bk_evaluate()` — for every market whose DOWN token is confirmed falling,
-  prices ONE LIMIT entry at that token's live best bid, but ONLY when:
-  * the round exists and `time_left_sec > 60` (outside the force-exit
-    window), and
-  * the book is `fresh == true` (the host's freshness gate) with a bid side, and
-  * the opposite (UP) token of the same condition is not already held,
-    unless `allow_both_sides` is `1`.
+* `bk_on_book(update)` — tracks each token's mid. A move of at least
+  `threshold` (a fraction, default 0.04 = 4%) arms that token: up if the mid
+  rose, down if it fell. A smaller move clears the arm. The comparison is
+  against the fractional move. An earlier version multiplied the move by
+  100 and then compared it with 0.04, which armed on a 0.04% flicker.
+* `bk_evaluate()` — buys the UP token only while it is armed up, and the
+  DOWN token only while it is armed down. The limit price is that token's
+  live best bid, and only when:
+  * the round exists and `time_left_sec` is outside the entry cutoff
+    (60 seconds, unless `entry_cutoff_pct` says otherwise),
+  * `min_time_left_for_entry` (default 120s) and `entry_open_after_pct`
+    (default 20) both allow a new entry,
+  * the book is `fresh == true` with a bid, and the bid is inside
+    `[min_entry_price, max_entry_price]` (defaults 0.15 and 0.50),
+  * the opposite token of the same condition is not already held, unless
+    `allow_both_sides` is `1`,
+  * this condition has not already used its `max_entries_per_round` slot
+    (default 1 — no re-entry after a sell).
 * The same call emits **exits** for positions `bk.holdings()` reports. A
   sell is judged on the fresh **best bid** after a taker fee, never the
   mid. PolySim's schedule is 0; the decision still haircuts by
@@ -37,22 +48,8 @@ by the kernel (entry gates, sizing, risk, signing, submission).
 
 Everything else (risk, sizing, quotas, submission) belongs to the kernel.
 A position that hits none of the exit rules still holds to settlement.
-
-## The direction gate — live evidence (2026-10-24→26, 86 fills, 0 maker)
-
-| leg | fills | WR | net |
-|:---|:---|:---|:---|
-| DOWN leg — buy the DOWN token while its own price is crashing | 44 | 56.8% | **+$22.79** |
-| UP leg — chase the UP token's spike | 40 | 7.5% | −$40.37 |
-
-* The 0.20-0.35 entry band filled at WR 75% on the down leg; the 0.40+ fills
-  on the up leg went 17-for-17 losing — chasing a spike buys the top and eats
-  mean reversion.
-* The up leg is DELETED, not disabled: there is no tunable, no param, no
-  config that re-arms it. `bk_evaluate` iterates `market.down_token` only.
-* Only the leg whose own price is falling is ever buyable — the confirmed
-  premise IS a falling price, and any rebound clears it before the next
-  entry.
+`trailing_exit` stays false: these exits are strategy signals, which the
+kernel honours even for a holder.
 
 ## Maker entries (issue 742's `entry_maker` declaration)
 
@@ -60,39 +57,20 @@ The manifest declares `"entry_maker": true`, so the host builds every
 `OrderRequest` for this strategy as `FillPolicy::Maker` — post-only — and
 submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 
-* the strategy quotes the leg's own **best_bid** (it never chases the ask),
-  so the order is a resting maker quote, not a crossing one;
-* in a live crash the falling price crosses the resting bid — the fill is a
-  MAKER fill: no taker fee (taker fees had eaten **17.8%** of the down leg's
-  gross profit; the curve peaks at 1.75%/side at p=0.5) plus the maker
-  rebate;
-* an unfilled bid simply rests to the round's end and dies there —
-  **不成交 = 错过机会，不是亏损** (a missed chance, never a loss);
-* the contrast with `smart_money_reverse` is the point: stabilizing first
-  does NOT work (after an informed crash the book never retests), the edge
-  is catching the knife WHILE it is still falling — the entry mechanism
-  (price falls through the resting bid) and the edge (the crash continues)
-  are the same fact.
-
-## What was removed
-
-* the up-token entry arm (`want = "up"`) — the WR 7.5% leg;
-* the per-token `direction` state and the momentum-flip branch — dead once
-  the gate landed (a premise that stops falling is simply not a trade);
-* no kernel-ladder opt-in was added (`trailing_exit` stays false). On a
-  locally-settled run (PolySim, dry) the policy ladder **skips** a
-  hold-to-settlement strategy, and the ladder's own profit rule is a +100%
-  backstop — a +50% mark that round-trips to a loss never reached it. The
-  exits below are strategy signals, which the kernel honours even for a
-  holder. The live window's 19 `trailing_stop` exits netted +$15.72 (15 of
-  them on the down leg).
+* the strategy quotes the leg's own **best_bid** (it never crosses the ask);
+* a fill happens only if a later trade reaches that bid. An unfilled bid
+  rests until the round ends — a missed chance, never a loss;
+* the 2026-11-12 study found that this fill selects tokens that keep
+  moving against the position. Settlement win rates sat 10 to 17 points
+  below the entry price in every entry-price bucket. That is why tightening
+  the take-profit did not produce an 80% win rate.
 
 ## The read-only surface it uses
 
 | call | purpose here |
 |:---|:---|
 | `bk.round()` | round timing; skip entries inside the force-exit window |
-| `bk.markets()` | the round's UP/DOWN token pairs (only `down_token` is read) |
+| `bk.markets()` | the round's UP/DOWN token pairs (both legs are read) |
 | `bk.book(token)` | best bid to rest at, plus the `fresh` verdict |
 | `bk.params()` | tunables (manifest defaults, hot-param overridable) |
 | `bk.holdings()` | open positions the exit rules and the both-sides guard read |
@@ -103,7 +81,7 @@ submits it with `maker_timeout_ms = -1`, the OME's never-escalate clock:
 
 | name | default | min | max | meaning |
 |:---|:---|:---|:---|:---|
-| `threshold` | `0.04` | `0.005` | `1` | single-tick mid drop (%) that confirms the DOWN leg |
+| `threshold` | `0.04` | `0.005` | `1` | single-tick mid move (fraction, so 0.04 = 4%) that arms the leg |
 | `take_profit_pct` | `40` | `0` | `500` | sell when net PnL on the best bid, after the taker fee, reaches this many percent. `0` disables |
 | `take_profit_pct_tight` | `0` | `0` | `500` | the band's value at the END of the round: the band slides LINEARLY from `take_profit_pct` at round start to this as the clock drains (time-weighted tightening, 2026-11-06). `0` keeps the flat band exactly |
 | `take_profit_price` | `0` | `0` | `0.99` | sell when the best bid reaches this price AND the fee-net proceeds still beat the entry. `0` disables |
