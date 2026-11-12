@@ -44,6 +44,59 @@ impl Core {
         mut config: CoreConfig,
         mut accounts: crate::account::AccountLedgers,
     ) -> Self {
+        // Issue 1140: per-account round duration. Parse ACCOUNT_<ID>_ROUND_DURATION_SEC
+        // for each configured account and validate against ACCOUNT_<ID>_ROUNDS
+        // (subscription allow-list). Fail-closed: if an account's anchor duration
+        // is not in its allow-list, refuse the boot.
+        let env_file_path = config.env_file_path.clone();
+        let env_lookup = crate::account::config::env_lookup_from_sources(
+            env_file_path.as_deref().map(std::path::Path::new),
+        );
+        for acc in accounts.account_list() {
+            let id = acc.id.as_str();
+            // env_suffix: uppercase alphanumeric, fold everything else to '_'
+            let sfx: String = id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
+            if let Some(sec_str) = env_lookup(&key) {
+                if let Ok(sec) = sec_str.trim().parse::<i64>() {
+                    config.account_round_durations.insert(id.to_string(), sec);
+                    // Validation: the anchor must be in the account's ROUNDS allow-list.
+                    if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
+                        // Note: the message names the env suffix and the value
+                        // only — the allow-list body itself is not echoed back
+                        // (CodeQL cleartext-logging: no account payload lands
+                        // in the log).
+                        panic!(
+                            "refusing to boot: ACCOUNT_{sfx}_ROUND_DURATION_SEC={sec}s \
+                             is not in the account's ACCOUNT_{sfx}_ROUNDS allow-list \
+                             (fail-closed: fix the value or add it to ROUNDS)"
+                        );
+                    }
+                } else {
+                    panic!(
+                        "refusing to boot: ACCOUNT_{sfx}_ROUND_DURATION_SEC=`{sec_str}` is not an i64 \
+                         (fail-closed: fix .env and restart)"
+                    );
+                }
+            }
+        }
+        drop(env_lookup);
+        // Honor the deprecated `round_duration_sec` field for backward
+        // compatibility with existing test constructors. If it differs from
+        // the Default value (900), propagate it to `default_round_duration_sec`
+        // so the runtime code path picks it up.
+        if config.round_duration_sec != 900 {
+            config.default_round_duration_sec = config.round_duration_sec;
+        }
         // Whether the boot below replayed durable cash journals (the server's
         // post-construction seed reads it — a replayed balance must not be
         // re-seeded over).

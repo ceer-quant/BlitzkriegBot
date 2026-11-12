@@ -1314,7 +1314,7 @@ impl Backtester for EventBacktester {
             // byte-identically, as does a corpus with no declared duration
             // at all.
             if let DataEvent::RoundMarkets { markets, .. } = &te.event {
-                let grid = self.core.config().round_duration_sec;
+                let grid = self.core.config().default_round_duration_sec;
                 let mut foreign: Vec<(String, i64)> = Vec::new();
                 for m in markets {
                     if m.round_duration_sec > 0

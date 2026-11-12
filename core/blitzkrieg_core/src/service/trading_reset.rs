@@ -603,19 +603,17 @@ impl Core {
     }
 
     /// 轮次时间周期的运行时写路径（`round_duration.set`，UI 设置卡）：
-    /// **next_session** —— 白名单校验通过后只写持久格（生产
-    /// `data/runtime/config.json`），本会话的网格一个字节都不动。
+    /// **per-account** —— 白名单校验通过后把 `ACCOUNT_<ID>_ROUND_DURATION_SEC`
+    /// 写入 `.env`（原子 upsert），并在内存中更新
+    /// `config.account_round_durations`，立即生效。
     ///
-    /// 为什么不是热旋钮：轮次周期是网格坐标系 —— `round_slot` 是用会话的
-    /// duration 推导的 UTC 网格索引，仓位恢复（`OpenParams.expires_at_ms`）、
-    /// #457 过期扫描都用**当前** config 重算存量订单/仓位的过期时间；热切
-    /// duration 会把旧 slot 全部错解（15m 轮的 slot 3 在 5m 网格里是另一个
-    /// 时间窗）。重启后启动层读回持久格，新网格从干净状态开始。
+    /// 红线：在途轮/单保留出生网格（不重槽、不重算 PnL）。热切 duration
+    /// 只对新轮生效；旧 slot 的存量订单/仓位不重新解析。
     ///
-    /// `reset: true` 清格 —— 下次会话回落启动解析（显式 flag > env >
-    /// TOML > 默认）。`durationSec` 与 `reset` 恰好给一个，都给或都不给
-    /// 拒绝。`runtime_config_path: None`（回测器/进程内测试）拒绝写并如实
-    /// 回报 —— 测试不往调用者恰好在的 checkout 里落文件。
+    /// `reset: true` 清该账户的覆盖 —— 下次会话该账户回落到默认网格。
+    /// `durationSec` 与 `reset` 恰好给一个，都给或都不给拒绝。
+    /// `account_id` 必须指定；对不存在的账户拒绝。
+    /// `runtime_config_path: None`（回测器/进程内测试）拒绝写并如实回报。
     pub fn apply_round_duration_set(
         &mut self,
         patch: &crate::schema::SetRoundDurationParams,
@@ -624,6 +622,7 @@ impl Core {
     ) -> CoreResult<crate::schema::RoundDurationUpdate> {
         use crate::schema::{ROUND_DURATION_SET_NOTE, RoundDurationUpdate};
 
+        let account_id = &patch.account_id;
         if patch.reset && patch.duration_sec.is_some() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -634,55 +633,64 @@ impl Core {
         if !patch.reset && sec.is_none() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                format!(
-                    "round_duration.set needs durationSec (one of {:?}) or reset: true",
-                    self.config.allowed_round_secs
-                ),
+                "round_duration.set needs durationSec (one of {:?}) or reset: true".to_string(),
             ));
         }
 
-        let persist = |value: Option<i64>| -> CoreResult<()> {
-            let Some(path) = self.config.runtime_config_path.as_deref() else {
-                return Err(CoreError::new(
+        // Validate the account exists in the book.
+        self.accounts
+            .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
+            .ok_or_else(|| {
+                CoreError::new(
                     CoreErrorCode::InvalidParams,
-                    "round_duration.set: no runtime config path configured — \
-                     persistence is disabled for this core (backtests and \
-                     in-process tests); nothing was applied"
-                        .to_string(),
-                ));
-            };
+                    format!("round_duration.set: no such account `{account_id}`"),
+                )
+            })?;
+
+        // reset: remove the account's override from .env and memory.
+        if patch.reset {
+            let sfx: String = account_id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
             let env_path = self
                 .config
                 .env_file_path
                 .as_deref()
                 .map(std::path::Path::new);
-            crate::runtime_config::persist_round_duration_to_with_env(
-                std::path::Path::new(path),
-                value,
-                actor,
-                now_ms,
-                env_path,
-            )
-            .map_err(|e| {
+            let Some(env_path) = env_path else {
+                return Err(CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    "round_duration.set: no env file path configured — persistence is disabled \
+                     for this core (backtests and in-process tests); nothing was applied"
+                        .to_string(),
+                ));
+            };
+            crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::InvalidParams,
-                    format!("round_duration.set: persist failed, nothing changed: {e}"),
+                    format!("round_duration.set: persist reset failed: {e}"),
                 )
-            })
-        };
-
-        // reset 路径：清格，下次会话回落启动解析。
-        if patch.reset {
-            persist(None)?;
+            })?;
+            self.config.account_round_durations.remove(account_id);
             tracing::info!(
                 target: "risk",
                 actor = %actor,
+                account = %account_id,
                 reason = patch.reason.as_deref().unwrap_or(""),
-                "round duration cell cleared — next session re-resolves from \
-                 the boot flags/env/TOML ({ROUND_DURATION_SET_NOTE})"
+                "round duration override cleared for account — falls back to default grid \
+                 ({ROUND_DURATION_SET_NOTE})"
             );
             return Ok(RoundDurationUpdate {
-                next_session_sec: self.config.round_duration_sec,
+                account_id: account_id.clone(),
+                next_session_sec: self.config.default_round_duration_sec,
                 reset: true,
                 at_ms: now_ms,
                 actor: actor.to_string(),
@@ -691,12 +699,9 @@ impl Core {
             });
         }
 
-        // 写路径：声明并集校验（一格越界值就是一台没人能解读的网格），然后
-        // 原子写持久格。并集来自插件申报（`supported_round_secs`），不是内核
-        // 知识；空并集 = 没有插件申报任何档 = 全拒（fail-closed）。
-        let Some(sec) = sec else {
-            unreachable!("the reset path returned above; a write path has a durationSec");
-        };
+        // Write path: duration_sec is Some (guaranteed by validation above).
+        let sec = sec.unwrap();
+        // Validate against allowed_round_secs whitelist.
         if !self.config.allowed_round_secs.contains(&sec) {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
@@ -707,17 +712,79 @@ impl Core {
                 ),
             ));
         }
-        persist(Some(sec))?;
+
+        // Validate against the account's ROUNDS subscription allow-list (if declared).
+        let acc = self
+            .accounts
+            .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
+            .unwrap();
+        if !acc.rounds.is_empty() && !acc.rounds.contains(&sec) {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "round_duration.set: {sec} is not in account `{account_id}`'s subscribed \
+                     round families ({:?}) — nothing was applied",
+                    acc.rounds
+                ),
+            ));
+        }
+
+        // Persist to .env only (atomic upsert), not the retired JSON cell.
+        let env_path = self
+            .config
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new);
+        let Some(env_path) = env_path else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "round_duration.set: no env file path configured — persistence is disabled \
+                 for this core (backtests and in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+
+        let sfx: String = account_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
+        crate::env_file::upsert_env_vars(
+            env_path,
+            &std::collections::BTreeMap::from([(key, sec.to_string())]),
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("round_duration.set: persist failed, nothing changed: {e}"),
+            )
+        })?;
+        self.config
+            .account_round_durations
+            .insert(account_id.clone(), sec);
         tracing::info!(
             target: "risk",
             actor = %actor,
-            from = self.config.round_duration_sec,
+            account = %account_id,
+            from = self
+                .config
+                .account_round_durations
+                .get(account_id)
+                .copied()
+                .unwrap_or(self.config.default_round_duration_sec),
             to = sec,
-            current_session_unchanged = true,
             reason = patch.reason.as_deref().unwrap_or(""),
-            "round duration set to {sec}s — next session ({ROUND_DURATION_SET_NOTE})"
+            "round duration set for account — live this session, persisted \
+             ({ROUND_DURATION_SET_NOTE})"
         );
         Ok(RoundDurationUpdate {
+            account_id: account_id.clone(),
             next_session_sec: sec,
             reset: false,
             at_ms: now_ms,

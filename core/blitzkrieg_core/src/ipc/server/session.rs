@@ -531,7 +531,7 @@ pub async fn run(
             }
             if let Err(e) = disc.start(host.clone(), cfg).await {
                 eprintln!("blitzkrieg-core: discovery start failed for {venue}@{duration}s: {e}");
-            } else if *duration == config.round_duration_sec {
+            } else if *duration == config.default_round_duration_sec {
                 eprintln!("blitzkrieg-core: discovery started for {venue}");
             } else {
                 eprintln!("blitzkrieg-core: discovery started for {venue} @ {duration}s family");

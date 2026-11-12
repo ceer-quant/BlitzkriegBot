@@ -1292,27 +1292,25 @@ pub const STRATEGY_PARAMS_SET_NOTE: &str = "live from the strategy's next evalua
 // ── 轮次时间周期可设置 — round_duration.get / round_duration.set ────────────
 
 /// `round_duration.get` result: the effective round length, where it came
-/// from, the switchable whitelist, and what a restart would resolve to (the
-/// persisted cell outranks TOML/default but not an explicit CLI flag).
+/// from, the switchable whitelist, and per-account round durations.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundDurationResult {
-    /// The effective seconds this session runs on.
+    /// The effective seconds the DEFAULT account runs on (fallback for
+    /// accounts without an explicit `ACCOUNT_<ID>_ROUND_DURATION_SEC`).
     pub effective_sec: i64,
     /// One of `cli` / `env` / `runtime` / `toml` / `default` — the boot
-    /// resolution's own report, so the UI can say "an explicit flag outranks
-    /// this card" instead of silently ignoring a write.
+    /// resolution's own report for the default grid.
     pub source: &'static str,
+    /// Per-account round durations: `account_id → seconds`. Accounts absent
+    /// from this map fall back to `effective_sec`.
+    pub per_account: std::collections::BTreeMap<String, i64>,
     /// The switchable whitelist (labels come from the plugins' declared
-    /// `round_labels`, aggregated at boot — issue 648). Empty `label` rows
-    /// are still listed so the UI can name a non-standard boot value.
+    /// `round_labels`, aggregated at boot — issue 648).
     pub allowed: Vec<RoundDurationOption>,
-    /// What the NEXT session will run on: the persisted cell if one was
-    /// written (regardless of this session's source), else the effective
-    /// value. The UI reads this to prefill the card.
+    /// What the next session will run on for the default account.
     pub next_session_sec: i64,
-    /// Whether the persisted cell holds a value (a write happened at some
-    /// point; `round_duration.set` with `reset` clears it).
+    /// Whether the persisted cell holds a value for the default account.
     pub persisted: bool,
 }
 
@@ -1326,13 +1324,23 @@ pub struct RoundDurationOption {
     pub label: Option<&'static str>,
 }
 
-/// `round_duration.set` params: `durationSec` must be one of the whitelist
-/// values (300/900/3600/14400/86400); `reset` instead clears the persisted
-/// cell so the next session falls back to the boot flags/env/TOML. Exactly
-/// one of the two must be given.
+/// One account's round duration entry.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRoundDuration {
+    pub account_id: String,
+    pub duration_sec: i64,
+}
+
+/// `round_duration.set` params: `account_id` names the account whose grid is
+/// being set; `duration_sec` must be one of the whitelist values;
+/// `reset` clears that account's override (falls back to default). Exactly
+/// one of `duration_sec` or `reset` must be given.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetRoundDurationParams {
+    /// The account whose round duration is being set. Required.
+    pub account_id: String,
     #[serde(default)]
     pub duration_sec: Option<i64>,
     #[serde(default)]
@@ -1345,10 +1353,13 @@ pub struct SetRoundDurationParams {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundDurationUpdate {
-    /// What the next session will run on after this write.
+    /// The account whose grid was set.
+    pub account_id: String,
+    /// What the account will run on after this write (for `reset`, the
+    /// default grid).
     pub next_session_sec: i64,
-    /// `reset` clears the cell (falls back to boot resolution) instead of
-    /// writing a value.
+    /// `reset` clears the account's override (falls back to boot resolution)
+    /// instead of writing a value.
     pub reset: bool,
     pub at_ms: i64,
     pub actor: String,
@@ -1358,9 +1369,10 @@ pub struct RoundDurationUpdate {
 }
 
 /// [`RoundDurationUpdate::note`] — one spelling, used by the reply and the log.
-pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
-     grid index) and live positions/orders were slotted under the old length; \
-     an explicit --round-sec flag still outranks this setting";
+pub const ROUND_DURATION_SET_NOTE: &str = "per-account round grid: new wheels for the account run on the \
+     new grid immediately; in-transit wheels keep their birth grid (not re-slotted); \
+     the value persists for the next session; an explicit --round-sec / BK_ROUND_SEC \
+     still outranks this setting at boot";
 
 // ── ④ 统一映射：unified.candidates / unified.confirm / unified.revoke ─────
 

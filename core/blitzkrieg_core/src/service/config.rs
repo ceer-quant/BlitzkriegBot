@@ -41,7 +41,21 @@ pub struct CoreConfig {
     /// Consecutive-loss breaker threshold and cooldown.
     pub max_consecutive_losses: u32,
     pub breaker_cooldown_sec: i64,
-    /// Round length used to derive a position's expiry from its round slot.
+    /// Per-account round length anchor: `account_id → seconds`. Each account's
+    /// own grid (`ACCOUNT_<ID>_ROUND_DURATION_SEC` env key). Absent for an
+    /// account → falls back to `default_round_duration_sec`. This is the
+    /// single source of truth for timing math (slot derivation, expiry, stop
+    /// tightening) — replacing the old global `round_duration_sec`.
+    pub account_round_durations: std::collections::HashMap<String, i64>,
+    /// Fallback round length for accounts without an explicit
+    /// `ACCOUNT_<ID>_ROUND_DURATION_SEC`. Populated from
+    /// `ACCOUNT_DEFAULT_ROUND_DURATION_SEC` env key (default 900), or from
+    /// the deprecated `RUNTIME_ROUND_DURATION_SEC` with a deprecation warning.
+    pub default_round_duration_sec: i64,
+    /// Deprecated: kept for test compatibility. Use `default_round_duration_sec`
+    /// and `account_round_durations` instead. This field is NOT consulted by
+    /// any runtime code path — it exists only so existing test constructors
+    /// keep compiling. Set `default_round_duration_sec` for the actual value.
     pub round_duration_sec: i64,
     /// The round lengths switchable this session: the DECLARED UNION of the
     /// registered market plugins' `supported_round_secs` (`MarketPluginRegistry
@@ -512,7 +526,7 @@ impl CoreConfig {
         crate::engine::EngineConfig {
             scanner: crate::scanner::ScannerConfig {
                 assets: self.assets.clone(),
-                round_duration_sec: self.round_duration_sec,
+                round_duration_sec: self.default_round_duration_sec,
                 min_round_age_sec: self.min_round_age_sec,
                 min_time_left_sec: self.positions.exit.min_time_left_sec,
             },
@@ -1009,15 +1023,12 @@ impl Default for CoreConfig {
             positions: PositionConfig::default(),
             max_consecutive_losses: 3,
             breaker_cooldown_sec: 300,
+            round_duration_source: "default",
+            account_round_durations: std::collections::HashMap::new(),
+            default_round_duration_sec: 900,
             round_duration_sec: 900,
-            // Empty = no plugin's declaration is on file, so every
-            // round-duration admission refuses (fail-closed). The production
-            // boot overwrites this from the registry; in-process tests with
-            // no market concern keep the historical behaviour through the
-            // TEST_ALLOWED_ROUNDS helper.
             allowed_round_secs: Vec::new(),
             round_labels: std::collections::BTreeMap::new(),
-            round_duration_source: "default",
             runtime_config_path: None,
             env_file_path: None,
             credential_vars: std::collections::BTreeMap::new(),

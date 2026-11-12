@@ -14,7 +14,7 @@ impl Core {
         if self.replay_sched() {
             return;
         }
-        let dur_ms = self.config.round_duration_sec * 1000;
+        let dur_ms = self.config.default_round_duration_sec * 1000;
         if dur_ms <= 0 {
             return;
         }
@@ -31,7 +31,7 @@ impl Core {
             if o.round_slot <= 0 {
                 continue;
             }
-            let eff = self.order_eff_round_sec(o);
+            let eff = self.order_eff_round_sec(o.account_id.as_str(), o);
             if eff > 0 && now_ms >= (o.round_slot + 1) * eff * 1000 {
                 expired.push((o.order_id.clone(), eff));
             }
@@ -54,7 +54,12 @@ impl Core {
             .open_positions()
             .iter()
             .filter(|p| p.round_duration_sec == 0)
-            .map(|p| (p.token_id.clone(), self.round_family_of_token(&p.token_id)))
+            .map(|p| {
+                (
+                    p.token_id.clone(),
+                    self.round_family_of_token(p.account_id.as_str(), &p.token_id),
+                )
+            })
             .collect();
         self.positions
             .backfill_round_families(|tok| families.get(tok).copied().unwrap_or(0));
@@ -389,11 +394,11 @@ impl Core {
                     && p.account_id.as_str() == account_id.as_str()
                     && p.strategy == strategy
             })
-            .map(|p| self.position_eff_round_sec(p))
+            .map(|p| self.position_eff_round_sec(p.account_id.as_str(), p))
             .filter(|eff| *eff > 0);
         let slot = self.books_round_slot(missing_token).unwrap_or_else(|| {
             let fam = naked_family
-                .unwrap_or(self.config.round_duration_sec)
+                .unwrap_or(self.account_round_duration(account_id.as_str()))
                 .max(1);
             now_ms / (fam * 1000).max(1)
         });
@@ -519,7 +524,7 @@ impl Core {
             // live for its full hour even while the core runs 900s rounds.
             // A `0` family folds to the global grid — the pre-B1b value —
             // and the resolution just made is the lazy idempotent stamp.
-            let eff = self.order_eff_round_sec(&order);
+            let eff = self.order_eff_round_sec(order.account_id.as_str(), &order);
             let dur_ms = eff * 1000;
             let expires_at = (order.round_slot + 1) * dur_ms;
             self.ome.backfill_round_duration(id, eff);
