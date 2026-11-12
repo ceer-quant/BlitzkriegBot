@@ -187,12 +187,12 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
   <p class="bb-eyebrow">Numbers</p>
   <h2 class="bb-h2">Built Fast. Built Real.</h2>
   <div class="bb-stats">
-    <div class="bb-stat"><b data-count="783">783</b><span>Commits</span></div>
-    <div class="bb-stat"><b data-count="710">710</b><span>Pull Requests</span></div>
+    <RepoStat kind="changes" label="Commits" />
+    <RepoStat kind="pullRequests" label="Pull Requests" />
     <div class="bb-stat"><b data-count="100" data-suffix="%">100%</b><span>Rust Core</span></div>
     <div class="bb-stat"><b data-count="4">4</b><span>已接入市场</span></div>
   </div>
-  <p class="bb-note">Dry → Simulation → Live，同一条链路。</p>
+  <p class="bb-note">Commits 与 Pull Requests 是上一稳定版到最新 Release 的数量，和顶栏公告同一份数据。读不到发布记录时这两格不显示。Dry → Simulation → Live，同一条链路。</p>
 </section>
 
 <section class="bb-sec" id="roadmap">
