@@ -41,30 +41,6 @@ export function useRoundDuration() {
     () => pending.value !== null && pending.value !== doc.value?.nextSessionSec,
   )
   const flagLocked = computed(() => doc.value?.source === 'cli_or_env')
-  const sourceLabel = computed(() => {
-    switch (doc.value?.source) {
-      case 'cli_or_env': return '命令行/环境变量'
-      case 'runtime': return '面板设置'
-      case 'toml': return '配置文件'
-      case 'env': return '环境变量'
-      default: return '出厂默认'
-    }
-  })
-
-  // ── 配置真相 vs 执行真相（issue 1139）──────────────────────────────
-  // wire 的 effective_sec 等于启动解析出的默认网格 = 配置真相（source 字段如实
-  // 说明来源：cli/env/runtime/toml/default）。default 账户的执行真相取 per-account
-  // 覆盖（round_duration.set 立即写入 .env + 内存，立即生效），缺省回落到
-  // 配置网格。二者分裂时卡面必须红条告警，不静默。
-  const configSec = computed(() => doc.value?.effectiveSec ?? null)
-  const execSec = computed(() => {
-    const pa = doc.value?.perAccount?.['default']
-    return pa !== undefined ? pa : doc.value?.effectiveSec ?? null
-  })
-  const split = computed(() =>
-    configSec.value !== null && execSec.value !== null && configSec.value !== execSec.value,
-  )
-
   /** 5m/15m/1h/4h/daily，非标档位回落「Xs」。 */
   const roundLabel = (sec: number | null): string => {
     if (sec === null) return '—'
@@ -137,5 +113,5 @@ export function useRoundDuration() {
 
   onMounted(load)
 
-  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, sourceLabel, configSec, execSec, split, roundLabel, load, save, reset }
+  return { doc, err, msg, busy, pending, segments, value, dirty, flagLocked, roundLabel, load, save, reset }
 }

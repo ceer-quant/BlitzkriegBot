@@ -6,12 +6,11 @@
  * 提示音、行情快速轮询）。
  */
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, Timer, RotateCcw, FileKey } from 'lucide-vue-next'
+import { Copy, Check, KeyRound, RefreshCw, ShieldCheck, ShieldAlert, ShieldQuestion, LogOut, Info, SlidersHorizontal, RotateCcw, FileKey } from 'lucide-vue-next'
 import { getToken, loginAt, logout, ping, probeSession, api } from '@/api/client'
-import type { Position, ResetTradingResultDoc } from '@/api/client'
+import type { ResetTradingResultDoc } from '@/api/client'
 import { adjudicateSession } from '@/lib/session'
 import { dateTime } from '@/lib/format'
-import { useRoundDuration } from '@/lib/round-duration'
 import { useSettingsStore } from '@/stores/settings'
 import { usePanelStore } from '@/stores/panel'
 import { useTheme, type ThemeMode } from '@/lib/theme'
@@ -127,55 +126,7 @@ const themeValue = computed<ThemeMode>({
   set: (v) => setTheme(v as ThemeMode),
 })
 
-// ── 轮次时间周期（next_session：轮次网格是坐标系，热切会错解存量 round_slot）──
-// 2026-10-24 操作者指令：切换入口主阵地挪到行情页倒计时卡（盯盘时切周期
-// 不离开语境）；本卡保留为同一 composable 的第二卡面 —— 共享一份读数与
-// 写路径（lib/round-duration.ts），语义零改动。
-const {
-  doc: roundDoc, err: roundErr, msg: roundMsg, busy: roundBusy,
-  segments: roundSegments, value: roundValue, dirty: roundDirty,
-  flagLocked: roundFlagLocked, execSec: roundExecSec,
-  configSec: roundConfigSec, split: roundSplit, roundLabel,
-  save: saveRound, reset: resetRound,
-} = useRoundDuration()
-
-// 本单（「立即结束当前轮」）：有在途仓位时必弹确认框（N 仓位 + 滑点警告），
-// 无仓位直接切；flagLocked（启动参数在管）时整条路径禁用。
-const roundConfirmOpen = ref(false)
-const roundConfirmN = ref(0)
-const roundConfirmSec = ref(0)
-const roundImmediate = ref(false)
-
-async function doSave(): Promise<void> {
-  if (!roundImmediate.value) {
-    await saveRound('default')
-    return
-  }
-  // 立即切换：先查在途仓位，有则必弹确认框，不静默；无仓位则直接切。
-  try {
-    const snap = await api.snapshot()
-    const n = (snap.positions ?? []).filter(
-      (p: Position) => (p.accountId ?? 'default') === 'default' && (p.shares ?? 0) > 0,
-    ).length
-    if (n > 0) {
-      roundConfirmN.value = n
-      roundConfirmSec.value = Number(roundValue.value)
-      roundConfirmOpen.value = true
-      return
-    }
-  } catch (e) {
-    roundErr.value = e instanceof Error ? e.message : String(e)
-    return
-  }
-  await saveRound('default', { immediate: true })
-}
-
-async function doSaveImmediate(): Promise<void> {
-  roundConfirmOpen.value = false
-  await saveRound('default', { immediate: true })
-}
-
-// ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
+	// ── 交易环境重置（issue 458：确认词门；内核三道门 + manual-ops 审计）────────────
 // issue 561（裁决 2）：重置按账户隔离 —— 显式携带面板 display 账户（唯一可
 // 信源），重置只清洗该账户的账簿/挂单/持仓/记录，其他账户分文不动。
 const resetOpen = ref(false)
@@ -280,84 +231,6 @@ async function doResetTrading(): Promise<void> {
       <AlertBanner v-if="envReloadMsg" class="mt-3" tone="info">{{ envReloadMsg }}</AlertBanner>
     </Card>
 
-    <!-- ── 轮次时间周期（next_session）────────────────────────────────── -->
-    <Card class="mt-3.5">
-    <CardHeader label="轮次时间周期（本会话）">
-      <template #title>
-        <Timer class="size-4 text-faint-fg" />
-      </template>
-    </CardHeader>
-
-      <AlertBanner v-if="!roundDoc && !roundErr" class="mb-3" tone="info">正在读取轮次周期…</AlertBanner>
-      <AlertBanner v-else-if="!roundDoc" class="mb-3" tone="warn">
-        读不到轮次周期读数（{{ roundErr ?? '内核离线或版本过旧' }}）。这个内核可能不认识 round_duration.get。
-      </AlertBanner>
-
-      <template v-else>
-        <!-- 单一真相源：本会话执行值（per-account 覆盖优先，缺省回落 default 网格）+
-             下一轮值。配置/执行“双真相”行与分裂红条已收敛（issue 1151）：卡面只展示
-             执行真相，分裂告警能力保留于内核门禁，不在卡面常态重复。 -->
-        <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
-          <div class="min-w-0 sm:min-w-auto">
-            <SegmentedControl
-              v-model="roundValue"
-              :segments="roundSegments"
-              size="sm"
-              :disabled="roundBusy || roundFlagLocked"
-              class="w-full sm:w-auto"
-            />
-          </div>
-        </div>
-
-        <div class="mt-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0 rounded-md border border-line bg-panel-2 px-3 py-2">
-          <div class="flex min-w-0 flex-1 items-start gap-2 text-[11.5px] leading-snug text-muted-fg">
-            <Info class="mt-px size-3.5 shrink-0 text-faint-fg" />
-            <span>
-              本会话按 <span class="font-medium">{{ roundExecSec }}</span>s 运行；
-              <span v-if="roundDirty">下一轮起按 <span class="font-medium">{{ roundValue }}</span>s</span>
-              <span v-else>下一轮起按 <span class="font-medium">{{ roundExecSec }}</span>s</span>。
-              在途轮保持出生网格结算。
-              <span v-if="roundFlagLocked" class="block mt-0.5 text-[11px] text-faint-fg">
-                当前轮次由启动参数（--round-sec / BK_ROUND_SEC）显式指定，面板写入不会覆盖；去掉该启动参数后重启即生效。
-              </span>
-            </span>
-          </div>
-          <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
-            <Switch
-              v-model="roundImmediate"
-              :disabled="roundBusy || roundFlagLocked || !roundDirty"
-              label="立即结束当前轮（市价平掉在途仓位）"
-            />
-            <Button
-              variant="ghost"
-              size="sm"
-              :disabled="roundBusy || roundDoc.perAccount?.['default'] === undefined"
-              title="清除面板设置，本会话回落到启动参数解析"
-              @click="resetRound('default')"
-            >
-              <RefreshCw class="size-3.5" />清除
-            </Button>
-            <Button
-              size="sm"
-              :disabled="roundBusy || !roundDirty"
-              title="把选中的轮次周期写入持久格；开启「立即结束当前轮」时会先平掉在途仓位再切网格"
-              @click="doSave"
-            >
-              <Check class="size-3.5" />保存
-            </Button>
-          </div>
-        </div>
-
-        <!-- 分裂告警能力保留（红条一级）：default 账户配置网格 ≠ 执行网格时红条，
-             不静默。配置/执行并列的“常态显示”已收敛，此处只在真分裂时出现（issue 1151）。 -->
-        <AlertBanner v-if="roundSplit" class="mt-3" tone="error">
-          轮次配置与执行分裂：配置 {{ roundLabel(roundConfigSec) }} / 实际 {{ roundLabel(roundExecSec) }}
-          —— 不静默。default 账户 per-account 覆盖与市场声明族不一致；在途轮保持原网格结算。
-        </AlertBanner>
-        <AlertBanner v-if="roundErr" class="mt-3" tone="warn">{{ roundErr }}</AlertBanner>
-        <AlertBanner v-if="roundMsg" class="mt-3" tone="info">{{ roundMsg }}</AlertBanner>
-      </template>
-    </Card>
 
     <!-- ── 交易环境重置（issue 458）──────────────────────────────────────────── -->
     <Card class="mt-3.5">
@@ -402,20 +275,6 @@ async function doResetTrading(): Promise<void> {
       @confirm="doResetTrading"
     />
 
-    <!-- 本单：立即切换轮次的确认框——有在途仓位时必弹，N 仓位 + 滑点警告。 -->
-    <ConfirmWordDialog
-      v-model:open="roundConfirmOpen"
-      word="YES"
-      title="立即切换轮次"
-      :lines="[
-        `将立即平掉 ${roundConfirmN} 个在途仓位，并按 ${roundLabel(roundConfirmSec)}s 开新轮，`,
-        '强平按市价成交，可能产生滑点损失；已成交部分如实入账，不静默。',
-      ]"
-      action-label="确认立即切换"
-      :busy="roundBusy"
-      :error="roundErr"
-      @confirm="doSaveImmediate"
-    />
 
     <!-- ── 外观与节奏 ──────────────────────────────────────────────────── -->
     <Card class="mt-3.5">
