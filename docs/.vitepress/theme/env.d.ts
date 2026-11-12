@@ -2,8 +2,11 @@ declare const __BB_RELEASE__: {
   version: string
   tag: string
   url: string
-  /** Commits since the previous stable release. Shared with the home counters. */
+  /** Commits since the previous stable release. Banner only. */
   changes: number | null
-  /** Merged PRs in that same release window. */
-  pullRequests: number | null
 } | null
+
+declare const __BB_REPO_COUNTS__: {
+  commits: number | null
+  pullRequests: number | null
+}

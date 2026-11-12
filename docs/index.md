@@ -200,12 +200,12 @@ description: 独立交易者的 TradingOS —— Market-Agnostic Core、Risk-Fir
   <p class="bb-eyebrow">Numbers</p>
   <h2 class="bb-h2">Built Fast. Built Real.</h2>
   <div class="bb-stats">
-    <RepoStat kind="changes" label="Commits" />
+    <RepoStat kind="commits" label="Commits" />
     <RepoStat kind="pullRequests" label="Pull Requests" />
     <div class="bb-stat"><b data-count="100" data-suffix="%">100%</b><span>Rust Core</span></div>
     <div class="bb-stat"><b data-count="4">4</b><span>已接入市场</span></div>
   </div>
-  <p class="bb-note">Commits 与 Pull Requests 是上一稳定版到最新 Release 的数量，和顶栏公告同一份数据。读不到发布记录时这两格不显示。Dry → Simulation → Live，同一条链路。</p>
+  <p class="bb-note">Commits 是 main 上的全部提交，Pull Requests 是仓库里已合并的全部 PR。构建时从 GitHub 读取，读不到就不显示。Dry → Simulation → Live，同一条链路。</p>
 </section>
 
 <section class="bb-sec" id="roadmap">

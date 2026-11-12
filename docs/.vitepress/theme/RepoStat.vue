@@ -1,15 +1,15 @@
 <script setup lang="ts">
 defineProps<{
-  kind: 'changes' | 'pullRequests'
+  kind: 'commits' | 'pullRequests'
   label: string
 }>()
 
-const release = __BB_RELEASE__
+const counts = __BB_REPO_COUNTS__
 </script>
 
 <template>
-  <div v-if="release && release[kind] != null" class="bb-stat">
-    <b :data-count="release[kind]">{{ Number(release[kind]).toLocaleString('en-US') }}</b>
+  <div v-if="counts && counts[kind] != null" class="bb-stat">
+    <b :data-count="counts[kind]">{{ Number(counts[kind]).toLocaleString('en-US') }}</b>
     <span>{{ label }}</span>
   </div>
 </template>
