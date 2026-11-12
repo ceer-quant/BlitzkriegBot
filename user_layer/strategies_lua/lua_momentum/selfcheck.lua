@@ -202,8 +202,8 @@ end
 
 -- ── #1130 轮首禁入窗：entry_open_after_pct ──────────────────────────────────
 
--- 入场后前 entry_open_after_pct% 时间不开新仓（fail-closed，duration 用
--- round_duration_cache 动态种子，读不到时拒新入场）。只挡新开仓，不动
+-- 入场后前 entry_open_after_pct% 时间不开新仓（fail-open，duration 用
+-- round_duration_cache 动态种子，读不到时不拒）。只挡新开仓，不动
 -- 已持仓退出。
 do
   reset()
@@ -236,6 +236,41 @@ do
   feed("down-1", 0.45, 4000)
   local r = evaluate()
   ok(#r.entries == 1, "time_left=100 在轮首窗外：entry offered, got " .. #r.entries)
+end
+
+-- 300 秒种子：entry_open_after_pct=20%，duration=300，elapsed 阈值 60s。
+-- time_left > 240s（elapsed < 60s）：拒；time_left <= 240s：允许。
+do
+  reset()
+  state.params = { ["stop_loss_pct"] = "0", take_profit_pct = "0",
+                   trail_arm_pct = "0", trail_giveback_pct = "0",
+                   max_entry_price = "0", min_time_left_for_entry = "0" }
+  state.time_left = 300
+  hold("down-1", "0.28")
+  quote("down-1", "0.42", "0.43")
+  evaluate() -- 种 round_duration_cache = 300
+  state.holdings = {}
+
+  -- 轮头 elapsed=0 < 60s：拒
+  state.time_left = 300
+  feed("down-1", 0.50, 0)
+  feed("down-1", 0.45, 1000)
+  local r = evaluate()
+  ok(#r.entries == 0, "300s 轮头 elapsed=0 < 60s：拒新入场，got " .. #r.entries)
+
+  -- elapsed=60s 边界：不拒
+  state.time_left = 240
+  feed("down-1", 0.50, 0) -- 重置基准
+  feed("down-1", 0.45, 2000)
+  local r = evaluate()
+  ok(#r.entries == 1, "300s elapsed=60s 边界：entry offered, got " .. #r.entries)
+
+  -- 深轮尾 time_left=100（elapsed=200s > 60s）：允许
+  state.time_left = 100
+  feed("down-1", 0.50, 0) -- 重置基准
+  feed("down-1", 0.45, 4000)
+  local r = evaluate()
+  ok(#r.entries == 1, "300s time_left=100 在轮首窗外：entry offered, got " .. #r.entries)
 end
 
 -- ── helper functions (used by self-check tests) ───────────────────────────
