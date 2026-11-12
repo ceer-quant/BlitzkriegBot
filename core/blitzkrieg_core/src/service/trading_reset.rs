@@ -707,15 +707,29 @@ impl Core {
                 ),
             ));
         }
+        let from = self.config.round_duration_sec;
+        // ponytail: moving `self.config.round_duration_sec` re-grids the live
+        // session immediately; in-transit wheels/orders keep their birth grid
+        // (red line — no re-slot, no PnL re-realization). The engine's Scanner
+        // is synced via set_scanner_round_duration so timing gates and expiry
+        // math agree on the same grid — only new slot computations see the
+        // new duration, stored round_slot values on in-flight positions are
+        // untouched.
+        self.config.round_duration_sec = sec;
+        // Sync the engine's live Scanner so timing gates and expiry math use
+        // the same grid. Infallible — in-memory only.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_scanner_round_duration(sec);
+        }
         persist(Some(sec))?;
         tracing::info!(
             target: "risk",
             actor = %actor,
-            from = self.config.round_duration_sec,
+            from,
             to = sec,
-            current_session_unchanged = true,
+            current_session_sec = sec,
             reason = patch.reason.as_deref().unwrap_or(""),
-            "round duration set to {sec}s — next session ({ROUND_DURATION_SET_NOTE})"
+            "round duration set to {sec}s — live this session, persisted ({ROUND_DURATION_SET_NOTE})"
         );
         Ok(RoundDurationUpdate {
             next_session_sec: sec,

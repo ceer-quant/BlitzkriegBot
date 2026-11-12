@@ -264,10 +264,10 @@ async function doResetTrading(): Promise<void> {
       <template v-else>
         <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
           <div class="min-w-0 sm:min-w-auto">
-            <div class="text-[12.5px] font-semibold">下次会话的全局轮长</div>
+            <div class="text-[12.5px] font-semibold">当前全局轮长</div>
             <p class="mt-0.5 text-[11px] text-faint-fg">
               这是复盘坐标系与未配置账户的回落，不是各账户的交易周期 —— 账户各跑各的周期族在账户卡配置（热生效）。
-              本格改动影响历史回测的 round_slot 索引，重启后生效。
+              改动立即作用于本会话；在途轮保持原网格结算。
             </p>
           </div>
           <SegmentedControl
@@ -286,10 +286,10 @@ async function doResetTrading(): Promise<void> {
               当前轮次由启动参数（--round-sec 或 BK_ROUND_SEC 环境变量）显式指定。面板写入仍会保存，但显式参数优先 —— 想让面板设置生效，请去掉该启动参数后重启。
             </span>
             <span v-else-if="roundDoc.persisted">
-              已有面板设置：下次会话按 {{ roundDoc.nextSessionSec }}s 运行。清除后回落到启动参数解析。
+              已有面板设置：本会话按 {{ roundDoc.nextSessionSec }}s 运行。清除后回落到启动参数解析。
             </span>
             <span v-else>
-              尚无面板设置：下次会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
+              尚未面板设置：本会话按 {{ roundSourceLabel }}的 {{ roundDoc.effectiveSec }}s 运行。
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
@@ -297,7 +297,7 @@ async function doResetTrading(): Promise<void> {
               variant="ghost"
               size="sm"
               :disabled="roundBusy || !roundDoc.persisted"
-              title="清除面板设置，下次会话回落到启动参数解析"
+              title="清除面板设置，本会话回落到启动参数解析"
               @click="resetRound"
             >
               <RefreshCw class="size-3.5" />清除
@@ -305,7 +305,7 @@ async function doResetTrading(): Promise<void> {
             <Button
               size="sm"
               :disabled="roundBusy || !roundDirty"
-              title="把选中的轮次周期写入持久格（重启内核后生效）"
+              title="把选中的轮次周期写入持久格（立即生效，无需重启）"
               @click="saveRound"
             >
               <Check class="size-3.5" />保存

@@ -1345,7 +1345,8 @@ pub struct SetRoundDurationParams {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundDurationUpdate {
-    /// What the next session will run on after this write.
+    /// The effective round length this session runs on immediately (the grid
+    /// moves in-session), and what the next session will run on too.
     pub next_session_sec: i64,
     /// `reset` clears the cell (falls back to boot resolution) instead of
     /// writing a value.
@@ -1358,9 +1359,10 @@ pub struct RoundDurationUpdate {
 }
 
 /// [`RoundDurationUpdate::note`] — one spelling, used by the reply and the log.
-pub const ROUND_DURATION_SET_NOTE: &str = "next session: the round grid is a coordinate system (round_slot is a UTC \
-     grid index) and live positions/orders were slotted under the old length; \
-     an explicit --round-sec flag still outranks this setting";
+pub const ROUND_DURATION_SET_NOTE: &str = "effective now: the running session's wheels run on the new grid immediately \
+     (new wheels on the new grid; in-transit wheels keep their birth grid — not re-slotted), \
+     and the value persists for the next session; an explicit --round-sec / BK_ROUND_SEC \
+     still outranks this setting at boot";
 
 // ── ④ 统一映射：unified.candidates / unified.confirm / unified.revoke ─────
 

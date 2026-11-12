@@ -83,10 +83,12 @@ try {
   check('the audit trail names the actor',
     typeof set.actor === 'string' && set.actor.startsWith('uid:'), JSON.stringify(set));
 
-  // 2. The running grid does not move (next-session semantics).
+  // 2. The write takes effect immediately in the running session
+  //    (live semantics, #1129 P0 C1). In-transit rounds keep their birth
+  //    grid; the running grid itself moves now.
   const mid = await core.request('round_duration.get', {});
-  check('the running session keeps its effective value after a write',
-    mid.effectiveSec === 900 && mid.nextSessionSec === 300 && mid.persisted === true,
+  check('the write takes effect in the running session immediately',
+    mid.effectiveSec === 300 && mid.nextSessionSec === 300 && mid.persisted === true,
     JSON.stringify(mid));
 
   // 5. A value outside the plugins' declared union is refused and the cell
@@ -101,7 +103,7 @@ try {
     refused?.message?.includes('not declared by any market plugin'), JSON.stringify(refused));
   const afterBad = await core.request('round_duration.get', {});
   check('a refused write leaves the cell exactly as it was',
-    afterBad.nextSessionSec === 300 && afterBad.effectiveSec === 900, JSON.stringify(afterBad));
+    afterBad.nextSessionSec === 300 && afterBad.effectiveSec === 300, JSON.stringify(afterBad));
 
   // 7 (ambiguity guard): durationSec + reset together is refused.
   let both = null;

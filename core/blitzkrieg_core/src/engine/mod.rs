@@ -914,6 +914,24 @@ impl Engine {
         self.scanner.round_timing_legacy_at(dur, now_ms)
     }
 
+    /// Sync the live Scanner's round duration with a new value — used by
+    /// `round_duration.set` so the engine's timing gates and Core's expiry
+    /// math agree on the same grid mid-session. Both `EngineConfig.scanner`
+    /// (read by `table_round_timing` / `family_round_timing`) and the live
+    /// `Scanner` (read by `round_timing` / hot-path slot math) are updated.
+    /// In-transit positions keep their stored `round_slot` (birth grid) —
+    /// only new slot computations see the new duration, so no in-flight
+    /// position is re-slotted and no realized PnL is re-computed.
+    pub fn set_scanner_round_duration(&mut self, sec: i64) {
+        self.cfg.scanner.round_duration_sec = sec;
+        self.scanner.set_config(ScannerConfig {
+            round_duration_sec: sec,
+            assets: self.cfg.scanner.assets.clone(),
+            min_round_age_sec: self.cfg.scanner.min_round_age_sec,
+            min_time_left_sec: self.cfg.scanner.min_time_left_sec,
+        });
+    }
+
     /// E3: the round clock of the TABLE's resolved family — every row
     /// through `row_family_duration` must agree (true for every single-family
     /// table: the replay corpora, and the per-family boot instances B1d
