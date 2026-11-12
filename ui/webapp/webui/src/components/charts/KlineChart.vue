@@ -38,6 +38,9 @@ const bars = ref<KlineBar[]>([])
 const loaded = ref(false)
 const failed = ref<string | null>(null)
 
+// ── 快轮：fastPoll 開時 2s 刷新，關閉時 15s 刷新（與盤口節奏一致）
+const pollInterval = computed(() => (settings.fastPoll ? 2_000 : 15_000))
+
 /**
  * issue 781：请求序号 + 请求时刻的身份捕获。切换账户/venue/symbol 后，
  * 旧请求的在途响应绝不允许覆盖新数据 —— 一个响应只有在「序号仍是最新」
@@ -103,12 +106,10 @@ watch(
   { immediate: true },
 )
 
-// 2s poll, same pacing as the HFT tab's snapshot tick (see HftPage) — and the
-// same persisted preference gates it: fastPoll off means the operator asked
-// for watch-only, so the chart holds its last bars instead of polling.
+// 2s poll（fastPoll 開）或 15s poll（fastPoll 關），與盤口節奏保持一致
 const { pause: stopPoll } = useIntervalFn(() => {
-  if (settings.fastPoll) void refresh()
-}, 2_000)
+  void refresh()
+}, pollInterval)
 onUnmounted(() => { stopPoll() })
 
 /** Sub-minute and 1m bars read as clock time; wider spans need the date. */
