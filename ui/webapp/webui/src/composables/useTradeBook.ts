@@ -15,20 +15,26 @@ export function useTradeBook(
   visibleBooks: ComputedRef<AssetBook[]>,
 ) {
   const depthAsset = ref('')
+  // 上一帧非空的 visibleBooks：轮次翻牌/venue 切换时 visibleBooks 可能有一拍为空，
+  // 缓存让选中态与 K 线就绪态跨这一拍稳住，避免 KlineCard 卸载闪烁（issue 1149）。
+  const lastBooks = ref<AssetBook[]>([])
   // 资产选择跟随 venue 过滤后的可见行：旧所的资产不会成为新所页面的选中项
   // （切换账户清空旧所行时，选中资产随 visibleBooks 重置到新所首行）。
+  // visibleBooks 为空时不清空 depthAsset，保留选中态跨空拍。
   watch(visibleBooks, (b) => {
-    if (!b.length) {
-      depthAsset.value = ''
-      return
-    }
+    if (!b.length) return
+    lastBooks.value = b
     if (!b.some((x) => x.asset === depthAsset.value)) depthAsset.value = b[0].asset
   }, { immediate: true })
 
   /** UP or DOWN token of the selected asset — the two halves of the round. */
   const depthToken = ref<'up' | 'down'>('up')
 
-  const activeBook = computed(() => visibleBooks.value.find((b) => b.asset === depthAsset.value) ?? null)
+  const activeBook = computed(() =>
+    visibleBooks.value.find((b) => b.asset === depthAsset.value) ??
+    lastBooks.value.find((b) => b.asset === depthAsset.value) ??
+    null,
+  )
   // ── K线 (E29, kline.history) ───────────────────────────────────────────────
   /**
    * The aggregator keys prediction-token bars by TOKEN id (what `feed_klines`
