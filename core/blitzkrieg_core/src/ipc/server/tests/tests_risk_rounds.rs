@@ -1265,7 +1265,9 @@ async fn the_soft_unload_gate_admits_the_overridden_familys_batches() {
         question: "override family".to_string(),
     };
     assert!(
-        data_plane.admit_poll_batch(&core, std::slice::from_ref(&batch)).await,
+        data_plane
+            .admit_poll_batch(&core, std::slice::from_ref(&batch))
+            .await,
         "the override family is ACTIVE — its batches must reach the engine"
     );
     assert_eq!(data_plane.soft_unloaded_count(), 0);
