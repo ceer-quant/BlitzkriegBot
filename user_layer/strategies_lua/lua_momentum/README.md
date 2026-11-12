@@ -5,8 +5,14 @@
 > 2026-11-05 through 2026-11-12, official 0/1 outcomes, taker fee
 > `shares * 0.07 * p * (1-p)`, one-cent spread, no same-round re-entry)
 > did not reach win rate ≥ 80% and profit factor ≥ 1.2 on the held-out
-> window. Defaults were not retuned. Full table:
-> `docs/reports/lua-momentum-oos-2026-11-12.md`.
+> window. A later window that study had not touched (2026-10-12 through
+> 2026-10-26) says the same thing, and the maker rule there is about a 26%
+> win rate and a 0.34 profit factor, not ~75% / >1.1. The closest taker
+> test (buy an ask of 0.80–0.90 in the last 45–120 seconds, then hold) was
+> 87.7% and 1.18 out of sample, short of 1.2, so it was not adopted.
+> Defaults were not retuned. Tables:
+> `docs/reports/lua-momentum-oos-2026-11-12.md`,
+> `docs/reports/lua-momentum-oos-2026-10.md`.
 > The v2-corpus census after the #419 locked-top fix still stands for the
 > old both-legs taker shape: **20,038 closed / net −$17,575.78 / PF 0.43**
 > (`docs/reports/evolution/RETEST-2026-10-10.md` §4).
