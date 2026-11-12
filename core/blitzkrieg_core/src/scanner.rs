@@ -155,11 +155,9 @@ pub struct Scanner {
     /// venue's clock property, not a family's: the same venue's wall clock
     /// serves every round duration it lists.
     clock_offset_ms: HashMap<String, i64>,
-    /// #1157 log dedupe: `(token, active grid)` pairs already announced at
-    /// INFO. `can_trade_reason_for` is `&self` and runs every tick per market,
-    /// so the set sits behind a mutex (the scanner stays `Sync`; a `RefCell`
-    /// would not). The first sight of a pair is the operator evidence line;
-    /// repeats are debug. The refusal itself does not consult this set.
+    /// #1157: `(token, active grid)` pairs already logged at INFO. The guard is
+    /// `&self` (every tick), so the set is interior mutability. Repeats are
+    /// debug; the refusal does not read this set.
     off_grid_refusal_logged: std::sync::Mutex<HashSet<(String, i64)>>,
 }
 
@@ -497,12 +495,8 @@ impl Scanner {
         // settlement timing (`family_duration` above feeds `round_timing_for`),
         // but it no longer governs which round a market may be traded in.
         if self.grid_override && family_duration != self.cfg.round_duration_sec {
-            // #1157 evidence, once per (token, active grid). The guard runs on
-            // every tick for every off-grid market (a 5m grid against a 15m
-            // SOL row used to print this INFO on each evaluation and flood the
-            // terminal). The refusal stands either way; only the level changes.
-            // The lock is dropped before the log so a subscriber cannot
-            // re-enter this mutex.
+            // #1157: INFO once per (token, active grid); repeats are debug.
+            // Drop the lock before logging so a subscriber cannot re-enter.
             let grid = self.cfg.round_duration_sec;
             let first = {
                 let mut seen = self
@@ -1343,10 +1337,8 @@ mod tests {
         );
     }
 
-    /// #1157: the off-grid refusal is still `NoMarkets` on every evaluation,
-    /// but the INFO evidence line is once per `(token, active grid)`. Repeats
-    /// are DEBUG. A different token, or the same token on a new active grid,
-    /// is a new evidence line; an on-grid row does not touch the set.
+    /// #1157: repeated evaluations of one `(token, grid)` emit INFO once
+    /// (further hits are DEBUG). A new token or grid logs again.
     #[test]
     fn off_grid_refusal_info_is_once_per_token_and_grid() {
         use tracing::Level;
@@ -1450,9 +1442,7 @@ mod tests {
         );
     }
 
-    /// Counts `target = "engine"` events whose message is the #1157 off-grid
-    /// refusal. Thread-local via `with_default`, so it does not touch the
-    /// process subscriber.
+    /// `target = "engine"` events for the #1157 line. Thread-local subscriber.
     #[derive(Clone)]
     struct OffGridLogCapture(Arc<Mutex<Vec<tracing::Level>>>);
 
