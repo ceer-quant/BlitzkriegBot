@@ -5,8 +5,9 @@
  *
  * The panel has no WebSocket: the whole data channel is poll-redraw-poll on
  * the same 2s tick the HFT tab uses for snapshots, honouring the same
- * persisted fastPoll preference (off = watch-only, chart freezes on its last
- * bars rather than lying about liveness). The LAST bar is the GROWING one
+ * persisted fastPoll preference (on = 2 s, off = 15 s at the orderbook's pace);
+ * the chart keeps ticking on either setting instead of lying about liveness.
+ * The LAST bar is the GROWING one
  * (`isClosed: false`) — it is drawn semi-transparent so "still forming" reads
  * at a glance; closed bars never change under it (§10.3: data-driven close,
  * one bar one event, never throttled).
