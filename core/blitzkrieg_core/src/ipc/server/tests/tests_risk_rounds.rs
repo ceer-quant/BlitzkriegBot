@@ -1041,8 +1041,25 @@ async fn risk_set_limits_refuses_a_forbidden_field_and_applies_nothing() {
 /// 挂载；reset 落回 boot 全局族同样零新挂载。挂载收到的 config 必须
 /// 是 boot 快照（assets 不是零）—— kalshi 按 (asset, round_duration_sec)
 /// 选 series，零配置永远发现不了任何东西（#535 的形状）。
+///
+/// 并行安全（CI rust-check 的教训）：`VENUE_LIVE_DISCOVERY_CFG` 是进程级
+/// 静态，挂载测试们并行运行——本用例的计数窗口曾被别的用例的挂载插入
+/// （本地绿 CI 红的调度差），且 assert 时的持锁 panic 毒化了静态互斥、
+/// 级联放倒三个无辜测试。修法：本用例的插件/发现 tag 用进程内唯一名，
+/// 所有计数按该 tag 过滤——并行插入的条目带别的 tag，天然不可见；锁卫
+/// 全部 `into_inner` 去毒，计数先绑定后断言，panic 不持锁。
 #[tokio::test]
 async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
+    // Unique in-process: every cfg entry THIS test produces carries it, and
+    // no parallel test can append an entry with it (their plugins use their
+    // own tags) — the counting below is interference-free by construction.
+    let tag = "venuelive-mount-idem";
+    let cfg_of_tag = |v: &Vec<(String, blitzkrieg_market_api::DiscoveryConfig)>| {
+        v.iter()
+            .filter(|(t, _)| t == tag)
+            .map(|(_, cfg)| cfg.clone())
+            .collect::<Vec<_>>()
+    };
     let dir = std::env::temp_dir().join(format!("bk-round-dur-mount-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1079,9 +1096,9 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
         };
         let registry = crate::market::registry::MarketPluginRegistry::new();
         registry.register(Box::new(VenueLivePlugin {
-            name: "venuelive".to_string(),
+            name: tag.to_string(),
             discovery: VenueLiveDiscovery {
-                tag: "venuelive".to_string(),
+                tag: tag.to_string(),
             },
         }));
         (
@@ -1090,12 +1107,12 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
             PeerAuth::SameUid { uid: own_uid() },
         )
     };
-    // Boot shape: venuelive active on the GLOBAL family only — 300s has no
+    // Boot shape: the venue active on the GLOBAL family only — 300s has no
     // instance polling it, exactly the live incident's pre-state.
     let host: Arc<dyn blitzkrieg_market_api::MarketHost> =
         Arc::new(crate::market::host::CoreHost::new(core.clone()));
     let mut mounted = std::collections::BTreeSet::new();
-    mounted.insert(("venuelive".to_string(), 900));
+    mounted.insert((tag.to_string(), 900));
     let data_plane = DataPlaneRuntime {
         feed_ws_enabled: true,
         discovery_enabled: true,
@@ -1105,10 +1122,6 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
         soft_unloaded_polling_instances: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         feed_reuse: None,
     };
-    let starts_before = VENUE_LIVE_DISCOVERY_CFG
-        .lock()
-        .expect("venue live discovery cfg poisoned")
-        .len();
 
     // Override to the unmounted family: the write must mount it live.
     let set = rpc_with_data_plane(
@@ -1124,29 +1137,29 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
     assert!(set.get("error").is_none(), "the set must land: {set}");
     assert_eq!(set["result"]["nextSessionSec"], serde_json::json!(300));
     assert!(
-        data_plane.discovery_mounted_at("venuelive", 300),
+        data_plane.discovery_mounted_at(tag, 300),
         "the override family's discovery must be mounted: {:?}",
         data_plane
             .discovery_mounted
             .lock()
-            .expect("mounted set poisoned")
+            .unwrap_or_else(|p| p.into_inner())
     );
-    let starts = VENUE_LIVE_DISCOVERY_CFG
-        .lock()
-        .expect("venue live discovery cfg poisoned")[starts_before..]
-        .to_vec();
+    let starts = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
     assert_eq!(
         starts.len(),
         1,
-        "exactly one new discovery start: {starts:?}"
+        "exactly one discovery start for the unique tag: {starts:?}"
     );
-    assert_eq!(starts[0].0, "venuelive");
     assert_eq!(
-        starts[0].1.round_duration_sec, 300,
+        starts[0].round_duration_sec, 300,
         "the new instance polls the OVERRIDE family, not the global one"
     );
     assert_eq!(
-        starts[0].1.assets,
+        starts[0].assets,
         vec!["BTC".to_string()],
         "the mount hands the boot's asset set, never zeroes"
     );
@@ -1166,13 +1179,15 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
         again.get("error").is_none(),
         "the re-write must land: {again}"
     );
-    assert_eq!(
-        VENUE_LIVE_DISCOVERY_CFG
+    let after_rewrite = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
             .lock()
-            .expect("venue live discovery cfg poisoned")
-            .len(),
-        starts_before + 1,
-        "an already-mounted family must not restart"
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    assert_eq!(
+        after_rewrite.len(),
+        1,
+        "an already-mounted family must not restart: {after_rewrite:?}"
     );
 
     // Reset → back to the global family, mounted since boot: still no new
@@ -1188,13 +1203,15 @@ async fn round_duration_set_mounts_the_new_familys_discovery_at_runtime() {
     )
     .await;
     assert!(reset.get("error").is_none(), "the reset must land: {reset}");
-    assert_eq!(
-        VENUE_LIVE_DISCOVERY_CFG
+    let after_reset = cfg_of_tag(
+        &VENUE_LIVE_DISCOVERY_CFG
             .lock()
-            .expect("venue live discovery cfg poisoned")
-            .len(),
-        starts_before + 1,
-        "the boot-mounted global family must not restart on reset"
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    assert_eq!(
+        after_reset.len(),
+        1,
+        "the boot-mounted global family must not restart on reset: {after_reset:?}"
     );
 }
 
