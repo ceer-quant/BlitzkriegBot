@@ -392,14 +392,25 @@ pub fn load_account_ledgers_single_source(
         }
         None => {
             // Issue 923: the toml fallback is REMOVED — env accounts only.
-            // No ACCOUNT_* keys anywhere is the zero-config deployment: the
-            // single default account. A residue file at the legacy path is
-            // still shouted at (same family as the env-wins branch) so an
-            // operator who still believes the toml rules the book learns it
-            // does not.
+            // No ACCOUNT_LIST in the env is the zero-config deployment: the
+            // single default account. But ACCOUNT_DEFAULT_STRATEGIES may still
+            // be set in .env (issue 967 env-only) — apply it to the default
+            // account so a boot with only ACCOUNT_DEFAULT_STRATEGIES="lua_momentum"
+            // actually runs that strategy, instead of registering it and leaving
+            // every scope OFF.
+            let mut book = AccountLedgers::single_default(now_ms);
+            let default_id = crate::account::default_account_id();
+            if let Some(strategies) = env("ACCOUNT_DEFAULT_STRATEGIES")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| env_list(Some(s)))
+                .filter(|s| !s.is_empty())
+                && let Some(a) = book.account_mut(&default_id)
+            {
+                a.strategies = strategies;
+            }
             if legacy_path.exists() {
                 tracing::warn!(
-                    "accounts: NO ACCOUNT_* keys found — booting the zero-config \
+                    "accounts: NO ACCOUNT_LIST found — booting the zero-config \
                      single-default book; the legacy {} is no longer a config \
                      source (the toml fallback was removed, issue 751 / issue \
                      923) and is IGNORED — run scripts/migrate-config-to-env.sh \
@@ -407,7 +418,7 @@ pub fn load_account_ledgers_single_source(
                     legacy_path.display()
                 );
             }
-            Ok(AccountLedgers::single_default(now_ms))
+            Ok(book)
         }
     }
 }
