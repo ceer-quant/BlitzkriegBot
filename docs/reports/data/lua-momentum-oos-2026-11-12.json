@@ -1,0 +1,3875 @@
+{
+  "question": "Can lua_momentum reach win rate >= 0.80 and profit factor >= 1.2 after taker fees, out of sample, with no same-round re-entry?",
+  "answer": "No. Defaults other than the threshold-unit fix were not changed.",
+  "windows": {
+    "in_sample": "2026-11-05 00:00:00Z <= slot < 2026-11-10 00:00:00Z",
+    "out_of_sample": "slot >= 2026-11-10 00:00:00Z, through the download on 2026-11-12",
+    "markets_in_sample": 7674,
+    "markets_out_of_sample": 4088,
+    "assets": [
+      "btc",
+      "eth",
+      "sol",
+      "xrp"
+    ],
+    "durations_sec": [
+      300,
+      900
+    ]
+  },
+  "execution": {
+    "shares": 10,
+    "entry": "maker at floor(mid - 0.005, 0.01); fill only when a later 60s mid trades at or below that bid; entry fee 0",
+    "exit_fee": "shares * 0.07 * p * (1-p) with p = the bid at the sell",
+    "settlement_fee": 0,
+    "reentry": "forbidden after a sell in the same condition and round",
+    "price_source": "https://data-api.polymarket.com/v2/prices-history bucket_seconds=60, treated as mid",
+    "settlement_source": "gamma outcomePrices in {0,1} must match the series terminal 0/1 point; mismatches and unresolved markets dropped",
+    "spread_basis": "median two-sided spread on the four checked-in L2 hours is $0.01 (n=97932)",
+    "dns_failures_dropped": 6
+  },
+  "selection": {
+    "rule": "On IS only, among configs with n>=150, maximize min(wr/0.80, min(pf,3)/1.20). A target hit also required robustness: >=2 assets with n>=30 and PF>=1, and both durations PF>=0.8 when each has n>=30. OOS was scored once, for baseline and the selected config.",
+    "selected": "down_band_20_40_tp25",
+    "reason": "best_raw_below_target_not_robust",
+    "selected_params": {
+      "threshold": 0.06,
+      "min_entry": 0.2,
+      "max_entry": 0.4,
+      "tp": 25,
+      "trail_arm": 0,
+      "trail_give": 15.0,
+      "sl_up": 0,
+      "sl_down": 0,
+      "min_time_left": 120,
+      "open_after": 20,
+      "cutoff": 60,
+      "legs": "down"
+    },
+    "shipped_behavior": "threshold comparison corrected from percent-points to a fraction so manifest default 0.04 means 4%. No other default changed. The selected config was not shipped: it loses money out of sample and failed the robustness rule."
+  },
+  "pre_fix_threshold_bug": {
+    "note": "Before this change, classify() computed a percent-point move and compared it with threshold 0.04, so a 0.04% move armed. On 60-second bars most moves already exceed 4%, so the bug and the 4% rule produce similar trade counts. On a tick book the bug arms on flicker.",
+    "effective_fraction": 0.0004,
+    "in_sample": {
+      "n": 4335,
+      "wr": 0.1698,
+      "pf": 0.2795,
+      "net": -6573.6758,
+      "max_dd": 6586.4145
+    },
+    "out_of_sample": {
+      "n": 2196,
+      "wr": 0.1562,
+      "pf": 0.2454,
+      "net": -3560.3132,
+      "max_dd": 3564.4764
+    }
+  },
+  "in_sample": [
+    {
+      "name": "baseline",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 711,
+        "losses": 3495,
+        "flats": 0,
+        "wr": 0.169,
+        "pf": 0.2815,
+        "net": -6327.9453,
+        "gross_win": 2479.8077,
+        "gross_loss": -8807.753,
+        "max_dd": 6341.184,
+        "reasons": {
+          "stop_loss": 2140,
+          "take_profit": 594,
+          "settlement": 1406,
+          "trailing_stop": 66
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 186,
+            "losses": 905,
+            "wr": 0.1705,
+            "pf": 0.2919,
+            "net": -1632.9613
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 190,
+            "losses": 881,
+            "wr": 0.1774,
+            "pf": 0.3014,
+            "net": -1521.1899
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 162,
+            "losses": 874,
+            "wr": 0.1564,
+            "pf": 0.2446,
+            "net": -1674.3341
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 173,
+            "losses": 835,
+            "wr": 0.1716,
+            "pf": 0.2886,
+            "net": -1499.46
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 303,
+            "losses": 1279,
+            "wr": 0.1915,
+            "pf": 0.2784,
+            "net": -1839.042
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 408,
+            "losses": 2216,
+            "wr": 0.1555,
+            "pf": 0.2828,
+            "net": -4488.9034
+          }
+        }
+      }
+    },
+    {
+      "name": "hold",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 0,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 796,
+        "losses": 3410,
+        "flats": 0,
+        "wr": 0.1893,
+        "pf": 0.4747,
+        "net": -5615.1,
+        "gross_win": 5073.9,
+        "gross_loss": -10689.0,
+        "max_dd": 5640.0,
+        "reasons": {
+          "settlement": 4206
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 208,
+            "losses": 883,
+            "wr": 0.1907,
+            "pf": 0.4625,
+            "net": -1511.5
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 197,
+            "losses": 874,
+            "wr": 0.1839,
+            "pf": 0.4718,
+            "net": -1426.8
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 184,
+            "losses": 852,
+            "wr": 0.1776,
+            "pf": 0.4384,
+            "net": -1494.1
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 207,
+            "losses": 801,
+            "wr": 0.2054,
+            "pf": 0.5298,
+            "net": -1182.7
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 395,
+            "losses": 1187,
+            "wr": 0.2497,
+            "pf": 0.6698,
+            "net": -1240.8
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 401,
+            "losses": 2223,
+            "wr": 0.1528,
+            "pf": 0.369,
+            "net": -4374.3
+          }
+        }
+      }
+    },
+    {
+      "name": "tp15_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 15,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 1191,
+        "losses": 3015,
+        "flats": 0,
+        "wr": 0.2832,
+        "pf": 0.3589,
+        "net": -6048.1577,
+        "gross_win": 3385.8423,
+        "gross_loss": -9434.0,
+        "max_dd": 6064.1387,
+        "reasons": {
+          "take_profit": 1058,
+          "settlement": 3148
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 311,
+            "losses": 780,
+            "wr": 0.2851,
+            "pf": 0.3524,
+            "net": -1611.208
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 313,
+            "losses": 758,
+            "wr": 0.2923,
+            "pf": 0.3892,
+            "net": -1420.4908
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 276,
+            "losses": 760,
+            "wr": 0.2664,
+            "pf": 0.3166,
+            "net": -1616.4323
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 291,
+            "losses": 717,
+            "wr": 0.2887,
+            "pf": 0.3792,
+            "net": -1400.0266
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 652,
+            "losses": 930,
+            "wr": 0.4121,
+            "pf": 0.4396,
+            "net": -1647.0615
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 539,
+            "losses": 2085,
+            "wr": 0.2054,
+            "pf": 0.3224,
+            "net": -4401.0962
+          }
+        }
+      }
+    },
+    {
+      "name": "tp20_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 20,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 1156,
+        "losses": 3050,
+        "flats": 0,
+        "wr": 0.2748,
+        "pf": 0.3642,
+        "net": -6081.6312,
+        "gross_win": 3483.3688,
+        "gross_loss": -9565.0,
+        "max_dd": 6097.6123,
+        "reasons": {
+          "take_profit": 1017,
+          "settlement": 3189
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 297,
+            "losses": 794,
+            "wr": 0.2722,
+            "pf": 0.3522,
+            "net": -1644.5363
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 302,
+            "losses": 769,
+            "wr": 0.282,
+            "pf": 0.3915,
+            "net": -1438.0618
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 272,
+            "losses": 764,
+            "wr": 0.2625,
+            "pf": 0.329,
+            "net": -1599.0277
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 285,
+            "losses": 723,
+            "wr": 0.2827,
+            "pf": 0.3859,
+            "net": -1400.0054
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 628,
+            "losses": 954,
+            "wr": 0.397,
+            "pf": 0.4424,
+            "net": -1689.4511
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 528,
+            "losses": 2096,
+            "wr": 0.2012,
+            "pf": 0.3279,
+            "net": -4392.1801
+          }
+        }
+      }
+    },
+    {
+      "name": "tp40_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 1057,
+        "losses": 3149,
+        "flats": 0,
+        "wr": 0.2513,
+        "pf": 0.3919,
+        "net": -6027.8709,
+        "gross_win": 3884.6291,
+        "gross_loss": -9912.5,
+        "max_dd": 6048.0527,
+        "reasons": {
+          "take_profit": 888,
+          "settlement": 3318
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 267,
+            "losses": 824,
+            "wr": 0.2447,
+            "pf": 0.3803,
+            "net": -1634.8851
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 278,
+            "losses": 793,
+            "wr": 0.2596,
+            "pf": 0.4127,
+            "net": -1439.5559
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 245,
+            "losses": 791,
+            "wr": 0.2365,
+            "pf": 0.3582,
+            "net": -1587.8698
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 267,
+            "losses": 741,
+            "wr": 0.2649,
+            "pf": 0.4187,
+            "net": -1365.5601
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 559,
+            "losses": 1023,
+            "wr": 0.3534,
+            "pf": 0.4978,
+            "net": -1642.5174
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 498,
+            "losses": 2126,
+            "wr": 0.1898,
+            "pf": 0.3398,
+            "net": -4385.3535
+          }
+        }
+      }
+    },
+    {
+      "name": "tp60_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 60,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 995,
+        "losses": 3211,
+        "flats": 0,
+        "wr": 0.2366,
+        "pf": 0.4171,
+        "net": -5893.3003,
+        "gross_win": 4217.6997,
+        "gross_loss": -10111.0,
+        "max_dd": 5921.7585,
+        "reasons": {
+          "take_profit": 794,
+          "settlement": 3412
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 257,
+            "losses": 834,
+            "wr": 0.2356,
+            "pf": 0.3978,
+            "net": -1609.0374
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 262,
+            "losses": 809,
+            "wr": 0.2446,
+            "pf": 0.4505,
+            "net": -1375.987
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 227,
+            "losses": 809,
+            "wr": 0.2191,
+            "pf": 0.382,
+            "net": -1566.1964
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 249,
+            "losses": 759,
+            "wr": 0.247,
+            "pf": 0.4411,
+            "net": -1342.0795
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 516,
+            "losses": 1066,
+            "wr": 0.3262,
+            "pf": 0.5425,
+            "net": -1556.7694
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 479,
+            "losses": 2145,
+            "wr": 0.1825,
+            "pf": 0.3535,
+            "net": -4336.5309
+          }
+        }
+      }
+    },
+    {
+      "name": "tp100_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 100,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 903,
+        "losses": 3303,
+        "flats": 0,
+        "wr": 0.2147,
+        "pf": 0.4482,
+        "net": -5744.2954,
+        "gross_win": 4666.5046,
+        "gross_loss": -10410.8,
+        "max_dd": 5777.932,
+        "reasons": {
+          "take_profit": 603,
+          "settlement": 3603
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 232,
+            "losses": 859,
+            "wr": 0.2126,
+            "pf": 0.4375,
+            "net": -1546.1893
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 230,
+            "losses": 841,
+            "wr": 0.2148,
+            "pf": 0.4631,
+            "net": -1403.1297
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 208,
+            "losses": 828,
+            "wr": 0.2008,
+            "pf": 0.4065,
+            "net": -1540.9299
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 233,
+            "losses": 775,
+            "wr": 0.2312,
+            "pf": 0.4886,
+            "net": -1254.0465
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 458,
+            "losses": 1124,
+            "wr": 0.2895,
+            "pf": 0.6093,
+            "net": -1402.6758
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 445,
+            "losses": 2179,
+            "wr": 0.1696,
+            "pf": 0.3635,
+            "net": -4341.6197
+          }
+        }
+      }
+    },
+    {
+      "name": "tp40_notrail",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 723,
+        "losses": 3483,
+        "flats": 0,
+        "wr": 0.1719,
+        "pf": 0.2887,
+        "net": -6302.8227,
+        "gross_win": 2558.7262,
+        "gross_loss": -8861.5489,
+        "max_dd": 6316.0614,
+        "reasons": {
+          "stop_loss": 2174,
+          "take_profit": 621,
+          "settlement": 1411
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 189,
+            "losses": 902,
+            "wr": 0.1732,
+            "pf": 0.3017,
+            "net": -1623.0011
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 194,
+            "losses": 877,
+            "wr": 0.1811,
+            "pf": 0.3109,
+            "net": -1509.5698
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 163,
+            "losses": 873,
+            "wr": 0.1573,
+            "pf": 0.2477,
+            "net": -1677.2787
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 177,
+            "losses": 831,
+            "wr": 0.1756,
+            "pf": 0.2949,
+            "net": -1492.973
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 314,
+            "losses": 1268,
+            "wr": 0.1985,
+            "pf": 0.3008,
+            "net": -1819.4682
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 409,
+            "losses": 2215,
+            "wr": 0.1559,
+            "pf": 0.2837,
+            "net": -4483.3545
+          }
+        }
+      }
+    },
+    {
+      "name": "down_only",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "down"
+      },
+      "metrics": {
+        "n": 2932,
+        "wins": 557,
+        "losses": 2375,
+        "flats": 0,
+        "wr": 0.19,
+        "pf": 0.3082,
+        "net": -4264.1533,
+        "gross_win": 1899.9926,
+        "gross_loss": -6164.1459,
+        "max_dd": 4269.942,
+        "reasons": {
+          "stop_loss": 1430,
+          "take_profit": 477,
+          "settlement": 976,
+          "trailing_stop": 49
+        },
+        "by_asset": {
+          "btc": {
+            "n": 766,
+            "wins": 141,
+            "losses": 625,
+            "wr": 0.1841,
+            "pf": 0.3139,
+            "net": -1114.178
+          },
+          "eth": {
+            "n": 771,
+            "wins": 150,
+            "losses": 621,
+            "wr": 0.1946,
+            "pf": 0.3232,
+            "net": -1086.6421
+          },
+          "sol": {
+            "n": 722,
+            "wins": 134,
+            "losses": 588,
+            "wr": 0.1856,
+            "pf": 0.274,
+            "net": -1108.6321
+          },
+          "xrp": {
+            "n": 673,
+            "wins": 132,
+            "losses": 541,
+            "wr": 0.1961,
+            "pf": 0.3218,
+            "net": -954.7013
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1008,
+            "wins": 244,
+            "losses": 764,
+            "wr": 0.2421,
+            "pf": 0.3489,
+            "net": -1119.9422
+          },
+          "5m": {
+            "n": 1924,
+            "wins": 313,
+            "losses": 1611,
+            "wr": 0.1627,
+            "pf": 0.2925,
+            "net": -3144.2111
+          }
+        }
+      }
+    },
+    {
+      "name": "up_only",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "up"
+      },
+      "metrics": {
+        "n": 1545,
+        "wins": 219,
+        "losses": 1326,
+        "flats": 0,
+        "wr": 0.1417,
+        "pf": 0.2343,
+        "net": -2574.4435,
+        "gross_win": 787.8516,
+        "gross_loss": -3362.2951,
+        "max_dd": 2586.7937,
+        "reasons": {
+          "stop_loss": 835,
+          "take_profit": 174,
+          "settlement": 514,
+          "trailing_stop": 22
+        },
+        "by_asset": {
+          "btc": {
+            "n": 390,
+            "wins": 56,
+            "losses": 334,
+            "wr": 0.1436,
+            "pf": 0.2349,
+            "net": -660.4479
+          },
+          "eth": {
+            "n": 366,
+            "wins": 57,
+            "losses": 309,
+            "wr": 0.1557,
+            "pf": 0.2601,
+            "net": -558.8572
+          },
+          "sol": {
+            "n": 388,
+            "wins": 53,
+            "losses": 335,
+            "wr": 0.1366,
+            "pf": 0.2368,
+            "net": -658.1211
+          },
+          "xrp": {
+            "n": 401,
+            "wins": 53,
+            "losses": 348,
+            "wr": 0.1322,
+            "pf": 0.2092,
+            "net": -697.0173
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 779,
+            "wins": 106,
+            "losses": 673,
+            "wr": 0.1361,
+            "pf": 0.1936,
+            "net": -1055.6399
+          },
+          "5m": {
+            "n": 766,
+            "wins": 113,
+            "losses": 653,
+            "wr": 0.1475,
+            "pf": 0.2603,
+            "net": -1518.8036
+          }
+        }
+      }
+    },
+    {
+      "name": "down_tp30_flat",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 30,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "down"
+      },
+      "metrics": {
+        "n": 2932,
+        "wins": 772,
+        "losses": 2160,
+        "flats": 0,
+        "wr": 0.2633,
+        "pf": 0.3884,
+        "net": -4111.6854,
+        "gross_win": 2611.3146,
+        "gross_loss": -6723.0,
+        "max_dd": 4119.7595,
+        "reasons": {
+          "settlement": 2264,
+          "take_profit": 668
+        },
+        "by_asset": {
+          "btc": {
+            "n": 766,
+            "wins": 195,
+            "losses": 571,
+            "wr": 0.2546,
+            "pf": 0.3756,
+            "net": -1118.3335
+          },
+          "eth": {
+            "n": 771,
+            "wins": 204,
+            "losses": 567,
+            "wr": 0.2646,
+            "pf": 0.4004,
+            "net": -1056.6615
+          },
+          "sol": {
+            "n": 722,
+            "wins": 191,
+            "losses": 531,
+            "wr": 0.2645,
+            "pf": 0.3656,
+            "net": -1038.0136
+          },
+          "xrp": {
+            "n": 673,
+            "wins": 182,
+            "losses": 491,
+            "wr": 0.2704,
+            "pf": 0.414,
+            "net": -898.6768
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1008,
+            "wins": 379,
+            "losses": 629,
+            "wr": 0.376,
+            "pf": 0.4784,
+            "net": -1066.5109
+          },
+          "5m": {
+            "n": 1924,
+            "wins": 393,
+            "losses": 1531,
+            "wr": 0.2043,
+            "pf": 0.3491,
+            "net": -3045.1746
+          }
+        }
+      }
+    },
+    {
+      "name": "thr08",
+      "params": {
+        "threshold": 0.08,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 3994,
+        "wins": 667,
+        "losses": 3327,
+        "flats": 0,
+        "wr": 0.167,
+        "pf": 0.2817,
+        "net": -5967.5629,
+        "gross_win": 2340.5521,
+        "gross_loss": -8308.1151,
+        "max_dd": 5982.3909,
+        "reasons": {
+          "stop_loss": 2002,
+          "take_profit": 552,
+          "settlement": 1381,
+          "trailing_stop": 59
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1026,
+            "wins": 171,
+            "losses": 855,
+            "wr": 0.1667,
+            "pf": 0.2917,
+            "net": -1519.5664
+          },
+          "eth": {
+            "n": 1020,
+            "wins": 181,
+            "losses": 839,
+            "wr": 0.1775,
+            "pf": 0.3011,
+            "net": -1445.8755
+          },
+          "sol": {
+            "n": 992,
+            "wins": 157,
+            "losses": 835,
+            "wr": 0.1583,
+            "pf": 0.2526,
+            "net": -1567.1965
+          },
+          "xrp": {
+            "n": 956,
+            "wins": 158,
+            "losses": 798,
+            "wr": 0.1653,
+            "pf": 0.2815,
+            "net": -1434.9246
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1510,
+            "wins": 284,
+            "losses": 1226,
+            "wr": 0.1881,
+            "pf": 0.273,
+            "net": -1778.7985
+          },
+          "5m": {
+            "n": 2484,
+            "wins": 383,
+            "losses": 2101,
+            "wr": 0.1542,
+            "pf": 0.2853,
+            "net": -4188.7644
+          }
+        }
+      }
+    },
+    {
+      "name": "thr12",
+      "params": {
+        "threshold": 0.12,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 3803,
+        "wins": 617,
+        "losses": 3186,
+        "flats": 0,
+        "wr": 0.1622,
+        "pf": 0.2815,
+        "net": -5660.4652,
+        "gross_win": 2217.6244,
+        "gross_loss": -7878.0897,
+        "max_dd": 5675.1271,
+        "reasons": {
+          "stop_loss": 1886,
+          "take_profit": 504,
+          "settlement": 1355,
+          "trailing_stop": 58
+        },
+        "by_asset": {
+          "btc": {
+            "n": 967,
+            "wins": 152,
+            "losses": 815,
+            "wr": 0.1572,
+            "pf": 0.2803,
+            "net": -1466.5557
+          },
+          "eth": {
+            "n": 969,
+            "wins": 166,
+            "losses": 803,
+            "wr": 0.1713,
+            "pf": 0.2999,
+            "net": -1364.897
+          },
+          "sol": {
+            "n": 948,
+            "wins": 148,
+            "losses": 800,
+            "wr": 0.1561,
+            "pf": 0.26,
+            "net": -1476.833
+          },
+          "xrp": {
+            "n": 919,
+            "wins": 151,
+            "losses": 768,
+            "wr": 0.1643,
+            "pf": 0.2864,
+            "net": -1352.1796
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1441,
+            "wins": 257,
+            "losses": 1184,
+            "wr": 0.1783,
+            "pf": 0.2605,
+            "net": -1745.0959
+          },
+          "5m": {
+            "n": 2362,
+            "wins": 360,
+            "losses": 2002,
+            "wr": 0.1524,
+            "pf": 0.2905,
+            "net": -3915.3694
+          }
+        }
+      }
+    },
+    {
+      "name": "thr02",
+      "params": {
+        "threshold": 0.02,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4308,
+        "wins": 729,
+        "losses": 3579,
+        "flats": 0,
+        "wr": 0.1692,
+        "pf": 0.2809,
+        "net": -6511.4823,
+        "gross_win": 2543.1065,
+        "gross_loss": -9054.5889,
+        "max_dd": 6524.221,
+        "reasons": {
+          "stop_loss": 2205,
+          "take_profit": 606,
+          "settlement": 1425,
+          "trailing_stop": 72
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1126,
+            "wins": 196,
+            "losses": 930,
+            "wr": 0.1741,
+            "pf": 0.2953,
+            "net": -1677.2802
+          },
+          "eth": {
+            "n": 1093,
+            "wins": 190,
+            "losses": 903,
+            "wr": 0.1738,
+            "pf": 0.2956,
+            "net": -1577.7584
+          },
+          "sol": {
+            "n": 1067,
+            "wins": 170,
+            "losses": 897,
+            "wr": 0.1593,
+            "pf": 0.2503,
+            "net": -1707.3303
+          },
+          "xrp": {
+            "n": 1022,
+            "wins": 173,
+            "losses": 849,
+            "wr": 0.1693,
+            "pf": 0.2819,
+            "net": -1549.1134
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1607,
+            "wins": 306,
+            "losses": 1301,
+            "wr": 0.1904,
+            "pf": 0.2768,
+            "net": -1865.145
+          },
+          "5m": {
+            "n": 2701,
+            "wins": 423,
+            "losses": 2278,
+            "wr": 0.1566,
+            "pf": 0.2825,
+            "net": -4646.3373
+          }
+        }
+      }
+    },
+    {
+      "name": "band_20_40",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.2,
+        "max_entry": 0.4,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 2835,
+        "wins": 489,
+        "losses": 2346,
+        "flats": 0,
+        "wr": 0.1725,
+        "pf": 0.2913,
+        "net": -4058.22,
+        "gross_win": 1668.0748,
+        "gross_loss": -5726.2947,
+        "max_dd": 4058.22,
+        "reasons": {
+          "stop_loss": 1457,
+          "take_profit": 420,
+          "settlement": 923,
+          "trailing_stop": 35
+        },
+        "by_asset": {
+          "btc": {
+            "n": 734,
+            "wins": 127,
+            "losses": 607,
+            "wr": 0.173,
+            "pf": 0.3068,
+            "net": -1022.0466
+          },
+          "eth": {
+            "n": 726,
+            "wins": 124,
+            "losses": 602,
+            "wr": 0.1708,
+            "pf": 0.2969,
+            "net": -1020.0768
+          },
+          "sol": {
+            "n": 705,
+            "wins": 124,
+            "losses": 581,
+            "wr": 0.1759,
+            "pf": 0.2771,
+            "net": -1042.4218
+          },
+          "xrp": {
+            "n": 670,
+            "wins": 114,
+            "losses": 556,
+            "wr": 0.1701,
+            "pf": 0.2836,
+            "net": -973.6747
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1197,
+            "wins": 244,
+            "losses": 953,
+            "wr": 0.2038,
+            "pf": 0.3027,
+            "net": -1329.0698
+          },
+          "5m": {
+            "n": 1638,
+            "wins": 245,
+            "losses": 1393,
+            "wr": 0.1496,
+            "pf": 0.2856,
+            "net": -2729.1502
+          }
+        }
+      }
+    },
+    {
+      "name": "band_25_45",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.25,
+        "max_entry": 0.45,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 2775,
+        "wins": 517,
+        "losses": 2258,
+        "flats": 0,
+        "wr": 0.1863,
+        "pf": 0.2885,
+        "net": -4425.7692,
+        "gross_win": 1794.9828,
+        "gross_loss": -6220.752,
+        "max_dd": 4434.5615,
+        "reasons": {
+          "stop_loss": 1453,
+          "take_profit": 436,
+          "settlement": 839,
+          "trailing_stop": 47
+        },
+        "by_asset": {
+          "btc": {
+            "n": 738,
+            "wins": 143,
+            "losses": 595,
+            "wr": 0.1938,
+            "pf": 0.312,
+            "net": -1128.4614
+          },
+          "eth": {
+            "n": 708,
+            "wins": 137,
+            "losses": 571,
+            "wr": 0.1935,
+            "pf": 0.2969,
+            "net": -1094.8454
+          },
+          "sol": {
+            "n": 691,
+            "wins": 117,
+            "losses": 574,
+            "wr": 0.1693,
+            "pf": 0.247,
+            "net": -1208.3793
+          },
+          "xrp": {
+            "n": 638,
+            "wins": 120,
+            "losses": 518,
+            "wr": 0.1881,
+            "pf": 0.2993,
+            "net": -994.0831
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1121,
+            "wins": 243,
+            "losses": 878,
+            "wr": 0.2168,
+            "pf": 0.3111,
+            "net": -1327.546
+          },
+          "5m": {
+            "n": 1654,
+            "wins": 274,
+            "losses": 1380,
+            "wr": 0.1657,
+            "pf": 0.2784,
+            "net": -3098.2232
+          }
+        }
+      }
+    },
+    {
+      "name": "band_35_55",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.35,
+        "max_entry": 0.55,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 1955,
+        "wins": 421,
+        "losses": 1534,
+        "flats": 0,
+        "wr": 0.2153,
+        "pf": 0.2992,
+        "net": -3457.811,
+        "gross_win": 1476.4215,
+        "gross_loss": -4934.2326,
+        "max_dd": 3468.211,
+        "reasons": {
+          "stop_loss": 1062,
+          "take_profit": 333,
+          "trailing_stop": 41,
+          "settlement": 519
+        },
+        "by_asset": {
+          "btc": {
+            "n": 537,
+            "wins": 109,
+            "losses": 428,
+            "wr": 0.203,
+            "pf": 0.2764,
+            "net": -1011.4656
+          },
+          "eth": {
+            "n": 476,
+            "wins": 112,
+            "losses": 364,
+            "wr": 0.2353,
+            "pf": 0.3337,
+            "net": -782.018
+          },
+          "sol": {
+            "n": 483,
+            "wins": 101,
+            "losses": 382,
+            "wr": 0.2091,
+            "pf": 0.2872,
+            "net": -863.3714
+          },
+          "xrp": {
+            "n": 459,
+            "wins": 99,
+            "losses": 360,
+            "wr": 0.2157,
+            "pf": 0.3044,
+            "net": -800.9561
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 839,
+            "wins": 178,
+            "losses": 661,
+            "wr": 0.2122,
+            "pf": 0.2857,
+            "net": -1182.9232
+          },
+          "5m": {
+            "n": 1116,
+            "wins": 243,
+            "losses": 873,
+            "wr": 0.2177,
+            "pf": 0.306,
+            "net": -2274.8879
+          }
+        }
+      }
+    },
+    {
+      "name": "late_half",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 60,
+        "open_after": 50,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 1677,
+        "wins": 222,
+        "losses": 1455,
+        "flats": 0,
+        "wr": 0.1324,
+        "pf": 0.2411,
+        "net": -2799.0939,
+        "gross_win": 889.0396,
+        "gross_loss": -3688.1336,
+        "max_dd": 2808.0416,
+        "reasons": {
+          "stop_loss": 549,
+          "settlement": 972,
+          "take_profit": 148,
+          "trailing_stop": 8
+        },
+        "by_asset": {
+          "btc": {
+            "n": 430,
+            "wins": 50,
+            "losses": 380,
+            "wr": 0.1163,
+            "pf": 0.2004,
+            "net": -776.0205
+          },
+          "eth": {
+            "n": 415,
+            "wins": 61,
+            "losses": 354,
+            "wr": 0.147,
+            "pf": 0.2584,
+            "net": -650.3802
+          },
+          "sol": {
+            "n": 433,
+            "wins": 61,
+            "losses": 372,
+            "wr": 0.1409,
+            "pf": 0.2599,
+            "net": -694.2745
+          },
+          "xrp": {
+            "n": 399,
+            "wins": 50,
+            "losses": 349,
+            "wr": 0.1253,
+            "pf": 0.2484,
+            "net": -678.4187
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 886,
+            "wins": 163,
+            "losses": 723,
+            "wr": 0.184,
+            "pf": 0.3116,
+            "net": -1113.2939
+          },
+          "5m": {
+            "n": 791,
+            "wins": 59,
+            "losses": 732,
+            "wr": 0.0746,
+            "pf": 0.1859,
+            "net": -1685.8
+          }
+        }
+      }
+    },
+    {
+      "name": "not_too_late",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 180,
+        "open_after": 10,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 3697,
+        "wins": 693,
+        "losses": 3004,
+        "flats": 0,
+        "wr": 0.1874,
+        "pf": 0.3032,
+        "net": -5100.4716,
+        "gross_win": 2219.0011,
+        "gross_loss": -7319.4727,
+        "max_dd": 5105.3788,
+        "reasons": {
+          "stop_loss": 2185,
+          "take_profit": 623,
+          "trailing_stop": 78,
+          "settlement": 811
+        },
+        "by_asset": {
+          "btc": {
+            "n": 959,
+            "wins": 181,
+            "losses": 778,
+            "wr": 0.1887,
+            "pf": 0.3155,
+            "net": -1312.4383
+          },
+          "eth": {
+            "n": 946,
+            "wins": 180,
+            "losses": 766,
+            "wr": 0.1903,
+            "pf": 0.3167,
+            "net": -1260.8008
+          },
+          "sol": {
+            "n": 906,
+            "wins": 165,
+            "losses": 741,
+            "wr": 0.1821,
+            "pf": 0.2754,
+            "net": -1320.7553
+          },
+          "xrp": {
+            "n": 886,
+            "wins": 167,
+            "losses": 719,
+            "wr": 0.1885,
+            "pf": 0.3042,
+            "net": -1206.4771
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1642,
+            "wins": 333,
+            "losses": 1309,
+            "wr": 0.2028,
+            "pf": 0.2897,
+            "net": -1864.0682
+          },
+          "5m": {
+            "n": 2055,
+            "wins": 360,
+            "losses": 1695,
+            "wr": 0.1752,
+            "pf": 0.3107,
+            "net": -3236.4034
+          }
+        }
+      }
+    },
+    {
+      "name": "fav_60_75_hold",
+      "params": {
+        "threshold": 0.02,
+        "min_entry": 0.6,
+        "max_entry": 0.75,
+        "tp": 0,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 45,
+        "open_after": 50,
+        "cutoff": 30,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 545,
+        "wins": 218,
+        "losses": 327,
+        "flats": 0,
+        "wr": 0.4,
+        "pf": 0.3092,
+        "net": -1518.7,
+        "gross_win": 679.9,
+        "gross_loss": -2198.6,
+        "max_dd": 1527.3,
+        "reasons": {
+          "settlement": 545
+        },
+        "by_asset": {
+          "btc": {
+            "n": 140,
+            "wins": 59,
+            "losses": 81,
+            "wr": 0.4214,
+            "pf": 0.3339,
+            "net": -362.5
+          },
+          "eth": {
+            "n": 139,
+            "wins": 51,
+            "losses": 88,
+            "wr": 0.3669,
+            "pf": 0.2606,
+            "net": -439.0
+          },
+          "sol": {
+            "n": 138,
+            "wins": 61,
+            "losses": 77,
+            "wr": 0.442,
+            "pf": 0.3777,
+            "net": -320.0
+          },
+          "xrp": {
+            "n": 128,
+            "wins": 47,
+            "losses": 81,
+            "wr": 0.3672,
+            "pf": 0.2732,
+            "net": -397.2
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 346,
+            "wins": 169,
+            "losses": 177,
+            "wr": 0.4884,
+            "pf": 0.4433,
+            "net": -662.4
+          },
+          "5m": {
+            "n": 199,
+            "wins": 49,
+            "losses": 150,
+            "wr": 0.2462,
+            "pf": 0.1512,
+            "net": -856.3
+          }
+        }
+      }
+    },
+    {
+      "name": "fav_55_70_tp15",
+      "params": {
+        "threshold": 0.02,
+        "min_entry": 0.55,
+        "max_entry": 0.7,
+        "tp": 15,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 60,
+        "open_after": 40,
+        "cutoff": 30,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 981,
+        "wins": 438,
+        "losses": 543,
+        "flats": 0,
+        "wr": 0.4465,
+        "pf": 0.3485,
+        "net": -2192.9824,
+        "gross_win": 1173.3176,
+        "gross_loss": -3366.3,
+        "max_dd": 2192.9824,
+        "reasons": {
+          "settlement": 671,
+          "take_profit": 310
+        },
+        "by_asset": {
+          "btc": {
+            "n": 228,
+            "wins": 103,
+            "losses": 125,
+            "wr": 0.4518,
+            "pf": 0.3551,
+            "net": -498.1544
+          },
+          "eth": {
+            "n": 256,
+            "wins": 107,
+            "losses": 149,
+            "wr": 0.418,
+            "pf": 0.3207,
+            "net": -621.8337
+          },
+          "sol": {
+            "n": 253,
+            "wins": 114,
+            "losses": 139,
+            "wr": 0.4506,
+            "pf": 0.3479,
+            "net": -568.694
+          },
+          "xrp": {
+            "n": 244,
+            "wins": 114,
+            "losses": 130,
+            "wr": 0.4672,
+            "pf": 0.3746,
+            "net": -504.3003
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 472,
+            "wins": 256,
+            "losses": 216,
+            "wr": 0.5424,
+            "pf": 0.435,
+            "net": -758.6366
+          },
+          "5m": {
+            "n": 509,
+            "wins": 182,
+            "losses": 327,
+            "wr": 0.3576,
+            "pf": 0.2912,
+            "net": -1434.3458
+          }
+        }
+      }
+    },
+    {
+      "name": "fav_65_78_hold",
+      "params": {
+        "threshold": 0.01,
+        "min_entry": 0.65,
+        "max_entry": 0.78,
+        "tp": 0,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 30,
+        "open_after": 60,
+        "cutoff": 20,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 473,
+        "wins": 207,
+        "losses": 266,
+        "flats": 0,
+        "wr": 0.4376,
+        "pf": 0.3017,
+        "net": -1335.1,
+        "gross_win": 576.7,
+        "gross_loss": -1911.8,
+        "max_dd": 1339.9,
+        "reasons": {
+          "settlement": 473
+        },
+        "by_asset": {
+          "btc": {
+            "n": 123,
+            "wins": 52,
+            "losses": 71,
+            "wr": 0.4228,
+            "pf": 0.2818,
+            "net": -366.8
+          },
+          "eth": {
+            "n": 124,
+            "wins": 47,
+            "losses": 77,
+            "wr": 0.379,
+            "pf": 0.2403,
+            "net": -418.2
+          },
+          "sol": {
+            "n": 117,
+            "wins": 60,
+            "losses": 57,
+            "wr": 0.5128,
+            "pf": 0.4085,
+            "net": -242.0
+          },
+          "xrp": {
+            "n": 109,
+            "wins": 48,
+            "losses": 61,
+            "wr": 0.4404,
+            "pf": 0.3022,
+            "net": -308.1
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 286,
+            "wins": 149,
+            "losses": 137,
+            "wr": 0.521,
+            "pf": 0.4242,
+            "net": -565.0
+          },
+          "5m": {
+            "n": 187,
+            "wins": 58,
+            "losses": 129,
+            "wr": 0.3102,
+            "pf": 0.1725,
+            "net": -770.1
+          }
+        }
+      }
+    },
+    {
+      "name": "down_band_20_40_tp25",
+      "params": {
+        "threshold": 0.06,
+        "min_entry": 0.2,
+        "max_entry": 0.4,
+        "tp": 25,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "down"
+      },
+      "metrics": {
+        "n": 1990,
+        "wins": 532,
+        "losses": 1458,
+        "flats": 0,
+        "wr": 0.2673,
+        "pf": 0.391,
+        "net": -2653.1308,
+        "gross_win": 1703.5692,
+        "gross_loss": -4356.7,
+        "max_dd": 2653.2671,
+        "reasons": {
+          "settlement": 1518,
+          "take_profit": 472
+        },
+        "by_asset": {
+          "btc": {
+            "n": 531,
+            "wins": 134,
+            "losses": 397,
+            "wr": 0.2524,
+            "pf": 0.3668,
+            "net": -760.5113
+          },
+          "eth": {
+            "n": 528,
+            "wins": 142,
+            "losses": 386,
+            "wr": 0.2689,
+            "pf": 0.4057,
+            "net": -678.1419
+          },
+          "sol": {
+            "n": 484,
+            "wins": 134,
+            "losses": 350,
+            "wr": 0.2769,
+            "pf": 0.3667,
+            "net": -661.6331
+          },
+          "xrp": {
+            "n": 447,
+            "wins": 122,
+            "losses": 325,
+            "wr": 0.2729,
+            "pf": 0.43,
+            "net": -552.8445
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 748,
+            "wins": 282,
+            "losses": 466,
+            "wr": 0.377,
+            "pf": 0.4914,
+            "net": -716.9199
+          },
+          "5m": {
+            "n": 1242,
+            "wins": 250,
+            "losses": 992,
+            "wr": 0.2013,
+            "pf": 0.343,
+            "net": -1936.2109
+          }
+        }
+      }
+    },
+    {
+      "name": "thr06_tp25_flat",
+      "params": {
+        "threshold": 0.06,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 25,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4092,
+        "wins": 1093,
+        "losses": 2999,
+        "flats": 0,
+        "wr": 0.2671,
+        "pf": 0.3755,
+        "net": -5843.2079,
+        "gross_win": 3513.7921,
+        "gross_loss": -9357.0,
+        "max_dd": 5863.6991,
+        "reasons": {
+          "take_profit": 945,
+          "settlement": 3147
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1053,
+            "wins": 277,
+            "losses": 776,
+            "wr": 0.2631,
+            "pf": 0.3629,
+            "net": -1565.3116
+          },
+          "eth": {
+            "n": 1045,
+            "wins": 288,
+            "losses": 757,
+            "wr": 0.2756,
+            "pf": 0.4046,
+            "net": -1379.5655
+          },
+          "sol": {
+            "n": 1012,
+            "wins": 259,
+            "losses": 753,
+            "wr": 0.2559,
+            "pf": 0.337,
+            "net": -1555.2851
+          },
+          "xrp": {
+            "n": 982,
+            "wins": 269,
+            "losses": 713,
+            "wr": 0.2739,
+            "pf": 0.3997,
+            "net": -1343.0456
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1546,
+            "wins": 591,
+            "losses": 955,
+            "wr": 0.3823,
+            "pf": 0.4635,
+            "net": -1625.3912
+          },
+          "5m": {
+            "n": 2546,
+            "wins": 502,
+            "losses": 2044,
+            "wr": 0.1972,
+            "pf": 0.3334,
+            "net": -4217.8167
+          }
+        }
+      }
+    },
+    {
+      "name": "stop20_tp40_notrail",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 20,
+        "sl_down": 20,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 599,
+        "losses": 3607,
+        "flats": 0,
+        "wr": 0.1424,
+        "pf": 0.2512,
+        "net": -6328.4525,
+        "gross_win": 2123.0705,
+        "gross_loss": -8451.523,
+        "max_dd": 6339.1043,
+        "reasons": {
+          "stop_loss": 2384,
+          "take_profit": 517,
+          "settlement": 1305
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 154,
+            "losses": 937,
+            "wr": 0.1412,
+            "pf": 0.2629,
+            "net": -1635.1025
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 158,
+            "losses": 913,
+            "wr": 0.1475,
+            "pf": 0.2705,
+            "net": -1505.9944
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 137,
+            "losses": 899,
+            "wr": 0.1322,
+            "pf": 0.2174,
+            "net": -1666.5063
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 150,
+            "losses": 858,
+            "wr": 0.1488,
+            "pf": 0.2543,
+            "net": -1520.8493
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 232,
+            "losses": 1350,
+            "wr": 0.1466,
+            "pf": 0.2346,
+            "net": -1801.9713
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 367,
+            "losses": 2257,
+            "wr": 0.1399,
+            "pf": 0.2576,
+            "net": -4526.4812
+          }
+        }
+      }
+    },
+    {
+      "name": "open0_mintl90",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40.0,
+        "trail_arm": 22.0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 90,
+        "open_after": 0,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4338,
+        "wins": 770,
+        "losses": 3568,
+        "flats": 0,
+        "wr": 0.1775,
+        "pf": 0.2854,
+        "net": -6474.0751,
+        "gross_win": 2585.8546,
+        "gross_loss": -9059.9296,
+        "max_dd": 6484.5621,
+        "reasons": {
+          "stop_loss": 2215,
+          "take_profit": 644,
+          "settlement": 1385,
+          "trailing_stop": 94
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1118,
+            "wins": 203,
+            "losses": 915,
+            "wr": 0.1816,
+            "pf": 0.2972,
+            "net": -1653.667
+          },
+          "eth": {
+            "n": 1103,
+            "wins": 198,
+            "losses": 905,
+            "wr": 0.1795,
+            "pf": 0.2939,
+            "net": -1605.0408
+          },
+          "sol": {
+            "n": 1079,
+            "wins": 184,
+            "losses": 895,
+            "wr": 0.1705,
+            "pf": 0.2588,
+            "net": -1679.4146
+          },
+          "xrp": {
+            "n": 1038,
+            "wins": 185,
+            "losses": 853,
+            "wr": 0.1782,
+            "pf": 0.2916,
+            "net": -1535.9527
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1714,
+            "wins": 362,
+            "losses": 1352,
+            "wr": 0.2112,
+            "pf": 0.2912,
+            "net": -1985.1717
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 408,
+            "losses": 2216,
+            "wr": 0.1555,
+            "pf": 0.2828,
+            "net": -4488.9034
+          }
+        }
+      }
+    },
+    {
+      "name": "open30_tp30",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 30,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 30.0,
+        "sl_down": 50.0,
+        "min_time_left": 120,
+        "open_after": 30,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 2986,
+        "wins": 480,
+        "losses": 2506,
+        "flats": 0,
+        "wr": 0.1608,
+        "pf": 0.2725,
+        "net": -4585.9695,
+        "gross_win": 1718.0248,
+        "gross_loss": -6303.9944,
+        "max_dd": 4602.858,
+        "reasons": {
+          "stop_loss": 1253,
+          "take_profit": 384,
+          "settlement": 1349
+        },
+        "by_asset": {
+          "btc": {
+            "n": 798,
+            "wins": 133,
+            "losses": 665,
+            "wr": 0.1667,
+            "pf": 0.2696,
+            "net": -1227.5109
+          },
+          "eth": {
+            "n": 759,
+            "wins": 119,
+            "losses": 640,
+            "wr": 0.1568,
+            "pf": 0.2752,
+            "net": -1146.0165
+          },
+          "sol": {
+            "n": 731,
+            "wins": 123,
+            "losses": 608,
+            "wr": 0.1683,
+            "pf": 0.2762,
+            "net": -1113.2641
+          },
+          "xrp": {
+            "n": 698,
+            "wins": 105,
+            "losses": 593,
+            "wr": 0.1504,
+            "pf": 0.2693,
+            "net": -1099.1781
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1328,
+            "wins": 267,
+            "losses": 1061,
+            "wr": 0.2011,
+            "pf": 0.2848,
+            "net": -1570.9135
+          },
+          "5m": {
+            "n": 1658,
+            "wins": 213,
+            "losses": 1445,
+            "wr": 0.1285,
+            "pf": 0.266,
+            "net": -3015.056
+          }
+        }
+      }
+    },
+    {
+      "name": "open40_thr08_tp20",
+      "params": {
+        "threshold": 0.08,
+        "min_entry": 0.15,
+        "max_entry": 0.45,
+        "tp": 20,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 40,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 2523,
+        "wins": 534,
+        "losses": 1989,
+        "flats": 0,
+        "wr": 0.2117,
+        "pf": 0.3311,
+        "net": -3731.8961,
+        "gross_win": 1847.5039,
+        "gross_loss": -5579.4,
+        "max_dd": 3739.8966,
+        "reasons": {
+          "settlement": 2083,
+          "take_profit": 440
+        },
+        "by_asset": {
+          "btc": {
+            "n": 670,
+            "wins": 146,
+            "losses": 524,
+            "wr": 0.2179,
+            "pf": 0.3191,
+            "net": -1010.2625
+          },
+          "eth": {
+            "n": 651,
+            "wins": 146,
+            "losses": 505,
+            "wr": 0.2243,
+            "pf": 0.3495,
+            "net": -910.7688
+          },
+          "sol": {
+            "n": 621,
+            "wins": 121,
+            "losses": 500,
+            "wr": 0.1948,
+            "pf": 0.303,
+            "net": -978.1621
+          },
+          "xrp": {
+            "n": 581,
+            "wins": 121,
+            "losses": 460,
+            "wr": 0.2083,
+            "pf": 0.3556,
+            "net": -832.7028
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1071,
+            "wins": 356,
+            "losses": 715,
+            "wr": 0.3324,
+            "pf": 0.4483,
+            "net": -1113.793
+          },
+          "5m": {
+            "n": 1452,
+            "wins": 178,
+            "losses": 1274,
+            "wr": 0.1226,
+            "pf": 0.2647,
+            "net": -2618.1032
+          }
+        }
+      }
+    },
+    {
+      "name": "down_thr08_tp40_flat",
+      "params": {
+        "threshold": 0.08,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 40,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "down"
+      },
+      "metrics": {
+        "n": 2834,
+        "wins": 706,
+        "losses": 2128,
+        "flats": 0,
+        "wr": 0.2491,
+        "pf": 0.4028,
+        "net": -3893.7805,
+        "gross_win": 2626.4195,
+        "gross_loss": -6520.2,
+        "max_dd": 3904.7414,
+        "reasons": {
+          "settlement": 2238,
+          "take_profit": 596
+        },
+        "by_asset": {
+          "btc": {
+            "n": 737,
+            "wins": 173,
+            "losses": 564,
+            "wr": 0.2347,
+            "pf": 0.3888,
+            "net": -1058.6045
+          },
+          "eth": {
+            "n": 745,
+            "wins": 187,
+            "losses": 558,
+            "wr": 0.251,
+            "pf": 0.4098,
+            "net": -1013.552
+          },
+          "sol": {
+            "n": 703,
+            "wins": 176,
+            "losses": 527,
+            "wr": 0.2504,
+            "pf": 0.3835,
+            "net": -984.8084
+          },
+          "xrp": {
+            "n": 649,
+            "wins": 170,
+            "losses": 479,
+            "wr": 0.2619,
+            "pf": 0.4322,
+            "net": -836.8158
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 975,
+            "wins": 348,
+            "losses": 627,
+            "wr": 0.3569,
+            "pf": 0.5174,
+            "net": -971.0105
+          },
+          "5m": {
+            "n": 1859,
+            "wins": 358,
+            "losses": 1501,
+            "wr": 0.1926,
+            "pf": 0.3516,
+            "net": -2922.7701
+          }
+        }
+      }
+    },
+    {
+      "name": "both_thr08_band_tp30",
+      "params": {
+        "threshold": 0.08,
+        "min_entry": 0.2,
+        "max_entry": 0.45,
+        "tp": 30,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 25,
+        "sl_down": 25,
+        "min_time_left": 90,
+        "open_after": 25,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 2245,
+        "wins": 342,
+        "losses": 1903,
+        "flats": 0,
+        "wr": 0.1523,
+        "pf": 0.2539,
+        "net": -3479.9904,
+        "gross_win": 1184.2134,
+        "gross_loss": -4664.2037,
+        "max_dd": 3486.3325,
+        "reasons": {
+          "stop_loss": 1095,
+          "take_profit": 283,
+          "settlement": 867
+        },
+        "by_asset": {
+          "btc": {
+            "n": 599,
+            "wins": 95,
+            "losses": 504,
+            "wr": 0.1586,
+            "pf": 0.2682,
+            "net": -904.4711
+          },
+          "eth": {
+            "n": 578,
+            "wins": 93,
+            "losses": 485,
+            "wr": 0.1609,
+            "pf": 0.273,
+            "net": -850.9463
+          },
+          "sol": {
+            "n": 554,
+            "wins": 80,
+            "losses": 474,
+            "wr": 0.1444,
+            "pf": 0.2224,
+            "net": -924.948
+          },
+          "xrp": {
+            "n": 514,
+            "wins": 74,
+            "losses": 440,
+            "wr": 0.144,
+            "pf": 0.2515,
+            "net": -799.625
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1139,
+            "wins": 195,
+            "losses": 944,
+            "wr": 0.1712,
+            "pf": 0.2481,
+            "net": -1349.7933
+          },
+          "5m": {
+            "n": 1106,
+            "wins": 147,
+            "losses": 959,
+            "wr": 0.1329,
+            "pf": 0.2575,
+            "net": -2130.197
+          }
+        }
+      }
+    },
+    {
+      "name": "bank100_notrail",
+      "params": {
+        "threshold": 0.04,
+        "min_entry": 0.15,
+        "max_entry": 0.5,
+        "tp": 100,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 0,
+        "sl_down": 0,
+        "min_time_left": 120,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "both"
+      },
+      "metrics": {
+        "n": 4206,
+        "wins": 903,
+        "losses": 3303,
+        "flats": 0,
+        "wr": 0.2147,
+        "pf": 0.4482,
+        "net": -5744.2954,
+        "gross_win": 4666.5046,
+        "gross_loss": -10410.8,
+        "max_dd": 5777.932,
+        "reasons": {
+          "take_profit": 603,
+          "settlement": 3603
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1091,
+            "wins": 232,
+            "losses": 859,
+            "wr": 0.2126,
+            "pf": 0.4375,
+            "net": -1546.1893
+          },
+          "eth": {
+            "n": 1071,
+            "wins": 230,
+            "losses": 841,
+            "wr": 0.2148,
+            "pf": 0.4631,
+            "net": -1403.1297
+          },
+          "sol": {
+            "n": 1036,
+            "wins": 208,
+            "losses": 828,
+            "wr": 0.2008,
+            "pf": 0.4065,
+            "net": -1540.9299
+          },
+          "xrp": {
+            "n": 1008,
+            "wins": 233,
+            "losses": 775,
+            "wr": 0.2312,
+            "pf": 0.4886,
+            "net": -1254.0465
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1582,
+            "wins": 458,
+            "losses": 1124,
+            "wr": 0.2895,
+            "pf": 0.6093,
+            "net": -1402.6758
+          },
+          "5m": {
+            "n": 2624,
+            "wins": 445,
+            "losses": 2179,
+            "wr": 0.1696,
+            "pf": 0.3635,
+            "net": -4341.6197
+          }
+        }
+      }
+    },
+    {
+      "name": "down_bank40_band",
+      "params": {
+        "threshold": 0.05,
+        "min_entry": 0.2,
+        "max_entry": 0.4,
+        "tp": 40,
+        "trail_arm": 0,
+        "trail_give": 15.0,
+        "sl_up": 40,
+        "sl_down": 40,
+        "min_time_left": 90,
+        "open_after": 20,
+        "cutoff": 60,
+        "legs": "down"
+      },
+      "metrics": {
+        "n": 1996,
+        "wins": 340,
+        "losses": 1656,
+        "flats": 0,
+        "wr": 0.1703,
+        "pf": 0.2856,
+        "net": -2857.312,
+        "gross_win": 1142.4974,
+        "gross_loss": -3999.8094,
+        "max_dd": 2857.312,
+        "reasons": {
+          "stop_loss": 1074,
+          "take_profit": 311,
+          "settlement": 611
+        },
+        "by_asset": {
+          "btc": {
+            "n": 531,
+            "wins": 88,
+            "losses": 443,
+            "wr": 0.1657,
+            "pf": 0.2994,
+            "net": -742.9526
+          },
+          "eth": {
+            "n": 531,
+            "wins": 90,
+            "losses": 441,
+            "wr": 0.1695,
+            "pf": 0.2905,
+            "net": -753.7001
+          },
+          "sol": {
+            "n": 486,
+            "wins": 87,
+            "losses": 399,
+            "wr": 0.179,
+            "pf": 0.272,
+            "net": -711.0503
+          },
+          "xrp": {
+            "n": 448,
+            "wins": 75,
+            "losses": 373,
+            "wr": 0.1674,
+            "pf": 0.2786,
+            "net": -649.609
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 751,
+            "wins": 153,
+            "losses": 598,
+            "wr": 0.2037,
+            "pf": 0.303,
+            "net": -846.3212
+          },
+          "5m": {
+            "n": 1245,
+            "wins": 187,
+            "losses": 1058,
+            "wr": 0.1502,
+            "pf": 0.2781,
+            "net": -2010.9908
+          }
+        }
+      }
+    }
+  ],
+  "out_of_sample": [
+    {
+      "name": "baseline",
+      "metrics": {
+        "n": 2135,
+        "wins": 325,
+        "losses": 1810,
+        "flats": 0,
+        "wr": 0.1522,
+        "pf": 0.2386,
+        "net": -3494.6403,
+        "gross_win": 1095.3591,
+        "gross_loss": -4589.9994,
+        "max_dd": 3500.2163,
+        "reasons": {
+          "stop_loss": 1058,
+          "settlement": 766,
+          "take_profit": 286,
+          "trailing_stop": 25
+        },
+        "by_asset": {
+          "btc": {
+            "n": 557,
+            "wins": 83,
+            "losses": 474,
+            "wr": 0.149,
+            "pf": 0.2295,
+            "net": -937.0328
+          },
+          "eth": {
+            "n": 543,
+            "wins": 80,
+            "losses": 463,
+            "wr": 0.1473,
+            "pf": 0.2325,
+            "net": -901.2287
+          },
+          "sol": {
+            "n": 510,
+            "wins": 75,
+            "losses": 435,
+            "wr": 0.1471,
+            "pf": 0.2241,
+            "net": -846.6601
+          },
+          "xrp": {
+            "n": 525,
+            "wins": 87,
+            "losses": 438,
+            "wr": 0.1657,
+            "pf": 0.2694,
+            "net": -809.7187
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 799,
+            "wins": 167,
+            "losses": 632,
+            "wr": 0.209,
+            "pf": 0.3151,
+            "net": -859.0898
+          },
+          "5m": {
+            "n": 1336,
+            "wins": 158,
+            "losses": 1178,
+            "wr": 0.1183,
+            "pf": 0.2099,
+            "net": -2635.5506
+          }
+        }
+      },
+      "fill": "next_bar"
+    },
+    {
+      "name": "baseline",
+      "metrics": {
+        "n": 2817,
+        "wins": 1012,
+        "losses": 1805,
+        "flats": 0,
+        "wr": 0.3592,
+        "pf": 0.741,
+        "net": -1090.8319,
+        "gross_win": 3120.1992,
+        "gross_loss": -4211.0311,
+        "max_dd": 1106.0946,
+        "reasons": {
+          "stop_loss": 1327,
+          "settlement": 453,
+          "take_profit": 955,
+          "trailing_stop": 82
+        },
+        "by_asset": {
+          "btc": {
+            "n": 714,
+            "wins": 247,
+            "losses": 467,
+            "wr": 0.3459,
+            "pf": 0.6512,
+            "net": -387.1693
+          },
+          "eth": {
+            "n": 707,
+            "wins": 252,
+            "losses": 455,
+            "wr": 0.3564,
+            "pf": 0.7511,
+            "net": -262.8274
+          },
+          "sol": {
+            "n": 683,
+            "wins": 237,
+            "losses": 446,
+            "wr": 0.347,
+            "pf": 0.7029,
+            "net": -311.3936
+          },
+          "xrp": {
+            "n": 713,
+            "wins": 276,
+            "losses": 437,
+            "wr": 0.3871,
+            "pf": 0.8702,
+            "net": -129.4417
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 893,
+            "wins": 350,
+            "losses": 543,
+            "wr": 0.3919,
+            "pf": 0.8012,
+            "net": -193.64
+          },
+          "5m": {
+            "n": 1924,
+            "wins": 662,
+            "losses": 1262,
+            "wr": 0.3441,
+            "pf": 0.7228,
+            "net": -897.1919
+          }
+        }
+      },
+      "fill": "down_immediate_optimistic"
+    },
+    {
+      "name": "down_band_20_40_tp25",
+      "metrics": {
+        "n": 1029,
+        "wins": 247,
+        "losses": 782,
+        "flats": 0,
+        "wr": 0.24,
+        "pf": 0.3252,
+        "net": -1577.0673,
+        "gross_win": 760.1327,
+        "gross_loss": -2337.2,
+        "max_dd": 1585.4469,
+        "reasons": {
+          "settlement": 808,
+          "take_profit": 221
+        },
+        "by_asset": {
+          "btc": {
+            "n": 272,
+            "wins": 65,
+            "losses": 207,
+            "wr": 0.239,
+            "pf": 0.3295,
+            "net": -418.9056
+          },
+          "eth": {
+            "n": 261,
+            "wins": 53,
+            "losses": 208,
+            "wr": 0.2031,
+            "pf": 0.2699,
+            "net": -452.2049
+          },
+          "sol": {
+            "n": 247,
+            "wins": 61,
+            "losses": 186,
+            "wr": 0.247,
+            "pf": 0.3315,
+            "net": -370.975
+          },
+          "xrp": {
+            "n": 249,
+            "wins": 68,
+            "losses": 181,
+            "wr": 0.2731,
+            "pf": 0.3775,
+            "net": -334.9819
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 379,
+            "wins": 153,
+            "losses": 226,
+            "wr": 0.4037,
+            "pf": 0.5051,
+            "net": -336.3649
+          },
+          "5m": {
+            "n": 650,
+            "wins": 94,
+            "losses": 556,
+            "wr": 0.1446,
+            "pf": 0.2515,
+            "net": -1240.7024
+          }
+        }
+      },
+      "fill": "next_bar"
+    },
+    {
+      "name": "down_band_20_40_tp25",
+      "metrics": {
+        "n": 1586,
+        "wins": 792,
+        "losses": 794,
+        "flats": 0,
+        "wr": 0.4994,
+        "pf": 0.9411,
+        "net": -139.6126,
+        "gross_win": 2231.8874,
+        "gross_loss": -2371.5,
+        "max_dd": 228.9494,
+        "reasons": {
+          "take_profit": 759,
+          "settlement": 827
+        },
+        "by_asset": {
+          "btc": {
+            "n": 405,
+            "wins": 200,
+            "losses": 205,
+            "wr": 0.4938,
+            "pf": 0.8737,
+            "net": -78.307
+          },
+          "eth": {
+            "n": 398,
+            "wins": 184,
+            "losses": 214,
+            "wr": 0.4623,
+            "pf": 0.8099,
+            "net": -120.083
+          },
+          "sol": {
+            "n": 391,
+            "wins": 195,
+            "losses": 196,
+            "wr": 0.4987,
+            "pf": 0.9218,
+            "net": -46.0925
+          },
+          "xrp": {
+            "n": 392,
+            "wins": 213,
+            "losses": 179,
+            "wr": 0.5434,
+            "pf": 1.1978,
+            "net": 104.87
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 536,
+            "wins": 334,
+            "losses": 202,
+            "wr": 0.6231,
+            "pf": 1.166,
+            "net": 101.4347
+          },
+          "5m": {
+            "n": 1050,
+            "wins": 458,
+            "losses": 592,
+            "wr": 0.4362,
+            "pf": 0.8631,
+            "net": -241.0472
+          }
+        }
+      },
+      "fill": "down_immediate_optimistic"
+    }
+  ],
+  "sensitivity_in_sample_optimistic_fill": [
+    {
+      "name": "baseline",
+      "split": "IS",
+      "fill": "down_immediate_optimistic",
+      "metrics": {
+        "n": 5536,
+        "wins": 2019,
+        "losses": 3517,
+        "flats": 0,
+        "wr": 0.3647,
+        "pf": 0.7822,
+        "net": -1793.8662,
+        "gross_win": 6442.8344,
+        "gross_loss": -8236.7006,
+        "max_dd": 1874.8413,
+        "reasons": {
+          "take_profit": 1888,
+          "stop_loss": 2647,
+          "settlement": 823,
+          "trailing_stop": 178
+        },
+        "by_asset": {
+          "btc": {
+            "n": 1414,
+            "wins": 498,
+            "losses": 916,
+            "wr": 0.3522,
+            "pf": 0.7442,
+            "net": -548.942
+          },
+          "eth": {
+            "n": 1402,
+            "wins": 512,
+            "losses": 890,
+            "wr": 0.3652,
+            "pf": 0.7685,
+            "net": -476.9118
+          },
+          "sol": {
+            "n": 1394,
+            "wins": 506,
+            "losses": 888,
+            "wr": 0.363,
+            "pf": 0.7888,
+            "net": -442.1747
+          },
+          "xrp": {
+            "n": 1326,
+            "wins": 503,
+            "losses": 823,
+            "wr": 0.3793,
+            "pf": 0.8317,
+            "net": -325.8376
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1726,
+            "wins": 628,
+            "losses": 1098,
+            "wr": 0.3638,
+            "pf": 0.6757,
+            "net": -663.2223
+          },
+          "5m": {
+            "n": 3810,
+            "wins": 1391,
+            "losses": 2419,
+            "wr": 0.3651,
+            "pf": 0.8174,
+            "net": -1130.6439
+          }
+        }
+      }
+    },
+    {
+      "name": "down_band_20_40_tp25",
+      "split": "IS",
+      "fill": "down_immediate_optimistic",
+      "metrics": {
+        "n": 3189,
+        "wins": 1693,
+        "losses": 1496,
+        "flats": 0,
+        "wr": 0.5309,
+        "pf": 1.0932,
+        "net": 417.4929,
+        "gross_win": 4899.1929,
+        "gross_loss": -4481.7,
+        "max_dd": 181.5039,
+        "reasons": {
+          "take_profit": 1622,
+          "settlement": 1567
+        },
+        "by_asset": {
+          "btc": {
+            "n": 820,
+            "wins": 407,
+            "losses": 413,
+            "wr": 0.4963,
+            "pf": 0.9657,
+            "net": -42.695
+          },
+          "eth": {
+            "n": 826,
+            "wins": 436,
+            "losses": 390,
+            "wr": 0.5278,
+            "pf": 1.0394,
+            "net": 45.6594
+          },
+          "sol": {
+            "n": 795,
+            "wins": 432,
+            "losses": 363,
+            "wr": 0.5434,
+            "pf": 1.1343,
+            "net": 146.5477
+          },
+          "xrp": {
+            "n": 748,
+            "wins": 418,
+            "losses": 330,
+            "wr": 0.5588,
+            "pf": 1.2716,
+            "net": 267.9808
+          }
+        },
+        "by_duration": {
+          "15m": {
+            "n": 1077,
+            "wins": 643,
+            "losses": 434,
+            "wr": 0.597,
+            "pf": 1.0218,
+            "net": 28.7334
+          },
+          "5m": {
+            "n": 2112,
+            "wins": 1050,
+            "losses": 1062,
+            "wr": 0.4972,
+            "pf": 1.123,
+            "net": 388.7595
+          }
+        }
+      }
+    }
+  ],
+  "unconditional_price_ceiling": {
+    "note": "Not a strategy. At the minute nearest the target time-left, settlement frequency of a token whose mid falls in that 0.05 bin. taker_pf buys the ask and pays the taker fee. maker_pf assumes a fill at the bid with NO adverse selection. The maker momentum strategy does not get that fill: it fills only when price trades down through the bid, and those fills win less often than the entry price.",
+    "in_sample_time_left_120s": [
+      {
+        "mid": 0.1,
+        "n": 936,
+        "wr": 0.1186,
+        "taker_ask": 0.11,
+        "taker_pf": 1.0169,
+        "maker_bid": 0.09,
+        "maker_pf_if_unconditional_fill": 1.3604
+      },
+      {
+        "mid": 0.15,
+        "n": 507,
+        "wr": 0.1124,
+        "taker_ask": 0.16,
+        "taker_pf": 0.621,
+        "maker_bid": 0.14,
+        "maker_pf_if_unconditional_fill": 0.7781
+      },
+      {
+        "mid": 0.2,
+        "n": 632,
+        "wr": 0.1962,
+        "taker_ask": 0.21,
+        "taker_pf": 0.8574,
+        "maker_bid": 0.19,
+        "maker_pf_if_unconditional_fill": 1.0406
+      },
+      {
+        "mid": 0.25,
+        "n": 388,
+        "wr": 0.25,
+        "taker_ask": 0.26,
+        "taker_pf": 0.8856,
+        "maker_bid": 0.24,
+        "maker_pf_if_unconditional_fill": 1.0556
+      },
+      {
+        "mid": 0.3,
+        "n": 515,
+        "wr": 0.2816,
+        "taker_ask": 0.31,
+        "taker_pf": 0.814,
+        "maker_bid": 0.29,
+        "maker_pf_if_unconditional_fill": 0.9595
+      },
+      {
+        "mid": 0.35,
+        "n": 329,
+        "wr": 0.307,
+        "taker_ask": 0.36,
+        "taker_pf": 0.7348,
+        "maker_bid": 0.34,
+        "maker_pf_if_unconditional_fill": 0.8599
+      },
+      {
+        "mid": 0.4,
+        "n": 457,
+        "wr": 0.3917,
+        "taker_ask": 0.41,
+        "taker_pf": 0.8643,
+        "maker_bid": 0.39,
+        "maker_pf_if_unconditional_fill": 1.0071
+      },
+      {
+        "mid": 0.45,
+        "n": 315,
+        "wr": 0.4349,
+        "taker_ask": 0.46,
+        "taker_pf": 0.8426,
+        "maker_bid": 0.44,
+        "maker_pf_if_unconditional_fill": 0.9796
+      },
+      {
+        "mid": 0.5,
+        "n": 382,
+        "wr": 0.5,
+        "taker_ask": 0.51,
+        "taker_pf": 0.8958,
+        "maker_bid": 0.49,
+        "maker_pf_if_unconditional_fill": 1.0408
+      },
+      {
+        "mid": 0.55,
+        "n": 314,
+        "wr": 0.5637,
+        "taker_ask": 0.56,
+        "taker_pf": 0.9462,
+        "maker_bid": 0.54,
+        "maker_pf_if_unconditional_fill": 1.1006
+      },
+      {
+        "mid": 0.6,
+        "n": 458,
+        "wr": 0.6092,
+        "taker_ask": 0.61,
+        "taker_pf": 0.9286,
+        "maker_bid": 0.59,
+        "maker_pf_if_unconditional_fill": 1.0831
+      },
+      {
+        "mid": 0.65,
+        "n": 329,
+        "wr": 0.693,
+        "taker_ask": 0.66,
+        "taker_pf": 1.0834,
+        "maker_bid": 0.64,
+        "maker_pf_if_unconditional_fill": 1.2698
+      },
+      {
+        "mid": 0.7,
+        "n": 515,
+        "wr": 0.7184,
+        "taker_ask": 0.71,
+        "taker_pf": 0.9707,
+        "maker_bid": 0.69,
+        "maker_pf_if_unconditional_fill": 1.1464
+      },
+      {
+        "mid": 0.75,
+        "n": 388,
+        "wr": 0.75,
+        "taker_ask": 0.76,
+        "taker_pf": 0.8821,
+        "maker_bid": 0.74,
+        "maker_pf_if_unconditional_fill": 1.0541
+      },
+      {
+        "mid": 0.8,
+        "n": 632,
+        "wr": 0.8038,
+        "taker_ask": 0.81,
+        "taker_pf": 0.8946,
+        "maker_bid": 0.79,
+        "maker_pf_if_unconditional_fill": 1.089
+      },
+      {
+        "mid": 0.85,
+        "n": 507,
+        "wr": 0.8876,
+        "taker_ask": 0.86,
+        "taker_pf": 1.1961,
+        "maker_bid": 0.84,
+        "maker_pf_if_unconditional_fill": 1.5038
+      },
+      {
+        "mid": 0.9,
+        "n": 936,
+        "wr": 0.8814,
+        "taker_ask": 0.91,
+        "taker_pf": 0.6839,
+        "maker_bid": 0.89,
+        "maker_pf_if_unconditional_fill": 0.9186
+      },
+      {
+        "mid": 0.95,
+        "n": 1085,
+        "wr": 0.9604,
+        "taker_ask": 0.96,
+        "taker_pf": 0.9392,
+        "maker_bid": 0.94,
+        "maker_pf_if_unconditional_fill": 1.5468
+      }
+    ],
+    "out_of_sample_time_left_120s": [
+      {
+        "mid": 0.1,
+        "n": 513,
+        "wr": 0.0838,
+        "taker_ask": 0.11,
+        "taker_pf": 0.6915,
+        "maker_bid": 0.09,
+        "maker_pf_if_unconditional_fill": 0.9251
+      },
+      {
+        "mid": 0.15,
+        "n": 251,
+        "wr": 0.1633,
+        "taker_ask": 0.16,
+        "taker_pf": 0.9572,
+        "maker_bid": 0.14,
+        "maker_pf_if_unconditional_fill": 1.1993
+      },
+      {
+        "mid": 0.2,
+        "n": 305,
+        "wr": 0.1967,
+        "taker_ask": 0.21,
+        "taker_pf": 0.8602,
+        "maker_bid": 0.19,
+        "maker_pf_if_unconditional_fill": 1.044
+      },
+      {
+        "mid": 0.25,
+        "n": 173,
+        "wr": 0.1618,
+        "taker_ask": 0.26,
+        "taker_pf": 0.513,
+        "maker_bid": 0.24,
+        "maker_pf_if_unconditional_fill": 0.6115
+      },
+      {
+        "mid": 0.3,
+        "n": 249,
+        "wr": 0.2932,
+        "taker_ask": 0.31,
+        "taker_pf": 0.8616,
+        "maker_bid": 0.29,
+        "maker_pf_if_unconditional_fill": 1.0155
+      },
+      {
+        "mid": 0.35,
+        "n": 172,
+        "wr": 0.3837,
+        "taker_ask": 0.36,
+        "taker_pf": 1.0328,
+        "maker_bid": 0.34,
+        "maker_pf_if_unconditional_fill": 1.2087
+      },
+      {
+        "mid": 0.4,
+        "n": 168,
+        "wr": 0.4107,
+        "taker_ask": 0.41,
+        "taker_pf": 0.9355,
+        "maker_bid": 0.39,
+        "maker_pf_if_unconditional_fill": 1.0901
+      },
+      {
+        "mid": 0.45,
+        "n": 143,
+        "wr": 0.4056,
+        "taker_ask": 0.46,
+        "taker_pf": 0.747,
+        "maker_bid": 0.44,
+        "maker_pf_if_unconditional_fill": 0.8684
+      },
+      {
+        "mid": 0.5,
+        "n": 200,
+        "wr": 0.5,
+        "taker_ask": 0.51,
+        "taker_pf": 0.8958,
+        "maker_bid": 0.49,
+        "maker_pf_if_unconditional_fill": 1.0408
+      },
+      {
+        "mid": 0.55,
+        "n": 143,
+        "wr": 0.5944,
+        "taker_ask": 0.56,
+        "taker_pf": 1.0733,
+        "maker_bid": 0.54,
+        "maker_pf_if_unconditional_fill": 1.2484
+      },
+      {
+        "mid": 0.6,
+        "n": 168,
+        "wr": 0.5893,
+        "taker_ask": 0.61,
+        "taker_pf": 0.8548,
+        "maker_bid": 0.59,
+        "maker_pf_if_unconditional_fill": 0.9971
+      },
+      {
+        "mid": 0.65,
+        "n": 172,
+        "wr": 0.6163,
+        "taker_ask": 0.66,
+        "taker_pf": 0.7708,
+        "maker_bid": 0.64,
+        "maker_pf_if_unconditional_fill": 0.9034
+      },
+      {
+        "mid": 0.7,
+        "n": 249,
+        "wr": 0.7068,
+        "taker_ask": 0.71,
+        "taker_pf": 0.9172,
+        "maker_bid": 0.69,
+        "maker_pf_if_unconditional_fill": 1.0832
+      },
+      {
+        "mid": 0.75,
+        "n": 173,
+        "wr": 0.8382,
+        "taker_ask": 0.76,
+        "taker_pf": 1.5228,
+        "maker_bid": 0.74,
+        "maker_pf_if_unconditional_fill": 1.8195
+      },
+      {
+        "mid": 0.8,
+        "n": 305,
+        "wr": 0.8033,
+        "taker_ask": 0.81,
+        "taker_pf": 0.8917,
+        "maker_bid": 0.79,
+        "maker_pf_if_unconditional_fill": 1.0854
+      },
+      {
+        "mid": 0.85,
+        "n": 251,
+        "wr": 0.8367,
+        "taker_ask": 0.86,
+        "taker_pf": 0.776,
+        "maker_bid": 0.84,
+        "maker_pf_if_unconditional_fill": 0.9756
+      },
+      {
+        "mid": 0.9,
+        "n": 513,
+        "wr": 0.9162,
+        "taker_ask": 0.91,
+        "taker_pf": 1.0058,
+        "maker_bid": 0.89,
+        "maker_pf_if_unconditional_fill": 1.3509
+      },
+      {
+        "mid": 0.95,
+        "n": 612,
+        "wr": 0.9395,
+        "taker_ask": 0.96,
+        "taker_pf": 0.6023,
+        "maker_bid": 0.94,
+        "maker_pf_if_unconditional_fill": 0.9919
+      }
+    ],
+    "in_sample_time_left_60s": [
+      {
+        "mid": 0.1,
+        "n": 549,
+        "wr": 0.1275,
+        "taker_ask": 0.11,
+        "taker_pf": 1.1045,
+        "maker_bid": 0.09,
+        "maker_pf_if_unconditional_fill": 1.4776
+      },
+      {
+        "mid": 0.15,
+        "n": 239,
+        "wr": 0.1381,
+        "taker_ask": 0.16,
+        "taker_pf": 0.7854,
+        "maker_bid": 0.14,
+        "maker_pf_if_unconditional_fill": 0.984
+      },
+      {
+        "mid": 0.2,
+        "n": 298,
+        "wr": 0.2215,
+        "taker_ask": 0.21,
+        "taker_pf": 0.9992,
+        "maker_bid": 0.19,
+        "maker_pf_if_unconditional_fill": 1.2128
+      },
+      {
+        "mid": 0.25,
+        "n": 182,
+        "wr": 0.2802,
+        "taker_ask": 0.26,
+        "taker_pf": 1.0343,
+        "maker_bid": 0.24,
+        "maker_pf_if_unconditional_fill": 1.2328
+      },
+      {
+        "mid": 0.3,
+        "n": 228,
+        "wr": 0.2763,
+        "taker_ask": 0.31,
+        "taker_pf": 0.7931,
+        "maker_bid": 0.29,
+        "maker_pf_if_unconditional_fill": 0.9348
+      },
+      {
+        "mid": 0.35,
+        "n": 130,
+        "wr": 0.3308,
+        "taker_ask": 0.36,
+        "taker_pf": 0.8198,
+        "maker_bid": 0.34,
+        "maker_pf_if_unconditional_fill": 0.9594
+      },
+      {
+        "mid": 0.4,
+        "n": 166,
+        "wr": 0.4759,
+        "taker_ask": 0.41,
+        "taker_pf": 1.2189,
+        "maker_bid": 0.39,
+        "maker_pf_if_unconditional_fill": 1.4203
+      },
+      {
+        "mid": 0.45,
+        "n": 128,
+        "wr": 0.4688,
+        "taker_ask": 0.46,
+        "taker_pf": 0.9659,
+        "maker_bid": 0.44,
+        "maker_pf_if_unconditional_fill": 1.123
+      },
+      {
+        "mid": 0.5,
+        "n": 122,
+        "wr": 0.5,
+        "taker_ask": 0.51,
+        "taker_pf": 0.8958,
+        "maker_bid": 0.49,
+        "maker_pf_if_unconditional_fill": 1.0408
+      },
+      {
+        "mid": 0.55,
+        "n": 128,
+        "wr": 0.5312,
+        "taker_ask": 0.56,
+        "taker_pf": 0.83,
+        "maker_bid": 0.54,
+        "maker_pf_if_unconditional_fill": 0.9654
+      },
+      {
+        "mid": 0.6,
+        "n": 166,
+        "wr": 0.5241,
+        "taker_ask": 0.61,
+        "taker_pf": 0.6561,
+        "maker_bid": 0.59,
+        "maker_pf_if_unconditional_fill": 0.7653
+      },
+      {
+        "mid": 0.65,
+        "n": 130,
+        "wr": 0.6692,
+        "taker_ask": 0.66,
+        "taker_pf": 0.971,
+        "maker_bid": 0.64,
+        "maker_pf_if_unconditional_fill": 1.1381
+      },
+      {
+        "mid": 0.7,
+        "n": 228,
+        "wr": 0.7237,
+        "taker_ask": 0.71,
+        "taker_pf": 0.9964,
+        "maker_bid": 0.69,
+        "maker_pf_if_unconditional_fill": 1.1767
+      },
+      {
+        "mid": 0.75,
+        "n": 182,
+        "wr": 0.7198,
+        "taker_ask": 0.76,
+        "taker_pf": 0.7553,
+        "maker_bid": 0.74,
+        "maker_pf_if_unconditional_fill": 0.9025
+      },
+      {
+        "mid": 0.8,
+        "n": 298,
+        "wr": 0.7785,
+        "taker_ask": 0.81,
+        "taker_pf": 0.7676,
+        "maker_bid": 0.79,
+        "maker_pf_if_unconditional_fill": 0.9344
+      },
+      {
+        "mid": 0.85,
+        "n": 239,
+        "wr": 0.8619,
+        "taker_ask": 0.86,
+        "taker_pf": 0.9458,
+        "maker_bid": 0.84,
+        "maker_pf_if_unconditional_fill": 1.189
+      },
+      {
+        "mid": 0.9,
+        "n": 549,
+        "wr": 0.8725,
+        "taker_ask": 0.91,
+        "taker_pf": 0.6297,
+        "maker_bid": 0.89,
+        "maker_pf_if_unconditional_fill": 0.8457
+      },
+      {
+        "mid": 0.95,
+        "n": 728,
+        "wr": 0.9602,
+        "taker_ask": 0.96,
+        "taker_pf": 0.9342,
+        "maker_bid": 0.94,
+        "maker_pf_if_unconditional_fill": 1.5385
+      }
+    ],
+    "out_of_sample_time_left_60s": [
+      {
+        "mid": 0.1,
+        "n": 228,
+        "wr": 0.136,
+        "taker_ask": 0.11,
+        "taker_pf": 1.1893,
+        "maker_bid": 0.09,
+        "maker_pf_if_unconditional_fill": 1.5911
+      },
+      {
+        "mid": 0.15,
+        "n": 110,
+        "wr": 0.1273,
+        "taker_ask": 0.16,
+        "taker_pf": 0.715,
+        "maker_bid": 0.14,
+        "maker_pf_if_unconditional_fill": 0.8958
+      },
+      {
+        "mid": 0.2,
+        "n": 133,
+        "wr": 0.2331,
+        "taker_ask": 0.21,
+        "taker_pf": 1.0675,
+        "maker_bid": 0.19,
+        "maker_pf_if_unconditional_fill": 1.2957
+      },
+      {
+        "mid": 0.25,
+        "n": 88,
+        "wr": 0.2955,
+        "taker_ask": 0.26,
+        "taker_pf": 1.1141,
+        "maker_bid": 0.24,
+        "maker_pf_if_unconditional_fill": 1.328
+      },
+      {
+        "mid": 0.3,
+        "n": 99,
+        "wr": 0.2727,
+        "taker_ask": 0.31,
+        "taker_pf": 0.7789,
+        "maker_bid": 0.29,
+        "maker_pf_if_unconditional_fill": 0.9181
+      },
+      {
+        "mid": 0.4,
+        "n": 84,
+        "wr": 0.381,
+        "taker_ask": 0.41,
+        "taker_pf": 0.826,
+        "maker_bid": 0.39,
+        "maker_pf_if_unconditional_fill": 0.9625
+      },
+      {
+        "mid": 0.6,
+        "n": 84,
+        "wr": 0.619,
+        "taker_ask": 0.61,
+        "taker_pf": 0.9681,
+        "maker_bid": 0.59,
+        "maker_pf_if_unconditional_fill": 1.1292
+      },
+      {
+        "mid": 0.7,
+        "n": 99,
+        "wr": 0.7273,
+        "taker_ask": 0.71,
+        "taker_pf": 1.0145,
+        "maker_bid": 0.69,
+        "maker_pf_if_unconditional_fill": 1.1981
+      },
+      {
+        "mid": 0.75,
+        "n": 88,
+        "wr": 0.7045,
+        "taker_ask": 0.76,
+        "taker_pf": 0.7012,
+        "maker_bid": 0.74,
+        "maker_pf_if_unconditional_fill": 0.8378
+      },
+      {
+        "mid": 0.8,
+        "n": 133,
+        "wr": 0.7669,
+        "taker_ask": 0.81,
+        "taker_pf": 0.7185,
+        "maker_bid": 0.79,
+        "maker_pf_if_unconditional_fill": 0.8746
+      },
+      {
+        "mid": 0.85,
+        "n": 110,
+        "wr": 0.8727,
+        "taker_ask": 0.86,
+        "taker_pf": 1.0389,
+        "maker_bid": 0.84,
+        "maker_pf_if_unconditional_fill": 1.3061
+      },
+      {
+        "mid": 0.9,
+        "n": 228,
+        "wr": 0.864,
+        "taker_ask": 0.91,
+        "taker_pf": 0.5848,
+        "maker_bid": 0.89,
+        "maker_pf_if_unconditional_fill": 0.7854
+      },
+      {
+        "mid": 0.95,
+        "n": 332,
+        "wr": 0.9488,
+        "taker_ask": 0.96,
+        "taker_pf": 0.7182,
+        "maker_bid": 0.94,
+        "maker_pf_if_unconditional_fill": 1.1827
+      }
+    ]
+  }
+}

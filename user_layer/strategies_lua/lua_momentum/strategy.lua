@@ -1,27 +1,18 @@
--- lua_momentum — the official Lua 5.4 example strategy (E30 / #336),
--- surgically narrowed to its one live-positive leg (2026-11-01 evidence),
--- with configurable exits (2026-11-02).
+-- lua_momentum — the official Lua 5.4 example strategy (E30 / #336).
+-- Both legs are armed (operator ruling 2026-11-04). A rising leg buys the
+-- UP token; a falling leg buys the DOWN token. Entries rest post-only at
+-- that leg's best bid (manifest `entry_maker: true`). After an exit,
+-- max_entries_per_round (default 1) refuses another entry in that condition
+-- for the rest of the round.
 --
--- ⚠️ EXAMPLE / SINGLE-EDGE PACKAGE: the v2-corpus census after #419
--- (docs/reports/evolution/RETEST-2026-10-10.md §4) measured the OLD
--- both-legs taker shape at net −$17,575.78 over 20,038 closed trades. The
--- unmanaged live window (2026-10-24→26) then split the legs apart: buying
--- the DOWN leg while its own price was crashing filled 44 trades at WR
--- 56.8% (net +$22.79; the 0.20-0.35 entry band filled at WR 75%), while
--- chasing the UP leg filled 40 trades at WR 7.5% (net −$40.37; the 17
--- fills at 0.40+ all lost). The up leg is DELETED below — it never trades
--- again, and no tunable re-arms it.
---
--- The one edge this package keeps: when a DOWN token's own mid crashes by
--- `threshold` percent in one tick, rest a PURE MAKER bid at its best_bid
--- (manifest `entry_maker: true`, issue 742 — post-only, never escalates to
--- taker). In a live crash the falling price crosses the resting bid, so a
--- fill is a maker fill (no taker fee, plus the maker rebate); an unfilled
--- bid simply rests to the round's end — a missed chance, never a loss.
--- Catching the knife WHILE it is still falling is the trade; chasing a
--- spike is not (the smart_money_reverse falsification round proved the
--- stabilize-then-bid variant negative: after an informed crash the book
--- does not retest).
+-- ⚠️ NOT A MEASURED EDGE. The 2026-11-12 settlement-truth replay
+-- (docs/reports/lua-momentum-oos-2026-11-12.md) covered BTC/ETH/SOL/XRP
+-- 5m and 15m from 2026-11-05 through 2026-11-12, with official 0/1
+-- outcomes and taker fees of shares*0.07*p*(1-p). No predeclared parameter
+-- set reached win rate >= 80% and profit factor >= 1.2 on the held-out
+-- window (2026-11-10 onward). Defaults below were therefore not retuned.
+-- The older "up leg is deleted" comment described a 2026-11-01 experiment
+-- that this file no longer implements.
 --
 -- Exits (2026-11-02). The package used to return empty `exits` and declare
 -- `holds_to_settlement`, so on PolySim (the kernel settles locally) the
@@ -32,8 +23,8 @@
 -- a holder. Every exit is judged on the fresh BEST BID minus a taker fee
 -- (official `rate * p * (1-p)` per share; a zero PolySim schedule does not
 -- zero the model). The mid is never a sell price. A position that never
--- hits a rule still rides to settlement — the down-leg edge is the
--- collection, the new rules only bank a giveback.
+-- hits a rule still rides to settlement. The exits only bank a giveback;
+-- they are not, by themselves, a measured edge (see the study above).
 --
 -- Holding both sides of one round is NOT the trade. `holds_to_settlement`
 -- waives the kernel's "Already in {asset}" gate so a pair collector can
@@ -300,16 +291,20 @@ local function classify(token, mid)
     if pm == nil or cm == nil or pm <= 0 then
         return
     end
-    local move_pct = (cm - pm) / pm * 100.0
+    -- `threshold` is a fraction (manifest default 0.04 = 4%, description
+    -- "default 4%"). Comparing the percent-point move to that fraction
+    -- armed on a 0.04% flicker. The study in
+    -- docs/reports/lua-momentum-oos-2026-11-12.md is this fractional rule.
+    local move = (cm - pm) / pm
     -- Direction gate (two legs again, operator ruling 2026-11-04): a leg
     -- crashing ≥ threshold arms "down"; a leg rising ≥ threshold arms "up".
     -- A sub-threshold move clears the confirmation; a flip breaks the old
     -- premise (bk_evaluate turns the break into a bid cancel).
-    if math.abs(move_pct) < threshold() then
+    if math.abs(move) < threshold() then
         confirmed[token] = nil
         return
     end
-    local dir = move_pct > 0 and "up" or "down"
+    local dir = move > 0 and "up" or "down"
     if confirmed[token] == true and direction[token] ~= dir then
         direction[token] = dir
         return
@@ -778,11 +773,9 @@ end
 --   exits   = { { token=, reason= } }                    kernel prices the exit
 --   breaks  = { { token=, broken_price= } }              kernel cancels bids
 --
--- Direction gate: the DOWN leg only, and only while IT is the leg whose
--- price is falling (`confirmed` is set by nothing else). The entry price is
--- the leg's own best_bid — a resting maker quote the crash crosses, never a
--- chase (the manifest's `entry_maker: true` makes every entry post-only and
--- never-escalating).
+-- Direction gate: each leg only while its own momentum matches it (UP token
+-- rising, DOWN token falling). The entry price is that leg's best_bid — a
+-- resting maker quote (`entry_maker: true` is post-only and never-escalating).
 function bk_evaluate()
     local out = { entries = {}, exits = {}, breaks = {} }
 
