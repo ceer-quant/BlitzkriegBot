@@ -97,6 +97,31 @@ impl Core {
         Ok(())
     }
 
+    /// 撤销目标账户的全部 live 挂单（防幽灵单），不强平仓位。
+    /// 任一撤单失败即中止并返回错误；调用方决定如何处理。
+    /// 返回被撤单的笔数。
+    pub(crate) fn cancel_all_live_orders_for_account(
+        &mut self,
+        account_id: &str,
+        now_ms: i64,
+    ) -> CoreResult<usize> {
+        use blitzkrieg_market_api::AccountId;
+        let acct = AccountId::from(account_id);
+        let order_ids: Vec<String> = self
+            .ome
+            .live_orders()
+            .iter()
+            .filter(|o| o.account_id == acct && o.status.is_live())
+            .map(|o| o.order_id.clone())
+            .collect();
+        let mut n = 0usize;
+        for id in &order_ids {
+            self.cancel(id, now_ms)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// Release every bookkeeping hold an order took when it was placed.
     ///
     /// The terminal transition has TWO callers — an explicit [`Self::cancel`]

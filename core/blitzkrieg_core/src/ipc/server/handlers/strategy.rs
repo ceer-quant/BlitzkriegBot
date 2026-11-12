@@ -143,6 +143,10 @@ pub(crate) async fn handle_strategy(
                 if reason.is_none() && mirror_persistence {
                     let default_id = crate::account::default_account_id();
                     let mut c = core.lock().await;
+                    // 切断旧状态：禁用策略前撤销该账户全部 live 挂单（防幽灵单）。
+                    if !enabled {
+                        let _ = c.cancel_all_live_orders_for_account(default_id.as_str(), now_ms());
+                    }
                     match c.set_scoped_strategy_enabled(
                         &default_id,
                         name,
@@ -225,6 +229,8 @@ pub(crate) async fn handle_strategy(
                         assignment.push(name.to_string());
                     } else if !enabled {
                         assignment.retain(|s| s != name);
+                        // 切断旧状态：禁用策略前撤销该账户全部 live 挂单（防幽灵单）。
+                        let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms());
                     }
                     let kept_exits_only = match c.set_account_strategies_persisting(
                         &id,
