@@ -168,11 +168,11 @@ check('轮次周期切换入口在行情页倒计时卡（共享 composable 单�
   assert.match(hft, /v-model="roundSwitch\.value\.value"[\s\S]*?:segments="switcherSegments"/, '倒计时卡缺 SegmentedControl 切换控件（档位绑定必须走声明筛 switcherSegments）')
   assert.match(hft, /switcherLocked/, '倒计时卡缺声明唯一档锁定分支 —— 交易所只声明一档时切换器必须退化为静态标签（venue 是数据不是逻辑）')
   assert.match(hft, /roundSwitch\.flagLocked\.value/, '倒计时卡未消费 flagLocked —— 显式启动参数在管时必须禁用切换')
-  assert.match(hft, /roundSwitch\.save\(store\.activeAccount \?\? 'default'\)/, '倒计时卡写入必须钉当前账户 —— per-account 写路径不许静默丢 accountId')
+	  assert.match(hft, /roundSwitch\.save\((accountId|store\.activeAccount \?\? 'default')/, '倒计时卡写入必须钉当前账户 —— per-account 写路径不许静默丢 accountId')
   // 设置页保留同源卡面（第二入口），且不许再私藏一份独立写路径。
-  const settings = read('src', 'pages', 'settings', 'SettingsGeneral.vue')
-  assert.match(settings, /useRoundDuration\(\)/, '设置页轮次卡未接 composable —— 两卡必须共享一份逻辑')
-  for (const [file, src] of [['HftPage.vue', hft], ['SettingsGeneral.vue', settings]]) {
+		  // 设置页轮次卡已删除（#1155），行情页倒计时卡是唯一的轮次写入入口。
+		  const settings = read('src', 'pages', 'settings', 'SettingsGeneral.vue')
+		  for (const [file, src] of [['HftPage.vue', hft], ['SettingsGeneral.vue', settings]]) {
     assert.doesNotMatch(src, /api\.roundDurationSet/, `${file} 直接摸 roundDurationSet —— 写路径必须走 lib/round-duration.ts 单源`)
   }
 })
