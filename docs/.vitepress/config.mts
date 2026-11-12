@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitepress'
-import { loadReleaseBanner } from './load-release.mts'
+import { loadReleaseBanner, loadRepoCounts } from './load-release.mts'
 import { chineseSearchOptimize, pagefindPlugin } from 'vitepress-plugin-pagefind'
 import { readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -35,7 +35,8 @@ for (const rel of collect(docsRoot).sort()) {
 const base = process.env.DOCS_BASE || '/'
 
 export default defineConfig(async () => {
-  const release = await loadReleaseBanner()
+  const [release, counts] = await Promise.all([loadReleaseBanner(), loadRepoCounts()])
+  const releaseTag = JSON.stringify(release?.tag ?? '')
   return {
   base,
   title: 'BlitzkriegBot',
@@ -59,10 +60,16 @@ export default defineConfig(async () => {
       {},
       "(function(){var d=document,el=null,light='#f6f6f8',dark='#11141b';function sync(){el=el||d.querySelector('meta[name=theme-color]');if(!el)return;el.setAttribute('content',d.documentElement.classList.contains('dark')?dark:light)}d.addEventListener('DOMContentLoaded',sync);new MutationObserver(sync).observe(d.documentElement,{attributes:true,attributeFilter:['class']})})()",
     ],
+    [
+      'script',
+      {},
+      `(function(){try{var tag=${releaseTag};if(!tag)return;if(localStorage.getItem('bb-release-dismissed:'+tag)==='1'){document.documentElement.classList.add('bb-release-dismissed');return;}document.documentElement.classList.add('bb-release-open');}catch(e){}})()`,
+    ],
   ],
   vite: {
     define: {
       __BB_RELEASE__: JSON.stringify(release),
+      __BB_REPO_COUNTS__: JSON.stringify(counts),
     },
     plugins: [
       pagefindPlugin({
@@ -81,7 +88,6 @@ export default defineConfig(async () => {
     outline: { level: [2, 3], label: '本页目录' },
     nav: [
       { text: '开始', link: '/getting-started' },
-      { text: 'late_favorite', link: '/late-favorite' },
       { text: '文档', link: '/FEATURES' },
       { text: '术语表', link: '/glossary' },
     ],

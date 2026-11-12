@@ -13,7 +13,12 @@ export type ReleaseBanner = {
   url: string
   /** Commits on the latest release since the previous stable release. */
   changes: number | null
-  /** Merged PRs whose merge date falls in that same release window. */
+}
+
+export type RepoCounts = {
+  /** Commits reachable from the default branch (main). */
+  commits: number | null
+  /** Merged pull requests in the repository. */
   pullRequests: number | null
 }
 
@@ -42,18 +47,38 @@ function displayVersion(tag: string): string {
   return tag.startsWith('v') ? tag.slice(1) : tag
 }
 
-function day(iso: string | undefined): string | null {
-  if (!iso || iso.length < 10) return null
-  return iso.slice(0, 10)
+async function commitCount(): Promise<number | null> {
+  const res = await fetch(`${API}/repos/${REPO}/commits?sha=main&per_page=1`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'BlitzkriegBot-docs',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!res.ok) return null
+  const link = res.headers.get('link') ?? ''
+  const last = link.match(/[?&]page=(\d+)>;\s*rel="last"/)
+  if (!last) return null
+  const n = Number(last[1])
+  return Number.isFinite(n) && n > 0 ? n : null
 }
 
-/** Merged PRs between two release publish dates, inclusive. */
-async function pullRequestsBetween(from: string, to: string): Promise<number | null> {
-  const q = encodeURIComponent(`repo:${REPO} is:pr is:merged merged:${from}..${to}`)
+async function mergedPullRequests(): Promise<number | null> {
+  const q = encodeURIComponent(`repo:${REPO} is:pr is:merged`)
   const { ok, json } = await getJson(`/search/issues?q=${q}&per_page=1`)
   if (!ok || !json || typeof json !== 'object') return null
   const total = (json as { total_count?: unknown }).total_count
   return typeof total === 'number' && total >= 0 ? total : null
+}
+
+export async function loadRepoCounts(): Promise<RepoCounts> {
+  try {
+    const [commits, pullRequests] = await Promise.all([commitCount(), mergedPullRequests()])
+    return { commits, pullRequests }
+  } catch {
+    return { commits: null, pullRequests: null }
+  }
 }
 
 export async function loadReleaseBanner(): Promise<ReleaseBanner | null> {
@@ -76,15 +101,11 @@ export async function loadReleaseBanner(): Promise<ReleaseBanner | null> {
         : null
       if (typeof ahead === 'number' && ahead >= 0) changes = ahead
     }
-    const from = day(previous?.published_at)
-    const to = day(latest.published_at)
-    const pullRequests = from && to ? await pullRequestsBetween(from, to) : null
     return {
       version: displayVersion(latest.tag_name),
       tag: latest.tag_name,
       url: latest.html_url,
       changes,
-      pullRequests,
     }
   } catch {
     return null

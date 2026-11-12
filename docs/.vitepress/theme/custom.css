@@ -830,11 +830,29 @@ div[class*='language-'] {
   --bb-max: 1152px;
 }
 
+html,
+body,
+#app {
+  background-color: var(--vp-c-bg);
+}
+
+.Layout.bb-landing,
+.Layout.bb-landing .VPContent,
+.Layout.bb-landing .VPPage {
+  width: 100%;
+  max-width: none;
+  background-color: var(--vp-c-bg);
+}
+
 .bb-landing .bb-sec,
 .bb-landing .bb-hero {
-  max-width: var(--bb-max);
-  margin: 0 auto;
-  padding: 0 24px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
+  padding-left: max(24px, calc((100% - var(--bb-max)) / 2));
+  padding-right: max(24px, calc((100% - var(--bb-max)) / 2));
+  background-color: transparent;
 }
 
 .bb-landing .bb-hero {
@@ -1530,21 +1548,35 @@ div[class*='language-'] {
   }
 }
 
-/* 最新 release 横幅。颜色只走主题令牌，亮暗两套都跟着变。 */
+/* 最新 release 横幅：贴在视口最顶，导航用 --vp-layout-top-height 让到它下面。 */
+html.bb-release-open {
+  --vp-layout-top-height: 36px;
+}
+html.bb-release-dismissed .bb-release {
+  display: none;
+}
 .bb-release {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: calc(var(--vp-z-index-nav) + 1);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px 16px;
-  flex-wrap: wrap;
-  padding: 10px 44px 10px 16px;
-  position: relative;
-  background: var(--vp-c-brand-soft);
-  color: var(--vp-c-text-1);
-  border-bottom: 1px solid var(--vp-c-border);
-  font-size: 14px;
-  line-height: 1.45;
+  gap: 0.55em;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  margin: 0;
+  padding: 7px 40px;
+  background: color-mix(in oklab, var(--vp-c-brand-1) 14%, var(--vp-c-bg));
+  color: var(--vp-c-text-2);
+  border-bottom: 1px solid color-mix(in oklab, var(--vp-c-brand-1) 32%, transparent);
+  font-size: 13px;
+  line-height: 1.4;
   text-align: center;
+  white-space: nowrap;
 }
 .bb-release-text {
   margin: 0;
@@ -1555,25 +1587,22 @@ div[class*='language-'] {
   text-decoration: none;
   white-space: nowrap;
 }
-.bb-release-link::before {
-  content: '> ';
-}
 .bb-release-link:hover {
   color: var(--vp-c-brand-2);
   text-decoration: underline;
 }
 .bb-release-close {
   position: absolute;
-  right: 8px;
+  right: 6px;
   top: 50%;
   transform: translateY(-50%);
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--vp-c-text-2);
-  font-size: 20px;
+  color: var(--vp-c-text-3);
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
@@ -1582,10 +1611,14 @@ div[class*='language-'] {
   color: var(--vp-c-text-1);
 }
 @media (max-width: 640px) {
+  html.bb-release-open {
+    --vp-layout-top-height: 64px;
+  }
   .bb-release {
-    justify-content: flex-start;
-    text-align: left;
-    padding: 10px 44px 10px 12px;
-    font-size: 13px;
+    white-space: normal;
+    min-height: 44px;
+    padding: 8px 36px 8px 12px;
+    font-size: 12px;
+    line-height: 1.45;
   }
 }
