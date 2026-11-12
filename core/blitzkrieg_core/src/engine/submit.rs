@@ -1058,6 +1058,14 @@ impl Engine {
             source,
             account_id: account_id.to_string(),
             exits_only: false,
+            // #1170 (方案 A): stamp this scope's round-family binding from the
+            // host's table at BIRTH — every registration path (initial load,
+            // reload, account-scope rebuild) funnels through here, so a
+            // binding survives re-instantiation without the host re-pushing.
+            round_family_sec: self
+                .strategy_families
+                .get(&crate::engine::strategy_env_fold(&name))
+                .copied(),
         };
         // Hand the host config to the newly registered strategy — the SAME
         // JSON projection every other push site uses (RFC-645 A-2, 决议④:

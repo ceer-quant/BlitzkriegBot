@@ -1444,6 +1444,7 @@ mod tests {
     mod settlement_service_tests;
     mod shadow_evolution_tests;
     mod strategy_dispatch_tests;
+    mod strategy_family_binding_tests;
     mod strategy_params_tests;
     mod tests_account_reset;
     mod tests_place_fill;
