@@ -938,6 +938,21 @@ jobs:
       - name: Upgrade propagation self-test (#252)
         run: sh scripts/upgrade-propagate-test.sh
 
+      # Step 1's other half: the build worktree is the only tree a release is
+      # compiled from and it lives under `target/`, so a disk reclamation, a
+      # `cargo clean` or a `git worktree prune` used to kill every upgrade at
+      # step 1 with git's own "cannot change to …: No such file or directory" —
+      # after the operator had already asked for the deploy. The bootstrap that
+      # recreates it (a cold build, never a failed one) is what this pins,
+      # including the two things it must refuse: a foreign repository parked at
+      # the build path, and a plain dir inside the main work tree (a bootstrap
+      # that trusted `--git-dir` there would let step 1's `checkout --detach`
+      # run against the MAIN work tree). Reverse-acceptance: dropping the
+      # `--show-toplevel` guard turns "the main checkout's HEAD did not move" red,
+      # and dropping the common-dir check turns the foreign-repo case red.
+      - name: Upgrade build-worktree bootstrap self-test
+        run: sh scripts/upgrade-worktree-test.sh
+
       # #211's detector. Its self-test spawns real processes and asserts on exit
       # codes and log wording, so it is the regression net for the thing that is
       # supposed to notice the core is down. Reverse-acceptance already proved
