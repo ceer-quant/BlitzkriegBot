@@ -808,6 +808,7 @@ async fn two_account_fixture() -> (
 
 mod tests_accept_err_state;
 mod tests_account_books;
+mod tests_account_settings_write;
 mod tests_account_verbs;
 mod tests_backtest;
 mod tests_blueprint;

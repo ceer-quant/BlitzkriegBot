@@ -429,6 +429,14 @@ pub fn load_account_ledgers_single_source(
 /// default (no legacy toml fallback exists any more). A malformed `.env`
 /// (unreadable, or keys that fail the fail-closed parse) refuses the reload
 /// and the caller keeps the current configuration.
+///
+/// #1189 PR-C: this is the same-process reload half every account settings
+/// write face runs after its `.env` upsert (`service::accounts::persist`), so
+/// the parse here must be as COMPLETE as the boot's: the zero-config branch
+/// applies `ACCOUNT_DEFAULT_STRATEGIES` to the default account exactly like
+/// [`load_account_ledgers_single_source`] does (issue 967's env-only
+/// spelling) — otherwise a zero-config `account.strategies.set` would land
+/// the key on disk and the reload would drop it right back out of memory.
 pub fn load_account_ledgers_for_reload(
     env_path: &Path,
     now_ms: i64,
@@ -446,7 +454,23 @@ pub fn load_account_ledgers_for_reload(
         .collect();
     match load_account_ledgers_from_env(now_ms, allowed, &|key| file_map.get(key).cloned())? {
         Some(book) => Ok(book),
-        None => Ok(AccountLedgers::single_default(now_ms)),
+        None => {
+            // The zero-config single default — with issue 967's
+            // ACCOUNT_DEFAULT_STRATEGIES applied, the boot parse's own
+            // spelling (see `load_account_ledgers_single_source`).
+            let mut book = AccountLedgers::single_default(now_ms);
+            let default_id = crate::account::default_account_id();
+            if let Some(strategies) = file_map
+                .get("ACCOUNT_DEFAULT_STRATEGIES")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| env_list(Some(s.clone())))
+                .filter(|s| !s.is_empty())
+                && let Some(a) = book.account_mut(&default_id)
+            {
+                a.strategies = strategies;
+            }
+            Ok(book)
+        }
     }
 }
 
@@ -1209,6 +1233,14 @@ struct EnvAccount {
     secret_env: Option<String>,
     passphrase_env: Option<String>,
     private_key_env: Option<String>,
+    /// #1189 PR-C: the opening equity `env_persist_account_opening_equity`
+    /// writes (issue 1046) — parsed back so the same-process reload every
+    /// settings write runs cannot silently drop the runtime fact the env
+    /// grammar itself persists (the write existed without a read: a reload
+    /// cleared the memory cell until the next venue report re-seeded it).
+    /// `None` = key absent; a PRESENT value that is not a decimal refuses
+    /// the parse (fail-closed, the same discipline every other key runs).
+    opening_equity: Option<rust_decimal::Decimal>,
 }
 
 fn parse_env_account(
@@ -1217,6 +1249,20 @@ fn parse_env_account(
 ) -> Result<EnvAccount, CoreError> {
     let sfx = env_suffix(id);
     let key = |tail: &str| format!("ACCOUNT_{sfx}_{tail}");
+    let opening_equity = match env(&key("OPENING_EQUITY")) {
+        None => None,
+        Some(raw) => Some(
+            rust_decimal::Decimal::from_str_exact(raw.trim()).map_err(|_| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "ACCOUNT_{sfx}_OPENING_EQUITY=`{raw}` does not parse as a decimal \
+                         — fix .env and restart (fail-closed)"
+                    ),
+                )
+            })?,
+        ),
+    };
     Ok(EnvAccount {
         name: env(&key("NAME")),
         venue: env(&key("VENUE")),
@@ -1228,5 +1274,6 @@ fn parse_env_account(
         secret_env: env(&key("SECRET_ENV")),
         passphrase_env: env(&key("PASSPHRASE_ENV")),
         private_key_env: env(&key("PRIVATE_KEY_ENV")),
+        opening_equity,
     })
 }

@@ -62,7 +62,12 @@ pub fn load_account_ledgers_from_env(
             trading_enabled: row.trading_enabled.unwrap_or(true),
             strategies: row.strategies.clone(),
             rounds: validate_rounds_from(&rounds_key, rounds, allowed)?,
-            opening_equity: None,
+            // #1189 PR-C: the opening equity rides the env grammar back into
+            // the book (the write face has persisted it since issue 1046) so
+            // the same-process reload every settings write runs keeps the
+            // cumulative-PnL identity instead of dropping it until the next
+            // venue report.
+            opening_equity: row.opening_equity,
             updated_at_ms: now_ms,
         });
     }

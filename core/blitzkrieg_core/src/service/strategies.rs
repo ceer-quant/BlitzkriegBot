@@ -159,8 +159,8 @@ impl Core {
 
     /// The per-account half of `strategy.enable {name, accountId?, reason?}`:
     /// set ONE (strategy, account) scope's enablement — persist to the
-    /// account book's `strategies` set (memory first, disk after, one
-    /// transaction) and drive the engine's scope state from it.
+    /// account book's `strategies` set (`.env` first, then the same-process
+    /// reload) and drive the engine's scope state from it.
     ///
     /// Enable: the strategy joins the account's enablement set; a scope that
     /// does not exist yet is instantiated (Lua sources only — the same
@@ -185,7 +185,7 @@ impl Core {
         enabled: bool,
         actor: &str,
         reason: &str,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> CoreResult<(Vec<String>, Vec<String>)> {
         use crate::schema::ACCOUNT_STRATEGIES_SET_NOTE;
         // Existence first, with the standard unknown-account refusal, before
@@ -255,7 +255,18 @@ impl Core {
                 ),
             )
         })?;
-        self.accounts.set_strategies(id, set.clone(), now_ms)?;
+        // #1189 PR-C: the same-process reload — the write shape the account
+        // settings faces run: the set in force is the parse of the `.env`
+        // just written, so the rebuild runs over what the next boot loads.
+        self.reload_accounts().map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "strategy.enable: the .env write landed but the same-process reload \
+                     refused ({e}) — the set is on disk and takes full effect at the next boot"
+                ),
+            )
+        })?;
         // #537: the default account's scoped write keeps the persisted
         // enabled-set in lockstep (the same mirror `set_account_strategies_
         // persisting` runs): the boot migrates the state file ONLY while the

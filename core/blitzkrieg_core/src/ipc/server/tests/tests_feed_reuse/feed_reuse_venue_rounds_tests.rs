@@ -14,9 +14,14 @@ async fn venue_set_mounts_every_declared_family_of_the_account() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
     let env_path = dir.join(".env");
+    // #1189 PR-C: the write faces re-derive the whole book from the `.env`
+    // after every write (write env + same-process reload), so the file must
+    // spell the declaration the memory book carries — the memory-only
+    // spelling would be dropped by the reload (and was never durable: the
+    // next boot read the same env and lost it too).
     std::fs::write(
         &env_path,
-        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\n",
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\nACCOUNT_PAPER_ROUNDS=\"900,3600\"\n",
     )
     .expect("fixture");
 
@@ -178,9 +183,12 @@ async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
     let env_path = dir.join(".env");
+    // #1189 PR-C: the venue binding is durable state — the write faces
+    // re-derive the book from the `.env` after every write, so the file
+    // spells the binding the memory book carries.
     std::fs::write(
         &env_path,
-        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\n",
+        "ACCOUNT_LIST=paper\nACCOUNT_PAPER_NAME=\"paper\"\nACCOUNT_PAPER_VENUE=\"roundsmount\"\n",
     )
     .expect("fixture");
 
