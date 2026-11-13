@@ -1301,12 +1301,14 @@ async fn main() -> anyhow::Result<()> {
     let env_lookup = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
     match blitzkrieg_core::db_import::import_once(&db_path, env_lookup) {
         Ok(report) if report.imported_anything() => {
+            // Counts only — the report's numeric columns are row counts,
+            // never credential material; the path names the database file.
+            let accounts = report.accounts;
+            let risk_rows = report.risk_rows;
+            let ledger_entries = report.ledger_entries;
             eprintln!(
-                "blitzkrieg-core: legacy import v1 folded {} account(s), {} risk row(s), \
-                 {} ledger entr(ies) into {}",
-                report.accounts,
-                report.risk_rows,
-                report.ledger_entries,
+                "blitzkrieg-core: legacy import v1 folded {accounts} account(s), \
+                 {risk_rows} risk row(s), {ledger_entries} ledger entr(ies) into {}",
                 db_path.display()
             );
         }
