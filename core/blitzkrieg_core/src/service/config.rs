@@ -214,6 +214,18 @@ pub struct CoreConfig {
     pub size_usd: Decimal,
     pub min_shares: Decimal,
     pub max_shares: Decimal,
+    /// Issue #1189 (PR-D): per-account share band overrides —
+    /// `account_id → min shares`. [`CoreConfig::share_band_for`] prefers the
+    /// account row over the global `min_shares`.
+    pub account_min_shares: HashMap<String, Decimal>,
+    /// Issue #1189 (PR-D): per-account share band overrides —
+    /// `account_id → max shares`. [`CoreConfig::share_band_for`] prefers the
+    /// account row over the global `max_shares`.
+    pub account_max_shares: HashMap<String, Decimal>,
+    /// Issue #1189 (PR-D): per-account market plugin overrides —
+    /// `account_id → plugin name`. [`CoreConfig::market_plugin_for`] prefers
+    /// the account row over the caller-supplied fallback.
+    pub account_market_plugins: HashMap<String, String>,
     /// P0 #202 — the per-entry budget as a percentage of the account's cash
     /// equity, replacing the absolute `size_usd` when > 0. 0 (the default)
     /// keeps every deployment's current order sizes exactly as they are.
@@ -584,6 +596,32 @@ impl CoreConfig {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    /// Issue #1189 (PR-D): the share band for one account — account row wins,
+    /// a missing row falls back to the global `min_shares` / `max_shares`.
+    pub fn share_band_for(&self, account_id: &str) -> (Decimal, Decimal) {
+        (
+            self.account_min_shares
+                .get(account_id)
+                .copied()
+                .unwrap_or(self.min_shares),
+            self.account_max_shares
+                .get(account_id)
+                .copied()
+                .unwrap_or(self.max_shares),
+        )
+    }
+
+    /// Issue #1189 (PR-D): the market plugin for one account — account row
+    /// wins, a missing row falls back to the caller-supplied `fallback`
+    /// (the `RUNTIME_MARKET_PLUGIN` env or a compiled default; resolved by
+    /// the caller, never hard-coded here).
+    pub fn market_plugin_for(&self, account_id: &str, fallback: &str) -> String {
+        self.account_market_plugins
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     /// Install the engine described by this config (the live server's startup
@@ -1069,6 +1107,11 @@ impl Default for CoreConfig {
             size_usd: Decimal::new(25, 1), // 2.5
             min_shares: Decimal::from(10),
             max_shares: Decimal::from(10),
+            // Issue #1189 (PR-D): empty = no account carries its own band or
+            // market plugin; every account resolves to the global values.
+            account_min_shares: HashMap::new(),
+            account_max_shares: HashMap::new(),
+            account_market_plugins: HashMap::new(),
             size_pct: Decimal::ZERO,
             trend_confirm_sec: 60,
             trend_window_floor_ms: 10_000,
@@ -1381,4 +1424,72 @@ pub(super) struct InflightTaker {
     pub(super) matched_price: Option<Decimal>,
     /// Stage 1: why the venue would have killed the FOK.
     pub(super) rejected_msg: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #1189 (PR-D): the account row wins; a missing row falls back to
+    /// the global band.
+    #[test]
+    fn share_band_for_account_rows_win() {
+        let mut config = CoreConfig::default();
+        config
+            .account_min_shares
+            .insert("A".to_string(), Decimal::from(10));
+        config
+            .account_max_shares
+            .insert("A".to_string(), Decimal::from(20));
+        config
+            .account_min_shares
+            .insert("B".to_string(), Decimal::from(5));
+        config
+            .account_max_shares
+            .insert("B".to_string(), Decimal::from(50));
+        assert_eq!(
+            config.share_band_for("A"),
+            (Decimal::from(10), Decimal::from(20))
+        );
+        assert_eq!(
+            config.share_band_for("B"),
+            (Decimal::from(5), Decimal::from(50))
+        );
+        // No row for C: the global band stands.
+        assert_eq!(
+            config.share_band_for("C"),
+            (config.min_shares, config.max_shares)
+        );
+    }
+
+    /// Issue #1189 (PR-D): the account row wins; a missing row falls back to
+    /// the caller-supplied fallback.
+    #[test]
+    fn market_plugin_for_account_rows_win() {
+        let mut config = CoreConfig::default();
+        config
+            .account_market_plugins
+            .insert("A".to_string(), "polymarket".to_string());
+        config
+            .account_market_plugins
+            .insert("B".to_string(), "kalshi".to_string());
+        assert_eq!(config.market_plugin_for("A", "fallback"), "polymarket");
+        assert_eq!(config.market_plugin_for("B", "fallback"), "kalshi");
+        // No row for C: the fallback stands.
+        assert_eq!(config.market_plugin_for("C", "fallback"), "fallback");
+    }
+
+    /// Issue #1189 (PR-D): empty maps resolve every account to the global
+    /// band — the historical single-account behaviour, byte for byte.
+    #[test]
+    fn share_band_for_empty_map_matches_global() {
+        let config = CoreConfig::default();
+        assert_eq!(
+            config.share_band_for("any"),
+            (config.min_shares, config.max_shares)
+        );
+        assert!(config.account_min_shares.is_empty());
+        assert!(config.account_max_shares.is_empty());
+        assert!(config.account_market_plugins.is_empty());
+    }
 }

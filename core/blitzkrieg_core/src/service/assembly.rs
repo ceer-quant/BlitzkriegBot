@@ -159,6 +159,60 @@ impl Core {
                     );
                 }
             }
+            // Issue #1189 (PR-D): per-account share band and market plugin.
+            // ACCOUNT_<SFX>_MIN_SHARES / ACCOUNT_<SFX>_MAX_SHARES resolve the
+            // account's band (`CoreConfig::share_band_for` prefers the row,
+            // falls back to the global min_shares/max_shares);
+            // ACCOUNT_<SFX>_MARKET_PLUGIN names the account's market plugin
+            // (`CoreConfig::market_plugin_for` prefers the row, falls back to
+            // the caller-supplied fallback). Fail-closed, same posture as the
+            // round anchor above: a non-decimal value refuses the boot, and a
+            // resolved band whose min exceeds its max refuses the boot.
+            let mut account_min_shares: Option<Decimal> = None;
+            let mut account_max_shares: Option<Decimal> = None;
+            let min_shares_key = format!("ACCOUNT_{sfx}_MIN_SHARES");
+            if let Some(raw) = env_lookup(&min_shares_key) {
+                match raw.trim().parse::<Decimal>() {
+                    Ok(v) => account_min_shares = Some(v),
+                    Err(_) => panic!(
+                        "refusing to boot: {min_shares_key}=`{raw}` is not a decimal \
+                         (fail-closed: fix .env and restart)"
+                    ),
+                }
+            }
+            let max_shares_key = format!("ACCOUNT_{sfx}_MAX_SHARES");
+            if let Some(raw) = env_lookup(&max_shares_key) {
+                match raw.trim().parse::<Decimal>() {
+                    Ok(v) => account_max_shares = Some(v),
+                    Err(_) => panic!(
+                        "refusing to boot: {max_shares_key}=`{raw}` is not a decimal \
+                         (fail-closed: fix .env and restart)"
+                    ),
+                }
+            }
+            if account_min_shares.is_some() || account_max_shares.is_some() {
+                let band_min = account_min_shares.unwrap_or(config.min_shares);
+                let band_max = account_max_shares.unwrap_or(config.max_shares);
+                if band_min > band_max {
+                    panic!(
+                        "refusing to boot: ACCOUNT_{sfx} share band [{band_min}, {band_max}] is \
+                         incompatible (min > max) (fail-closed: fix the cells and restart)"
+                    );
+                }
+            }
+            if let Some(v) = account_min_shares {
+                config.account_min_shares.insert(id.to_string(), v);
+            }
+            if let Some(v) = account_max_shares {
+                config.account_max_shares.insert(id.to_string(), v);
+            }
+            let market_plugin_key = format!("ACCOUNT_{sfx}_MARKET_PLUGIN");
+            if let Some(raw) = env_lookup(&market_plugin_key) {
+                let plugin = raw.trim().to_string();
+                if !plugin.is_empty() {
+                    config.account_market_plugins.insert(id.to_string(), plugin);
+                }
+            }
         }
         drop(env_lookup);
         // #1170 (方案 A): per-strategy round-family bindings. The
