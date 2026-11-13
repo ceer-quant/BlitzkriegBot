@@ -58,6 +58,10 @@ pub struct Core {
     /// UNTOUCHED: reserve/release/settle keep their exact signatures.
     accounts: crate::account::AccountLedgers,
     risk: RiskGate,
+    /// issue #1189: the per-account risk/exit store, when one is open. `None`
+    /// = the env fallback (every test, and a kernel with no store wired).
+    /// Panel writes go here; a missing row falls back to the global matrix.
+    account_risk_db: Option<crate::risk::account_store::AccountRiskDb>,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
     breaker: LossBreakers,

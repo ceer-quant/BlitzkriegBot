@@ -48,14 +48,26 @@ fn exit_env_key(field: &str) -> Option<&'static str> {
 /// log tells them persistence failed.
 fn persist_changes_to_env(
     env_path: Option<&std::path::Path>,
+    account_id: Option<&str>,
     changes: &[(&'static str, String)],
 ) -> bool {
     let Some(env_path) = env_path else {
         return false;
     };
+    let is_default = account_id
+        .map(|id| id == crate::model::default_account_id().as_str())
+        .unwrap_or(true);
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
-        .filter_map(|(field, value)| Some((systemic_env_key(field)?.to_string(), value.clone())))
+        .filter_map(|(field, value)| {
+            let key = if is_default {
+                systemic_env_key(field).map(str::to_string)
+            } else {
+                crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
+                    .or_else(|| systemic_env_key(field).map(str::to_string))
+            };
+            key.map(|k| (k, value.clone()))
+        })
         .collect();
     if vars.is_empty() {
         return false;
@@ -74,14 +86,26 @@ fn persist_changes_to_env(
 /// Same as [`persist_changes_to_env`] but for exit-discipline field names.
 fn persist_exit_changes_to_env(
     env_path: Option<&std::path::Path>,
+    account_id: Option<&str>,
     changes: &[(&'static str, String)],
 ) -> bool {
     let Some(env_path) = env_path else {
         return false;
     };
+    let is_default = account_id
+        .map(|id| id == crate::model::default_account_id().as_str())
+        .unwrap_or(true);
     let vars: std::collections::BTreeMap<String, String> = changes
         .iter()
-        .filter_map(|(field, value)| Some((exit_env_key(field)?.to_string(), value.clone())))
+        .filter_map(|(field, value)| {
+            let key = if is_default {
+                exit_env_key(field).map(str::to_string)
+            } else {
+                crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
+                    .or_else(|| exit_env_key(field).map(str::to_string))
+            };
+            key.map(|k| (k, value.clone()))
+        })
         .collect();
     if vars.is_empty() {
         return false;
@@ -232,7 +256,11 @@ pub(crate) async fn handle_risk(
                                 .iter()
                                 .map(|c| (c.field, c.to.clone()))
                                 .collect();
-                            let persisted = persist_changes_to_env(env_path, &changes);
+                            let persisted = if update.persisted {
+                                true
+                            } else {
+                                persist_changes_to_env(env_path, p.account_id.as_deref(), &changes)
+                            };
                             Ok(with_persisted(
                                 serde_json::to_value(update).unwrap_or(Value::Null),
                                 persisted,
@@ -274,7 +302,11 @@ pub(crate) async fn handle_risk(
                             .iter()
                             .map(|c| (c.field, c.to.clone()))
                             .collect();
-                        let persisted = persist_exit_changes_to_env(env_path, &changes);
+                        let persisted = if update.persisted {
+                            true
+                        } else {
+                            persist_exit_changes_to_env(env_path, p.account_id.as_deref(), &changes)
+                        };
                         Ok(with_persisted(
                             serde_json::to_value(update).unwrap_or(Value::Null),
                             persisted,

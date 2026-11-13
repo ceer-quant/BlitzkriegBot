@@ -1016,6 +1016,11 @@ pub const RISK_LIMIT_UPDATE_NOTE: &str = "hot-applied; persisted to the risk-sta
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SetSystemicLimitsParams {
+    /// The account whose `account_risk` row this patch writes. Absent = the
+    /// process default account (the legacy single-account spelling); a named
+    /// account gets its own row and never touches a sibling's limits.
+    #[serde(default)]
+    pub account_id: Option<String>,
     // ── 账户级（五项）──
     /// 单笔最大亏损（USD）：Gate 2 从止损价推导，超额入场缩到帽内。
     #[serde(default, with = "crate::decimal::opt")]
@@ -1116,6 +1121,11 @@ pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "single-loss + position-size live, 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SetExitParams {
+    /// The account whose `account_exit_policy` row this patch writes. Absent =
+    /// the process default account; a named account gets its own row and a
+    /// sibling's exit discipline is untouched.
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// 止损（入场价百分比）：跌破即触发保护性离场。出厂 12。
     #[serde(default, with = "crate::decimal::opt")]
     pub stop_loss_pct: Option<Decimal>,

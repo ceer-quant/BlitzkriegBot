@@ -1139,6 +1139,14 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         }
         s.value
     };
+    // issue #1189: keep the EXPLICIT flag values before the resolver shadows
+    // them. The per-account DB row is the durable value; a CLI flag overrides
+    // it for this process run only (never written back to the DB).
+    let cli_exit_take_profit_pct = exit_take_profit_pct;
+    let cli_exit_stop_loss_pct = exit_stop_loss_pct;
+    let cli_exit_trailing_min_high_pct = exit_trailing_min_high_pct;
+    let cli_exit_min_trail_pct = exit_min_trail_pct;
+    let cli_exit_force_sec = exit_force_sec;
     let exit_take_profit_pct = exit_knob(
         &mut report,
         "exit.take_profit_pct",
@@ -1298,6 +1306,11 @@ pub(crate) fn parse_args(argv: &[String], env: &EnvVars) -> Args {
         exit_force_sec,
         exit_trailing_enabled: exit_trailing_enabled.value,
         exit_strategy_exit_maker_first: exit_strategy_exit_maker_first.value,
+        cli_exit_take_profit_pct,
+        cli_exit_stop_loss_pct,
+        cli_exit_trailing_min_high_pct,
+        cli_exit_min_trail_pct,
+        cli_exit_force_sec,
         feed_ws,
         net_check,
         replay,

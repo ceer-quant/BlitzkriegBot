@@ -473,6 +473,24 @@ impl RiskGate {
         &self.config.systemic
     }
 
+    /// The risk limits in force for ONE account: the account's own row when
+    /// one exists, else the default/fallback matrix. The admission path and
+    /// the arbitration pipeline both resolve through this one lookup.
+    pub fn account_limits(&self, account_id: &str) -> &crate::risk::limits::AccountRiskLimits {
+        self.config.systemic.account_for(account_id)
+    }
+
+    /// Install one account's risk row (the panel write path). The default
+    /// matrix is untouched; callers that need the legacy single-account
+    /// spelling update it explicitly.
+    pub fn set_account_limits(
+        &mut self,
+        account_id: &str,
+        limits: crate::risk::limits::AccountRiskLimits,
+    ) {
+        self.config.systemic.set_account(account_id, limits);
+    }
+
     pub fn check(&self, req: &OrderRequest) -> CoreResult<()> {
         self.check_with_equity(req, Decimal::ZERO)
     }
@@ -527,7 +545,9 @@ impl RiskGate {
         // scripts that set it at boot; the two are OR'd: whichever is non-zero
         // binds, the tighter one wins if both are armed.
         if req.side == Side::Buy {
-            let account_cap = &self.config.systemic.account.max_order_notional_usd;
+            let account_cap = &self
+                .account_limits(req.account_id.as_str())
+                .max_order_notional_usd;
             let cli_cap = self.config.max_order_notional;
             let cap = match (
                 account_cap.is_enabled().then_some(account_cap.value()),
@@ -620,6 +640,7 @@ mod tests {
                     max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         });
@@ -648,6 +669,7 @@ mod tests {
                     max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         });
@@ -713,6 +735,7 @@ mod tests {
                     max_order_notional_usd: Bound::new(dec!(1000), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             max_order_notional_pct: dec!(20),
             ..Default::default()
@@ -786,6 +809,7 @@ mod tests {
                     max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         });
@@ -811,6 +835,7 @@ mod tests {
                     max_order_notional_usd: Bound::new(dec!(1000), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             max_order_notional_pct: dec!(20),
             ..Default::default()
@@ -919,6 +944,9 @@ mod tests {
 // the readout (`risk.limits`) and the tail-append hooks wire them in,
 // default-off (§4.1 factory-silent): an unconfigured kernel behaves
 // exactly as before.
+/// issue #1189: the per-account risk/exit rows' durable store (`account_risk`
+/// / `account_exit_policy`). `None` = the env fallback the tests run under.
+pub mod account_store;
 pub mod limits;
 pub mod physics;
 // E-VA: strategy-level virtual accounts — a risk-layer quota book on the

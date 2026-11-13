@@ -37,6 +37,11 @@ pub mod compat;
 pub mod config;
 pub mod data_lock;
 pub mod data_source;
+/// #1189: SQLite persistence — credential encryption (AES-256-GCM, one random
+/// nonce per record, `nonce || ciphertext || tag`) with `.env` fallback.
+/// Lands first because no plaintext credential may enter the DB file before
+/// its encryption exists.
+pub mod db;
 /// The kernel-side `.env` writer (market.credentials.set landing). The read
 /// side is the launcher's `ui_kit_panel::env_file` — same file format, one
 /// contract.

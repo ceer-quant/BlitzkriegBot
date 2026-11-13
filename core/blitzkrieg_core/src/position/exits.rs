@@ -14,8 +14,14 @@ impl PositionManager {
 
     /// Update a position's exit state from a fresh book.
     pub fn tick(&mut self, position_id: &str, book: Option<&OrderbookSnapshot>, now_ms: i64) {
-        let cfg = self.config.exit.clone();
         if let Some(pos) = self.open.iter_mut().find(|p| p.id == position_id) {
+            let mut cfg = self
+                .config
+                .account_exit
+                .get(pos.account_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| self.config.exit.clone());
+            self.config.apply_cli_exit_overrides(&mut cfg);
             let view = book.map(BookView::from_snapshot);
             Self::valuate_one(pos, view.as_ref(), now_ms, &cfg);
         }
@@ -51,8 +57,15 @@ impl PositionManager {
     /// Safe to call even when automated exits are disabled, so the dashboard
     /// always shows live unrealized PnL and HWM.
     pub fn valuate(&mut self, books: &dyn Fn(&str) -> Option<BookView>, now_ms: i64) {
-        let cfg = self.config.exit.clone();
+        let global = self.config.exit.clone();
         for pos in self.open.iter_mut() {
+            let mut cfg = self
+                .config
+                .account_exit
+                .get(pos.account_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| global.clone());
+            self.config.apply_cli_exit_overrides(&mut cfg);
             let book = books(&pos.token_id);
             Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
         }
@@ -77,11 +90,18 @@ impl PositionManager {
         if dirty_tokens.is_empty() {
             return;
         }
-        let cfg = self.config.exit.clone();
+        let global = self.config.exit.clone();
         for pos in self.open.iter_mut() {
             if !dirty_tokens.contains(&pos.token_id) {
                 continue;
             }
+            let mut cfg = self
+                .config
+                .account_exit
+                .get(pos.account_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| global.clone());
+            self.config.apply_cli_exit_overrides(&mut cfg);
             let book = books(&pos.token_id);
             Self::valuate_one(pos, book.as_ref(), now_ms, &cfg);
         }
@@ -188,10 +208,21 @@ impl PositionManager {
         tick_boundary_ms: i64,
         _dirty_tokens: &std::collections::HashSet<String>,
     ) -> Vec<ExitRequest> {
-        let cfg = self.config.exit.clone();
+        let global = self.config.exit.clone();
         let mut out = Vec::new();
         let mut withheld: Vec<SuppressedStopEvent> = Vec::new();
         for pos in self.open.iter_mut() {
+            // Per-account exit discipline: a row in `account_exit_policy` (or
+            // its `BK_EXIT_*_<ACCOUNT>` env fallback) replaces the global
+            // config for THIS position only. A missing row is the global
+            // config, byte-identical to the pre-per-account behaviour.
+            let mut cfg = self
+                .config
+                .account_exit
+                .get(pos.account_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| global.clone());
+            self.config.apply_cli_exit_overrides(&mut cfg);
             // The strategy's own trailing declaration rides ON TOP of the
             // kernel-wide config for THIS position's verdict; every other knob
             // stays shared. Cheap: an absent override short-circuits to the
@@ -302,7 +333,7 @@ impl PositionManager {
             if let Some(t) = pos.target_exit_price
                 && priceable
                 && exit_price >= t
-                && hold_sec >= self.config.exit.exit_grace_sec
+                && hold_sec >= cfg.exit_grace_sec
             {
                 out.push(ExitRequest {
                     position_id: pos.id.clone(),

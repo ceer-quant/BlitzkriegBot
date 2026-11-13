@@ -92,6 +92,14 @@ arc-swap = "1"
 # same data must hash identically (reproducibility is a gate, not a hope).
 # Already in the dependency tree; this names the edge.
 sha2 = "0.10"
+# #1189: AES-256-GCM credential encryption (one random nonce per record),
+# the CSPRNG for those nonces, and base64 for the .env master key.
+aes-gcm = "0.11"
+rand = "0.9"
+base64 = "0.23"
+# #1189: the SQLite store. `bundled` compiles SQLite from source, so the
+# binary carries its own engine and needs no system libsqlite (issue §6).
+rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
 
 # statvfs for the archive's free-space guard (unix only).
 [target.'cfg(unix)'.dependencies]

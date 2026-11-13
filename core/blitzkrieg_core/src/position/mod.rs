@@ -79,6 +79,27 @@ pub struct CashFlows {
 #[serde(rename_all = "camelCase", default)]
 pub struct PositionConfig {
     pub exit: ExitConfig,
+    /// Per-account exit-discipline overrides (`BK_EXIT_*_<ACCOUNT>`), projected
+    /// from the SQLite `account_exit_policy` table (or the env fallback) at
+    /// boot and on every `risk.setExit`. Empty = every account uses `exit`;
+    /// a hit is the account's own row. Only the five cockpit fields differ —
+    /// every other `ExitConfig` knob stays global.
+    #[serde(default)]
+    pub account_exit: std::collections::HashMap<String, ExitConfig>,
+    /// The CLI `--exit-*` flags, kept as an explicit override layer. A `Some`
+    /// here wins over the account row and the global config for this process
+    /// run only; the write path never persists them to the DB. `None` = the
+    /// flag was not passed and the account/global value stands.
+    #[serde(default)]
+    pub cli_exit_stop_loss_pct: Option<Decimal>,
+    #[serde(default)]
+    pub cli_exit_take_profit_pct: Option<Decimal>,
+    #[serde(default)]
+    pub cli_exit_force_exit_sec: Option<i64>,
+    #[serde(default)]
+    pub cli_exit_trailing_min_high_pct: Option<Decimal>,
+    #[serde(default)]
+    pub cli_exit_min_trail_pct: Option<Decimal>,
     pub max_positions: usize,
     /// #363: how many positions may be open at once on ONE asset. This
     /// replaces the hardcoded one-per-asset gate (the binary
@@ -144,10 +165,39 @@ fn default_true() -> bool {
     true
 }
 
+impl PositionConfig {
+    /// Apply the CLI `--exit-*` override layer onto an account/global config.
+    /// `Some` fields win; `None` leaves the incoming value untouched, so an
+    /// account's own row survives a run that passed only one exit flag.
+    pub fn apply_cli_exit_overrides(&self, cfg: &mut ExitConfig) {
+        if let Some(v) = self.cli_exit_stop_loss_pct {
+            cfg.stop_loss_pct = v;
+        }
+        if let Some(v) = self.cli_exit_take_profit_pct {
+            cfg.take_profit_pct = v;
+        }
+        if let Some(v) = self.cli_exit_force_exit_sec {
+            cfg.force_exit_sec = v;
+        }
+        if let Some(v) = self.cli_exit_trailing_min_high_pct {
+            cfg.trailing_min_high_pct = v;
+        }
+        if let Some(v) = self.cli_exit_min_trail_pct {
+            cfg.min_trail_pct = v;
+        }
+    }
+}
+
 impl Default for PositionConfig {
     fn default() -> Self {
         Self {
             exit: ExitConfig::default(),
+            account_exit: std::collections::HashMap::new(),
+            cli_exit_stop_loss_pct: None,
+            cli_exit_take_profit_pct: None,
+            cli_exit_force_exit_sec: None,
+            cli_exit_trailing_min_high_pct: None,
+            cli_exit_min_trail_pct: None,
             max_positions: 2,
             // #363: the historical one-per-asset gate, now a number.
             max_positions_per_asset: 1,

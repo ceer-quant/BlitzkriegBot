@@ -612,6 +612,16 @@ impl Core {
                 // book. An unknown account is refused — no implicit empty book,
                 // ever (reverse acceptance C) — with the same Gate-2 accounting
                 // as an arbitration rejection.
+                let mut exit_cfg = self
+                    .config
+                    .positions
+                    .account_exit
+                    .get(account_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| self.config.positions.exit.clone());
+                self.config
+                    .positions
+                    .apply_cli_exit_overrides(&mut exit_cfg);
                 match self.accounts.get_mut(&account_id) {
                     Err(e) => crate::arbitration::Outcome {
                         decision: crate::arbitration::Decision::Rejected {
@@ -632,7 +642,7 @@ impl Core {
                             risk: &self.risk,
                             breaker: &self.breaker,
                             ledger,
-                            exit_cfg: &self.config.positions.exit,
+                            exit_cfg: &exit_cfg,
                             time_left_sec,
                             now_ms,
                             equity,
@@ -1090,6 +1100,16 @@ impl Core {
                     .as_ref()
                     .is_some_and(|e| e.strategy_holds_to_settlement(&intent.request.strategy));
                 // E28 (§9.3): the reserve happens in THIS account's book.
+                let mut exit_cfg = self
+                    .config
+                    .positions
+                    .account_exit
+                    .get(account_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| self.config.positions.exit.clone());
+                self.config
+                    .positions
+                    .apply_cli_exit_overrides(&mut exit_cfg);
                 match self.accounts.get_mut(&account_id) {
                     Err(e) => crate::arbitration::Outcome {
                         decision: crate::arbitration::Decision::Rejected {
@@ -1107,7 +1127,7 @@ impl Core {
                             risk: &self.risk,
                             breaker: &self.breaker,
                             ledger,
-                            exit_cfg: &self.config.positions.exit,
+                            exit_cfg: &exit_cfg,
                             time_left_sec: policy_time_left_sec,
                             now_ms,
                             equity,

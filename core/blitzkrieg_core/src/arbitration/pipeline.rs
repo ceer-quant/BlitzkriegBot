@@ -20,7 +20,9 @@ use super::{Decision, GateId, GateOutcome, GateTrace, Modification, PhysicsBindi
 use crate::exit_policy::{ExitConfig, effective_stop_pct};
 use crate::ledger::Ledger;
 use crate::model::{OrderRequest, Side};
-use crate::risk::limits::{EntryJudgment, SystemicReject, account_breaker_key, judge_entry};
+use crate::risk::limits::{
+    EntryJudgment, SystemicReject, account_breaker_key, judge_entry_account,
+};
 use crate::risk::physics::apply_physics;
 use crate::risk::{LossBreakers, RiskGate, is_close_intent};
 use blitzkrieg_market_api::{MarketType, OrderIntent, OrderKind, TimeInForce};
@@ -258,13 +260,15 @@ pub fn process_intent(intent: &StrategyIntent, ctx: &mut IntentCtx<'_>) -> Outco
         // audit's parity is a byte gate). When armed, a bound that bites
         // either refuses here or shrinks the entry — the reduced size rides
         // through Gate 3's probe and the decision comes back MODIFIED.
-        // issue #983: risk control follows the account — no global caps.
-        let limits = ctx.risk.systemic_snapshot();
-        if limits.any_armed() {
+        // issue #983: risk control follows the account — resolve the
+        // REQUEST'S OWN row (`account_risk` / env fallback). A missing row
+        // falls back to the default/global matrix.
+        let account_limits = ctx.risk.account_limits(intent.request.account_id.as_str());
+        if account_limits.any_armed() {
             let bound_stop_pct =
                 effective_stop_pct(ctx.exit_cfg.stop_loss_pct, ctx.time_left_sec, ctx.exit_cfg);
-            match judge_entry(
-                limits,
+            match judge_entry_account(
+                account_limits,
                 intent.request.price,
                 intent.request.size,
                 bound_stop_pct,

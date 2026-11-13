@@ -16,6 +16,7 @@ fn dry_core(balance: Decimal) -> Core {
                     max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         },
@@ -36,6 +37,7 @@ fn live_core(balance: Decimal) -> Core {
                     max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         },

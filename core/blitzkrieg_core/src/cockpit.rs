@@ -109,6 +109,14 @@ pub fn env_key_for_field(field: &str) -> Option<&'static str> {
         .map(|k| k.env_key)
 }
 
+/// The account-suffixed spelling of a cockpit key. `maxPositionSize` + `paper`
+/// → `BK_RISK_MAX_POSITION_SIZE_PAPER`. The write path emits the suffix form;
+/// the read path also accepts the infix spelling (see
+/// [`crate::config::account_env_key`]).
+pub fn env_key_for_field_account(field: &str, account_id: &str) -> Option<String> {
+    env_key_for_field(field).map(|base| crate::config::account_env_key(base, account_id))
+}
+
 /// A parsed cockpit value — what a raw `.env` string becomes. Exit
 /// percentages are Decimals, deadlines are seconds, switches are bools.
 #[derive(Debug, Clone, Copy, PartialEq)]

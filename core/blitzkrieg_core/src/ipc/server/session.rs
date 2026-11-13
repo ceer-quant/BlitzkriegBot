@@ -34,6 +34,21 @@ pub async fn run(
     }
 
     let mut core = Core::new(config.clone());
+    // issue #1189: open the SQLite per-account risk/exit store when the
+    // deployment names one. Absent = the env fallback (the test posture and
+    // a kernel that has not migrated yet). A failure to open the DB the
+    // operator explicitly named is FAIL-CLOSED (issue #1189 §5): the kernel
+    // refuses to run rather than silently trading on the env fallback while
+    // the operator believes the DB is authoritative.
+    if let Ok(path) = std::env::var("BLITZKRIEG_DB_PATH")
+        && !path.trim().is_empty()
+        && let Err(e) = core.open_account_risk_db(path)
+    {
+        return Err(anyhow::anyhow!(
+            "account risk DB open failed ({e}) — refusing to boot on the env fallback \
+             (fail-closed: fix BLITZKRIEG_DB_PATH or unset it to run env-only)"
+        ));
+    }
     eprintln!(
         "blitzkrieg-core: core constructed t={} dt={} ms",
         now_ms(),

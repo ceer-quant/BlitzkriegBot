@@ -16,6 +16,7 @@
 
 use rust_decimal::Decimal;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Where a limit's effective value came from (§4.4). The same four words the
 /// kernel's startup provenance has always used ("every setting above its
@@ -147,6 +148,20 @@ pub struct AccountRiskLimits {
     pub max_order_notional_usd: Bound,
 }
 
+impl AccountRiskLimits {
+    /// True when any bound on THIS account is armed. The per-account form of
+    /// [`SystemicRiskLimits::any_armed`], used by the admission path once the
+    /// account has been resolved.
+    pub fn any_armed(&self) -> bool {
+        self.max_single_loss_usd.is_enabled()
+            || self.max_daily_drawdown_usd.is_enabled()
+            || self.max_position_size.is_enabled()
+            || self.max_consecutive_losses.is_enabled()
+            || self.cooldown_minutes.is_enabled()
+            || self.max_order_notional_usd.is_enabled()
+    }
+}
+
 /// The whole systemic-limit set a kernel runs under: the per-account matrix
 /// only. Risk control follows the account's capital — there is NO process-wide
 /// (global) cap; every bound here is judged against the request's OWN account
@@ -158,7 +173,40 @@ pub struct AccountRiskLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemicRiskLimits {
+    /// The factory/default matrix. Kept as the fallback for accounts without
+    /// their own row (and for the legacy global env face), so an unconfigured
+    /// kernel behaves exactly as before.
     pub account: AccountRiskLimits,
+    /// Per-account overrides, keyed by `AccountId`. A hit here wins over
+    /// `account`; a miss falls back to it. This is the map the SQLite
+    /// `account_risk` table projects into at boot and the map the panel write
+    /// path updates.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accounts: BTreeMap<String, AccountRiskLimits>,
+}
+
+impl SystemicRiskLimits {
+    /// The limits in force for `account_id`: the account's own row when one
+    /// exists, otherwise the default/fallback matrix. The one lookup every
+    /// consumer uses, so a missing account can never silently get another
+    /// account's caps.
+    pub fn account_for(&self, account_id: &str) -> &AccountRiskLimits {
+        self.accounts.get(account_id).unwrap_or(&self.account)
+    }
+
+    /// Install (or replace) one account's row. The default matrix is left
+    /// untouched — the caller decides whether this account is also the
+    /// process default and should update `account` for backward compatibility.
+    pub fn set_account(&mut self, account_id: &str, limits: AccountRiskLimits) {
+        self.accounts.insert(account_id.to_string(), limits);
+    }
+
+    /// Every account with an explicit row, sorted for a stable read.
+    pub fn account_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.accounts.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 impl SystemicRiskLimits {
@@ -205,7 +253,88 @@ impl SystemicRiskLimits {
                 cooldown_minutes: one("BK_RISK_COOLDOWN_MINUTES"),
                 max_order_notional_usd: one("BK_RISK_MAX_ORDER_NOTIONAL_USD"),
             },
+            accounts: BTreeMap::new(),
         }
+    }
+
+    /// The per-account form of [`Self::from_lookup`]: first resolve the
+    /// default/global face, then overlay every account-suffixed key. Both
+    /// spellings are accepted so an operator can write either
+    /// `BK_RISK_MAX_POSITION_SIZE_PAPER` (suffix, the execution-policy
+    /// convention) or `BK_RISK_PAPER_MAX_POSITION_SIZE` (infix). The first
+    /// one found wins; a present-but-unparseable value warns and leaves the
+    /// fallback bound standing.
+    pub fn from_lookup_with_accounts<I, S>(
+        accounts: I,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut out = Self::from_lookup(&lookup);
+        out.overlay_accounts_from_lookup(accounts, lookup);
+        out
+    }
+
+    /// Overlay account-suffixed keys onto THIS matrix's existing default row
+    /// (`self.account`). Unlike [`Self::from_lookup_with_accounts`], the base
+    /// is the EFFECTIVE global matrix — including CLI-resolved values — so a
+    /// per-account row inherits the same daily-loss/order-notional bounds the
+    /// process resolved before the account-specific keys are applied.
+    pub fn overlay_accounts_from_lookup<I, S>(
+        &mut self,
+        accounts: I,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for account in accounts {
+            let account = account.as_ref();
+            let suffix = crate::config::account_env_suffix(account);
+            let mut row = self.account.clone();
+            let mut touched = false;
+            for (field, env_suffix) in [
+                ("max_single_loss_usd", "MAX_SINGLE_LOSS_USD"),
+                ("max_daily_drawdown_usd", "MAX_DAILY_DRAWDOWN_USD"),
+                ("max_position_size", "MAX_POSITION_SIZE"),
+                ("max_consecutive_losses", "MAX_CONSECUTIVE_LOSSES"),
+                ("cooldown_minutes", "COOLDOWN_MINUTES"),
+                ("max_order_notional_usd", "MAX_ORDER_NOTIONAL_USD"),
+            ] {
+                let keys = [
+                    format!("BK_RISK_{env_suffix}_{suffix}"),
+                    format!("BK_RISK_{suffix}_{env_suffix}"),
+                ];
+                let Some(raw) = keys.iter().find_map(|k| lookup(k)) else {
+                    continue;
+                };
+                match raw.trim().parse::<Decimal>() {
+                    Ok(v) => {
+                        set_account_bound(&mut row, field, Bound::new(v, LimitSource::Env));
+                        touched = true;
+                    }
+                    Err(_) => tracing::warn!(
+                        key = %keys[0],
+                        raw = %raw,
+                        "per-account risk key value unparseable — fallback bound stays"
+                    ),
+                }
+            }
+            if touched {
+                self.accounts.insert(account.to_string(), row);
+            }
+        }
+    }
+
+    /// The process-environment form of [`Self::from_lookup_with_accounts`].
+    pub fn from_env_with_accounts<I, S>(accounts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::from_lookup_with_accounts(accounts, |key| std::env::var(key).ok())
     }
 
     /// The boot-log face (§4 provenance): one line per ARMED limit, naming its
@@ -251,12 +380,21 @@ impl SystemicRiskLimits {
     /// is a byte gate, and an extra "nothing armed" trace would break it).
     pub fn any_armed(&self) -> bool {
         let a = &self.account;
-        a.max_single_loss_usd.is_enabled()
-            || a.max_daily_drawdown_usd.is_enabled()
-            || a.max_position_size.is_enabled()
-            || a.max_consecutive_losses.is_enabled()
-            || a.cooldown_minutes.is_enabled()
-            || a.max_order_notional_usd.is_enabled()
+        a.any_armed() || self.accounts.values().any(AccountRiskLimits::any_armed)
+    }
+}
+
+/// Set one named bound on an [`AccountRiskLimits`] row. The string field
+/// names are the same ones the cockpit write path uses.
+pub(crate) fn set_account_bound(row: &mut AccountRiskLimits, field: &str, bound: Bound) {
+    match field {
+        "max_single_loss_usd" => row.max_single_loss_usd = bound,
+        "max_daily_drawdown_usd" => row.max_daily_drawdown_usd = bound,
+        "max_position_size" => row.max_position_size = bound,
+        "max_consecutive_losses" => row.max_consecutive_losses = bound,
+        "cooldown_minutes" => row.cooldown_minutes = bound,
+        "max_order_notional_usd" => row.max_order_notional_usd = bound,
+        other => debug_assert!(false, "unmapped account risk field {other}"),
     }
 }
 
@@ -361,12 +499,25 @@ pub fn judge_entry(
     entry_size: Decimal,
     bound_stop_pct: Decimal,
 ) -> EntryJudgment {
+    judge_entry_account(&limits.account, entry_price, entry_size, bound_stop_pct)
+}
+
+/// [`judge_entry`] against ONE account's already-resolved row. The
+/// arbitration pipeline and the submission gate call this form after looking
+/// the account up, so two accounts with different `max_position_size` /
+/// `max_single_loss_usd` are judged against their own numbers.
+pub fn judge_entry_account(
+    limits: &AccountRiskLimits,
+    entry_price: Decimal,
+    entry_size: Decimal,
+    bound_stop_pct: Decimal,
+) -> EntryJudgment {
     // Account sizing: the share cap and the single-loss cap both SHRINK the
     // entry; the tighter survives and names itself. A cap that cannot fit
     // even the reduced entry refuses (`缩不下`).
     let mut approved = entry_size;
     let mut binding: Option<&'static str> = None;
-    let size_cap = &limits.account.max_position_size;
+    let size_cap = &limits.max_position_size;
     if size_cap.is_enabled() {
         // Whole shares only (prediction markets trade whole shares): a
         // fractional cap floors to the largest honest size.
@@ -385,7 +536,7 @@ pub fn judge_entry(
             binding = Some("max_position_size");
         }
     }
-    let loss_cap = &limits.account.max_single_loss_usd;
+    let loss_cap = &limits.max_single_loss_usd;
     if loss_cap.is_enabled() {
         match single_loss_verdict(loss_cap.value(), entry_price, bound_stop_pct, approved) {
             SingleLossVerdict::Within => {}
@@ -697,5 +848,76 @@ mod tests {
             } => assert!(detail.contains("whole share"), "{detail}"),
             other => panic!("expected account rejection, got {other:?}"),
         }
+    }
+
+    /// issue #1189: two accounts with different rows are judged against their
+    /// own caps. A row that is absent falls back to the default matrix.
+    #[test]
+    fn two_accounts_have_independent_position_size_caps() {
+        let mut limits = SystemicRiskLimits::default();
+        limits.account.max_position_size = Bound::new(dec!(100), LimitSource::Default);
+        limits.accounts.insert(
+            "small".into(),
+            AccountRiskLimits {
+                max_position_size: Bound::new(dec!(5), LimitSource::Env),
+                ..Default::default()
+            },
+        );
+        limits.accounts.insert(
+            "large".into(),
+            AccountRiskLimits {
+                max_position_size: Bound::new(dec!(50), LimitSource::Env),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            limits.account_for("small").max_position_size.value(),
+            dec!(5)
+        );
+        assert_eq!(
+            limits.account_for("large").max_position_size.value(),
+            dec!(50)
+        );
+        assert_eq!(
+            limits.account_for("unconfigured").max_position_size.value(),
+            dec!(100)
+        );
+        assert_eq!(
+            judge_entry_account(limits.account_for("small"), dec!(0.5), dec!(10), dec!(12)),
+            EntryJudgment::Reduce {
+                approved: dec!(5),
+                limit: "max_position_size",
+            }
+        );
+        assert_eq!(
+            judge_entry_account(limits.account_for("large"), dec!(0.5), dec!(10), dec!(12)),
+            EntryJudgment::Pass
+        );
+    }
+
+    /// The per-account env face accepts both the suffix and infix spellings;
+    /// the suffix is what the write path emits.
+    #[test]
+    fn per_account_risk_env_keys_overlay_the_global_face() {
+        let vars = std::collections::HashMap::from([
+            ("BK_RISK_MAX_POSITION_SIZE".to_string(), "100".to_string()),
+            (
+                "BK_RISK_MAX_POSITION_SIZE_PAPER".to_string(),
+                "7".to_string(),
+            ),
+            (
+                "BK_RISK_INF_MAX_SINGLE_LOSS_USD".to_string(),
+                "0.25".to_string(),
+            ),
+        ]);
+        let s = SystemicRiskLimits::from_lookup_with_accounts(["paper", "inf"], |k| {
+            vars.get(k).cloned()
+        });
+        assert_eq!(s.account.max_position_size.value(), dec!(100));
+        assert_eq!(s.account_for("paper").max_position_size.value(), dec!(7));
+        assert_eq!(s.account_for("inf").max_single_loss_usd.value(), dec!(0.25));
+        // An account with no suffixed keys has no row: the global fallback
+        // still applies (and a later global change remains visible).
+        assert!(!s.accounts.contains_key("unconfigured"));
     }
 }

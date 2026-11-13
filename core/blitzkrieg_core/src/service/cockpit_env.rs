@@ -82,6 +82,43 @@ impl Core {
                 }
             }
         }
+        // Per-account rows (`BK_EXIT_STOP_LOSS_PCT_PAPER`,
+        // `BK_RISK_MAX_POSITION_SIZE_PAPER`, and the infix spelling). The
+        // global keys above stay the fallback for accounts without a row.
+        let accounts: Vec<String> = self
+            .accounts
+            .account_list()
+            .iter()
+            .map(|a| a.id.to_string())
+            .collect();
+        for account in accounts {
+            let suffix = crate::config::account_env_suffix(&account);
+            for key in COCKPIT_KEYS {
+                let candidates = [
+                    format!("{}_{}", key.env_key, suffix),
+                    crate::config::account_env_key(key.env_key, &account),
+                ];
+                let Some(raw) = candidates.iter().find_map(|k| vars.get(k)) else {
+                    continue;
+                };
+                let Some(value) = parse_cockpit_value(key, raw) else {
+                    tracing::warn!(
+                        key = %candidates[0],
+                        "per-account cockpit env key is present but unparseable — skipped"
+                    );
+                    continue;
+                };
+                let moved = match key.family {
+                    CockpitFamily::Exit => self.apply_cockpit_exit_for(&account, key.field, value),
+                    CockpitFamily::Systemic => {
+                        self.apply_cockpit_systemic_for(&account, key.field, value)
+                    }
+                };
+                if moved {
+                    applied.push(format!("{account}.{} -> {}", key.field, raw.trim()));
+                }
+            }
+        }
         applied
     }
 
@@ -92,12 +129,21 @@ impl Core {
     /// refusal: memory may never hold a value the file does not have.
     pub(crate) fn persist_cockpit_changes(
         &self,
+        account_id: Option<&str>,
         changes: &[(&str, String)],
     ) -> Result<(), CoreError> {
+        let is_default = account_id
+            .map(|id| id == crate::model::default_account_id().as_str())
+            .unwrap_or(true);
         let vars: std::collections::BTreeMap<String, String> = changes
             .iter()
             .filter_map(|(field, value)| {
-                crate::cockpit::env_key_for_field(field).map(|k| (k.to_string(), value.clone()))
+                let key = if is_default {
+                    crate::cockpit::env_key_for_field(field).map(str::to_string)
+                } else {
+                    crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
+                };
+                key.map(|k| (k, value.clone()))
             })
             .collect();
         let Some(path) = self.cockpit_env_path() else {
@@ -169,6 +215,163 @@ impl Core {
         changed
     }
 
+    /// Apply one exit-discipline value to ONE account's row (or create the
+    /// row from the current global config). The default account also moves
+    /// the global working copy, preserving the legacy single-account readout.
+    fn apply_cockpit_exit_for(
+        &mut self,
+        account_id: &str,
+        field: &str,
+        value: CockpitValue,
+    ) -> bool {
+        let mut exit = self
+            .config
+            .positions
+            .account_exit
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(|| self.config.positions.exit.clone());
+        let changed = match (field, value) {
+            ("stopLossPct", CockpitValue::Decimal(v)) if v > Decimal::ZERO => {
+                let moved = exit.stop_loss_pct != v;
+                exit.stop_loss_pct = v;
+                moved
+            }
+            ("takeProfitPct", CockpitValue::Decimal(v)) if v > Decimal::ZERO => {
+                let moved = exit.take_profit_pct != v;
+                exit.take_profit_pct = v;
+                moved
+            }
+            ("forceExitSec", CockpitValue::Int(v)) if v >= 0 => {
+                let moved = exit.force_exit_sec != v;
+                exit.force_exit_sec = v;
+                moved
+            }
+            ("trailingEnabled", CockpitValue::Bool(v)) => {
+                let moved = exit.trailing_enabled != v;
+                exit.trailing_enabled = v;
+                moved
+            }
+            ("strategyExitMakerFirst", CockpitValue::Bool(v)) => {
+                let moved = exit.strategy_exit_maker_first != v;
+                exit.strategy_exit_maker_first = v;
+                moved
+            }
+            _ => {
+                tracing::warn!(
+                    account = %account_id,
+                    field = field,
+                    "per-account cockpit env value is out of range — skipped"
+                );
+                return false;
+            }
+        };
+        if !changed {
+            return false;
+        }
+        self.config
+            .positions
+            .account_exit
+            .insert(account_id.to_string(), exit.clone());
+        if account_id == crate::model::default_account_id().as_str() {
+            self.config.positions.exit = exit.clone();
+        }
+        let mut positions = self.config.positions.clone();
+        positions.exit = self.config.positions.exit.clone();
+        self.positions.set_config(positions);
+        true
+    }
+
+    /// Apply one systemic-limit value to ONE account's row. The default
+    /// account also moves the global fallback matrix.
+    fn apply_cockpit_systemic_for(
+        &mut self,
+        account_id: &str,
+        field: &str,
+        value: CockpitValue,
+    ) -> bool {
+        let v = match value {
+            CockpitValue::Decimal(v) => v,
+            _ => {
+                tracing::warn!(
+                    account = %account_id,
+                    field = field,
+                    "per-account systemic cockpit key must be a decimal — skipped"
+                );
+                return false;
+            }
+        };
+        if v < Decimal::ZERO {
+            tracing::warn!(
+                account = %account_id,
+                field = field,
+                "per-account systemic cockpit value is negative — skipped"
+            );
+            return false;
+        }
+        let mut row = self
+            .risk
+            .config()
+            .systemic
+            .accounts
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(|| self.risk.config().systemic.account.clone());
+        let moved = match field {
+            "maxSingleLossUsd" => {
+                let moved = row.max_single_loss_usd.value() != v;
+                row.max_single_loss_usd =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            "maxDailyDrawdownUsd" => {
+                let moved = row.max_daily_drawdown_usd.value() != v;
+                row.max_daily_drawdown_usd =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            "maxPositionSize" => {
+                let moved = row.max_position_size.value() != v;
+                row.max_position_size =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            "maxConsecutiveLosses" => {
+                let moved = row.max_consecutive_losses.value() != v;
+                row.max_consecutive_losses =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            "cooldownMinutes" => {
+                let moved = row.cooldown_minutes.value() != v;
+                row.cooldown_minutes =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            "maxOrderNotionalUsd" => {
+                let moved = row.max_order_notional_usd.value() != v;
+                row.max_order_notional_usd =
+                    crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Env);
+                moved
+            }
+            other => {
+                debug_assert!(false, "unmapped per-account systemic field {other}");
+                return false;
+            }
+        };
+        if !moved {
+            return false;
+        }
+        self.risk
+            .config_mut()
+            .systemic
+            .set_account(account_id, row.clone());
+        if account_id == crate::model::default_account_id().as_str() {
+            self.risk.config_mut().systemic.account = row;
+        }
+        true
+    }
+
     /// Apply one systemic-limit value onto the working copy (the same Bound
     /// write the setSystemic path does, sourced `Env` — the file IS the env
     /// layer). Returns whether the value changed anything.
@@ -212,6 +415,10 @@ impl Core {
             "cooldownMinutes" => {
                 let moved = matrix.account.cooldown_minutes.value() != v;
                 (&mut matrix.account.cooldown_minutes, moved)
+            }
+            "maxOrderNotionalUsd" => {
+                let moved = matrix.account.max_order_notional_usd.value() != v;
+                (&mut matrix.account.max_order_notional_usd, moved)
             }
             other => {
                 debug_assert!(false, "unmapped systemic cockpit field {other}");
