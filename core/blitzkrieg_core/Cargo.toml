@@ -97,8 +97,9 @@ sha2 = "0.10"
 aes-gcm = "0.11"
 rand = "0.9"
 base64 = "0.23"
-# #1189: the SQLite store. `bundled` compiles SQLite from source, so the
-# binary carries its own engine and needs no system libsqlite (issue §6).
+# #1189: the SQLite store (db) AND the one-shot legacy importer (db_import).
+# `bundled` compiles SQLite from source, so the binary carries its own
+# engine and needs no system libsqlite (issue §6).
 rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
 
 # statvfs for the archive's free-space guard (unix only).

@@ -42,6 +42,9 @@ pub mod data_source;
 /// Lands first because no plaintext credential may enter the DB file before
 /// its encryption exists.
 pub mod db;
+/// #1189: the one-shot legacy-data importer — the Node-era `data/` files and
+/// `.env` knobs folded into the SQLite database, exactly once.
+pub mod db_import;
 /// The kernel-side `.env` writer (market.credentials.set landing). The read
 /// side is the launcher's `ui_kit_panel::env_file` — same file format, one
 /// contract.
