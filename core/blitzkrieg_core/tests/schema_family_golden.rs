@@ -88,6 +88,7 @@ fn family_03_risk_limits_result() {
                 max_position_size: Bound::new(d("500"), LimitSource::Flag),
                 max_consecutive_losses: Bound::off(),
                 cooldown_minutes: Bound::off(),
+                max_order_notional_usd: Bound::off(),
             },
         },
         exit: RiskExitView {
@@ -103,7 +104,7 @@ fn family_03_risk_limits_result() {
     // "<provenance>"}; Decimal-as-string everywhere else (camelCase).
     assert_eq!(
         wire(&v),
-        r#"{"version":"1.1","account":{"id":"default","limits":{"maxSingleLossUsd":{"value":"35","source":"env"},"maxDailyDrawdownUsd":{"value":"0","source":"default"},"maxPositionSize":{"value":"500","source":"flag"},"maxConsecutiveLosses":{"value":"0","source":"default"},"cooldownMinutes":{"value":"0","source":"default"}}},"exit":{"stopLossPct":0.12,"takeProfitPct":0.24,"forceExitSec":300,"trailingEnabled":true,"holderStopPct":0.12,"strategyExitMakerFirst":true}}"#
+        r#"{"version":"1.1","account":{"id":"default","limits":{"maxSingleLossUsd":{"value":"35","source":"env"},"maxDailyDrawdownUsd":{"value":"0","source":"default"},"maxPositionSize":{"value":"500","source":"flag"},"maxConsecutiveLosses":{"value":"0","source":"default"},"cooldownMinutes":{"value":"0","source":"default"},"maxOrderNotionalUsd":{"value":"0","source":"default"}}},"exit":{"stopLossPct":0.12,"takeProfitPct":0.24,"forceExitSec":300,"trailingEnabled":true,"holderStopPct":0.12,"strategyExitMakerFirst":true}}"#
     );
 }
 

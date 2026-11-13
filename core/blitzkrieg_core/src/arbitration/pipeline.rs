@@ -563,7 +563,7 @@ mod tests {
         let (mut ledger, _risk, breaker, exit_cfg, tokens) = setup();
         // Shrink the absolute per-order cap: 0.40 × 12 = 4.80 notional.
         let mut tight = crate::service::CoreConfig::default().risk.clone();
-        tight.max_order_notional = dec!(4);
+        tight.systemic.account.max_order_notional_usd = Bound::new(dec!(4), LimitSource::Flag);
         tight.max_order_notional_pct = Decimal::ZERO; // the absolute cap decides
         let risk = RiskGate::new(tight);
         let mut c = ctx(&mut ledger, &risk, &breaker, &exit_cfg, &tokens);

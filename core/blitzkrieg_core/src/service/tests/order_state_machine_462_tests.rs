@@ -4,13 +4,19 @@
 
 use super::*;
 use crate::risk::RiskConfig;
+use crate::risk::limits::{Bound, LimitSource};
 use rust_decimal_macros::dec;
 
 /// Dry core, seed `balance`, the shipped per-order notional cap 3.
 fn dry_core(balance: Decimal) -> Core {
     let mut c = Core::new(CoreConfig {
         risk: RiskConfig {
-            max_order_notional: dec!(3),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         },
         dry_seed_balance: Decimal::from(10_000),
@@ -25,7 +31,12 @@ fn live_core(balance: Decimal) -> Core {
     let mut c = Core::new(CoreConfig {
         mode: Mode::Live,
         risk: RiskConfig {
-            max_order_notional: dec!(3),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         },
         dry_seed_balance: Decimal::from(10_000),

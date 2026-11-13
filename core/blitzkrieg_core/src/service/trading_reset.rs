@@ -5,6 +5,7 @@
 
 use crate::model::*;
 use crate::position::EquityBasis;
+use crate::risk::limits::{Bound, LimitSource};
 use crate::schema::Event;
 use blitzkrieg_market_api::net::now_ms;
 use rust_decimal::Decimal;
@@ -99,7 +100,13 @@ impl Core {
             .any(|c| c.field == "minShares" || c.field == "maxShares");
         for c in &changes {
             match c.field {
-                "maxOrderNotional" => self.risk.config_mut().max_order_notional = c.to,
+                "maxOrderNotional" => {
+                    self.risk
+                        .config_mut()
+                        .systemic
+                        .account
+                        .max_order_notional_usd = Bound::new(c.to, LimitSource::Flag)
+                }
                 "maxOrderNotionalPct" => self.risk.config_mut().max_order_notional_pct = c.to,
                 "maxOpenNotionalUsd" => self.risk.config_mut().max_open_notional_usd = c.to,
                 "minShares" => self.config.min_shares = c.to,
@@ -155,7 +162,7 @@ impl Core {
         })
     }
 
-    /// 生效风控可编辑（`risk.setSystemic`）：五项账户级限额的运行时写路径，
+    /// 生效风控可编辑（`risk.setSystemic`）：六项账户级限额的运行时写路径，
     /// 仿 [`Self::apply_risk_limits`] 的 plan-first + 审计姿态。
     /// issue #983：风控只跟随账户，无全局限额。
     ///
@@ -193,7 +200,7 @@ impl Core {
         if patch.is_empty() {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "risk.setSystemic needs at least one of the five per-account systemic fields; \
+                "risk.setSystemic needs at least one of the six per-account systemic fields; \
                  read the current values with risk.limits"
                     .to_string(),
             ));
@@ -253,6 +260,12 @@ impl Core {
             patch.cooldown_minutes,
             "next_session",
         )?;
+        plan(
+            "maxOrderNotionalUsd",
+            &matrix.account.max_order_notional_usd,
+            patch.max_order_notional_usd,
+            "live",
+        )?;
 
         if changes.is_empty() {
             return Err(CoreError::new(
@@ -300,6 +313,11 @@ impl Core {
             set(
                 &mut matrix.account.cooldown_minutes,
                 patch.cooldown_minutes,
+                flag,
+            );
+            set(
+                &mut matrix.account.max_order_notional_usd,
+                patch.max_order_notional_usd,
                 flag,
             );
         }

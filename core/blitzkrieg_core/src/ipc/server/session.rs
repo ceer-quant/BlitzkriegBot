@@ -233,6 +233,17 @@ pub async fn run(
                             tracing::warn!("cockpit env-file watch: re-derive failed: {e}")
                         }
                     }
+                    // Same `.env`, same external edit: execution_policy's POLICY_*
+                    // keys ride the same file. Hot-reload them so a hand edit of
+                    // the execution-policy section lands without a restart — the
+                    // same "real-time write to .env, real-time enable, no restart"
+                    // contract the cockpit families already enjoy.
+                    if let Err(e) = c.reload_execution_policy() {
+                        tracing::warn!(
+                            "execution_policy env-file watch: reload failed ({e}); \
+                             the in-memory policy stands until the next write or restart"
+                        );
+                    }
                 }
             }
         });

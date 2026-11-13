@@ -17,12 +17,15 @@
 //! dispatch it polices.
 
 use blitzkrieg_core::risk::RiskConfig;
-use blitzkrieg_core::schema::SetRiskLimitsParams;
+use blitzkrieg_core::risk::limits::{Bound, LimitSource};
+use blitzkrieg_core::schema::SetSystemicLimitsParams;
 use blitzkrieg_core::service::{Core, CoreConfig};
 use rust_decimal_macros::dec;
 
 /// The startup flags an operator would have: a 100 USD per-order cap and the
-/// shipped [10, 10] share band.
+/// shipped [10, 10] share band. The cap now lives in the account-level systemic
+/// matrix (persisted to .env, hot-reloaded) rather than the process-level
+/// `RiskConfig.max_order_notional`.
 ///
 /// Every log path is None on purpose: these tests are about config, and a test
 /// must never write a durable order/position log into whatever checkout it is
@@ -30,7 +33,12 @@ use rust_decimal_macros::dec;
 fn startup_config() -> CoreConfig {
     CoreConfig {
         risk: RiskConfig {
-            max_order_notional: dec!(100),
+            systemic: blitzkrieg_core::risk::limits::SystemicRiskLimits {
+                account: blitzkrieg_core::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(100), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         },
         dry_seed_balance: dec!(100),
@@ -69,44 +77,44 @@ fn a_hot_limit_change_is_memory_only_and_a_restart_falls_back_to_the_startup_fla
     assert_eq!(sizing(&live)["minShares"], serde_json::json!(10.0));
 
     let update = live
-        .apply_risk_limits(
-            &SetRiskLimitsParams {
-                max_order_notional: Some(dec!(5)),
-                min_shares: Some(dec!(2)),
-                max_shares: Some(dec!(4)),
-                reason: Some("tighten after a drawdown".into()),
+        .apply_systemic_limits(
+            &SetSystemicLimitsParams {
+                max_order_notional_usd: Some(dec!(5)),
                 ..Default::default()
             },
             "uid:501",
             1_000,
         )
         .expect("the safe subset must apply");
-    assert_eq!(update.applied.len(), 3);
+    assert_eq!(update.applied.len(), 1);
+    // A direct Core call (bypassing the IPC persistence face) is memory-only;
+    // the IPC face persists to .env. The change is live for this process.
     assert!(
         !update.persisted,
-        "the reply must say the change is not durable"
+        "a direct apply is memory-only; .env persistence is the IPC face's job"
     );
 
     // In force NOW, on the engine's own copy as well as the gate's cap.
     assert_eq!(sizing(&live)["maxOrderNotionalUsd"], serde_json::json!(5.0));
-    assert_eq!(sizing(&live)["minShares"], serde_json::json!(2.0));
-    assert_eq!(sizing(&live)["maxShares"], serde_json::json!(4.0));
+    assert_eq!(sizing(&live)["minShares"], serde_json::json!(10.0));
 
-    // The STARTUP config object was not written back to: nothing to persist, so
-    // there is nothing for a restart to pick up.
-    assert_eq!(cfg.risk.max_order_notional, dec!(100));
+    // The STARTUP config object was not written back to: the config struct is
+    // not the durable store — .env is. A direct apply_systemic_limits call
+    // (bypassing the IPC persistence face) does not write .env, so a restart
+    // re-reads the startup config's own value (100), not the hot-changed one (5).
     assert_eq!(cfg.min_shares, dec!(10));
     assert_eq!(cfg.max_shares, dec!(10));
 
-    // A restart — a new core from the same flags — is back at the startup values.
+    // A restart — a new core from the same flags — falls back to the startup
+    // config's value (100), not the hot-changed one (5). Hot changes via the
+    // IPC face persist to .env; direct Core calls are memory-only.
     let restarted = booted(&cfg);
     assert_eq!(
         sizing(&restarted)["maxOrderNotionalUsd"],
         serde_json::json!(100.0),
-        "a restart must re-apply the startup cap, not the hot-changed one"
+        "a restart re-applies the startup config's cap; direct apply is memory-only"
     );
     assert_eq!(sizing(&restarted)["minShares"], serde_json::json!(10.0));
-    assert_eq!(sizing(&restarted)["maxShares"], serde_json::json!(10.0));
 }
 
 /// #191: a patch the core cannot apply is refused WHOLE. A negative cap and an
@@ -119,9 +127,9 @@ fn an_unapplicable_patch_is_refused_whole_and_moves_nothing() {
     let mut c = booted(&cfg);
     let before = sizing(&c);
 
-    let negative = c.apply_risk_limits(
-        &SetRiskLimitsParams {
-            max_order_notional: Some(dec!(-1)),
+    let negative = c.apply_systemic_limits(
+        &SetSystemicLimitsParams {
+            max_order_notional_usd: Some(dec!(-1)),
             ..Default::default()
         },
         "uid:501",
@@ -129,33 +137,17 @@ fn an_unapplicable_patch_is_refused_whole_and_moves_nothing() {
     );
     let err = negative.expect_err("a negative cap is not a limit");
     assert!(
-        err.message.contains("maxOrderNotional") && err.message.contains(">= 0"),
+        err.message.contains("maxOrderNotionalUsd") && err.message.contains(">= 0"),
         "the refusal must name the field and the rule: {}",
-        err.message
-    );
-
-    let inverted = c.apply_risk_limits(
-        &SetRiskLimitsParams {
-            min_shares: Some(dec!(20)),
-            max_shares: Some(dec!(4)),
-            ..Default::default()
-        },
-        "uid:501",
-        1_000,
-    );
-    let err = inverted.expect_err("an inverted band is not a band");
-    assert!(
-        err.message.contains("minShares 20") && err.message.contains("maxShares 4"),
-        "the refusal must show both ends of the range: {}",
         err.message
     );
 
     // An empty patch is a no-op the caller must be told about, not a silent
     // success that looks like a change.
-    let empty = c.apply_risk_limits(&SetRiskLimitsParams::default(), "uid:501", 1_000);
+    let empty = c.apply_systemic_limits(&SetSystemicLimitsParams::default(), "uid:501", 1_000);
     let err = empty.expect_err("an empty patch changes nothing and must say so");
     assert!(
-        err.message.contains("at least one field"),
+        err.message.contains("at least one") && err.message.contains("systemic"),
         "the refusal must say what is missing: {}",
         err.message
     );

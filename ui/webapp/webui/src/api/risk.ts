@@ -18,7 +18,7 @@ export interface RiskBound {
   source: LimitSource | string
 }
 
-/** The per-account matrix (§4.2, five). Risk control follows the account's
+/** The per-account matrix (§4.2, six). Risk control follows the account's
  *  capital — there is no process-wide (global) cap (issue #983). */
 export interface AccountRiskLimitsView {
   maxSingleLossUsd: RiskBound
@@ -26,6 +26,7 @@ export interface AccountRiskLimitsView {
   maxPositionSize: RiskBound
   maxConsecutiveLosses: RiskBound
   cooldownMinutes: RiskBound
+  maxOrderNotionalUsd: RiskBound
 }
 
 /** The exit triple Gate 4 binds per entry (plain numbers, not Bounds). */
@@ -59,7 +60,7 @@ export interface RiskLimitsDoc {
 }
 
 /**
- * `risk.setSystemic` 请求体：五项任选（只发改动项），小数跨线是字符串（内核
+ * `risk.setSystemic` 请求体：六项任选（只发改动项），小数跨线是字符串（内核
  * serde 的 Decimal 约定）；`0` = 关闭该限额。`reason` 进审计行。
  * issue #983：全部为账户级限额，无全局限额。
  */
@@ -69,6 +70,7 @@ export interface RiskSetSystemicBody {
   maxPositionSize?: string | number
   maxConsecutiveLosses?: string | number
   cooldownMinutes?: string | number
+  maxOrderNotionalUsd?: string | number
   reason?: string
 }
 
@@ -147,10 +149,10 @@ export const riskApi = {
    */
   riskLimits: () => request<RiskLimitsDoc>('/risk-limits'),
   /**
-   * 生效风控可编辑的写路径（`risk.setSystemic`）：五项账户级限额的热写
+   * 生效风控可编辑的写路径（`risk.setSystemic`）：六项账户级限额的热写
    * （issue #983：风控只跟随账户，无全局限额）。只发改动过的字段；内核
    * plan-first（一项非法则整体拒）+ 逐字段审计，回执里每个 bound 带
-   * effect（两项 live / 三项 next_session）。persistence = env：改动的
+   * effect（三项 live / 三项 next_session）。persistence = env：改动的
    * BK_RISK_* 键写入内核 `.env`，重启后以 source=env 重新武装。
    */
   riskSetSystemic: (body: RiskSetSystemicBody) =>
