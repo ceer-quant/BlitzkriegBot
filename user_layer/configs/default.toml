@@ -1,116 +1,21 @@
-# User-layer runtime configuration. Parameters only; no credentials here.
-# Credentials are read by the kernel process from its own environment.
+# User-layer runtime configuration — retired, kept as an archived record.
 #
-# 〔issue 967 退休，2026-11-06〕THIS FILE IS NOT READ. The kernel's only
-# persistent configuration is `.env` (process env `BK_*`), resolved
-# flag > env > built-in default. The values below are kept as the documented
-# history of what the file used to arm; editing them changes nothing at boot.
-# `--config`, `--no-config`, `BK_CONFIG` and this whole TOML layer are gone —
-# a boot that still carries the file runs the compiled factory (systemic limits
-# off, orderbook staleness 8000 ms). The 72-hour profile is
-# `production-72h.env` (issue #865); `production-72h.toml` is inert too.
+# 〔issue 967 退休，2026-11-06；issue 1189 正文移除，2026-11-13〕THIS FILE IS
+# NOT READ. The kernel reads no configuration from this file: accounts, risk
+# and exit policy live in SQLite (`data/blitzkrieg.sqlite`, issue #1189).
+# `user_layer/configs/default.toml` 已退休，账户与风控配置见 SQLite
+# （issue #1189）。
 #
-# ── env single-source for the ENGINE FACTORY keys (2026-10-23) ──────────────
-# assets / round_sec / min_round_age_sec / min_time_left_sec stay ABSENT on
-# purpose. They are compiled into the binary at the same values the file used
-# to carry, and an explicit round_sec here shadows the round-duration UI card
-# (issue 499). Those four are not "retired from the parser" — they are
-# deliberately not written. `[risk]` and `engine.max_orderbook_stale_ms` below
-# ARE written: a normal boot must enforce them (#864, #866).
-
-# ── Orderbook freshness (#866) ───────────────────────────────────────────────
-# Compiled default is 8000 ms (`--no-config` keeps it). A repo-root boot uses
-# the row below: above one 1000 ms poll plus the feed's 500 ms latency
-# allowance, and below one 5000 ms request timeout, so a hung poll stops new
-# entries. `0` still means the check is off; this file does not set 0.
-# CLI and BK_MAX_ORDERBOOK_STALE_MS outrank this row.
-
-[engine]
-max_orderbook_stale_ms = 3500
-
-# ── The engine-level exit ladder (E17/#264) ──────────────────────────────────
-# Exits belong to the KERNEL, not to a strategy library: these four knobs are
-# read by `exit_policy::ExitConfig` for every strategy, including one nobody
-# rebuilt. They are the same four the `--exit-*` flags set, and the flags win
-# over this section (CLI > file > compiled default).
+# The file is kept on purpose (issue #1189 §4 recommends archiving, not
+# deletion). The `[engine]` / `[exit]` / `[risk]` bodies it used to carry were
+# removed in PR-E: they were inert after #967, and keeping numbers in a
+# "configuration" file invites treating them as armed settings — which they
+# are not. Historical values live in git history (`git log --follow -- this
+# file`).
 #
-# Nothing is set here on purpose. The shipped ladder is the compiled one, and
-# the ticket that added this section deliberately did NOT move it — a ladder is
-# changed by measuring it (an A/B replay with `--exit-*`), not by editing a
-# default. The values below are therefore documentation, written as comments:
-# uncommenting one is an explicit act, and the startup log then names it
-# (`exit.stop_loss_pct=12 (toml)`).
+# Where configuration actually comes from now:
+#   - accounts / risk / exit policy:  SQLite (`data/blitzkrieg.sqlite`)
+#   - global static knobs:            process environment (`.env`, `BK_*`)
+#   - everything else:                compiled defaults
 #
-#   take_profit_pct       = 100   fixed take-profit, % of entry (a backstop only:
-#                                 normal exits ride the trailing stop)
-#   stop_loss_pct         = 12    stop-loss, % of entry
-#   trailing_enabled      = false the trailing stop's arming switch. OFF is the
-#                                 issue-356 calibration (the proven operator
-#                                 never sold into profit — every exit was a
-#                                 REDEEM/MERGE); hot-writable per session via
-#                                 `risk.setExit` (trailingEnabled). Strategies
-#                                 declare their OWN verdict per package — the
-#                                 Lua manifest's `trailing_exit` key (absent =
-#                                 follow this value; true/false = force
-#                                 on/off for that strategy's positions) — so
-#                                 spread_arb-style mean-reversion sellers bank
-#                                 profit without flipping the kernel-wide
-#                                 switch that the REDEEM-family philosophies
-#                                 were calibrated against. NOT a startup
-#                                 config key: this ladder's compiled face has
-#                                 no trailing_enabled field, and the knob is
-#                                 operator-hot-write + strategy-declaration
-#                                 territory by design.
-#   trailing_min_high_pct = 15    profit (%) needed before the trailing stop arms
-#   min_trail_pct         = 8     floor for the trailing stop's give-back (%)
-#
-# [exit]
-# stop_loss_pct = 12
-# min_trail_pct = 8
-
-# ── Systemic risk limits (E26 / DEV_V0_3 §4, issue #864) ────────────────────
-# 〔issue 967 退休〕NOT loaded. The armed numbers live as `BK_RISK_*` env keys
-# (see `.env.example`); an unset key is the factory posture (bound 0 = off).
-# Not hot keys: a change takes effect at the next kernel START, and the startup
-# log names each armed limit and its source (`risk.systemic: max_single_loss_usd=0.50 (env)`).
-#
-# The daily-drawdown slot is the SAME budget as the #173 daily-loss breaker
-# (one counter). The compiled relative cap stays 20% of the day's opening
-# cash; the TIGHTER of that and `max_daily_drawdown_usd` applies. On any book
-# larger than $25 the $5 absolute cap is the one that binds. The 72-hour env
-# tightens the relative cap to 10% (`BK_MAX_DAILY_LOSS_PCT`) without touching
-# DRY_RUN.
-#
-# Sizing against the compiled 12% stop: one share at 0.99 loses $0.1188, so
-# $0.50 still admits a few shares, and the default 10-share band is shrunk
-# rather than silently kept. `max_position_size` 5 is the share ceiling.
-
-[risk]
-max_single_loss_usd = "0.50"
-max_daily_drawdown_usd = "5"
-max_position_size = "5"
-max_consecutive_losses = "4"
-cooldown_minutes = "30"
-max_total_position = "6"
-max_total_exposure_usd = "20"
-max_correlation_usd = "12"
-global_kill_switch_loss_usd = "8"
-#
-# The exit ladder Gate 4 binds is the exit policy's PROJECTION unless an
-# explicit ladder opts in (validated row by row; a backwards ladder is
-# warned about and does NOT take over):
-#
-#   [[risk.ladder]]
-#   at_pct       = 50    # profit % of entry at which the step fires
-#   close_ratio  = 0.5   # fraction of the position this step closes
-#   move_stop_to = "0.45" # optional: where the stop moves to (price)
-
-# ── Strategies are NOT configured here ───────────────────────────────────────
-# PR-B removed `[strategy]`. The kernel ships ZERO strategies and enables
-# NONE of them by default: every strategy comes from a cdylib under the
-# strategy dir (default `user_layer/strategies`, scanned recursively for
-# *.dylib/*.so at startup) and starts DISABLED. What starts enabled is the
-# operator's persisted intent — `data/strategy-state.json`, rewritten on every
-# panel/CLI toggle and replayed at the next boot — plus explicit
-# `--enable-strategy <name>` / `--disable-strategy <name>` flags (an explicit
-# off wins). A missing strategy dir or state file is normal, never an error.
+# 引用：https://github.com/ceer-quant/BlitzkriegBot/issues/1189 （PR-E）

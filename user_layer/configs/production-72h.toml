@@ -1,33 +1,17 @@
-# 72-hour dry profile (issues #864, #865, #866, #868).
+# 72-hour dry profile — retired, kept as an archived record.
 #
-# 〔issue 967 退休，2026-11-06〕THIS FILE IS NOT READ. `BK_CONFIG`,
-# `--config` and `--no-config` are gone with the TOML layer; the numbers below
-# are now spelled as `BK_RISK_*` / `BK_MAX_ORDERBOOK_STALE_MS` keys in
-# `production-72h.env`. `scripts/soak-72h-check.mjs --preflight` locks the
-# record here to that env profile, so an edit in one place without the other
-# fails the gate. The original header follows.
+# 〔issue 967 退休，2026-11-06；issue 1189 正文移除，2026-11-13〕THIS FILE IS
+# NOT READ. The kernel reads no configuration from this file: accounts, risk
+# and exit policy live in SQLite (`data/blitzkrieg.sqlite`, issue #1189).
+# `user_layer/configs/production-72h.toml` 已退休，账户与风控配置见 SQLite
+# （issue #1189）。
 #
-# Point the kernel at this file with BK_CONFIG (see production-72h.env) or
-# `--config user_layer/configs/production-72h.toml`. The numbers match
-# `default.toml` on purpose: a normal repo-root boot and this profile enforce
-# the same loss bounds and the same orderbook budget. A test locks that.
+# The file is kept on purpose (issue #1189 §4 recommends archiving, not
+# deletion). The `[engine]` / `[risk]` numbers it used to carry were removed in
+# PR-E: they were inert after #967, and keeping numbers in a "configuration"
+# file invites treating them as armed settings — which they are not. The
+# profile's actual values are spelled as `BK_*` keys in
+# `user_layer/configs/production-72h.env`; historical toml values live in git
+# history (`git log --follow -- this file`).
 #
-# This file does not set DRY_RUN and does not enable a strategy. Strategy
-# names that may be passed to `--enable-strategy` live in
-# `production-72h.allowlist`, which is empty until
-# `docs/reports/cost-adjusted-edge-72h.md` records a GO. Start with
-# `--no-strategy-state` so a leftover `data/strategy-state.json` cannot turn
-# a losing package back on.
-#
-# `--no-config` is the factory escape hatch (limits off, staleness 8000 ms).
-# Do not use it for a 72-hour run.
-
-[engine]
-max_orderbook_stale_ms = 3500
-
-[risk]
-max_single_loss_usd = "0.50"
-max_daily_drawdown_usd = "5"
-max_position_size = "5"
-max_consecutive_losses = "4"
-cooldown_minutes = "30"
+# 引用：https://github.com/ceer-quant/BlitzkriegBot/issues/1189 （PR-E）
