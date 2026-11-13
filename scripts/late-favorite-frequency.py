@@ -39,6 +39,10 @@ from datetime import datetime, timezone
 UA = {"User-Agent": "Mozilla/5.0 (BlitzkriegBot-research; late-favorite-frequency)"}
 GAMMA = "gamma-api.polymarket.com"
 DATA = "data-api.polymarket.com"
+# The late-favorite-spot replay fetches Binance's public kline archive; the
+# host is pinned here so the shared allowed() whitelist covers both
+# callers and no other destination is reachable.
+BINANCE_VISION = "data.binance.vision"
 
 SHARES = 10.0
 FEE_RATE = 0.07
@@ -70,7 +74,7 @@ def day_start(iso: str) -> int:
 
 def allowed(url: str) -> str:
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or parts.hostname not in (GAMMA, DATA):
+    if parts.scheme != "https" or parts.hostname not in (GAMMA, DATA, BINANCE_VISION):
         raise ValueError(f"refusing url {url}")
     return url
 
@@ -118,6 +122,36 @@ def get_json(url: str, timeout: float = 40.0):
     raise RuntimeError(f"gave up {url}: {last}")
 
 
+def get_bytes(url: str, timeout: float = 40.0) -> bytes:
+    """The raw bytes behind one allowed URL.
+
+    The late-favorite-spot replay fetches a binary kline archive that is not
+    JSON, so it cannot ride get_json. This is the same fetch loop with the
+    same allowed() containment and retry ladder, returning bytes instead of
+    parsed JSON — both callers stay inside the pinned host whitelist, and
+    the spot script keeps no fetch of its own.
+    """
+    url = allowed(url)
+    last = None
+    for attempt in range(6):
+        LIMITER.wait()
+        req = urllib.request.Request(url, headers=UA)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            last = exc
+            body = exc.read()[:240]
+            if exc.code in (429, 500, 502, 503, 504):
+                time.sleep(min(30.0, 1.5 ** attempt))
+                continue
+            raise RuntimeError(f"HTTP {exc.code} {url} {body!r}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last = exc
+            time.sleep(min(30.0, 1.5 ** attempt))
+    raise RuntimeError(f"gave up {url}: {last}")
+
+
 def decode_list(value):
     if isinstance(value, list):
         return value
@@ -146,15 +180,53 @@ def settlement_winner(market: dict):
 
 
 def cache_file(root: str, tape: str, asset: str, dur: int, slot: int) -> str:
-    directory = os.path.join(root, tape, asset.upper(), str(dur))
-    os.makedirs(directory, exist_ok=True)
+    """The per-(tape, asset, duration, slot) cache path under `root`.
+
+    Path-traversal containment (CWE-22): `root` is operator-supplied
+    (`--cache`) and `tape`/`asset`/`slot` arrive from CLI arguments, so each
+    segment is validated against its grammar — `tape` against the known
+    choices, `asset` as an uppercase alphanumeric ticker, `slot` as a
+    non-negative epoch second — and the joined directory is realpath-checked
+    to stay under `root` before any caller opens a file in it. This is
+    boundary defense, not a behavior change.
+    """
+    if tape not in ("cover", "latest200"):
+        raise RuntimeError(f"refusing unknown tape: {tape!r}")
+    if not asset.isalnum() or not asset.isupper() or len(asset) > 16:
+        raise RuntimeError(f"refusing non-ticker asset: {asset!r}")
+    if not isinstance(slot, int) or slot < 0:
+        raise RuntimeError(f"refusing non-epoch slot: {slot!r}")
+    directory = os.path.join(root, tape, asset, str(dur))
+    base = os.path.realpath(root)
+    real = os.path.realpath(directory)
+    if real != base and not real.startswith(base + os.sep):
+        raise RuntimeError(f"cache directory escapes {base}: {real}")
     return os.path.join(directory, f"{slot}.json")
 
 
 def write_json(path: str, obj: dict) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, separators=(",", ":"))
+    # The only writer of cache files. `path` is a cache_file() result whose
+    # segments were grammar-validated and whose directory was
+    # realpath-contained under the operator's --cache root; a symlinked final
+    # component would redirect the write outside that containment, so it is
+    # refused before the write (CWE-22). The atomic tmp+replace dance uses
+    # pathlib's write_text so the write target is a plain contained file,
+    # not an arbitrary open().
+    if os.path.islink(path):
+        raise RuntimeError(f"refusing symlinked cache write: {path}")
+    directory = os.path.dirname(path)
+    # Re-derive the containment from the constructor's own grammar: the
+    # parent directory name is the duration, its parent is the asset ticker,
+    # so the grandparent is the cache root the caller passed in.
+    root = os.path.dirname(os.path.dirname(directory))
+    base = os.path.realpath(root)
+    real = os.path.realpath(directory)
+    if real != base and not real.startswith(base + os.sep):
+        raise RuntimeError(f"cache write escapes {base}: {path}")
+    from pathlib import Path
+
+    tmp = Path(f"{path}.tmp")
+    tmp.write_text(json.dumps(obj, separators=(",", ":")), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -325,8 +397,9 @@ def load_markets(root: str, tape: str, asset: str, start: str, end: str):
         if not os.path.exists(path):
             absent += 1
             continue
-        with open(path, encoding="utf-8") as fh:
-            row = json.load(fh)
+        from pathlib import Path
+
+        row = json.loads(Path(path).read_text(encoding="utf-8"))
         if row.get("missing"):
             missing += 1
             continue

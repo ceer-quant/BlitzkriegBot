@@ -761,6 +761,14 @@ async fn main() -> anyhow::Result<()> {
             // exactly one source. Empty when the operator opted out — the
             // exit sweep is then byte-identical to its historical behavior.
             exit_ladder: explicit_ladder.clone(),
+            // issue #1189: explicit CLI `--exit-*` flags override the account's
+            // DB/env exit row for THIS process run only; they are never written
+            // back to the database.
+            cli_exit_stop_loss_pct: args.cli_exit_stop_loss_pct,
+            cli_exit_take_profit_pct: args.cli_exit_take_profit_pct,
+            cli_exit_force_exit_sec: args.cli_exit_force_sec,
+            cli_exit_trailing_min_high_pct: args.cli_exit_trailing_min_high_pct,
+            cli_exit_min_trail_pct: args.cli_exit_min_trail_pct,
             ..Default::default()
         },
         entry_maker_timeout_ms: args.entry_maker_timeout_ms,

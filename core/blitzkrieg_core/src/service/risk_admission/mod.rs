@@ -24,6 +24,25 @@ use super::helpers::{escalation_delay_ms, exit_intent_key, is_close_intent};
 use super::parse_direction;
 use super::{EXIT_REPORT_BEAT_MS, marketable_exit_price};
 
+impl Core {
+    /// The exit discipline in force for one account: the account's own row
+    /// (`account_exit_policy` / `BK_EXIT_*_<ACCOUNT>`) when one exists, else
+    /// the global `ExitConfig`. The ONE lookup every admission/exit site
+    /// uses, so two accounts can run different stops/profit targets without
+    /// a second threshold copy.
+    pub(crate) fn exit_config_for(&self, account_id: &AccountId) -> crate::exit_policy::ExitConfig {
+        let mut cfg = self
+            .config
+            .positions
+            .account_exit
+            .get(account_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| self.config.positions.exit.clone());
+        self.config.positions.apply_cli_exit_overrides(&mut cfg);
+        cfg
+    }
+}
+
 mod admission;
 mod exit_jobs;
 mod exits;

@@ -701,8 +701,8 @@ impl Core {
         //    out (#174 — the same doctrine `check_with_equity` applies to the
         //    kill switch above). A max_position_size < 1 or a single-loss cap
         //    smaller than one share's stop must never trap an exit.
-        let limits = self.risk.systemic_snapshot();
-        if limits.any_armed() && !is_close_intent(&req.internal_key) {
+        let account_limits = self.risk.account_limits(req.account_id.as_str());
+        if account_limits.any_armed() && !is_close_intent(&req.internal_key) {
             // Same doctrine as the pipeline gate: a holder's bound stop is
             // the wide containment width the walker will actually enforce.
             // #963: the ordinary path sizes against the WIDEST stop the ramp
@@ -714,17 +714,19 @@ impl Core {
                 .engine
                 .as_ref()
                 .is_some_and(|e| e.strategy_holds_to_settlement(&req.strategy));
+            let exit_cfg = self.exit_config_for(&req.account_id);
             let bound_stop_pct = if holder {
-                crate::exit_policy::holder_effective_stop_pct(0, &self.config.positions.exit)
+                crate::exit_policy::holder_effective_stop_pct(0, &exit_cfg)
             } else {
-                crate::exit_policy::effective_stop_pct(
-                    self.config.positions.exit.stop_loss_pct,
-                    i64::MAX,
-                    &self.config.positions.exit,
-                )
+                crate::exit_policy::effective_stop_pct(exit_cfg.stop_loss_pct, i64::MAX, &exit_cfg)
             };
             if let crate::risk::limits::EntryJudgment::Reject { detail, .. } =
-                crate::risk::limits::judge_entry(limits, chase_price, req.size, bound_stop_pct)
+                crate::risk::limits::judge_entry_account(
+                    account_limits,
+                    chase_price,
+                    req.size,
+                    bound_stop_pct,
+                )
             {
                 return Err(detail);
             }

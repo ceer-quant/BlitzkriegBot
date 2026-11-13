@@ -86,7 +86,7 @@ impl Core {
         // `breaker_cooldown_sec`). Off at the factory: nothing is recorded
         // unless the operator armed the bound.
         {
-            let account_limits = &self.risk.config().systemic.account;
+            let account_limits = self.risk.account_limits(closed.account_id.as_str());
             let max_losses =
                 u32::try_from(account_limits.max_consecutive_losses.value().floor()).unwrap_or(0);
             if max_losses >= 1 {

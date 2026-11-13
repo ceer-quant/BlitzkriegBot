@@ -234,6 +234,116 @@ impl ExtensionConfig {
     }
 }
 
+/// The env suffix for an account id: uppercased, every non-alphanumeric
+/// mapped to `_`. The same grammar as the execution-policy per-account keys
+/// (`POLICY_BUDGET_RATIO_BINANCE_MAIN`), reused so risk/exit per-account keys
+/// read the same way an operator already expects.
+pub fn account_env_suffix(account_id: &str) -> String {
+    account_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The account-suffixed spelling of a cockpit env key. `BK_RISK_MAX_POSITION_SIZE`
+/// + `paper` → `BK_RISK_MAX_POSITION_SIZE_PAPER`.
+///
+/// The infix spelling (`BK_RISK_PAPER_MAX_POSITION_SIZE`) is also accepted on
+/// read; the suffix form is what the write path emits.
+pub fn account_env_key(base: &str, account_id: &str) -> String {
+    format!("{base}_{}", account_env_suffix(account_id))
+}
+
+/// Per-account exit-discipline overrides, derived from the SAME effective
+/// global [`crate::exit_policy::ExitConfig`] the process resolved at boot.
+///
+/// Only accounts that actually carry a `BK_EXIT_*_<ACCOUNT>` key get a row;
+/// every other account falls back to the global config, so a later global
+/// change is still visible to it (the same fallback rule as the risk matrix).
+pub fn account_exit_overrides<I, S>(
+    base: &crate::exit_policy::ExitConfig,
+    accounts: I,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> std::collections::HashMap<String, crate::exit_policy::ExitConfig>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = std::collections::HashMap::new();
+    for account in accounts {
+        let account = account.as_ref();
+        let suffix = account_env_suffix(account);
+        let mut cfg = base.clone();
+        let mut touched = false;
+        macro_rules! dec_key {
+            ($field:ident, $env:expr) => {{
+                let key = format!("BK_EXIT_{}_{}", $env, suffix);
+                if let Some(raw) = lookup(&key) {
+                    if let Ok(v) = raw.trim().parse::<rust_decimal::Decimal>() {
+                        cfg.$field = v;
+                        touched = true;
+                    } else {
+                        tracing::warn!(key = %key, raw = %raw, "per-account exit key unparseable — global value stays");
+                    }
+                }
+            }};
+        }
+        dec_key!(stop_loss_pct, "STOP_LOSS_PCT");
+        dec_key!(take_profit_pct, "TAKE_PROFIT_PCT");
+        dec_key!(min_trail_pct, "MIN_TRAIL_PCT");
+        dec_key!(trailing_min_high_pct, "TRAILING_MIN_HIGH_PCT");
+        let force_key = format!("BK_EXIT_FORCE_EXIT_SEC_{suffix}");
+        if let Some(raw) = lookup(&force_key) {
+            match raw.trim().parse::<i64>() {
+                Ok(v) => {
+                    cfg.force_exit_sec = v;
+                    touched = true;
+                }
+                Err(_) => tracing::warn!(
+                    key = %force_key,
+                    raw = %raw,
+                    "per-account exit key unparseable — global value stays"
+                ),
+            }
+        }
+        let trailing_key = format!("BK_EXIT_TRAILING_ENABLED_{suffix}");
+        if let Some(raw) = lookup(&trailing_key)
+            && let Some(v) = parse_env_bool(&raw)
+        {
+            cfg.trailing_enabled = v;
+            touched = true;
+        }
+        let maker_key = format!("BK_EXIT_STRATEGY_EXIT_MAKER_FIRST_{suffix}");
+        if let Some(raw) = lookup(&maker_key)
+            && let Some(v) = parse_env_bool(&raw)
+        {
+            cfg.strategy_exit_maker_first = v;
+            touched = true;
+        }
+        if touched {
+            out.insert(account.to_string(), cfg);
+        }
+    }
+    out
+}
+
+/// Parse the boolean spellings the env face accepts (the launcher's parser
+/// accepts `1/true/yes/on` and `0/false/no/off`; keep the same set here so a
+/// hand-edited key means the same thing in both places).
+pub(crate) fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// Record a parsed key, or a precise warning when the value had the wrong type.
 /// An unusable value leaves the key unset rather than guessing at it.
 fn got<T>(slot: &mut Option<T>, parsed: Result<T, String>, key: &str, warnings: &mut Vec<String>) {
@@ -262,6 +372,32 @@ mod tests {
         assert_eq!(pick(Some(1), Some(2), 3).source, Source::Cli);
         assert_eq!(pick(None, Some(2), 3), Sourced::new(2, Source::Env));
         assert_eq!(pick(None, None, 3), Sourced::new(3, Source::Default));
+    }
+
+    /// issue #1189: two accounts can run different exit disciplines; an
+    /// account without a row keeps the global config.
+    #[test]
+    fn per_account_exit_overrides_are_independent() {
+        let base = crate::exit_policy::ExitConfig::default();
+        let vars = std::collections::HashMap::from([
+            ("BK_EXIT_STOP_LOSS_PCT_PAPER".to_string(), "8".to_string()),
+            (
+                "BK_EXIT_TAKE_PROFIT_PCT_PAPER".to_string(),
+                "90".to_string(),
+            ),
+            ("BK_EXIT_STOP_LOSS_PCT_LIVE".to_string(), "15".to_string()),
+            (
+                "BK_EXIT_TRAILING_ENABLED_LIVE".to_string(),
+                "true".to_string(),
+            ),
+        ]);
+        let out =
+            account_exit_overrides(&base, ["paper", "live", "other"], |k| vars.get(k).cloned());
+        assert_eq!(out["paper"].stop_loss_pct, rust_decimal_macros::dec!(8));
+        assert_eq!(out["paper"].take_profit_pct, rust_decimal_macros::dec!(90));
+        assert_eq!(out["live"].stop_loss_pct, rust_decimal_macros::dec!(15));
+        assert!(out["live"].trailing_enabled);
+        assert!(!out.contains_key("other"));
     }
 
     #[test]

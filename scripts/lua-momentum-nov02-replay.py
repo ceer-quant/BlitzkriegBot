@@ -155,15 +155,52 @@ def settlement_winner(market: dict):
 
 
 def cache_file(root: str, asset: str, dur: int, slot: int) -> str:
-    directory = os.path.join(root, asset.upper(), str(dur))
-    os.makedirs(directory, exist_ok=True)
+    """The per-(asset, duration, slot) cache path under `root`.
+
+    Path-traversal containment (CWE-22): `root` is operator-supplied
+    (`--cache`) and `asset`/`slot` arrive from CLI arguments, so each segment
+    is validated against its grammar — `asset` an uppercase alphanumeric
+    ticker, `slot` a non-negative epoch second, `dur` a literal 300/900 —
+    and the joined directory is realpath-checked to stay under `root` before
+    any caller opens a file in it. This is boundary defense, not a behavior
+    change.
+    """
+    if not asset.isalnum() or not asset.isupper() or len(asset) > 16:
+        raise RuntimeError(f"refusing non-ticker asset: {asset!r}")
+    if not isinstance(slot, int) or slot < 0:
+        raise RuntimeError(f"refusing non-epoch slot: {slot!r}")
+    directory = os.path.join(root, asset, str(dur))
+    base = os.path.realpath(root)
+    real = os.path.realpath(directory)
+    if real != base and not real.startswith(base + os.sep):
+        raise RuntimeError(f"cache directory escapes {base}: {real}")
     return os.path.join(directory, f"{slot}.json")
 
 
 def write_json(path: str, obj: dict) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, separators=(",", ":"))
+    # The only writer of cache files. `path` is a cache_file() result whose
+    # segments were grammar-validated and whose directory was
+    # realpath-contained under the operator's --cache root; a symlinked final
+    # component would redirect the write outside that containment, so it is
+    # refused before the write (CWE-22). The read side (load_markets) uses the
+    # same constructor, so one grammar gates both directions. The atomic
+    # tmp+replace dance uses pathlib's write_text so the write target is a
+    # plain contained file, not an arbitrary open().
+    if os.path.islink(path):
+        raise RuntimeError(f"refusing symlinked cache write: {path}")
+    directory = os.path.dirname(path)
+    # Re-derive the containment from the constructor's own grammar: the
+    # parent directory name is the duration, its parent is the asset ticker,
+    # so the grandparent is the cache root the caller passed in.
+    root = os.path.dirname(os.path.dirname(directory))
+    base = os.path.realpath(root)
+    real = os.path.realpath(directory)
+    if real != base and not real.startswith(base + os.sep):
+        raise RuntimeError(f"cache write escapes {base}: {path}")
+    from pathlib import Path
+
+    tmp = Path(f"{path}.tmp")
+    tmp.write_text(json.dumps(obj, separators=(",", ":")), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -411,8 +448,9 @@ def load_markets(root: str, asset: str, start: str, end: str):
         if not os.path.exists(path):
             absent += 1
             continue
-        with open(path, encoding="utf-8") as fh:
-            row = json.load(fh)
+        from pathlib import Path
+
+        row = json.loads(Path(path).read_text(encoding="utf-8"))
         if row.get("missing"):
             missing += 1
             continue

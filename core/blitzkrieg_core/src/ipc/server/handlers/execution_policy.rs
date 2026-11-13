@@ -160,6 +160,9 @@ async fn execution_policy_set(
     c.execution_policy_record_env_write(written);
     c.reload_execution_policy()
         .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    // issue #1189: a budget_ratio=1 save is legal on its own but collides
+    // with a per-order equity cap below 100% — name it at the save boundary.
+    c.warn_if_budget_ratio_conflicts(&p.account_id);
     // `after` is the RELOADED view — the state the kernel will actually
     // judge under, not the in-memory state the write replaced.
     let after = c

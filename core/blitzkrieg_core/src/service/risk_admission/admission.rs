@@ -367,8 +367,12 @@ impl Core {
         // the pipeline's Modification::SizeReduced does for strategy entries;
         // its Reject arm refuses with the gate's own vocabulary.
         if req.side == Side::Buy {
-            let limits = self.risk.systemic_snapshot();
-            if limits.any_armed() {
+            // issue #983: systemic limits are per-account only — resolve the
+            // REQUEST'S OWN row (SQLite `account_risk`, or the env fallback)
+            // rather than a process-wide matrix. A missing row falls back to
+            // the default/global matrix.
+            let account_limits = self.risk.account_limits(req.account_id.as_str());
+            if account_limits.any_armed() {
                 // issue #983: systemic limits are per-account only — no
                 // process-wide facts needed.
                 // The bound stop is the discipline that will ACTUALLY fire:
@@ -401,20 +405,22 @@ impl Core {
                     .as_ref()
                     .map(|e| e.last_time_left_sec())
                     .unwrap_or(i64::MAX);
+                let exit_cfg = self.exit_config_for(&req.account_id);
                 let bound_stop_pct = if holder {
-                    crate::exit_policy::holder_effective_stop_pct(
-                        time_left_sec,
-                        &self.config.positions.exit,
-                    )
+                    crate::exit_policy::holder_effective_stop_pct(time_left_sec, &exit_cfg)
                 } else {
                     crate::exit_policy::effective_stop_pct(
-                        self.config.positions.exit.stop_loss_pct,
+                        exit_cfg.stop_loss_pct,
                         time_left_sec,
-                        &self.config.positions.exit,
+                        &exit_cfg,
                     )
                 };
-                match crate::risk::limits::judge_entry(limits, req.price, req.size, bound_stop_pct)
-                {
+                match crate::risk::limits::judge_entry_account(
+                    account_limits,
+                    req.price,
+                    req.size,
+                    bound_stop_pct,
+                ) {
                     crate::risk::limits::EntryJudgment::Pass => {}
                     crate::risk::limits::EntryJudgment::Reduce { approved, limit } => {
                         tracing::info!(

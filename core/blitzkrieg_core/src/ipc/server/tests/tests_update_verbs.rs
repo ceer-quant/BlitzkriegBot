@@ -60,6 +60,7 @@ async fn a_configured_limit_crosses_the_wire_as_a_string_with_provenance() {
                     max_single_loss_usd: Bound::new(dec!(35), LimitSource::Env),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         },

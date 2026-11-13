@@ -109,6 +109,14 @@ pub(crate) struct Args {
     /// resolved `BK_EXIT_STRATEGY_EXIT_MAKER_FIRST` > compiled default
     /// (false). Same persistence contract as `exit_trailing_enabled`.
     pub(crate) exit_strategy_exit_maker_first: bool,
+    /// issue #1189: the EXPLICIT `--exit-*` flags, kept separate from the
+    /// resolved values so a per-account DB row can be overridden for this
+    /// process run without writing back to the database.
+    pub(crate) cli_exit_take_profit_pct: Option<Decimal>,
+    pub(crate) cli_exit_stop_loss_pct: Option<Decimal>,
+    pub(crate) cli_exit_trailing_min_high_pct: Option<Decimal>,
+    pub(crate) cli_exit_min_trail_pct: Option<Decimal>,
+    pub(crate) cli_exit_force_sec: Option<i64>,
     pub(crate) feed_ws: bool,
     /// `--net-check`: probe the venue's network paths, print one JSON report and
     /// exit (0 all passed / 1 any failed). Answered before any service starts,

@@ -637,6 +637,7 @@ fn gate_counts_follow_the_account_in_the_strategy_page() {
                         max_order_notional_usd: Bound::new(dec!(100), LimitSource::Flag),
                         ..Default::default()
                     },
+                    accounts: Default::default(),
                 },
                 ..Default::default()
             },
@@ -802,6 +803,7 @@ fn a_gate_exemption_never_bypasses_a_safety_boundary() {
                     max_order_notional_usd: Bound::new(dec!(1), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         },

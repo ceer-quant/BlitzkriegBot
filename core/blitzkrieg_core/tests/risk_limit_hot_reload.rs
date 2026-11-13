@@ -38,6 +38,7 @@ fn startup_config() -> CoreConfig {
                     max_order_notional_usd: Bound::new(dec!(100), LimitSource::Flag),
                     ..Default::default()
                 },
+                accounts: Default::default(),
             },
             ..Default::default()
         },

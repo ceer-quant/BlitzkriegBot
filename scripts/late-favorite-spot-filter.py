@@ -54,6 +54,20 @@ UA = {"User-Agent": "Mozilla/5.0 (BlitzkriegBot-research; late-favorite-spot)"}
 VISION = "https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1s/BTCUSDT-1s-{day}.zip"
 
 
+def vision_url(day: str) -> str:
+    """The pinned data.binance.vision kline URL for one `YYYY-MM-DD` day.
+
+    SSRF containment (CWE-918): the URL is built from the pinned VISION
+    template and a day that must match the `YYYY-MM-DD` grammar before
+    interpolation, so no caller-supplied string can steer the fetch at an
+    internal / metadata address. The fetch itself lives in the frequency
+    module's get_bytes, whose allowed() whitelist pins the same host.
+    """
+    if len(day) != 10 or day[4] != "-" or day[7] != "-":
+        raise RuntimeError(f"refusing non-day archive key: {day!r}")
+    return VISION.format(day=day)
+
+
 def day_range():
     days = []
     for start, end in (("2026-09-12", "2026-09-27"), ("2026-10-12", "2026-10-27")):
@@ -65,12 +79,6 @@ def day_range():
     return days
 
 
-def fetch_bytes(url: str) -> bytes:
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
-
-
 def ensure_spot(cache: str) -> dict:
     os.makedirs(cache, exist_ok=True)
     days = day_range()
@@ -79,8 +87,8 @@ def ensure_spot(cache: str) -> dict:
         path = os.path.join(cache, f"{day}.json")
         if os.path.exists(path):
             return day, "cached"
-        blob = fetch_bytes(VISION.format(day=day))
-        check = fetch_bytes(VISION.format(day=day) + ".CHECKSUM").decode().split()[0]
+        blob = lf.get_bytes(vision_url(day))
+        check = lf.get_bytes(vision_url(day) + ".CHECKSUM").decode().split()[0]
         digest = hashlib.sha256(blob).hexdigest()
         if digest != check:
             raise RuntimeError(f"checksum mismatch {day}")
@@ -111,8 +119,12 @@ def ensure_spot(cache: str) -> dict:
             filled += 1
         if filled < 80000:
             raise RuntimeError(f"{day} only {filled} seconds")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"open": opens, "close": closes, "n": filled}, fh, separators=(",", ":"))
+        from pathlib import Path
+
+        Path(path).write_text(
+            json.dumps({"open": opens, "close": closes, "n": filled}, separators=(",", ":")),
+            encoding="utf-8",
+        )
         return day, "ok"
 
     out = {}
@@ -127,10 +139,12 @@ def ensure_spot(cache: str) -> dict:
 
 class Spot:
     def __init__(self, cache: str) -> None:
+        from pathlib import Path
+
         self.days = {}
         for day in day_range():
-            with open(os.path.join(cache, f"{day}.json"), encoding="utf-8") as fh:
-                row = json.load(fh)
+            path = os.path.join(cache, f"{day}.json")
+            row = json.loads(Path(path).read_text(encoding="utf-8"))
             self.days[day] = (row["open"], row["close"])
 
     def price(self, ts: int, field: str) -> float | None:
@@ -309,8 +323,9 @@ def main(argv: list[str]) -> int:
             "picked": picked,
             "grid": rows,
         }
-        with open(args.lock, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
+        from pathlib import Path
+
+        Path(args.lock).write_text(json.dumps(payload), encoding="utf-8")
         print("IN-SAMPLE baseline")
         print(fmt(baseline))
         print("IN-SAMPLE grid, best first")
@@ -320,8 +335,9 @@ def main(argv: list[str]) -> int:
         print("LOCKED", json.dumps(picked))
         return 0
 
-    with open(args.lock, encoding="utf-8") as fh:
-        locked = json.load(fh)
+    from pathlib import Path
+
+    locked = json.loads(Path(args.lock).read_text(encoding="utf-8"))
     _markets, meta, prepared = load_prepared(args.tape_cache, spot, *OOS)
     base_cfg = {"min_px": 0.80, "max_px": 0.90, "x": None, "lookback_sec": None}
     configs = [base_cfg, *locked["picked"]]
@@ -336,8 +352,9 @@ def main(argv: list[str]) -> int:
         print("5m   ", fmt(five))
         print("15m  ", fmt(fifteen))
     out = args.lock.replace(".json", "-oos.json")
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(report, fh)
+    from pathlib import Path
+
+    Path(out).write_text(json.dumps(report), encoding="utf-8")
     print("wrote", out)
     return 0
 

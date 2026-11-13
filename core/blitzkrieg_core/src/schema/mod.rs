@@ -1009,14 +1009,14 @@ pub const RISK_LIMIT_UPDATE_NOTE: &str = "hot-applied; persisted to the risk-sta
 // ── 生效风控可编辑 — risk.setSystemic（六项账户级限额的运行时写路径）─────────
 
 /// `risk.setSystemic` params: the six per-account systemic limits (issue
-/// #983: risk control follows the account's capital — no global caps), every
-/// field optional (only the named fields change). Values are USD / shares /
-/// counts / minutes on the decimal-STRING wire (the readout's convention);
-/// `0` = off.
+/// #983: risk follows the account's capital — no global caps); `accountId`
+/// picks the `account_risk` row (absent = default). USD / shares / counts /
+/// minutes, decimal-STRING wire; `0` = off.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SetSystemicLimitsParams {
-    // ── 账户级（五项）──
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// 单笔最大亏损（USD）：Gate 2 从止损价推导，超额入场缩到帽内。
     #[serde(default, with = "crate::decimal::opt")]
     pub max_single_loss_usd: Option<Decimal>,
@@ -1102,11 +1102,9 @@ pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "single-loss + position-size live, 
      next session; persisted to .env (BK_RISK_*) when the kernel has an env \
      file, in-memory only otherwise";
 
-// ── 退出纪律可编辑 — risk.setExit（止损/止盈/强平的运行时写路径）────────────
-
-/// `risk.setExit` params: the exit triple Gate 4 binds per entry, every field
-/// optional (only the named fields change). Percentages are decimal STRINGS on
-/// the wire (the readout's convention); `forceExitSec` is seconds.
+/// `risk.setExit` params: the exit triple Gate 4 binds per entry, all fields
+/// optional; `accountId` picks the `account_exit_policy` row (absent = default).
+/// Percentages are decimal STRINGS; `forceExitSec` is seconds.
 ///
 /// Calibration guard: `forceExitSec: 0` DISABLES the guillotine and
 /// `stopLossPct: 0` would stop on entry tick, so the percentages are refused
@@ -1116,6 +1114,8 @@ pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "single-loss + position-size live, 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SetExitParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// 止损（入场价百分比）：跌破即触发保护性离场。出厂 12。
     #[serde(default, with = "crate::decimal::opt")]
     pub stop_loss_pct: Option<Decimal>,

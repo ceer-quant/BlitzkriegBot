@@ -137,6 +137,7 @@ impl Core {
         // recover across a kill -9 (the reply's `persisted` field says which
         // posture this kernel has: file-backed or memory-only).
         let persisted = self.risk_state_record_limits(&changes);
+        self.warn_budget_conflict_if_needed(&changes);
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -206,8 +207,11 @@ impl Core {
             ));
         }
 
-        // Plan first, write later —— 被拒的 patch 一个字节都不动。
-        let matrix = self.risk.config().systemic.clone();
+        // Plan first, write later —— 被拒的 patch 一个字节都不动.
+        // Per-account (issue #1189): the patch names its account's
+        // `account_risk` row; absent = the process default account.
+        let target = self.resolve_set_target(patch.account_id.as_deref(), "risk.setSystemic")?;
+        let matrix = self.risk.config().systemic.account_for(&target).clone();
         let mut changes: Vec<SystemicLimitChange> = Vec::new();
         let mut plan = |field: &'static str,
                         from: &crate::risk::limits::Bound,
@@ -232,37 +236,37 @@ impl Core {
 
         plan(
             "maxSingleLossUsd",
-            &matrix.account.max_single_loss_usd,
+            &matrix.max_single_loss_usd,
             patch.max_single_loss_usd,
             "live",
         )?;
         plan(
             "maxDailyDrawdownUsd",
-            &matrix.account.max_daily_drawdown_usd,
+            &matrix.max_daily_drawdown_usd,
             patch.max_daily_drawdown_usd,
             "next_session",
         )?;
         plan(
             "maxPositionSize",
-            &matrix.account.max_position_size,
+            &matrix.max_position_size,
             patch.max_position_size,
             "live",
         )?;
         plan(
             "maxConsecutiveLosses",
-            &matrix.account.max_consecutive_losses,
+            &matrix.max_consecutive_losses,
             patch.max_consecutive_losses,
             "next_session",
         )?;
         plan(
             "cooldownMinutes",
-            &matrix.account.cooldown_minutes,
+            &matrix.cooldown_minutes,
             patch.cooldown_minutes,
             "next_session",
         )?;
         plan(
             "maxOrderNotionalUsd",
-            &matrix.account.max_order_notional_usd,
+            &matrix.max_order_notional_usd,
             patch.max_order_notional_usd,
             "live",
         )?;
@@ -274,53 +278,10 @@ impl Core {
             ));
         }
 
-        // Write phase: the six live bounds land in the matrix the pipeline
-        // snapshots per entry; the three next-session rows also land there
-        // (the readout must show the operator's intent and the restart
-        // resolution agrees), but nothing re-judges this session — the
-        // breaker keeps its birth pair, the day's loss book stays closed.
-        {
-            let cfg = self.risk.config_mut();
-            let matrix = &mut cfg.systemic;
-            let set = |bound: &mut crate::risk::limits::Bound,
-                       to: Option<Decimal>,
-                       source: crate::risk::limits::LimitSource| {
-                if let Some(v) = to {
-                    *bound = crate::risk::limits::Bound::new(v, source);
-                }
-            };
-            let flag = crate::risk::limits::LimitSource::Flag;
-            set(
-                &mut matrix.account.max_single_loss_usd,
-                patch.max_single_loss_usd,
-                flag,
-            );
-            set(
-                &mut matrix.account.max_daily_drawdown_usd,
-                patch.max_daily_drawdown_usd,
-                flag,
-            );
-            set(
-                &mut matrix.account.max_position_size,
-                patch.max_position_size,
-                flag,
-            );
-            set(
-                &mut matrix.account.max_consecutive_losses,
-                patch.max_consecutive_losses,
-                flag,
-            );
-            set(
-                &mut matrix.account.cooldown_minutes,
-                patch.cooldown_minutes,
-                flag,
-            );
-            set(
-                &mut matrix.account.max_order_notional_usd,
-                patch.max_order_notional_usd,
-                flag,
-            );
-        }
+        // Write phase: the row build + install lives in
+        // `install_account_risk_row` (account_store.rs); this file keeps the
+        // plan/persist orchestration only.
+        let row = self.install_account_risk_row(&target, &matrix, patch);
 
         // File-first (operator ruling 2026-11-08 — same posture as the exit
         // discipline): the `.env` file is the single source of truth for the
@@ -328,8 +289,19 @@ impl Core {
         // working copy moves, and a persist failure refuses the whole apply.
         // (The old order — memory hot-write, then a best-effort persist in
         // the IPC face — is the divergence the ruling bans.)
-        let persisted: bool = if self.cockpit_env_path().is_some() {
+        let persisted: bool = if let Some(db) = &self.account_risk_db {
+            db.save_risk(&target, &row).map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::Internal,
+                    format!(
+                        "systemic limits NOT applied: the account_risk store write failed ({e})"
+                    ),
+                )
+            })?;
+            true
+        } else if self.cockpit_env_path().is_some() {
             self.persist_cockpit_changes(
+                Some(&target),
                 changes
                     .iter()
                     .map(|c| (c.field, c.to.clone()))
@@ -407,8 +379,17 @@ impl Core {
             ));
         }
 
-        // Plan first, write later —— 被拒的 patch 一个字节都不动。
-        let current = self.config.positions.exit.clone();
+        // Plan first, write later —— 被拒的 patch 一个字节都不动.
+        // Per-account (issue #1189): the named account's
+        // `account_exit_policy` row; absent = the process default account.
+        let target = self.resolve_set_target(patch.account_id.as_deref(), "risk.setExit")?;
+        let current = self
+            .config
+            .positions
+            .account_exit
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| self.config.positions.exit.clone());
         let mut changes: Vec<ExitSetChange> = Vec::new();
         let mut plan = |field: &'static str,
                         from: Decimal,
@@ -503,12 +484,30 @@ impl Core {
         // logged — is precisely the divergence the ruling bans.) Without a
         // file (backtester, unwired tests): the direct memory write is the
         // whole story, honestly reported as `persisted: false`.
-        let exit_persisted: bool = if self.cockpit_env_path().is_some() {
+        let exit_persisted: bool = if let Some(db) = self.account_risk_db.clone() {
+            let exit = self.install_account_exit_row(&target, &current, patch);
+            db.save_exit(&target, &exit).map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::Internal,
+                    format!(
+                        "exit discipline NOT applied: the account_exit_policy store write failed ({e})"
+                    ),
+                )
+            })?;
+            true
+        } else if self.cockpit_env_path().is_some() {
+            let is_default = target == crate::model::default_account_id().as_str();
             let vars: std::collections::BTreeMap<String, String> = changes
                 .iter()
                 .filter_map(|c| {
-                    crate::cockpit::env_key_for_field(c.field)
-                        .map(|k| (k.to_string(), c.to.clone()))
+                    let key = if is_default {
+                        crate::cockpit::env_key_for_field(c.field).map(str::to_string)
+                    } else {
+                        crate::cockpit::env_key_for_field_account(c.field, &target).or_else(|| {
+                            crate::cockpit::env_key_for_field(c.field).map(str::to_string)
+                        })
+                    };
+                    key.map(|k| (k, c.to.clone()))
                 })
                 .collect();
             let path = self.cockpit_env_path().expect("checked above");
@@ -533,8 +532,8 @@ impl Core {
             })?;
             true
         } else {
-            // Memory-only posture: the patch moves the working copy directly.
-            let mut exit = self.config.positions.exit.clone();
+            // Memory-only posture: the patch moves the account's row directly.
+            let mut exit = current.clone();
             if let Some(v) = patch.stop_loss_pct {
                 exit.stop_loss_pct = v;
             }
@@ -550,9 +549,15 @@ impl Core {
             if let Some(on) = patch.strategy_exit_maker_first {
                 exit.strategy_exit_maker_first = on;
             }
-            self.config.positions.exit = exit.clone();
+            self.config
+                .positions
+                .account_exit
+                .insert(target.clone(), exit.clone());
+            if target == crate::model::default_account_id().as_str() {
+                self.config.positions.exit = exit.clone();
+            }
             let mut positions = self.config.positions.clone();
-            positions.exit = exit;
+            positions.exit = self.config.positions.exit.clone();
             self.positions.set_config(positions);
             false
         };

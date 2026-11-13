@@ -7,6 +7,57 @@ use crate::account::AccountLedgers;
 use std::collections::HashMap;
 
 impl Core {
+    /// Open the per-account risk/exit store (issue #1189) and overlay its
+    /// rows onto the working copies. The env-derived rows loaded at boot stay
+    /// in place; the store is the stronger source, so its rows win. A missing
+    /// file is an empty store (the env fallback stays). Idempotent: a second
+    /// open replaces the first store and re-reads it.
+    pub fn open_account_risk_db(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        let db = crate::risk::account_store::AccountRiskDb::open(path)
+            .map_err(|e| format!("account risk store open failed: {e}"))?;
+        let risks = db.load_risk();
+        let exits = db.load_exits(&self.config.positions.exit);
+        self.risk.config_mut().systemic.accounts.extend(risks);
+        self.config.positions.account_exit.extend(exits);
+        self.positions.set_config(self.config.positions.clone());
+        self.account_risk_db = Some(db);
+        Ok(())
+    }
+
+    /// True when a durable per-account store is open. `false` = env fallback.
+    pub fn account_risk_db_open(&self) -> bool {
+        self.account_risk_db.is_some()
+    }
+
+    /// issue #1189: `budget_ratio = 1` lets the execution policy size an order
+    /// at 100% of the account's available balance, while
+    /// `BK_MAX_ORDER_NOTIONAL_PCT < 100` refuses any single order above that
+    /// share of equity. The two are individually legal and jointly a guaranteed
+    /// per-order refusal at the exact size the policy asked for, so the save
+    /// path names the conflict instead of letting the operator discover it as
+    /// a rejected order.
+    pub(crate) fn warn_if_budget_ratio_conflicts(&self, account_id: &str) {
+        let Some(policy) = self.execution_policy.as_ref() else {
+            return;
+        };
+        let ratio = policy.section_for(account_id).budget_ratio;
+        let pct = self.risk.config().max_order_notional_pct;
+        if ratio == Decimal::ONE && pct < Decimal::from(100) {
+            tracing::warn!(
+                target: "risk",
+                account = %account_id,
+                budget_ratio = %ratio,
+                max_order_notional_pct = %pct,
+                "budget_ratio=1.0 conflicts with max_order_notional_pct<100: the policy will size an \
+                 order at 100% of available balance, then the per-order equity cap will refuse it. \
+                 Raise BK_MAX_ORDER_NOTIONAL_PCT to 100 or lower the account's budget_ratio."
+            );
+        }
+    }
+
     pub fn new(config: CoreConfig) -> Self {
         // E28 (§9.5) + issue 751 (.env single source) + issue 923 (the
         // migration window closed): the account book loads through the
@@ -51,6 +102,26 @@ impl Core {
         let env_file_path = config.env_file_path.clone();
         let env_lookup = crate::account::config::env_lookup_from_sources(
             env_file_path.as_deref().map(std::path::Path::new),
+        );
+        // issue #1189: per-account risk/exit rows. The env face is the
+        // fallback when the SQLite store is not open; the per-account keys
+        // (`BK_RISK_*_<ACCOUNT>` / `BK_EXIT_*_<ACCOUNT>`) overlay the global
+        // config already resolved by the boot chain. A row that exists wins;
+        // an account without one keeps the global values (the historical
+        // single-account behaviour).
+        let account_ids: Vec<String> = accounts
+            .account_list()
+            .iter()
+            .map(|a| a.id.to_string())
+            .collect();
+        config
+            .risk
+            .systemic
+            .overlay_accounts_from_lookup(&account_ids, &env_lookup);
+        config.positions.account_exit = crate::config::account_exit_overrides(
+            &config.positions.exit,
+            &account_ids,
+            &env_lookup,
         );
         for acc in accounts.account_list() {
             let id = acc.id.as_str();
@@ -474,6 +545,7 @@ impl Core {
         });
         let mut core = Self {
             risk: RiskGate::new(config.risk.clone()),
+            account_risk_db: None,
             config,
             ome: Ome::new(),
             inflight_takers: Vec::new(),
