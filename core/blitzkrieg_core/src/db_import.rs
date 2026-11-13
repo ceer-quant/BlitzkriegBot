@@ -338,13 +338,11 @@ const SETTING_KEYS: &[&str] = &[
 const IMPORT_ACTOR: &str = "db_import_v1";
 
 /// Import the legacy world into `db_path`, exactly once.
-///
-/// `env_lookup` is the `.env` read face (the kernel passes
+///// `env_lookup` is the `.env` read face (the kernel passes
 /// `|k| std::env::var(k).ok()`); every account / risk / exit / policy knob
 /// is read through it. Returns what was folded in — the second run sees the
 /// `import_v1` marker and returns the all-zero report.
-///
-/// After the transaction commits, every legacy file the run actually read
+///// After the transaction commits, every legacy file the run actually read
 /// is renamed to `<name>.migrated` (best effort: a rename failure only
 /// warns; an existing `.migrated` target is skipped — the file was already
 /// folded by an earlier run and must not be read twice).
@@ -882,13 +880,20 @@ fn fold_ledgers(
 /// The state snapshots → `kernel_meta` (raw file contents, no re-encoding):
 /// `data/state.json` → `legacy_state_json`, `data/runtime/config.json` →
 /// `runtime_config_json`, `data/update/state.json` → `update_state_json`. A
-/// missing file is skipped-and-noted, never fatal. Files the run actually
-/// read are queued for the `.migrated` backup.
+/// missing file is skipped-and-noted, never fatal.
+///// These three files stay IN PLACE after the import: they are LIVE cells,
+// # not dead history — the boot's credentials-cell migration strips the
+/// credentials key from `runtime/config.json` and the update state keeps
+/// being rewritten every check. Only the historical ledgers (orders,
+/// positions, trades, ledger journals, strategy-state) are renamed to
+/// `.migrated` by their fold functions; the state files are read into
+/// `kernel_meta` as a snapshot and the files continue to serve their
+/// live readers.
 fn import_state_files(
     tx: &Connection,
     data_dir: &Path,
     now: i64,
-    imported: &mut Vec<PathBuf>,
+    _imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     for (rel, key) in [
@@ -897,15 +902,10 @@ fn import_state_files(
         ("update/state.json", "update_state_json"),
     ] {
         let path = data_dir.join(rel);
-        if path.with_extension("json.migrated").exists() {
-            skipped.push(rel.to_string());
-            continue;
-        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             skipped.push(rel.to_string());
             continue;
         };
-        imported.push(path);
         tx.execute(
             "INSERT OR IGNORE INTO kernel_meta (key, value, updated_at_ms) VALUES (?1, ?2, ?3)",
             params![key, text, now],

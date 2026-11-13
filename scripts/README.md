@@ -98,7 +98,9 @@ cargo build --release --workspace --locked
 - `upgrade.sh` — the one-shot production upgrade behind the shim's `upgrade`
   verb (#252, #244): light data backup → fetch the source (`ceer/…`, override
   with `BLITZKRIEG_UPGRADE_SOURCE`) → detached checkout of the build worktree
-  `target/bk-main-build` → release build of the workspace, the strategy cdylibs
+  `target/bk-main-build` (created or recreated when it is gone: it lives under
+  `target/`, so a clean-up between upgrades costs a cold build, not the deploy)
+  → release build of the workspace, the strategy cdylibs
   and the panel's webui bundle → local gates (core lib tests **and** the panel's
   `check:all`; no pipeline, so a red suite actually stops the deploy) → stage the
   whole release and print what it changes → stop → install → start → verify
@@ -109,6 +111,19 @@ cargo build --release --workspace --locked
   is kept under `target/rollback-<ts>` (three newest kept) and restored if the new
   build does not answer within `BLITZKRIEG_UPGRADE_DEADLINE` (120s). `--check`
   builds, gates and stages without touching the live stack. It never edits `.env`.
+- `lib/upgrade-worktree.sh` — the build worktree's bootstrap (step 1 of the
+  above), sourced by `upgrade.sh` and driven directly by `upgrade-worktree-test.sh`
+  (throwaway repos, no network, no build). `ua_wt_ensure <repo> <build_wt> <sha>`
+  leaves the worktree usable whatever state it is in: absent → created, a healthy
+  worktree of the same repo → reused untouched, a stale dir → recreated, a
+  checkout of ANOTHER repository → refused (a release is never compiled from a
+  foreign tree). `--show-toplevel`, not `--git-dir`, is what separates a worktree
+  root from a plain dir inside the main work tree — the second would let step 1's
+  `checkout --detach` run against the main checkout.
+- `upgrade-worktree-test.sh` — `sh scripts/upgrade-worktree-test.sh`, exit 0 =
+  pass: creates, reuses, recreates and refuses against throwaway repos, and pins
+  the main checkout's HEAD and branch across the recreate (the plain-dir hazard
+  above). Runs in CI (`ops-gates`, macOS).
 - `lib/upgrade-artifacts.sh` — the staging/drift/install/verify/rollback half of
   the above, sourced by `upgrade.sh` and driven directly by
   `upgrade-propagate-test.sh` (no build, no network).
