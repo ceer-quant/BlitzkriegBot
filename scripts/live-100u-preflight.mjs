@@ -21,7 +21,6 @@ import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LIVE_ENV = join(ROOT, 'user_layer', 'configs', 'production-live-100u.env');
-const LIVE_TOML = join(ROOT, 'user_layer', 'configs', 'production-live-100u.toml');
 const LIVE_ALLOW = join(ROOT, 'user_layer', 'configs', 'production-live-100u.allowlist');
 const DRY_ENV = join(ROOT, 'user_layer', 'configs', 'production-72h.env');
 const EXAMPLE = join(ROOT, '.env.example');
@@ -57,22 +56,6 @@ function parseEnv(text) {
   return out;
 }
 
-function parseTomlScalars(text) {
-  const out = {};
-  for (const line of text.split('\n')) {
-    const t = line.trim();
-    if (!t || t.startsWith('#') || t.startsWith('[')) continue;
-    const eq = t.indexOf('=');
-    if (eq < 0) continue;
-    let val = t.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    out[t.slice(0, eq).trim()] = val;
-  }
-  return out;
-}
-
 function parseAllowlist(text) {
   return text
     .split('\n')
@@ -90,7 +73,7 @@ function num(v) {
  * say false because sourcing it is the opt-in, and nothing sources it unless
  * the operator does.
  */
-export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
+export function judgeConfig({ example, dryEnv, liveEnv, allow }) {
   const problems = [];
   if (example.DRY_RUN !== 'true') problems.push(`.env.example DRY_RUN=${example.DRY_RUN}`);
   if (dryEnv.DRY_RUN !== 'true') problems.push(`production-72h.env DRY_RUN=${dryEnv.DRY_RUN}`);
@@ -121,7 +104,7 @@ export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
   if (!(minShares >= 1) || !(maxShares >= minShares) || maxShares > notional) {
     problems.push(`share band ${minShares}..${maxShares} does not fit under $${notional} at a $1 price`);
   }
-  if (num(liveEnv.BK_MAX_ORDERBOOK_STALE_MS) !== 3500 || num(toml.max_orderbook_stale_ms) !== 3500) {
+  if (num(liveEnv.BK_MAX_ORDERBOOK_STALE_MS) !== 3500) {
     problems.push('stale-book guard is not 3500ms');
   }
   if (num(liveEnv.BK_MAX_DAILY_LOSS) !== 5) problems.push('daily loss cap is not $5');
@@ -132,14 +115,12 @@ export function judgeConfig({ example, dryEnv, liveEnv, toml, allow }) {
     max_consecutive_losses: '4',
     cooldown_minutes: '30',
   };
+  // Issue #1189 (PR-E): the retired toml bodies are gone — the live env is
+  // what arms the boot; the toml-side reconciliation is retired with them.
   for (const [k, v] of Object.entries(required)) {
-    if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);
-  }
-  // The toml file is an inert record now, so the live env is what arms the
-  // boot: every one of the nine must be spelled there with the same value.
-  for (const [k, v] of Object.entries(required)) {
-    const key = `BK_RISK_${k.toUpperCase()}`;
-    if (liveEnv[key] !== v) problems.push(`${key}=${liveEnv[key]} want ${v}`);
+    if (liveEnv[`BK_RISK_${k.toUpperCase()}`] !== v) {
+      problems.push(`${k}=${liveEnv[`BK_RISK_${k.toUpperCase()}`]} want ${v}`);
+    }
   }
   if (allow.length !== 0) problems.push(`allowlist is not empty: ${allow.join(',')}`);
   return { problems, pass: problems.length === 0 };
@@ -319,7 +300,6 @@ function loadConfig() {
     example: parseEnv(readFileSync(EXAMPLE, 'utf8')),
     dryEnv: parseEnv(readFileSync(DRY_ENV, 'utf8')),
     liveEnv: parseEnv(readFileSync(LIVE_ENV, 'utf8')),
-    toml: parseTomlScalars(readFileSync(LIVE_TOML, 'utf8')),
     allow: parseAllowlist(readFileSync(LIVE_ALLOW, 'utf8')),
   });
 }
@@ -333,7 +313,6 @@ function runSelfTest() {
     example: { DRY_RUN: 'true' },
     dryEnv: { DRY_RUN: 'true' },
     liveEnv: parseEnv(readFileSync(LIVE_ENV, 'utf8')),
-    toml: parseTomlScalars(readFileSync(LIVE_TOML, 'utf8')),
     allow: [],
   });
   if (!good.pass) fail(`shipped files: ${good.problems.join('; ')}`);
@@ -341,7 +320,6 @@ function runSelfTest() {
     example: { DRY_RUN: 'false' },
     dryEnv: { DRY_RUN: 'true' },
     liveEnv: parseEnv(readFileSync(LIVE_ENV, 'utf8')),
-    toml: parseTomlScalars(readFileSync(LIVE_TOML, 'utf8')),
     allow: [],
   });
   if (flipped.pass) fail('a default DRY_RUN=false must fail');
@@ -349,7 +327,6 @@ function runSelfTest() {
     example: { DRY_RUN: 'true' },
     dryEnv: { DRY_RUN: 'true' },
     liveEnv: parseEnv(readFileSync(LIVE_ENV, 'utf8')),
-    toml: parseTomlScalars(readFileSync(LIVE_TOML, 'utf8')),
     allow: ['pair_discount_arb'],
   });
   if (named.pass) fail('a non-empty allowlist must fail');

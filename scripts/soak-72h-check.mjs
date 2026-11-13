@@ -26,7 +26,6 @@ import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_PATH = join(ROOT, 'user_layer', 'configs', 'production-72h.env');
-const TOML_PATH = join(ROOT, 'user_layer', 'configs', 'production-72h.toml');
 const ALLOW_PATH = join(ROOT, 'user_layer', 'configs', 'production-72h.allowlist');
 const EXAMPLE_PATH = join(ROOT, '.env.example');
 const REPORT_PATH = join(ROOT, 'docs', 'reports', 'cost-adjusted-edge-72h.json');
@@ -47,23 +46,6 @@ function parseEnv(text) {
     const eq = t.indexOf('=');
     if (eq < 0) continue;
     out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
-  }
-  return out;
-}
-
-function parseTomlScalars(text) {
-  const out = {};
-  for (const line of text.split('\n')) {
-    const t = line.trim();
-    if (!t || t.startsWith('#') || t.startsWith('[')) continue;
-    const eq = t.indexOf('=');
-    if (eq < 0) continue;
-    const key = t.slice(0, eq).trim();
-    let val = t.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    out[key] = val;
   }
   return out;
 }
@@ -145,7 +127,6 @@ function preflight() {
   const problems = [];
   const env = parseEnv(readFileSync(ENV_PATH, 'utf8'));
   const example = parseEnv(readFileSync(EXAMPLE_PATH, 'utf8'));
-  const toml = parseTomlScalars(readFileSync(TOML_PATH, 'utf8'));
   const allow = parseAllowlist(readFileSync(ALLOW_PATH, 'utf8'));
   const report = JSON.parse(readFileSync(REPORT_PATH, 'utf8'));
 
@@ -157,9 +138,10 @@ function preflight() {
     problems.push(`BK_CONFIG=${env.BK_CONFIG} (the TOML layer is retired; drop the key)`);
   }
   const stale = num(env.BK_MAX_ORDERBOOK_STALE_MS);
-  const staleToml = num(toml.max_orderbook_stale_ms);
   if (!(stale > 0) || stale !== 3500) problems.push(`env staleness ${env.BK_MAX_ORDERBOOK_STALE_MS} (want 3500, not 0)`);
-  if (staleToml !== 3500) problems.push(`toml staleness ${toml.max_orderbook_stale_ms}`);
+  // Issue #1189 (PR-E): the retired toml bodies are gone; the env profile is
+  // the only arming surface, and the toml-side reconciliation is retired with
+  // it. The inert-record checks below (BK_CONFIG pointer) stay.
   const required = {
     max_single_loss_usd: '0.50',
     max_daily_drawdown_usd: '5',
@@ -167,16 +149,14 @@ function preflight() {
     max_consecutive_losses: '4',
     cooldown_minutes: '30',
   };
-  for (const [k, v] of Object.entries(required)) {
-    if (toml[k] !== v) problems.push(`toml ${k}=${toml[k]} want ${v}`);
-  }
-  // The toml file is an inert record now, so the env profile is what arms the
-  // boot: every one of the nine must be spelled there with the same value.
+  // Issue #1189 (PR-E): the toml bodies are retired — the env profile is what
+  // arms the boot: every one of the five must be spelled there with the same
+  // value. The toml-side reconciliation is retired with the bodies.
   for (const [k, v] of Object.entries(required)) {
     const key = `BK_RISK_${k.toUpperCase()}`;
     if (env[key] !== v) problems.push(`${key}=${env[key]} want ${v}`);
   }
-  const daily = num(toml.max_daily_drawdown_usd);
+  const daily = num(env.BK_RISK_MAX_DAILY_DRAWDOWN_USD);
   // Issue #991: the fallback settlement policy is read at boot only, so the
   // 72h profile must SPELL it — the soak gate then records exactly which
   // policy the run exercised. `cash` is the default; either value passes the
