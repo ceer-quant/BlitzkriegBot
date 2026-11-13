@@ -797,7 +797,11 @@ mod tests {
                 assert_eq!(approved, dec!(7), "the cap floors to whole shares");
                 assert_eq!(limit, "max_position_size");
             }
-            other => panic!("expected a reduction, got {other:?}"),
+            // Diagnostic only: the assert_eq! arm above is the verification;
+            // the judgment value is not interpolated into the panic message
+            // (CodeQL rust/cleartext-logging treats risk-decision values as
+            // sensitive on the log sink).
+            _other => panic!("expected a reduction"),
         }
     }
 
@@ -819,7 +823,7 @@ mod tests {
                 assert_eq!(approved, dec!(6));
                 assert_eq!(limit, "max_single_loss_usd");
             }
-            other => panic!("expected a reduction, got {other:?}"),
+            _other => panic!("expected a reduction"),
         }
     }
 
@@ -833,7 +837,7 @@ mod tests {
                 reject: SystemicReject::AccountLimit,
                 detail,
             } => assert!(detail.contains("max_single_loss_usd"), "{detail}"),
-            other => panic!("expected account rejection, got {other:?}"),
+            _other => panic!("expected account rejection"),
         }
     }
 
@@ -846,7 +850,7 @@ mod tests {
                 reject: SystemicReject::AccountLimit,
                 detail,
             } => assert!(detail.contains("whole share"), "{detail}"),
-            other => panic!("expected account rejection, got {other:?}"),
+            _other => panic!("expected account rejection"),
         }
     }
 
