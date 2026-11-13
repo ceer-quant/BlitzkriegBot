@@ -1020,40 +1020,18 @@ impl Core {
 
     /// Reload account configuration from .env (ACCOUNT_* keys).
     /// Fails closed if the .env is malformed, keeping the current configuration.
-    ///
-    /// #1189 PR-C: this is the same-process reload half of the account-level
-    /// write pattern. Every account settings write face (venue.set, rounds.set,
-    /// strategies.set — `service::accounts::persist`) lands its ACCOUNT_<SFX>_* keys
-    /// in the `.env` first and then reloads through HERE, so the in-memory book
-    /// after a write is re-derived by the boot's own parse
-    /// (`load_account_ledgers_for_reload` — the same fail-closed grammar the
-    /// startup loader runs): what a write applied IS what the next boot loads,
-    /// with no second in-memory spelling to drift. When the durable store
-    /// becomes the account library (#1189 PR-B/D), the write faces keep their
-    /// shape and this reload reads the library instead of the `.env`.
-    ///
-    /// The env path resolves exactly like the write faces'
-    /// [`CoreConfig::account_env_write_paths`]: the configured `env_file_path`,
-    /// or the `.env` sibling of `accounts_config_path` when only the legacy
-    /// spelling is configured — one resolution for a write and its reload, so
-    /// a core can never write one file and reload another.
     pub fn reload_accounts(&mut self) -> Result<(), String> {
         let env_file = self
             .config
-            .account_env_write_paths()
-            .map(|(env, _legacy)| env)
-            .or_else(|| {
-                self.config
-                    .env_file_path
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-            })
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new)
             .ok_or_else(|| "env_file_path not set".to_string())?;
         let now_ms = blitzkrieg_market_api::net::now_ms();
         let allowed = &self.config.allowed_round_secs;
         // Env-only (issue 923): no legacy toml fallback — a .env without
         // ACCOUNT_LIST reloads into the zero-config single default.
-        match crate::account::config::load_account_ledgers_for_reload(&env_file, now_ms, allowed) {
+        match crate::account::config::load_account_ledgers_for_reload(env_file, now_ms, allowed) {
             Ok(accounts) => self.accounts.reload_config(accounts),
             Err(e) => Err(e.to_string()),
         }

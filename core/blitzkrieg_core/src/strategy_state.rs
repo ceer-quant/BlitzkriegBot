@@ -18,20 +18,6 @@
 //!   `set_strategy_enabled` the RPC uses, which fails silently for unknown
 //!   names and is warned about.
 //!
-//!   ISSUE #1189 PR-C READ PRIORITY: this file is no longer the source of
-//!   the per-account enablement sets. The `ACCOUNT_<SFX>_STRATEGIES` env rows
-//!   outrank it everywhere — an explicit key (empty included) is the
-//!   account's whole truth and this file is not even consulted for that
-//!   account. What remains here is (a) the default account's fallback, only
-//!   when it has NO env key at all, and only as a one-time migration input
-//!   (`apply_account_strategy_assignments_at_boot`), and (b) the engine's
-//!   default-scope global toggle replay above. The write faces
-//!   (`strategy.enable` / `account.strategies.set`) keep writing this file
-//!   BESIDE the env rows for the whole dual-write transition, so a reader
-//!   that still knows only the file (an older panel, a boot path not yet
-//!   cut over) keeps seeing a truthful set; PR-D retires the file readers
-//!   and then this writer.
-//!
 //! SHAPE
 //!   `{"version":1,"enabled":["a","b"]}` — sorted and deduplicated on save, so
 //!   the file diffs stably. Missing or malformed file means "nothing

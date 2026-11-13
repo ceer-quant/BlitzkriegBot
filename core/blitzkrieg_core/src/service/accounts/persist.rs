@@ -11,25 +11,13 @@ use crate::service::build_lua_scope;
 use super::Core;
 
 impl Core {
-    /// The account↔venue binding write (`account.venue.set`): the durable write
-    /// into the account book's `.env` and the in-memory application are ONE
-    /// transaction in the #1189 PR-C shape — persist FIRST (plan-and-persist
-    /// before apply: a persist failure leaves both the file and the memory
-    /// exactly as they were, so the two stores can never disagree), then the
-    /// SAME-PROCESS RELOAD re-derives the whole book through the boot's own
-    /// parse ([`Core::reload_accounts`] — env over the file the write just
-    /// landed). The in-memory record is not patched field-by-field any more:
-    /// there is exactly one spelling of the book (the env grammar), so what a
-    /// write applied IS what the next boot loads. When the durable store
-    /// becomes the account library (#1189 PR-B/D), the write face keeps this
-    /// shape and the reload reads the library instead of the `.env`.
-    ///
-    /// A reload refusal AFTER a landed write is the one half-state this order
-    /// can produce: the `.env` carries the binding, the process keeps trading
-    /// under the old one, and the error says so — the binding takes full
-    /// effect at the next boot (or after `system.env.reload` re-syncs).
-    ///
-    /// A core without an
+    /// The account↔venue binding write (`account.venue.set`): the in-memory
+    /// write through [`crate::account::AccountLedgers::set_venue`] and the
+    /// durable write into the account book's own file are ONE transaction —
+    /// the persist happens FIRST (plan-and-persist before apply: a persist
+    /// failure leaves both the file and the memory exactly as they were, so
+    /// the two stores can never disagree), the in-memory record moves only
+    /// after the file accepted. A core without an
     /// [`CoreConfig::accounts_config_path`] (backtester, most in-process
     /// tests) refuses instead of writing into whatever checkout it happens
     /// to run from — the `runtime_config_path` posture, kept.
@@ -43,7 +31,7 @@ impl Core {
         venue: &str,
         actor: &str,
         reason: &str,
-        _now_ms: i64,
+        now_ms: i64,
     ) -> CoreResult<()> {
         use crate::schema::ACCOUNT_VENUE_SET_NOTE;
         // Existence first, with the standard unknown-account refusal, before
@@ -68,19 +56,7 @@ impl Core {
                 ),
             )
         })?;
-        // #1189 PR-C: the same-process reload — the book re-derives from the
-        // `.env` through the boot's own parse, so the binding the write landed
-        // is the binding in force (no field-patched second spelling).
-        self.reload_accounts().map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.venue.set: the .env write landed but the same-process \
-                     reload refused ({e}) — the binding is on disk and takes full \
-                     effect at the next boot"
-                ),
-            )
-        })?;
+        self.accounts.set_venue(id, venue, now_ms)?;
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -97,11 +73,9 @@ impl Core {
 
     /// The account round-FAMILY write (`account.rounds.set`, 轮次多族 B2):
     /// validate → persist FIRST (a failure leaves both stores untouched) →
-    /// the SAME-PROCESS RELOAD re-derives the book from the `.env` (the #1189
-    /// PR-C write shape: what the write landed IS what the next boot loads —
-    /// see [`Self::set_account_venue_persisting`]). The venue.set transaction
-    /// posture, kept: the persist happens FIRST (plan-and-persist before apply
-    /// — the two stores can never disagree), and a core without an
+    /// the in-memory book. The venue.set transaction posture, kept: the
+    /// persist happens FIRST (plan-and-persist before apply — the two stores
+    /// can never disagree), and a core without an
     /// [`CoreConfig::accounts_config_path`] refuses instead of writing into
     /// whatever checkout it happens to run from.
     ///
@@ -109,12 +83,10 @@ impl Core {
     /// SAME whitelist + dedup the parser runs — one spelling of the rule,
     /// never two) over `Some(rounds)`; an empty list passes through as the
     /// legal unrestricted set and REMOVES the file key (missing == `[]` at
-    /// the next boot; the deleted key is the cleaner spelling). The reload's
-    /// own parse re-checks the union (the same fail-closed door), so the
-    /// write-side re-check is the parser itself. The open-exposure refusal
-    /// for a shrinking set is the IPC arm's job — it needs the position book
-    /// AND the removed-family arithmetic, and its refusal must move NOTHING
-    /// (memory and disk exactly as they were).
+    /// the next boot; the deleted key is the cleaner spelling). The
+    /// open-exposure refusal for a shrinking set is the IPC arm's job — it
+    /// needs the position book AND the removed-family arithmetic, and its
+    /// refusal must move NOTHING (memory and disk exactly as they were).
     pub fn set_account_rounds_persisting(
         &mut self,
         id: &crate::account::AccountId,
@@ -156,19 +128,11 @@ impl Core {
                 ),
             )
         })?;
-        // #1189 PR-C: the same-process reload (see
-        // [`Self::set_account_venue_persisting`]) — the declared set in force
-        // is the parse of the `.env` the write just landed.
-        self.reload_accounts().map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.rounds.set: the .env write landed but the same-process \
-                     reload refused ({e}) — the declaration is on disk and takes \
-                     full effect at the next boot"
-                ),
-            )
-        })?;
+        // The write-side re-check inside `set_rounds` runs again (same
+        // fail-closed posture at every door) — it cannot refuse what
+        // `validate_rounds` passed, but the door stays.
+        self.accounts
+            .set_rounds(id, rounds.clone(), &self.config.allowed_round_secs)?;
         tracing::info!(
             target: "risk",
             actor = %actor,
@@ -760,10 +724,6 @@ impl Core {
     /// decision: memory AND the operator's `.env` in one transaction (persist
     /// first), then the engine scopes rebuilt from it (removed-and-flat
     /// drop; removed-and-held demote exits-only; added instantiate enabled).
-    /// The in-memory half is the #1189 PR-C same-process reload (see
-    /// [`Self::set_account_venue_persisting`]): the book re-derives from the
-    /// `.env` the write just landed, so the rebuild runs over exactly what
-    /// the next boot loads.
     ///
     /// Returns the exits-only keep-list for the reply.
     pub fn set_account_strategies_persisting(
@@ -772,7 +732,7 @@ impl Core {
         strategies: Vec<String>,
         actor: &str,
         reason: &str,
-        _now_ms: i64,
+        now_ms: i64,
     ) -> CoreResult<Vec<String>> {
         use crate::schema::ACCOUNT_STRATEGIES_SET_NOTE;
         self.accounts.require(id)?;
@@ -885,20 +845,8 @@ impl Core {
                 ),
             )
         })?;
-        // #1189 PR-C: the same-process reload (see
-        // [`Self::set_account_venue_persisting`]) — the enablement set in
-        // force is the parse of the `.env` the write just landed, so the
-        // engine rebuild below runs over exactly what the next boot loads.
-        self.reload_accounts().map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.strategies.set: the .env write landed but the \
-                     same-process reload refused ({e}) — the set is on disk and \
-                     takes full effect at the next boot"
-                ),
-            )
-        })?;
+        self.accounts
+            .set_strategies(id, requested.clone(), now_ms)?;
         // #537: the default account's writes keep the persisted enabled-set
         // in lockstep. The boot migrates the state file's set into the file
         // ONLY while the default account has no `strategies` key; without
@@ -967,19 +915,6 @@ impl Core {
     /// (default 账户 strategies=["pair_discount_arb","spread_arb"] 升级后
     /// 行为不变) and the file is the only truth from that boot on.
     ///
-    /// READ PRIORITY (issue #1189 PR-C — the inversion, stated once): the
-    /// per-account `ACCOUNT_<SFX>_STRATEGIES` env rows outrank
-    /// `strategy-state.json` everywhere. The env row is consulted FIRST (an
-    /// explicit key, empty included, is the account's whole enablement truth);
-    /// the state file is only the FALLBACK for a default account with no key
-    /// at all, and only as a one-time migration input. The pre-#1189 order
-    /// (state file first, env rows second) could resurrect a set the operator
-    /// had already emptied; the dual-write transition (every `strategy.enable`
-    /// /`account.strategies.set` keeps writing the file beside the env rows)
-    /// keeps the old carrier alive until the file's readers are retired in
-    /// PR-D. A malformed or absent state file is never an error — it just
-    /// means "nothing to migrate".
-    ///
     /// NOT part of `install_engine`: the replay/backtest boot goes through
     /// that path too and its single-default book must keep byte-identical
     /// outcomes (the exit-economics baseline). Production assembly is the
@@ -991,25 +926,19 @@ impl Core {
         let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
             return Vec::new();
         };
-        // The default account's env row is read FIRST (issue #1189 read
-        // priority): an explicit key — empty included — is the whole truth,
-        // and the state file is not even opened as a migration candidate.
+        // The persisted enabled-set (strategy-state.json) drives the one-time
+        // migration of the default account. Read BEFORE any write.
+        let persisted_enabled: Vec<String> = match self.config.strategy_state_path.as_deref() {
+            Some(p) => crate::strategy_state::load(std::path::Path::new(p)),
+            None => Vec::new(),
+        };
         let default_id = crate::account::default_account_id();
+        // The default account's assignment key decides whether the boot runs
+        // on the file's spelling (migration already happened) or migrates.
         let default_has_key = self
             .accounts
             .account(&default_id)
             .is_some_and(|a| !a.strategies.is_empty());
-        // Only a default account with NO env key falls back to the persisted
-        // enabled-set (strategy-state.json), and only as the one-time
-        // migration input. Read BEFORE any write.
-        let persisted_enabled: Vec<String> = if default_has_key {
-            Vec::new()
-        } else {
-            match self.config.strategy_state_path.as_deref() {
-                Some(p) => crate::strategy_state::load(std::path::Path::new(p)),
-                None => Vec::new(),
-            }
-        };
         let mut migrated: Vec<String> = Vec::new();
         if !default_has_key && !persisted_enabled.is_empty() {
             // One-time migration: the file gains the explicit default
@@ -1103,18 +1032,6 @@ impl Core {
     /// `market.credentials.set` 写入，永不进入账户请求或响应。
     /// 无 [`CoreConfig::accounts_config_path`] 的内核（回测、多数进程内测试）
     /// 拒绝 —— 同 venue.set 的 "persistence is disabled" 文案形状。
-    ///
-    /// #1189 PR-C note — why the create/remove topology writes apply targeted
-    /// instead of reloading: the same-process reload
-    /// ([`Core::reload_accounts`]) re-derives the book and REFUSES an id-set
-    /// change by design (the `system.env.reload` contract: topology moves
-    /// are the explicit operator verbs' job). create/remove ARE the topology
-    /// write, so the in-memory half is the minted/retired row itself — and
-    /// the minted shape is exactly what the env write spelled (id, name,
-    /// venue, `Prediction`, `Active`, trading on, empty sets), so the book
-    /// and the `.env` agree without a reload. When the durable store becomes
-    /// the account library (#1189 PR-B/D), these two faces write the library
-    /// row and keep the same targeted apply.
     ///
     /// venue 名的注册校验（plan-first）是调用方的职责 —— 编译进来的插件注册
     /// 表在 IPC 层，市场无关的 core 看不见（同 [`Self::set_account_venue_persisting`]）。
@@ -1248,8 +1165,6 @@ impl Core {
     /// 删户重建是绑定变更的唯一出口；零配置的 default 由下一次 boot 的
     /// 缺文件/缺行路径重新派生）。被删的是进程级 active 账户时自动回切
     /// 剩余账户的第一个（会话级切换器在下次读时照簿解析）。
-    /// 同 [`Self::create_account_persisting`]：topology 写不做 reload ——
-    /// 簿的 id 集合正是这次写要改的东西，reload 按合同拒绝 id 变更。
     pub fn remove_account_persisting(
         &mut self,
         id: &crate::account::AccountId,
