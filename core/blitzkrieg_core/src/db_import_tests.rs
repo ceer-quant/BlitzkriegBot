@@ -420,15 +420,35 @@ fn legacy_files_are_renamed_after_commit_and_rerun_is_noop() {
             "data/ledger/default.journal.live.jsonl",
             "data/ledger/default.journal.live.jsonl.migrated",
         ),
-        ("data/state.json", "data/state.json.migrated"),
-        (
-            "data/runtime/config.json",
-            "data/runtime/config.json.migrated",
-        ),
     ] {
         assert!(!dir.path().join(rel).exists(), "renamed away: {rel}");
         assert!(dir.path().join(migrated).exists(), "backed up: {migrated}");
     }
+
+    // The state snapshots are LIVE cells, not dead history: they are read
+    // into kernel_meta and stay in place (the boot's credentials-cell
+    // migration strips runtime/config.json and the update state keeps
+    // being rewritten). Only the historical ledgers above are renamed.
+    for rel in ["data/state.json", "data/runtime/config.json"] {
+        assert!(dir.path().join(rel).exists(), "live cell stays: {rel}");
+    }
+    let db2 = Connection::open(&db).expect("reopen");
+    let legacy_state: String = db2
+        .query_row(
+            "SELECT value FROM kernel_meta WHERE key = 'legacy_state_json'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("state.json folded");
+    assert!(legacy_state.contains("\"round\":7"), "{legacy_state}");
+    let runtime_state: String = db2
+        .query_row(
+            "SELECT value FROM kernel_meta WHERE key = 'runtime_config_json'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("config.json folded");
+    assert!(runtime_state.contains("{}"), "{runtime_state}");
 
     // The second run is the marker no-op: no error even though every
     // legacy file is gone (all `.migrated`), and nothing is re-imported.
