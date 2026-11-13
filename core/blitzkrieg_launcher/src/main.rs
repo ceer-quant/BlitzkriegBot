@@ -1285,6 +1285,42 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // ───────────────── issue #1189 PR-A: the one-shot legacy import ─────────
+    // The distribution binary carries the account store: when a database
+    // path is named (BLITZKRIEG_DB_PATH or the shipped default), the first
+    // boot imports the old world — the `.env` ACCOUNT_* / BK_RISK_* /
+    // POLICY_* rows and the `data/` json(l) ledgers — into SQLite, in one
+    // transaction, with the `import_v1` marker making every later boot a
+    // no-op. Only the serving path runs this (offline modes returned above);
+    // an import failure is fatal (fail-closed).
+    let db_path = std::env::var("BLITZKRIEG_DB_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(blitzkrieg_core::db::DEFAULT_DB_PATH));
+    let env_lookup = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+    match blitzkrieg_core::db_import::import_once(&db_path, env_lookup) {
+        Ok(report) if report.imported_anything() => {
+            eprintln!(
+                "blitzkrieg-core: legacy import v1 folded {} account(s), {} risk row(s), \
+                 {} ledger entr(ies) into {}",
+                report.accounts,
+                report.risk_rows,
+                report.ledger_entries,
+                db_path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!(
+                "blitzkrieg-core: legacy import into {} FAILED: {e} — refusing to boot \
+                 (fix the old files and restart, or unset BLITZKRIEG_DB_PATH to run env-only)",
+                db_path.display()
+            );
+            std::process::exit(2);
+        }
+    }
+
     server::run(args.socket.clone(), config, args.tick_ms, rx, registry).await?;
     eprintln!("blitzkrieg-core stopped");
     Ok(())

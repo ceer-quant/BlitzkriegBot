@@ -272,6 +272,22 @@ pub struct ImportReport {
     pub skipped: Vec<String>,
 }
 
+impl ImportReport {
+    // True when this run folded anything in — the second (idempotent)
+    // run reports all zeros and the boot log stays quiet.
+    pub fn imported_anything(&self) -> bool {
+        self.accounts
+            + self.risk_rows
+            + self.exit_rows
+            + self.settings
+            + self.orders
+            + self.positions
+            + self.trades
+            + self.ledger_entries
+            != 0
+    }
+}
+
 /// The account a pre-E28 row reads as (the serde default the live loaders
 /// use): `account_id` absent = the `default` book.
 const DEFAULT_ACCOUNT: &str = "default";
@@ -494,10 +510,11 @@ fn env_account_suffix(id: &str) -> String {
         .to_ascii_uppercase()
 }
 
-/// One `accounts` row per id: name / venue / status / trading_enabled from
-/// `ACCOUNT_<SFX>_*`, defaulting to the id / '' / active / 1. `market_type`
-/// is a placeholder (`prediction`) — the canonical schema requires the
-/// column and the legacy `.env` carries no market-type knob.
+/// One `accounts` row per id: name / venue / status / trading_enabled /
+/// rounds from `ACCOUNT_<SFX>_*`, defaulting to the id / '' / active / 1 /
+/// '[]'. `market_type` is a placeholder (`prediction`) — the canonical
+/// schema requires the column and the legacy `.env` carries no market-type
+/// knob.
 fn insert_account(
     tx: &Connection,
     account_id: &str,
@@ -510,11 +527,35 @@ fn insert_account(
     let trading_enabled = env(&format!("ACCOUNT_{sfx}_TRADING_ENABLED"))
         .map(|raw| !matches!(raw.trim(), "false" | "0" | "no" | "off"))
         .unwrap_or(true);
+    // The round-family allow-list (`ACCOUNT_<SFX>_ROUNDS`, e.g.
+    // "[900,3600]") rides onto the account row as rounds_json — the same
+    // cell the panel's rounds card persists. Unparseable JSON falls back to
+    // '[]' (the schema default: no declared family).
+    let rounds_json = env(&format!("ACCOUNT_{sfx}_ROUNDS"))
+        .map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.starts_with('[')
+                && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+            {
+                trimmed.to_string()
+            } else {
+                "[]".to_string()
+            }
+        })
+        .unwrap_or_else(|| "[]".to_string());
     Ok(tx.execute(
         "INSERT OR IGNORE INTO accounts \
-         (id, name, market_type, status, venue, trading_enabled, updated_at_ms) \
-         VALUES (?1, ?2, 'prediction', ?3, ?4, ?5, ?6)",
-        params![account_id, name, status, venue, trading_enabled, now_ms()],
+         (id, name, market_type, status, venue, trading_enabled, rounds_json, updated_at_ms) \
+         VALUES (?1, ?2, 'prediction', ?3, ?4, ?5, ?6, ?7)",
+        params![
+            account_id,
+            name,
+            status,
+            venue,
+            trading_enabled,
+            rounds_json,
+            now_ms()
+        ],
     )?)
 }
 

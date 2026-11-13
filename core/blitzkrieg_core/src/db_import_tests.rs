@@ -439,3 +439,95 @@ fn legacy_files_are_renamed_after_commit_and_rerun_is_noop() {
     assert_eq!(second.ledger_entries, 0);
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM orders"), 1);
 }
+
+/// Issue #1189 acceptance (handoff §4): "after importing old data, the
+/// ledger, positions, and rounds match what they were before the import".
+/// The fold keeps every row's identity and payload: an open position keeps
+/// its id and account, the cash journal keeps every entry's kind/amount/ts,
+/// and the round cells land in kernel_meta verbatim (rounds_json is part of
+/// the account row). This test writes a pre-import book, imports it, and
+/// asserts the SQLite rows carry the same facts the files did.
+#[test]
+fn imported_rows_match_the_pre_import_book() {
+    let dir = TmpDir::new();
+    for sub in ["orders", "positions", "ledger"] {
+        std::fs::create_dir_all(dir.path().join(format!("data/{sub}"))).expect("mkdir");
+    }
+    // Pre-import book: one open position on default, one on paper; a cash
+    // journal with a seed and a fill on both sides.
+    std::fs::write(
+        dir.path().join("data/positions/positions.jsonl"),
+        "{\"id\":\"pos-a\",\"accountId\":\"default\",\"tokenId\":\"tok-1\",\"entryPrice\":\"0.42\",\"shares\":\"10\",\"open\":true,\"expiresAtMs\":900000}\n\
+         {\"id\":\"pos-b\",\"accountId\":\"paper\",\"tokenId\":\"tok-2\",\"entryPrice\":\"0.55\",\"shares\":\"4\",\"open\":true,\"expiresAtMs\":900000}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("data/ledger/default.journal.dry.jsonl"),
+        "{\"kind\":\"seed\",\"amount\":\"100\",\"atMs\":100}\n\
+         {\"kind\":\"fill\",\"amount\":\"-0.42\",\"atMs\":200}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("data/ledger/paper.journal.dry.jsonl"),
+        "{\"kind\":\"seed\",\"amount\":\"50\",\"atMs\":100}\n",
+    )
+    .expect("write");
+    // A round cell on the account row (the rounds_json the account book
+    // carried pre-import).
+    let env = |key: &str| match key {
+        "ACCOUNT_LIST" => Some("default,paper".to_string()),
+        "ACCOUNT_DEFAULT_ROUNDS" => Some("[900,3600]".to_string()),
+        "ACCOUNT_PAPER_ROUNDS" => Some("[300]".to_string()),
+        _ => None,
+    };
+
+    let db = dir.path().join("data/bank.db");
+    let report = import_once(&db, env).expect("import");
+    assert_eq!(report.positions, 2);
+    assert_eq!(report.ledger_entries, 3);
+
+    // The positions table carries both rows with their payloads.
+    let pos_json = scalar_text(
+        &db,
+        "SELECT payload_json FROM positions WHERE account_id = 'default' AND position_id = 'pos-a'",
+    );
+    assert!(pos_json.contains("\"tokenId\":\"tok-1\""), "{pos_json}");
+    assert!(pos_json.contains("\"entryPrice\":\"0.42\""), "{pos_json}");
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT count(*) FROM positions WHERE account_id = 'paper' AND position_id = 'pos-b'"
+        ),
+        1
+    );
+
+    // The ledger entries keep kind/amount/ts per account.
+    assert_eq!(
+        scalar_text(
+            &db,
+            "SELECT kind FROM ledger_entries WHERE account_id = 'default' ORDER BY id"
+        ),
+        "seed"
+    );
+    assert_eq!(
+        scalar_text(
+            &db,
+            "SELECT amount FROM ledger_entries WHERE account_id = 'default' AND kind = 'fill'"
+        ),
+        "-0.42"
+    );
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT count(*) FROM ledger_entries WHERE account_id = 'paper'"
+        ),
+        1
+    );
+
+    // The round cells ride the account rows (rounds_json).
+    let rounds_a = scalar_text(&db, "SELECT rounds_json FROM accounts WHERE id = 'default'");
+    assert!(rounds_a.contains("900"), "{rounds_a}");
+    assert!(rounds_a.contains("3600"), "{rounds_a}");
+    let rounds_b = scalar_text(&db, "SELECT rounds_json FROM accounts WHERE id = 'paper'");
+    assert!(rounds_b.contains("300"), "{rounds_b}");
+}
