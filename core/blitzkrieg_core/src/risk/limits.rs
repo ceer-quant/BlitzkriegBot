@@ -836,7 +836,7 @@ mod tests {
             EntryJudgment::Reject {
                 reject: SystemicReject::AccountLimit,
                 detail,
-            } => assert!(detail.contains("max_single_loss_usd"), "{detail}"),
+            } => assert!(detail.contains("max_single_loss_usd")),
             _other => panic!("expected account rejection"),
         }
     }
@@ -849,7 +849,7 @@ mod tests {
             EntryJudgment::Reject {
                 reject: SystemicReject::AccountLimit,
                 detail,
-            } => assert!(detail.contains("whole share"), "{detail}"),
+            } => assert!(detail.contains("whole share")),
             _other => panic!("expected account rejection"),
         }
     }

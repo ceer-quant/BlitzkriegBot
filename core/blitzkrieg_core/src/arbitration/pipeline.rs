@@ -950,9 +950,9 @@ mod tests {
                 reason: RejectReason::LossBreaker,
                 gate: GateId::Risk,
                 detail,
-            } => assert!(detail.contains("for account"), "{detail}"),
+            } => assert!(detail.contains("for account")),
             // Diagnostic only: the assert! arm above is the verification;
-            // the decision value is not interpolated into the panic message
+            // the decision value is not interpolated into the assert message
             // (CodeQL rust/cleartext-logging).
             _other => panic!("expected LossBreaker"),
         }
