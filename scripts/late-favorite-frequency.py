@@ -39,6 +39,10 @@ from datetime import datetime, timezone
 UA = {"User-Agent": "Mozilla/5.0 (BlitzkriegBot-research; late-favorite-frequency)"}
 GAMMA = "gamma-api.polymarket.com"
 DATA = "data-api.polymarket.com"
+# The late-favorite-spot replay fetches Binance's public kline archive; the
+# host is pinned here so the shared allowed() whitelist covers both
+# callers and no other destination is reachable.
+BINANCE_VISION = "data.binance.vision"
 
 SHARES = 10.0
 FEE_RATE = 0.07
@@ -70,7 +74,7 @@ def day_start(iso: str) -> int:
 
 def allowed(url: str) -> str:
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or parts.hostname not in (GAMMA, DATA):
+    if parts.scheme != "https" or parts.hostname not in (GAMMA, DATA, BINANCE_VISION):
         raise ValueError(f"refusing url {url}")
     return url
 
@@ -113,6 +117,36 @@ def get_json(url: str, timeout: float = 40.0):
                 continue
             raise RuntimeError(f"HTTP {exc.code} {url} {body!r}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last = exc
+            time.sleep(min(30.0, 1.5 ** attempt))
+    raise RuntimeError(f"gave up {url}: {last}")
+
+
+def get_bytes(url: str, timeout: float = 40.0) -> bytes:
+    """The raw bytes behind one allowed URL.
+
+    The late-favorite-spot replay fetches a binary kline archive that is not
+    JSON, so it cannot ride get_json. This is the same fetch loop with the
+    same allowed() containment and retry ladder, returning bytes instead of
+    parsed JSON — both callers stay inside the pinned host whitelist, and
+    the spot script keeps no fetch of its own.
+    """
+    url = allowed(url)
+    last = None
+    for attempt in range(6):
+        LIMITER.wait()
+        req = urllib.request.Request(url, headers=UA)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            last = exc
+            body = exc.read()[:240]
+            if exc.code in (429, 500, 502, 503, 504):
+                time.sleep(min(30.0, 1.5 ** attempt))
+                continue
+            raise RuntimeError(f"HTTP {exc.code} {url} {body!r}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
             last = exc
             time.sleep(min(30.0, 1.5 ** attempt))
     raise RuntimeError(f"gave up {url}: {last}")

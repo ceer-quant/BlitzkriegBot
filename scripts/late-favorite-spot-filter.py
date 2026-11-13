@@ -60,8 +60,8 @@ def vision_url(day: str) -> str:
     SSRF containment (CWE-918): the URL is built from the pinned VISION
     template and a day that must match the `YYYY-MM-DD` grammar before
     interpolation, so no caller-supplied string can steer the fetch at an
-    internal / metadata address. The day grammar check below is the
-    containment; the sole consumer (`one`) passes nothing else.
+    internal / metadata address. The fetch itself lives in the frequency
+    module's get_bytes, whose allowed() whitelist pins the same host.
     """
     if len(day) != 10 or day[4] != "-" or day[7] != "-":
         raise RuntimeError(f"refusing non-day archive key: {day!r}")
@@ -79,12 +79,6 @@ def day_range():
     return days
 
 
-def fetch_bytes(url: str) -> bytes:
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
-
-
 def ensure_spot(cache: str) -> dict:
     os.makedirs(cache, exist_ok=True)
     days = day_range()
@@ -93,8 +87,8 @@ def ensure_spot(cache: str) -> dict:
         path = os.path.join(cache, f"{day}.json")
         if os.path.exists(path):
             return day, "cached"
-        blob = fetch_bytes(vision_url(day))
-        check = fetch_bytes(vision_url(day) + ".CHECKSUM").decode().split()[0]
+        blob = lf.get_bytes(vision_url(day))
+        check = lf.get_bytes(vision_url(day) + ".CHECKSUM").decode().split()[0]
         digest = hashlib.sha256(blob).hexdigest()
         if digest != check:
             raise RuntimeError(f"checksum mismatch {day}")
