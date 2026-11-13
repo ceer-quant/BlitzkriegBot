@@ -134,7 +134,7 @@ try {
   check('an ambiguous write (value + reset) is refused',
     both?.message?.includes('not both'), JSON.stringify(both));
 
-  // #1154: `round_duration.set {immediate: true}` — 撤单 → 市价强平 → 切网格，
+  // 秒切秒换：每次 round_duration.set 都立即撤单→市价强平→切网格，
   // fail-closed；成交按真实账簿价入账，台账写 operator_grid_switch。
   await core.request('books.snapshot', {
     tokenId: 'tok',
@@ -148,23 +148,23 @@ try {
     mode: 'taker',
     price: 0.40,
     size: 5,
-    internalKey: 'immediate-probe',
+    internalKey: 'switch-probe',
     strategy: 's',
     asset: 'BTC',
     direction: 'up',
     roundSlot: Math.floor(Date.now() / 1000 / 900),
   });
   const beforePos = await core.request('positions.list', {});
-  check('immediate probe: 一笔在途仓位',
+  check('切换前有一笔在途仓位',
     beforePos.positions?.length === 1, JSON.stringify(beforePos));
 
-  const immediate = await core.request('round_duration.set',
-    { accountId: 'default', durationSec: 300, immediate: true, reason: 'gate immediate' });
-  check('immediate set 回执新网格',
-    immediate.nextSessionSec === 300 && immediate.reset === false, JSON.stringify(immediate));
+  const switched = await core.request('round_duration.set',
+    { accountId: 'default', durationSec: 300, reason: 'gate switch' });
+  check('set 回执新网格（秒切秒换）',
+    switched.nextSessionSec === 300 && switched.reset === false, JSON.stringify(switched));
 
   const afterPos = await core.request('positions.list', {});
-  check('immediate switch 平掉在途仓位',
+  check('秒切换平掉在途仓位',
     afterPos.positions?.length === 0, JSON.stringify(afterPos));
 
   const mid2 = await core.request('round_duration.get', {});
@@ -177,39 +177,39 @@ try {
   check('台账写 operator_grid_switch 且出场价是真实 bid 0.39',
     earlyExit === true, JSON.stringify(trades));
 
-  // flagLocked：显式 --round-sec 在管时即时切换被如实拒绝。
+  // flagLocked：显式 --round-sec 在管时，立即切换是破坏性的，所有
+  // round_duration.set 写入都被如实拒绝（不再区分 immediate 字段）。
   const core5 = makeCore('flaglocked', ['--round-sec', '3600']);
   await core5.start();
   let flaglocked = null;
   try {
     await core5.request('round_duration.set',
-      { accountId: 'default', durationSec: 300, immediate: true });
+      { accountId: 'default', durationSec: 300 });
   } catch (e) {
     flaglocked = { message: e?.message ?? String(e) };
   }
-  check('flagLocked 拒绝即时切换',
+  check('flagLocked 拒绝所有即时切换写入',
     flaglocked && (flaglocked.message.includes('锁定') || flaglocked.message.includes('拒绝')),
     JSON.stringify(flaglocked));
   await core5.stop();
 
-  // 非 immediate 写入不得动在途仓位（出生网格保护，next_session 语义不动）。
+  // 秒切秒换：每次写入都立即平掉在途仓位（与「非 immediate 不平仓」的
+  // 旧 next_session 语义不同，切换本身即原子动作，无单独按钮）。
   await core.request('books.snapshot', {
     tokenId: 'tok2', bids: [{ price: 0.39, size: 100 }], asks: [{ price: 0.40, size: 100 }],
   });
   await core.request('orders.place', {
     tokenId: 'tok2', conditionId: 'cond2', side: 'buy', mode: 'taker',
-    price: 0.40, size: 5, internalKey: 'next-probe', strategy: 's', asset: 'ETH',
+    price: 0.40, size: 5, internalKey: 'switch-probe-2', strategy: 's', asset: 'ETH',
     direction: 'up', roundSlot: Math.floor(Date.now() / 1000 / 900),
   });
   const stillPos = await core.request('positions.list', {});
-  check('next_session 写入前有一笔在途仓位',
+  check('写入前有一笔在途仓位',
     stillPos.positions?.length === 1, JSON.stringify(stillPos));
   await core.request('round_duration.set', { accountId: 'default', durationSec: 300 });
   const stillPos2 = await core.request('positions.list', {});
-  check('非 immediate 写入不平在途仓位',
-    stillPos2.positions?.length === 1, JSON.stringify(stillPos2));
-
-  await core.stop();
+  check('秒切秒换：写入后在途仓位被平',
+    stillPos2.positions?.length === 0, JSON.stringify(stillPos2));
 
   // 4. The restart resolution: the new core reads the .env override back
   //    (same deployment cwd — a restart re-runs in place) and the account
@@ -236,24 +236,26 @@ try {
   // 8. An explicit --round-sec governs the DEFAULT grid only — the persisted
   //    per-account override survives the flag untouched, and the readout
   //    names its source so the card can explain itself.
-  const core3 = makeCore('flagged', ['--round-sec', '3600']);
-  // Re-arm the override for this core's cwd: write 300, boot with the flag.
-  await core3.start();
-  const preFlag = await core3.request('round_duration.set',
-    { accountId: 'default', durationSec: 300 });
-  check('the flagged core accepts a per-account write (the override lands)',
+  //
+  //    新语义：flagLocked（--round-sec）时 round_duration.set 被拒绝
+  //    （立即切换是破坏性的）。覆盖须在非 flagLocked 核上设置，再
+  //    用 flagged 核（同一 cwd）读取验证覆盖保留 + 默认网格由 flag 控制。
+  const preFlag = await core.request('round_duration.set',
+    { accountId: 'default', durationSec: 300, reason: 'e2e gate' });
+  check('非 flagLocked 核接受 per-account 写入',
     preFlag.accountId === 'default' && preFlag.nextSessionSec === 300, JSON.stringify(preFlag));
-  await core3.stop();
-  const core4 = makeCore('flagged2', ['--round-sec', '3600'], core3.cwd);
-  await core4.start();
-  const flagged = await core4.request('round_duration.get', {});
+  await core.stop();
+
+  const core3 = makeCore('flagged', ['--round-sec', '3600'], core.cwd);
+  await core3.start();
+  const flagged = await core3.request('round_duration.get', {});
   check('an explicit --round-sec runs the default grid while the override survives',
     flagged.effectiveSec === 3600 && flagged.perAccount?.default === 300, JSON.stringify(flagged));
   check('the flagged readout names its source so the card can explain itself',
     // #499 renamed the source tier: TOML is a default FOR the card, not a
     // veto over it, so a flag readout is exactly "cli_or_env".
     flagged.source === 'cli_or_env', JSON.stringify(flagged));
-  await core4.stop();
+  await core3.stop();
 
   console.log(gate.failures === 0
     ? '\nround:duration — set/restart/flag precedence all hold over the real wire.'

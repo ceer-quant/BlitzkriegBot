@@ -588,16 +588,17 @@ impl Core {
 
     /// 轮次时间周期的运行时写路径（`round_duration.set`，UI 设置卡）：per-account
     /// 白名单校验后把 `ACCOUNT_<ID>_ROUND_DURATION_SEC` 原子 upsert 进 `.env`
-    /// 并更新内存，立即生效。红线：在途轮/单保留出生网格；`reset` 清
-    /// 覆盖回落默认网格；`durationSec` 与 `reset` 恰二选一；缺少
-    /// `env_file_path`（回测器/进程内测试）如实拒绝。
+    /// 并更新内存，秒切秒换（先撤单/强平，再切网格）。红线：撤单/强平
+    /// fail-closed，未全成网格不切；`reset` 清覆盖回落默认网格；
+    /// `durationSec` 与 `reset` 恰二选一；缺少 `env_file_path`（回测器/
+    /// 进程内测试）如实拒绝。
     ///
-    /// #1154: `patch.immediate` 要求「立即结束当前轮」：先撤该账户在途轮
-    /// 市场的全部挂单，再按市价真实强平其仓位（PnL 按真实成交价，台账写
-    /// `operator_grid_switch`，审计日志带 actor），最后切入新网格。
-    /// 任一步骤 fail-closed：撤单失败中止；强平不全如实入账并报错，
-    /// 网格不切；`round_duration_source == "cli_or_env"`（flagLocked）时
-    /// 破坏性切换被如实拒绝。
+    /// 2026-11-13 操作者指令：切换即「秒切秒换」——不再有 immediate 开关。
+    /// 写入一律先撤该账户在途轮市场的全部挂单，再按市价真实强平其仓位
+    /// （PnL 按真实成交价，台账写 `operator_grid_switch`，审计日志带 actor），
+    /// 最后切入新网格。任一步骤 fail-closed：撤单失败中止；强平不全如实
+    /// 入账并报错，网格不切；`round_duration_source == "cli_or_env"`
+    /// （flagLocked）时破坏性切换被如实拒绝。
     pub fn apply_round_duration_set(
         &mut self,
         patch: &crate::schema::SetRoundDurationParams,
@@ -628,8 +629,8 @@ impl Core {
                     format!("round_duration.set: no such account `{account_id}`"),
                 )
             })?;
-        // #1154: flagLocked（显式启动参数在管）时破坏性切换不赢，如实拒绝——在任何账簿动作之前判定。
-        if patch.immediate && self.config.round_duration_source == "cli_or_env" {
+        // 秒切秒换：flagLocked（显式启动参数在管）时破坏性切换不赢，如实拒绝——在任何账簿动作之前判定。
+        if self.config.round_duration_source == "cli_or_env" {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "round_duration.set(immediate): 当前网格由 --round-sec / BK_ROUND_SEC \
@@ -665,12 +666,16 @@ impl Core {
                 ));
             }
         }
-        // #1154: 撤单 → 市价强平 → 切网格的前两步，fail-closed。
-        if patch.immediate {
-            self.cancel_and_flatten_account(account_id, now_ms, actor)?;
-        }
-        // reset: remove the account's override from .env and memory.
-        if patch.reset {
+        // ── Two-phase commit (持久优先)：有 env_file_path 时先 .env 持久化，
+        // 失败则拒绝，无账簿副作用；无 env_file_path（回测/进程内测试）则
+        // 跳过持久化，直接在内存执行。再撤单→市价强平（fail-closed），最后
+        // 内存更新+引擎网格切换。任何一步失败都不留半边天。
+        if let Some(env_path) = self
+            .config
+            .env_file_path
+            .as_deref()
+            .map(std::path::Path::new)
+        {
             let sfx: String = account_id
                 .chars()
                 .map(|c| {
@@ -682,25 +687,33 @@ impl Core {
                 })
                 .collect();
             let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-            let env_path = self
-                .config
-                .env_file_path
-                .as_deref()
-                .map(std::path::Path::new);
-            let Some(env_path) = env_path else {
-                return Err(CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    "round_duration.set: no env file path configured — persistence is disabled \
-                     for this core (backtests and in-process tests); nothing was applied"
-                        .to_string(),
-                ));
-            };
-            crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!("round_duration.set: persist reset failed: {e}"),
+
+            if patch.reset {
+                crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::InvalidParams,
+                        format!("round_duration.set: persist reset failed: {e}"),
+                    )
+                })?;
+            } else {
+                let sec = sec.unwrap();
+                crate::env_file::upsert_env_vars(
+                    env_path,
+                    &std::collections::BTreeMap::from([(key, sec.to_string())]),
                 )
-            })?;
+                .map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::InvalidParams,
+                        format!("round_duration.set: persist failed, nothing changed: {e}"),
+                    )
+                })?;
+            }
+        }
+
+        // 撤单 → 市价强平 → 切网格的前两步，fail-closed（一律执行，秒切秒换）。
+        self.cancel_and_flatten_account(account_id, now_ms, actor)?;
+        // reset: clear the account's override from memory (already removed from .env above).
+        if patch.reset {
             self.config.account_round_durations.remove(account_id);
             if let Some(engine) = self.engine.as_mut() {
                 engine.set_scanner_round_duration(self.config.default_round_duration_sec);
@@ -724,44 +737,8 @@ impl Core {
             });
         }
         // Write path: duration_sec is Some (guaranteed by validation above).
+        // .env upsert already done above (persist-first); now update memory + engine grid.
         let sec = sec.unwrap();
-
-        // Persist to .env only (atomic upsert), not the retired JSON cell.
-        let env_path = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new);
-        let Some(env_path) = env_path else {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                "round_duration.set: no env file path configured — persistence is disabled \
-                 for this core (backtests and in-process tests); nothing was applied"
-                    .to_string(),
-            ));
-        };
-
-        let sfx: String = account_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_uppercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-        crate::env_file::upsert_env_vars(
-            env_path,
-            &std::collections::BTreeMap::from([(key, sec.to_string())]),
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("round_duration.set: persist failed, nothing changed: {e}"),
-            )
-        })?;
         self.config
             .account_round_durations
             .insert(account_id.clone(), sec);

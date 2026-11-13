@@ -316,6 +316,86 @@ fn duplicate_trade_for_an_untracked_order_is_not_rebooked_elsewhere() {
     assert_eq!(restarted.pending_unknown_count(), 0);
 }
 
+/// # 防串味：切换账户/周期/策略后，旧订单在网络延迟窗口内的迟到回执，
+/// 必须归属下单的旧账户，绝不能被兜底绑到新账户同 token+side 的新 live
+/// 单上。`resolve` 的 token+side 兜底按账户作用域（见 ome.rs `resolve`）。
+#[test]
+fn late_fill_after_switch_is_not_rebound_to_sibling_account() {
+    let mut ome = Ome::new();
+
+    // 账户 A 在 `tok` 上挂一笔买单。
+    let a_req = OrderRequest {
+        account_id: AccountId::from("acct-a"),
+        ..req("ka", dec!(10))
+    };
+    ome.submit(SubmitParams {
+        order_id: "o-a".into(),
+        request: a_req,
+        submitted_at_ms: 1,
+        decision_at_ms: 1,
+        execute_at_ms: 1,
+        report_at_ms: 1,
+        maker_timeout_ms: 0,
+        round_duration_sec: 0,
+    })
+    .unwrap();
+    ome.mark_live("o-a", 1).unwrap();
+
+    // 账户 B 在同 token+side 上挂一笔新买单（切换后新账户的单）。
+    let b_req = OrderRequest {
+        account_id: AccountId::from("acct-b"),
+        ..req("kb", dec!(10))
+    };
+    ome.submit(SubmitParams {
+        order_id: "o-b".into(),
+        request: b_req,
+        submitted_at_ms: 2,
+        decision_at_ms: 2,
+        execute_at_ms: 2,
+        report_at_ms: 2,
+        maker_timeout_ms: 0,
+        round_duration_sec: 0,
+    })
+    .unwrap();
+    ome.mark_live("o-b", 2).unwrap();
+
+    // 切换：A 的在途订单被旧状态一并清走（连记录都消失）。
+    assert_eq!(ome.remove_account_orders("acct-a"), 1);
+
+    //  venue 回执延迟抵达，被寻址到 A 的订单且账户声明为 A，trade id 是新的
+    // （未重复），因此不能走重复交易去重，只能靠 resolve 兜底。
+    let fill = Fill {
+        order_id: "o-a".into(),
+        trade_id: Some("t-late".into()),
+        token_id: "tok".into(),
+        side: Side::Buy,
+        price: dec!(0.4),
+        size: dec!(4),
+        status: FillStatus::Confirmed,
+        ts_ms: 100,
+        tx_hash: None,
+        maker: None,
+        account_id: AccountId::from("acct-a"),
+    };
+    let out = ome.apply_fill_report(fill, 101).unwrap();
+
+    // 不得把旧单的成交打到 B 的新单上；未归属则缓冲/告警，不静默入错账。
+    assert!(
+        out.delta.is_none(),
+        "a late fill for a removed order must not be re-bound to another account's live order"
+    );
+    assert_eq!(
+        ome.get("o-b").unwrap().filled_size,
+        Decimal::ZERO,
+        "B's order must not absorb A's late fill"
+    );
+    assert_eq!(
+        ome.pending_unknown_count(),
+        1,
+        "unattributable late fill is buffered and alerted, not silently dropped"
+    );
+}
+
 // ── #178: terminal absorption ────────────────────────────────────────────
 
 /// The acceptance criterion: a Cancelled order that receives a late partial

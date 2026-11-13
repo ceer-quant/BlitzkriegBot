@@ -261,6 +261,8 @@ pub(crate) async fn handle_account(
                     }
                     let id = AccountId::from(p.account_id.as_str());
                     let mut c = core.lock().await;
+                    // 切断旧状态：切换 venue 前撤销该账户全部 live 挂单（防幽灵单）。
+                    let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms());
                     // One transaction in the method layer: persist FIRST
                     // (fail leaves both stores untouched), then memory. The
                     // method layer's refusals are all client faults
@@ -462,6 +464,8 @@ pub(crate) async fn handle_account(
                     // stores untouched), then memory. Method-layer refusals
                     // are all client faults, surfaced as INVALID_PARAMS
                     // through the typed tail.
+                    // 切断旧状态：切换 rounds 前撤销该账户全部 live 挂单（防幽灵单）。
+                    let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms());
                     c.set_account_rounds_persisting(
                         &id,
                         new_rounds.clone(),
@@ -581,6 +585,10 @@ pub(crate) async fn handle_account(
                 async move {
                     let id = AccountId::from(p.account_id.as_str());
                     let mut c = core.lock().await;
+                    // 切断旧状态：禁用交易前撤销该账户全部 live 挂单（防幽灵单）。
+                    if !p.enabled {
+                        let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms());
+                    }
                     c.set_account_trading_persisting(
                         &id,
                         p.enabled,
@@ -613,6 +621,8 @@ pub(crate) async fn handle_account(
                     c.require_account(&id)?;
                     let now_ms = blitzkrieg_market_api::net::now_ms();
                     if p.frozen {
+                        // 切断旧状态：冻结前撤销该账户全部 live 挂单（防幽灵单）。
+                        let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms);
                         c.freeze_account_manual(
                             id.as_str(),
                             p.reason
@@ -675,6 +685,8 @@ pub(crate) async fn handle_account(
                 async move {
                     let id = AccountId::from(p.account_id.as_str());
                     let mut c = core.lock().await;
+                    // 切断旧状态：切换策略前撤销该账户全部 live 挂单（防幽灵单）。
+                    let _ = c.cancel_all_live_orders_for_account(id.as_str(), now_ms());
                     // The method layer adds nothing to the transaction: the
                     // service plan-first checks names against the REGISTERED
                     // set, persists, flips the book, rebuilds the engine

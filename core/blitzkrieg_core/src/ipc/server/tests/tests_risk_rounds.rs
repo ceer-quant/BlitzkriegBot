@@ -722,11 +722,11 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         );
     }
 
-    // A core with NO env file path (backtests, in-process tests)
-    // refuses the write instead of dropping a file into whatever
-    // checkout the caller runs from.
+    // A core with NO env file path (backtests, in-process tests): the write
+    // still lands in memory (seconds-cut, no persistence), it just never
+    // touches the filesystem.
     let (bare, registry2, peer2) = hot_reload_fixture().await;
-    let refused = rpc(
+    let accepted = rpc(
         &bare,
         &registry2,
         &peer2,
@@ -735,11 +735,8 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     )
     .await;
     assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("persistence is disabled"),
-        "a path-less core refuses the write: {refused}"
+        accepted.get("error").is_none(),
+        "a path-less core allows in-memory write (no persistence): {accepted}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
