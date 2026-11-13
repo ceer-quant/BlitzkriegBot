@@ -1,4 +1,5 @@
 use super::*;
+use crate::risk::limits::{Bound, LimitSource};
 
 #[test]
 fn default_config_has_no_limits_and_places_the_entry() {
@@ -103,7 +104,8 @@ fn rejection_causes_report_per_order_cap_risk_bucket() {
     let mut c = core_with_engine(HashMap::new());
     let now = 1_000_000i64;
     feed_entry_setup(&mut c, now);
-    c.risk_config_mut().max_order_notional = dec!(1);
+    c.risk_config_mut().systemic.account.max_order_notional_usd =
+        Bound::new(dec!(1), LimitSource::Flag);
     assert_eq!(
         c.engine_evaluate(now + 12_000),
         0,

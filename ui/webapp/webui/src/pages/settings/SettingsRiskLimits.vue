@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 生效风控读数 + 编辑（E26 §4.4 / 用户裁决：九项系统限额必须都能改）。每个限额
+ * 生效风控读数 + 编辑（E26 §4.4 / 用户裁决：六项系统限额必须都能改）。每个限额
  * 都是「值 + 来源」，来源不明的数字不是操作者能据以行动的答案。
  *
  * 可编辑：每行一个输入框（预填当前生效值），保存走 risk.setSystemic —— 只发
@@ -69,6 +69,7 @@ const ROW_DEFS: RiskRowDef[] = [
   { field: 'maxPositionSize', label: '单仓上限', unit: '股', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxPositionSize },
   { field: 'maxConsecutiveLosses', label: '连亏熔断', unit: '次', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.maxConsecutiveLosses },
   { field: 'cooldownMinutes', label: '熔断冷静期', unit: '分钟', group: '账户', int: true, bound: () => riskDoc.value?.account.limits.cooldownMinutes },
+  { field: 'maxOrderNotionalUsd', label: '单笔下单帽', unit: 'USD', group: '账户', int: false, bound: () => riskDoc.value?.account.limits.maxOrderNotionalUsd },
 ]
 
 // ── 编辑缓冲 + 保存（risk.setSystemic，只发改动项）──
@@ -269,7 +270,7 @@ async function saveRisk(): Promise<void> {
   const keys = Object.keys(built)
   const exitKeys = Object.keys(builtExit)
   if (keys.length === 0 && exitKeys.length === 0) {
-    riskMsg.value = '没有改动 —— 九项限额与退出纪律都与内核当前生效值一致。'
+    riskMsg.value = '没有改动 —— 六项系统限额与退出纪律都与内核当前生效值一致。'
     return
   }
   riskSaving.value = true
@@ -307,7 +308,7 @@ const riskHint = computed(() => {
   if (!riskDoc.value) return ''
   return armedRows.value.length > 0
     ? '六项改动立即约束下一笔策略开仓；回撤 / 连亏 / 冷静期三项重启后生效（本会话不追溯改判）。连亏熔断触发时暂停该账户的新开仓，平仓永不受限。'
-    : '九项系统限额全部为 0 = 关闭（出厂承诺）：内核行为与未加风控时逐位一致。保存后六项立即生效。'
+    : '六项系统限额全部为 0 = 关闭（出厂承诺）：内核行为与未加风控时逐位一致。保存后六项立即生效。'
 })
 onMounted(() => void loadRisk())
 </script>

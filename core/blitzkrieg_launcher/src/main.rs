@@ -289,14 +289,15 @@ async fn main() -> anyhow::Result<()> {
         "BK_RISK_MAX_POSITION_SIZE",
         "BK_RISK_MAX_CONSECUTIVE_LOSSES",
         "BK_RISK_COOLDOWN_MINUTES",
+        "BK_RISK_MAX_ORDER_NOTIONAL_USD",
     ]
     .iter()
     .all(|key| std::env::var(key).is_err());
     if all_keys_absent && !std::path::Path::new(env_path).is_file() {
         eprintln!(
             "blitzkrieg-core: WARNING {env_path} is missing or unreadable; \
-             all five BK_RISK_* limits are unset — running at factory \
-             (five per-account limits at factory off)"
+             all six BK_RISK_* limits are unset — running at factory \
+             (six per-account limits at factory off)"
         );
     }
     // Issue #967 (Phase-5): the `[[risk.ladder]]` opt-in lived in TOML. The

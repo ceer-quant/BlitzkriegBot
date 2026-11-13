@@ -107,7 +107,6 @@ impl Default for RiskConfig {
 /// is allowed. Everything not listed here is refused — see
 /// [`hot_reload_refusal`] and [`crate::schema::SetRiskLimitsParams`].
 pub const HOT_RELOADABLE: &[&str] = &[
-    "maxOrderNotional",
     "maxOrderNotionalPct",
     "maxOpenNotionalUsd",
     "minShares",
@@ -130,6 +129,15 @@ pub const HOT_RELOADABLE: &[&str] = &[
 /// `PositionConfig` / `ExitConfig`), so the refusal is actionable, never a dead
 /// end.
 pub const HOT_RELOAD_REFUSED: &[(&[&str], &str)] = &[
+    (
+        &[
+            "maxOrderNotional",
+            "max_order_notional",
+            "max-order-notional",
+        ],
+        "folded into the account-level systemic matrix — use risk.setSystemic with \
+         maxOrderNotionalUsd (persists to .env, hot-loads without restart)",
+    ),
     (
         &["maxDailyLossUsd", "max_daily_loss_usd", "max-daily-loss"],
         "the daily-loss breaker is judged against the day's accumulated realized-loss \
@@ -513,16 +521,31 @@ impl RiskGate {
             ));
         }
         // Notional cap applies to BUY commitment; SELL is bounded by position (P2).
+        // The cap is read from the per-account systemic matrix (account-level,
+        // persisted to .env, hot-reloaded) — not from the process-level CLI flag.
+        // The CLI flag (`--max-order-notional`) still works as a fallback for
+        // scripts that set it at boot; the two are OR'd: whichever is non-zero
+        // binds, the tighter one wins if both are armed.
         if req.side == Side::Buy {
-            let notional = req.price * req.size;
-            if notional > self.config.max_order_notional {
-                return Err(CoreError::new(
-                    CoreErrorCode::RiskRejected,
-                    format!(
-                        "notional {notional} exceeds per-order cap {}",
-                        self.config.max_order_notional
-                    ),
-                ));
+            let account_cap = &self.config.systemic.account.max_order_notional_usd;
+            let cli_cap = self.config.max_order_notional;
+            let cap = match (
+                account_cap.is_enabled().then_some(account_cap.value()),
+                (cli_cap > Decimal::ZERO).then_some(cli_cap),
+            ) {
+                (Some(a), Some(c)) => Some(a.min(c)),
+                (Some(a), None) => Some(a),
+                (None, Some(c)) => Some(c),
+                (None, None) => None,
+            };
+            if let Some(cap_value) = cap {
+                let notional = req.price * req.size;
+                if notional > cap_value {
+                    return Err(CoreError::new(
+                        CoreErrorCode::RiskRejected,
+                        format!("notional {notional} exceeds per-order cap {}", cap_value),
+                    ));
+                }
             }
         }
         // P0 #202 — the equity-relative cap. It bounds ANY order that is not
@@ -562,6 +585,7 @@ impl RiskGate {
 mod tests {
     use super::*;
     use crate::model::{FillPolicy, Side};
+    use crate::risk::limits::{Bound, LimitSource};
     use rust_decimal_macros::dec;
 
     fn req(side: Side, price: Decimal, size: Decimal) -> OrderRequest {
@@ -591,7 +615,12 @@ mod tests {
     #[test]
     fn gates_notional_and_kill() {
         let mut g = RiskGate::new(RiskConfig {
-            max_order_notional: dec!(3),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         });
         // 0.5 * 4 = 2.0 within cap; 0.5 * 8 = 4.0 rejected.
@@ -614,7 +643,12 @@ mod tests {
     #[test]
     fn kill_switch_freezes_entries_but_never_exits() {
         let mut g = RiskGate::new(RiskConfig {
-            max_order_notional: dec!(3),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         });
         g.kill("self-check failed");
@@ -674,7 +708,12 @@ mod tests {
         // cap is deliberately wide (1000) so only the RELATIVE one can bite.
         let equity = dec!(4.8);
         let g = RiskGate::new(RiskConfig {
-            max_order_notional: dec!(1000),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(1000), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             max_order_notional_pct: dec!(20),
             ..Default::default()
         });
@@ -742,7 +781,12 @@ mod tests {
     #[test]
     fn equity_notional_cap_is_inert_when_unconfigured_or_equityless() {
         let plain = RiskGate::new(RiskConfig {
-            max_order_notional: dec!(3),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(3), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         });
         // 6.00 over the absolute 3.00 cap → refused by the ABSOLUTE cap only.
@@ -762,7 +806,12 @@ mod tests {
         // and with the equity stated it IS refused — so the only difference
         // between these two lines is the argument).
         let armed = RiskGate::new(RiskConfig {
-            max_order_notional: dec!(1000),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(1000), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             max_order_notional_pct: dec!(20),
             ..Default::default()
         });

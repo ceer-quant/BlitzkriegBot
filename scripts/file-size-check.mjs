@@ -66,6 +66,10 @@ const ALLOW = [
   // (the round_duration.set write path lives here). Debt marker — the file
   // may shrink or die, never grow past atAuthoring.
   { path: 'core/blitzkrieg_core/src/service/trading_reset.rs', atAuthoring: 1541 },
+  // #1186: max_order_notional_usd folded into AccountRiskLimits grew
+  // schema/mod.rs past the limit. Debt marker — the file may shrink or die,
+  // never grow past atAuthoring.
+  { path: 'core/blitzkrieg_core/src/schema/mod.rs', atAuthoring: 1501 },
 ];
 
 const checks = [];

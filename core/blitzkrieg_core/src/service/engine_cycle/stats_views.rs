@@ -736,7 +736,7 @@ impl Core {
             "shareBandUsd": dec_json(share_band),
             "sizePct": dec_json(globals.size_pct),
             "sizeBudgetUsd": size_budget.map(dec_json),
-            "maxOrderNotionalUsd": dec_json(risk.max_order_notional),
+            "maxOrderNotionalUsd": dec_json(risk.systemic.account.max_order_notional_usd.value()),
             "maxOrderNotionalPct": dec_json(risk.max_order_notional_pct),
             "equityCapUsd": equity_cap.map(dec_json),
             "worstCaseOrderUsd": dec_json(worst),

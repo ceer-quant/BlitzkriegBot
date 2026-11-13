@@ -92,6 +92,11 @@ pub const COCKPIT_KEYS: &[CockpitKey] = &[
         field: "cooldownMinutes",
         family: CockpitFamily::Systemic,
     },
+    CockpitKey {
+        env_key: "BK_RISK_MAX_ORDER_NOTIONAL_USD",
+        field: "maxOrderNotionalUsd",
+        family: CockpitFamily::Systemic,
+    },
 ];
 
 /// The `.env` key a wire field name maps to — THE one mapping table (the
@@ -119,7 +124,7 @@ pub enum CockpitValue {
 pub fn parse_cockpit_value(key: &CockpitKey, raw: &str) -> Option<CockpitValue> {
     let raw = raw.trim();
     match key.field {
-        // The two percentages and the five systemic limits: decimals >= 0.
+        // The two percentages and the six systemic limits: decimals >= 0.
         "stopLossPct" | "takeProfitPct" => rust_decimal::Decimal::from_str_exact(raw)
             .ok()
             .map(CockpitValue::Decimal),
@@ -133,7 +138,8 @@ pub fn parse_cockpit_value(key: &CockpitKey, raw: &str) -> Option<CockpitValue> 
         | "maxDailyDrawdownUsd"
         | "maxPositionSize"
         | "maxConsecutiveLosses"
-        | "cooldownMinutes" => rust_decimal::Decimal::from_str_exact(raw)
+        | "cooldownMinutes"
+        | "maxOrderNotionalUsd" => rust_decimal::Decimal::from_str_exact(raw)
             .ok()
             .map(CockpitValue::Decimal),
         other => {
@@ -186,6 +192,7 @@ pub fn overlay_risk_limits(
                     "maxPositionSize" => &mut systemic.limits.max_position_size,
                     "maxConsecutiveLosses" => &mut systemic.limits.max_consecutive_losses,
                     "cooldownMinutes" => &mut systemic.limits.cooldown_minutes,
+                    "maxOrderNotionalUsd" => &mut systemic.limits.max_order_notional_usd,
                     other => {
                         debug_assert!(false, "unmapped systemic overlay field {other}");
                         continue;
@@ -204,17 +211,17 @@ mod tests {
 
     #[test]
     fn table_is_complete_and_unique() {
-        assert_eq!(COCKPIT_KEYS.len(), 10);
+        assert_eq!(COCKPIT_KEYS.len(), 11);
         let mut keys: Vec<_> = COCKPIT_KEYS.iter().map(|k| k.env_key).collect();
         keys.sort();
         keys.dedup();
-        assert_eq!(keys.len(), 10, "duplicate env key in the cockpit table");
+        assert_eq!(keys.len(), 11, "duplicate env key in the cockpit table");
         let mut fields: Vec<_> = COCKPIT_KEYS.iter().map(|k| k.field).collect();
         fields.sort();
         fields.dedup();
         assert_eq!(
             fields.len(),
-            10,
+            11,
             "duplicate wire field in the cockpit table"
         );
     }

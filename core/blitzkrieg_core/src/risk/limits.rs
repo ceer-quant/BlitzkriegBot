@@ -140,6 +140,11 @@ pub struct AccountRiskLimits {
     /// Cooldown after the breaker fires (minutes → seconds at the existing
     /// consumer; the unit here matches the config file's, per §4.2).
     pub cooldown_minutes: Bound,
+    /// Per-order notional cap (USD) for THIS account — folds the old
+    /// process-level `--max-order-notional` CLI flag into the account-level
+    /// systemic matrix so it persists to `.env`, hot-loads without restart,
+    /// and is judged per-account rather than process-wide (issue #983).
+    pub max_order_notional_usd: Bound,
 }
 
 /// The whole systemic-limit set a kernel runs under: the per-account matrix
@@ -198,6 +203,7 @@ impl SystemicRiskLimits {
                 max_position_size: one("BK_RISK_MAX_POSITION_SIZE"),
                 max_consecutive_losses: one("BK_RISK_MAX_CONSECUTIVE_LOSSES"),
                 cooldown_minutes: one("BK_RISK_COOLDOWN_MINUTES"),
+                max_order_notional_usd: one("BK_RISK_MAX_ORDER_NOTIONAL_USD"),
             },
         }
     }
@@ -229,8 +235,12 @@ impl SystemicRiskLimits {
             &self.account.max_consecutive_losses,
         );
         push("cooldown_minutes", &self.account.cooldown_minutes);
+        push(
+            "max_order_notional_usd",
+            &self.account.max_order_notional_usd,
+        );
         if out.is_empty() {
-            out.push("risk.systemic: at factory (all five per-account limits off)".to_string());
+            out.push("risk.systemic: at factory (all six per-account limits off)".to_string());
         }
         out
     }
@@ -246,6 +256,7 @@ impl SystemicRiskLimits {
             || a.max_position_size.is_enabled()
             || a.max_consecutive_losses.is_enabled()
             || a.cooldown_minutes.is_enabled()
+            || a.max_order_notional_usd.is_enabled()
     }
 }
 
@@ -429,6 +440,7 @@ mod tests {
             ("max_position_size", &a.max_position_size),
             ("max_consecutive_losses", &a.max_consecutive_losses),
             ("cooldown_minutes", &a.cooldown_minutes),
+            ("max_order_notional_usd", &a.max_order_notional_usd),
         ] {
             assert!(!b.is_enabled(), "{name} must ship disabled");
             assert_eq!(b.source(), LimitSource::Default, "{name} provenance");
@@ -446,13 +458,14 @@ mod tests {
     /// armed bound must name `env` and a missing key must stay at the factory
     /// posture (no TOML fallback anywhere in the chain).
     #[test]
-    fn env_lookup_arms_all_five_and_names_env() {
+    fn env_lookup_arms_all_six_and_names_env() {
         let keys = std::collections::HashMap::from([
             ("BK_RISK_MAX_SINGLE_LOSS_USD", dec!(0.5)),
             ("BK_RISK_MAX_DAILY_DRAWDOWN_USD", dec!(5)),
             ("BK_RISK_MAX_POSITION_SIZE", dec!(5)),
             ("BK_RISK_MAX_CONSECUTIVE_LOSSES", dec!(4)),
             ("BK_RISK_COOLDOWN_MINUTES", dec!(30)),
+            ("BK_RISK_MAX_ORDER_NOTIONAL_USD", dec!(6)),
         ]);
         let s = SystemicRiskLimits::from_lookup(|k| keys.get(k).map(|v| v.to_string()));
         for (name, b) in [
@@ -461,6 +474,7 @@ mod tests {
             ("max_position_size", &s.account.max_position_size),
             ("max_consecutive_losses", &s.account.max_consecutive_losses),
             ("cooldown_minutes", &s.account.cooldown_minutes),
+            ("max_order_notional_usd", &s.account.max_order_notional_usd),
         ] {
             assert!(b.is_enabled(), "{name} must be armed by .env");
             assert_eq!(b.source(), LimitSource::Env, "{name} provenance");
@@ -493,6 +507,7 @@ mod tests {
             "maxPositionSize",
             "maxConsecutiveLosses",
             "cooldownMinutes",
+            "maxOrderNotionalUsd",
         ] {
             assert!(doc.get(key).is_some(), "missing wire key {key}");
         }
@@ -504,7 +519,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("at factory"), "{}", lines[0]);
         assert!(
-            lines[0].contains("all five per-account limits off"),
+            lines[0].contains("all six per-account limits off"),
             "{}",
             lines[0]
         );

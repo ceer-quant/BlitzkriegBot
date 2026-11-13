@@ -3,6 +3,7 @@
 use super::*;
 use crate::position::EquityBasis;
 use crate::risk::RiskConfig;
+use crate::risk::limits::{Bound, LimitSource};
 use rust_decimal_macros::dec;
 
 #[test]
@@ -212,7 +213,8 @@ fn a_risk_rejection_reaches_the_error_slot_with_its_own_reason() {
     // so the panel's answer to "why did nothing get placed?" is the same
     // reason the caller got, not a stale banner.
     let mut c = dry_core(dec!(10));
-    c.risk_config_mut().max_order_notional = dec!(1);
+    c.risk_config_mut().systemic.account.max_order_notional_usd =
+        Bound::new(dec!(1), LimitSource::Flag);
     c.book_snapshot("tok", vec![], vec![(dec!(0.40), dec!(100))], 1);
     let err = c
         .place_outcome(order(FillPolicy::Taker, dec!(0.4), dec!(5), "k1"), 0, 1)

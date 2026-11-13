@@ -1,4 +1,5 @@
 use super::*;
+use crate::risk::limits::{Bound, LimitSource};
 
 /// The sparse-cadence contract: a quiet tick inside the fallback window
 /// advances the scheduled-cycle counter but does NOT call the strategy;
@@ -631,7 +632,12 @@ fn gate_counts_follow_the_account_in_the_strategy_page() {
     let mut c = Core::with_account_book(
         CoreConfig {
             risk: RiskConfig {
-                max_order_notional: dec!(100),
+                systemic: crate::risk::limits::SystemicRiskLimits {
+                    account: crate::risk::limits::AccountRiskLimits {
+                        max_order_notional_usd: Bound::new(dec!(100), LimitSource::Flag),
+                        ..Default::default()
+                    },
+                },
                 ..Default::default()
             },
             dry_seed_balance: dec!(1000),
@@ -791,7 +797,12 @@ fn a_gate_exemption_never_bypasses_a_safety_boundary() {
         5,
         WINDOW_SHUT,
         RiskConfig {
-            max_order_notional: dec!(1),
+            systemic: crate::risk::limits::SystemicRiskLimits {
+                account: crate::risk::limits::AccountRiskLimits {
+                    max_order_notional_usd: Bound::new(dec!(1), LimitSource::Flag),
+                    ..Default::default()
+                },
+            },
             ..Default::default()
         },
         |_| crate::strategies::GateExemptions::all(),

@@ -20,6 +20,7 @@ fn systemic_env_key(field: &str) -> Option<&'static str> {
         "maxPositionSize" => "BK_RISK_MAX_POSITION_SIZE",
         "maxConsecutiveLosses" => "BK_RISK_MAX_CONSECUTIVE_LOSSES",
         "cooldownMinutes" => "BK_RISK_COOLDOWN_MINUTES",
+        "maxOrderNotionalUsd" => "BK_RISK_MAX_ORDER_NOTIONAL_USD",
         _ => return None,
     })
 }

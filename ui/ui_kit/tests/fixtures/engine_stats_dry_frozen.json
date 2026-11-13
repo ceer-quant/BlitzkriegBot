@@ -138,7 +138,7 @@
     "equityCapUsd": null,
     "equityUsd": 1000.0,
     "maxOrderNotionalPct": 0.0,
-    "maxOrderNotionalUsd": 100.0,
+    "maxOrderNotionalUsd": 0.0,
     "maxPrice": 1.0,
     "maxShares": 10.0,
     "minShares": 10.0,

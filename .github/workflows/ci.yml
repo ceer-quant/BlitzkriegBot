@@ -482,6 +482,15 @@ jobs:
           node-version: 22
       - name: Build the core and UI binaries (release)
         run: cargo build --release --workspace --locked
+      # UI Kit gate (E5) drives the real panel against the compiled core over IPC;
+      # it needs the Vue front-end bundle built by the panel lane, which runs in
+      # parallel and shares no filesystem with this job. Build it here so the
+      # UI Kit gate's UDS-served panel has a dist/ to serve.
+      - name: Build the panel bundle for UI Kit gate
+        run: |
+          cd ui/webapp/webui
+          npm ci
+          npm run build
       # The gates that drove the shipped strategies (strategy-gate /
       # strategy-evolution / trend-follow / mean-reversion / strategy-limit) are
       # retired with them. Two things still need a cdylib, for opposite reasons:

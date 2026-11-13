@@ -653,10 +653,12 @@ impl Core {
         core
     }
 
-    /// #363: the boot-time policy load. Fail-closed on ANY malformed input;
-    /// the refusal is both panicked (the boot must not continue) and audited
-    /// (`load-refused`), so an operator who walks up to a dead kernel finds
-    /// the reason in the journal, not only in a scrolled-away log line.
+    /// #363: the boot-time policy load. Malformed input is audited
+    /// (`load-refused`) and logged as a warning — the boot continues with the
+    /// neutral (no-policy) kernel instead of dying. This mirrors the cockpit
+    /// families' posture (warn + keep last-known-good): a bad POLICY_* key in
+    /// `.env` must not take the whole kernel down, and the operator can fix
+    /// the file and hot-reload without a restart.
     fn load_execution_policy_at_boot(
         config: &CoreConfig,
     ) -> Option<crate::execution_policy::Policy> {
@@ -683,10 +685,11 @@ impl Core {
                         error: Some(reason.clone()),
                     },
                 );
-                panic!(
-                    "refusing to boot: {reason} (fail-closed: fix execution_policy.toml and \
-                     restart)"
+                tracing::warn!(
+                    "execution_policy boot load refused ({reason}); continuing with the \
+                     neutral kernel — fix .env and hot-reload, no restart needed"
                 );
+                None
             }
         }
     }

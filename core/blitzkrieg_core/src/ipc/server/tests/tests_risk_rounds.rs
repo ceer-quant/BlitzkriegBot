@@ -7,19 +7,18 @@ use blitzkrieg_market_api::net::now_ms;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
-/// #191 acceptance (a): one `risk.setLimits` call moves the entry limits
-/// without a restart, answers with the audit record (old → new, actor,
-/// instant, `persisted:false`) and the very NEXT order is judged by the NEW
+/// #191 acceptance (a): one `risk.setSystemic` call moves the per-account
+/// notional cap without a restart, answers with the audit record
+/// (old → new, actor, instant), and the very NEXT order is judged by the NEW
 /// value.
 #[tokio::test]
-async fn risk_set_limits_binds_the_next_order_without_a_restart() {
+async fn risk_set_systemic_binds_next_order_without_restart() {
     let (core, registry, peer) = hot_reload_fixture().await;
 
     let feed = rpc(&core, &registry, &peer, books_line()).await;
     assert!(feed.get("error").is_none(), "feed the book first: {feed}");
 
-    // 2.00 USD against the 3 USD startup cap: MUST be admitted, or the
-    // post-change refusal below would prove nothing about the change.
+    // 2.00 USD against the startup default (cap off): MUST be admitted.
     let before = rpc(
         &core,
         &registry,
@@ -29,7 +28,7 @@ async fn risk_set_limits_binds_the_next_order_without_a_restart() {
     .await;
     assert!(
         before.get("error").is_none(),
-        "2.00 must pass the 3 USD startup cap: {before}"
+        "2.00 must pass with no cap set: {before}"
     );
     assert_eq!(
         before["result"]["status"],
@@ -41,7 +40,7 @@ async fn risk_set_limits_binds_the_next_order_without_a_restart() {
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":3,"method":"risk.setLimits","params":{"maxOrderNotional":1,"minShares":2,"maxShares":4,"reason":"tighten after drawdown"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"risk.setSystemic","params":{"maxOrderNotionalUsd":1,"reason":"tighten after drawdown"}}"#.to_string(),
     )
     .await;
     assert!(
@@ -49,11 +48,6 @@ async fn risk_set_limits_binds_the_next_order_without_a_restart() {
         "the safe subset must be accepted: {applied}"
     );
     let audit = &applied["result"];
-    assert_eq!(
-        audit["persisted"],
-        serde_json::json!(false),
-        "the update must state that it is memory-only: {audit}"
-    );
     assert_eq!(
         audit["actor"],
         serde_json::json!(format!("uid:{}", own_uid())),
@@ -74,25 +68,17 @@ async fn risk_set_limits_binds_the_next_order_without_a_restart() {
             .unwrap_or_else(|| panic!("{field} must be in the audit record: {audit}"))
     };
     assert_eq!(
-        change("maxOrderNotional")["from"],
-        serde_json::json!(3.0),
-        "the audit keeps the OLD value"
+        change("maxOrderNotionalUsd")["from"],
+        serde_json::json!("0"),
+        "the audit keeps the OLD value (factory off)"
     );
-    assert_eq!(change("maxOrderNotional")["to"], serde_json::json!(1.0));
-    assert_eq!(change("minShares")["from"], serde_json::json!(10.0));
-    assert_eq!(change("minShares")["to"], serde_json::json!(2.0));
-    assert_eq!(change("maxShares")["to"], serde_json::json!(4.0));
+    assert_eq!(change("maxOrderNotionalUsd")["to"], serde_json::json!("1"));
 
-    // `engine.stats.sizing` is what the panel answers "what may ONE entry
-    // commit with?" from, and with an engine installed it is read live off
-    // the engine's own config — the same `global_sizing()` the ticket
-    // arithmetic calls. So this is the no-restart half: the boot-time copy
-    // moved too, not just the `CoreConfig` a new `Core` would be built from.
+    // `engine.stats.sizing` reads live off the systemic matrix — the
+    // no-restart half: the new cap is in force immediately.
     let stats = rpc(&core, &registry, &peer, stats_line(4)).await;
     let sizing = &stats["result"]["sizing"];
     assert_eq!(sizing["maxOrderNotionalUsd"], serde_json::json!(1.0));
-    assert_eq!(sizing["minShares"], serde_json::json!(2.0));
-    assert_eq!(sizing["maxShares"], serde_json::json!(4.0));
 
     // The SAME 2.00 ticket, on another asset (so the only possible reason is
     // the cap, never the one-position-per-asset gate), judged by the NEW cap.
@@ -969,13 +955,13 @@ async fn risk_set_limits_refuses_a_forbidden_field_and_applies_nothing() {
     assert!(feed.get("error").is_none(), "feed the book first: {feed}");
     let before = rpc(&core, &registry, &peer, stats_line(2)).await;
 
-    // A double carrier: `maxOrderNotional` is inside the safe subset,
+    // A double carrier: `maxOrderNotionalPct` is inside the safe subset,
     // `stopLossPct` is an exit threshold. The whole request must be refused.
     let refused = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":3,"method":"risk.setLimits","params":{"maxOrderNotional":1,"stopLossPct":"0.50"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"risk.setLimits","params":{"maxOrderNotionalPct":1,"stopLossPct":"0.50"}}"#.to_string(),
     )
     .await;
     assert_eq!(
@@ -997,7 +983,7 @@ async fn risk_set_limits_refuses_a_forbidden_field_and_applies_nothing() {
         "and how to get it: {refused}"
     );
     assert!(
-        msg.contains("maxOrderNotional"),
+        msg.contains("maxOrderNotionalPct"),
         "and what CAN be changed live: {refused}"
     );
 

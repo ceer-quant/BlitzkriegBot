@@ -157,8 +157,8 @@ pub mod method {
     /// [`crate::risk::hot_reload_refusal`].
     pub const RISK_SET_LIMITS: &str = "risk.setLimits";
     /// 生效风控可编辑（用户裁决：单笔最大亏损、当日最大回撤等设置选项必须
-    /// 都可以被编辑）：五项账户级限额的运行时写路径（issue #983：风控只
-    /// 跟随账户，无全局限额）。两项热生效（每笔入场现场判读、只约束新
+    /// 都可以被编辑）：六项账户级限额的运行时写路径（issue #983：风控只
+    /// 跟随账户，无全局限额）。三项热生效（每笔入场现场判读、只约束新
     /// 敞口、不携带计数器）；回撤预算与连亏熔断对按「下次会话」语义落盘
     /// 态生效 —— 不是热旋钮（HOT_RELOAD_REFUSED 记名拒绝的理由仍然成立），
     /// 回执里逐项注明生效时机。持久化：写路径把改动的 `BK_RISK_*` 键
@@ -1006,9 +1006,9 @@ pub struct RiskLimitUpdate {
 pub const RISK_LIMIT_UPDATE_NOTE: &str = "hot-applied; persisted to the risk-state file when the kernel has one, \
      in-memory only otherwise";
 
-// ── 生效风控可编辑 — risk.setSystemic（五项账户级限额的运行时写路径）─────────
+// ── 生效风控可编辑 — risk.setSystemic（六项账户级限额的运行时写路径）─────────
 
-/// `risk.setSystemic` params: the five per-account systemic limits (issue
+/// `risk.setSystemic` params: the six per-account systemic limits (issue
 /// #983: risk control follows the account's capital — no global caps), every
 /// field optional (only the named fields change). Values are USD / shares /
 /// counts / minutes on the decimal-STRING wire (the readout's convention);
@@ -1034,6 +1034,11 @@ pub struct SetSystemicLimitsParams {
     /// 熔断冷静期（分钟）：**下次会话生效** —— 与连亏熔断同一裁决。
     #[serde(default, with = "crate::decimal::opt")]
     pub cooldown_minutes: Option<Decimal>,
+    /// 单笔下单帽（USD）：账户级，与 `BK_RISK_MAX_ORDER_NOTIONAL_USD` 同一
+    /// `.env` 键，热载入立即生效，重启从 `.env` 恢复。取代进程级的
+    /// `--max-order-notional` CLI 标语（issue #983：风控跟随账户资本）。
+    #[serde(default, with = "crate::decimal::opt")]
+    pub max_order_notional_usd: Option<Decimal>,
     /// Free-text note from the caller, echoed into the audit line.
     #[serde(default)]
     pub reason: Option<String>,
@@ -1048,6 +1053,7 @@ impl SetSystemicLimitsParams {
             && self.max_position_size.is_none()
             && self.max_consecutive_losses.is_none()
             && self.cooldown_minutes.is_none()
+            && self.max_order_notional_usd.is_none()
     }
 }
 
