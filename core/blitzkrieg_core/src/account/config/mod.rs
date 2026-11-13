@@ -427,8 +427,8 @@ pub fn load_account_ledgers_single_source(
 /// Env-only (issue 923): the ACCOUNT_* keys from the `.env` file decide the
 /// whole book — no ACCOUNT_LIST in the file reloads the zero-config single
 /// default (no legacy toml fallback exists any more). A malformed `.env`
-/// (unreadable, or keys that fail the fail-closed parse) refuses the reload
-/// and the caller keeps the current configuration.
+/// (keys that fail the fail-closed parse) refuses the reload and the caller
+/// keeps the current configuration.
 ///
 /// #1189 PR-C: this is the same-process reload half every account settings
 /// write face runs after its `.env` upsert (`service::accounts::persist`), so
@@ -437,17 +437,27 @@ pub fn load_account_ledgers_single_source(
 /// [`load_account_ledgers_single_source`] does (issue 967's env-only
 /// spelling) — otherwise a zero-config `account.strategies.set` would land
 /// the key on disk and the reload would drop it right back out of memory.
+///
+/// A MISSING file is not a malformed one: a write face that removed the last
+/// key (e.g. strategy.disable on a fresh deployment with no `.env`) lands a
+/// successful no-op remove on a non-existent file, and the reload must then
+/// resolve the zero-config single default (the same semantics a missing file
+/// has at boot), not refuse with ENOENT.
 pub fn load_account_ledgers_for_reload(
     env_path: &Path,
     now_ms: i64,
     allowed: &[i64],
 ) -> Result<AccountLedgers, CoreError> {
-    let text = std::fs::read_to_string(env_path).map_err(|e| {
-        CoreError::new(
-            CoreErrorCode::InvalidParams,
-            format!("{} unreadable: {e}", env_path.display()),
-        )
-    })?;
+    let text = match std::fs::read_to_string(env_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("{} unreadable: {e}", env_path.display()),
+            ));
+        }
+    };
     let file_map: std::collections::HashMap<String, String> = text
         .lines()
         .filter_map(crate::env_file::parse_line)
