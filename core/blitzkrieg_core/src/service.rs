@@ -45,7 +45,7 @@ pub(crate) use risk_admission::{AccountGate, GLOBAL_KILL_ACCOUNT, GateReason};
 pub(crate) use risk_admission::RiskStateCell;
 
 pub struct Core {
-    config: CoreConfig,
+    pub(crate) config: CoreConfig,
     ome: Ome,
     /// #351: dry taker legs in flight — two-stage time-causal fill
     /// (match at `execute_at_ms`, report at `report_at_ms`). Empty
@@ -56,8 +56,8 @@ pub struct Core {
     /// the active account's book stands in where no order context exists
     /// (seeding, equity views, the audit's cash identity). `Ledger` itself is
     /// UNTOUCHED: reserve/release/settle keep their exact signatures.
-    accounts: crate::account::AccountLedgers,
-    risk: RiskGate,
+    pub(crate) accounts: crate::account::AccountLedgers,
+    pub(crate) risk: RiskGate,
     /// issue #1189: the per-account risk/exit store, when one is open. `None`
     /// = the env fallback (every test, and a kernel with no store wired).
     /// Panel writes go here; a missing row falls back to the global matrix.
@@ -68,7 +68,7 @@ pub struct Core {
     /// E25 (#331): the intent-audit sink — one JSONL line per arbitrated
     /// suggestion plus the throttled `INTENT_DECISION` push state (§3.4).
     intent_audit: crate::arbitration::AuditSink,
-    positions: PositionManager,
+    pub(crate) positions: PositionManager,
     books: HashMap<TokenId, Book>,
     /// The pending-close exit-reason ledger — map, insertion order and the
     /// eviction/sweep counters as one grouped state machine (issue #780).

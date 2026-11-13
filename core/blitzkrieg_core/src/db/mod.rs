@@ -35,7 +35,7 @@ pub mod migrations;
 pub mod schema;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
@@ -67,9 +67,11 @@ pub const META_LEGACY_STATE_JSON: &str = "legacy_state_json";
 ///
 /// The connection sits behind a [`Mutex`] because the trading kernel is the
 /// single writer: one process, one connection, every statement serialised.
-/// Cloning is intentionally not implemented — there is exactly one store.
+/// Cloning dups the handle (same file, same single-writer discipline); there
+/// is still exactly one store on disk.
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     path: PathBuf,
 }
 
@@ -91,7 +93,7 @@ impl Database {
         configure(&conn)?;
         migrations::run(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             path,
         })
     }

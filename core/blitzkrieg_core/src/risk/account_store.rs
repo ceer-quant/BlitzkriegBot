@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 pub const MAX_ORDER_NOTIONAL_SETTING: &str = "risk.max_order_notional_usd";
 
 /// The durable per-account risk/exit store.
+#[derive(Clone)]
 pub struct AccountRiskDb {
     db: Database,
 }
@@ -240,6 +241,126 @@ impl AccountRiskDb {
             .map_err(|e| format!("account_exit_policy write failed: {e}"))?;
             Ok(())
         })
+    }
+}
+
+impl crate::service::Core {
+    /// The budget-ratio conflict warn after a `risk.setLimits` that touched
+    /// `maxOrderNotionalPct` (issue #1189 review note 5): a no-op unless
+    /// the policy actually conflicts, so the call site stays one line.
+    pub(crate) fn warn_budget_conflict_if_needed(
+        &self,
+        changes: &[crate::schema::RiskLimitChange],
+    ) {
+        if changes.iter().any(|c| c.field == "maxOrderNotionalPct") {
+            let account = self.accounts.active_id().to_string();
+            self.warn_if_budget_ratio_conflicts(&account);
+        }
+    }
+
+    /// Resolve the account a panel patch targets (issue #1189 per-account):
+    /// the named account, or the process default when absent. Refuses an
+    /// unknown account (fail-closed: never silently a sibling's row).
+    pub(crate) fn resolve_set_target(
+        &self,
+        account_id: Option<&str>,
+        op: &str,
+    ) -> Result<String, crate::model::CoreError> {
+        let target = account_id
+            .map(str::to_string)
+            .unwrap_or_else(|| self.accounts.active_id().to_string());
+        if self
+            .accounts
+            .account(&crate::account::AccountId::from(target.as_str()))
+            .is_none()
+        {
+            return Err(crate::model::CoreError::new(
+                crate::model::CoreErrorCode::InvalidParams,
+                format!("{op}: unknown account `{target}`; nothing was applied"),
+            ));
+        }
+        Ok(target)
+    }
+
+    /// The systemic write phase (issue #1189 per-account): apply the named
+    /// fields onto the target account's row, install it, and mirror it into
+    /// the global fallback for the default account so the legacy readout
+    /// keeps working. Returns the installed row for the persist phase.
+    pub(crate) fn install_account_risk_row(
+        &mut self,
+        target: &str,
+        base: &AccountRiskLimits,
+        patch: &crate::schema::SetSystemicLimitsParams,
+    ) -> AccountRiskLimits {
+        let mut row = base.clone();
+        let set = |bound: &mut Bound, to: Option<Decimal>| {
+            if let Some(v) = to {
+                *bound = Bound::new(v, LimitSource::Flag);
+            }
+        };
+        set(&mut row.max_single_loss_usd, patch.max_single_loss_usd);
+        set(
+            &mut row.max_daily_drawdown_usd,
+            patch.max_daily_drawdown_usd,
+        );
+        set(&mut row.max_position_size, patch.max_position_size);
+        set(
+            &mut row.max_consecutive_losses,
+            patch.max_consecutive_losses,
+        );
+        set(&mut row.cooldown_minutes, patch.cooldown_minutes);
+        set(
+            &mut row.max_order_notional_usd,
+            patch.max_order_notional_usd,
+        );
+        let is_default = target == crate::model::default_account_id().as_str();
+        self.risk
+            .config_mut()
+            .systemic
+            .set_account(target, row.clone());
+        if is_default {
+            self.risk.config_mut().systemic.account = row.clone();
+        }
+        row
+    }
+
+    /// The exit-discipline write phase (issue #1189 per-account): apply the
+    /// patch onto the current effective exit config, install it as the
+    /// account's row (mirroring the default account into the global), and
+    /// hand the row back for the persist phase.
+    pub(crate) fn install_account_exit_row(
+        &mut self,
+        target: &str,
+        current: &ExitConfig,
+        patch: &crate::schema::SetExitParams,
+    ) -> ExitConfig {
+        let mut exit = current.clone();
+        if let Some(v) = patch.stop_loss_pct {
+            exit.stop_loss_pct = v;
+        }
+        if let Some(v) = patch.take_profit_pct {
+            exit.take_profit_pct = v;
+        }
+        if let Some(sec) = patch.force_exit_sec {
+            exit.force_exit_sec = sec;
+        }
+        if let Some(on) = patch.trailing_enabled {
+            exit.trailing_enabled = on;
+        }
+        if let Some(on) = patch.strategy_exit_maker_first {
+            exit.strategy_exit_maker_first = on;
+        }
+        self.config
+            .positions
+            .account_exit
+            .insert(target.to_string(), exit.clone());
+        if target == crate::model::default_account_id().as_str() {
+            self.config.positions.exit = exit.clone();
+        }
+        let mut positions = self.config.positions.clone();
+        positions.exit = exit.clone();
+        self.positions.set_config(positions);
+        exit
     }
 }
 

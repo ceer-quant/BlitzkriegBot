@@ -137,10 +137,7 @@ impl Core {
         // recover across a kill -9 (the reply's `persisted` field says which
         // posture this kernel has: file-backed or memory-only).
         let persisted = self.risk_state_record_limits(&changes);
-        if changes.iter().any(|c| c.field == "maxOrderNotionalPct") {
-            let account = self.accounts.active_id().to_string();
-            self.warn_if_budget_ratio_conflicts(&account);
-        }
+        self.warn_budget_conflict_if_needed(&changes);
         for c in &changes {
             tracing::info!(
                 target: "risk",
@@ -210,24 +207,10 @@ impl Core {
             ));
         }
 
-        // Plan first, write later —— 被拒的 patch 一个字节都不动。
+        // Plan first, write later —— 被拒的 patch 一个字节都不动.
         // Per-account (issue #1189): the patch names its account's
-        // `account_risk` row; absent = the process default account (the
-        // legacy single-account spelling). A sibling's row is never touched.
-        let target = patch
-            .account_id
-            .clone()
-            .unwrap_or_else(|| self.accounts.active_id().to_string());
-        if self
-            .accounts
-            .account(&AccountId::from(target.as_str()))
-            .is_none()
-        {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("risk.setSystemic: unknown account `{target}`; nothing was applied"),
-            ));
-        }
+        // `account_risk` row; absent = the process default account.
+        let target = self.resolve_set_target(patch.account_id.as_deref(), "risk.setSystemic")?;
         let matrix = self.risk.config().systemic.account_for(&target).clone();
         let mut changes: Vec<SystemicLimitChange> = Vec::new();
         let mut plan = |field: &'static str,
@@ -295,41 +278,10 @@ impl Core {
             ));
         }
 
-        // Write phase: build the account's new row from the old one plus the
-        // named fields, install it, and mirror it into the global fallback
-        // only for the default account (so the legacy readout keeps working).
-        {
-            let mut row = matrix.clone();
-            let set = |bound: &mut crate::risk::limits::Bound, to: Option<Decimal>| {
-                if let Some(v) = to {
-                    *bound =
-                        crate::risk::limits::Bound::new(v, crate::risk::limits::LimitSource::Flag);
-                }
-            };
-            set(&mut row.max_single_loss_usd, patch.max_single_loss_usd);
-            set(
-                &mut row.max_daily_drawdown_usd,
-                patch.max_daily_drawdown_usd,
-            );
-            set(&mut row.max_position_size, patch.max_position_size);
-            set(
-                &mut row.max_consecutive_losses,
-                patch.max_consecutive_losses,
-            );
-            set(&mut row.cooldown_minutes, patch.cooldown_minutes);
-            set(
-                &mut row.max_order_notional_usd,
-                patch.max_order_notional_usd,
-            );
-            let is_default = target == crate::model::default_account_id().as_str();
-            self.risk
-                .config_mut()
-                .systemic
-                .set_account(&target, row.clone());
-            if is_default {
-                self.risk.config_mut().systemic.account = row;
-            }
-        }
+        // Write phase: the row build + install lives in
+        // `install_account_risk_row` (account_store.rs); this file keeps the
+        // plan/persist orchestration only.
+        let row = self.install_account_risk_row(&target, &matrix, patch);
 
         // File-first (operator ruling 2026-11-08 — same posture as the exit
         // discipline): the `.env` file is the single source of truth for the
@@ -338,7 +290,6 @@ impl Core {
         // (The old order — memory hot-write, then a best-effort persist in
         // the IPC face — is the divergence the ruling bans.)
         let persisted: bool = if let Some(db) = &self.account_risk_db {
-            let row = self.risk.config().systemic.account_for(&target).clone();
             db.save_risk(&target, &row).map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::Internal,
@@ -428,23 +379,10 @@ impl Core {
             ));
         }
 
-        // Plan first, write later —— 被拒的 patch 一个字节都不动。
+        // Plan first, write later —— 被拒的 patch 一个字节都不动.
         // Per-account (issue #1189): the named account's
         // `account_exit_policy` row; absent = the process default account.
-        let target = patch
-            .account_id
-            .clone()
-            .unwrap_or_else(|| self.accounts.active_id().to_string());
-        if self
-            .accounts
-            .account(&AccountId::from(target.as_str()))
-            .is_none()
-        {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("risk.setExit: unknown account `{target}`; nothing was applied"),
-            ));
-        }
+        let target = self.resolve_set_target(patch.account_id.as_deref(), "risk.setExit")?;
         let current = self
             .config
             .positions
@@ -546,33 +484,8 @@ impl Core {
         // logged — is precisely the divergence the ruling bans.) Without a
         // file (backtester, unwired tests): the direct memory write is the
         // whole story, honestly reported as `persisted: false`.
-        let exit_persisted: bool = if let Some(db) = &self.account_risk_db {
-            let mut exit = current.clone();
-            if let Some(v) = patch.stop_loss_pct {
-                exit.stop_loss_pct = v;
-            }
-            if let Some(v) = patch.take_profit_pct {
-                exit.take_profit_pct = v;
-            }
-            if let Some(sec) = patch.force_exit_sec {
-                exit.force_exit_sec = sec;
-            }
-            if let Some(on) = patch.trailing_enabled {
-                exit.trailing_enabled = on;
-            }
-            if let Some(on) = patch.strategy_exit_maker_first {
-                exit.strategy_exit_maker_first = on;
-            }
-            self.config
-                .positions
-                .account_exit
-                .insert(target.clone(), exit.clone());
-            if target == crate::model::default_account_id().as_str() {
-                self.config.positions.exit = exit.clone();
-            }
-            let mut positions = self.config.positions.clone();
-            positions.exit = self.config.positions.exit.clone();
-            self.positions.set_config(positions);
+        let exit_persisted: bool = if let Some(db) = self.account_risk_db.clone() {
+            let exit = self.install_account_exit_row(&target, &current, patch);
             db.save_exit(&target, &exit).map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::Internal,
