@@ -411,10 +411,13 @@ id = "legacy"
     }
 
     #[test]
-    fn reload_refuses_a_malformed_env_and_dies_on_an_unreadable_one() {
+    fn reload_refuses_a_malformed_env_and_treats_a_missing_one_as_zero_config() {
         // The malformed contract: a bad ACCOUNT_* value refuses the reload
-        // (fail-closed, the caller keeps the current configuration), and an
-        // UNREADABLE .env refuses too.
+        // (fail-closed, the caller keeps the current configuration). A
+        // MISSING .env is NOT malformed (#1189 PR-C): a write face that
+        // removed the last key no-ops on a non-existent file, and the
+        // reload resolves the zero-config single default — the same
+        // semantics a missing file has at boot.
         let dir = std::env::temp_dir().join(format!("bk-reload-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dot_env = dir.join(".env");
@@ -423,13 +426,14 @@ id = "legacy"
             .expect_err("a bad status refuses the reload");
         assert!(err.message.contains("STATUS=`magical`"), "{}", err.message);
 
-        let err = load_account_ledgers_for_reload(
+        let book = load_account_ledgers_for_reload(
             Path::new("/nonexistent/bk-none/.env"),
             5,
             TEST_ALLOWED_ROUNDS,
         )
-        .expect_err("an unreadable .env refuses the reload");
-        assert!(err.message.contains("unreadable"), "{}", err.message);
+        .expect("a missing .env reloads the zero-config single default");
+        assert_eq!(book.account_list().len(), 1);
+        assert_eq!(book.active_id().as_str(), "default");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
