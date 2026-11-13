@@ -185,3 +185,28 @@ BLITZKRIEG_*    面板 / 网关 / 更新检查 / 启动脚本进程设置
 - **不该删**：`manifest.json`（包合同）、`execution_policy.toml`（结构化合同）、
   `update.toml`（出厂缺省）、`default.toml`（显式 act 面文档；PR-4 可再评估）。
   它们各有 env 之上的独立身份，删除只会把结构化数据压平成 env 键名拼接。
+
+## 10. issue #1189（PR-E）：toml 配置正文移除与 `.env` 口径切换（2026-11-13）
+
+账户配置迁入 SQLite（`data/blitzkrieg.sqlite`）后的文档面清理，纯文档改动：
+
+- `user_layer/configs/default.toml`、`production-72h.toml`、
+  `production-live-100u.toml`：正文替换为退休说明——「本文件已退休，账户与
+  风控配置见 SQLite（issue #1189）」；`[risk]` / `[exit]` / `[engine]` 的
+  数字段全部移除（#967 后它们已不生效，保留数字只会被误当成武装中的配置）。
+  文件本身保留作历史存档（issue #1189 §4 推荐），旧值可在 git 历史中查到。
+- `user_layer/configs/accounts.toml`：同上处理（该文件已不在 main 中，无需操作）。
+- `.env.example`：
+  - 删除死键 `POLYMARKET_API_KEY`、`KALSHI_API_KEY`（全仓零读点，§3 判定）；
+    修正为真实读点 `KALSHI_API_KEY_ID` / `KALSHI_RSA_PRIVATE_KEY`。
+  - 新增 `BLITZKRIEG_DB_KEY` 段：主密钥（`openssl rand -base64 32` 生成，
+    32 字节 base64）；缺失或错误 = 拒绝解密并给出明确错误，**永不静默明文
+    回退**（评审意见 2）。
+  - 账户凭证段改为说明：凭证值留在 `.env` 作 fallback，账户行只存变量名，
+    库内为 AES-256-GCM 密文（`nonce + ciphertext + tag`，逐记录独立 nonce）。
+  - `DRY_RUN=true` 注释保持不动（默认必须保持 true）。
+- `README.md`：配置相关段落改为「账户与风控在 SQLite（`data/blitzkrieg.sqlite`），
+  `.env` 只留全局静态（`DRY_RUN`、面板口令、主密钥、凭证 fallback）」；
+  配置优先级表述同步删除已退役的 toml 层。
+- 扩展 `[meta]`（`extensions/*/config.toml`）与策略 manifest 是包合同，
+  不在本次清理范围（§1 判决不变）。

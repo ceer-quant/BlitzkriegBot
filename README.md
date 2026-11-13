@@ -129,7 +129,7 @@ cp .env.example .env
 bin/blitzkrieg run
 ```
 
-浏览器打开 **<http://127.0.0.1:51888/panel>** 并用 `.env` 里的凭证登录。先核对运行模式为 dry，再配置账户与策略；启用前不会自动运行策略。
+浏览器打开 **<http://127.0.0.1:51888/panel>** 并用 `.env` 里的凭证登录。先核对运行模式为 dry，再在面板配置账户与风控（写入 SQLite `data/blitzkrieg.sqlite`）；启用前不会自动运行策略。
 
 **路线 B：源码构建（开发者）**
 
@@ -169,7 +169,7 @@ blitzkrieg run
 - **dry 出厂默认**；唯一碰真钱的开关是 `DRY_RUN=false` / `--mode live`，且需真人明确授权——项目硬性规则。
 - **`--readonly` 结构性只读**：压过一切 live 请求，连下单通道都不构造。
 - **策略出厂全关**：内核 0 个启用策略；装包只是「已安装」，启用真值是「账户 × 策略」复合键。
-- **密钥只走环境变量**：`.env` 被 git 忽略，绝不入库；安全问题走 [`SECURITY.md`](./SECURITY.md) 私下披露。
+- **密钥只走环境变量或数据库**：`.env` 被 git 忽略，绝不入库；账户凭证以 **AES-256-GCM** 密文存入 SQLite（主密钥 `BLITZKRIEG_DB_KEY` 放 `.env`，缺失 = 解密拒绝、绝不静默明文回退）；安全问题走 [`SECURITY.md`](./SECURITY.md) 私下披露。
 - **数据与你自己的判断归你**：本项目按「现状」提供，不构成投资建议，不对任何损失负责。
 
 ## FAQ
@@ -180,7 +180,7 @@ blitzkrieg run
 
 **Q：策略装了为什么不动？** 三道门：包在 `user_layer/strategies_lua/`（安装）→ 面板策略页按账户打开开关（启用）→ 请求了策略但一个都没加载成功时内核拒绝启动（保护）。启动日志逐包打印装载与启用状态。
 
-**Q：数据存哪里？** 仓库根 `data/` 下：成交/订单/持仓 JSONL、`accounts.toml`、策略启用集。`blitzkrieg backup` 一键备份（每日轻量 + 周日全量）。
+**Q：数据存哪里？** 账户、风控、账本、交易与运行时状态在 SQLite（`data/blitzkrieg.sqlite`，凭证为 AES-256-GCM 密文）；历史 JSONL 文件只读留档。`blitzkrieg backup` 一键备份（每日轻量 + 周日全量）。
 
 **Q：怎么升级？** `blitzkrieg upgrade`（构建 → 停栈 → 换装 → 起栈 → 身份校验，全自动，上一代日志轮转保留）；或 `git pull && cargo build --release --workspace --locked`。正式版本以 [Releases](https://github.com/ceer-quant/BlitzkriegBot/releases) tag 为准（当前 **0.4.2**）。
 
@@ -249,7 +249,7 @@ docs/ · dev-docs/      公开文档 · 内部文档（不入库）
 
 ### 配置与旋钮
 
-- 配置优先级：**命令行参数 > `BK_*` 环境变量 > `user_layer/configs/default.toml` > 代码默认值**；启动时每个非默认值打印 `key=value (source)`；未知键逐个告警，绝不静默忽略。
+- 配置口径：**账户与风控在 SQLite（`data/blitzkrieg.sqlite`）**，`.env` 只留全局静态（`DRY_RUN`、面板口令、主密钥 `BLITZKRIEG_DB_KEY`、凭证 fallback）。配置优先级：**命令行参数 > `BK_*` 环境变量 > 代码默认值**（`user_layer/configs/*.toml` 已退休，#967 / #1189）；启动时每个非默认值打印 `key=value (source)`；未知键逐个告警，绝不静默忽略。
 - 常用旗标：`--mode dry|live` · `--readonly` · `--engine --feed-ws` · `--assets BTC,ETH,SOL,XRP` · `--round-sec 900 --min-time-left 180` · `--max-positions 2 --max-order-notional 6` · `--seed-balance 1000` · `--socket <path>` · `--enable/disable-strategy` · `--replay`。全表见 `blitzkrieg --help` 与 [`docs/rust-core/ARCHITECTURE.md`](./docs/rust-core/ARCHITECTURE.md)。
 - 服务器部署：`BLITZKRIEG_PANEL_ADDR=0.0.0.0:51888`（凭据必需；跨站一律 403）。
 
