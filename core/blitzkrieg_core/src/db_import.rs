@@ -7,12 +7,15 @@
 //! the bridge that folds the old world into it, exactly once.
 //!
 //! Rules straight from the issue:
-//!  - self-contained: the v1 DDL lives HERE ([`SCHEMA_V1`]) — the importer
+//!  - self-contained: the v1 DDL lives HERE ([`SCHEMA_V1`]), a verbatim copy
+//!    of the canonical store schema (`db::schema`, PR #1190) — the importer
 //!    builds its database from nothing and depends on no db module;
 //!  - idempotent: `kernel_meta.import_v1` is the done-marker — a second run
 //!    inserts nothing and returns the all-zero report;
-//!  - additive only: every insert is INSERT OR IGNORE, and NOTHING under
-//!    `data/` is modified or deleted (backups are the caller's call);
+//!  - additive only: every insert is INSERT OR IGNORE, and every legacy file
+//!    the run read is renamed to `<name>.migrated` AFTER the transaction
+//!    commits (best effort — a rename failure only warns; an existing
+//!    `.migrated` target is skipped, so re-runs never touch it again);
 //!  - money is TEXT end to end (the `decimal` wire spelling), never a float;
 //!  - `config.toml` / `*.toml` are retired — never read, never imported.
 //!
@@ -29,137 +32,232 @@ use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value};
 
-/// The v1 schema — issue #1189 §2: fourteen tables plus the indexes the
-/// per-account lookups need. Money columns are TEXT (the `decimal` wire
-/// spelling); `IF NOT EXISTS` keeps the DDL re-runnable.
-const SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS accounts (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL DEFAULT '',
-    venue           TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL DEFAULT 'active',
-    trading_enabled INTEGER NOT NULL DEFAULT 1,
-    created_at      TEXT
-);
-CREATE TABLE IF NOT EXISTS account_credentials (
-    account_id TEXT NOT NULL,
-    env_key    TEXT NOT NULL,
-    env_value  TEXT NOT NULL,
-    PRIMARY KEY (account_id, env_key),
-    FOREIGN KEY (account_id) REFERENCES accounts (id)
-);
-CREATE TABLE IF NOT EXISTS account_risk (
-    account_id TEXT NOT NULL,
-    key        TEXT NOT NULL,
-    value      TEXT NOT NULL,
-    PRIMARY KEY (account_id, key),
-    FOREIGN KEY (account_id) REFERENCES accounts (id)
-);
-CREATE TABLE IF NOT EXISTS account_exit_policy (
-    account_id  TEXT PRIMARY KEY,
-    policy_json TEXT NOT NULL,
-    FOREIGN KEY (account_id) REFERENCES accounts (id)
-);
-CREATE TABLE IF NOT EXISTS account_settings (
-    account_id TEXT NOT NULL,
-    key        TEXT NOT NULL,
-    value      TEXT NOT NULL,
-    PRIMARY KEY (account_id, key),
-    FOREIGN KEY (account_id) REFERENCES accounts (id)
-);
-CREATE TABLE IF NOT EXISTS strategy_assignments (
-    account_id  TEXT NOT NULL,
-    strategy    TEXT NOT NULL,
-    config_json TEXT,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (account_id, strategy),
-    FOREIGN KEY (account_id) REFERENCES accounts (id)
-);
-CREATE TABLE IF NOT EXISTS orders (
-    id              TEXT PRIMARY KEY,
-    account_id      TEXT NOT NULL DEFAULT 'default',
-    strategy        TEXT,
-    asset           TEXT,
-    direction       TEXT,
-    side            TEXT,
-    status          TEXT,
-    price           TEXT,
-    size            TEXT,
-    filled_size     TEXT,
-    payload_json    TEXT NOT NULL,
-    submitted_at_ms INTEGER,
-    updated_at_ms   INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_orders_account ON orders (account_id);
-CREATE TABLE IF NOT EXISTS fills (
-    id           TEXT PRIMARY KEY,
-    order_id     TEXT NOT NULL,
-    account_id   TEXT NOT NULL DEFAULT 'default',
-    price        TEXT NOT NULL,
-    size         TEXT NOT NULL,
-    fee_usd      TEXT,
-    filled_at_ms INTEGER,
-    payload_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_fills_order ON fills (order_id);
-CREATE TABLE IF NOT EXISTS positions (
-    id            TEXT PRIMARY KEY,
-    account_id    TEXT NOT NULL DEFAULT 'default',
-    strategy      TEXT,
-    asset         TEXT,
-    direction     TEXT,
-    entry_price   TEXT,
-    current_price TEXT,
-    shares        TEXT,
-    cost_usd      TEXT,
-    entered_at_ms INTEGER,
-    payload_json  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_positions_account ON positions (account_id);
-CREATE TABLE IF NOT EXISTS trades (
-    id            TEXT PRIMARY KEY,
-    account_id    TEXT NOT NULL DEFAULT 'default',
-    strategy      TEXT,
-    asset         TEXT,
-    direction     TEXT,
-    entry_price   TEXT,
-    exit_price    TEXT,
-    shares        TEXT,
-    cost_usd      TEXT,
-    fees_usd      TEXT,
-    gross_pnl_usd TEXT,
-    net_pnl_usd   TEXT,
-    payload_json  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_trades_account ON trades (account_id);
-CREATE TABLE IF NOT EXISTS ledger_entries (
-    id           TEXT PRIMARY KEY,
-    account_id   TEXT NOT NULL,
-    kind         TEXT NOT NULL,
-    amount       TEXT NOT NULL,
-    ts_ms        INTEGER,
-    payload_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger_entries (account_id);
-CREATE TABLE IF NOT EXISTS audit_log (
-    id     INTEGER PRIMARY KEY,
-    ts     TEXT NOT NULL,
-    event  TEXT NOT NULL,
-    detail TEXT
-);
-CREATE TABLE IF NOT EXISTS kernel_meta (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at TEXT
-);
+/// The v1 schema — a verbatim copy of the canonical store DDL (`db::schema`,
+/// main PR #1190): 18 tables plus the 8 indexes the per-account lookups
+/// need. Money columns are TEXT (the `decimal` wire spelling); `IF NOT
+/// EXISTS` keeps the DDL re-runnable. The SQL is byte-identical to the
+/// canonical `SCHEMA_V1` so an imported database and a migrated one are the
+/// same shape.
+const SCHEMA_V1: &str = r#"
+-- Schema version ledger. The migration runner owns this table's bootstrap;
+-- it is repeated here so SCHEMA_V1 alone is a complete v1 database.
 CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+  version       INTEGER PRIMARY KEY,
+  applied_at_ms INTEGER NOT NULL
 );
-";
+
+-- Kernel metadata (import marker, active/display account, update + runtime
+-- cells). `dry_run` is deliberately NOT storable here: whether the process
+-- simulates is decided by the environment alone (issue #1189 §2/§4).
+CREATE TABLE IF NOT EXISTS kernel_meta (
+  key           TEXT PRIMARY KEY,
+  value         TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  CHECK (lower(key) <> 'dry_run')
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  market_type     TEXT NOT NULL,          -- prediction / spot / ...
+  status          TEXT NOT NULL,          -- active / read_only / frozen / suspended
+  status_reason   TEXT,
+  venue           TEXT NOT NULL DEFAULT '',
+  trading_enabled INTEGER NOT NULL,
+  rounds_json     TEXT NOT NULL DEFAULT '[]',
+  opening_equity  TEXT,                   -- decimal string, never REAL
+  updated_at_ms   INTEGER NOT NULL
+);
+
+-- Credential ENV VAR NAMES only, plus the AES-256-GCM sealed payload
+-- (nonce || ciphertext || tag) and the name of the env var holding the
+-- master key. The plaintext value never lands in this table.
+CREATE TABLE IF NOT EXISTS account_credentials (
+  account_id         TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  api_key_env        TEXT,
+  secret_env         TEXT,
+  passphrase_env     TEXT,
+  private_key_env    TEXT,
+  encrypted_payload  BLOB,
+  encryption_key_env TEXT,
+  updated_at_ms      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_risk (
+  account_id             TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  max_single_loss_usd    TEXT NOT NULL,
+  max_daily_drawdown_usd TEXT NOT NULL,
+  max_position_size      TEXT NOT NULL,
+  max_consecutive_losses TEXT NOT NULL,
+  cooldown_minutes       TEXT NOT NULL,
+  source                 TEXT NOT NULL,   -- default / imported_env / imported_toml / panel / flag
+  updated_at_ms          INTEGER NOT NULL
+);
+
+-- The full ExitConfig as JSON; `source` as in account_risk.
+CREATE TABLE IF NOT EXISTS account_exit_policy (
+  account_id    TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  policy_json   TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+-- Execution policy, sizing ratios, daily loss, round anchor, hot caps, the
+-- shadow-evolution copy. Money and ratios are decimal strings; POLICY_RULES
+-- values are JSON text.
+CREATE TABLE IF NOT EXISTS account_settings (
+  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  key           TEXT NOT NULL,
+  value         TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (account_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_assignments (
+  account_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  strategy           TEXT NOT NULL,
+  enabled            INTEGER NOT NULL,
+  params_json        TEXT,
+  round_duration_sec INTEGER,             -- STRATEGY_<NAME>_ROUND_DURATION_SEC
+  updated_at_ms      INTEGER NOT NULL,
+  PRIMARY KEY (account_id, strategy)
+);
+
+CREATE TABLE IF NOT EXISTS venues (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL DEFAULT '',
+  config_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS markets (
+  id         TEXT PRIMARY KEY,
+  venue_id   TEXT NOT NULL,
+  account_id TEXT,
+  meta_json  TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS rounds (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id    TEXT NOT NULL,
+  venue_id      TEXT,
+  market_id     TEXT,
+  duration_sec  INTEGER,
+  started_at_ms INTEGER,
+  ends_at_ms    INTEGER,
+  state_json    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  account_id    TEXT NOT NULL,
+  order_id      TEXT NOT NULL,
+  payload_json  TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (account_id, order_id)
+);
+
+CREATE TABLE IF NOT EXISTS fills (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id   TEXT NOT NULL,
+  order_id     TEXT,
+  payload_json TEXT NOT NULL,
+  ts_ms        INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+  account_id    TEXT NOT NULL,
+  position_id   TEXT NOT NULL,
+  payload_json  TEXT NOT NULL,
+  open          INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (account_id, position_id)
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+  id           TEXT PRIMARY KEY,
+  account_id   TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  exit_time    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id   TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  amount       TEXT NOT NULL,             -- decimal string
+  payload_json TEXT NOT NULL,
+  ts_ms        INTEGER NOT NULL
+);
+
+-- Cross-account arbitrage legs. v1 holds exactly one row (id = 1); it belongs
+-- to two accounts, so it is NOT folded into a single account's settings.
+CREATE TABLE IF NOT EXISTS arb_pairs (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  leg_a_venue   TEXT NOT NULL,
+  leg_a_account TEXT NOT NULL,
+  leg_b_venue   TEXT NOT NULL,
+  leg_b_account TEXT NOT NULL,
+  pairs_json    TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_ms       INTEGER NOT NULL,
+  account_id  TEXT,
+  actor       TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  detail_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fills_account     ON fills(account_id, ts_ms);
+CREATE INDEX IF NOT EXISTS idx_ledger_account    ON ledger_entries(account_id, ts_ms);
+CREATE INDEX IF NOT EXISTS idx_audit_ts          ON audit_log(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_rounds_account    ON rounds(account_id);
+CREATE INDEX IF NOT EXISTS idx_orders_account    ON orders(account_id, updated_at_ms);
+CREATE INDEX IF NOT EXISTS idx_positions_account ON positions(account_id, open);
+CREATE INDEX IF NOT EXISTS idx_trades_account    ON trades(account_id, exit_time);
+CREATE INDEX IF NOT EXISTS idx_markets_venue     ON markets(venue_id);
+"#;
+
+/// Every table the v1 schema creates, in dependency order (parents first) —
+/// the canonical inventory, asserted against `sqlite_master` by the tests.
+pub const TABLES: &[&str] = &[
+    "schema_migrations",
+    "kernel_meta",
+    "accounts",
+    "account_credentials",
+    "account_risk",
+    "account_exit_policy",
+    "account_settings",
+    "strategy_assignments",
+    "venues",
+    "markets",
+    "rounds",
+    "orders",
+    "fills",
+    "positions",
+    "trades",
+    "ledger_entries",
+    "arb_pairs",
+    "audit_log",
+];
+
+/// Every index the v1 schema creates — the canonical inventory.
+pub const INDEXES: &[&str] = &[
+    "idx_fills_account",
+    "idx_ledger_account",
+    "idx_audit_ts",
+    "idx_rounds_account",
+    "idx_orders_account",
+    "idx_positions_account",
+    "idx_trades_account",
+    "idx_markets_venue",
+];
 
 /// What one import run folded in. Counts are rows actually INSERTED, so the
-/// second (idempotent) run reports all zeros.
+/// second (idempotent) run reports all zeros. `skipped` lists every legacy
+/// input that was absent (missing files) or already carried a `.migrated`
+/// backup (renamed in an earlier run).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImportReport {
     pub accounts: usize,
@@ -178,20 +276,21 @@ pub struct ImportReport {
 /// use): `account_id` absent = the `default` book.
 const DEFAULT_ACCOUNT: &str = "default";
 
-/// The cockpit risk family (`BK_RISK_*`, COCKPIT_KEYS minus the exit family)
-/// — the `account_risk` row set, global value with a per-account `_SFX`
-/// spelling on top.
+/// The cockpit systemic-risk family (`BK_RISK_*`, COCKPIT_KEYS minus the
+/// exit family) — the `account_risk` row set, global value with a
+/// per-account `_SFX` spelling on top. These five land in the fixed
+/// `account_risk` columns; `MAX_ORDER_NOTIONAL_USD` is a settings key, not
+/// a risk-matrix column (see [`SETTING_KEYS`]).
 const RISK_KEYS: &[&str] = &[
     "MAX_SINGLE_LOSS_USD",
     "MAX_DAILY_DRAWDOWN_USD",
     "MAX_POSITION_SIZE",
     "MAX_CONSECUTIVE_LOSSES",
     "COOLDOWN_MINUTES",
-    "MAX_ORDER_NOTIONAL_USD",
 ];
 
 /// The cockpit exit family (`BK_EXIT_*`) — folded per account into one
-/// `policy_json` object.
+/// `policy_json` object (the `ExitConfig` JSON projection).
 const EXIT_KEYS: &[&str] = &[
     "STOP_LOSS_PCT",
     "TAKE_PROFIT_PCT",
@@ -200,10 +299,13 @@ const EXIT_KEYS: &[&str] = &[
     "STRATEGY_EXIT_MAKER_FIRST",
 ];
 
-/// The `account_settings` key set: the execution-policy family (`POLICY_*`
-/// wins over the bare alias), the pre-#751 bare names (`BUDGET_RATIO`,
-/// `MAX_BUDGET_USD`), and the launcher's sizing / daily-loss / notional caps.
+/// The `account_settings` key set: the cockpit systemic cap the risk matrix
+/// has no column for (`MAX_ORDER_NOTIONAL_USD`), the execution-policy family
+/// (`POLICY_*` wins over the bare alias), the pre-#751 bare names
+/// (`BUDGET_RATIO`, `MAX_BUDGET_USD`), and the launcher's sizing /
+/// daily-loss / notional caps.
 const SETTING_KEYS: &[&str] = &[
+    "BK_RISK_MAX_ORDER_NOTIONAL_USD",
     "BUDGET_RATIO",
     "MIN_BUDGET_USD",
     "MAX_BUDGET_USD",
@@ -216,12 +318,20 @@ const SETTING_KEYS: &[&str] = &[
     "BK_MAX_ORDER_NOTIONAL_PCT",
 ];
 
+/// The audit actor a legacy import lands under.
+const IMPORT_ACTOR: &str = "db_import_v1";
+
 /// Import the legacy world into `db_path`, exactly once.
 ///
 /// `env_lookup` is the `.env` read face (the kernel passes
 /// `|k| std::env::var(k).ok()`); every account / risk / exit / policy knob
 /// is read through it. Returns what was folded in — the second run sees the
 /// `import_v1` marker and returns the all-zero report.
+///
+/// After the transaction commits, every legacy file the run actually read
+/// is renamed to `<name>.migrated` (best effort: a rename failure only
+/// warns; an existing `.migrated` target is skipped — the file was already
+/// folded by an earlier run and must not be read twice).
 pub fn import_once(
     db_path: &Path,
     env_lookup: impl Fn(&str) -> Option<String>,
@@ -234,6 +344,7 @@ pub fn import_once(
         .with_context(|| format!("open import database {}", db_path.display()))?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA_V1)?;
 
     // The done-marker: a present import_v1 makes this run a no-op.
@@ -250,9 +361,13 @@ pub fn import_once(
 
     let data_dir = legacy_data_dir(db_path);
     let accounts = account_ids(&env_lookup);
-    let now = utc_now();
+    let now = now_ms();
     let mut report = ImportReport::default();
     let mut skipped: Vec<String> = Vec::new();
+    // The files this run actually read (present, non-`.migrated`): the ones
+    // the post-commit backup phase renames. Ledger journals are per-account
+    // and get their own entries appended as they are folded.
+    let mut imported: Vec<PathBuf> = Vec::new();
 
     // One transaction: the whole import lands together with its marker,
     // migration row and audit row — a crash mid-import leaves NO
@@ -264,40 +379,79 @@ pub fn import_once(
         report.exit_rows += insert_account_exit_policy(&tx, id, &env_lookup)?;
         report.settings += insert_account_settings(&tx, id, &env_lookup)?;
     }
-    report.orders = fold_orders(&tx, &data_dir, &mut skipped)?;
-    report.positions = fold_positions(&tx, &data_dir, &mut skipped)?;
-    report.trades = fold_trades(&tx, &data_dir, &mut skipped)?;
-    report.ledger_entries = fold_ledgers(&tx, &data_dir, &accounts, &mut skipped)?;
-    import_state_files(&tx, &data_dir, &now, &mut skipped)?;
+    report.orders = fold_orders(&tx, &data_dir, &mut imported, &mut skipped)?;
+    report.positions = fold_positions(&tx, &data_dir, &mut imported, &mut skipped)?;
+    report.trades = fold_trades(&tx, &data_dir, &mut imported, &mut skipped)?;
+    report.ledger_entries = fold_ledgers(&tx, &data_dir, &accounts, &mut imported, &mut skipped)?;
+    import_state_files(&tx, &data_dir, now, &mut imported, &mut skipped)?;
     tx.execute(
-        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (1, ?1)",
         params![now],
     )?;
     tx.execute(
-        "INSERT OR IGNORE INTO kernel_meta (key, value, updated_at) \
+        "INSERT OR IGNORE INTO kernel_meta (key, value, updated_at_ms) \
          VALUES ('import_v1', '1', ?1)",
         params![now],
     )?;
-    let detail = format!(
-        "accounts={} risk_rows={} exit_rows={} settings={} orders={} positions={} \
-         trades={} ledger_entries={} skipped={}",
-        report.accounts,
-        report.risk_rows,
-        report.exit_rows,
-        report.settings,
-        report.orders,
-        report.positions,
-        report.trades,
-        report.ledger_entries,
-        skipped.len(),
-    );
+    let detail = serde_json::json!({
+        "accounts": report.accounts,
+        "risk_rows": report.risk_rows,
+        "exit_rows": report.exit_rows,
+        "settings": report.settings,
+        "orders": report.orders,
+        "positions": report.positions,
+        "trades": report.trades,
+        "ledger_entries": report.ledger_entries,
+        "skipped": skipped.len(),
+    })
+    .to_string();
     report.audit = tx.execute(
-        "INSERT INTO audit_log (ts, event, detail) VALUES (?1, 'db_import_v1', ?2)",
-        params![now, detail],
+        "INSERT INTO audit_log (ts_ms, account_id, actor, action, detail_json) \
+         VALUES (?1, NULL, ?2, 'db_import_v1', ?3)",
+        params![now, IMPORT_ACTOR, detail],
     )?;
     tx.commit()?;
+
+    // Post-commit backup: rename every file the run read. Best effort —
+    // failures warn and never fail the import (the database is the source
+    // of truth now; the rename only stops a second reader from double-
+    // counting the file).
+    for path in &imported {
+        backup_as_migrated(path, &mut skipped);
+    }
     report.skipped = skipped;
     Ok(report)
+}
+
+/// Rename `path` to `<path>.migrated` (i.e. `orders.jsonl` →
+/// `orders.jsonl.migrated`). Skips (records in `skipped`) when the target
+/// already exists — the file was folded by an earlier run. A rename failure
+/// only warns.
+fn backup_as_migrated(path: &Path, skipped: &mut Vec<String>) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let target = path.with_extension(format!(
+        "{}.migrated",
+        path.extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    if target.exists() {
+        skipped.push(format!("{name} (already migrated)"));
+        return;
+    }
+    if let Err(e) = std::fs::rename(path, &target) {
+        eprintln!(
+            "warn: db_import: backup rename {} -> {} failed: {e}",
+            path.display(),
+            target.display()
+        );
+        skipped.push(format!("{name} (backup failed)"));
+        return;
+    }
+    skipped.push(format!("{name} (migrated)"));
 }
 
 /// The legacy `data/` tree: the database's own directory (the deployment
@@ -341,7 +495,9 @@ fn env_account_suffix(id: &str) -> String {
 }
 
 /// One `accounts` row per id: name / venue / status / trading_enabled from
-/// `ACCOUNT_<SFX>_*`, defaulting to the id / '' / active / 1.
+/// `ACCOUNT_<SFX>_*`, defaulting to the id / '' / active / 1. `market_type`
+/// is a placeholder (`prediction`) — the canonical schema requires the
+/// column and the legacy `.env` carries no market-type knob.
 fn insert_account(
     tx: &Connection,
     account_id: &str,
@@ -355,40 +511,52 @@ fn insert_account(
         .map(|raw| !matches!(raw.trim(), "false" | "0" | "no" | "off"))
         .unwrap_or(true);
     Ok(tx.execute(
-        "INSERT OR IGNORE INTO accounts (id, name, venue, status, trading_enabled) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![account_id, name, venue, status, trading_enabled],
+        "INSERT OR IGNORE INTO accounts \
+         (id, name, market_type, status, venue, trading_enabled, updated_at_ms) \
+         VALUES (?1, ?2, 'prediction', ?3, ?4, ?5, ?6)",
+        params![account_id, name, status, venue, trading_enabled, now_ms()],
     )?)
 }
 
-/// One `account_risk` map per account: every global `BK_RISK_*` value, with
-/// the `BK_RISK_*_<SFX>` spelling on top (per-account value wins).
+/// One `account_risk` row per account: the five cockpit systemic limits,
+/// global `BK_RISK_*` value with the `BK_RISK_*_<SFX>` spelling on top
+/// (per-account value wins). Fixed columns, not EAV — `source` records where
+/// the row came from (`imported_env`). Every column is NOT NULL, so a
+/// missing env value falls back to the shipped `'0'` (the factory posture:
+/// bound off).
 fn insert_account_risk(
     tx: &Connection,
     account_id: &str,
     env: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<usize> {
     let sfx = env_account_suffix(account_id);
-    let mut rows: BTreeMap<&str, String> = BTreeMap::new();
+    let mut values: Vec<String> = Vec::with_capacity(RISK_KEYS.len());
     for key in RISK_KEYS {
         let value = env(&format!("BK_RISK_{key}_{sfx}")).or_else(|| env(&format!("BK_RISK_{key}")));
-        if let Some(value) = value {
-            rows.insert(key, value);
-        }
+        values.push(value.unwrap_or_else(|| "0".to_string()));
     }
-    let mut inserted = 0;
-    for (key, value) in &rows {
-        inserted += tx.execute(
-            "INSERT OR IGNORE INTO account_risk (account_id, key, value) VALUES (?1, ?2, ?3)",
-            params![account_id, key, value],
-        )?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(RISK_KEYS.len() + 3);
+    params.push(&account_id);
+    for value in &values {
+        params.push(value);
     }
-    Ok(inserted)
+    params.push(&"imported_env");
+    let now = now_ms();
+    params.push(&now);
+    Ok(tx.execute(
+        "INSERT OR IGNORE INTO account_risk \
+         (account_id, max_single_loss_usd, max_daily_drawdown_usd, max_position_size, \
+          max_consecutive_losses, cooldown_minutes, source, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params_from_iter(params),
+    )?)
 }
 
 /// One `account_exit_policy` row per account (skipped when the env carries no
 /// `BK_EXIT_*` value for it): the global exit knobs with the `_SFX` spelling
-/// on top, rendered as one `policy_json` object.
+/// on top, rendered as one `policy_json` object. Percentages and seconds are
+/// JSON NUMBERS (the `policy_json` contract: `{"stop_loss_pct":12,
+/// "take_profit_pct":100}` — numeric, not stringly).
 fn insert_account_exit_policy(
     tx: &Connection,
     account_id: &str,
@@ -399,7 +567,29 @@ fn insert_account_exit_policy(
     for key in EXIT_KEYS {
         let value = env(&format!("BK_EXIT_{key}_{sfx}")).or_else(|| env(&format!("BK_EXIT_{key}")));
         if let Some(value) = value {
-            policy.insert((*key).to_string(), Value::String(value));
+            // Numbers stay numbers; booleans parse; anything else is kept
+            // as the raw string (the panel's unparseable-value rule).
+            let parsed = if matches!(key, &"TRAILING_ENABLED" | &"STRATEGY_EXIT_MAKER_FIRST") {
+                match value.trim() {
+                    "true" => Some(Value::Bool(true)),
+                    "false" => Some(Value::Bool(false)),
+                    _ => None,
+                }
+            } else {
+                value
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .map(Value::from)
+                    .or_else(|| {
+                        value
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .and_then(|n| serde_json::Number::from_f64(n).map(Value::Number))
+                    })
+            };
+            policy.insert((*key).to_string(), parsed.unwrap_or(Value::String(value)));
         }
     }
     if policy.is_empty() {
@@ -407,13 +597,16 @@ fn insert_account_exit_policy(
     }
     let policy_json = serde_json::json!(policy).to_string();
     Ok(tx.execute(
-        "INSERT OR IGNORE INTO account_exit_policy (account_id, policy_json) VALUES (?1, ?2)",
-        params![account_id, policy_json],
+        "INSERT OR IGNORE INTO account_exit_policy (account_id, policy_json, source, updated_at_ms) \
+         VALUES (?1, ?2, 'imported_env', ?3)",
+        params![account_id, policy_json, now_ms()],
     )?)
 }
 
 /// The `account_settings` rows for every account: `POLICY_*` beats the bare
-/// alias for every key that has both (the execution policy's env rule).
+/// alias for every key that has both (the execution policy's env rule), and
+/// `BK_RISK_MAX_ORDER_NOTIONAL_USD` (the systemic cap with no risk-matrix
+/// column) lands here as a plain setting.
 fn insert_account_settings(
     tx: &Connection,
     account_id: &str,
@@ -429,8 +622,9 @@ fn insert_account_settings(
     let mut inserted = 0;
     for (key, value) in &rows {
         inserted += tx.execute(
-            "INSERT OR IGNORE INTO account_settings (account_id, key, value) VALUES (?1, ?2, ?3)",
-            params![account_id, key, value],
+            "INSERT OR IGNORE INTO account_settings (account_id, key, value, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, key, value, now_ms()],
         )?;
     }
     Ok(inserted)
@@ -438,10 +632,13 @@ fn insert_account_settings(
 
 /// `data/orders/orders.jsonl` → `orders`: the log is append-only CURRENT
 /// snapshots, so fold to the LATEST line per order id (later lines win — the
-/// `OrderDb::load` rule) and insert one row per id.
+/// `OrderDb::load` rule) and insert one row per id. The whole original line
+/// is the `payload_json` (no business-column split); `order_id` comes from
+/// the row's id fields; `updated_at_ms` from the row (fallback: now).
 fn fold_orders(
     tx: &Connection,
     data_dir: &Path,
+    imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
     const REL: &str = "orders/orders.jsonl";
@@ -450,6 +647,13 @@ fn fold_orders(
         skipped.push(REL.to_string());
         return Ok(0);
     }
+    if path.with_extension("jsonl.migrated").exists() {
+        // Already folded by an earlier run; the marker makes the whole
+        // import a no-op anyway, but skip the rename dance explicitly.
+        skipped.push(REL.to_string());
+        return Ok(0);
+    }
+    imported.push(path.clone());
     let mut latest: BTreeMap<String, (String, Value)> = BTreeMap::new();
     for (line, row) in read_jsonl(&path) {
         if let Some(id) = str_field(&row, &["orderId", "order_id", "id"])
@@ -461,24 +665,22 @@ fn fold_orders(
     let mut inserted = 0;
     for (id, (payload, row)) in &latest {
         inserted += tx.execute(
-            "INSERT OR IGNORE INTO orders \
-             (id, account_id, strategy, asset, direction, side, status, \
-              price, size, filled_size, payload_json, submitted_at_ms, updated_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR IGNORE INTO orders (account_id, order_id, payload_json, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
             params![
-                id,
                 account_of(row),
-                str_field(row, &["strategy"]),
-                str_field(row, &["asset"]),
-                str_field(row, &["direction"]),
-                str_field(row, &["side"]),
-                str_field(row, &["status"]),
-                str_field(row, &["price"]),
-                str_field(row, &["size"]),
-                str_field(row, &["filledSize", "filled_size"]),
+                id,
                 payload,
-                i64_field(row, &["submittedAtMs", "submitted_at_ms"]),
-                i64_field(row, &["updatedAtMs", "updated_at_ms"]),
+                i64_field(
+                    row,
+                    &[
+                        "updatedAtMs",
+                        "updated_at_ms",
+                        "submittedAtMs",
+                        "submitted_at_ms"
+                    ]
+                )
+                .unwrap_or_else(now_ms),
             ],
         )?;
     }
@@ -487,10 +689,12 @@ fn fold_orders(
 
 /// `data/positions/positions.dry.jsonl` then `positions.jsonl` →
 /// `positions`: the dry snapshot loads first, the live one overwrites — same
-/// id, live wins.
+/// id, live wins. The whole line is `payload_json`; the `open` flag comes
+/// from the row (absent = still open — the live book's default).
 fn fold_positions(
     tx: &Connection,
     data_dir: &Path,
+    imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
     let mut folded: BTreeMap<String, (String, Value)> = BTreeMap::new();
@@ -500,6 +704,11 @@ fn fold_positions(
             skipped.push(rel.to_string());
             continue;
         }
+        if path.with_extension("jsonl.migrated").exists() {
+            skipped.push(rel.to_string());
+            continue;
+        }
+        imported.push(path.clone());
         for (line, row) in read_jsonl(&path) {
             if let Some(id) = str_field(&row, &["id", "position_id"])
                 && !id.is_empty()
@@ -511,33 +720,41 @@ fn fold_positions(
     let mut inserted = 0;
     for (id, (payload, row)) in &folded {
         inserted += tx.execute(
-            "INSERT OR IGNORE INTO positions \
-             (id, account_id, strategy, asset, direction, entry_price, current_price, \
-              shares, cost_usd, entered_at_ms, payload_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT OR IGNORE INTO positions (account_id, position_id, payload_json, open, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                id,
                 account_of(row),
-                str_field(row, &["strategy"]),
-                str_field(row, &["asset"]),
-                str_field(row, &["direction"]),
-                str_field(row, &["entryPrice", "entry_price"]),
-                str_field(row, &["currentPrice", "current_price"]),
-                str_field(row, &["shares"]),
-                str_field(row, &["costUsd", "cost_usd"]),
-                i64_field(row, &["enteredAtMs", "entered_at_ms"]),
+                id,
                 payload,
+                open_flag(row),
+                i64_field(row, &["updatedAtMs", "updated_at_ms", "enteredAtMs", "entered_at_ms"])
+                    .unwrap_or_else(now_ms),
             ],
         )?;
     }
     Ok(inserted)
 }
 
+/// The `open` flag of a legacy position row: an explicit `open` / `isOpen`
+/// field wins, a status field is the fallback (`Closed` / `closed` = 0).
+/// Absent both = still open (the live book's default).
+fn open_flag(row: &Value) -> bool {
+    if let Some(flag) = bool_field(row, &["open", "isOpen"]) {
+        return flag;
+    }
+    if let Some(status) = str_field(row, &["status"]) {
+        return !matches!(status.trim(), "closed" | "Closed" | "settled" | "Settled");
+    }
+    true
+}
+
 /// `data/trades/trades.jsonl` then `trades-live.jsonl` → `trades`: dry log
-/// first, live log overwrites — same id, live wins.
+/// first, live log overwrites — same id, live wins. The whole line is
+/// `payload_json`; `exit_time` from the row (fallback: now).
 fn fold_trades(
     tx: &Connection,
     data_dir: &Path,
+    imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
     let mut folded: BTreeMap<String, (String, Value)> = BTreeMap::new();
@@ -547,6 +764,11 @@ fn fold_trades(
             skipped.push(rel.to_string());
             continue;
         }
+        if path.with_extension("jsonl.migrated").exists() {
+            skipped.push(rel.to_string());
+            continue;
+        }
+        imported.push(path.clone());
         for (line, row) in read_jsonl(&path) {
             if let Some(id) = str_field(&row, &["id", "trade_id"])
                 && !id.is_empty()
@@ -558,24 +780,17 @@ fn fold_trades(
     let mut inserted = 0;
     for (id, (payload, row)) in &folded {
         inserted += tx.execute(
-            "INSERT OR IGNORE INTO trades \
-             (id, account_id, strategy, asset, direction, entry_price, exit_price, shares, \
-              cost_usd, fees_usd, gross_pnl_usd, net_pnl_usd, payload_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR IGNORE INTO trades (id, account_id, payload_json, exit_time) \
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 id,
                 account_of(row),
-                str_field(row, &["strategy"]),
-                str_field(row, &["asset"]),
-                str_field(row, &["direction"]),
-                str_field(row, &["entryPrice", "entry_price"]),
-                str_field(row, &["exitPrice", "exit_price"]),
-                str_field(row, &["shares"]),
-                str_field(row, &["costUsd", "cost_usd"]),
-                str_field(row, &["feesUsd", "fees_usd"]),
-                str_field(row, &["grossPnlUsd", "gross_pnl_usd"]),
-                str_field(row, &["netPnlUsd", "net_pnl_usd"]),
                 payload,
+                i64_field(
+                    row,
+                    &["exitTime", "exit_time", "closedAtMs", "closed_at_ms"]
+                )
+                .unwrap_or_else(now_ms),
             ],
         )?;
     }
@@ -583,12 +798,15 @@ fn fold_trades(
 }
 
 /// `data/ledger/<account>.journal.dry.jsonl` / `.live.jsonl` → `ledger_entries`:
-/// one row per journal line, keyed `<account>:<mode>:<seq>`; `kind` / `amount`
-/// are read from the row and the amount stays the TEXT it was serialized as.
+/// one row per journal line; `kind` / `amount` are read from the row (the
+/// amount stays the TEXT it was serialized as), the whole line is
+/// `payload_json`, `ts_ms` from the row (fallback: now). The autoincrement
+/// `id` is the database's business, not the import's.
 fn fold_ledgers(
     tx: &Connection,
     data_dir: &Path,
     accounts: &[String],
+    imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
     let mut inserted = 0;
@@ -600,22 +818,19 @@ fn fold_ledgers(
                 skipped.push(rel);
                 continue;
             }
-            for (seq, (line, row)) in read_jsonl(&path).into_iter().enumerate() {
+            if path.with_extension("jsonl.migrated").exists() {
+                skipped.push(rel);
+                continue;
+            }
+            imported.push(path.clone());
+            for (line, row) in read_jsonl(&path) {
                 let kind = str_field(&row, &["kind"]).unwrap_or_default();
                 let amount = str_field(&row, &["amount"]).unwrap_or_default();
-                let at_ms = i64_field(&row, &["atMs", "at_ms"]);
+                let at_ms = i64_field(&row, &["atMs", "at_ms", "ts", "tsMs", "ts_ms"]);
                 inserted += tx.execute(
-                    "INSERT OR IGNORE INTO ledger_entries \
-                     (id, account_id, kind, amount, ts_ms, payload_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        format!("{account}:{mode}:{}", seq + 1),
-                        account,
-                        kind,
-                        amount,
-                        at_ms,
-                        line,
-                    ],
+                    "INSERT INTO ledger_entries (account_id, kind, amount, payload_json, ts_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![account, kind, amount, line, at_ms.unwrap_or_else(now_ms),],
                 )?;
             }
         }
@@ -626,11 +841,13 @@ fn fold_ledgers(
 /// The state snapshots → `kernel_meta` (raw file contents, no re-encoding):
 /// `data/state.json` → `legacy_state_json`, `data/runtime/config.json` →
 /// `runtime_config_json`, `data/update/state.json` → `update_state_json`. A
-/// missing file is skipped-and-noted, never fatal.
+/// missing file is skipped-and-noted, never fatal. Files the run actually
+/// read are queued for the `.migrated` backup.
 fn import_state_files(
     tx: &Connection,
     data_dir: &Path,
-    now: &str,
+    now: i64,
+    imported: &mut Vec<PathBuf>,
     skipped: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     for (rel, key) in [
@@ -639,12 +856,17 @@ fn import_state_files(
         ("update/state.json", "update_state_json"),
     ] {
         let path = data_dir.join(rel);
+        if path.with_extension("json.migrated").exists() {
+            skipped.push(rel.to_string());
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             skipped.push(rel.to_string());
             continue;
         };
+        imported.push(path);
         tx.execute(
-            "INSERT OR IGNORE INTO kernel_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO kernel_meta (key, value, updated_at_ms) VALUES (?1, ?2, ?3)",
             params![key, text, now],
         )?;
     }
@@ -692,37 +914,37 @@ fn i64_field(row: &Value, names: &[&str]) -> Option<i64> {
     })
 }
 
+/// The first present field as a bool (a `0`/`1` numeric or a `"true"`/
+/// `"false"` string both parse).
+fn bool_field(row: &Value, names: &[&str]) -> Option<bool> {
+    let obj = row.as_object()?;
+    names.iter().find_map(|name| {
+        let value = obj.get(*name)?;
+        match value {
+            Value::Bool(b) => Some(*b),
+            Value::Number(n) => n.as_i64().map(|i| i != 0),
+            Value::String(s) => match s.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    })
+}
+
 /// The account a legacy row settled in — absent `account_id` reads as the
 /// `default` book (the serde default the live loaders use).
 fn account_of(row: &Value) -> String {
     str_field(row, &["account_id", "accountId"]).unwrap_or_else(|| DEFAULT_ACCOUNT.to_string())
 }
 
-/// RFC 3339 UTC timestamp, no date dependency: civil-from-days over
-/// `SystemTime`.
-fn utc_now() -> String {
-    let secs = SystemTime::now()
+/// Milliseconds since the Unix epoch, or 0 if the clock is before it.
+fn now_ms() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
-    let (h, m, s) = (secs % 86_400 / 3_600, secs % 3_600 / 60, secs % 60);
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
-/// (year, month, day) for days since 1970-01-01 — Howard Hinnant's
-/// `civil_from_days`.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    let year = yoe as i64 + era * 400 + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
