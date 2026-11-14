@@ -853,7 +853,11 @@ impl RiskExitStore for SqliteStore {
             .map_err(|e| e.message)
     }
     fn get_exit(&self, account: &str) -> Vec<(String, String)> {
-        let rows = self.store.risk_db().load_exits(&ExitConfig::default());
+        let rows = self
+            .store
+            .risk_db()
+            .load_exits(&ExitConfig::default())
+            .unwrap();
         let Some(exit) = rows.get(account) else {
             return Vec::new();
         };
@@ -1444,8 +1448,8 @@ fn sqlite_risk_exit_match_the_raw_account_risk_db_pair() {
         store_rows["alpha"].max_order_notional_usd.value(),
         "the settings-key cap must match the raw pair's"
     );
-    let raw_exits = raw.load_exits(&ExitConfig::default());
-    let store_exits = store.risk_db().load_exits(&ExitConfig::default());
+    let raw_exits = raw.load_exits(&ExitConfig::default()).unwrap();
+    let store_exits = store.risk_db().load_exits(&ExitConfig::default()).unwrap();
     assert_eq!(
         raw_exits["alpha"].stop_loss_pct, store_exits["alpha"].stop_loss_pct,
         "the exit row's value must match the raw pair's"

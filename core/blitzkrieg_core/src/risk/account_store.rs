@@ -146,27 +146,21 @@ impl AccountRiskDb {
 
     /// Every `account_exit_policy` row, deserialized over `base` (the global
     /// exit config). A malformed JSON row is skipped with a warning; the
-    /// caller's global/account fallback stands.
-    pub fn load_exits(&self, base: &ExitConfig) -> BTreeMap<String, ExitConfig> {
+    /// caller's global/account fallback stands. Zero rows is `Ok` with an
+    /// empty map ("this account has no DB row → use the env global") — but a
+    /// *query* failure (the table is gone, the file unreadable) is `Err`: it
+    /// is never silent-grown into "no rows", which the boot chain would read
+    /// as "use the env global" and keep trading with a silently-defaulted
+    /// exit discipline (issue #1199 fourth audit P0: the load_risk fix in
+    /// #1214 applied to the exit twin too).
+    pub fn load_exits(&self, base: &ExitConfig) -> Result<BTreeMap<String, ExitConfig>, String> {
         self.db.with_connection(|conn| {
-            let mut stmt = match conn.prepare(
-                "SELECT account_id, policy_json FROM account_exit_policy",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "account_exit_policy read failed — env fallback stays");
-                    return BTreeMap::new();
-                }
-            };
-            let rows = match stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "account_exit_policy read failed — env fallback stays");
-                    return BTreeMap::new();
-                }
-            };
+            let mut stmt = conn
+                .prepare("SELECT account_id, policy_json FROM account_exit_policy")
+                .map_err(|e| format!("account_exit_policy prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("account_exit_policy query_map failed: {e}"))?;
             let mut out = BTreeMap::new();
             for row in rows {
                 let (id, json) = match row {
@@ -188,7 +182,7 @@ impl AccountRiskDb {
                 }
             }
             let _ = base;
-            out
+            Ok(out)
         })
     }
 
@@ -459,7 +453,7 @@ mod tests {
             ..Default::default()
         };
         db.save_exit("paper", &exit).unwrap();
-        let rows = db.load_exits(&ExitConfig::default());
+        let rows = db.load_exits(&ExitConfig::default()).unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         assert_eq!(rows["paper"].take_profit_pct, dec!(90));
         drop(db);
@@ -492,6 +486,40 @@ mod tests {
         let err = db.load_risk().unwrap_err();
         assert!(
             err.contains("account_risk"),
+            "the error must name the failing query: {err}"
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A freshly opened store has zero exit rows: `load_exits` answers `Ok`
+    /// with an empty map — absence is not an error ("no row → use the env
+    /// global" is the intended semantics). Only a *query* failure is (issue
+    /// #1199 fourth audit P0: an empty map must never mask a read failure,
+    /// or the boot chain silently trades the env global's exit discipline).
+    #[test]
+    fn fresh_db_load_exits_is_ok_and_empty() {
+        let (db, dir) = temp_db();
+        let rows = db.load_exits(&ExitConfig::default()).unwrap();
+        assert!(rows.is_empty(), "zero rows is Ok, not an error: {rows:?}");
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A query failure (the `account_exit_policy` table is gone) surfaces as
+    /// `Err` — never silent-grown into an empty map the boot chain would
+    /// misread as "use the env global" and keep trading with a
+    /// silently-defaulted exit discipline (issue #1199 fourth audit P0 red
+    /// line, the exit twin of `load_risk_query_failure_returns_err`).
+    #[test]
+    fn load_exits_query_failure_returns_err() {
+        let (db, dir) = temp_db();
+        db.db()
+            .with_connection(|conn| conn.execute("DROP TABLE account_exit_policy", []))
+            .expect("drop the account_exit_policy table");
+        let err = db.load_exits(&ExitConfig::default()).unwrap_err();
+        assert!(
+            err.contains("account_exit_policy"),
             "the error must name the failing query: {err}"
         );
         drop(db);
