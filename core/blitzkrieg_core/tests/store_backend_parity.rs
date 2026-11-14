@@ -811,7 +811,7 @@ impl RiskExitStore for SqliteStore {
             .map_err(|e| e.message)
     }
     fn get_risk(&self, account: &str) -> Vec<(String, String)> {
-        let rows = self.store.risk_db().load_risk();
+        let rows = self.store.risk_db().load_risk().unwrap_or_default();
         let Some(row) = rows.get(account) else {
             return Vec::new();
         };
@@ -1432,8 +1432,8 @@ fn sqlite_risk_exit_match_the_raw_account_risk_db_pair() {
     // The durable facts agree (the values; the source column is 'panel' on
     // both — the row's provenance label, the load face spells the values
     // as env, the read face's label).
-    let raw_rows = raw.load_risk();
-    let store_rows = store.risk_db().load_risk();
+    let raw_rows = raw.load_risk().unwrap();
+    let store_rows = store.risk_db().load_risk().unwrap();
     assert_eq!(
         raw_rows["alpha"].max_position_size.value(),
         store_rows["alpha"].max_position_size.value(),
@@ -1458,7 +1458,7 @@ fn sqlite_risk_exit_match_the_raw_account_risk_db_pair() {
     store
         .save_risk_bounds(Some("alpha"), &merge)
         .expect("merge write");
-    let merged = store.risk_db().load_risk();
+    let merged = store.risk_db().load_risk().unwrap();
     assert_eq!(
         merged["alpha"].max_position_size.value(),
         dec!(5),

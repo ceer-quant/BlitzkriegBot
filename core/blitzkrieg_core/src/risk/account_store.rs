@@ -48,38 +48,33 @@ impl AccountRiskDb {
     }
 
     /// Every `account_risk` row, keyed by account id. A missing row means the
-    /// caller's env/global fallback applies.
-    pub fn load_risk(&self) -> BTreeMap<String, AccountRiskLimits> {
+    /// caller's env/global fallback applies — that is `Ok` with an empty map.
+    /// A *query* failure (the table is gone, the file unreadable) returns
+    /// `Err`; it is never silent-grown into "no rows", which the boot chain
+    /// would read as "use the env global" and keep trading with widened limits.
+    pub fn load_risk(&self) -> Result<BTreeMap<String, AccountRiskLimits>, String> {
         self.db.with_connection(|conn| {
-            let mut stmt = match conn.prepare(
-                "SELECT account_id, max_single_loss_usd, max_daily_drawdown_usd,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT account_id, max_single_loss_usd, max_daily_drawdown_usd,
                         max_position_size, max_consecutive_losses, cooldown_minutes,
                         source
                  FROM account_risk",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "account_risk read failed — env fallback stays");
-                    return BTreeMap::new();
-                }
-            };
-            let rows = match stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
-            }) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "account_risk read failed — env fallback stays");
-                    return BTreeMap::new();
-                }
-            };
+                )
+                .map_err(|e| format!("account_risk prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                })
+                .map_err(|e| format!("account_risk query_map failed: {e}"))?;
             let mut out = BTreeMap::new();
             for row in rows {
                 let (id, single, daily, position, losses, cooldown, source) = match row {
@@ -145,7 +140,7 @@ impl AccountRiskDb {
                 }
                 out.insert(id, limits);
             }
-            out
+            Ok(out)
         })
     }
 
@@ -447,7 +442,7 @@ mod tests {
         };
         db.save_risk("small", &small).unwrap();
         db.save_risk("large", &large).unwrap();
-        let rows = db.load_risk();
+        let rows = db.load_risk().unwrap();
         assert_eq!(rows["small"].max_position_size.value(), dec!(5));
         assert_eq!(rows["large"].max_position_size.value(), dec!(50));
         drop(db);
@@ -467,6 +462,38 @@ mod tests {
         let rows = db.load_exits(&ExitConfig::default());
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         assert_eq!(rows["paper"].take_profit_pct, dec!(90));
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A freshly opened store has zero rows: `load_risk` answers `Ok` with an
+    /// empty map — absence is not an error. Only a *query* failure is (issue
+    /// #1199 P1-1: an empty map reads as "no row → use the env global", so it
+    /// must never mask a read failure).
+    #[test]
+    fn fresh_db_load_risk_is_ok_and_empty() {
+        let (db, dir) = temp_db();
+        let rows = db.load_risk().unwrap();
+        assert!(rows.is_empty(), "zero rows is Ok, not an error: {rows:?}");
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A query failure (the `account_risk` table is gone) surfaces as `Err` —
+    /// never silent-grown into an empty map the boot chain would misread as
+    /// "use the env global" and keep trading with widened limits (issue
+    /// #1199 P1-1 red line).
+    #[test]
+    fn load_risk_query_failure_returns_err() {
+        let (db, dir) = temp_db();
+        db.db()
+            .with_connection(|conn| conn.execute("DROP TABLE account_risk", []))
+            .expect("drop the account_risk table");
+        let err = db.load_risk().unwrap_err();
+        assert!(
+            err.contains("account_risk"),
+            "the error must name the failing query: {err}"
+        );
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }
