@@ -80,7 +80,9 @@ check('the button and the verb routing share the one predicate', () => {
   assert.match(tables, /function expired\(p: Position\): boolean \{/)
   assert.match(tables, /positionExpired\(p, props\.identityDurSec \?\? 900\)/)
   // ...and HftPage routes the verb through the same imported predicate.
-  assert.match(page, /import \{ newestFirst, positionExpired \} from '@\/lib\/trades'/)
+  // (issue 1199 P0-4: the import gained `isKnownPnl` — the assertion pins
+  // that `positionExpired` still comes from lib/trades, not the member list.)
+  assert.match(page, /import \{[^}]*\bpositionExpired\b[^}]*\} from '@\/lib\/trades'/)
   assert.match(page, /positionExpired\(position, identityDurSec\.value \?\? 900\)/)
   // The old divergent form (remainingSec-only routing) must stay dead.
   assert.doesNotMatch(page, /const expired = position\.remainingSec !== undefined/)

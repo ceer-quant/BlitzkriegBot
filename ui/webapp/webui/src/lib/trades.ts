@@ -68,6 +68,25 @@ export function dedupeTrades<T extends { id: string }>(rows: readonly T[]): T[] 
   return [...byTrade.values()]
 }
 
+/**
+ * 现金真相红线（issue 1199 P0-4）：一行的 `netPnlUsd` 是否是**有效数字** ——
+ * 非 null/undefined/NaN/''/Infinity，即可以参与胜负与净额算术的读数。
+ *
+ * 折叠（`Number(x) || 0`）把「未知」读成 0：既不算赢也不算未知，直接
+ * 稀释胜率与当日净额（unverifiable_expiry 的 fallback 记账行、缺字段的
+ * 老内核行、合成死单行都落这条）。任何「胜负分母 / 净额汇总」必须先用
+ * 本谓词过闸，未知行单独计数、单独展示，绝不许进分母。
+ *
+ * 有意只认数值有效性，不认 exitReason —— 退出原因是行的叙事标签
+ * （`unverifiable_expiry` 行内核也发数值 netPnlUsd），把它当未知判据会
+ * 在标签拼写漂移时静默吞行。行的「未知」就是「读数缺失/非法」这一件事。
+ */
+export function isKnownPnl(t: { netPnlUsd?: unknown }): boolean {
+  if (t.netPnlUsd === null || t.netPnlUsd === undefined || t.netPnlUsd === '') return false
+  const n = Number(t.netPnlUsd)
+  return Number.isFinite(n)
+}
+
 /** When a trade closed, falling back to when it opened (a row always has one). */
 function closeStamp(r: { exitTime?: number; entryTime?: number }): number {
   return Number(r.exitTime ?? r.entryTime ?? 0) || 0
