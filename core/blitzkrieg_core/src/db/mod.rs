@@ -1,11 +1,18 @@
 //! SQLite-backed persistence for BlitzkriegBot (issue #1189).
 //!
 //! Account configuration, credentials, risk, exit discipline, runtime state,
-//! orders, fills, positions, trades, ledger and audit all live in ONE database
-//! file (`data/blitzkrieg.sqlite` by default). The migration is what retires
-//! `config.toml` and the `data/*.json` / `*.jsonl` family as configuration and
-//! state sources; `.env` keeps only the truly global static settings, the panel
-//! password and the credential master key.
+//! markets and audit live in ONE database file (`data/blitzkrieg.sqlite` by
+//! default). The migration is what retires `config.toml` and the `data/*.json`
+//! / `*.jsonl` family as configuration and state sources; `.env` keeps only
+//! the truly global static settings, the panel password and the credential
+//! master key.
+//!
+//! Orders, fills, positions, trades and the cash ledger are NOT here: since
+//! v2 (#1199 PR-0.5 T-02) those five tables are dropped, because the runtime
+//! truth for all of them is the `data/*.jsonl` files the kernel's JSONL stores
+//! own (`order_db` / `trade_db` / `position_db` / `ledger`) — the tables only
+//! ever held one-shot importer rows and made the schema advertise storage
+//! nothing reads.
 //!
 //! # Layout
 //!

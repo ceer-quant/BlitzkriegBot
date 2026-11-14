@@ -1,8 +1,9 @@
 //! The #1189 importer's test module — the acceptance matrix: idempotency,
-//! per-account isolation, no DRY_RUN leakage, the orders fold, the
-//! `.migrated` backup, the canonical-table spot checks, and the empty-tree
-//! import. Tmpdirs follow the repo discipline (temp dir + pid + atomic
-//! counter; no `tempfile` dependency).
+//! per-account isolation, no DRY_RUN leakage, the `.migrated`-free import
+//! (the JSONL folds were removed with the five ledger tables, #1199 PR-0.5
+//! T-02), the canonical-table spot checks, and the empty-tree import. Tmpdirs
+//! follow the repo discipline (temp dir + pid + atomic counter; no `tempfile`
+//! dependency).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,10 +74,6 @@ fn import_once_is_idempotent_second_run_is_all_zero() {
     assert_eq!(second.risk_rows, 0);
     assert_eq!(second.exit_rows, 0);
     assert_eq!(second.settings, 0);
-    assert_eq!(second.orders, 0);
-    assert_eq!(second.positions, 0);
-    assert_eq!(second.trades, 0);
-    assert_eq!(second.ledger_entries, 0);
     assert_eq!(second.audit, 0);
     assert_eq!(
         second.skipped,
@@ -153,62 +150,88 @@ fn dry_run_env_key_is_never_persisted() {
     );
 }
 
-/// Test 4 — the orders.jsonl fold: a missing accountId reads as `default`,
-/// the latest snapshot per order id wins (OrderDb::load rule), the whole
-/// row lands in payload_json (no business-column split), and the file is
-/// backed up as `.migrated` after the commit.
+/// Test 4 — #1199 PR-0.5 (T-02): the five zero-runtime-write tables are
+/// gone, so the importer must NOT touch the ledger JSONL trees at all: no
+/// rows in the five tables, no `.migrated` rename of the JSONL files (they
+/// are the LIVE books the JSONL stores own), and the skipped report carries
+/// no ledger-tree entries.
 #[test]
-fn orders_jsonl_folds_to_latest_snapshot_per_id() {
+fn importer_leaves_the_ledger_jsonl_trees_alone() {
     let dir = TmpDir::new();
-    std::fs::create_dir_all(dir.path().join("data/orders")).expect("mkdir");
-    let jsonl = r#"{"orderId":"o1","strategy":"s","asset":"BTC","direction":"up","side":"buy","price":"0.55","size":"10","filledSize":"0","status":"Submitted","submittedAtMs":100,"updatedAtMs":100}
-{"orderId":"o2","accountId":"paper","strategy":"s","asset":"ETH","direction":"down","side":"sell","price":"12.5","size":"3","filledSize":"0","status":"Submitted","submittedAtMs":200,"updatedAtMs":200}
-{"orderId":"o1","strategy":"s","asset":"BTC","direction":"up","side":"buy","price":"0.55","size":"10","filledSize":"4","status":"PartiallyFilled","submittedAtMs":100,"updatedAtMs":300}
-"#;
-    std::fs::write(dir.path().join("data/orders/orders.jsonl"), jsonl).expect("write");
+    // A fully-populated legacy tree — exactly the fixture the old folds ate.
+    for sub in ["orders", "positions", "trades", "ledger"] {
+        std::fs::create_dir_all(dir.path().join(format!("data/{sub}"))).expect("mkdir");
+    }
+    std::fs::write(
+        dir.path().join("data/orders/orders.jsonl"),
+        "{\"orderId\":\"o1\",\"accountId\":\"default\",\"updatedAtMs\":100}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("data/positions/positions.jsonl"),
+        "{\"id\":\"p1\",\"accountId\":\"default\",\"open\":true}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("data/trades/trades.jsonl"),
+        "{\"id\":\"t1\",\"accountId\":\"default\",\"exitTime\":100}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.path().join("data/ledger/default.journal.live.jsonl"),
+        "{\"kind\":\"seed\",\"amount\":\"100\",\"atMs\":100}\n",
+    )
+    .expect("write");
 
-    // The db lives INSIDE `data/` — that directory is the legacy root the
-    // importer scans for the JSONL trees.
     let db = dir.path().join("data/bank.db");
     let report = import_once(&db, |_| None).expect("import");
-    assert_eq!(report.orders, 2, "o1 folds to ONE row (latest wins)");
 
-    let count = scalar_i64(&db, "SELECT count(*) FROM orders");
-    assert_eq!(count, 2, "two rows in the table");
-    let o1_status: String = {
-        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open db");
-        conn.query_row(
-            "SELECT json_extract(payload_json, '$.status') FROM orders WHERE order_id = 'o1'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("payload status")
-    };
-    assert_eq!(o1_status, "PartiallyFilled", "the later snapshot wins");
-    let o2_account = scalar_text(&db, "SELECT account_id FROM orders WHERE order_id = 'o2'");
-    assert_eq!(o2_account, "paper", "accountId is read");
-    let o1_account = scalar_text(&db, "SELECT account_id FROM orders WHERE order_id = 'o1'");
-    assert_eq!(
-        o1_account, "default",
-        "missing accountId = the default book"
-    );
+    // The five tables stay EMPTY (the tables themselves exist — the
+    // importer's embedded v1 DDL still builds them; v2 of the migration
+    // runner is what drops them on a migrated database).
+    for (table, ddl_shape) in [
+        ("orders", "SELECT count(*) FROM orders"),
+        ("fills", "SELECT count(*) FROM fills"),
+        ("positions", "SELECT count(*) FROM positions"),
+        ("trades", "SELECT count(*) FROM trades"),
+        ("ledger_entries", "SELECT count(*) FROM ledger_entries"),
+    ] {
+        let rows = scalar_i64(&db, ddl_shape);
+        assert_eq!(
+            rows, 0,
+            "{table} must stay empty — no importer fold feeds it"
+        );
+    }
 
-    // The backup: the file is renamed, not deleted; the second run is a
-    // marker no-op and does not double-import.
-    assert!(
-        !dir.path().join("data/orders/orders.jsonl").exists(),
-        "the original is renamed away"
-    );
-    assert!(
-        dir.path()
-            .join("data/orders/orders.jsonl.migrated")
-            .exists(),
-        "orders.jsonl -> orders.jsonl.migrated"
-    );
-    let second = import_once(&db, |_| None).expect("second import");
-    assert_eq!(second.orders, 0, "second run inserts nothing");
-    assert_eq!(scalar_i64(&db, "SELECT count(*) FROM orders"), 2);
+    // No rename: the JSONL books are the runtime truth and stay in place,
+    // with no `.migrated` siblings appearing beside them.
+    for rel in [
+        "data/orders/orders.jsonl",
+        "data/positions/positions.jsonl",
+        "data/trades/trades.jsonl",
+        "data/ledger/default.journal.live.jsonl",
+    ] {
+        assert!(dir.path().join(rel).exists(), "live book stays: {rel}");
+        let migrated = format!("{rel}.migrated");
+        assert!(
+            !dir.path().join(&migrated).exists(),
+            "no .migrated backup may appear: {migrated}"
+        );
+    }
+
+    // The skipped report lists only the state snapshots (missing), never a
+    // ledger-tree entry.
+    for rel in [
+        "orders/orders.jsonl",
+        "positions/positions.jsonl",
+        "ledger/default.journal.live.jsonl",
+    ] {
+        assert!(
+            !report.skipped.iter().any(|s| s == rel),
+            "ledger tree must not be scanned at all: {rel}"
+        );
+    }
+    assert!(report.audit == 1, "the import itself still audits");
 }
 
 /// Test 5 — a completely empty legacy tree imports cleanly: schema +
@@ -218,24 +241,11 @@ fn empty_legacy_tree_imports_schema_and_marker_only() {
     let dir = TmpDir::new();
     let report = import_once(&dir.path().join("bank.db"), |_| None).expect("import");
     assert_eq!(report.accounts, 1, "the default account still lands");
-    assert_eq!(report.orders, 0);
-    assert_eq!(report.positions, 0);
-    assert_eq!(report.trades, 0);
-    assert_eq!(report.ledger_entries, 0);
 
     // Every expected legacy input is reported missing, never silently absent.
-    for rel in [
-        "orders/orders.jsonl",
-        "positions/positions.jsonl",
-        "positions/positions.dry.jsonl",
-        "trades/trades.jsonl",
-        "trades/trades-live.jsonl",
-        "ledger/default.journal.dry.jsonl",
-        "ledger/default.journal.live.jsonl",
-        "state.json",
-        "runtime/config.json",
-        "update/state.json",
-    ] {
+    // Since #1199 PR-0.5 (T-02) the ledger trees are not scanned at all, so
+    // only the three state snapshots are expected here.
+    for rel in ["state.json", "runtime/config.json", "update/state.json"] {
         assert!(
             report.skipped.iter().any(|s| s == rel),
             "missing input not reported: {rel}"
@@ -249,7 +259,7 @@ fn empty_legacy_tree_imports_schema_and_marker_only() {
     );
     assert_eq!(
         tables, 19,
-        "the 18-table v1 schema + sqlite_sequence landed"
+        "the 18-table v1 schema + sqlite_sequence landed (the importer builds the v1 shape; v2 of the migration runner is what drops the five tables)"
     );
     let marker = scalar_i64(
         &db,
@@ -363,72 +373,25 @@ fn canonical_tables_and_columns_are_present() {
     );
 }
 
-/// Test 7 — the backup renames every legacy family the run read, and a
-/// second run over a half-backed tree is a marker no-op (no double import,
-/// no error on the already-migrated files).
+/// Test 7 — the state snapshots are read into `kernel_meta` verbatim and stay
+/// IN PLACE (live cells), and a second run over the same tree is a marker
+/// no-op. (The `.migrated` backup for the ledger trees went with the folds,
+/// #1199 PR-0.5 T-02.)
 #[test]
-fn legacy_files_are_renamed_after_commit_and_rerun_is_noop() {
+fn state_snapshots_fold_to_kernel_meta_and_rerun_is_noop() {
     let dir = TmpDir::new();
-    for sub in ["orders", "positions", "trades", "ledger"] {
-        std::fs::create_dir_all(dir.path().join(format!("data/{sub}"))).expect("mkdir");
-    }
-    std::fs::write(
-        dir.path().join("data/orders/orders.jsonl"),
-        "{\"orderId\":\"o1\",\"accountId\":\"default\",\"updatedAtMs\":100}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        dir.path().join("data/positions/positions.jsonl"),
-        "{\"id\":\"p1\",\"accountId\":\"default\",\"updatedAtMs\":100}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        dir.path().join("data/trades/trades.jsonl"),
-        "{\"id\":\"t1\",\"accountId\":\"default\",\"exitTime\":100}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        dir.path().join("data/ledger/default.journal.live.jsonl"),
-        "{\"kind\":\"fill\",\"amount\":\"1.5\",\"atMs\":100}\n",
-    )
-    .expect("write");
-    std::fs::write(dir.path().join("data/state.json"), "{\"round\":7}").expect("write");
     std::fs::create_dir_all(dir.path().join("data/runtime")).expect("mkdir");
+    std::fs::write(dir.path().join("data/state.json"), "{\"round\":7}").expect("write");
     std::fs::write(dir.path().join("data/runtime/config.json"), "{}").expect("write");
 
     let db = dir.path().join("data/bank.db");
     let report = import_once(&db, |_| None).expect("import");
-    assert_eq!(report.orders, 1);
-    assert_eq!(report.positions, 1);
-    assert_eq!(report.trades, 1);
-    assert_eq!(report.ledger_entries, 1);
-
-    for (rel, migrated) in [
-        (
-            "data/orders/orders.jsonl",
-            "data/orders/orders.jsonl.migrated",
-        ),
-        (
-            "data/positions/positions.jsonl",
-            "data/positions/positions.jsonl.migrated",
-        ),
-        (
-            "data/trades/trades.jsonl",
-            "data/trades/trades.jsonl.migrated",
-        ),
-        (
-            "data/ledger/default.journal.live.jsonl",
-            "data/ledger/default.journal.live.jsonl.migrated",
-        ),
-    ] {
-        assert!(!dir.path().join(rel).exists(), "renamed away: {rel}");
-        assert!(dir.path().join(migrated).exists(), "backed up: {migrated}");
-    }
+    assert_eq!(report.accounts, 1);
 
     // The state snapshots are LIVE cells, not dead history: they are read
     // into kernel_meta and stay in place (the boot's credentials-cell
     // migration strips runtime/config.json and the update state keeps
-    // being rewritten). Only the historical ledgers above are renamed.
+    // being rewritten).
     for rel in ["data/state.json", "data/runtime/config.json"] {
         assert!(dir.path().join(rel).exists(), "live cell stays: {rel}");
     }
@@ -450,48 +413,22 @@ fn legacy_files_are_renamed_after_commit_and_rerun_is_noop() {
         .expect("config.json folded");
     assert!(runtime_state.contains("{}"), "{runtime_state}");
 
-    // The second run is the marker no-op: no error even though every
-    // legacy file is gone (all `.migrated`), and nothing is re-imported.
+    // The second run is the marker no-op: nothing is re-imported.
     let second = import_once(&db, |_| None).expect("second import");
-    assert_eq!(second.orders, 0);
-    assert_eq!(second.positions, 0);
-    assert_eq!(second.trades, 0);
-    assert_eq!(second.ledger_entries, 0);
-    assert_eq!(scalar_i64(&db, "SELECT count(*) FROM orders"), 1);
+    assert_eq!(second.accounts, 0);
+    assert_eq!(second.audit, 0);
 }
 
 /// Issue #1189 acceptance (handoff §4): "after importing old data, the
 /// ledger, positions, and rounds match what they were before the import".
-/// The fold keeps every row's identity and payload: an open position keeps
-/// its id and account, the cash journal keeps every entry's kind/amount/ts,
-/// and the round cells land in kernel_meta verbatim (rounds_json is part of
-/// the account row). This test writes a pre-import book, imports it, and
-/// asserts the SQLite rows carry the same facts the files did.
+/// Since #1199 PR-0.5 (T-02) the ledger/positions half of that contract is
+/// retired — those books live in the JSONL files, untouched by the import
+/// (test 4) — but the round cells (the `rounds_json` the account book
+/// carried pre-import) still land on the account rows, so this test keeps
+/// the rounds half of the acceptance.
 #[test]
-fn imported_rows_match_the_pre_import_book() {
+fn account_rounds_cells_survive_the_import() {
     let dir = TmpDir::new();
-    for sub in ["orders", "positions", "ledger"] {
-        std::fs::create_dir_all(dir.path().join(format!("data/{sub}"))).expect("mkdir");
-    }
-    // Pre-import book: one open position on default, one on paper; a cash
-    // journal with a seed and a fill on both sides.
-    std::fs::write(
-        dir.path().join("data/positions/positions.jsonl"),
-        "{\"id\":\"pos-a\",\"accountId\":\"default\",\"tokenId\":\"tok-1\",\"entryPrice\":\"0.42\",\"shares\":\"10\",\"open\":true,\"expiresAtMs\":900000}\n\
-         {\"id\":\"pos-b\",\"accountId\":\"paper\",\"tokenId\":\"tok-2\",\"entryPrice\":\"0.55\",\"shares\":\"4\",\"open\":true,\"expiresAtMs\":900000}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        dir.path().join("data/ledger/default.journal.dry.jsonl"),
-        "{\"kind\":\"seed\",\"amount\":\"100\",\"atMs\":100}\n\
-         {\"kind\":\"fill\",\"amount\":\"-0.42\",\"atMs\":200}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        dir.path().join("data/ledger/paper.journal.dry.jsonl"),
-        "{\"kind\":\"seed\",\"amount\":\"50\",\"atMs\":100}\n",
-    )
-    .expect("write");
     // A round cell on the account row (the rounds_json the account book
     // carried pre-import).
     let env = |key: &str| match key {
@@ -503,46 +440,9 @@ fn imported_rows_match_the_pre_import_book() {
 
     let db = dir.path().join("data/bank.db");
     let report = import_once(&db, env).expect("import");
-    assert_eq!(report.positions, 2);
-    assert_eq!(report.ledger_entries, 3);
-
-    // The positions table carries both rows with their payloads.
-    let pos_json = scalar_text(
-        &db,
-        "SELECT payload_json FROM positions WHERE account_id = 'default' AND position_id = 'pos-a'",
-    );
-    assert!(pos_json.contains("\"tokenId\":\"tok-1\""), "{pos_json}");
-    assert!(pos_json.contains("\"entryPrice\":\"0.42\""), "{pos_json}");
-    assert_eq!(
-        scalar_i64(
-            &db,
-            "SELECT count(*) FROM positions WHERE account_id = 'paper' AND position_id = 'pos-b'"
-        ),
-        1
-    );
-
-    // The ledger entries keep kind/amount/ts per account.
-    assert_eq!(
-        scalar_text(
-            &db,
-            "SELECT kind FROM ledger_entries WHERE account_id = 'default' ORDER BY id"
-        ),
-        "seed"
-    );
-    assert_eq!(
-        scalar_text(
-            &db,
-            "SELECT amount FROM ledger_entries WHERE account_id = 'default' AND kind = 'fill'"
-        ),
-        "-0.42"
-    );
-    assert_eq!(
-        scalar_i64(
-            &db,
-            "SELECT count(*) FROM ledger_entries WHERE account_id = 'paper'"
-        ),
-        1
-    );
+    assert_eq!(report.accounts, 2);
+    assert_eq!(report.risk_rows, 2);
+    assert_eq!(report.audit, 1);
 
     // The round cells ride the account rows (rounds_json).
     let rounds_a = scalar_text(&db, "SELECT rounds_json FROM accounts WHERE id = 'default'");

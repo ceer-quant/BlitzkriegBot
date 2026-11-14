@@ -1,4 +1,4 @@
-//! SQLite schema v1 (issue #1189, §2).
+//! SQLite schema (issue #1189, §2; v2 = #1199 PR-0.5 T-02).
 //!
 //! One database holds both account state and kernel metadata. Every monetary
 //! value is a **decimal string** (`TEXT`), never a SQLite `REAL` — the kernel
@@ -8,15 +8,28 @@
 //! The SQL here is the single definition of the schema. [`crate::db::migrations`]
 //! owns the version number and the runner; this module owns the DDL and the
 //! table/index inventory the tests check against.
+//!
+//! # v2 (#1199 PR-0.5, T-02): the five zero-runtime-write tables are dropped
+//!
+//! `orders` / `fills` / `positions` / `trades` / `ledger_entries` never had a
+//! runtime writer: the live truth for all five lives in the `data/*.jsonl`
+//! files (`order_db.rs` / `trade_db.rs` / `position_db.rs` / `ledger.rs`), and
+//! the only rows the SQLite tables ever carried came from the one-shot
+//! importer. Keeping them made the schema a lying surface — it advertised
+//! storage nothing reads. [`SCHEMA_V2`] drops them (and their indexes);
+//! [`SCHEMA_V1`] below stays byte-identical (append-only: a v1 database on
+//! disk is upgraded by the new migration, never by editing the old DDL).
 
 /// The schema version this module defines. Bumped whenever [`SCHEMA_V1`] is
 /// superseded by a new migration (never edited in place).
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
-/// Every table the v1 schema creates, in dependency order (parents first).
+/// Every table the CURRENT schema creates, in dependency order (parents first).
 ///
 /// The test suite asserts this list against `sqlite_master` so a table that is
-/// renamed or dropped cannot pass unnoticed.
+/// renamed or dropped cannot pass unnoticed. Since v2 (#1199 T-02) this is the
+/// post-migration target state: the five ledger tables the importer alone ever
+/// wrote are dropped, and the JSONL files are their only home.
 pub const TABLES: &[&str] = &[
     "schema_migrations",
     "kernel_meta",
@@ -29,26 +42,13 @@ pub const TABLES: &[&str] = &[
     "venues",
     "markets",
     "rounds",
-    "orders",
-    "fills",
-    "positions",
-    "trades",
-    "ledger_entries",
     "arb_pairs",
     "audit_log",
 ];
 
-/// Every index the v1 schema creates.
-pub const INDEXES: &[&str] = &[
-    "idx_fills_account",
-    "idx_ledger_account",
-    "idx_audit_ts",
-    "idx_rounds_account",
-    "idx_orders_account",
-    "idx_positions_account",
-    "idx_trades_account",
-    "idx_markets_venue",
-];
+/// Every index the CURRENT schema creates. Since v2 (#1199 T-02) the five
+/// per-account ledger indexes went with their tables.
+pub const INDEXES: &[&str] = &["idx_audit_ts", "idx_rounds_account", "idx_markets_venue"];
 
 /// The complete v1 schema.
 ///
@@ -236,6 +236,35 @@ CREATE INDEX IF NOT EXISTS idx_trades_account    ON trades(account_id, exit_time
 CREATE INDEX IF NOT EXISTS idx_markets_venue     ON markets(venue_id);
 "#;
 
+/// The v2 migration (#1199 PR-0.5, T-02 — the "write-matrix lockdown" ruling):
+/// drop the five tables that never had a runtime writer.
+///
+/// `orders` / `fills` / `positions` / `trades` / `ledger_entries` were written
+/// ONLY by the one-shot legacy importer; every runtime read and write of those
+/// facts goes to the `data/*.jsonl` files. The empty tables made the schema
+/// advertise storage nothing consumes, so v2 removes them — a database that
+/// boots through the migration runner converges on the same shape the runtime
+/// actually uses.
+///
+/// Indexes drop with their tables (SQLite would remove them implicitly, but
+/// the explicit `DROP INDEX IF EXISTS` keeps the intent readable and the
+/// statements order-independent). No foreign keys point at these tables, so the
+/// drop order is free; the child-before-parent spelling is defensive habit.
+/// Idempotent (`IF EXISTS` everywhere), so a partially applied file re-runs
+/// safely — same discipline as [`SCHEMA_V1`].
+pub const SCHEMA_V2: &str = r#"
+DROP INDEX IF EXISTS idx_fills_account;
+DROP INDEX IF EXISTS idx_ledger_account;
+DROP INDEX IF EXISTS idx_orders_account;
+DROP INDEX IF EXISTS idx_positions_account;
+DROP INDEX IF EXISTS idx_trades_account;
+DROP TABLE IF EXISTS fills;
+DROP TABLE IF EXISTS ledger_entries;
+DROP TABLE IF EXISTS positions;
+DROP TABLE IF EXISTS trades;
+DROP TABLE IF EXISTS orders;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +300,49 @@ mod tests {
                 .max(),
             Some(SCHEMA_VERSION)
         );
+    }
+
+    /// v2 (#1199 T-02) drops exactly the five zero-runtime-write tables and
+    /// their five indexes — no more, no less. A typo in the DROP list would
+    /// either leave a lying table behind or take a live one down.
+    #[test]
+    fn v2_drops_exactly_the_five_ledger_tables() {
+        const DROPPED_TABLES: &[&str] =
+            &["orders", "fills", "positions", "trades", "ledger_entries"];
+        const DROPPED_INDEXES: &[&str] = &[
+            "idx_orders_account",
+            "idx_fills_account",
+            "idx_positions_account",
+            "idx_trades_account",
+            "idx_ledger_account",
+        ];
+        for table in DROPPED_TABLES {
+            assert!(
+                SCHEMA_V2.contains(&format!("DROP TABLE IF EXISTS {table};")),
+                "SCHEMA_V2 must drop table {table}"
+            );
+            assert!(
+                !TABLES.contains(table),
+                "{table} is dropped by v2 — it must not be in the TABLES inventory"
+            );
+        }
+        for index in DROPPED_INDEXES {
+            assert!(
+                SCHEMA_V2.contains(&format!("DROP INDEX IF EXISTS {index};")),
+                "SCHEMA_V2 must drop index {index}"
+            );
+            assert!(
+                !INDEXES.contains(index),
+                "{index} is dropped by v2 — it must not be in the INDEXES inventory"
+            );
+        }
+        // The v1 DDL itself is never edited (append-only): the tables it
+        // creates must still be declared there, v2 is what removes them.
+        for table in DROPPED_TABLES {
+            assert!(
+                SCHEMA_V1.contains(&format!("CREATE TABLE IF NOT EXISTS {table} (")),
+                "SCHEMA_V1 keeps its historical DDL: {table} must still be created there"
+            );
+        }
     }
 }
