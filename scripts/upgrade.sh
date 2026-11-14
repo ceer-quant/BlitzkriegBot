@@ -7,8 +7,9 @@
 #      moved to main with v0.3.0; it used to be the feat/trading-safety-selfcheck
 #      branch, which stalled at Wave 0 and left every upgrade a no-op at 0.2.1),
 #      override with BLITZKRIEG_UPGRADE_SOURCE
-#   1. update the production build worktree target/bk-main-build to the source
-#      (detached checkout — the branch refs and the main checkout stay untouched)
+#   1. put the production build worktree target/bk-main-build on the source,
+#      creating it if it is gone (detached checkout — the branch refs and the
+#      main checkout stay untouched)
 #   2. build: release workspace + the reference strategy cdylib + the panel's
 #      webui bundle
 #   3. LOCAL GATES: core lib tests AND the panel's check:all — both must be green
@@ -61,7 +62,11 @@
 # serving the previous JS.
 #
 # The build worktree target/bk-main-build is the production build's home (do
-# NOT delete it); its target/ cache is what makes repeated upgrades fast.
+# NOT delete it); its target/ cache is what makes repeated upgrades fast. It
+# lives under target/ all the same, so disk reclamation or a worktree prune can
+# take it — which is a cold build, not a failed deploy: step 1 recreates it
+# (scripts/lib/upgrade-worktree.sh) instead of dying on git's "cannot change
+# to …: No such file or directory".
 
 set -eu
 
@@ -123,6 +128,9 @@ export REPO_ROOT BUILD_WT ARTIFACTS DYLIB_DIRS CONFIG_DIR DIST_DIR
 lib="$repo_root/scripts/lib/upgrade-artifacts.sh"
 [ -f "$lib" ] || die "$lib is missing — this checkout is incomplete"
 . "$lib"
+wtlib="$repo_root/scripts/lib/upgrade-worktree.sh"
+[ -f "$wtlib" ] || die "$wtlib is missing — this checkout is incomplete"
+. "$wtlib"
 
 step "0. fetch ceer, resolve source"
 git fetch ceer --quiet
@@ -136,6 +144,11 @@ SRC_SHORT=$(git rev-parse --short=12 "$SRC_SHA")
 echo "source: $SOURCE_REF @ $SRC_SHORT"
 
 step "1. production build worktree → source"
+# Create it when it is gone (or recreate a broken one) before touching it: the
+# worktree lives under target/, so a clean-up between upgrades must cost a cold
+# build, not the deploy. A worktree belonging to a different repository is
+# refused rather than built from.
+ua_wt_ensure "$repo_root" "$build_wt" "$SRC_SHA"
 git -C "$build_wt" fetch ceer --quiet
 git -C "$build_wt" checkout --detach "$SRC_SHA"
 
