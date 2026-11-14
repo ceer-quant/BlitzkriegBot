@@ -237,15 +237,15 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     );
 }
 
-/// 生效风控的持久化回路（issue #965 验收一）：面板保存 → `BK_RISK_*` 键
-/// 落进内核 `.env`（回执 `persisted=true` + `persistence=store` —— env-only
-/// 后端的载体）→ 「重启」（新解析走启动链的同一 seam
-/// `SystemicRiskLimits::from_lookup`，键位拼写就是写路径写下的那些）→ 限额
-/// 仍武装、来源诚实标注 env。持久化载体与回读一致 —— 一条载体链，没有第二
-/// 个 flag 标注的影子载体（issue #965 把 risk-state 文件里的 systemic 格
-/// 退役了）。
+/// 生效风控的持久化回路（issue #965 验收一 → 操作者裁决 2026-11-14）：
+/// 面板保存 → `BK_RISK_*` 落进 SQLite（回执 `persisted=true` +
+/// `persistence=store` —— DB 是唯一载体，`.env` 对内核只读、逐字节不动）
+/// → 「重启」（boot overlay 读的同一张表，fresh `load_risk` 就是启动链的
+/// 回读）→ 限额仍武装。持久化载体与回读一致 —— 一条载体链，没有第二个
+/// flag 标注的影子载体（issue #965 把 risk-state 文件里的 systemic 格
+/// 退役了；本轮把 env 载体一并退役）。
 #[tokio::test]
-async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
+async fn risk_set_systemic_persists_to_the_db_and_the_boot_rearms_it() {
     use rust_decimal_macros::dec;
     let dir = std::env::temp_dir().join(format!("bk-risk-env-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -267,10 +267,15 @@ async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     };
     let mut c = Core::new(cfg.clone());
     c.set_balance(cfg.dry_seed_balance);
+    c.open_account_risk_db(dir.join("risk.sqlite"))
+        .expect("temp risk db opens");
     cfg.install_engine(&mut c).expect("engine install");
     let core = Arc::new(AsyncMutex::new(c));
     let registry = crate::market::registry::MarketPluginRegistry::new();
     let peer = PeerAuth::SameUid { uid: own_uid() };
+    // The kernel never writes the .env (operator ruling 2026-11-14): the
+    // whole write must leave this byte-for-byte (here: absent) unchanged.
+    let env_before = std::fs::read(&env_path).ok();
 
     let applied = rpc(
         &core,
@@ -287,49 +292,39 @@ async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     assert_eq!(
         audit["persisted"],
         serde_json::json!(true),
-        "the env file is wired, so the write must land: {audit}"
+        "the store is wired, so the write must land: {audit}"
     );
     assert_eq!(
         audit["persistence"],
         serde_json::json!("store"),
-        "the receipt names the carrier: the env backend took the write: {audit}"
+        "the receipt names the carrier: the store took the write: {audit}"
     );
 
-    // The `.env` the write face produced: exactly the two keys, exactly the
-    // spellings the boot chain reads — one map, no second carrier.
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .expect("the .env exists")
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
+    // The durable half: the merged row lands in the SQLite risk table —
+    // exactly the row the boot overlay reads back on the next start.
+    let db = crate::risk::account_store::AccountRiskDb::open(dir.join("risk.sqlite"))
+        .expect("reopen the db for the read-back");
+    let rows = db.load_risk().expect("the risk rows load");
     assert_eq!(
-        on_file.get("BK_RISK_MAX_POSITION_SIZE").map(String::as_str),
-        Some("2"),
-        "{on_file:?}"
+        rows["default"].max_position_size.value(),
+        dec!(2),
+        "the DB row carries the new position size: {rows:?}"
     );
     assert_eq!(
-        on_file
-            .get("BK_RISK_MAX_SINGLE_LOSS_USD")
-            .map(String::as_str),
-        Some("0.75"),
-        "{on_file:?}"
+        rows["default"].max_single_loss_usd.value(),
+        dec!(0.75),
+        "the DB row carries the new single-loss cap: {rows:?}"
     );
 
-    // 「重启」：the boot chain resolves the bounds from EXACTLY these keys
-    // (`from_lookup` is `from_env`'s pure seam; the launcher folds .env into
-    // the process environment, `from_env` reads it back).
-    let limits =
-        crate::risk::limits::SystemicRiskLimits::from_lookup(|key| on_file.get(key).cloned());
-    let pos = &limits.account.max_position_size;
-    assert_eq!(pos.value(), dec!(2));
+    // 「重启」：the boot overlay reads that same table (a fresh `load_risk`
+    // IS the restart read-back) — the durable bound is armed on start.
+
+    // `.env` 逐字节不动（不存在也照实）—— 内核唯一不写它。
     assert_eq!(
-        pos.source(),
-        crate::risk::limits::LimitSource::Env,
-        "provenance is env — the persisted bound names its real layer"
+        std::fs::read(&env_path).ok(),
+        env_before,
+        "the kernel must never write the .env"
     );
-    let single = &limits.account.max_single_loss_usd;
-    assert_eq!(single.value(), dec!(0.75));
-    assert_eq!(single.source(), crate::risk::limits::LimitSource::Env);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

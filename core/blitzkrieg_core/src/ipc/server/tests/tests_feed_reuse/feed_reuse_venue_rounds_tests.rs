@@ -46,6 +46,8 @@ async fn venue_set_mounts_every_declared_family_of_the_account() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -214,6 +216,8 @@ async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -305,16 +309,21 @@ async fn rounds_set_mounts_every_added_family_and_persists_the_declaration() {
         durations.contains(&900) && durations.contains(&3600),
         "the mount started one discovery per added family: {durations:?}"
     );
-    // The durable half: rounds are on disk in .env, sibling fields intact.
-    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
-    assert!(
-        file.contains("ACCOUNT_PAPER_ROUNDS=\"900,3600\""),
-        "the declaration must land on disk: {file}"
+    // 操作者裁决 2026-11-14：durable 半边是 SQLite 的 accounts 行 ——
+    // rounds_json 就是下一次 boot 的声明；sibling 字段同行。
+    let rows = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
+    let row = rows.iter().find(|r| r.id == "paper").expect("paper row");
+    let rounds: Vec<i64> =
+        serde_json::from_str(&row.rounds_json).expect("rounds json parses");
+    assert_eq!(
+        rounds,
+        vec![900, 3600],
+        "the declaration must land on disk: {row:?}"
     );
-    assert!(
-        file.contains("ACCOUNT_PAPER_NAME=\"paper\""),
-        "sibling field kept: {file}"
-    );
+    assert_eq!(row.name, "paper", "sibling field kept: {row:?}");
     // And the in-memory book reads the new set.
     {
         let c = core.lock().await;
@@ -398,6 +407,8 @@ async fn rounds_set_refuses_a_removal_with_open_exposure_and_moves_nothing() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -567,6 +578,8 @@ async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -661,11 +674,18 @@ async fn rounds_set_soft_unloads_a_clean_removal_and_the_poll_gate_drops_it() {
         serde_json::json!(false),
         "a pure removal mounts nothing: {reply}"
     );
-    // Both stores moved.
-    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
-    assert!(
-        file.contains("ACCOUNT_PAPER_ROUNDS=\"900\"") && !file.contains("3600"),
-        "the file must carry the shrunk set: {file}"
+    // Both stores moved（行的家是 SQLite，操作者裁决 2026-11-14）。
+    let rows = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
+    let row = rows.iter().find(|r| r.id == "paper").expect("paper row");
+    let rounds: Vec<i64> =
+        serde_json::from_str(&row.rounds_json).expect("rounds json parses");
+    assert_eq!(
+        rounds,
+        vec![900],
+        "the row must carry the shrunk set: {row:?}"
     );
     {
         let c = core.lock().await;
@@ -755,6 +775,8 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -851,10 +873,25 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
         serde_json::json!([900, 3600]),
         "duplicates dropped, first-seen order kept: {reply}"
     );
-    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
-    assert!(
-        file.contains("ACCOUNT_PAPER_ROUNDS=\"900,3600\""),
-        "the deduplicated set is what lands on disk: {file}"
+    // 操作者裁决 2026-11-14：行的家是 SQLite。去重后的集合落 rounds_json；
+    // 空集 = 行存在、rounds_json 为 []（行即真相，与 boot 回读一致）——
+    // 一个新 core 读同一张表启动不受限。
+    let read_rows = |dir: &std::path::Path| {
+        crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+            .expect("the store re-opens")
+            .load_accounts()
+            .expect("rows readable")
+    };
+    let row = read_rows(&dir)
+        .into_iter()
+        .find(|r| r.id == "paper")
+        .expect("paper row");
+    let rounds: Vec<i64> =
+        serde_json::from_str(&row.rounds_json).expect("rounds json parses");
+    assert_eq!(
+        rounds,
+        vec![900, 3600],
+        "the deduplicated set is what lands on disk: {row:?}"
     );
 
     // The EMPTY set: the key is REMOVED from the file (missing == []).
@@ -873,30 +910,17 @@ async fn rounds_set_refuses_bad_values_and_the_empty_set_removes_the_file_key() 
         "the empty set is the legal unrestricted write: {reply}"
     );
     assert_eq!(reply["result"]["rounds"], serde_json::json!([]), "{reply}");
-    let file = std::fs::read_to_string(&env_path).expect("fixture readable");
+    let row = read_rows(&dir)
+        .into_iter()
+        .find(|r| r.id == "paper")
+        .expect("paper row");
+    let rounds: Vec<i64> =
+        serde_json::from_str(&row.rounds_json).expect("rounds json parses");
     assert!(
-        !file.contains("_ROUNDS"),
-        // ("roundslive" the venue contains the substring — match the
-        // KEY spelling, not a bare substring.)
-        "the rounds key must be GONE from the file: {file}"
+        rounds.is_empty(),
+        //（"roundslive" the venue contains the substring — the ROW's
+        // rounds_json is the whole truth, not a key's absence.）
+        "the empty set boots unrestricted: {row:?}"
     );
-    assert!(
-        file.contains("ACCOUNT_PAPER_NAME=\"paper\""),
-        "siblings kept: {file}"
-    );
-
-    // Persistence round-trip: a NEW core reading the same sources boots
-    // unrestricted (the deleted key parses as the empty set).
-    let reread = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        now_ms(),
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the file the write produced must boot");
-    let account = reread.account(&AccountId::from("paper")).expect("account");
-    assert!(
-        account.rounds.is_empty(),
-        "the deleted key boots unrestricted"
-    );
+    assert_eq!(row.name, "paper", "siblings kept: {row:?}");
 }

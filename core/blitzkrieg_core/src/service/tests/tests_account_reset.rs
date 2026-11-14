@@ -1063,6 +1063,8 @@ fn account_remove_sweeps_both_sides_and_the_archaeology() {
             mode: Mode::Dry,
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：删户同步写 accounts 表。
+            db_path: Some(dir.join("store.sqlite")),
             ..Default::default()
         },
         crate::account::config::load_account_ledgers_single_source(

@@ -108,6 +108,8 @@ async fn account_create_refuses_a_duplicate_id_and_leaves_the_file_untouched() {
     let core = Arc::new(AsyncMutex::new(Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(env_path.parent().unwrap().join("store.sqlite")),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
@@ -185,6 +187,8 @@ async fn venue_set_is_visible_to_account_list_through_the_same_process_reload() 
     let core = Arc::new(AsyncMutex::new(Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(env_path.parent().unwrap().join("store.sqlite")),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
@@ -236,27 +240,21 @@ async fn venue_set_is_visible_to_account_list_through_the_same_process_reload() 
         "the sibling is untouched: {default}"
     );
 
-    // The durable half: the .env key, and a fresh boot-shaped load agrees.
-    let on_file = env_map(&env_path);
-    assert_eq!(
-        on_file.get("ACCOUNT_PAPER_VENUE").map(String::as_str),
-        Some("polysimulator"),
-        "the binding is on disk: {on_file:?}"
-    );
-    let reread = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        now_ms(),
-        crate::account::config::TEST_ALLOWED_ROUNDS,
+    // 操作者裁决 2026-11-14：durable 半边是 SQLite 的 accounts 行 —— 行的
+    // venue 就是下一次 boot 的绑定（reload 读的同一张表）。
+    let rows = crate::risk::account_store::AccountRiskDb::open(
+        env_path.parent().unwrap().join("store.sqlite"),
     )
-    .expect("the written file re-parses");
+    .expect("the store re-opens")
+    .load_accounts()
+    .expect("rows readable");
     assert_eq!(
-        reread
-            .account(&AccountId::from("paper"))
-            .expect("paper")
+        rows.iter()
+            .find(|r| r.id == "paper")
+            .expect("paper row")
             .venue,
         "polysimulator",
-        "what the write applied IS what the next boot loads"
+        "the binding is on disk: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
 }
@@ -280,6 +278,9 @@ async fn strategy_isolation_fixture() -> (
     let mut c = Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite（store + risk db 同
+            // 一开口——default 账户臂的 mirror 写认的是 store 句柄）。
+            db_path: Some(env_path.parent().unwrap().join("store.sqlite")),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
@@ -288,8 +289,6 @@ async fn strategy_isolation_fixture() -> (
         two_account_book(now_ms()),
     );
     let db_path = env_path.parent().unwrap().join("store.sqlite");
-    c.open_account_risk_db(&db_path)
-        .expect("settings store opens");
     let mut engine = crate::engine::Engine::new(EngineConfig::default());
     test_support::host_disabled(
         &mut engine,
@@ -430,15 +429,29 @@ async fn strategy_enable_is_per_account_isolated_between_default_and_paper() {
 
 // ── 4. execution_policy.set 带 accountId 写 POLICY_*_<SFX> 键 ───────────
 
+/// 操作者裁决 2026-11-14：`execution_policy.set` 的持久化半边住进 SQLite
+/// 的 `account_settings`（键 = env 语法原名，defaults 段存伪账户 `defaults`
+/// 名下）。读回助手：一个账户的全部设置行。
+fn account_settings_rows(
+    db_path: &std::path::Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    crate::risk::account_store::AccountRiskDb::open(db_path)
+        .expect("reopen the store")
+        .load_settings()
+        .expect("settings readable")
+}
+
 /// `execution_policy.set` with an `accountId` is the per-account section
-/// write: the six `POLICY_*_<SFX>` keys land in the `.env` (never the
-/// global names), a sibling account's section is untouched, and the
-/// reloaded section view (`execution_policy.get`, the state the kernel
-/// will judge under) reflects the write in the same process.
+/// write: the six `POLICY_*_<SFX>` keys land in SQLite's `account_settings`
+/// under the account's row (never the global names), a sibling account's
+/// section is untouched, and the reloaded section view
+/// (`execution_policy.get`, the state the kernel will judge under)
+/// reflects the write in the same process.
 #[tokio::test]
 async fn execution_policy_set_writes_the_per_account_suffix_keys_and_the_reload_reflects_them() {
     let (core, registry, peer, env_path) =
         policy_fixture_with_accounts(&["default", "paper"]).await;
+    let db_path = env_path.parent().unwrap().join("store.sqlite");
 
     let reply = rpc(
         &core,
@@ -449,36 +462,36 @@ async fn execution_policy_set_writes_the_per_account_suffix_keys_and_the_reload_
     .await;
     assert!(reply.get("error").is_none(), "the set must land: {reply}");
 
-    let on_file = env_map(&env_path);
+    let rows = account_settings_rows(&db_path);
+    let paper = rows.get("paper").expect("paper's settings row");
     assert_eq!(
-        on_file.get("POLICY_BUDGET_RATIO_PAPER").map(String::as_str),
+        paper.get("POLICY_BUDGET_RATIO_PAPER").map(String::as_str),
         Some("0.25"),
-        "the per-account key carries the ratio: {on_file:?}"
+        "the per-account key carries the ratio: {paper:?}"
     );
     assert_eq!(
-        on_file
-            .get("POLICY_MIN_BUDGET_USD_PAPER")
-            .map(String::as_str),
+        paper.get("POLICY_MIN_BUDGET_USD_PAPER").map(String::as_str),
         Some("5"),
-        "{on_file:?}"
+        "{paper:?}"
     );
     assert_eq!(
-        on_file
-            .get("POLICY_MAX_BUDGET_USD_PAPER")
-            .map(String::as_str),
+        paper.get("POLICY_MAX_BUDGET_USD_PAPER").map(String::as_str),
         Some("50"),
-        "{on_file:?}"
+        "{paper:?}"
     );
-    // The GLOBAL names are not this write's face (the fixture seeds the
-    // global ratio 0.10; the account section rides its own keys).
-    assert_eq!(
-        on_file.get("POLICY_BUDGET_RATIO").map(String::as_str),
-        Some("0.10"),
-        "the global default is untouched: {on_file:?}"
+    // The GLOBAL names are not this write's face: the globals stay where
+    // the fixture seeded them (the `.env` line, read-only) and no
+    // `defaults` POLICY row was minted by a per-account write.
+    assert!(
+        !rows
+            .get("defaults")
+            .map(|d| d.keys().any(|k| k.starts_with("POLICY_")))
+            .unwrap_or(false),
+        "the global default is untouched: {rows:?}"
     );
     assert!(
-        !on_file.keys().any(|k| k == "POLICY_BUDGET_RATIO_DEFAULT"),
-        "the default account's section is untouched: {on_file:?}"
+        !rows.contains_key("default"),
+        "the default account's section is untouched: {rows:?}"
     );
 
     // The same-process reload half: execution_policy.get answers the
@@ -507,15 +520,13 @@ async fn execution_policy_set_writes_the_per_account_suffix_keys_and_the_reload_
     )
     .await;
     assert!(reply.get("error").is_none(), "the reset must land: {reply}");
-    let on_file = env_map(&env_path);
+    let rows = account_settings_rows(&db_path);
     assert!(
-        !on_file.keys().any(|k| k.ends_with("_PAPER")),
-        "the reset swept paper's section: {on_file:?}"
-    );
-    assert_eq!(
-        on_file.get("POLICY_BUDGET_RATIO").map(String::as_str),
-        Some("0.10"),
-        "the global default survives the account reset: {on_file:?}"
+        !rows
+            .get("paper")
+            .map(|p| p.keys().any(|k| k.starts_with("POLICY_")))
+            .unwrap_or(false),
+        "the reset swept paper's section: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
 }

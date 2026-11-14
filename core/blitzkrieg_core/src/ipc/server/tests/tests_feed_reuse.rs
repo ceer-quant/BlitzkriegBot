@@ -106,6 +106,8 @@ async fn reuse_fixture(
     );
     let cfg = CoreConfig {
         accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+        // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+        db_path: Some(dir.join("store.sqlite")),
         engine_enabled: true,
         round_duration_sec: 900,
         allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),

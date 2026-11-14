@@ -51,11 +51,6 @@
 // block is deleted — the test bodies do not change.
 #![allow(dead_code)]
 
-use blitzkrieg_core::account::config::{
-    env_persist_account_create, env_persist_account_remove, env_persist_account_rounds,
-    env_persist_account_status, env_persist_account_strategies, env_persist_account_trading,
-    env_persist_account_venue, load_account_ledgers_single_source,
-};
 use blitzkrieg_core::account::{AccountStatus, CredentialKeys};
 use blitzkrieg_core::exit_policy::ExitConfig;
 use blitzkrieg_core::model::default_account_id;
@@ -63,7 +58,7 @@ use blitzkrieg_core::risk::limits::{AccountRiskLimits, Bound, LimitSource};
 use blitzkrieg_core::store::StoreApi as _;
 use rust_decimal_macros::dec;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ── the trait: StoreApi, grouped by domain (the agreed #1199 shape) ─────────
 
@@ -178,266 +173,8 @@ pub trait CredentialsStore {
     fn save_credentials(&self, vars: &[(&str, &str)], reset: bool) -> Result<(), String>;
 }
 
-// ── EnvStore: the env backend over the REAL kernel write faces ──────────────
-
-/// The env backend: a scratch directory holding the `.env` (the kernel's
-/// single config source) plus the runtime settings cell. Every write goes
-/// through the kernel's own public env-write faces — the same functions the
-/// service layer calls — and every read resolves through the boot loader.
-/// The risk/exit and credentials domains delegate to the PRODUCTION
-/// `blitzkrieg_core::store::EnvStore` (the PR-1 implementation), so the
-/// parity exercises the shipped env backend, not a test double.
-pub struct EnvStore {
-    env_path: PathBuf,
-    legacy_toml: PathBuf,
-    state_path: PathBuf,
-    inner: blitzkrieg_core::store::EnvStore,
-}
-
-impl EnvStore {
-    /// A fresh scratch deployment. The legacy toml path is INSIDE the
-    /// scratch (and never created): the write faces refuse while a legacy
-    /// toml exists, and the parity fixture must not trip that refusal.
-    pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "bk-store-parity-env-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let env_path = dir.join(".env");
-        let legacy_toml = dir.join("accounts.toml");
-        let inner = blitzkrieg_core::store::EnvStore::new(
-            Some((env_path.clone(), legacy_toml.clone())),
-            Some(env_path.clone()),
-            None,
-        );
-        Self {
-            env_path,
-            legacy_toml,
-            state_path: dir.join("runtime-config.json"),
-            inner,
-        }
-    }
-
-    pub fn env_path(&self) -> &Path {
-        &self.env_path
-    }
-}
-
-impl Drop for EnvStore {
-    fn drop(&mut self) {
-        if let Some(dir) = self.env_path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-}
-
-impl AccountStore for EnvStore {
-    fn create(&self, id: &str, name: Option<&str>) -> Result<(), String> {
-        env_persist_account_create(
-            &self.legacy_toml,
-            &self.env_path,
-            id,
-            name,
-            None,
-            &CredentialKeys::default(),
-        )
-        .map_err(|e| e.to_string())
-    }
-    fn set_venue(&self, id: &str, venue: &str) -> Result<(), String> {
-        env_persist_account_venue(&self.legacy_toml, &self.env_path, id, venue)
-            .map_err(|e| e.to_string())
-    }
-    fn set_rounds(&self, id: &str, rounds: &[i64]) -> Result<(), String> {
-        env_persist_account_rounds(&self.legacy_toml, &self.env_path, id, rounds)
-            .map_err(|e| e.to_string())
-    }
-    fn set_status(&self, id: &str, status: &str) -> Result<(), String> {
-        let parsed = match status {
-            "active" => AccountStatus::Active,
-            "readonly" => AccountStatus::ReadOnly,
-            "frozen" => AccountStatus::Frozen,
-            other => return Err(format!("unknown status `{other}`")),
-        };
-        env_persist_account_status(&self.legacy_toml, &self.env_path, id, &parsed)
-            .map_err(|e| e.to_string())
-    }
-    fn set_trading_enabled(&self, id: &str, on: bool) -> Result<(), String> {
-        env_persist_account_trading(&self.legacy_toml, &self.env_path, id, on)
-            .map_err(|e| e.to_string())
-    }
-    fn set_strategies(&self, id: &str, strategies: &[&str]) -> Result<(), String> {
-        let owned: Vec<String> = strategies.iter().map(|s| s.to_string()).collect();
-        env_persist_account_strategies(&self.legacy_toml, &self.env_path, id, &owned)
-            .map_err(|e| e.to_string())
-    }
-    fn remove(&self, id: &str) -> Result<(), String> {
-        env_persist_account_remove(&self.legacy_toml, &self.env_path, id).map_err(|e| e.to_string())
-    }
-    fn list(&self) -> Result<Vec<AccountRow>, String> {
-        let book = load_account_ledgers_single_source(
-            &self.legacy_toml,
-            Some(&self.env_path),
-            0,
-            // The boot resolution validates the declared rounds family
-            // against the plugins' union — the parity fixture uses exactly
-            // the durations the union declares (300/900/3600, the scanner's
-            // own labels), so the env backend resolves the same book the
-            // memory backend holds.
-            &[300, 900, 3600],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(book
-            .account_list()
-            .iter()
-            .map(|a| AccountRow {
-                id: a.id.as_str().to_string(),
-                name: a.name.clone(),
-                venue: a.venue.clone(),
-                status: status_word(&a.status),
-                trading_enabled: a.trading_enabled,
-                rounds: a.rounds.clone(),
-                strategies: a.strategies.clone(),
-            })
-            .collect())
-    }
-}
-
-impl SettingsStore for EnvStore {
-    fn set_round_duration(&self, sec: Option<i64>) -> Result<(), String> {
-        blitzkrieg_core::runtime_config::persist_round_duration_to_with_env(
-            &self.state_path,
-            sec,
-            "uid:parity",
-            0,
-            Some(&self.env_path),
-        )
-        .map_err(|e| e.to_string())
-    }
-    fn set_market_plugin(&self, plugin: Option<&str>) -> Result<(), String> {
-        blitzkrieg_core::runtime_config::persist_market_plugin_to_with_env(
-            &self.state_path,
-            plugin,
-            "uid:parity",
-            0,
-            Some(&self.env_path),
-        )
-        .map_err(|e| e.to_string())
-    }
-    fn get_round_duration(&self) -> Option<i64> {
-        blitzkrieg_core::runtime_config::load_round_duration_from(
-            &self.state_path,
-            &[300, 900, 3600],
-        )
-        .map(|c| c.duration_sec)
-    }
-    fn get_market_plugin(&self) -> Option<String> {
-        blitzkrieg_core::runtime_config::load_market_plugin_from(&self.state_path).map(|c| c.plugin)
-    }
-}
-
-impl RiskExitStore for EnvStore {
-    fn set_risk(&self, account: &str, fields: &[(&str, &str)]) -> Result<(), String> {
-        let owned: Vec<(String, String)> = fields
-            .iter()
-            .map(|(f, v)| (f.to_string(), v.to_string()))
-            .collect();
-        self.inner
-            .save_risk_bounds(Some(account), &owned)
-            .map(|_| ())
-            .map_err(|e| e.message)
-    }
-    fn get_risk(&self, account: &str) -> Vec<(String, String)> {
-        let vars = blitzkrieg_core::env_file::read_env_vars(&self.env_path).unwrap_or_default();
-        // The read face mirrors the write face's key grammar exactly: the
-        // default account's row is the GLOBAL (unsuffixed) keys, a named
-        // account's row is its suffixed keys — no cross-account fallback
-        // (the DB read face is per-account, and the parity compares the
-        // per-account row).
-        let is_default = account == default_account_id().as_str();
-        let mut out = Vec::new();
-        for key in blitzkrieg_core::cockpit::COCKPIT_KEYS
-            .iter()
-            .filter(|k| k.family == blitzkrieg_core::cockpit::CockpitFamily::Systemic)
-        {
-            let candidate = if is_default {
-                key.env_key.to_string()
-            } else {
-                blitzkrieg_core::config::account_env_key(key.env_key, account)
-            };
-            if let Some(raw) = vars.get(&candidate) {
-                out.push((key.field.to_string(), raw.trim().to_string()));
-            }
-        }
-        sorted_row(out)
-    }
-    fn set_exit(&self, account: &str, fields: &[(&str, &str)]) -> Result<(), String> {
-        let owned: Vec<(String, String)> = fields
-            .iter()
-            .map(|(f, v)| (f.to_string(), v.to_string()))
-            .collect();
-        self.inner
-            .save_exit(Some(account), &owned)
-            .map(|_| ())
-            .map_err(|e| e.message)
-    }
-    fn get_exit(&self, account: &str) -> Vec<(String, String)> {
-        let vars = blitzkrieg_core::env_file::read_env_vars(&self.env_path).unwrap_or_default();
-        // The read face mirrors the write face's key grammar exactly (see
-        // `get_risk`): the default account's row is the GLOBAL keys, a
-        // named account's row is its suffixed keys.
-        let is_default = account == default_account_id().as_str();
-        let mut out = Vec::new();
-        for key in blitzkrieg_core::cockpit::COCKPIT_KEYS
-            .iter()
-            .filter(|k| k.family == blitzkrieg_core::cockpit::CockpitFamily::Exit)
-        {
-            let candidate = if is_default {
-                key.env_key.to_string()
-            } else {
-                blitzkrieg_core::config::account_env_key(key.env_key, account)
-            };
-            if let Some(raw) = vars.get(&candidate) {
-                out.push((key.field.to_string(), raw.trim().to_string()));
-            }
-        }
-        sorted_row(out)
-    }
-}
-
-impl CredentialsStore for EnvStore {
-    fn save_credentials(&self, vars: &[(&str, &str)], reset: bool) -> Result<(), String> {
-        let owned: BTreeMap<String, String> = vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let reset_keys: Vec<&str> = if reset {
-            vars.iter().map(|(k, _)| *k).collect()
-        } else {
-            Vec::new()
-        };
-        self.inner
-            .save_credentials(&owned, &reset_keys)
-            .map_err(|e| e.message)
-    }
-}
-
-impl StoreApi for EnvStore {
-    fn accounts(&self) -> &dyn AccountStore {
-        self
-    }
-    fn settings(&self) -> &dyn SettingsStore {
-        self
-    }
-    fn risk_exit(&self) -> &dyn RiskExitStore {
-        self
-    }
-    fn credentials(&self) -> &dyn CredentialsStore {
-        self
-    }
-}
+// ── (操作者裁决 2026-11-14：`.env` 后端已随内核的 env 写入路径整体删除——
+//  任何写回 `.env` 的代码都是违约。对等面只剩 SQLite 与内存测试替身。) ──
 
 // ── MemoryStore: the in-memory backend ──────────────────────────────────────
 
@@ -1106,27 +843,20 @@ fn refusal_kind(e: &str) -> String {
 /// THE acceptance: the same business path produces the same outcomes on the
 /// env backend, the in-memory backend and the SQLite backend.
 #[test]
-fn all_three_backends_agree_on_the_business_path() {
-    let env = EnvStore::new("main");
+fn the_backends_agree_on_the_business_path() {
     let mem = MemoryStore::new();
     let sqlite = SqliteStore::new("main");
 
-    let env_report = run_business_path(&env);
     let mem_report = run_business_path(&mem);
     let sqlite_report = run_business_path(&sqlite);
 
     // Every observable — every write's refusal/success, every list row, the
     // removal's effect, every settings read, the risk/exit round-trip —
-    // must be identical across the three backends.
+    // must be identical across the two backends.
     assert_eq!(
-        env_report, mem_report,
-        "the env backend and the in-memory backend disagree on the business path:\n\
-         env: {env_report:#?}\nmem: {mem_report:#?}"
-    );
-    assert_eq!(
-        env_report, sqlite_report,
-        "the env backend and the SQLite backend disagree on the business path:\n\
-         env: {env_report:#?}\nsqlite: {sqlite_report:#?}"
+        mem_report, sqlite_report,
+        "the in-memory backend and the SQLite backend disagree on the business path:\n\
+         mem: {mem_report:#?}\nsqlite: {sqlite_report:#?}"
     );
 
     // The report must be non-trivial: a path where every operation failed
@@ -1135,39 +865,39 @@ fn all_three_backends_agree_on_the_business_path() {
     // risk/exit round-trip actually landed, and the settings cell actually
     // moved.
     assert!(
-        env_report.iter().any(|l| l.starts_with("create a: Ok")),
-        "alpha must be created on the env backend: {env_report:#?}"
+        sqlite_report.iter().any(|l| l.starts_with("create a: Ok")),
+        "alpha must be created on the env backend: {sqlite_report:#?}"
     );
     assert!(
-        env_report.iter().any(|l| l.contains("alpha")
+        sqlite_report.iter().any(|l| l.contains("alpha")
             && l.contains("polymarket")
             && l.contains("frozen")
             && l.contains("[900, 3600]")),
-        "the list row must carry every write: {env_report:#?}"
+        "the list row must carry every write: {sqlite_report:#?}"
     );
     assert!(
-        env_report.iter().any(|l| l
+        sqlite_report.iter().any(|l| l
             == "list after remove: Ok([AccountRow { id: \"alpha\", \
              name: \"Alpha\", venue: \"polymarket\", status: \"frozen\", trading_enabled: true, \
              rounds: [900, 3600], strategies: [\"s1\", \"s2\"] }])"),
-        "removal must take beta and only beta: {env_report:#?}"
+        "removal must take beta and only beta: {sqlite_report:#?}"
     );
     assert!(
-        env_report
+        sqlite_report
             .iter()
             .any(|l| l.contains("get round: Some(300)")),
-        "the settings cell must carry the round duration: {env_report:#?}"
+        "the settings cell must carry the round duration: {sqlite_report:#?}"
     );
     assert!(
-        env_report.iter().any(|l| l
+        sqlite_report.iter().any(|l| l
             == "get risk alpha: [(\"cooldownMinutes\", \"30\"), (\"maxPositionSize\", \"5\")]"),
-        "the risk round-trip must land both writes (the merge, not the replace): {env_report:#?}"
+        "the risk round-trip must land both writes (the merge, not the replace): {sqlite_report:#?}"
     );
     assert!(
-        env_report.iter().any(|l| l
+        sqlite_report.iter().any(|l| l
             == "get exit alpha: [(\"stopLossPct\", \"8\"), (\"takeProfitPct\", \"90\"), \
              (\"trailingEnabled\", \"true\")]"),
-        "the exit round-trip must land all three fields: {env_report:#?}"
+        "the exit round-trip must land all three fields: {sqlite_report:#?}"
     );
 }
 
@@ -1190,18 +920,6 @@ fn the_sqlite_backend_enumerates_its_legal_differences() {
         plugin.unwrap_err().contains("no store face"),
         "the refusal must name the missing face"
     );
-    // The env backend CARRIES the cell (the runtime-config cell + the env
-    // key — the launcher's domain, the env carrier's write).
-    let env = EnvStore::new("diffs-env");
-    assert!(
-        env.settings().set_market_plugin(Some("polymarket")).is_ok(),
-        "the env backend carries the market-plugin cell (the launcher's domain)"
-    );
-    assert_eq!(
-        env.settings().get_market_plugin().as_deref(),
-        Some("polymarket"),
-        "the env backend's cell reads back"
-    );
     // The memory backend carries it too (the map).
     let mem = MemoryStore::new();
     assert!(mem.settings().set_market_plugin(Some("polymarket")).is_ok());
@@ -1222,41 +940,15 @@ fn the_sqlite_backend_enumerates_its_legal_differences() {
         "the refusal must name the PR-3 gate"
     );
     assert!(
-        env.credentials()
-            .save_credentials(&[("KALSHI_API_KEY", "k")], false)
-            .is_ok(),
-        "the env backend carries credentials (.env is the carrier)"
-    );
-    assert!(
-        std::fs::read_to_string(env.env_path())
-            .unwrap_or_default()
-            .lines()
-            .any(|l| {
-                blitzkrieg_core::env_file::parse_line(l)
-                    .map(|(k, v)| k == "KALSHI_API_KEY" && v == "k")
-                    .unwrap_or(false)
-            }),
-        "the env backend's credential write landed on file"
-    );
-    assert!(
         mem.credentials()
             .save_credentials(&[("KALSHI_API_KEY", "k")], false)
             .is_ok(),
         "the memory backend records credentials"
     );
 
-    // 3. The duplicate create: the env store refuses its own ACCOUNT_LIST
-    // duplicate; the SqliteStore's create is INSERT OR IGNORE (idempotent).
-    // The service layer's duplicate refusal (the book check) is the
-    // production gate for both — the store-level difference is named.
-    assert!(
-        env.accounts().create("alpha", Some("Alpha")).is_ok(),
-        "the env create lands the first time"
-    );
-    assert!(
-        env.accounts().create("alpha", None).is_err(),
-        "the env store refuses its own duplicate (the ACCOUNT_LIST check)"
-    );
+    // 3. The duplicate create: the SqliteStore's create is INSERT OR
+    // IGNORE (idempotent); the service layer's duplicate refusal (the book
+    // check) is the production gate — the store-level shape is named.
     assert!(
         sqlite.accounts().create("alpha", Some("Alpha")).is_ok(),
         "the sqlite create lands the first time"
@@ -1267,17 +959,7 @@ fn the_sqlite_backend_enumerates_its_legal_differences() {
          (the named, legal store-level difference; the service layer refuses \
          the duplicate before the store in production)"
     );
-    // Neither duplicate changed the BOOK the boot resolves (alpha exists
-    // once, with its first-write name).
-    assert_eq!(
-        env.list()
-            .unwrap()
-            .iter()
-            .filter(|r| r.id == "alpha")
-            .count(),
-        1,
-        "the env book holds alpha once"
-    );
+    // The duplicate left the book with alpha once (its first-write name).
     assert_eq!(
         sqlite
             .list()
@@ -1316,38 +998,23 @@ fn the_sqlite_backend_enumerates_its_legal_differences() {
         "the DB materializes the ghost row (the FK precondition) — the named, \
          legal store-level difference"
     );
-    // And the env backend's ghost write leaves a dead key, not a book row
-    // (the env binding above already carries the market-plugin/credentials
-    // writes; the ghost uses the same scratch).
-    let _ = env.accounts().set_venue("ghost", "polymarket");
-    assert!(
-        !env.list().unwrap().iter().any(|r| r.id == "ghost"),
-        "the env backend's ghost is a dead key, never a book row"
-    );
-    assert!(
-        std::fs::read_to_string(env.env_path())
-            .unwrap_or_default()
-            .contains("ACCOUNT_GHOST_VENUE"),
-        "the env backend's ghost write left its dead key on file (the named, \
-         legal store-level difference)"
-    );
+    // The ghost row is the FK precondition's honest face — the service
+    // layer refuses the ghost before the store in production (the same
+    // named difference as above).
 }
 
 /// The refusal discipline must agree on the OBSERVABLE face: an unknown
-/// account is refused (or, on the env backend, writes a key the book never
-/// resolves — the write-side existence check is the service layer's, per
-/// the grammar) — and on the env/memory backends the ghost never
-/// materializes in the book. The issue's "no implicit ledger" discipline is
-/// about the BOOK the BOOT resolves (ACCOUNT_LIST), and the env/memory
-/// backends keep it; the SQLite list face reads the accounts table, where
-/// the FK precondition materializes the row (the named, legal store-level
+/// account is refused by the service layer (the grammar's write-side
+/// existence check) — and the ghost never materializes in the BOOK the
+/// boot resolves. The SQLite list face reads the accounts table, where the
+/// FK precondition materializes the row (the named, legal store-level
 /// difference asserted in `the_sqlite_backend_enumerates_its_legal_differences`).
 #[test]
 fn unknown_account_never_materializes_in_the_book() {
-    let env = EnvStore::new("ghost");
     let mem = MemoryStore::new();
+    let sqlite = SqliteStore::new("ghost3");
 
-    for store in [&env as &dyn StoreApi, &mem as &dyn StoreApi] {
+    for store in [&sqlite as &dyn StoreApi, &mem as &dyn StoreApi] {
         let a = store.accounts();
         // every write face against a ghost id: refused by name (memory) or
         // a dead key (env) — both are legal backend semantics, and the
@@ -1367,9 +1034,8 @@ fn unknown_account_never_materializes_in_the_book() {
     }
 
     // The memory backend's stronger face (write-side refusal, by name) is
-    // the one the service layer's parity contract will standardize on:
-    // pin it so a future change keeps refusing rather than degrading to
-    // the env backend's dead-key shape.
+    // the one the service layer's parity contract standardizes on: pin it
+    // so a future change keeps refusing rather than degrading.
     let mem_refused = {
         let a = mem.accounts();
         (

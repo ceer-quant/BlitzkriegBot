@@ -705,6 +705,8 @@ async fn policy_fixture_with_accounts(
         execution_policy_audit_path: Some(audit_path.to_string_lossy().to_string()),
         env_file_path: Some(env_path.to_string_lossy().to_string()),
         dry_seed_balance: dec!(100),
+        // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+        db_path: Some(dir.join("store.sqlite")),
         trade_log_path: None,
         order_log_path: None,
         position_log_path: None,
@@ -813,6 +815,7 @@ mod tests_account_verbs;
 mod tests_backtest;
 mod tests_blueprint;
 mod tests_execution_policy;
+mod tests_env_readonly;
 mod tests_exit_params;
 mod tests_feed_reuse;
 mod tests_hot_reload;

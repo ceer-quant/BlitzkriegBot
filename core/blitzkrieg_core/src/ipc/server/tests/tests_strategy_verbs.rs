@@ -47,6 +47,8 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
         position_log_path: None,
         env_file_path: Some(env_path.to_string_lossy().into_owned()),
         accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+        // 持久化后端是 SQLite（`.env` 只读）：策略集合写 account_settings 行。
+        db_path: Some(dir.join("store.sqlite")),
         ..Default::default()
     };
     let mut c = Core::with_account_book(cfg, book);
