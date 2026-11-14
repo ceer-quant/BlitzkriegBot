@@ -31,7 +31,7 @@ impl Core {
         // empty map (the boot chain would read that as "use the env global"
         // and keep trading with widened limits). Fail-closed: refuse boot.
         let risks = db.load_risk()?;
-        let exits = db.load_exits(&self.config.positions.exit)?;
+        let exits = db.load_exits()?;
         let default_id = crate::model::default_account_id();
         if let Some(row) = risks.get(default_id.as_str()) {
             self.risk.config_mut().systemic.account = row.clone();

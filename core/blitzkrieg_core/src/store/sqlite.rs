@@ -177,7 +177,7 @@ impl SqliteStore {
     ) -> Result<crate::exit_policy::ExitConfig, String> {
         let mut exit = self
             .risk
-            .load_exits(&crate::exit_policy::ExitConfig::default())
+            .load_exits()
             .map_err(|e| format!("account_exit_policy read failed: {e}"))?
             .get(account_id)
             .cloned()
@@ -768,7 +768,7 @@ mod tests {
         store
             .save_exit(Some("paper"), &fields(&[("stopLossPct", "8")]))
             .unwrap();
-        let rows = store.risk.load_exits(&ExitConfig::default()).unwrap();
+        let rows = store.risk.load_exits().unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         store
             .save_exit(
@@ -776,7 +776,7 @@ mod tests {
                 &fields(&[("takeProfitPct", "90"), ("trailingEnabled", "true")]),
             )
             .unwrap();
-        let rows = store.risk.load_exits(&ExitConfig::default()).unwrap();
+        let rows = store.risk.load_exits().unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         assert_eq!(rows["paper"].take_profit_pct, dec!(90));
         assert!(rows["paper"].trailing_enabled);

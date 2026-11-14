@@ -116,9 +116,7 @@ async fn risk_set_systemic_and_exit_write_the_db_not_the_env() {
         serde_json::json!(true),
         "the DB carrier is wired, so the write must land: {applied}"
     );
-    let exits = db
-        .load_exits(&crate::exit_policy::ExitConfig::default())
-        .unwrap();
+    let exits = db.load_exits().unwrap();
     assert_eq!(
         exits["default"].stop_loss_pct,
         dec!(8),
