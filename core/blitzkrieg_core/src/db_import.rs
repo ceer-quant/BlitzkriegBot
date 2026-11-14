@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::{Map, Value};
 
 /// The v1 schema — a verbatim copy of the canonical store DDL (`db::schema`,
@@ -225,11 +225,12 @@ CREATE INDEX IF NOT EXISTS idx_markets_venue     ON markets(venue_id);
 
 /// Every table the importer's v1 DDL creates, in dependency order (parents
 /// first) — the canonical inventory, asserted against `sqlite_master` by the
-/// tests. NOTE (#1199 PR-0.5 T-02): this stays the full 18-table v1 list on
-/// purpose — the importer still BUILDS the v1 shape (the embedded `SCHEMA_V1`
-/// copy is byte-identical history), it just no longer WRITES the five ledger
-/// tables; the migration runner's v2 drops them on the next open of a
-/// migrated database.
+/// tests. NOTE (#1199 PR-0.5 T-02, third audit P0-2 #1199): this stays the
+/// full 18-table v1 list on purpose, but `import_once` only EXECUTES
+/// `SCHEMA_V1` on a database that has never run any migration
+/// (`schema_migrations` absent or empty). On an already-migrated database the
+/// five ledger tables stay dropped by v2; the embedded `SCHEMA_V1` copy is
+/// byte-identical history, not DDL re-run on every boot.
 pub const TABLES: &[&str] = &[
     "schema_migrations",
     "kernel_meta",
@@ -343,6 +344,50 @@ const SETTING_KEYS: &[&str] = &[
 /// The audit actor a legacy import lands under.
 const IMPORT_ACTOR: &str = "db_import_v1";
 
+/// `true` when `kernel_meta` already carries the `import_v1` done-marker.
+/// A brand-new database has no `kernel_meta` at all, which is "no marker"
+/// rather than an error — the existence probe goes through `sqlite_master`
+/// (always present) so a missing table never masquerades as a SQL failure.
+fn import_v1_marker_present(conn: &Connection) -> anyhow::Result<bool> {
+    let has_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'kernel_meta'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_table == 0 {
+        return Ok(false);
+    }
+    match conn.query_row(
+        "SELECT 1 FROM kernel_meta WHERE key = 'import_v1'",
+        [],
+        |_| Ok(()),
+    ) {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `true` when this database has never run a migration: `schema_migrations`
+/// is missing (brand-new file) or empty (bootstrapped, nothing applied).
+/// Only such a "fresh" database is built by the importer's embedded v1 DDL;
+/// an already-migrated database keeps the shape the migration runner gave it.
+fn schema_migrations_is_empty(conn: &Connection) -> anyhow::Result<bool> {
+    let has_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_table == 0 {
+        return Ok(true);
+    }
+    Ok(
+        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get::<_, i64>(0)
+        })? == 0,
+    )
+}
+
 /// Import the legacy world into `db_path`, exactly once.
 ///// `env_lookup` is the `.env` read face (the kernel passes
 /// `|k| std::env::var(k).ok()`); every account / risk / exit / policy knob
@@ -365,18 +410,24 @@ pub fn import_once(
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(SCHEMA_V1)?;
 
-    // The done-marker: a present import_v1 makes this run a no-op.
-    let marker: Option<()> = conn
-        .query_row(
-            "SELECT 1 FROM kernel_meta WHERE key = 'import_v1'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?;
-    if marker.is_some() {
+    // The done-marker: a present import_v1 makes this run a no-op. Check it
+    // BEFORE any DDL: an already-migrated database must never resurrect the
+    // five ledger tables v2 dropped (#1199 third audit P0-2). The old order
+    // ran `SCHEMA_V1` (`CREATE TABLE IF NOT EXISTS`, 18 tables) on every
+    // boot, so a database migrated down to 13 tables was permanently restored
+    // to the lying 18-table shape.
+    if import_v1_marker_present(&conn)? {
         return Ok(ImportReport::default());
+    }
+
+    // Only a database that has never run any migration (`schema_migrations`
+    // absent or empty) gets the embedded v1 DDL from the importer. Anything
+    // already migrated keeps the shape the migration runner gave it — the
+    // five ledger tables stay dropped, and `SCHEMA_V1` is history, not boot
+    // DDL re-executed on every start.
+    if schema_migrations_is_empty(&conn)? {
+        conn.execute_batch(SCHEMA_V1)?;
     }
 
     let data_dir = legacy_data_dir(db_path);
