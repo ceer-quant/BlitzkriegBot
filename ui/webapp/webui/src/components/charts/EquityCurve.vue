@@ -31,10 +31,15 @@ const el = ref<HTMLDivElement | null>(null)
  */
 	const series = computed<number[]>(() => {
 	  let cum = 0
-	  // 未知盈亏不折叠为 0：未知行写 NaN，让 ECharts 在该处断线，绝不画出
-	  // 虚假的平段；只对 isKnownPnl 的行做累加。
+	  let broke = false
+	  // 未知盈亏不折叠为 0：首个未知行写 NaN 并置 broke，其后所有累计点均为 NaN，
+	  // 因为再无基准可追溯，绝不续出不可核对的数（如 [+10, 未知, +5]
+	  // 画成 [10, NaN, 15]）。broke 持续到系列结束——逐行账本基准不可得，
+	  // 只能在末点用账本口径 total 覆写（见下文），且末点若已是 NaN 则
+	  // 保持断线，绝不把总计盖在未知点上制造虚假涨跌。
 	  const pts = props.rows.map((t) => {
-	    if (!isKnownPnl(t)) return NaN
+	    if (!isKnownPnl(t)) broke = true
+	    if (broke) return NaN
 	    return (cum += Number(t.netPnlUsd))
 	  })
 	  // 最后一笔的累计值以账本口径总计（props.total）为准，避免与卡片头条金额不一致：
