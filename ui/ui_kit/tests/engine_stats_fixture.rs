@@ -203,10 +203,6 @@ const NOT_CARRIED: &[(&str, &str)] = &[
         "per-strategy cap refusals; panel uses stats rows",
     ),
     (
-        "accountGates",
-        "per-account entry gate (issue #1045); panel surface lands in #1044",
-    ),
-    (
         "accountingAudit",
         "in-kernel books audit; no panel surface yet",
     ),
