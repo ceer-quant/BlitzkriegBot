@@ -6,11 +6,13 @@
  * 钉住的事实（#1140 per-account 契约，每条对应一个 user-facing 承诺）：
  *
  *   1. readout：effectiveSec 来自出厂默认（900），source=default，perAccount
- *      为空，可切换档位（插件声明并集）带 scanner 的 5m/15m/1h/4h/daily 标签。
+ *      为空，可切换档位（插件声明并集）带 scanner 标签（断言抽查
+ *      5m/15m/daily 三档）。
  *   2. 写路径：round_duration.set {accountId:'default', durationSec:300} 把
  *      ACCOUNT_DEFAULT_ROUND_DURATION_SEC 落进 cwd/.env；回执点名账户与
  *      nextSessionSec=300；审计回执 actor 带 uid:。
- *   3. 立即生效：本会话 perAccount.default=300（内存 map 即时更新）；全局
+ *   3. 立即生效：本会话 perAccount.default=300，且引擎扫描器时钟同步
+ *      （engineActiveSec=300，#1151 无 split-brain）；默认网格
  *      effectiveSec 一个字节不动（per-account 覆盖与默认网格分离）。
  *   4. 重启生效：重启后的内核从 .env 读回 perAccount.default=300 —— 持久
  *      覆盖 outranks 出厂默认。

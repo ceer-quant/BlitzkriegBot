@@ -337,14 +337,14 @@ onMounted(() => void loadRisk())
 
     <template v-else>
       <div class="mt-3">
-        <template v-for="(group, gi) in ['账户', '全局']" :key="group">
+        <template v-for="group in ['账户']" :key="group">
           <div class="label-micro mt-2 first:mt-0">{{ group }}级限额</div>
           <div class="mt-1">
             <div
               v-for="(row, i) in riskRows.filter((r) => r.group === group)"
               :key="row.field"
               class="flex items-center justify-between gap-3 py-1.5 text-[12px]"
-              :class="(gi === 0 && i === 0) || (gi === 1 && i === 0) ? '' : 'border-t border-line'"
+              :class="i === 0 ? '' : 'border-t border-line'"
             >
               <span class="text-faint-fg">{{ row.label }}</span>
               <span class="flex items-center gap-2">
@@ -420,7 +420,7 @@ onMounted(() => void loadRisk())
       <p v-if="riskMsg" class="mt-2 text-[11px] leading-snug text-gold-400">{{ riskMsg }}</p>
       <div v-if="riskReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted || riskReceipt.persistence === 'env' ? '已持久化到 .env' : '未持久化，重启回到启动配置' }}）
+          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted || riskReceipt.persistence === 'env' ? '已持久化' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in riskReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }} → {{ c.to === '0' ? '关闭' : c.to }}
@@ -429,7 +429,7 @@ onMounted(() => void loadRisk())
       </div>
       <div v-if="exitReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          退出纪律已写入 {{ exitReceipt.applied.length }} 项（{{ exitReceipt.persisted || exitReceipt.persistence === 'env' ? '已持久化到 .env' : '未持久化，重启回到启动配置' }}）
+          退出纪律已写入 {{ exitReceipt.applied.length }} 项（{{ exitReceipt.persisted || exitReceipt.persistence === 'env' ? '已持久化' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in exitReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ changeText(c) }}

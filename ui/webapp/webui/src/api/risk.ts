@@ -84,8 +84,8 @@ export interface SystemicLimitChange {
 }
 
 /** `risk.setSystemic` 回执：改了什么、谁改的、何时、持久化到哪。persistence
- * = env（已把改动的 BK_RISK_* 键写入内核 `.env`，重启后以 source=env 重新
- * 武装）或 none（未接线 env 文件或写入失败 —— 日志里有路径）；每项 applied
+ * = env（改动的 BK_RISK_* 键已由内核持久化，重启后以 source=env 重新武装）
+ * 或 none（未接线持久存储或写入失败 —— 日志里有路径）；每项 applied
  * 带 effect=live|next_session（两项 live：单笔亏损/单仓上限；三项
  * next_session：回撤预算/连亏熔断/冷静期）。回执必须写明 effect 与
  * persistence，禁止只显示「已保存」。 */
@@ -126,7 +126,7 @@ export interface ExitSetChange {
 }
 
 /** `risk.setExit` 回执：改了什么、谁改的、何时、持久化到哪。persistence
- * = env（已把改动的 BK_EXIT_* 键写入内核 `.env`，重启后按启动链重新解析出
+ * = env（改动的 BK_EXIT_* 键已由内核持久化，重启后按启动链重新解析出
  * 同样的值）或 none；每项 applied 带 effect=live（新入场下一笔按新值绑定，
  * 已开仓位的退出扫描同步跟随）。回执必须写明 effect 与 persistence，
  * 禁止只显示「已保存」。 */
@@ -153,7 +153,7 @@ export const riskApi = {
    * （issue #983：风控只跟随账户，无全局限额）。只发改动过的字段；内核
    * plan-first（一项非法则整体拒）+ 逐字段审计，回执里每个 bound 带
    * effect（三项 live / 三项 next_session）。persistence = env：改动的
-   * BK_RISK_* 键写入内核 `.env`，重启后以 source=env 重新武装。
+   * BK_RISK_* 键由内核持久化，重启后以 source=env 重新武装。
    */
   riskSetSystemic: (body: RiskSetSystemicBody) =>
     request<SystemicLimitUpdateDoc>('/risk/set-systemic', {
@@ -164,8 +164,8 @@ export const riskApi = {
    * 退出纪律的写路径（`risk.setExit`）：止损/止盈/强平三项的热写。
    * 只发改动过的字段；内核 plan-first（一项非法则整体拒）+ 逐字段审计，
    * 回执里每项带 old→new 与 effect=live（新入场下一笔按新值绑定，已开仓位
-   * 的退出扫描同步跟随）。persistence = env：改动的 BK_EXIT_* 键写入内核
-   * `.env`，重启后按启动链（CLI > env > default）重新解析出同样的值。
+   * 的退出扫描同步跟随）。persistence = env：改动的 BK_EXIT_* 键由内核
+   * 持久化，重启后按启动链（CLI > env > default）重新解析出同样的值。
    */
   riskSetExit: (body: RiskSetExitBody) =>
     request<ExitSetUpdateDoc>('/risk/set-exit', {

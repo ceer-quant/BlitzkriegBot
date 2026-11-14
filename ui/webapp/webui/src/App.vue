@@ -107,7 +107,7 @@ const freeze = computed(() => freezeBanner(stats.value))
 		// 配态停用（account.status === 'frozen'）与风控冻结是两回事，不得混入同一 red
 		// banner；配态停用在设置页单独呈现为「配置停用」，不提供面板解冻。
 		const accountFreezes = computed(() => accountFreezeBanners(stats.value))
-		// 配置态闸门（read_only / suspended / trading disabled）：由 .env 派生，
+		// 配置态闸门（read_only / suspended / trading disabled）：由账户配置派生，
 		// 不提供面板解冻，呈现为可关闭的 amber 提示，不钉死在 cockpit。
 		const configGates = computed(() => configGateBanners(stats.value))
 	const lastError = computed(
@@ -378,7 +378,7 @@ onMounted(() => {
         <AlertBanner tone="error" :title="af.title" :hint="af.hint">{{ af.body }}</AlertBanner>
       </div>
       <div v-for="cg in configGates" :key="cg.identity" class="mb-3.5">
-        <!-- 配置态闸门：amber、可关、自动消失，无解冻门；改 .env 并重启即可恢复 -->
+        <!-- 配置态闸门：amber、可关、自动消失，无解冻门；改账户配置并重启即可恢复 -->
         <AlertBanner tone="warn" :title="cg.title" :hint="cg.hint" dismissible :auto-dismiss-ms="AUTO_DISMISS_MS"
           :auto-key="`config-${cg.identity}`" @dismiss="cg.identity && dismiss(cg.identity)"
         >
