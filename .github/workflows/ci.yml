@@ -78,6 +78,22 @@ jobs:
         run: |
           node scripts/contract-tree-check.mjs --self-test
           node scripts/contract-tree-check.mjs
+      - name: Guard #1199 — store-layering (env/SQL write paths)
+        # The #1199 acceptance gate: business code writes runtime state ONLY
+        # through the store seam (StoreApi); direct env writes (env_persist_*,
+        # .account_env_write_paths(), persist_cockpit_changes, env_file
+        # primitives, set_var/remove_var) and direct rusqlite/Connection use
+        # are violations. Teeth first (§A.4): the self-test pins the judge on
+        # fixtures (a business file gaining env::set_var MUST red; comments,
+        # strings, cfg(test) fixtures and the db:: surface must not), then the
+        # real verdict diffs the tree against scripts/store-layer-baseline.txt
+        # — the ratchet snapshot of the debt that exists on main today (issue
+        # #1199: the baseline only shrinks; new violations fail the PR).
+        # Pure text over the scanned trees, milliseconds, no build needed —
+        # which is why it lives in the always-run planner job.
+        run: |
+          node scripts/store-layer-check.mjs --self-test
+          node scripts/store-layer-check.mjs
       - name: Classify changed files into lanes
         id: plan
         env:
