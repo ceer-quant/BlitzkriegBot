@@ -166,15 +166,19 @@ impl SqliteStore {
 
     /// Merge wire field changes onto an existing exit-policy row (the stored
     /// JSON row, or the factory posture when the account has none) — the
-    /// DB-side twin of `install_account_exit_row`'s merge.
+    /// DB-side twin of `install_account_exit_row`'s merge. A store read
+    /// failure is propagated (fail-closed): merging onto a silently-empty
+    /// base could wipe a stored row the operator can't see (mirrors
+    /// `merge_risk_fields`, issue #1199 fourth audit P0).
     fn merge_exit_fields(
         &self,
         account_id: &str,
         fields: &FieldChanges,
-    ) -> crate::exit_policy::ExitConfig {
+    ) -> Result<crate::exit_policy::ExitConfig, String> {
         let mut exit = self
             .risk
             .load_exits(&crate::exit_policy::ExitConfig::default())
+            .map_err(|e| format!("account_exit_policy read failed: {e}"))?
             .get(account_id)
             .cloned()
             .unwrap_or_default();
@@ -214,7 +218,7 @@ impl SqliteStore {
                 }
             }
         }
-        exit
+        Ok(exit)
     }
 
     /// The settings family's write tail shared by the policy-section and
@@ -569,7 +573,12 @@ impl super::StoreApi for SqliteStore {
         let target = account_id
             .map(str::to_string)
             .unwrap_or_else(|| crate::model::default_account_id().as_str().to_string());
-        let exit = self.merge_exit_fields(&target, fields);
+        let exit = self.merge_exit_fields(&target, fields).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::Internal,
+                format!("the account_exit_policy store read failed ({e})"),
+            )
+        })?;
         self.risk.save_exit(&target, &exit).map_err(|e| {
             CoreError::new(
                 CoreErrorCode::Internal,
@@ -759,7 +768,7 @@ mod tests {
         store
             .save_exit(Some("paper"), &fields(&[("stopLossPct", "8")]))
             .unwrap();
-        let rows = store.risk.load_exits(&ExitConfig::default());
+        let rows = store.risk.load_exits(&ExitConfig::default()).unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         store
             .save_exit(
@@ -767,7 +776,7 @@ mod tests {
                 &fields(&[("takeProfitPct", "90"), ("trailingEnabled", "true")]),
             )
             .unwrap();
-        let rows = store.risk.load_exits(&ExitConfig::default());
+        let rows = store.risk.load_exits(&ExitConfig::default()).unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         assert_eq!(rows["paper"].take_profit_pct, dec!(90));
         assert!(rows["paper"].trailing_enabled);
