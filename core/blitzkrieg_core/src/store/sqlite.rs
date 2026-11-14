@@ -119,10 +119,18 @@ impl SqliteStore {
     /// of the service layer's in-memory merge (`install_account_risk_row`).
     /// An unknown field is skipped (a future wire field without a DB column
     /// must not crash the write — the pre-seam rule, kept).
-    fn merge_risk_fields(&self, account_id: &str, fields: &FieldChanges) -> AccountRiskLimits {
+    /// Read-modify-write base row for a risk patch. A store read failure is
+    /// propagated (fail-closed): merging onto a silently-empty base could wipe
+    /// a stored row the operator can't see.
+    fn merge_risk_fields(
+        &self,
+        account_id: &str,
+        fields: &FieldChanges,
+    ) -> Result<AccountRiskLimits, String> {
         let mut row = self
             .risk
             .load_risk()
+            .map_err(|e| format!("account_risk read failed: {e}"))?
             .get(account_id)
             .cloned()
             .unwrap_or_default();
@@ -153,7 +161,7 @@ impl SqliteStore {
                 }
             }
         }
-        row
+        Ok(row)
     }
 
     /// Merge wire field changes onto an existing exit-policy row (the stored
@@ -538,7 +546,12 @@ impl super::StoreApi for SqliteStore {
         let target = account_id
             .map(str::to_string)
             .unwrap_or_else(|| crate::model::default_account_id().as_str().to_string());
-        let row = self.merge_risk_fields(&target, fields);
+        let row = self.merge_risk_fields(&target, fields).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::Internal,
+                format!("the account_risk store read failed ({e})"),
+            )
+        })?;
         self.risk.save_risk(&target, &row).map_err(|e| {
             CoreError::new(
                 CoreErrorCode::Internal,
@@ -708,7 +721,7 @@ mod tests {
                 .save_risk_bounds(Some("paper"), &fields(&[("maxPositionSize", "5")]))
                 .unwrap()
         );
-        let rows = store.risk.load_risk();
+        let rows = store.risk.load_risk().unwrap();
         assert_eq!(rows["paper"].max_position_size.value(), dec!(5));
         assert_eq!(
             rows["paper"].max_position_size.source(),
@@ -721,14 +734,14 @@ mod tests {
         store
             .save_risk_bounds(Some("paper"), &fields(&[("cooldownMinutes", "30")]))
             .unwrap();
-        let rows = store.risk.load_risk();
+        let rows = store.risk.load_risk().unwrap();
         assert_eq!(rows["paper"].max_position_size.value(), dec!(5));
         assert_eq!(rows["paper"].cooldown_minutes.value(), dec!(30));
         // The default-account face (None) is its own row.
         store
             .save_risk_bounds(None, &fields(&[("maxSingleLossUsd", "25")]))
             .unwrap();
-        let rows = store.risk.load_risk();
+        let rows = store.risk.load_risk().unwrap();
         assert_eq!(
             rows["default"].max_single_loss_usd.value(),
             dec!(25),

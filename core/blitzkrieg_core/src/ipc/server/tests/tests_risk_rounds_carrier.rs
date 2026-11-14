@@ -71,7 +71,7 @@ async fn risk_set_systemic_and_exit_write_the_db_not_the_env() {
     // The DB row carries the values (the boot overlay's read).
     let db = crate::risk::account_store::AccountRiskDb::open(dir.join("risk.sqlite"))
         .expect("reopen the db for the read-back");
-    let rows = db.load_risk();
+    let rows = db.load_risk().unwrap();
     assert_eq!(
         rows["default"].max_position_size.value(),
         dec!(7),
