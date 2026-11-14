@@ -42,7 +42,11 @@ export function hasToken(): boolean {
 }
 
 /**
- * A non-2xx gateway response.
+ * A non-2xx gateway response — or a 200 whose body is the kernel-error
+ * envelope `{"error": "…"}` (see the `request` sniff below: the gateway
+ * answers kernel errors with the frozen 200 wire and `request` re-throws
+ * them with the synthetic status 500, the audit's mapping for a kernel-side
+ * fault).
  *
  * Written without a TypeScript parameter property (`constructor(readonly
  * status: …)`) so the class stays loadable under Node's strip-only TypeScript
@@ -162,6 +166,24 @@ export async function request<T>(
   if (!res.ok) {
     throw new ApiError(res.status, `网关返回 ${res.status}`)
   }
-  return (await res.json()) as T
+  const doc = (await res.json()) as unknown
+  // issue 1199 R2: THE error-envelope collection point. The gateway answers
+  // every KERNEL error as HTTP 200 + the sole-key document {"error": "…"}
+  // (ui_kit routes.rs `proxy_read` — frozen wire, the 200 stays). Sniffed
+  // HERE, in the one helper every endpoint module shares, so no call site
+  // can miss it again (the silent-degradation class this closes). The
+  // ApiError status is synthetic — 500, a kernel-side fault — never the
+  // wire's 200, which every status-based classification would read as
+  // success. Sole top-level key ONLY: legal `error` DATA fields ride
+  // multi-key documents (backtest JobView.error, NetCheckDoc.error, version
+  // check/stage `{started, error}`) and must stay values, never exceptions.
+  if (
+    typeof doc === 'object' && doc !== null && !Array.isArray(doc)
+    && Object.keys(doc).length === 1
+    && typeof (doc as { error?: unknown }).error === 'string'
+  ) {
+    throw new ApiError(500, (doc as { error: string }).error)
+  }
+  return doc as T
 }
 

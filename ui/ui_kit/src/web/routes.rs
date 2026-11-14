@@ -12,6 +12,9 @@ impl WebServer {
     /// the E25 audit tail, …) is a one-line call into this. The error document
     /// shape (`{ "error": … }`, with the kernel's own message — the frontend's
     /// `rpc -32601` feature-detect rides inside) is frozen wire contract.
+    /// The 200-on-error stays (B 方案, #1199 R2): the panel's `request()`
+    /// sniffs this sole-key envelope and re-throws it as an `ApiError` — the
+    /// one collection point, see `ui/webapp/webui/src/api/core.ts`.
     pub(super) fn proxy_read(
         &self,
         verb: &str,

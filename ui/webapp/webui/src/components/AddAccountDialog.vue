@@ -104,20 +104,31 @@ async function submit(): Promise<void> {
       Object.entries(credDraft.value).filter(([, v]) => v.trim() !== ''),
     )
     if (Object.keys(vars).length) {
-      const cred = await api.marketCredentialsSet({
-        plugin: venue.value,
-        vars,
-        reason: `panel add-account ${id}`,
-      })
-      if (cred.error) {
-        okMsg.value = `账户 ${id} 已创建（已落盘）；但凭据写入被拒：${cred.error} —— 稍后在设置页指引里补配后重启生效。`
+      // issue 1199 R2: 内核拒绝现在以 ApiError 到达（request() 的 200+{error}
+      // 信封嗅探）——账户已创建成功，这里保留设计的部分失败文案而不是把
+      // 整个提交打成硬错误。
+      let credError: string | null = null
+      let written: string[] = []
+      try {
+        const cred = await api.marketCredentialsSet({
+          plugin: venue.value,
+          vars,
+          reason: `panel add-account ${id}`,
+        })
+        if (cred.error) credError = cred.error
+        else written = cred.written ?? []
+      } catch (e) {
+        credError = e instanceof Error ? e.message : String(e)
+      }
+      if (credError) {
+        okMsg.value = `账户 ${id} 已创建（已落盘）；但凭据写入被拒：${credError} —— 稍后在设置页指引里补配后重启生效。`
         emit('created', id)
         return
       }
       // 凭据写入的是内核持久凭据格；本进程环境要等下一次启动（launcher 启动
       // 时加载）才携带新值，执行器也是启动时挂载的 —— 切换器徽章此刻
       // 仍读「凭证未载」，重启一次内核才翻绿。
-      okMsg.value = `账户 ${id} 已创建，${cred.written?.length ?? 0} 项凭据已持久化 —— 重启内核后生效（执行器在启动时读取凭据）。`
+      okMsg.value = `账户 ${id} 已创建，${written.length} 项凭据已持久化 —— 重启内核后生效（执行器在启动时读取凭据）。`
     } else {
       okMsg.value = `账户 ${id} 已创建（未填凭据 —— 下单执行器启动时会缺凭据，稍后可补）。`
     }

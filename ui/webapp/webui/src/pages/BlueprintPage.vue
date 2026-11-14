@@ -505,7 +505,17 @@ async function preloadPackage(name: string): Promise<void> {
     selectedId.value = null
     void scheduleCompile()
   } catch (e) {
-    preloadError.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+    const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+    // issue 1199 R2: a kernel refusal now arrives as an ApiError from
+    // request()'s error-envelope sniff (it used to resolve as a 200 + {error}
+    // value the `doc.error` branch above caught). Keep the designed fallback
+    // verbatim: a handwritten package opens in source mode, not as a preload
+    // error.
+    if (/no blueprint document/.test(msg)) {
+      await openSourceMode(name, '该包是手写策略（没有蓝图文档）—— 已按源码模式打开，画布图只对蓝图编译产物有意义。')
+      return
+    }
+    preloadError.value = msg
   } finally {
     preloading.value = false
   }
