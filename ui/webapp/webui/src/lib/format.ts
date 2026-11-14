@@ -18,6 +18,7 @@ export function compact(v: unknown, fallback = '—'): string {
 }
 
 export function money(v: unknown, digits = 2, fallback = '—'): string {
+  if (v === undefined || v === null || v === '') return fallback
   const n = Number(v)
   if (!Number.isFinite(n)) return fallback
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
@@ -25,6 +26,7 @@ export function money(v: unknown, digits = 2, fallback = '—'): string {
 
 /** Signed money for PnL: +$12.30 / −$4.10 */
 export function signedMoney(v: unknown, digits = 2, fallback = '—'): string {
+  if (v === undefined || v === null || v === '') return fallback
   const n = Number(v)
   if (!Number.isFinite(n)) return fallback
   const sign = n > 0 ? '+' : n < 0 ? '−' : ''
