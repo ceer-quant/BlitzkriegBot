@@ -12,11 +12,11 @@ export interface CumStats {
   wins: number
   losses: number
   /**
-   * 胜率（0–100）。**null = 未知**（服务端 summary 缺 winRate 字段，或
-   * 前端行折叠口径）—— 显示「未知」，绝不回落 0（0% 是「全败」的读数，
-   * 不是「不知道」）。issue 1199 P0-4。
+   * 胜率（0–100，永远是数值）。**操作者裁决 2026-11-14：永不出现「未知」**——
+   * 与总览页「已平仓交易」卡同口径：`wins / (wins + losses)`，0 笔 = 0.0%。
+   * 未知盈亏的行不进这个分母，由 `unknownPnlCount` 单独披露。
    */
-  winRate: number | null
+  winRate: number
   /**
    * netPnlUsd 读数缺失/非法的行数（未知盈亏）。这些行不进 wins/losses/
    * net/胜率分母 —— 单独计数、单独标注，绝不折叠成 0 混入。issue 1199 P0-4。

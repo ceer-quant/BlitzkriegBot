@@ -50,6 +50,8 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
         ..Default::default()
     };
     let mut c = Core::with_account_book(cfg, book);
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     let mut engine = crate::engine::Engine::new(EngineConfig::default());
     test_support::host_disabled(
         &mut engine,
@@ -88,11 +90,16 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
          even though the live dispatch hosted no pre-existing instance: {reply}"
     );
     assert_eq!(reply["result"]["accountId"], serde_json::json!("default"),);
-    let written =
-        std::fs::read_to_string(&env_path).expect("the enable must create the .env durable half");
-    assert!(
-        written.contains("ACCOUNT_DEFAULT_STRATEGIES=\"spread_arb\""),
-        "the durable half must carry the default account's set: {written}"
+    let db = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("reopen the store");
+    assert_eq!(
+        db.load_settings()
+            .unwrap()
+            .get("default")
+            .and_then(|k| k.get(crate::risk::account_store::STRATEGIES_SETTING))
+            .map(String::as_str),
+        Some("[\"spread_arb\"]"),
+        "the durable half is the account_settings row"
     );
 
     // The toggle-off half: empty set = the key LEAVES the file (the same
@@ -113,10 +120,19 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
         serde_json::json!(true),
         "{reply}"
     );
-    let written = std::fs::read_to_string(&env_path).expect("the .env survives the disable");
+    assert_eq!(
+        db.load_settings()
+            .unwrap()
+            .get("default")
+            .and_then(|k| k.get(crate::risk::account_store::STRATEGIES_SETTING))
+            .map(String::as_str),
+        Some("[]"),
+        "an empty set is an explicit row, never a resurrected env key"
+    );
+    let written = std::fs::read_to_string(&env_path).unwrap_or_default();
     assert!(
         !written.contains("ACCOUNT_DEFAULT_STRATEGIES"),
-        "empty set = the key is gone (absence is no declared set): {written}"
+        "the strategy set never lands in .env: {written}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

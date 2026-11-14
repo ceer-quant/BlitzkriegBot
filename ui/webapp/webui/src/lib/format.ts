@@ -38,6 +38,27 @@ export function winRatePct(v: unknown): number {
   return n * 100
 }
 
+/**
+ * 胜率的唯一口径（操作者裁决 2026-11-14）：已知盈亏的已平仓笔数之比，
+ * 0 笔 = 0.0%。全站只有这一处产出胜率 —— 页面不得各自拼百分数，也
+ * 不得把「缺字段」渲染成「未知」：0 笔与缺字段落到同一个数值。
+ */
+export function winRateOf(wins: number, losses: number): number {
+  const denom = wins + losses
+  return denom > 0 ? (wins / denom) * 100 : 0
+}
+
+/**
+ * 服务端给了 winRate 就用它（内核已裁决的聚合），没给就按同一公式用同一份
+ * 盈/亏计数复算 —— 两条路都返回数值，绝不返回 null。
+ */
+export function winRateValue(raw: unknown, wins: number, losses: number): number {
+  if (raw === undefined || raw === null || !Number.isFinite(Number(raw))) {
+    return winRateOf(wins, losses)
+  }
+  return winRatePct(raw)
+}
+
 export function pct(v: unknown, digits = 1, fallback = '—'): string {
   const n = Number(v)
   if (!Number.isFinite(n)) return fallback

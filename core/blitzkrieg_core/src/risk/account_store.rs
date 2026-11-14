@@ -22,6 +22,20 @@ use std::collections::BTreeMap;
 /// The `account_settings` key carrying the per-account order-notional cap.
 pub const MAX_ORDER_NOTIONAL_SETTING: &str = "risk.max_order_notional_usd";
 
+/// The `account_settings` key carrying an account's round-duration anchor in
+/// seconds — the `ACCOUNT_<ID>_ROUND_DURATION_SEC` key's DB twin (same
+/// spelling the SQLite store backend uses, one name for one fact).
+pub const ROUND_DURATION_SETTING: &str = "round.duration_sec";
+
+/// The `account_settings` key carrying an account's strategy ENABLEMENT set
+/// as a JSON array of names — the `ACCOUNT_<ID>_STRATEGIES` key's DB twin.
+pub const STRATEGIES_SETTING: &str = "strategies";
+
+/// `kernel_meta` key: Shadow Evolution on/off (process-scoped, not per-account).
+pub const SHADOW_ENABLED_META: &str = "shadow_enabled";
+/// `kernel_meta` key: Shadow Evolution unattended application on/off.
+pub const SHADOW_AUTO_EVOLVE_META: &str = "shadow_auto_evolve";
+
 /// The durable per-account risk/exit store.
 #[derive(Clone)]
 pub struct AccountRiskDb {
@@ -271,6 +285,84 @@ impl AccountRiskDb {
             )
             .map_err(|e| format!("account_exit_policy write failed: {e}"))?;
             Ok(())
+        })
+    }
+
+    // ── account_settings / kernel_meta ──────────────────────────────────────
+    // The account-scoped setting families that used to live in `.env` as
+    // `ACCOUNT_<ID>_*` keys: the round-duration anchor, the strategy
+    // enablement set, and the two Shadow-Evolution switches. Their durable
+    // home is this database — the same file, the same connection the rest of
+    // the account rows use, so "the account's data" is one write surface and
+    // `.env` stops being a second truth for runtime settings.
+
+    /// Every `account_settings` row, grouped by account then key. A query
+    /// failure is an `Err` (never silently "no rows", which the boot would
+    /// read as "fall back to the env default" and quietly change the grid).
+    pub fn load_settings(&self) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT account_id, key, value FROM account_settings")
+                .map_err(|e| format!("account_settings prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| format!("account_settings query failed: {e}"))?;
+            let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+            for row in rows {
+                let (account, key, value) =
+                    row.map_err(|e| format!("account_settings row failed: {e}"))?;
+                out.entry(account).or_default().insert(key, value);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Upsert (`Some(value)`) or delete (`None`) one account-scoped setting.
+    /// The account row is ensured first — same seam as [`Self::save_risk`]:
+    /// the store may be opened before the account book is mirrored.
+    pub fn save_setting(
+        &self,
+        account_id: &str,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO accounts
+                        (id, name, market_type, status, trading_enabled, updated_at_ms)
+                     VALUES (?1, ?1, 'prediction', 'active', 1, ?2)",
+                rusqlite::params![account_id, crate::db::now_ms()],
+            )
+            .map_err(|e| format!("account_settings account ensure failed: {e}"))?;
+            match value {
+                Some(v) => crate::db::account_setting_set(conn, account_id, key, v)
+                    .map_err(|e| format!("account_settings write failed: {e}")),
+                None => crate::db::account_setting_remove(conn, account_id, key)
+                    .map_err(|e| format!("account_settings delete failed: {e}")),
+            }
+        })
+    }
+
+    /// One `kernel_meta` value (`None` = never written).
+    pub fn load_kernel_meta(&self, key: &str) -> Result<Option<String>, String> {
+        self.db.with_connection(|conn| {
+            crate::db::kernel_meta_get(conn, key)
+                .map_err(|e| format!("kernel_meta read ({key}) failed: {e}"))
+        })
+    }
+
+    /// Upsert one `kernel_meta` value (process-scoped switches: the Shadow
+    /// Evolution toggles are not per-account facts).
+    pub fn save_kernel_meta(&self, key: &str, value: &str) -> Result<(), String> {
+        self.db.with_connection(|conn| {
+            crate::db::kernel_meta_set(conn, key, value)
+                .map_err(|e| format!("kernel_meta write ({key}) failed: {e}"))
         })
     }
 }

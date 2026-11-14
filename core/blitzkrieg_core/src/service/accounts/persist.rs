@@ -802,26 +802,34 @@ impl Core {
             .filter(|p| p.account_id == *id)
             .map(|p| p.strategy.clone())
             .collect();
-        let Some(store) = self.store.as_deref() else {
+        // 操作者裁决 2026-11-14：策略集合和账户其它数据同源 —— 落 SQLite
+        // （`account_settings.strategies`，JSON 数组），不再写 `.env`。空数组
+        // 是显式的「本账户什么都不跑」，与启动回读一致（存在行即为真相）。
+        let Some(db) = self.account_risk_db.clone() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "account.strategies.set: no accounts config path configured — \
-                 persistence is disabled for this core (backtests and \
-                 in-process tests); nothing was applied"
+                "account.strategies.set: no SQLite store on this core — persistence \
+                 is disabled (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        store
-            .save_account_strategies(id.as_str(), &requested)
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "account.strategies.set: persist failed, nothing changed: {}",
-                        e.message
-                    ),
-                )
-            })?;
+        let rendered = serde_json::to_string(&requested).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("account.strategies.set: the set does not render as JSON: {e}"),
+            )
+        })?;
+        db.save_setting(
+            id.as_str(),
+            crate::risk::account_store::STRATEGIES_SETTING,
+            Some(&rendered),
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("account.strategies.set: SQLite 落盘失败，未做任何变更（{e}）"),
+            )
+        })?;
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
         // #537: the default account's writes keep the persisted enabled-set
@@ -900,7 +908,7 @@ impl Core {
     /// Returns the migrated default enablement set (empty when nothing
     /// migrated) so the caller can report it on stderr.
     pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
-        let Some(store) = self.store.as_deref() else {
+        let Some(db) = self.account_risk_db.clone() else {
             return Vec::new();
         };
         // The persisted enabled-set (strategy-state.json) drives the one-time
@@ -931,8 +939,13 @@ impl Core {
             // the pre-toggle era. This one-time gate fires only when the file
             // never spelled an assignment; afterwards the accounts file is
             // the sole truth, exactly as the contract above states.
-            if store
-                .save_account_strategies(default_id.as_str(), &persisted_enabled)
+            let rendered = serde_json::to_string(&persisted_enabled).unwrap_or_default();
+            if db
+                .save_setting(
+                    default_id.as_str(),
+                    crate::risk::account_store::STRATEGIES_SETTING,
+                    Some(&rendered),
+                )
                 .is_ok()
             {
                 let _ =
@@ -942,8 +955,8 @@ impl Core {
                 tracing::info!(
                     strategies = ?migrated,
                     "strategy enablement migration: the default account's persisted \
-                     enabled set is materialized as its .env enablement rows — \
-                     the env rows are the only truth from here on"
+                     enabled set is materialized as its account_settings row — \
+                     the database row is the only truth from here on"
                 );
             }
         }
