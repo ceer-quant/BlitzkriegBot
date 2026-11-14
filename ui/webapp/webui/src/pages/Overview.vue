@@ -388,12 +388,11 @@ const needsStrategyHint = computed(() => {
 	const settlement = computed(() => snap.value?.stats?.settlement ?? null)
 	const hasUnverifiedSettlement = computed(() => {
 	  const s = settlement.value
-	  if (!s) return false
-	  return (
-	    (s.pendingFallbackClaims ?? 0) > 0 ||
-	    s.oldestFallbackClaimAgeMs != null ||
-	    s.fallbackReceivableUsd != null
-	  )
+		if (!s) return false
+		  return (
+		    (s.pendingFallbackClaims ?? 0) > 0 ||
+		    s.oldestFallbackClaimAgeMs != null
+		  )
 	})
 	const settlementAgeText = computed(() => {
 	  const a = settlement.value?.oldestFallbackClaimAgeMs
@@ -410,6 +409,9 @@ const needsStrategyHint = computed(() => {
 	      return '策略未声明'
 	  }
 	})
+	// §9：此卡读 process-level stats.settlement，不受页面账户/场馆过滤；
+	// 标题如实说出口径，免得单账户页把它误读为该账户敞口。
+	const settlementCardLabel = computed(() => '未核实敞口（全账户合计）')
 </script>
 
 <template>
@@ -626,8 +628,8 @@ const needsStrategyHint = computed(() => {
 
     <!-- issue 1199 R4: 未核实敞口 —— 结算已落但尚未被场馆裁决/兑回的估算
          金额。仅在内核带该键且存在未核实索赔时渲染，绝不冒充“零敞口”。 -->
-    <Card v-if="hasUnverifiedSettlement">
-      <CardHeader label="未核实敞口">
+	    <Card v-if="hasUnverifiedSettlement">
+	      <CardHeader :label="settlementCardLabel">
         <template #action>
           <Badge variant="default">{{ settlementPolicyLabel }}</Badge>
         </template>
