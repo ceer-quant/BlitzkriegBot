@@ -80,7 +80,7 @@ impl AccountRiskDb {
                 let (id, single, daily, position, losses, cooldown, source) = match row {
                     Ok(v) => v,
                     Err(e) => {
-                        return Err(format!("account_risk row unreadable — fail-closed: {e}"))
+                        return Err(format!("account_risk row unreadable — fail-closed: {e}"));
                     }
                 };
                 // The one-shot importer writes placeholder zeros
@@ -139,7 +139,7 @@ impl AccountRiskDb {
                     Err(e) => {
                         return Err(format!(
                             "account_settings max_order_notional read failed for {id}: {e}"
-                        ))
+                        ));
                     }
                 }
                 out.insert(id, limits);
@@ -172,7 +172,9 @@ impl AccountRiskDb {
                 let (id, json) = match row {
                     Ok(v) => v,
                     Err(e) => {
-                        return Err(format!("account_exit_policy row unreadable — fail-closed: {e}"))
+                        return Err(format!(
+                            "account_exit_policy row unreadable — fail-closed: {e}"
+                        ));
                     }
                 };
                 match serde_json::from_str::<ExitConfig>(&json) {
@@ -180,10 +182,10 @@ impl AccountRiskDb {
                         out.insert(id, exit);
                     }
                     Err(e) => tracing::warn!(
-                        account = %id,
-                    error = %e,
-                    "account_exit_policy row malformed — global exit stays"
-                ),
+                            account = %id,
+                        error = %e,
+                        "account_exit_policy row malformed — global exit stays"
+                    ),
                 }
             }
             Ok(out)

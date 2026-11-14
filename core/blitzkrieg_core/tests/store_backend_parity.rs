@@ -853,11 +853,7 @@ impl RiskExitStore for SqliteStore {
             .map_err(|e| e.message)
     }
     fn get_exit(&self, account: &str) -> Vec<(String, String)> {
-        let rows = self
-            .store
-            .risk_db()
-            .load_exits()
-            .unwrap();
+        let rows = self.store.risk_db().load_exits().unwrap();
         let Some(exit) = rows.get(account) else {
             return Vec::new();
         };

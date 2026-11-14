@@ -291,7 +291,9 @@ pub fn is_empty_database(conn: &Connection) -> anyhow::Result<bool> {
 /// `Err` instead of being melted into `None` — absence and failure must stay
 /// distinguishable (issue #1199 §11-1).
 pub fn kernel_meta_get(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
-    match conn.query_row("SELECT value FROM kernel_meta WHERE key = ?1", [key], |r| r.get(0)) {
+    match conn.query_row("SELECT value FROM kernel_meta WHERE key = ?1", [key], |r| {
+        r.get(0)
+    }) {
         Ok(v) => Ok(Some(v)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),

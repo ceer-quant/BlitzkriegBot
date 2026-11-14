@@ -694,7 +694,6 @@ impl super::StoreApi for SqliteStore {
 mod tests {
     use super::super::StoreApi;
     use super::*;
-    use crate::exit_policy::ExitConfig;
     use crate::risk::limits::LimitSource;
     use rust_decimal_macros::dec;
     use std::sync::atomic::{AtomicU64, Ordering};
