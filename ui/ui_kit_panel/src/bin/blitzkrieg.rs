@@ -424,10 +424,13 @@ fn ensure_env_file_and_credentials() {
     eprintln!(
         "\
 ================================================================================
-⚠  Panel credentials auto-created in .env (permissions 0600)
+⚠  .env auto-created (permissions 0600): panel credentials + SQLite master key
 
   BLITZKRIEG_PANEL_USER={user}
   BLITZKRIEG_PANEL_PASSWORD=********  (random — read .env for the value)
+  BLITZKRIEG_DB_KEY=********          (random AES-256 key — BACK IT UP: losing
+                                      it loses every credential stored in
+                                      data/blitzkrieg.sqlite)
 
   The file is a dotfile: `cat .env` from a terminal, or press Cmd+Shift+.
   in Finder to reveal hidden files.
@@ -445,9 +448,11 @@ Do NOT commit .env — it contains real credentials.
 /// replaced — a template carrying a pre-set value is operator intent, never
 /// overwritten.
 fn fill_credential_keys(template: &str, user: &str, password: &str) -> (String, bool) {
+    let db_key = generate_master_key();
     let mut filled_user = false;
     let mut filled_pass = false;
-    let mut out = String::with_capacity(template.len() + user.len() + password.len());
+    let mut filled_key = false;
+    let mut out = String::with_capacity(template.len() + user.len() + password.len() + 64);
     for line in template.split_inclusive('\n') {
         let trimmed = line.trim_start();
         if !filled_user && trimmed.starts_with("BLITZKRIEG_PANEL_USER=") {
@@ -464,6 +469,16 @@ fn fill_credential_keys(template: &str, user: &str, password: &str) -> (String, 
                 filled_pass = true;
                 continue;
             }
+        } else if !filled_key && trimmed.starts_with("BLITZKRIEG_DB_KEY=") {
+            let value = trimmed["BLITZKRIEG_DB_KEY=".len()..].trim();
+            if value.is_empty() {
+                // 操作者裁决 2026-11-14（#1199 第六轮）：首启生成 SQLite 主键
+                //（AES-256-GCM，32 原始字节 base64）。生成一次，随文件保存
+                // —— 丢了它，库里的凭证就解不开了。
+                out.push_str(&format!("BLITZKRIEG_DB_KEY={db_key}\n"));
+                filled_key = true;
+                continue;
+            }
         }
         out.push_str(line);
     }
@@ -473,7 +488,36 @@ fn fill_credential_keys(template: &str, user: &str, password: &str) -> (String, 
     if !filled_pass {
         out.push_str(&format!("BLITZKRIEG_PANEL_PASSWORD={password}\n"));
     }
+    if !filled_key {
+        out.push_str(&format!("BLITZKRIEG_DB_KEY={db_key}\n"));
+    }
     (out, filled_user && filled_pass)
+}
+
+/// One-shot SQLite master key for the auto-created `.env`: 32 raw bytes from
+/// the OS CSPRNG (`/dev/urandom`), base64-encoded — exactly the spelling
+/// `blitzkrieg_core::db::credentials::CredentialsManager` validates
+/// (`BLITZKRIEG_DB_KEY`, base64 of 32 raw bytes, AES-256-GCM).
+fn generate_master_key() -> String {
+    use std::io::Read;
+    let mut raw = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut raw))
+        .expect("read /dev/urandom: the OS CSPRNG is required for key generation");
+    // Standard base64 over 32 bytes: 44 chars, no padding ambiguity. The
+    // panel crate does not carry a base64 dependency (and must not gain one
+    // for a one-shot encode), so the table is inline and tested.
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(44);
+    for chunk in raw.chunks_exact(3) {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(T[(n >> 6) as usize & 63] as char);
+        out.push(T[n as usize & 63] as char);
+    }
+    out.push('=');
+    out
 }
 
 /// One-shot random alphanumeric string for the auto-created panel credentials.

@@ -237,15 +237,15 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     );
 }
 
-/// 生效风控的持久化回路（issue #965 验收一）：面板保存 → `BK_RISK_*` 键
-/// 落进内核 `.env`（回执 `persisted=true` + `persistence=store` —— env-only
-/// 后端的载体）→ 「重启」（新解析走启动链的同一 seam
-/// `SystemicRiskLimits::from_lookup`，键位拼写就是写路径写下的那些）→ 限额
-/// 仍武装、来源诚实标注 env。持久化载体与回读一致 —— 一条载体链，没有第二
-/// 个 flag 标注的影子载体（issue #965 把 risk-state 文件里的 systemic 格
-/// 退役了）。
+/// 生效风控的持久化回路（issue #965 验收一 → 操作者裁决 2026-11-14）：
+/// 面板保存 → `BK_RISK_*` 落进 SQLite（回执 `persisted=true` +
+/// `persistence=store` —— DB 是唯一载体，`.env` 对内核只读、逐字节不动）
+/// → 「重启」（boot overlay 读的同一张表，fresh `load_risk` 就是启动链的
+/// 回读）→ 限额仍武装。持久化载体与回读一致 —— 一条载体链，没有第二个
+/// flag 标注的影子载体（issue #965 把 risk-state 文件里的 systemic 格
+/// 退役了；本轮把 env 载体一并退役）。
 #[tokio::test]
-async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
+async fn risk_set_systemic_persists_to_the_db_and_the_boot_rearms_it() {
     use rust_decimal_macros::dec;
     let dir = std::env::temp_dir().join(format!("bk-risk-env-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -267,10 +267,15 @@ async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     };
     let mut c = Core::new(cfg.clone());
     c.set_balance(cfg.dry_seed_balance);
+    c.open_account_risk_db(dir.join("risk.sqlite"))
+        .expect("temp risk db opens");
     cfg.install_engine(&mut c).expect("engine install");
     let core = Arc::new(AsyncMutex::new(c));
     let registry = crate::market::registry::MarketPluginRegistry::new();
     let peer = PeerAuth::SameUid { uid: own_uid() };
+    // The kernel never writes the .env (operator ruling 2026-11-14): the
+    // whole write must leave this byte-for-byte (here: absent) unchanged.
+    let env_before = std::fs::read(&env_path).ok();
 
     let applied = rpc(
         &core,
@@ -287,49 +292,39 @@ async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     assert_eq!(
         audit["persisted"],
         serde_json::json!(true),
-        "the env file is wired, so the write must land: {audit}"
+        "the store is wired, so the write must land: {audit}"
     );
     assert_eq!(
         audit["persistence"],
         serde_json::json!("store"),
-        "the receipt names the carrier: the env backend took the write: {audit}"
+        "the receipt names the carrier: the store took the write: {audit}"
     );
 
-    // The `.env` the write face produced: exactly the two keys, exactly the
-    // spellings the boot chain reads — one map, no second carrier.
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .expect("the .env exists")
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
+    // The durable half: the merged row lands in the SQLite risk table —
+    // exactly the row the boot overlay reads back on the next start.
+    let db = crate::risk::account_store::AccountRiskDb::open(dir.join("risk.sqlite"))
+        .expect("reopen the db for the read-back");
+    let rows = db.load_risk().expect("the risk rows load");
     assert_eq!(
-        on_file.get("BK_RISK_MAX_POSITION_SIZE").map(String::as_str),
-        Some("2"),
-        "{on_file:?}"
+        rows["default"].max_position_size.value(),
+        dec!(2),
+        "the DB row carries the new position size: {rows:?}"
     );
     assert_eq!(
-        on_file
-            .get("BK_RISK_MAX_SINGLE_LOSS_USD")
-            .map(String::as_str),
-        Some("0.75"),
-        "{on_file:?}"
+        rows["default"].max_single_loss_usd.value(),
+        dec!(0.75),
+        "the DB row carries the new single-loss cap: {rows:?}"
     );
 
-    // 「重启」：the boot chain resolves the bounds from EXACTLY these keys
-    // (`from_lookup` is `from_env`'s pure seam; the launcher folds .env into
-    // the process environment, `from_env` reads it back).
-    let limits =
-        crate::risk::limits::SystemicRiskLimits::from_lookup(|key| on_file.get(key).cloned());
-    let pos = &limits.account.max_position_size;
-    assert_eq!(pos.value(), dec!(2));
+    // 「重启」：the boot overlay reads that same table (a fresh `load_risk`
+    // IS the restart read-back) — the durable bound is armed on start.
+
+    // `.env` 逐字节不动（不存在也照实）—— 内核唯一不写它。
     assert_eq!(
-        pos.source(),
-        crate::risk::limits::LimitSource::Env,
-        "provenance is env — the persisted bound names its real layer"
+        std::fs::read(&env_path).ok(),
+        env_before,
+        "the kernel must never write the .env"
     );
-    let single = &limits.account.max_single_loss_usd;
-    assert_eq!(single.value(), dec!(0.75));
-    assert_eq!(single.source(), crate::risk::limits::LimitSource::Env);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -726,6 +721,94 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
         "a path-less core allows in-memory write (no persistence): {accepted}"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 操作者裁决 2026-11-14（落库 + 启动回读）：`round_duration.set` 写的是
+/// SQLite 的 `account_settings` 行，不是 `.env`；下一个会话（新 Core、同一个
+/// 库）读回同一个网格 —— 写进去的和读出来的是同一个事实，`.env` 里连键都
+/// 不该出现。
+#[tokio::test]
+async fn round_duration_lands_in_sqlite_and_the_next_boot_reads_it_back() {
+    let dir = std::env::temp_dir().join(format!("bk-round-sql-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("store.sqlite");
+    let env_path = dir.join(".env");
+    let cfg = || CoreConfig {
+        env_file_path: Some(env_path.to_string_lossy().into_owned()),
+        allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+        round_labels: [(300, "5m"), (900, "15m")].into_iter().collect(),
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        ..Default::default()
+    };
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    let peer = PeerAuth::SameUid { uid: own_uid() };
+
+    // 第一个会话：写入 300。
+    {
+        let c = cfg();
+        let mut core = Core::new(c.clone());
+        core.set_balance(c.dry_seed_balance);
+        core.open_account_risk_db(&db_path).expect("store opens");
+        let core = Arc::new(AsyncMutex::new(core));
+        let set = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reason":"sql round trip"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(set.get("error").is_none(), "the set must land: {set}");
+    }
+
+    // 库里有那一行；`.env` 里没有任何轮次键。
+    let db = crate::risk::account_store::AccountRiskDb::open(&db_path).expect("reopen");
+    let stored = db
+        .load_settings()
+        .expect("settings readable")
+        .get("default")
+        .and_then(|keys| keys.get(crate::risk::account_store::ROUND_DURATION_SETTING))
+        .cloned();
+    assert_eq!(
+        stored.as_deref(),
+        Some("300"),
+        "the grid is an account_settings row"
+    );
+    let env_text = std::fs::read_to_string(&env_path).unwrap_or_default();
+    assert!(
+        !env_text.contains("ROUND_DURATION_SEC"),
+        "the round grid must never be written to .env: {env_text}"
+    );
+
+    // 第二个会话：同一个库 → 读回 300。默认账户的行同时是进程默认网格。
+    {
+        let c = cfg();
+        let mut core = Core::new(c.clone());
+        core.set_balance(c.dry_seed_balance);
+        core.open_account_risk_db(&db_path).expect("store re-opens");
+        let core = Arc::new(AsyncMutex::new(core));
+        let read = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.get","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            read["result"]["perAccount"]["default"],
+            serde_json::json!(300),
+            "the next boot reads the stored anchor back: {read}"
+        );
+        assert_eq!(
+            read["result"]["effectiveSec"],
+            serde_json::json!(300),
+            "the default account's row IS the process default grid: {read}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

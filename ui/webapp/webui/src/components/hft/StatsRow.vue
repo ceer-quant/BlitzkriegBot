@@ -52,12 +52,12 @@ defineProps<{
 
       <Card>
         <CardHeader label="胜率分布" />
-        <!-- issue 1199 P0-4：胜率 null = 未知（服务端 summary 缺字段/行折叠口径
-             无权威分母）——显示「未知」，绝不回落 0%（0% 是「全败」的读数，
-             不是「不知道」）。未知盈亏笔数同行披露，不进胜负分母。 -->
+        <!-- 操作者裁决 2026-11-14：胜率只有一个读数，永不出现「未知」——
+             总览页「已平仓交易」卡是基准口径（0 笔 = 0.0%）。分母是已知盈亏
+             的已平仓笔数，0 笔时比值为 0.0%，而不是一个形容词；未知盈亏的
+             笔数仍在本行如实披露，且不进胜负分母。 -->
         <div class="stat-num text-[30px] leading-none">
-          <span v-if="cumStats.winRate === null" class="text-faint-fg">未知</span>
-          <RollingNumber v-else :value="pct(cumStats.winRate)" />
+          <RollingNumber :value="pct(cumStats.winRate)" />
         </div>
       <div class="mt-1 flex items-center gap-3 text-[11.5px]">
         <span class="font-semibold text-up"><RollingNumber :value="cumStats.wins" /> 盈</span>

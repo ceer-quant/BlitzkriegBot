@@ -1,5 +1,17 @@
 use super::*;
 
+/// 账户 → 策略集合行（SQLite 的 `account_settings.strategies`）：
+/// 操作者裁决 2026-11-14 之后，集合的家是数据库，不是 `.env`。
+fn stored_strategy_set(dir: &std::path::Path, account: &str) -> Option<String> {
+    crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .ok()?
+        .load_settings()
+        .ok()?
+        .get(account)?
+        .get(crate::risk::account_store::STRATEGIES_SETTING)
+        .cloned()
+}
+
 /// 生产 16:29 形状的端到端牙（多账户 PR A 缺陷）：
 /// `account.create` on a locally-settling core seeds the minted account
 /// with `dry_seed_balance` — the same waking balance a boot account gets.
@@ -35,6 +47,8 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
             mode: Mode::Dry,
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
             ledger_journal_dir: Some(journal_dir.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：account.create 的 mint 落 store。
+            db_path: Some(dir.join("store.sqlite")),
             ..Default::default()
         },
         crate::account::config::load_account_ledgers_single_source(
@@ -45,6 +59,8 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     let probe = crate::account::AccountId::from("probe2");
     c.create_account_persisting(
         &probe,
@@ -103,6 +119,8 @@ fn account_create_seeds_a_runtime_mint_on_a_locally_settling_core() {
             mode: Mode::Live,
             accounts_config_path: Some(accounts_path_live.to_string_lossy().into_owned()),
             ledger_journal_dir: Some(journal_dir_live.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：LIVE mint 的账户行落独立 store。
+            db_path: Some(dir.join("store-live.sqlite")),
             ..Default::default()
         },
         crate::account::config::load_account_ledgers_single_source(
@@ -169,6 +187,8 @@ fn display_account_set_persists_and_validates_plan_first() {
     let mut c = Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：display 指针落 accounts 行。
+            db_path: Some(dir.join("store.sqlite")),
             ..Default::default()
         },
         crate::account::config::load_account_ledgers_single_source(
@@ -179,37 +199,46 @@ fn display_account_set_persists_and_validates_plan_first() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     // Boot default: the loader's first-ACTIVE rule points at `default`.
     assert_eq!(c.accounts.display_id(), "default");
 
-    // The legal re-point: memory AND file move together; a FRESH load
-    // (the next boot's call) reads `paper` back.
+    // The legal re-point: memory moves immediately; the durable half lands
+    // in kernel_meta (SQL)，绝不写 `.env`。
     c.set_display_account_persisting(&crate::account::AccountId::from("paper"), "test", "")
         .expect("the re-point lands");
     assert_eq!(c.accounts.display_id(), "paper");
-    let reloaded = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        2,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .unwrap();
-    assert_eq!(reloaded.display_id(), "paper", "the pointer is durable");
-    // The top-level key survived the render next to both rows' fields.
+    let db = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("store re-opens");
+    assert_eq!(
+        db.load_kernel_meta(crate::db::META_DISPLAY_ACCOUNT)
+            .expect("kernel_meta readable"),
+        Some("paper".to_string()),
+        "the display pointer is durable: paper"
+    );
+    // `.env` 逐字节不动。
     let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(text.contains("ACCOUNT_DISPLAY=\"paper\""), "{text}");
+    assert!(
+        !text.contains("ACCOUNT_DISPLAY"),
+        "env stays display-free: {text}"
+    );
+    assert!(text.contains("ACCOUNT_LIST=default,paper"), "{text}");
 
-    // UNKNOWN id: refused plan-first, memory and file untouched.
-    let before = std::fs::read_to_string(&env_path).unwrap();
+    // UNKNOWN id: refused plan-first, memory and store untouched.
+    let before_meta = db
+        .load_kernel_meta(crate::db::META_DISPLAY_ACCOUNT)
+        .expect("kernel_meta readable");
     let err = c
         .set_display_account_persisting(&crate::account::AccountId::from("ghost"), "test", "")
         .expect_err("unknown id");
     assert!(err.message.contains("unknown account"), "{}", err.message);
     assert_eq!(c.accounts.display_id(), "paper");
     assert_eq!(
-        std::fs::read_to_string(&env_path).unwrap(),
-        before,
-        "a refused write leaves the file byte-identical"
+        db.load_kernel_meta(crate::db::META_DISPLAY_ACCOUNT)
+            .expect("kernel_meta readable"),
+        before_meta,
+        "a refused write leaves the durable pointer untouched"
     );
 
     // issue 561（2026-10-20 裁决）改写旧断言：frozen 账户此前被
@@ -223,6 +252,9 @@ fn display_account_set_persists_and_validates_plan_first() {
     let mut c2 = Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // c2 用独立 store：c 已把 default/paper 写进 store.sqlite，而 frozen1 只在 c2 的 env 里，
+            // 须 materialize 进 c2 自己的表后才能被 display 指向。
+            db_path: Some(dir.join("store-c2.sqlite")),
             ..Default::default()
         },
         crate::account::config::load_account_ledgers_single_source(
@@ -233,6 +265,8 @@ fn display_account_set_persists_and_validates_plan_first() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("store-c2.sqlite"))
+        .expect("settings store opens");
     c2.set_display_account_persisting(&crate::account::AccountId::from("frozen1"), "test", "")
         .expect("a frozen account is a legal display target (issue 561)");
     assert_eq!(
@@ -240,14 +274,25 @@ fn display_account_set_persists_and_validates_plan_first() {
         "frozen1",
         "display follows a frozen book — view-only, posture gates the orders"
     );
-    let reloaded2 = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        2,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .unwrap();
-    assert_eq!(reloaded2.display_id(), "frozen1", "durable across boot");
+    // Durable across boot：同 store-c2.sqlite 再开一核心，display 指针从
+    // kernel_meta 复原为 frozen1（env 里已无 ACCOUNT_DISPLAY 键）。
+    let fresh_book = crate::account::AccountLedgers::new(
+        Vec::new(),
+        crate::account::AccountId::from("default"),
+    );
+    let mut c4 = crate::service::Core::with_account_book(
+        crate::service::CoreConfig {
+            accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            db_path: Some(dir.join("store-c2.sqlite")),
+            ..Default::default()
+        },
+        fresh_book,
+    );
+    assert_eq!(
+        c4.accounts.display_id(),
+        "frozen1",
+        "display survives boot from store: kernel_meta is the durable home"
+    );
 
     // 持久化关（无 accounts_config_path 的内核 — 回测/进程内测试）：整体
     // 拒绝，内存指针也不动（与 account.trading.set 同一姿态）。
@@ -292,6 +337,8 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host(
         c.engine.as_mut().unwrap(),
@@ -372,10 +419,15 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         &vec!["spread_arb".to_string()],
         "the book spells the named assignment"
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
+    assert_eq!(
+        stored_strategy_set(&dir, "default").as_deref(),
+        Some("[\"spread_arb\"]"),
+        "the assignment lands as an account_settings row"
+    );
+    let text = std::fs::read_to_string(&env_path).unwrap_or_default();
     assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"spread_arb\""),
-        "the file spells the named assignment: {text}"
+        !text.contains("ACCOUNT_DEFAULT_STRATEGIES"),
+        "the strategy set never lands in .env: {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -415,6 +467,8 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -437,10 +491,10 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
             .expect("migrated into the book"),
         &vec!["spread_arb".to_string(), "trend_follow".to_string()],
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES"),
-        "the file gained the default's explicit assignment: {text}"
+    assert_eq!(
+        stored_strategy_set(&dir, "default").as_deref(),
+        Some("[\"spread_arb\",\"trend_follow\"]"),
+        "the migration materializes the default's assignment as a row"
     );
 
     // Idempotence: a SECOND boot call does not re-report (the file now
@@ -468,6 +522,8 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),
@@ -534,6 +590,8 @@ fn boot_keeps_the_production_default_enablement_shape_byte_identical() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -610,6 +668,8 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -637,10 +697,10 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         vec!["paper".to_string()],
         "paper is the only account whose enablement set names it"
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_PAPER_STRATEGIES=\"trend_follow\""),
-        "the file spells paper's enablement: {text}"
+    assert_eq!(
+        stored_strategy_set(&dir, "paper").as_deref(),
+        Some("[\"trend_follow\"]"),
+        "paper's enablement is its own row"
     );
 
     // DISABLE it again for paper (flat scope → teardown), then re-enable:
@@ -681,6 +741,8 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),
@@ -742,6 +804,8 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -760,10 +824,10 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         .expect("the default disable lands");
     assert!(kept.is_empty(), "flat scope → nothing demoted");
     assert_eq!(set_now, vec!["trend_follow".to_string()]);
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"trend_follow\""),
-        "the file lost spread_arb the moment the toggle did: {text}"
+    assert_eq!(
+        stored_strategy_set(&dir, "default").as_deref(),
+        Some("[\"trend_follow\"]"),
+        "the row lost spread_arb the moment the toggle did"
     );
     assert_eq!(
         crate::strategy_state::load(&state_path),
@@ -787,6 +851,8 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),

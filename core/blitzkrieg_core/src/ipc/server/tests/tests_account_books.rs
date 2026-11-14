@@ -25,6 +25,7 @@ async fn two_account_persist_fixture() -> (
     crate::market::registry::MarketPluginRegistry,
     PeerAuth,
     std::path::PathBuf,
+    std::path::PathBuf,
 ) {
     static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -75,6 +76,8 @@ async fn two_account_persist_fixture() -> (
     );
     let cfg = CoreConfig {
         accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+        // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+        db_path: Some(dir.join("store.sqlite")),
         trade_log_path: None,
         order_log_path: None,
         position_log_path: None,
@@ -86,6 +89,7 @@ async fn two_account_persist_fixture() -> (
         crate::market::registry::MarketPluginRegistry::new(),
         PeerAuth::SameUid { uid: own_uid() },
         env_path,
+        dir.join("store.sqlite"),
     )
 }
 
@@ -96,7 +100,7 @@ async fn two_account_persist_fixture() -> (
 /// 在拒绝下逐字节不动。
 #[tokio::test]
 async fn account_create_round_trips_list_and_the_persisted_file() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
     registry.register(Box::new(VenueStubPlugin {
         name: "polysimulator".to_string(),
     }));
@@ -147,25 +151,19 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
     );
     assert_eq!(accounts.len(), 3);
 
-    // The FILE: a fresh load — the boot's own call — sees the row.
-    let book = crate::account::config::load_account_ledgers_single_source(
-        &env_path.with_file_name("accounts.toml"),
-        Some(&env_path),
-        5,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the written file re-parses");
-    let created = book.account(&AccountId::from("poly-main")).unwrap();
-    assert!(matches!(created.status, AccountStatus::Active));
-    assert!(matches!(
-        created.market_type,
-        blitzkrieg_market_api::MarketType::Prediction
-    ));
+    // 操作者裁决 2026-11-14：行的家是 SQLite —— fresh load 读的是库。
+    let rows = crate::risk::account_store::AccountRiskDb::open(&db_path)
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
+    let created = rows.iter().find(|r| r.id == "poly-main").unwrap();
+    assert_eq!(created.status, "active");
+    assert_eq!(created.market_type, "prediction");
     assert_eq!(created.venue, "polysimulator");
     assert_eq!(created.name, "Poly Main 2");
     // Siblings rode through untouched.
     assert_eq!(
-        book.account(&AccountId::from("default")).unwrap().name,
+        rows.iter().find(|r| r.id == "default").unwrap().name,
         "main"
     );
 
@@ -282,7 +280,7 @@ async fn account_create_round_trips_list_and_the_persisted_file() {
 /// 变更出口），但最后一格绝不放空。
 #[tokio::test]
 async fn account_remove_round_trips_list_and_the_persisted_file() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
 
     // Remove: the retirement lands on the wire, in memory, and in the file.
     let reply = rpc(
@@ -313,16 +311,13 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
     assert_eq!(accounts.len(), 1, "paper left the book");
     assert_eq!(accounts[0]["id"], serde_json::json!("default"));
 
-    // The FILE: a fresh load agrees.
-    let book = crate::account::config::load_account_ledgers_single_source(
-        &env_path.with_file_name("accounts.toml"),
-        Some(&env_path),
-        5,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the written file re-parses");
-    assert!(book.account(&AccountId::from("paper")).is_none());
-    assert!(book.account(&AccountId::from("default")).is_some());
+    // 操作者裁决 2026-11-14：行的家是 SQLite —— fresh load 读的是库。
+    let rows = crate::risk::account_store::AccountRiskDb::open(&db_path)
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
+    assert!(rows.iter().all(|r| r.id != "paper"), "paper left the rows");
+    assert!(rows.iter().any(|r| r.id == "default"));
 
     // The LAST account: refused — a deployment keeps at least one
     // account (the empty book fails the next boot). Paper is already
@@ -496,9 +491,10 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
     // exists. Its probe position from the position-pin arm above is
     // closed first (flat accounts only), `pinned` is the survivor, so
     // removing the active `default` lands and the active cell
-    // re-activates the first surviving account. The row leaves
-    // accounts.toml too — the next boot re-derives the zero-config
-    // default from the missing row.
+    // re-activates the first surviving account. The row leaves the
+    // `accounts` table too — the next boot rebuilds the book from rows
+    // and re-derives the zero-config default only when the table is
+    // empty.
     {
         let mut c = core.lock().await;
         let ids: Vec<String> = c
@@ -548,15 +544,20 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
         reply["result"]["active"], "pinned",
         "the active cell never dangles: it re-activates the first survivor"
     );
-    let book = crate::account::config::load_account_ledgers_single_source(
-        &env_path.with_file_name("accounts.toml"),
-        Some(&env_path),
-        5,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the written file re-parses");
-    assert!(book.account(&AccountId::from("default")).is_none());
-    assert!(book.account(&AccountId::from("pinned")).is_some());
+    // 操作者裁决 2026-11-14：行的家是 SQLite —— fresh load 读的是库
+    // （boot 的同一调用面：表非空 → 整簿从行重建，`default` 的行已被删）。
+    let rows = crate::risk::account_store::AccountRiskDb::open(&db_path)
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
+    assert!(
+        rows.iter().all(|r| r.id != "default"),
+        "`default` left the rows: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.id == "pinned"),
+        "the survivor is a row: {rows:?}"
+    );
     let scratch = env_path
         .parent()
         .expect("the fixture file has a parent")
@@ -571,7 +572,7 @@ async fn account_remove_round_trips_list_and_the_persisted_file() {
 /// 本测试钉死的不变量被打破的形状。
 #[tokio::test]
 async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
     let journal_dir = env_path.parent().expect("fixture dir").join("ledger");
     std::fs::create_dir_all(&journal_dir).expect("journal dir");
     let journal_path = journal_dir.join("paper.journal.jsonl");
@@ -647,7 +648,7 @@ async fn account_remove_retires_the_journal_file_and_a_recreate_starts_clean() {
 /// 同 venue.set 的文案形状）。
 #[tokio::test]
 async fn account_create_and_remove_are_refused_in_read_only_mode() {
-    let (core, registry, peer, _env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, _env_path, _db_path) = two_account_persist_fixture().await;
     core.lock().await.config_mut().mode = Mode::ReadOnly;
     let reply = rpc(
         &core,
@@ -1095,7 +1096,7 @@ async fn account_journal_default_follows_display_then_session_wins() {
 /// 线）。环境变量跨测试共享进程，变量名用本测试专属的名字并在结尾清理。
 #[tokio::test]
 async fn account_create_probes_credential_env_like_boot() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
     registry.register(Box::new(CredStubPlugin {
         name: "credvenue".to_string(),
     }));
@@ -1207,7 +1208,7 @@ async fn account_create_probes_credential_env_like_boot() {
 /// process-default chain the account views use.
 #[tokio::test]
 async fn ledger_balance_follows_the_session_account_switch() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
     // A DISTINCT cash number for paper, so an assertion cannot pass by
     // accident off two equal seeds.
     {
@@ -1272,7 +1273,7 @@ async fn ledger_balance_follows_the_session_account_switch() {
 /// `null` when unknown (never 0, never trade-folded).
 #[tokio::test]
 async fn ledger_balance_carries_opening_equity_and_net_pnl() {
-    let (core, registry, peer, env_path) = two_account_persist_fixture().await;
+    let (core, registry, peer, env_path, db_path) = two_account_persist_fixture().await;
     let mut session = SessionState::default();
     let reply = rpc_with_subs(
         &core,

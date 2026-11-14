@@ -202,13 +202,19 @@ async fn execution_policy_surface_list_get_set_reset_history() {
         .await;
     assert!(v.get("error").is_none(), "set answers: {v}");
 
-    // The .env now carries the section's keys (the write face's sweep-then-write;
-    // render_line quotes every value — the same contract the account layer writes)…
-    let text = std::fs::read_to_string(&path).expect("policy env");
+    // 操作者裁决 2026-11-14：段落在 SQLite 的 `account_settings` 行里
+    // （键 = env 语法原名）……
+    let rows = crate::risk::account_store::AccountRiskDb::open(
+        path.parent().unwrap().join("store.sqlite"),
+    )
+    .expect("the store re-opens")
+    .load_settings()
+    .expect("settings readable");
+    let section = rows.get("acct-a").expect("acct-a's settings row");
     assert!(
-        text.contains("POLICY_BUDGET_RATIO_ACCT_A=")
-            && text.contains("POLICY_MAX_BUDGET_USD_ACCT_A="),
-        "section landed: {text}"
+        section.contains_key("POLICY_BUDGET_RATIO_ACCT_A")
+            && section.contains_key("POLICY_MAX_BUDGET_USD_ACCT_A"),
+        "section landed: {section:?}"
     );
     // …and the reload sees it (the effective view is the account's own).
     let v = rpc(&core, &registry, &peer,
@@ -284,10 +290,19 @@ async fn execution_policy_surface_list_get_set_reset_history() {
         serde_json::json!("0.10"),
         "reset falls back: {v}"
     );
-    let text = std::fs::read_to_string(&path).expect("policy env");
+    // ……reset 后行里的 POLICY_ 键被扫光（段回退到全局）。
+    let rows = crate::risk::account_store::AccountRiskDb::open(
+        path.parent().unwrap().join("store.sqlite"),
+    )
+    .expect("the store re-opens")
+    .load_settings()
+    .expect("settings readable");
     assert!(
-        !text.contains("POLICY_BUDGET_RATIO_ACCT_A") && !text.contains("POLICY_RULES_ACCT_A"),
-        "section removed: {text}"
+        !rows
+            .get("acct-a")
+            .map(|s| s.keys().any(|k| k.starts_with("POLICY_")))
+            .unwrap_or(false),
+        "section removed: {rows:?}"
     );
 
     let _ = std::fs::remove_dir_all(path.parent().unwrap());

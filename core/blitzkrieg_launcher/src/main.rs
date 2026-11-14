@@ -1265,35 +1265,6 @@ async fn main() -> anyhow::Result<()> {
         // only applies when the flag is absent (handled in the parser).
     }
 
-    // The legacy credentials cell (`market.credentials.set`,
-    // data/runtime/config.json) is retired: `.env` is the single persistent
-    // credential home (operator ruling). One shot at boot — drain any legacy
-    // cell values into the configured `.env`, then strip the key so a later
-    // sibling-cell write cannot resurrect it. The launcher applies `.env` at
-    // the next start (this process already carries its own load), so the
-    // migration is next-session by construction, exactly like the old cell.
-    // Values never appear in the log; the migrated KEY names do.
-    if let (Some(config_path), Some(env_path)) = (
-        config.runtime_config_path.as_deref(),
-        config.env_file_path.as_deref(),
-    ) {
-        match blitzkrieg_core::runtime_config::migrate_credentials_cell_to_env(
-            std::path::Path::new(config_path),
-            std::path::Path::new(env_path),
-        ) {
-            Ok(0) => {}
-            Ok(_) => eprintln!(
-                "blitzkrieg-core: legacy credentials cell migrated into {env_path} — \
-                 restart (the launcher re-reads .env) to apply; market.credentials.set \
-                 now writes .env directly"
-            ),
-            Err(e) => eprintln!(
-                "blitzkrieg-core: legacy credentials cell migration failed: {e} — \
-                 the cell stays in place; market.credentials.set writes .env directly"
-            ),
-        }
-    }
-
     // ───────────────── issue #1189 PR-A: the one-shot legacy import ─────────
     // The distribution binary carries the account store: the first boot
     // imports the old world — the `.env` ACCOUNT_* / BK_RISK_* / POLICY_*

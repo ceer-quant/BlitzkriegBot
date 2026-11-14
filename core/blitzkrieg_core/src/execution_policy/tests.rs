@@ -820,20 +820,15 @@ then = { action = "skip" }
     /// keys, write the `Some` values, and return the snapshot the handler
     /// records before reloading. Same primitives the handler uses
     /// (`env_file`), so this exercises the real file face.
+    /// 操作者裁决 2026-11-14（#1199 第六轮）：内核的写面落 SQLite，`.env`
+    /// 只读。本助手模拟「上一会话遗留的 .env 行」与「写快照」的组合 ——
+    /// 不再写文件；`env_path` 仅用于把种子行铺在盘上供 reload 读取。
     fn ipc_section_write(
-        env_path: &Path,
+        _env_path: &Path,
         account_id: &str,
         section: Option<&SectionFields>,
     ) -> std::collections::BTreeMap<String, Option<String>> {
-        let state = section_env_state(account_id, section).expect("section state");
-        let keys: Vec<&str> = state.keys().map(|k| k.as_str()).collect();
-        crate::env_file::remove_env_vars(env_path, &keys).expect("section sweep");
-        let vars: std::collections::BTreeMap<String, String> = state
-            .iter()
-            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
-            .collect();
-        crate::env_file::upsert_env_vars(env_path, &vars).expect("section write");
-        state
+        section_env_state(account_id, section).expect("section state")
     }
 
     /// Read one key back through the launcher's read half — the file face as
@@ -884,10 +879,11 @@ then = { action = "skip" }
         // What the handler returns as `after` (and what `evaluate` judges
         // under) is this reloaded section view: 5, the tightening.
         assert_eq!(after.section_for("paper").max_budget_usd, dec!(5));
-        // The file holds the just-written value, not the stale 100.
+        // 操作者裁决 2026-11-14：内核不再写 `.env` —— 文件保持旧部署的
+        // 100，reload 经写快照解析出 5（写快照 > 文件）。
         assert_eq!(
             file_value(&env_path, "POLICY_MAX_BUDGET_USD_PAPER").as_deref(),
-            Some("5")
+            Some("100")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -940,7 +936,11 @@ then = { action = "skip" }
             dec!(100),
             "the stale deployment value must not come back"
         );
-        assert_eq!(file_value(&env_path, "POLICY_MAX_BUDGET_USD_PAPER"), None);
+        assert_eq!(
+            file_value(&env_path, "POLICY_MAX_BUDGET_USD_PAPER").as_deref(),
+            Some("100"),
+            "the file is never written by the kernel — the tombstone lives in the snapshot"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1008,10 +1008,11 @@ then = { action = "skip" }
 
         assert_eq!(after.section_for("paper").rules.len(), 1);
         assert_eq!(after.section_for("paper").rules[0].name, "tight_backstop");
-        // The file carries the same set through the launcher's read half.
+        // The file keeps the legacy set (the kernel never writes it); the
+        // snapshot's tight set is what the loader returns.
         let on_file = file_value(&env_path, "POLICY_RULES_PAPER").expect("rules on file");
         let parsed: Vec<Rule> = serde_json::from_str(&on_file).expect("file rules JSON");
-        assert_eq!(parsed[0].name, "tight_backstop");
+        assert_eq!(parsed[0].name, "old_backstop");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

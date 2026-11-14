@@ -64,18 +64,14 @@ pub struct Core {
     /// issue #1199 r2 (T-03, zeroed): the risk/exit write port's carrier
     /// decision (`Core::persist_risk_bounds` / `Core::persist_exit`) reads
     /// this FIRST — an open DB is the cockpit carrier (the whole merged row,
-    /// the pre-seam `AccountRiskDb::save_risk` / `save_exit` write), the
-    /// assembled `store` below is the env carrier, and `None`/`None` is the
-    /// backtester's memory-only posture.
+    /// the pre-seam `AccountRiskDb::save_risk` / `save_exit` write) and the
+    /// `None` posture is the backtester's memory-only one.
     account_risk_db: Option<crate::risk::account_store::AccountRiskDb>,
-    /// issue #1199 PR-1: the durable store every business write goes through
-    /// (default assembly = [`crate::store::EnvStore`], the `.env` backend).
-    /// `None` = persistence disabled for this core (backtester, most
-    /// in-process tests) — the standard "persistence is disabled" refusals
-    /// read this. With the DB closed this is the risk/exit carrier too (the
-    /// changed `BK_RISK_*` / `BK_EXIT_*` keys); with the DB open the DB
-    /// carries the cockpit families (issue #1199 ruling — the env is
-    /// read-only at runtime).
+    /// issue #1199 第六轮（操作者裁决 2026-11-14）：SQLite 后端
+    /// （[`crate::store::SqliteStore`]，由 `config.db_path` 打开）——唯一
+    /// 的持久化后端；`.env` 对内核只读。`None` = persistence disabled
+    /// for this core (backtester, most in-process tests) — the standard
+    /// "persistence is disabled" refusals read this.
     pub(crate) store: Option<Box<dyn crate::store::StoreApi>>,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].

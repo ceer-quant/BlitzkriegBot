@@ -228,29 +228,33 @@ impl Core {
         } else if !enabled {
             set.retain(|s| s != trimmed);
         }
-        // Persist FIRST (a failure leaves both stores untouched — the same
-        // memory-after-disk transaction every account writer runs; issue 751:
-        // the durable half upserts ACCOUNT_* keys into .env).
-        let Some(store) = self.store.as_deref() else {
+        // 持久优先：先落 SQLite（`account_settings.strategies`），失败则两侧都不动。
+        // 操作者裁决 2026-11-14：策略集合不再写 `.env`。
+        let Some(db) = self.account_risk_db.clone() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
-                "strategy.enable: no accounts config path configured — persistence \
-                 is disabled for this core (backtests and in-process tests); \
-                 nothing was applied"
+                "strategy.enable: no SQLite store on this core — persistence is \
+                 disabled (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        store
-            .save_account_strategies(id.as_str(), &set)
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "strategy.enable: persist failed, nothing changed: {}",
-                        e.message
-                    ),
-                )
-            })?;
+        let rendered = serde_json::to_string(&set).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("strategy.enable: the set does not render as JSON: {e}"),
+            )
+        })?;
+        db.save_setting(
+            id.as_str(),
+            crate::risk::account_store::STRATEGIES_SETTING,
+            Some(&rendered),
+        )
+        .map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("strategy.enable: SQLite 落盘失败，未做任何变更（{e}）"),
+            )
+        })?;
         self.accounts.set_strategies(id, set.clone(), now_ms)?;
         // #537: the default account's scoped write keeps the persisted
         // enabled-set in lockstep (the same mirror `set_account_strategies_

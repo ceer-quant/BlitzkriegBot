@@ -341,6 +341,8 @@ fn unfreeze_writes_env_back_and_entries_stay_open_after_rebuild() {
         auto_exits_enabled: false,
         accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
         env_file_path: Some(env_path.to_string_lossy().into_owned()),
+        // 持久化后端是 SQLite（`.env` 只读）：unfreeze 的 status/trading 落 accounts 表。
+        db_path: Some(root.join("store.sqlite")),
         ..Default::default()
     };
 
@@ -351,45 +353,44 @@ fn unfreeze_writes_env_back_and_entries_stay_open_after_rebuild() {
         "precondition: the config posture gates entries"
     );
 
+    // env 在写前快照：unfreeze 不得动文件（内核零写入）。
+    let env_before = std::fs::read_to_string(&env_path).expect("env readable");
+
     let r = c
         .unfreeze_account("default", "operator", now)
-        .expect("unfreeze must persist to .env and succeed");
+        .expect("unfreeze must persist and succeed");
     assert!(r.entries_allowed, "entries open at the unfreeze instant");
     assert!(!c.account_gate_blocked("default", now));
 
-    let text = std::fs::read_to_string(&env_path).expect("env readable");
+    // `.env` 逐字节不动——唯一写入者是安装器，内核不碰。
+    let env_after = std::fs::read_to_string(&env_path).expect("env readable");
+    assert_eq!(env_after, env_before, "unfreeze must not touch the .env: {env_after}");
+
+    // 持久化半边：accounts 表里的 default 行翻成 active / trading-on。
+    let rows = crate::risk::account_store::AccountRiskDb::open(root.join("store.sqlite"))
+        .expect("store re-opens")
+        .load_accounts()
+        .expect("accounts readable");
+    let row = rows
+        .iter()
+        .find(|r| r.id == "default")
+        .expect("default row present");
+    assert_eq!(row.status, "active", "status row is active: {rows:?}");
     assert!(
-        !text.contains("ACCOUNT_DEFAULT_STATUS"),
-        "STATUS must be gone (active = key absence): {text}"
-    );
-    assert!(
-        !text.contains("ACCOUNT_DEFAULT_TRADING_ENABLED"),
-        "TRADING_ENABLED must be gone (trading = key absence): {text}"
-    );
-    assert!(
-        text.contains("ACCOUNT_LIST=default"),
-        "the rest of the .env survives the rewrite: {text}"
+        row.trading_enabled,
+        "trading_enabled row is on: {rows:?}"
     );
 
-    // Restart from the same .env: no config gate comes back.
-    let rebuilt = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        now,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("reload");
-    let acct = rebuilt
-        .account(&AccountId::from("default"))
-        .expect("account present");
-    assert!(acct.trading_enabled, "trading re-reads as on");
-    assert!(acct.status.allows_entries(), "status re-reads as active");
-
-    let mut c2 = crate::service::Core::with_account_book(cfg(), rebuilt);
+    // Restart 从同一 store 读：SQL 行是权威，env 里的 stale frozen 不再参与门禁。
+    let fresh = crate::account::AccountLedgers::new(
+        Vec::new(),
+        crate::account::AccountId::from("default"),
+    );
+    let mut c2 = crate::service::Core::with_account_book(cfg(), fresh);
     crate::service::reconcile_config_gates(&mut c2, now);
     assert!(
         !c2.account_gate_blocked("default", now),
-        "a rebuild from the written .env must not resurrect the gate"
+        "a rebuild from the store must not resurrect the gate"
     );
 
     let _ = std::fs::remove_dir_all(&root);

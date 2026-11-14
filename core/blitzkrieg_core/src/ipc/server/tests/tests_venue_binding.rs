@@ -72,6 +72,8 @@ async fn venue_set_mounts_a_never_booted_venues_data_plane_at_runtime() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：account.venue.set 的写面走 store。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),

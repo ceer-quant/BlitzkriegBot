@@ -87,6 +87,12 @@ pub const ROUND_DURATION_SETTING: &str = "round.duration_sec";
 #[derive(Clone)]
 pub struct SqliteStore {
     risk: AccountRiskDb,
+    /// The AES-256-GCM manager built from `BLITZKRIEG_DB_KEY` at open.
+    /// `None` = the key is missing/malformed on this boot: the credential
+    /// write face refuses (the honest error — the operator must set the key),
+    /// and the boot injection keeps the env spelling (see
+    /// `credentials::inject_credentials_into_process_env`).
+    credentials: Option<std::sync::Arc<crate::db::credentials::CredentialsManager>>,
 }
 
 impl SqliteStore {
@@ -95,8 +101,34 @@ impl SqliteStore {
     /// The open is the only constructor: a failure is an error (fail-closed
     /// — the caller refuses to boot rather than run without a store).
     pub fn open(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+        // The credential master key is read ONCE, here (the same posture as
+        // `CredentialsManager::new`: missing/malformed refuses the credential
+        // domain but never the whole store — the rest of the rows are plain).
+        let credentials = match std::env::var(crate::db::credentials::MASTER_KEY_ENV) {
+            Ok(key) if !key.trim().is_empty() => {
+                match crate::db::credentials::CredentialsManager::new(&key) {
+                    Ok(m) => Some(std::sync::Arc::new(m)),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e.message,
+                            "credential encryption unavailable — market.credentials.set \
+                             will refuse until the master key is fixed"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "BLITZKRIEG_DB_KEY is not set — the credential store is unavailable; \
+                     UI-submitted credentials refuse and boot injection falls back to env"
+                );
+                None
+            }
+        };
         Ok(Self {
             risk: AccountRiskDb::open(path)?,
+            credentials,
         })
     }
 
@@ -645,8 +677,27 @@ impl super::StoreApi for SqliteStore {
         // The section's whole footprint, spelled by the env grammar the
         // importer and the policy loader share (the key set is the contract;
         // a `None` value is the sweep — key gone = inherit the globals).
-        self.ensure_account(account_id, None)
-            .map_err(|e| e.message)?;
+        // 操作者裁决 2026-11-14：reset（footprint 全 None）继承原 EnvStore 的
+        // 段存在性探针——`account_settings` 里没有任何 POLICY_ 行 = 没有可
+        // 撤销的段，按名如实拒绝（未知 id 不许静默 ok，也不许 ensure 出一行）。
+        let is_reset = state.values().all(|v| v.is_none());
+        if is_reset {
+            let has_section = self
+                .risk
+                .load_settings()
+                .map_err(|e| format!("policy section probe failed: {e}"))?
+                .get(account_id)
+                .map(|keys| keys.keys().any(|k| k.starts_with("POLICY_")))
+                .unwrap_or(false);
+            if !has_section {
+                return Err(format!(
+                    "execution policy reset: no policy section exists for `{account_id}`"
+                ));
+            }
+        } else {
+            self.ensure_account(account_id, None)
+                .map_err(|e| e.message)?;
+        }
         let rows: Vec<(&str, Option<&str>)> = state
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_deref()))
@@ -675,18 +726,51 @@ impl super::StoreApi for SqliteStore {
         vars: &BTreeMap<String, String>,
         reset_keys: &[&str],
     ) -> Result<(), CoreError> {
-        // The account_credentials table stores per-account credential ENV VAR
-        // NAMES plus the AES-256-GCM sealed payload — the var-name→account
-        // mapping is a PR-3 design decision (the current env grammar is
-        // global). A refusal is the honest face: no plaintext value ever
-        // lands in the DB, and no half-mapping is invented here.
-        let _ = (vars, reset_keys);
-        Err(CoreError::new(
-            CoreErrorCode::Internal,
-            "the sqlite store does not carry credentials yet (issue #1199 PR-3: \
-             the per-account var-name mapping and the AES-256-GCM sealing land \
-             there); the env carrier still owns this domain",
-        ))
+        // 操作者裁决 2026-11-14（#1199 第六轮）：凭证的家是数据库——每个值
+        // AES-256-GCM 封装后落 `kernel_meta.credential.<VAR>`（nonce ||
+        // ciphertext || tag，base64）。`.env` 对内核只读；明文值除了加密
+        // 行之外不落任何盘上位置。reset 分支按 plugin 声明表删行。
+        let manager = self.credentials.as_ref().ok_or_else(|| {
+            CoreError::new(
+                CoreErrorCode::NotAuthenticated,
+                "market.credentials.set: no credential master key — set BLITZKRIEG_DB_KEY \
+                 (base64 of 32 random bytes) and restart; nothing was written",
+            )
+        })?;
+        for (name, value) in vars {
+            let blob = manager.encrypt(value.as_bytes()).map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::NotAuthenticated,
+                    format!("market.credentials.set: encrypt failed ({})", e.message),
+                )
+            })?;
+            let b64 = crate::db::credentials::encode_blob(&blob);
+            self.risk
+                .save_kernel_meta(
+                    &format!("{}{name}", crate::risk::account_store::CREDENTIAL_META_PREFIX),
+                    &b64,
+                )
+                .map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::Internal,
+                        format!("market.credentials.set: SQLite write failed: {e}"),
+                    )
+                })?;
+        }
+        for name in reset_keys {
+            self.risk
+                .delete_kernel_meta(&format!(
+                    "{}{name}",
+                    crate::risk::account_store::CREDENTIAL_META_PREFIX
+                ))
+                .map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::Internal,
+                        format!("market.credentials.set: SQLite delete failed: {e}"),
+                    )
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -992,10 +1076,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The credentials domain refuses with a typed error (no plaintext, no
-    /// invented mapping — PR-3 owns it).
+    /// The credentials domain refuses with a typed error when the master key
+    /// is missing (操作者裁决 2026-11-14：写入面是加密的 kernel_meta 行；无键
+    /// 是诚实的 NotAuthenticated，绝不静默明文）。
     #[test]
     fn credentials_refuse_with_a_typed_error() {
+        let _lock = crate::db::credentials::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Deterministic: strip the var for the open + write, restore after.
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var(crate::db::credentials::MASTER_KEY_ENV, v),
+                        None => std::env::remove_var(crate::db::credentials::MASTER_KEY_ENV),
+                    }
+                }
+            }
+        }
+        let saved = std::env::var(crate::db::credentials::MASTER_KEY_ENV).ok();
+        unsafe { std::env::remove_var(crate::db::credentials::MASTER_KEY_ENV) };
+        let _restore = Restore(saved);
+
         let (store, dir) = temp_store();
         let err = store
             .save_credentials(
@@ -1003,8 +1107,11 @@ mod tests {
                 &[],
             )
             .unwrap_err();
-        assert_eq!(err.code, CoreErrorCode::Internal);
-        assert!(err.message.contains("PR-3"), "{err}");
+        assert_eq!(err.code, CoreErrorCode::NotAuthenticated);
+        assert!(
+            err.message.contains("BLITZKRIEG_DB_KEY"),
+            "the refusal names the master key, never a value: {err}"
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -35,9 +35,9 @@ pub use book::*;
 mod config_tests;
 
 /// The legacy config file's path spelling (§9.5). NOT a config source any
-/// more (issue 751): no loader reads it; `CoreConfig::account_env_write_paths`
-/// still carries the path because a live file at this path REFUSES every
-/// runtime write and the loader SHOUTS at it as residue.
+/// more (issue 751): no loader reads it. issue #1199 第六轮：内核不再写
+/// `.env`，账户簿的持久化家是 SQLite 的 `accounts` 表；盘上若还有这个
+/// 文件，装载器只会把它当残留大喊一声（RESIDUE warn），不读不写。
 pub const ACCOUNTS_CONFIG_PATH: &str = "user_layer/configs/accounts.toml";
 
 /// One `[[account]]` table as it sits on disk. Credential fields hold the

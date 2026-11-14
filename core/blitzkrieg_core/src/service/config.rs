@@ -109,6 +109,13 @@ pub struct CoreConfig {
     /// already carries the launcher's `.env` load, so every predicate reads
     /// `std::env` directly.
     pub env_file_path: Option<String>,
+    /// 操作者裁决 2026-11-14（#1199 第六轮）：`.env` 对内核是**只读**的——
+    /// 唯一的持久化后端是 SQLite。这是 SQLite 文件的路径（生产 =
+    /// `db::default_db_path()`，由 `session::run` 设置）；`Some` 时装配
+    /// 打开 [`crate::store::SqliteStore`] 并 fail-closed（打开失败拒绝启动，
+    /// 绝不静默降级成无存储）。`None` = 无存储（回测、多数进程内测试）：
+    /// 所有写面如实拒绝，绝不写 `.env`。`.env` 的读面不受本字段影响。
+    pub db_path: Option<std::path::PathBuf>,
     /// Every registered plugin's DECLARED credential env names (issue 648,
     /// `plugin → [env var name]` from `MarketPlugin::required_credential_env`),
     /// computed once at boot from the registry — the same report posture as
@@ -1041,29 +1048,6 @@ pub struct ShadowEvolutionTuning {
     pub deep_dims: Option<usize>,
 }
 
-impl CoreConfig {
-    /// The account write faces' source pair (issue 751, .env single source):
-    /// the `.env` the writers upsert ACCOUNT_* keys into, and the legacy toml
-    /// file whose mere existence REFUSES every runtime write (the migration
-    /// script owns the one-way move — a runtime write must never silently
-    /// fork the book across two sources the loader reads in different
-    /// precedences). `None` when persistence is off (backtester, tests).
-    ///
-    /// The `.env` path resolves per kernel: the configured `env_file_path`
-    /// in production (the launcher loads exactly that file); a configured
-    /// `accounts_config_path` alone (in-process persist round-trip tests)
-    /// derives the sibling `.env` beside the test's private toml — the same
-    /// scratch-dir isolation those tests already run.
-    pub fn account_env_write_paths(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        let legacy = self.accounts_config_path.as_deref()?;
-        let env = match self.env_file_path.as_deref() {
-            Some(env) => std::path::PathBuf::from(env),
-            None => std::path::Path::new(legacy).with_file_name(".env"),
-        };
-        Some((env, std::path::PathBuf::from(legacy)))
-    }
-}
-
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
@@ -1087,6 +1071,7 @@ impl Default for CoreConfig {
             round_labels: std::collections::BTreeMap::new(),
             runtime_config_path: None,
             env_file_path: None,
+            db_path: None,
             credential_vars: std::collections::BTreeMap::new(),
             accounts_config_path: None,
             manual_ops_audit_path: None,

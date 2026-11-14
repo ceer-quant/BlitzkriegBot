@@ -223,9 +223,8 @@ fn a_reset_ledger_kills_the_venues_cursor_generation() {
 #[test]
 fn an_account_remove_kills_only_its_own_venues_cursors() {
     let dir = reset_audit_dir("journal-cursor-remove");
-    // issue 751: the persist half writes .env and refuses while a legacy
-    // toml sits beside it — the fixture keeps the toml path ONLY as the
-    // refusal probe (never written).
+    // 操作者裁决 2026-11-14：持久化后端是 SQLite（`.env` 只读）。簿来自
+    // 环境语法，boot 会整簿物化进 `store.sqlite`，删户写的是同一张表。
     let accounts_path = dir.join("accounts.toml"); // the LEGACY path — never written
     let env_path = dir.join(".env");
     std::fs::write(
@@ -249,6 +248,8 @@ fn an_account_remove_kills_only_its_own_venues_cursors() {
     let mut c = Core::with_account_book(
         CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 持久化后端是 SQLite（`.env` 只读）：删户同步写 accounts 表。
+            db_path: Some(dir.join("store.sqlite")),
             // Default() points the record logs at the checkout's shared
             // data/ dir — keep every fixture write inside the scratch dir.
             trade_log_path: None,

@@ -74,17 +74,19 @@ async fn a_set_sweeps_the_kernel_generated_template_and_writes_the_env() {
         !toml_path.exists(),
         "the template is swept on the first real save"
     );
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .expect("the env file")
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
+    // 操作者裁决 2026-11-14：段落在 SQLite 的 account_settings 行里。
+    let rows = crate::risk::account_store::AccountRiskDb::open(
+        env_path.parent().unwrap().join("store.sqlite"),
+    )
+    .expect("the store re-opens")
+    .load_settings()
+    .expect("settings readable");
     assert_eq!(
-        on_file
-            .get("POLICY_BUDGET_RATIO_ACCT_T")
+        rows.get("acct-t")
+            .and_then(|s| s.get("POLICY_BUDGET_RATIO_ACCT_T"))
             .map(String::as_str),
         Some("0.05"),
-        "the section landed in the env the loader reads: {on_file:?}"
+        "the section landed in the store the loader reads: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
 }
@@ -119,16 +121,19 @@ async fn a_set_still_refuses_an_operator_edited_policy_file() {
         toml_path.exists(),
         "a refused write never touches the operator's file"
     );
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .expect("the env file")
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
+    // 操作者裁决 2026-11-14：拒绝下 store 里也不落任何 POLICY_ 行。
+    let rows = crate::risk::account_store::AccountRiskDb::open(
+        env_path.parent().unwrap().join("store.sqlite"),
+    )
+    .expect("the store re-opens")
+    .load_settings()
+    .expect("settings readable");
     assert!(
-        !on_file
-            .keys()
-            .any(|k| k.starts_with("POLICY_BUDGET_RATIO_ACCT_O")),
-        "nothing landed in the env under the refusal: {on_file:?}"
+        !rows
+            .get("acct-o")
+            .map(|s| s.keys().any(|k| k.starts_with("POLICY_BUDGET_RATIO_ACCT_O")))
+            .unwrap_or(false),
+        "nothing landed in the store under the refusal: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
 }

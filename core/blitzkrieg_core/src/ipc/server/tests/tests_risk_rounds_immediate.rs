@@ -5,7 +5,7 @@ use super::*;
 /// 秒切秒换（2026-11-13 操作者指令）：`round_duration.set`，有在途仓位——「撤单 →
 /// 市价强平 → 切网格」全链。出场价必须来自账簿真实 bid（0.39），不是
 /// 估算；trades 流水写 exit_reason=operator_grid_switch，扫描器网格立即
-/// 随新周期，.env 持久化。
+/// 随新周期，覆盖落 SQLite（`account_settings`），`.env` 不再被写。
 #[tokio::test]
 async fn round_duration_immediate_closes_position_and_switches_grid() {
     let dir = std::env::temp_dir().join(format!("bk-round-dur-imm-pos-{}", std::process::id()));
@@ -35,6 +35,8 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("store.sqlite"))
+            .expect("settings store opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
@@ -128,10 +130,24 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
         serde_json::json!(300),
         "the engine scanner clock switches with the account grid: {after}"
     );
+    // 持久化在数据库里（操作者裁决 2026-11-14：轮次与账户其它数据同源）。
+    let db = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("reopen the store for the read-back");
+    let stored = db
+        .load_settings()
+        .expect("settings readable")
+        .get("default")
+        .and_then(|keys| keys.get(crate::risk::account_store::ROUND_DURATION_SETTING))
+        .cloned();
+    assert_eq!(
+        stored.as_deref(),
+        Some("300"),
+        "the override is persisted as an account_settings row"
+    );
     let env_text = std::fs::read_to_string(&env_path).unwrap_or_default();
     assert!(
-        env_text.contains("ACCOUNT_DEFAULT_ROUND_DURATION_SEC=\"300\""),
-        "the override is persisted: {env_text}"
+        !env_text.contains("ROUND_DURATION_SEC"),
+        "the round grid never lands in .env: {env_text}"
     );
 }
 
@@ -165,6 +181,8 @@ async fn round_duration_immediate_no_position_switches_grid_directly() {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("store.sqlite"))
+            .expect("settings store opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
@@ -235,6 +253,8 @@ async fn round_duration_immediate_refused_when_flag_locked() {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("store.sqlite"))
+            .expect("settings store opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
@@ -433,6 +453,8 @@ async fn round_duration_immediate_reset_closes_positions_and_clears_grid() {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("store.sqlite"))
+            .expect("settings store opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
@@ -544,6 +566,8 @@ async fn round_duration_immediate_refuses_off_whitelist_before_touching_position
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("store.sqlite"))
+            .expect("settings store opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),

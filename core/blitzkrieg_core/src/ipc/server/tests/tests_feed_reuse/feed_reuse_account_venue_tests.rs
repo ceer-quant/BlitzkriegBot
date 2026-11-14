@@ -42,6 +42,8 @@ async fn account_create_mounts_a_never_booted_venues_data_plane_at_runtime() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             engine_enabled: true,
             round_duration_sec: 900,
             allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
@@ -233,6 +235,8 @@ async fn venue_set_unbind_does_not_touch_the_data_plane() {
         );
         let cfg = CoreConfig {
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
@@ -385,6 +389,8 @@ async fn account_venue_set_round_trips_get_and_the_persisted_file() {
             // write refuses (the same posture the round-duration card
             // runs), so the fixture must carry it for the round-trip.
             accounts_config_path: Some(accounts_path.to_string_lossy().into_owned()),
+            // 操作者裁决 2026-11-14：持久化后端是 SQLite；`.env` 只读。
+            db_path: Some(dir.join("store.sqlite")),
             trade_log_path: None,
             order_log_path: None,
             position_log_path: None,
@@ -462,26 +468,24 @@ async fn account_venue_set_round_trips_get_and_the_persisted_file() {
         "the same venue on a second account is the deployment model: {reply}"
     );
 
-    // The persist: a FRESH single-source load over the same paths — the
-    // same call the next boot makes — sees BOTH bindings and every sibling
-    // field (the name rode through untouched).
-    let book = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        1,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the written file re-parses");
+    // The persist: a FRESH read of the accounts table（行的家是 SQLite，
+    // 操作者裁决 2026-11-14）— the same rows the next boot rebuilds the
+    // book from — sees BOTH bindings and every sibling field (the name
+    // rode through untouched).
+    let rows = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
     assert_eq!(
-        book.account(&AccountId::from("paper")).unwrap().venue,
+        rows.iter().find(|r| r.id == "paper").unwrap().venue,
         "polysimulator"
     );
     assert_eq!(
-        book.account(&AccountId::from("default")).unwrap().venue,
+        rows.iter().find(|r| r.id == "default").unwrap().venue,
         "polysimulator"
     );
     assert_eq!(
-        book.account(&AccountId::from("paper")).unwrap().name,
+        rows.iter().find(|r| r.id == "paper").unwrap().name,
         "paper",
         "sibling fields survive the write-back"
     );
@@ -506,16 +510,17 @@ async fn account_venue_set_round_trips_get_and_the_persisted_file() {
     )
     .await;
     assert_eq!(reply["result"]["venues"][0]["venue"], serde_json::json!(""));
-    let book = crate::account::config::load_account_ledgers_single_source(
-        &accounts_path,
-        Some(&env_path),
-        2,
-        crate::account::config::TEST_ALLOWED_ROUNDS,
-    )
-    .expect("the unbound file re-parses");
-    assert_eq!(book.account(&AccountId::from("paper")).unwrap().venue, "");
+    // 操作者裁决 2026-11-14：unbind 的 durable 半边 = 行的 venue 回 ''。
+    let rows = crate::risk::account_store::AccountRiskDb::open(dir.join("store.sqlite"))
+        .expect("the store re-opens")
+        .load_accounts()
+        .expect("rows readable");
     assert_eq!(
-        book.account(&AccountId::from("default")).unwrap().venue,
+        rows.iter().find(|r| r.id == "paper").unwrap().venue,
+        ""
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.id == "default").unwrap().venue,
         "polysimulator",
         "the other account's binding survives the unbind"
     );

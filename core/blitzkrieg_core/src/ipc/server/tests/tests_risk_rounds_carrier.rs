@@ -17,8 +17,8 @@ use tokio::sync::Mutex as AsyncMutex;
 // allowlist). One file per carrier state:
 //   - DB open (the production shape since PR-2): the whole merged row lands
 //     in the DB, the .env is NOT written (read-only at runtime);
-//   - env carrier (no DB): the changed keys land in .env, the receipt says
-//     `persistence: store`, the working copy re-derives from the file;
+//   - env carrier (no DB): RETIRED（操作者裁决 2026-11-14）—— `.env` 只读，
+//     接了 env 文件但没有 store = 纯内存形态（见下方守卫测试）；
 //   - no store (backtester): the memory write is the whole story, honestly
 //     `persisted: false` / `persistence: none` — byte for byte the
 //     pre-zeroing else branch's posture.
@@ -147,8 +147,13 @@ async fn risk_set_systemic_and_exit_write_the_db_not_the_env() {
 /// reports `persisted: true` / `persistence: store` (the carrier-neutral
 /// spelling since the R2 P1-6 pass), and the working copies re-derive from
 /// the file (the file-first ruling).
+/// 操作者裁决 2026-11-14（#1199 第六轮）：`.env` 对内核只读 —— 即使
+/// `env_file_path` 已接线（旧部署的兼容形态），risk.setSystemic /
+/// risk.setExit 的持久化半边也绝不再写它：没有 store = 内存写是全部，
+/// 回执如实报 `persisted: false` / `persistence: none`，文件逐字节不动
+/// （唯一写入者是安装器）。
 #[tokio::test]
-async fn risk_set_systemic_and_exit_write_the_env_when_no_db() {
+async fn risk_set_systemic_and_exit_never_touch_a_wired_env_file() {
     use rust_decimal_macros::dec;
     let dir = std::env::temp_dir().join(format!("bk-env-carrier-{}", now_ms()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -168,12 +173,13 @@ async fn risk_set_systemic_and_exit_write_the_env_when_no_db() {
     let core = Arc::new(AsyncMutex::new(c));
     let registry = crate::market::registry::MarketPluginRegistry::new();
     let peer = PeerAuth::SameUid { uid: own_uid() };
+    let before = std::fs::read_to_string(&env_path).unwrap();
 
     let applied = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxPositionSize":2,"maxSingleLossUsd":"0.75","reason":"env carrier"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"risk.setSystemic","params":{"maxPositionSize":2,"maxSingleLossUsd":"0.75","reason":"env readonly"}}"#.to_string(),
     )
     .await;
     assert!(
@@ -182,71 +188,52 @@ async fn risk_set_systemic_and_exit_write_the_env_when_no_db() {
     );
     assert_eq!(
         applied["result"]["persisted"],
-        serde_json::json!(true),
-        "the env file is wired, so the write must land: {applied}"
+        serde_json::json!(false),
+        "no store = the honest memory-only report (the env is never a carrier): {applied}"
     );
     assert_eq!(
         applied["result"]["persistence"],
-        serde_json::json!("store"),
-        "the receipt names the carrier: {applied}"
+        serde_json::json!("none"),
+        "the receipt names the carrier: none: {applied}"
     );
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
-    assert_eq!(
-        on_file.get("BK_RISK_MAX_POSITION_SIZE").map(String::as_str),
-        Some("2"),
-        "the env carrier wrote the key: {on_file:?}"
-    );
-    assert_eq!(
-        on_file
-            .get("BK_RISK_MAX_SINGLE_LOSS_USD")
-            .map(String::as_str),
-        Some("0.75"),
-        "the env carrier wrote the key: {on_file:?}"
-    );
+    {
+        let c = core.lock().await;
+        assert_eq!(
+            c.risk_config().systemic.account.max_position_size.value(),
+            rust_decimal::Decimal::from(2),
+            "the memory write landed for this session"
+        );
+    }
 
-    // risk.setExit: the env carrier writes the changed BK_EXIT_* keys and
-    // re-derives the working copy from the file.
+    // risk.setExit: the same read-only shape.
     let applied = rpc(
         &core,
         &registry,
         &peer,
-        r#"{"jsonrpc":"2.0","id":2,"method":"risk.setExit","params":{"stopLossPct":"8","trailingEnabled":true,"reason":"env carrier"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"risk.setExit","params":{"stopLossPct":"8","trailingEnabled":true,"reason":"env readonly"}}"#.to_string(),
     )
     .await;
     assert!(
         applied.get("error").is_none(),
         "the patch must land: {applied}"
     );
-    assert_eq!(applied["result"]["persistence"], serde_json::json!("store"));
-    let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(crate::env_file::parse_line)
-        .collect();
-    assert_eq!(
-        on_file.get("BK_EXIT_STOP_LOSS_PCT").map(String::as_str),
-        Some("8"),
-        "the env carrier wrote the exit key: {on_file:?}"
-    );
-    assert_eq!(
-        on_file.get("BK_EXIT_TRAILING_ENABLED").map(String::as_str),
-        Some("true"),
-        "the env carrier wrote the trailing switch: {on_file:?}"
-    );
-    // The working copy re-derived from the file (the file-first ruling).
+    assert_eq!(applied["result"]["persisted"], serde_json::json!(false));
+    assert_eq!(applied["result"]["persistence"], serde_json::json!("none"));
     {
         let c = core.lock().await;
         assert_eq!(
             c.config().positions.exit.stop_loss_pct,
             dec!(8),
-            "the working copy re-derived from the file"
+            "the memory write landed for this session"
         );
     }
 
+    // The wired .env is byte-identical: the kernel never writes it.
+    assert_eq!(
+        std::fs::read_to_string(&env_path).unwrap(),
+        before,
+        "the .env is read-only for the kernel — the write never landed on file"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

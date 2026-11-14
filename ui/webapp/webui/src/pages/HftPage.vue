@@ -21,7 +21,7 @@ import { usePanelStore } from '@/stores/panel'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/lib/theme'
 import {
-  num, money, signedMoney, winRatePct, pct, signedPct, cents, mmss, duration,
+  num, money, signedMoney, winRateOf, winRateValue, pct, signedPct, cents, mmss, duration,
 } from '@/lib/format'
 import { useAccountBalance } from '@/lib/account-balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
@@ -438,13 +438,11 @@ const cumStats = computed(() => {
       net: s.attributedNetPnl ?? 0,
       wins: s.wins ?? 0,
       losses: s.losses ?? 0,
-      // issue 1199 P0-4：服务端统计是胜率的唯一来源（本页不再自算 —— 自算与
-      // 服务端并存必然打架）。字段缺失（老内核 summary 无 winRate）时
-      // 显示「未知」：winRatePct 对 undefined/NaN 回落 0 会把「不知道」
-      // 读成「全败」，那是编造的读数。
-      winRate: s.winRate === undefined || s.winRate === null || !Number.isFinite(Number(s.winRate))
-        ? null
-        : winRatePct(s.winRate),
+      // 操作者裁决 2026-11-14：全站只有一种胜率口径 —— 与总览页「已平仓交易」
+      // 卡同源（`wins / (wins + losses)`，0 笔 = 0.0%）。服务端 summary 缺
+      // winRate 字段（老内核）时按同一公式由它自己的盈/亏计数复算，绝不把
+      // 「不知道」写成形容词：分母为 0 时比值就是 0.0%，页面同时给出 0 盈 0 亏。
+      winRate: winRateValue(s.winRate, s.wins ?? 0, s.losses ?? 0),
       // 服务端 summary 是已裁决的聚合：没有「未知盈亏行」的口径可言
       // （未知盈亏的行根本不进 summary 的 fold，是内核侧职责）。
       unknownPnlCount: 0,
@@ -461,9 +459,9 @@ const cumStats = computed(() => {
   const unknownPnlCount = rows.length - known.length
   const net = known.reduce((x, t) => x + Number(t.netPnlUsd), 0)
   const wins = known.filter((t) => Number(t.netPnlUsd) > 0).length
-	  const pcts = known
-	    .map((t) => (isKnownPnl(t) ? Number(t.netPnlPct) : null))
-	    .filter((v): v is number => v != null && Number.isFinite(v))
+  const pcts = known
+    .map((t) => (isKnownPnl(t) ? Number(t.netPnlPct) : null))
+    .filter((v): v is number => v != null && Number.isFinite(v))
   const fees = known.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
   return {
     total: rows.length,
@@ -475,12 +473,7 @@ const cumStats = computed(() => {
     net,
     wins,
     losses: known.length - wins,
-    // issue 1199 P0-4：自算胜率删除（原 `wins / rows.length`）——与统计卡
-    // 并存的两个胜率必然打架。行折叠路径下胜率口径是「已知行」的比值，
-    // 但页面只在服务端 summary 缺席时走到这里；此时胜率声明为未知
-    // （null），胜负计数如实给出已知行的盈/亏 —— 不为一个没有权威
-    // 分母的比率编造百分数。
-    winRate: null,
+    winRate: winRateOf(wins, known.length - wins),
     unknownPnlCount,
     avgHold: undefined as number | undefined,
     best: pcts.length ? Math.max(...pcts) : undefined,
@@ -1349,10 +1342,9 @@ const journalOpen = ref(false)
           <div>
             <div class="label-micro">累计胜率</div>
             <div class="stat-num mt-1 text-[22px] leading-none">
-              <!-- issue 1199 P0-4：胜率 null = 未知（服务端 summary 缺字段，或
-                   老内核行折叠口径无权威分母）——显示「未知」而不是 0%。 -->
-              <span v-if="cumStats.winRate === null" class="text-faint-fg">未知</span>
-              <RollingNumber v-else :value="pct(cumStats.winRate)" />
+              <!-- 操作者裁决 2026-11-14：与总览页同一口径，胜率永远是数值
+                   （0 笔 = 0.0%），不出现「未知」。 -->
+              <RollingNumber :value="pct(cumStats.winRate)" />
             </div>
           </div>
           <div>
