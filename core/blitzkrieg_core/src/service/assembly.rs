@@ -12,6 +12,15 @@ impl Core {
     /// in place; the store is the stronger source, so its rows win. A missing
     /// file is an empty store (the env fallback stays). Idempotent: a second
     /// open replaces the first store and re-reads it.
+    ///
+    /// issue #1199 (the readout asymmetry, half 1): the DEFAULT account's DB
+    /// rows are mirrored into the global faces (`systemic.account` /
+    /// `positions.exit`) exactly like the write path's mirror
+    /// (`install_account_risk_row` / `install_account_exit_row`). The
+    /// readout's account section and the no-own-row fallback resolve against
+    /// the global face, so without this mirror a DB-sourced default row was
+    /// invisible to `risk.limits` while the engine already judged by it — the
+    /// "write DB, read env" divergence in its second spelling.
     pub fn open_account_risk_db(
         &mut self,
         path: impl Into<std::path::PathBuf>,
@@ -20,6 +29,13 @@ impl Core {
             .map_err(|e| format!("account risk store open failed: {e}"))?;
         let risks = db.load_risk();
         let exits = db.load_exits(&self.config.positions.exit);
+        let default_id = crate::model::default_account_id();
+        if let Some(row) = risks.get(default_id.as_str()) {
+            self.risk.config_mut().systemic.account = row.clone();
+        }
+        if let Some(exit) = exits.get(default_id.as_str()) {
+            self.config.positions.exit = exit.clone();
+        }
         self.risk.config_mut().systemic.accounts.extend(risks);
         self.config.positions.account_exit.extend(exits);
         self.positions.set_config(self.config.positions.clone());
@@ -30,6 +46,18 @@ impl Core {
     /// True when a durable per-account store is open. `false` = env fallback.
     pub fn account_risk_db_open(&self) -> bool {
         self.account_risk_db.is_some()
+    }
+
+    /// issue #1199 (the env watcher asymmetry): whether the env-file watcher
+    /// may re-derive the cockpit working copies from `.env`. The DB is the
+    /// cockpit carrier when one is open — a file re-derive would clobber the
+    /// DB-sourced working copies with the file's stale `BK_*` / `BK_EXIT_*`
+    /// keys on ANY unrelated `.env` write (an account toggle, a credential
+    /// save). The re-derive is the env-carrier backend's freshness mechanism
+    /// only; with the DB open the panel write path (the store seam) is the
+    /// way in, and env is read-only at runtime (issue #1199 ruling).
+    pub(crate) fn cockpit_env_rederive_allowed(&self) -> bool {
+        self.account_risk_db.is_none()
     }
 
     /// issue #1189: `budget_ratio = 1` lets the execution policy size an order

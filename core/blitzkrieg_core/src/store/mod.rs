@@ -1,8 +1,10 @@
 //! The storage seam (issue #1199, PR-1): the kernel's write paths persist
 //! through [`StoreApi`] instead of naming `.env` files and env keys
-//! directly. Today's only implementation is [`EnvStore`] (the `.env`
-//! backend, behaviour byte-identical to the pre-seam writers); the DB
-//! backend lands in a follow-up PR.
+//! directly. Backends: [`EnvStore`] (the `.env` backend, behaviour
+//! byte-identical to the pre-seam writers) and, since PR-2,
+//! [`SqliteStore`] (the DB backend — see its module doc for the install
+//! gate: the default assembly keeps EnvStore until the settings-family
+//! READ side migrates).
 //!
 //! Why a trait on `Core` (`Option<Box<dyn StoreApi>>`) and not an enum:
 //! the implementation set grows by ADDING a backend (SQLite next), and the
@@ -12,6 +14,10 @@
 //! `None` = persistence disabled for this core (backtester, most
 //! in-process tests) — the same honest refusal the writers gave when their
 //! path pair was `None`, now decided once at assembly instead of per call.
+
+mod sqlite;
+
+pub use sqlite::SqliteStore;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

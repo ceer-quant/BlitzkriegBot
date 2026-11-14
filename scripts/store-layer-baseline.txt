@@ -13,48 +13,9 @@
 # implementations. It is the exact list PR-1/PR-2 retire.
 # The session.rs .env watcher is a READ path — not a violation, and part of
 # the PR-2 retirement face (map §3.2 A2): do not delete it.
-core/blitzkrieg_core/src/ipc/server/handlers/execution_policy.rs:408 env-direct crate::env_file::remove_env_vars(env_path, &sweep_refs)
-core/blitzkrieg_core/src/ipc/server/handlers/execution_policy.rs:414 env-direct crate::env_file::upsert_env_vars(env_path, &vars)
-core/blitzkrieg_core/src/ipc/server/handlers/risk.rs:113 env-direct if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
-core/blitzkrieg_core/src/ipc/server/handlers/risk.rs:75 env-direct if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
-core/blitzkrieg_core/src/ipc/server/handlers/strategy.rs:141 env-direct .account_env_write_paths()
-core/blitzkrieg_core/src/market/mod.rs:647 env-direct crate::env_file::remove_env_vars(env_path, allowed).map_err(|e| {
-core/blitzkrieg_core/src/market/mod.rs:654 env-direct crate::env_file::upsert_env_vars(env_path, &vars).map_err(|e| {
 core/blitzkrieg_core/src/runtime_config.rs:204 env-direct crate::env_file::upsert_env_vars(env, &vars)?;
 core/blitzkrieg_core/src/runtime_config.rs:206 env-direct crate::env_file::remove_env_vars(env, &["RUNTIME_MARKET_PLUGIN"])?;
 core/blitzkrieg_core/src/runtime_config.rs:259 env-direct crate::env_file::upsert_env_vars(env, &vars)?;
 core/blitzkrieg_core/src/runtime_config.rs:261 env-direct crate::env_file::remove_env_vars(env, &["RUNTIME_ROUND_DURATION_SEC"])?;
 core/blitzkrieg_core/src/runtime_config.rs:307 env-direct crate::env_file::upsert_env_vars(env_path, &drained)?;
-core/blitzkrieg_core/src/service/accounts/mod.rs:117 env-direct && let Some((env_path, toml_path)) = self.config.account_env_write_paths()
-core/blitzkrieg_core/src/service/accounts/mod.rs:119 env-direct if let Err(e) = crate::account::config::env_persist_account_opening_equity(
-core/blitzkrieg_core/src/service/accounts/persist.rs:107 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:1078 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:1087 env-direct crate::account::config::env_persist_account_create(
-core/blitzkrieg_core/src/service/accounts/persist.rs:116 env-direct crate::account::config::env_persist_account_rounds(
-core/blitzkrieg_core/src/service/accounts/persist.rs:1209 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:1218 env-direct crate::account::config::env_persist_account_remove(&legacy, &env_path, id.as_str())
-core/blitzkrieg_core/src/service/accounts/persist.rs:185 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:192 env-direct crate::account::config::env_persist_cross_venue_arb(&legacy, &env_path, cfg).map_err(
-core/blitzkrieg_core/src/service/accounts/persist.rs:40 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:480 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:49 env-direct crate::account::config::env_persist_account_venue(&legacy, &env_path, id.as_str(), venue)
-core/blitzkrieg_core/src/service/accounts/persist.rs:522 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:531 env-direct crate::account::config::env_persist_account_trading(
-core/blitzkrieg_core/src/service/accounts/persist.rs:588 env-direct let Some((env_path, legacy_toml)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:608 env-direct crate::account::config::env_persist_account_active(
-core/blitzkrieg_core/src/service/accounts/persist.rs:616 env-direct crate::account::config::env_persist_account_status(
-core/blitzkrieg_core/src/service/accounts/persist.rs:675 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:684 env-direct crate::account::config::env_persist_display_account(&legacy, &env_path, id.as_str())
-core/blitzkrieg_core/src/service/accounts/persist.rs:824 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:833 env-direct crate::account::config::env_persist_account_strategies(
-core/blitzkrieg_core/src/service/accounts/persist.rs:926 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/accounts/persist.rs:957 env-direct if crate::account::config::env_persist_account_strategies(
-core/blitzkrieg_core/src/service/cockpit_env.rs:130 env-direct pub(crate) fn persist_cockpit_changes(
-core/blitzkrieg_core/src/service/cockpit_env.rs:154 env-direct crate::env_file::upsert_env_vars(path, &vars)
-core/blitzkrieg_core/src/service/strategies.rs:234 env-direct let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-core/blitzkrieg_core/src/service/strategies.rs:243 env-direct crate::account::config::env_persist_account_strategies(
-core/blitzkrieg_core/src/service/trading_reset.rs:303 env-direct self.persist_cockpit_changes(
-core/blitzkrieg_core/src/service/trading_reset.rs:514 env-direct if let Err(e) = crate::env_file::upsert_env_vars(path, &vars) {
-core/blitzkrieg_core/src/service/trading_reset.rs:715 env-direct crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
-core/blitzkrieg_core/src/service/trading_reset.rs:723 env-direct crate::env_file::upsert_env_vars(
 core/blitzkrieg_core/src/shadow_evolution/mod.rs:1235 env-direct if let Err(e) = crate::env_file::upsert_env_vars(std::path::Path::new(env_path), &vars) {

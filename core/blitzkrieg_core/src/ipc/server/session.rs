@@ -34,20 +34,38 @@ pub async fn run(
     }
 
     let mut core = Core::new(config.clone());
-    // issue #1189: open the SQLite per-account risk/exit store when the
-    // deployment names one. Absent = the env fallback (the test posture and
-    // a kernel that has not migrated yet). A failure to open the DB the
-    // operator explicitly named is FAIL-CLOSED (issue #1189 §5): the kernel
-    // refuses to run rather than silently trading on the env fallback while
-    // the operator believes the DB is authoritative.
-    if let Ok(path) = std::env::var("BLITZKRIEG_DB_PATH")
-        && !path.trim().is_empty()
-        && let Err(e) = core.open_account_risk_db(path)
-    {
-        return Err(anyhow::anyhow!(
-            "account risk DB open failed ({e}) — refusing to boot on the env fallback \
-             (fail-closed: fix BLITZKRIEG_DB_PATH or unset it to run env-only)"
-        ));
+    // issue #1199 PR-2: the database opens BY DEFAULT. The path comes from
+    // `db::default_db_path` — the SAME resolver the launcher's one-shot
+    // import uses — so the file the import fills is the file the kernel
+    // reads (the split brain that froze the default deployment's DB is dead:
+    // the launcher imported into the default path while the session only
+    // opened an explicit `BLITZKRIEG_DB_PATH`, so the panel's edits fell
+    // back to .env while the DB sat unread). A failure to open is
+    // FAIL-CLOSED for BOTH spellings (issue #1189 §5 posture, extended):
+    // the kernel refuses to run rather than silently trading on the env
+    // fallback while the operator believes the DB is authoritative. The
+    // error text distinguishes the two causes — an explicit path that will
+    // not open vs. the default path that cannot be created.
+    let explicit_db = std::env::var(crate::db::DB_PATH_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let db_path = crate::db::default_db_path();
+    if let Err(e) = core.open_account_risk_db(db_path.clone()) {
+        return Err(anyhow::anyhow!(match explicit_db {
+            Some(_) => format!(
+                "account risk DB open failed at {e} — refusing to boot (fail-closed: \
+                 fix {env} or point it at a writable file; the env fallback is retired — \
+                 issue #1199)",
+                env = crate::db::DB_PATH_ENV
+            ),
+            None => format!(
+                "account risk DB open failed at the default path {} ({e}) — refusing to \
+                 boot (fail-closed: the default database could not be created or opened — \
+                 fix the path or permissions; the env fallback is retired — issue #1199)",
+                db_path.display()
+            ),
+        }));
     }
     eprintln!(
         "blitzkrieg-core: core constructed t={} dt={} ms",
@@ -216,6 +234,14 @@ pub async fn run(
     // no-op (the file is the single source of truth; the in-memory config is
     // its read-only cache). 2s mtime poll, dependency-free; the derived
     // changes carry the audit line so the operator sees what their edit did.
+    //
+    // issue #1199 (the watcher asymmetry): with the SQLite store open the DB
+    // is the cockpit carrier, so the cockpit re-derive is DISABLED — any
+    // unrelated `.env` write (an account toggle, a credential save — they all
+    // rewrite the same file) used to re-derive the cockpit working copies
+    // FROM THE FILE and clobber the DB-sourced values with stale keys. The
+    // execution-policy reload stays: its carrier is still the env file, and
+    // the reload is a pure re-read (no clobber of DB-sourced state).
     if let Some(watch_path) = core
         .lock()
         .await
@@ -235,24 +261,31 @@ pub async fn run(
                 if cur.is_some() && cur != last {
                     last = cur;
                     let mut c = core.lock().await;
-                    match c.refresh_cockpit_from_env_file() {
-                        Ok(applied) if !applied.is_empty() => {
-                            tracing::info!(
-                                target: "risk",
-                                "cockpit config re-derived from the env file                                  (external edit): {}",
-                                applied.join("; ")
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!("cockpit env-file watch: re-derive failed: {e}")
+                    // The cockpit re-derive is the env-carrier backend's
+                    // freshness mechanism only (see the note above).
+                    if c.cockpit_env_rederive_allowed() {
+                        match c.refresh_cockpit_from_env_file() {
+                            Ok(applied) if !applied.is_empty() => {
+                                tracing::info!(
+                                    target: "risk",
+                                    "cockpit config re-derived from the env file \
+                                    (external edit): {}",
+                                    applied.join("; ")
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("cockpit env-file watch: re-derive failed: {e}")
+                            }
                         }
                     }
                     // Same `.env`, same external edit: execution_policy's POLICY_*
                     // keys ride the same file. Hot-reload them so a hand edit of
                     // the execution-policy section lands without a restart — the
                     // same "real-time write to .env, real-time enable, no restart"
-                    // contract the cockpit families already enjoy.
+                    // contract the cockpit families already enjoy. The policy
+                    // carrier IS the env file (no DB face yet), so this runs
+                    // regardless of the cockpit carrier.
                     if let Err(e) = c.reload_execution_policy() {
                         tracing::warn!(
                             "execution_policy env-file watch: reload failed ({e}); \
