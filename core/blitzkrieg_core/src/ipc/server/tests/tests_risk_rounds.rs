@@ -729,6 +729,94 @@ async fn round_duration_set_writes_the_cell_and_get_reads_it_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 操作者裁决 2026-11-14（落库 + 启动回读）：`round_duration.set` 写的是
+/// SQLite 的 `account_settings` 行，不是 `.env`；下一个会话（新 Core、同一个
+/// 库）读回同一个网格 —— 写进去的和读出来的是同一个事实，`.env` 里连键都
+/// 不该出现。
+#[tokio::test]
+async fn round_duration_lands_in_sqlite_and_the_next_boot_reads_it_back() {
+    let dir = std::env::temp_dir().join(format!("bk-round-sql-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("store.sqlite");
+    let env_path = dir.join(".env");
+    let cfg = || CoreConfig {
+        env_file_path: Some(env_path.to_string_lossy().into_owned()),
+        allowed_round_secs: crate::account::config::TEST_ALLOWED_ROUNDS.to_vec(),
+        round_labels: [(300, "5m"), (900, "15m")].into_iter().collect(),
+        trade_log_path: None,
+        order_log_path: None,
+        position_log_path: None,
+        ..Default::default()
+    };
+    let registry = crate::market::registry::MarketPluginRegistry::new();
+    let peer = PeerAuth::SameUid { uid: own_uid() };
+
+    // 第一个会话：写入 300。
+    {
+        let c = cfg();
+        let mut core = Core::new(c.clone());
+        core.set_balance(c.dry_seed_balance);
+        core.open_account_risk_db(&db_path).expect("store opens");
+        let core = Arc::new(AsyncMutex::new(core));
+        let set = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"round_duration.set","params":{"accountId":"default","durationSec":300,"reason":"sql round trip"}}"#
+                .to_string(),
+        )
+        .await;
+        assert!(set.get("error").is_none(), "the set must land: {set}");
+    }
+
+    // 库里有那一行；`.env` 里没有任何轮次键。
+    let db = crate::risk::account_store::AccountRiskDb::open(&db_path).expect("reopen");
+    let stored = db
+        .load_settings()
+        .expect("settings readable")
+        .get("default")
+        .and_then(|keys| keys.get(crate::risk::account_store::ROUND_DURATION_SETTING))
+        .cloned();
+    assert_eq!(
+        stored.as_deref(),
+        Some("300"),
+        "the grid is an account_settings row"
+    );
+    let env_text = std::fs::read_to_string(&env_path).unwrap_or_default();
+    assert!(
+        !env_text.contains("ROUND_DURATION_SEC"),
+        "the round grid must never be written to .env: {env_text}"
+    );
+
+    // 第二个会话：同一个库 → 读回 300。默认账户的行同时是进程默认网格。
+    {
+        let c = cfg();
+        let mut core = Core::new(c.clone());
+        core.set_balance(c.dry_seed_balance);
+        core.open_account_risk_db(&db_path).expect("store re-opens");
+        let core = Arc::new(AsyncMutex::new(core));
+        let read = rpc(
+            &core,
+            &registry,
+            &peer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"round_duration.get","params":{}}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            read["result"]["perAccount"]["default"],
+            serde_json::json!(300),
+            "the next boot reads the stored anchor back: {read}"
+        );
+        assert_eq!(
+            read["result"]["effectiveSec"],
+            serde_json::json!(300),
+            "the default account's row IS the process default grid: {read}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #458 `system.reset_trading` 的 wire 合同：三道门（Live 拒绝 / 确认词
 /// 逐字 RESET / 无审计路径拒绝）+ 重置闭环（停策略、清记录、re-seed、
 /// 自校验）+ 审计行 + 反向验收（审计流不清除/余额必复原/记录必空）。

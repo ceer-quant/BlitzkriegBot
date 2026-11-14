@@ -42,7 +42,117 @@ impl Core {
         self.risk.config_mut().systemic.accounts.extend(risks);
         self.config.positions.account_exit.extend(exits);
         self.positions.set_config(self.config.positions.clone());
+        // 操作者裁决 2026-11-14：轮次锚点的家是数据库，不是 `.env`。库里有行
+        // 就以行为准（`.env` 的 `ACCOUNT_*_ROUND_DURATION_SEC` 只是旧部署的
+        // 兼容回退）；写入面见 `round_duration.set`。这一层不读 env：env 已由
+        // `with_account_book` 先铺好，行覆盖它。
+        self.overlay_account_settings_from_db(&db)?;
+        // 进化引擎的两个开关也是「库里的行才是真相」：把句柄交给引擎，
+        // 运行时翻转直接落 `kernel_meta`，不再写 `.env`。
+        self.shadow_evolution.attach_settings_db(db.clone());
         self.account_risk_db = Some(db);
+        Ok(())
+    }
+
+    /// Overlay the `account_settings` rows onto the in-memory book:
+    /// per-account round anchors (and, for the default account, the process
+    /// default grid) plus the strategy enablement sets.
+    ///
+    /// Fail-closed on a value that would change the trading grid into
+    /// something no plugin declared or the account did not subscribe to:
+    /// the same refusal the env grammar applies, so a stale row can never
+    /// arm a grid the operator did not choose. A merely unparseable row is a
+    /// warn-and-skip (the env value stands) — one bad cell must not brick a
+    /// boot, and it cannot widen anything.
+    fn overlay_account_settings_from_db(
+        &mut self,
+        db: &crate::risk::account_store::AccountRiskDb,
+    ) -> Result<(), String> {
+        use crate::risk::account_store::ROUND_DURATION_SETTING;
+        let settings = db
+            .load_settings()
+            .map_err(|e| format!("account_settings read failed: {e}"))?;
+        let default_id = crate::model::default_account_id();
+        for (account_id, keys) in &settings {
+            let Some(raw) = keys.get(ROUND_DURATION_SETTING) else {
+                continue;
+            };
+            let sec: i64 = match raw.trim().parse() {
+                Ok(sec) => sec,
+                Err(_) => {
+                    tracing::warn!(
+                        account = %account_id,
+                        value = %raw,
+                        "account_settings round anchor is not an integer — the boot-time \
+                         env value stands for this account"
+                    );
+                    continue;
+                }
+            };
+            if !self.config.allowed_round_secs.contains(&sec) {
+                return Err(format!(
+                    "refusing to boot: account `{account_id}`'s stored round anchor {sec}s is \
+                     not declared by any market plugin (declared union: {:?}) — fix the \
+                     account_settings row or add the duration to a plugin",
+                    self.config.allowed_round_secs
+                ));
+            }
+            let subscribed = self
+                .accounts
+                .account(&blitzkrieg_market_api::AccountId::from(account_id.as_str()))
+                .map(|a| a.rounds.clone())
+                .unwrap_or_default();
+            if !subscribed.is_empty() && !subscribed.contains(&sec) {
+                return Err(format!(
+                    "refusing to boot: account `{account_id}`'s stored round anchor {sec}s is \
+                     not in its subscribed round families ({subscribed:?}) — fix the \
+                     account_settings row or the account's ROUNDS"
+                ));
+            }
+            if account_id == default_id.as_str() {
+                // 显式 `--round-sec` / `BK_ROUND_SEC` 仍然压过持久格（文档合同），
+                // 这时只保留 per-account 行、不动进程默认网格。
+                if self.config.round_duration_source == "cli_or_env" {
+                    tracing::warn!(
+                        stored = sec,
+                        effective = self.config.default_round_duration_sec,
+                        "account_settings holds a default-account round anchor, but the grid                          is locked by an explicit CLI/env flag — the flag stands"
+                    );
+                } else {
+                    self.config.default_round_duration_sec = sec;
+                    // 读数的来源如实改名：这一格来自库里的行，不是出厂默认。
+                    self.config.round_duration_source = "account_settings";
+                }
+            }
+            self.config
+                .account_round_durations
+                .insert(account_id.clone(), sec);
+        }
+        // 策略集合：行存在即为真相（显式空数组 = 本账户什么都不跑）。
+        for (account_id, keys) in &settings {
+            let Some(raw) = keys.get(crate::risk::account_store::STRATEGIES_SETTING) else {
+                continue;
+            };
+            match serde_json::from_str::<Vec<String>>(raw) {
+                Ok(set) => {
+                    let id = blitzkrieg_market_api::AccountId::from(account_id.as_str());
+                    if let Err(e) = self.accounts.set_strategies(&id, set, crate::db::now_ms()) {
+                        tracing::warn!(
+                            account = %account_id,
+                            error = %e.message,
+                            "account_settings strategies row could not be applied — \
+                             the boot-time env spelling stands for this account"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    account = %account_id,
+                    error = %e,
+                    "account_settings strategies row is not a JSON array — the boot-time \
+                     env spelling stands for this account"
+                ),
+            }
+        }
         Ok(())
     }
 

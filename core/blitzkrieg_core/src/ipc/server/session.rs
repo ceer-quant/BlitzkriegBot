@@ -12,7 +12,7 @@ use super::*;
 /// readouts all resolve against it.
 pub async fn run(
     socket_path: String,
-    config: CoreConfig,
+    mut config: CoreConfig,
     tick_ms: u64,
     shutdown: oneshot::Receiver<()>,
     registry: crate::market::registry::MarketPluginRegistry,
@@ -31,6 +31,49 @@ pub async fn run(
                 let _ = bus_tx.send(ev);
             }
         });
+    }
+
+    // 进化引擎的两个开关：`kernel_meta` 是家（`.env` 的 `SHADOW_*` 只是旧部署
+    // 的回退）。必须在 Core 构造前读 —— 它们决定引擎启动时是否 scaffolding。
+    // 读失败 / 无行 = 沿用 env，不新增失败面（真正的打开失败由下面的
+    // `open_account_risk_db` 统一拒绝）。
+    if let Ok(db) =
+        crate::risk::account_store::AccountRiskDb::open(crate::db::default_db_path())
+    {
+        if let Ok(Some(raw)) =
+            db.load_kernel_meta(crate::risk::account_store::SHADOW_ENABLED_META)
+        {
+            match raw.trim() {
+                "true" => config.shadow_evolution_enabled = true,
+                "false" => config.shadow_evolution_enabled = false,
+                other => eprintln!(
+                    "blitzkrieg-core: WARNING: kernel_meta shadow_enabled=`{other}` is not \
+                     true/false — the env spelling stands"
+                ),
+            }
+        }
+        if let Ok(Some(raw)) =
+            db.load_kernel_meta(crate::risk::account_store::SHADOW_AUTO_EVOLVE_META)
+        {
+            match raw.trim() {
+                "true" => {
+                    config
+                        .shadow_evolution_tuning
+                        .get_or_insert_with(Default::default)
+                        .auto_evolve = Some(true)
+                }
+                "false" => {
+                    config
+                        .shadow_evolution_tuning
+                        .get_or_insert_with(Default::default)
+                        .auto_evolve = Some(false)
+                }
+                other => eprintln!(
+                    "blitzkrieg-core: WARNING: kernel_meta shadow_auto_evolve=`{other}` is not \
+                     true/false — the env spelling stands"
+                ),
+            }
+        }
     }
 
     let mut core = Core::new(config.clone());

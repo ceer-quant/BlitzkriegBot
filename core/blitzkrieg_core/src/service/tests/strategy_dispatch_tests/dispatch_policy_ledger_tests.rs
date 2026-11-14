@@ -715,6 +715,8 @@ fn empty_set_teardown_then_enable_scoped_write_still_lands_ok() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("store.sqlite"))
+        .expect("settings store opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),

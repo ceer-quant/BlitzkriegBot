@@ -916,12 +916,12 @@ fn a_legacy_state_json_switch_conflict_is_ignored_the_boot_config_wins() {
     let _ = std::fs::remove_dir_all(&dir2);
 }
 
-/// With a write-back path configured, a runtime switch flip persists into
-/// the `.env` single source (issue 751: the retired `shadow_evolution.toml`
-/// write-back was removed), the bookkeeping keeps flowing to state.json, and
-/// the next boot resolves the flip back from `.env`.
+/// With a SQLite store attached, a runtime switch flip persists into
+/// `kernel_meta` (操作者裁决 2026-11-14: the switches' home is the database,
+/// not `.env`), the bookkeeping keeps flowing to state.json, and the next
+/// boot resolves the flip back from the row.
 #[test]
-fn a_switch_flip_writes_back_into_the_dotenv() {
+fn a_switch_flip_writes_back_into_the_store() {
     let (a, _b) = strategies();
     let refs: Vec<&dyn EngineStrategy> = vec![&a];
     let root = std::env::temp_dir().join(format!("bkevo-writeback-{}", std::process::id()));
@@ -931,58 +931,53 @@ fn a_switch_flip_writes_back_into_the_dotenv() {
     let dir = std::path::PathBuf::from(&cfg.audit_dir);
     let _ = std::fs::remove_dir_all(&dir);
 
-    let env_path = root.join(".env");
-    let mut m = ShadowEvolution::new_with_env_path(
-        cfg,
-        &refs,
-        Some(env_path.to_string_lossy().into_owned()),
-    );
+    let db_path = root.join("store.sqlite");
+    let db = crate::risk::account_store::AccountRiskDb::open(&db_path).expect("store opens");
+    let mut m = ShadowEvolution::new(cfg, &refs);
+    m.attach_settings_db(db.clone());
     m.enable(0);
     m.set_auto_evolve(true);
-    // The .env carries both flips…
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    let get = |k: &str| {
-        text.lines().find_map(|l| {
-            crate::env_file::parse_line(l)
-                .filter(|(kk, _)| kk == k)
-                .map(|(_, v)| v)
-        })
-    };
+
+    // kernel_meta carries both flips…
     assert_eq!(
-        get("SHADOW_ENABLED").as_deref(),
+        db.load_kernel_meta(crate::risk::account_store::SHADOW_ENABLED_META)
+            .unwrap()
+            .as_deref(),
         Some("true"),
-        "the enable flip landed"
+        "the enable flip landed in the store"
     );
     assert_eq!(
-        get("SHADOW_AUTO_EVOLVE").as_deref(),
+        db.load_kernel_meta(crate::risk::account_store::SHADOW_AUTO_EVOLVE_META)
+            .unwrap()
+            .as_deref(),
         Some("true"),
-        "the auto flip landed"
+        "the auto flip landed in the store"
+    );
+    // …and nothing was written into `.env` beside it.
+    assert!(
+        !root.join(".env").exists(),
+        "the switch verbs no longer write .env"
     );
     // …and state.json carries only the bookkeeping.
     let st = proposal::ProposalStore::new(&dir).load_state().unwrap();
     assert_eq!(st.enabled, None, "state.json no longer speaks for switches");
     assert_eq!(st.auto_evolve, None);
 
-    // The next boot resolves the switches FROM `.env` (what the launcher and
-    // `bin_support/boot` do: SHADOW_* env outranks the legacy toml section),
-    // so the flip survived WITHOUT any state.json switch key.
+    // The next boot resolves the switches FROM the store (the session's
+    // pre-construction read), so the flip survived WITHOUT any file key.
     let mut boot_cfg = fast_cfg(false, "writeback");
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    let get = |k: &str| {
-        text.lines().find_map(|l| {
-            crate::env_file::parse_line(l)
-                .filter(|(kk, _)| kk == k)
-                .map(|(_, v)| v)
-        })
-    };
-    boot_cfg.enabled = get("SHADOW_ENABLED").as_deref() == Some("true");
-    boot_cfg.auto_evolve = get("SHADOW_AUTO_EVOLVE").as_deref() == Some("true");
-    let m2 = ShadowEvolution::new_with_env_path(
-        boot_cfg,
-        &refs,
-        Some(env_path.to_string_lossy().into_owned()),
-    );
-    assert!(m2.is_enabled(), "the boot honors the .env the verb wrote");
+    boot_cfg.enabled = db
+        .load_kernel_meta(crate::risk::account_store::SHADOW_ENABLED_META)
+        .unwrap()
+        .as_deref()
+        == Some("true");
+    boot_cfg.auto_evolve = db
+        .load_kernel_meta(crate::risk::account_store::SHADOW_AUTO_EVOLVE_META)
+        .unwrap()
+        .as_deref()
+        == Some("true");
+    let m2 = ShadowEvolution::new(boot_cfg, &refs);
+    assert!(m2.is_enabled(), "the boot honors the row the verb wrote");
     assert!(m2.auto_evolve());
 
     // The bookkeeping file itself: written, readable, switch-free.

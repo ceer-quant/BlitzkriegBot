@@ -229,10 +229,12 @@ pub struct ShadowEvolution {
     /// E13: wall-clock ms of the last DEEP round (0 = clock not started).
     last_cycle_ms: i64,
     cycle_seq: u64,
-    /// The `.env` file the switch verbs write SHADOW_ENABLED / SHADOW_AUTO_EVOLVE
-    /// into (the durable half of the switch verbs). `None` disables the write
-    /// path (backtester, most in-process tests) — runtime-only switches.
-    env_path: Option<String>,
+    /// The SQLite store the switch verbs persist into (`kernel_meta`: the two
+    /// Shadow-Evolution switches are process-scoped facts, so they live beside
+    /// the rest of the kernel's durable state instead of in `.env`).
+    /// `None` = no store on this core (backtester, most in-process tests):
+    /// the switches are runtime-only, honestly logged as such.
+    settings_db: Option<crate::risk::account_store::AccountRiskDb>,
 }
 
 impl ShadowEvolution {
@@ -265,7 +267,7 @@ impl ShadowEvolution {
     pub fn new_with_env_path(
         cfg: ShadowEvolutionConfig,
         strategies: &[&dyn EngineStrategy],
-        env_path: Option<String>,
+        _env_path: Option<String>,
     ) -> Self {
         let store = proposal::ProposalStore::new(&cfg.audit_dir);
         // The deep-round clock is the only thing the persisted state still
@@ -298,7 +300,7 @@ impl ShadowEvolution {
             auto_evolve,
             last_cycle_ms,
             cycle_seq,
-            env_path,
+            settings_db: None,
             proposal_store: store,
         };
         me.proposal_store.load();
@@ -553,7 +555,7 @@ impl ShadowEvolution {
         for i in 0..self.units.len() {
             self.units[i].scaffold(&self.cfg, now_ms);
         }
-        self.persist_switch("SHADOW_ENABLED", true);
+        self.persist_switch(crate::risk::account_store::SHADOW_ENABLED_META, true);
         self.persist_state();
     }
 
@@ -564,7 +566,7 @@ impl ShadowEvolution {
         for u in self.units.iter_mut() {
             u.set = VariantSet::empty(&u.strategy);
         }
-        self.persist_switch("SHADOW_ENABLED", false);
+        self.persist_switch(crate::risk::account_store::SHADOW_ENABLED_META, false);
         self.persist_state();
     }
 
@@ -1178,7 +1180,7 @@ impl ShadowEvolution {
         self.auto_evolve = on;
         self.cfg.auto_evolve = on;
         tracing::info!(auto_evolve = on, "shadow evolution auto-evolve switched");
-        self.persist_switch("SHADOW_AUTO_EVOLVE", on);
+        self.persist_switch(crate::risk::account_store::SHADOW_AUTO_EVOLVE_META, on);
         self.persist_state();
     }
 
@@ -1215,30 +1217,27 @@ impl ShadowEvolution {
     /// without `env_path` (backtester, most in-process tests) and a write
     /// failure are logged and otherwise silent — the in-memory switch has
     /// already moved, and the operator's next flip retries the persist.
-    fn persist_switch(&self, env_key: &'static str, value: bool) {
-        let Some(env_path) = self.env_path.as_deref() else {
+    fn persist_switch(&self, meta_key: &'static str, value: bool) {
+        let Some(db) = self.settings_db.as_ref() else {
             tracing::debug!(
-                switch = env_key,
-                "no env path on this core — the switch is runtime-only"
+                switch = meta_key,
+                "no SQLite store on this core — the switch is runtime-only"
             );
             return;
         };
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert(
-            env_key.to_string(),
-            if value {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
-        );
-        if let Err(e) = crate::env_file::upsert_env_vars(std::path::Path::new(env_path), &vars) {
+        if let Err(e) = db.save_kernel_meta(meta_key, if value { "true" } else { "false" }) {
             tracing::error!(
-                switch = env_key,
+                switch = meta_key,
                 value,
                 "{e} — the switch is in force for this session but NOT persisted"
             );
         }
+    }
+
+    /// Attach the SQLite store the switch verbs persist into (the boot's
+    /// `open_account_risk_db` does this once the file is open).
+    pub fn attach_settings_db(&mut self, db: crate::risk::account_store::AccountRiskDb) {
+        self.settings_db = Some(db);
     }
 
     /// Persist the pure bookkeeping (the deep-round clock). The switch keys
