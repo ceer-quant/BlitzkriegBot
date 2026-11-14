@@ -461,7 +461,9 @@ const cumStats = computed(() => {
   const unknownPnlCount = rows.length - known.length
   const net = known.reduce((x, t) => x + Number(t.netPnlUsd), 0)
   const wins = known.filter((t) => Number(t.netPnlUsd) > 0).length
-  const pcts = known.map((t) => Number(t.netPnlPct) || 0)
+	  const pcts = known
+	    .map((t) => (isKnownPnl(t) ? Number(t.netPnlPct) : null))
+	    .filter((v): v is number => v != null && Number.isFinite(v))
   const fees = known.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
   return {
     total: rows.length,

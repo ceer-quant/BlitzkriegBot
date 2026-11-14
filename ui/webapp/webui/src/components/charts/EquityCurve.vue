@@ -40,7 +40,10 @@ const el = ref<HTMLDivElement | null>(null)
 	  // 最后一笔的累计值以账本口径总计（props.total）为准，避免与卡片头条金额不一致：
 	  // 头条显示账本口径（balance − seededTotal），图表末点也应显示同一个数，
 	  // 不再出现成交口径累计（cumStats）那个误导性的 +28。
-	  if (props.total != null && pts.length > 0) {
+	  // 末笔若未知（netPnlUsd 缺失/非法）则末点已是 NaN，保持断线，绝不把
+	  // 账本总计盖在未知点上制造虚假的末笔涨跌；只在末点有限且账本口径
+	  // 可用时才覆写，否则保留上一有效点或断线。
+	  if (props.total != null && pts.length > 0 && Number.isFinite(pts[pts.length - 1])) {
 	    pts[pts.length - 1] = props.total
 	  }
 	  return [0, ...pts]
