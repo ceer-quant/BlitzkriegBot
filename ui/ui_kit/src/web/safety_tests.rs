@@ -14,8 +14,8 @@
 
 use crate::core::types::{
     AccountGateView, ArchiveView, BlockedCounters, DailyLossAccountView, DailyLossView,
-    EngineStatsView, LastErrorView, LegacyVenueErrorView, ReconcileView, SettlementView,
-    SelfCheckItemView, SelfCheckView, StrategyStatsRow, TradingFrozenView, UiSnapshot,
+    EngineStatsView, LastErrorView, LegacyVenueErrorView, ReconcileView, SelfCheckItemView,
+    SelfCheckView, SettlementView, StrategyStatsRow, TradingFrozenView, UiSnapshot,
 };
 use crate::web::render_json_full;
 
@@ -183,10 +183,25 @@ fn an_old_core_renders_nulls_and_the_panel_shows_no_banner() {
 /// 新增转发字段时请同步加入本表，否则新字段的“网关没转发”不会被本条
 /// CI 断言捕获。
 const FORWARDED_STATS_KEYS: &[&str] = &[
-    "books", "tops", "spots", "rounds", "evaluations", "signals",
-    "placeRejected", "confirmed", "venueRejected", "lastError",
-    "lastVenueError", "reconcile", "tradingFrozen", "accountGates",
-    "strategies", "dbEmpty", "settlement", "dailyLoss", "archive",
+    "books",
+    "tops",
+    "spots",
+    "rounds",
+    "evaluations",
+    "signals",
+    "placeRejected",
+    "confirmed",
+    "venueRejected",
+    "lastError",
+    "lastVenueError",
+    "reconcile",
+    "tradingFrozen",
+    "accountGates",
+    "strategies",
+    "dbEmpty",
+    "settlement",
+    "dailyLoss",
+    "archive",
     "selfCheck",
 ];
 
