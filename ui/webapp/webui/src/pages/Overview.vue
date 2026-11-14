@@ -11,7 +11,7 @@ import {
 import { usePanelStore } from '@/stores/panel'
 import AlertBanner from '@/components/ui/alert/AlertBanner.vue'
 import {
-  num, compact, money, signedMoney, winRatePct, pct, shortAddr, duration,
+  num, compact, money, signedMoney, winRateOf, winRateValue, pct, shortAddr, duration,
 } from '@/lib/format'
 import { api } from '@/api/client'
 import { useAccountBalance } from '@/lib/account-balance'
@@ -113,7 +113,7 @@ const trades = computed(() => {
       count: scoped.totalTrades ?? 0,
       net: scoped.attributedNetPnl ?? 0,
       fees: scoped.totalFees ?? 0,
-      winRate: winRatePct(scoped.winRate),
+      winRate: winRateValue(scoped.winRate, scoped.wins ?? 0, scoped.losses ?? 0),
       win: scoped.wins ?? 0,
       loss: scoped.losses ?? 0,
     }
@@ -132,7 +132,7 @@ const trades = computed(() => {
     count: rows.length,
     net: known.reduce((a, t) => a + Number(t.netPnlUsd), 0),
     fees: rows.reduce((a, t) => a + (Number(t.feesUsd) || 0), 0),
-    winRate: known.length ? (win / known.length) * 100 : 0,
+    winRate: winRateOf(win, known.length - win),
     win,
     loss: known.length - win,
     unknownPnlCount,
