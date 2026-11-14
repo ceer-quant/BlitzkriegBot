@@ -101,6 +101,11 @@ const ALLOW = [
   // The composition root: main.rs wires config paths (which store, which
   // .env). Assembly is not a business-layer write.
   { path: 'core/blitzkrieg_launcher/src/main.rs', why: 'launcher assembly — wires the env/db paths' },
+  // The core-side assembly seam: `Core::with_account_book` captures the
+  // config's resolved paths into the EnvStore handle (PR-1). Same class as
+  // the launcher assembly above — wiring, not a business write; the writes
+  // themselves all route through the store it builds.
+  { path: 'core/blitzkrieg_core/src/service/assembly.rs', why: 'core assembly — builds the StoreApi handle from config paths (PR-1 seam)' },
 ];
 
 // ── violation patterns ───────────────────────────────────────────────────────
