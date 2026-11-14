@@ -13,6 +13,7 @@
  */
 import { watch, type ComputedRef } from 'vue'
 import type { Snapshot, TradeRow } from '@/api/client'
+import { isKnownPnl } from '@/lib/trades'
 import { playDang, playDing, playOrder, playProfit, playWuwu } from './alertSounds'
 
 /**
@@ -33,8 +34,10 @@ export function useAlertSounds(
     // Deduped: the raw rows can carry the same `hft-N` id from an earlier run, and
     // counting those twice would fire an alert sound for a trade that never closed.
     const rows = tradeRows()
-    const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
-    const losses = rows.filter((t) => (Number(t.netPnlUsd) || 0) <= 0).length
+    // 未知 netPnlUsd（结算未核实）既不胜也不负：折叠成 0 会把「未知结果」误判成亏损，
+    // 进而触发 playDang()。只对 isKnownPnl 的行做胜负计数。
+    const wins = rows.filter((t) => isKnownPnl(t) && Number(t.netPnlUsd) > 0).length
+    const losses = rows.filter((t) => isKnownPnl(t) && Number(t.netPnlUsd) <= 0).length
     const pos = s.positions?.length ?? 0
     // first frame only establishes the baseline (no replay storm on reload)
     if (primedWins === null || primedLosses === null || primedPositions === null) {
