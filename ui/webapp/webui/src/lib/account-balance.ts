@@ -21,7 +21,7 @@ export function useAccountBalance(
 ): BalanceView | null {
   if (!row) return null
 
-  const cash = Number(row.balance) || 0
+	  const cash = Number(row.balance)
   const seed = row.seededTotal !== undefined ? Number(row.seededTotal) || 0 : null
   const net = seed === null ? cash : cash - seed
 

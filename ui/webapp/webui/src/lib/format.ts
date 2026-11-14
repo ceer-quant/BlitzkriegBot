@@ -31,11 +31,11 @@ export function signedMoney(v: unknown, digits = 2, fallback = '—'): string {
   return `${sign}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
 }
 
-/** Core sends winRate as either a 0..1 fraction or an already-scaled percent. */
+/** Core sends winRate as a 0..1 fraction; always scale to percent. */
 export function winRatePct(v: unknown): number {
   const n = Number(v)
   if (!Number.isFinite(n)) return 0
-  return n > 1.5 ? n : n * 100
+  return n * 100
 }
 
 export function pct(v: unknown, digits = 1, fallback = '—'): string {

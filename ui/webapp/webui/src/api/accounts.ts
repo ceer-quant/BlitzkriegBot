@@ -141,7 +141,7 @@ export interface AccountStrategiesSetDoc {
 // PR G 的写动词（网关 /api/account-freeze/set 路由已存在）：冻结 = 该账户拒
 // 一切新单（手动+策略 entry）、平仓照放；会话级不持久化，内核重启即清。
 // 面板常态只读 stats.accountGates；解冻已迁移至 account.unfreeze（#1069），
-// account.freeze 仅保留冻结半边（frozen:false 解农入口已废，#1059）。面板
+// account.freeze 仅保留冻结半边（frozen:false 解冻入口已废，#1059）。面板
 // 现已在账户切换器里提供「急冻账户」显式入口（accountFreeze），与解冻入口
 // 分离，不得混为同一个静默开关。
 
