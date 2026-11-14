@@ -242,6 +242,32 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
     }
   }
 
+  /** 急冻账户：走 `account.freeze`（POST /api/account-freeze/set），与解冻
+   * （account.unfreeze）分离的显式入口，不得共用同一个静默开关。回执的
+   * `frozen` 是内核生效后的闸门状态：发出请求不等于已冻结，必须读回执。 */
+  async function freezeAccount(a: AccountRow): Promise<void> {
+    if (freezeBusy.value) return
+    freezeBusy.value = a.id
+    freezeErr.value = null
+    freezeMsg.value = null
+    try {
+      const res = await api.accountFreeze({ accountId: a.id, frozen: true, reason: 'panel freeze' })
+      if (res.error) throw new Error(res.error)
+      if (!res.frozen) {
+        freezeErr.value = `账户 ${a.id} 急冻未生效：内核回报 frozen=false，未置入闸门。`
+        return
+      }
+      freezeMsg.value = `账户 ${a.id} 已急冻，拒绝新单入场，持仓平仓照放（会话级，重启即清）。`
+      await refresh()
+      store.refresh()
+    } catch (e) {
+      freezeErr.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      freezeBusy.value = null
+      setTimeout(() => { freezeMsg.value = null }, 6000)
+    }
+  }
+
 // ── 添加账户（#517）：弹窗（选交易所→填 API）。可选项 = 已注册的行情插件。──
 const addOpen = ref(false)
 const registeredVenues = computed<string[]>(() => {
@@ -532,6 +558,14 @@ onBeforeUnmount(() => {
               :disabled="freezeBusy !== null"
               @click.stop="unfreezeAccount(a)"
             >{{ freezeBusy === a.id ? '解冻中…' : '解冻' }}</button>
+            <button
+              v-if="!isFrozenAccount(a.id)"
+              class="shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors"
+              :class="freezeBusy === a.id ? 'bg-down/15 text-down animate-pulse' : 'bg-down/10 text-down hover:bg-down/20 border border-down/30'"
+              :title="`急冻账户 ${a.id}，拒绝一切新单（手动+策略 entry），平仓照放；会话级不持久化，重启即清`"
+              :disabled="freezeBusy !== null"
+              @click.stop="freezeAccount(a)"
+            >{{ freezeBusy === a.id ? '冻结中…' : '急冻' }}</button>
             <span
               class="min-w-0 flex-1 truncate"
               :class="Array.isArray(a.strategies) && a.strategies.length ? 'text-fg' : 'text-faint-fg'"

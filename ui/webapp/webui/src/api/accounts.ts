@@ -139,9 +139,11 @@ export interface AccountStrategiesSetDoc {
 
 // ── 账户级急冻（account.freeze，issue 943）────────────────────────────
 // PR G 的写动词（网关 /api/account-freeze/set 路由已存在）：冻结 = 该账户拒
-// 一切新单（手动+策略 entry）、平仓照放；会话级不持久化。面板常态只读
-// stats.accountGates；解冻已迁移至 account.unfreeze（#1069），account.freeze
-// 仅保留冻结半边，不再提供 frozen:false 解农入口（#1059）。
+// 一切新单（手动+策略 entry）、平仓照放；会话级不持久化，内核重启即清。
+// 面板常态只读 stats.accountGates；解冻已迁移至 account.unfreeze（#1069），
+// account.freeze 仅保留冻结半边（frozen:false 解农入口已废，#1059）。面板
+// 现已在账户切换器里提供「急冻账户」显式入口（accountFreeze），与解冻入口
+// 分离，不得混为同一个静默开关。
 
 /** `account.unfreeze` 回执（#1069）：内核解冻后的诚实回执，`entriesAllowed`
  * 是面板必须读的唯一凭据——发出请求不等于已解冻，entriesAllowed 为
@@ -153,6 +155,40 @@ export interface AccountUnfreezeDoc {
   previousReason?: string | null
   /** 解冻后该账户是否可开新单：true = Gate 2 放行，false = 仍有其他闸门在。 */
   entriesAllowed: boolean
+  error?: string
+}
+
+/** `account.freeze` 回执（PR G，网关 /api/account-freeze/set 路由已存在）：
+ * 内核回报冻结后的闸门状态 `frozen` 与当前原因 `reason`。面板必须读
+ * 回执：发出请求不等于已冻结，`frozen` 为 true 且 note 未报错才算已急冻。
+ * 会话级不持久化，内核重启即清。与解冻（account.unfreeze）是两条独立
+ * 入口，面板不得把二者混为同一个静默开关。 */
+export interface AccountFreezeDoc {
+  accountId: string
+  frozen: boolean
+  /** 内核冻结原因（重复急冻保留第一次原因）。 */
+  reason?: string | null
+  note: string
+  error?: string
+}
+
+/** `extension.enable` / `extension.disable` 回执（`POST /api/extension/set`）：
+ * 内核运行 on_load/on_unload 并回答 `{name, enabled}`，或命名失败原因。 */
+export interface ExtensionSetDoc {
+  name: string
+  enabled: boolean
+  error?: string
+}
+
+/** `market.plugin.set` 回执（`POST /api/market-plugin/set`）：next_session 的
+ * 插件选择，`reset` 为 true 时清持久格（回落至启动旗标/首个注册者）。 */
+export interface MarketPluginSetDoc {
+  nextSessionPlugin: string
+  reset: boolean
+  atMs: number
+  actor: string
+  reason?: string | null
+  note: string
   error?: string
 }
 
@@ -294,6 +330,20 @@ export const accountsApi = {
       body: JSON.stringify(body),
     }),
   /**
+   * 账户级急冻写（`account.freeze`，PR G，网关 /api/account-freeze/set 路
+   * 由已存在）：冻结 = 该账户拒一切新单（手动+策略 entry）、平仓照放；
+   * 会话级不持久化，内核重启即清。`frozen` 恒为 true——解冻只走
+   * `account.unfreeze`（accountUnfreeze），二者是面板里两条独立的入口，
+   * 不得共用同一个静默开关。body 即 `{accountId, frozen, reason?}` 逐字
+   * 转发，同 account-trading/set 的纪律。调用方必须读回执的 `frozen`：
+   * 发出请求不等于已冻结，`frozen === true` 且无 error 才算已急冻。
+   */
+  accountFreeze: (body: { accountId: string; frozen: boolean; reason?: string }) =>
+    request<AccountFreezeDoc>('/account-freeze/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
    * 策略分配写：空列表 = 继承全部全局启用；非空 = 精确钉住。返回的
    * keptExitsOnly 是被移出但仍持仓的策略 —— 内核保活到平完。
    */
@@ -328,6 +378,30 @@ export const accountsApi = {
    */
   accountRoundsSet: (body: { accountId: string; rounds: number[]; reason?: string }) =>
     request<AccountRoundsSetResult>('/account-rounds/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 扩展插件启停写（`extension.enable` / `extension.disable`，#485 网关路由已存在）：
+   * body 即 `{name, enabled}` 逐字转发，交给内核的 extension.enable / extension.disable。
+   * 内核运行 on_load/on_unload 并回答 `{name, enabled}`，或命名失败原因。
+   * 网关注释明确：这是“the panel just never had an entry point”的写动词，本函数补上面板入口。
+   * 注意：market.ts 的 market.plugin.get 读路径保持不变，本写函数仅补 enable/disable 入口。
+   */
+  extensionSet: (body: { name: string; enabled: boolean; reason?: string }) =>
+    request<ExtensionSetDoc>('/extension/set', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * 行情插件启停写（`market.plugin.set`，#485 网关路由已存在）：body 即
+   * `{name?, reset?, reason?}` 逐字转发。name 必须是已注册插件，reset 清持久格；
+   * 两者二选一。内核 plan-first 拒绝未注册名，写 durable cell，运行中的会话
+   * feed/discovery/executor 不动（切换在下次会话生效，显式 --market-plugin 旗标仍优先）。
+   * 注意：market.ts 的 market.plugin.get 读路径保持不变，本写函数仅补 set 入口。
+   */
+  marketPluginSet: (body: { name?: string; reset?: boolean; reason?: string }) =>
+    request<MarketPluginSetDoc>('/market-plugin/set', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
