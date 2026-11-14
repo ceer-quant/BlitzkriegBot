@@ -127,33 +127,40 @@ async fn execution_policy_set(
     core: &Arc<AsyncMutex<Core>>,
     p: ExecutionPolicySetParams,
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
-    let (path, env_path) = {
+    // The policy config path gates the whole family (the "disabled" refusal
+    // is about the POLICY file, not the store); the durable half runs
+    // through the core's store (#1199).
+    {
         let c = core.lock().await;
-        match c.config().execution_policy_path.clone() {
-            Some(p) => (
-                p,
-                c.config()
-                    .env_file_path
-                    .clone()
-                    .map(std::path::PathBuf::from),
-            ),
-            None => {
-                return Err((
-                    Failure::INVALID_PARAMS,
-                    "execution policy disabled (no config path)".to_string(),
-                    None,
-                ));
-            }
+        if c.config().execution_policy_path.is_none() {
+            return Err((
+                Failure::INVALID_PARAMS,
+                "execution policy disabled (no config path)".to_string(),
+                None,
+            ));
         }
-    };
+    }
     let before = {
         let c = core.lock().await;
         c.execution_policy_section_view(&p.account_id)
             .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
     };
     let section = section_from_set_params(&p).map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
-    let written = policy_section_write(&path, env_path.as_deref(), &p.account_id, Some(section))
-        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    let written = {
+        let c = core.lock().await;
+        let store = c.store.as_deref().ok_or_else(|| {
+            (
+                Failure::INVALID_PARAMS,
+                "execution policy: no .env path configured — persistence is \
+                 disabled for this core (backtests and in-process tests); \
+                 nothing was applied"
+                    .to_string(),
+                None,
+            )
+        })?;
+        policy_section_write(store, &p.account_id, Some(section))
+            .map_err(|e| (Failure::INVALID_PARAMS, e, None))?
+    };
     let mut c = core.lock().await;
     // #757: this write is authoritative for its keys — the reload below
     // resolves them from here, not from the stale startup export.
@@ -188,32 +195,36 @@ async fn execution_policy_reset(
     core: &Arc<AsyncMutex<Core>>,
     p: ExecutionPolicyGetParams,
 ) -> Result<Value, (i32, String, Option<ErrorData>)> {
-    let (path, env_path) = {
+    {
         let c = core.lock().await;
-        match c.config().execution_policy_path.clone() {
-            Some(p) => (
-                p,
-                c.config()
-                    .env_file_path
-                    .clone()
-                    .map(std::path::PathBuf::from),
-            ),
-            None => {
-                return Err((
-                    Failure::INVALID_PARAMS,
-                    "execution policy disabled (no config path)".to_string(),
-                    None,
-                ));
-            }
+        if c.config().execution_policy_path.is_none() {
+            return Err((
+                Failure::INVALID_PARAMS,
+                "execution policy disabled (no config path)".to_string(),
+                None,
+            ));
         }
-    };
+    }
     let before = {
         let c = core.lock().await;
         c.execution_policy_section_view(&p.account_id)
             .map(|v| serde_json::to_value(&v).unwrap_or(Value::Null))
     };
-    let written = policy_section_write(&path, env_path.as_deref(), &p.account_id, None)
-        .map_err(|e| (Failure::INVALID_PARAMS, e, None))?;
+    let written = {
+        let c = core.lock().await;
+        let store = c.store.as_deref().ok_or_else(|| {
+            (
+                Failure::INVALID_PARAMS,
+                "execution policy: no .env path configured — persistence is \
+                 disabled for this core (backtests and in-process tests); \
+                 nothing was applied"
+                    .to_string(),
+                None,
+            )
+        })?;
+        policy_section_write(store, &p.account_id, None)
+            .map_err(|e| (Failure::INVALID_PARAMS, e, None))?
+    };
     let mut c = core.lock().await;
     // #757: the swept keys are authoritative ABSENCE — the reload must not
     // fall back to the value the process still carries from boot.
@@ -322,96 +333,37 @@ fn section_from_set_params(
 /// exists the write REFUSES — the loader reads env over that file, so a
 /// write here would be dead data the operator believes is live; the
 /// migration script owns the one-way move.
+/// #363: write ONE account section to the `.env` single source (issue 751).
+/// The section is REPLACED wholesale — every POLICY_<ID>_* key for the
+/// account is swept first, then the `Some` fields land (an absent field =
+/// no key = inherit from the globals, exactly the TOML section-replacement
+/// semantics). `reset` (section = None) sweeps all keys so the account
+/// falls back to the globals.
+///
+/// Returns the section's whole env footprint (`Some` = written value,
+/// `None` = swept). The caller records it in the core's in-memory snapshot
+/// BEFORE the reload (#757): the process already carries the startup export
+/// of the OLD value, and a reload must resolve these keys from this write,
+/// not from that stale snapshot. A rejected write returns `Err` before
+/// touching the file or the snapshot.
+///
+/// #1199 PR-1: the durable half runs through the core's store (the carrier
+/// behind the seam); the legacy-toml refusal, the bootstrap-template sweep
+/// and the reset-on-file probe live in [`EnvStore`] now, exactly where the
+/// old write face had them. The section's key FOOTPRINT stays here — it is
+/// the loader's spelling (`execution_policy::section_env_state`), a policy
+/// fact, not a storage fact.
 fn policy_section_write(
-    path: &str,
-    env_path: Option<&std::path::Path>,
+    store: &dyn crate::store::StoreApi,
     account_id: &str,
     section: Option<crate::execution_policy::SectionFields>,
 ) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
     if account_id.trim().is_empty() {
         return Err("account id must not be empty".to_string());
     }
-    let Some(env_path) = env_path else {
-        return Err(
-            "execution policy: no .env path configured — persistence is \
-             disabled for this core (backtests and in-process tests); \
-             nothing was applied"
-                .to_string(),
-        );
-    };
-    if std::path::Path::new(path).exists() {
-        // Issue #965: the KERNEL's own bootstrap template is not a legacy
-        // operator file — it is the shape reference the boot generates at the
-        // default path, and it is inert (the loader reads POLICY_* env only,
-        // issue #967). The first real save sweeps it, so no dead toml lingers
-        // beside the .env that is now the single source. An EDITED file is the
-        // operator's own: the refusal stands until the migrate script (or a
-        // hand removal) moves it out of the way.
-        let is_kernel_template = std::fs::read_to_string(path)
-            .map(|text| text == crate::execution_policy::BOOTSTRAP_TEMPLATE)
-            .unwrap_or(false);
-        if is_kernel_template {
-            match std::fs::remove_file(path) {
-                Ok(()) => {
-                    tracing::info!(
-                        path = %path,
-                        "swept the auto-generated execution_policy.toml template — \
-                         the .env write supersedes it"
-                    );
-                }
-                Err(e) => {
-                    // The template is inert, so a failed sweep must not block
-                    // the operator's write — warn and carry on.
-                    tracing::warn!(
-                        path = %path,
-                        error = %e,
-                        "could not sweep the auto-generated execution_policy.toml \
-                         template — proceeding with the .env write (the file is inert)"
-                    );
-                }
-            }
-        } else {
-            return Err(format!(
-                "refusing the policy write: the legacy {path} still exists — run \
-                 scripts/migrate-config-to-env.sh first (issue 751/#967: one source; \
-                 the loader reads POLICY_* env only, so this file is dead data)"
-            ));
-        }
-    }
-    // The section's whole env footprint, spelled by the loader's own rule
-    // (`execution_policy::section_env_state`) — one spelling for the write
-    // face and the reload's in-memory snapshot.
+    // The section's whole footprint, spelled by the loader's own rule —
+    // one spelling for the write face and the reload's in-memory snapshot.
     let state = crate::execution_policy::section_env_state(account_id, section.as_ref())?;
-    // `reset` of a section that is not ON FILE refuses by name (the fat-finger
-    // contract): the six keys are the section's whole footprint, none present
-    // = nothing to reset. The file face is the truth here — a section that
-    // lives only in the process environment is launcher-owned and this write
-    // face never claimed it.
-    if section.is_none() {
-        let on_file: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(crate::env_file::parse_line)
-            .collect();
-        let present = state.keys().any(|k| on_file.contains_key(k));
-        if !present {
-            return Err(format!(
-                "execution policy: no section for account `{account_id}` to reset"
-            ));
-        }
-    }
-    // Sweep-then-write (the account layer's posture): remove EVERY section
-    // key for the account, then upsert the `Some` fields — absent = key gone
-    // = inherit from the globals (the TOML section-replacement semantics),
-    // and `reset` rides the same sweep with nothing re-written.
-    let sweep_refs: Vec<&str> = state.keys().map(|k| k.as_str()).collect();
-    crate::env_file::remove_env_vars(env_path, &sweep_refs)
-        .map_err(|e| format!("policy env sweep failed: {e}"))?;
-    let vars: std::collections::BTreeMap<String, String> = state
-        .iter()
-        .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
-        .collect();
-    crate::env_file::upsert_env_vars(env_path, &vars)
-        .map_err(|e| format!("policy env write failed: {e}"))?;
+    store.save_policy_section(account_id, &state)?;
     Ok(state)
 }

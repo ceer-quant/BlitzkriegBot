@@ -37,7 +37,7 @@ impl Core {
         // Existence first, with the standard unknown-account refusal, before
         // anything touches disk.
         self.accounts.require(id)?;
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.venue.set: no accounts config path configured — \
@@ -46,8 +46,7 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_venue(&legacy, &env_path, id.as_str(), venue)
-            .map_err(|e| {
+        store.save_account_venue(id.as_str(), venue).map_err(|e| {
             CoreError::new(
                 CoreErrorCode::InvalidParams,
                 format!(
@@ -104,7 +103,7 @@ impl Core {
         // asked for a set.
         let rounds =
             crate::account::config::validate_rounds(Some(rounds), &self.config.allowed_round_secs)?;
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.rounds.set: no accounts config path configured — \
@@ -113,21 +112,17 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_rounds(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &rounds,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.rounds.set: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        store
+            .save_account_rounds(id.as_str(), &rounds)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.rounds.set: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         // The write-side re-check inside `set_rounds` runs again (same
         // fail-closed posture at every door) — it cannot refuse what
         // `validate_rounds` passed, but the door stays.
@@ -182,21 +177,19 @@ impl Core {
         // Persist first: the file's parse layer re-validates coherence (the
         // same rules the boot runs), so a write that would produce a
         // next-boot-refusing file is refused HERE, before memory moved.
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(err(
                 "arb.config.set: no accounts config path configured — persistence is \
                  disabled for this core (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_cross_venue_arb(&legacy, &env_path, cfg).map_err(
-            |e| {
-                err(format!(
-                    "arb.config.set: persist failed, nothing changed: {}",
-                    e.message
-                ))
-            },
-        )?;
+        store.save_arb_config(cfg).map_err(|e| {
+            err(format!(
+                "arb.config.set: persist failed, nothing changed: {}",
+                e.message
+            ))
+        })?;
         // Memory half, then the hot-push: the engine's adapters read the
         // stamp source, and the strategy reads the params bag — both on the
         // next evaluate, no restart.
@@ -477,14 +470,14 @@ impl Core {
     /// spells with `configured: false` after a successful call.
     pub fn arb_config_clear_persisting(&mut self, actor: &str) -> CoreResult<()> {
         let err = |msg: String| CoreError::new(CoreErrorCode::InvalidParams, msg);
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(err(
                 "arb.config.clear: no accounts config path configured — persistence is \
                  disabled for this core (backtests and in-process tests); nothing was applied"
                     .to_string(),
             ));
         };
-        crate::account::config::env_clear_cross_venue_arb(&legacy, &env_path).map_err(|e| {
+        store.clear_arb_config().map_err(|e| {
             err(format!(
                 "arb.config.clear: persist failed, nothing changed: {}",
                 e.message
@@ -519,7 +512,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::schema::ACCOUNT_TRADING_SET_NOTE;
         self.accounts.require(id)?;
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.trading.set: no accounts config path configured — \
@@ -528,21 +521,17 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_trading(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            enabled,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.trading.set: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        store
+            .save_account_trading(id.as_str(), enabled)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.trading.set: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         self.accounts.set_trading(id, enabled, now_ms)?;
         // 配置态 → gate 的推导不再是「仅启动」：set_trading 写回后立即重算，
         // 保证任何时刻 gate.blocked ⟺ 配置姿态非 Active（0.4.2 门禁验收规则）。
@@ -585,7 +574,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::schema::ACCOUNT_TRADING_SET_NOTE;
         self.accounts.require(id)?;
-        let Some((env_path, legacy_toml)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.status.set: no accounts config path configured — \
@@ -605,21 +594,14 @@ impl Core {
         };
         match &status {
             crate::account::AccountStatus::Active => {
-                crate::account::config::env_persist_account_active(
-                    &legacy_toml,
-                    &env_path,
-                    id.as_str(),
-                )
-                .map_err(persist_err)?;
+                store
+                    .save_account_active(id.as_str())
+                    .map_err(persist_err)?;
             }
             other => {
-                crate::account::config::env_persist_account_status(
-                    &legacy_toml,
-                    &env_path,
-                    id.as_str(),
-                    other,
-                )
-                .map_err(persist_err)?;
+                store
+                    .save_account_status(id.as_str(), other)
+                    .map_err(persist_err)?;
             }
         }
         // Memory last — only after the disk write succeeded.
@@ -672,7 +654,7 @@ impl Core {
     ) -> CoreResult<()> {
         use crate::schema::DISPLAY_ACCOUNT_SET_NOTE;
         self.accounts.require(id)?;
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "display.account.set: no accounts config path configured — \
@@ -681,16 +663,15 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_display_account(&legacy, &env_path, id.as_str())
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "display.account.set: persist failed, nothing changed: {}",
-                        e.message
-                    ),
-                )
-            })?;
+        store.save_display_account(id.as_str()).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "display.account.set: persist failed, nothing changed: {}",
+                    e.message
+                ),
+            )
+        })?;
         self.accounts.set_display(id)?;
         tracing::info!(
             target: "risk",
@@ -821,7 +802,7 @@ impl Core {
             .filter(|p| p.account_id == *id)
             .map(|p| p.strategy.clone())
             .collect();
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.strategies.set: no accounts config path configured — \
@@ -830,21 +811,17 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_strategies(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &requested,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.strategies.set: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        store
+            .save_account_strategies(id.as_str(), &requested)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.strategies.set: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
         // #537: the default account's writes keep the persisted enabled-set
@@ -923,7 +900,7 @@ impl Core {
     /// Returns the migrated default enablement set (empty when nothing
     /// migrated) so the caller can report it on stderr.
     pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Vec::new();
         };
         // The persisted enabled-set (strategy-state.json) drives the one-time
@@ -954,13 +931,9 @@ impl Core {
             // the pre-toggle era. This one-time gate fires only when the file
             // never spelled an assignment; afterwards the accounts file is
             // the sole truth, exactly as the contract above states.
-            if crate::account::config::env_persist_account_strategies(
-                &legacy,
-                &env_path,
-                default_id.as_str(),
-                &persisted_enabled,
-            )
-            .is_ok()
+            if store
+                .save_account_strategies(default_id.as_str(), &persisted_enabled)
+                .is_ok()
             {
                 let _ =
                     self.accounts
@@ -1075,7 +1048,7 @@ impl Core {
                 format!("account.create: account `{id}` already exists"),
             ));
         }
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.create: no accounts config path configured — \
@@ -1084,23 +1057,17 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_create(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            name,
-            venue,
-            &credential_keys,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.create: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        store
+            .save_account_create(id.as_str(), name, venue, &credential_keys)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "account.create: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         self.accounts.insert(crate::account::Account {
             id: id.clone(),
             name: name.unwrap_or(id.as_str()).to_string(),
@@ -1206,7 +1173,7 @@ impl Core {
                 ),
             ));
         }
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "account.remove: no accounts config path configured — \
@@ -1215,16 +1182,15 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_remove(&legacy, &env_path, id.as_str())
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::InvalidParams,
-                    format!(
-                        "account.remove：账户簿落盘失败，两个存储都没有改动：{}",
-                        e.message
-                    ),
-                )
-            })?;
+        store.remove_account(id.as_str()).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!(
+                    "account.remove：账户簿落盘失败，两个存储都没有改动：{}",
+                    e.message
+                ),
+            )
+        })?;
         // Journal 收尾（现金流水卡与任何账户对不上的根因修复）：把该账户的
         // 磁盘流水文件删掉，内存 trail 同步清空。同名 id 的下一次
         // `account.create` 是新账本，不是老账户续弦 —— 留着旧文件，下一次

@@ -62,6 +62,13 @@ pub struct Core {
     /// = the env fallback (every test, and a kernel with no store wired).
     /// Panel writes go here; a missing row falls back to the global matrix.
     account_risk_db: Option<crate::risk::account_store::AccountRiskDb>,
+    /// issue #1199 PR-1: the durable store every business write goes through
+    /// (default assembly = [`crate::store::EnvStore`], the `.env` backend).
+    /// `None` = persistence disabled for this core (backtester, most
+    /// in-process tests) — the standard "persistence is disabled" refusals
+    /// read this. DB-open cores keep the `account_risk_db` branch ahead of
+    /// it for risk/exit (PR-2 collapses the split).
+    pub(crate) store: Option<Box<dyn crate::store::StoreApi>>,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
     breaker: LossBreakers,

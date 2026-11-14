@@ -133,13 +133,16 @@ pub(crate) async fn handle_strategy(
                 // parents); legacy-exists refusal stays fail-closed inside
                 // `set_scoped_strategy_enabled` →
                 // `refuse_while_legacy_toml` (book.rs), so a write that would
-                // be dead data still errors instead of lying quiet.
+                // be dead data still errors instead of lying quiet. #1199:
+                // the check is the store handle's presence (the same
+                // per-call resolution the writers made, decided once at
+                // assembly).
                 let mirror_persistence = core
                     .lock()
                     .await
-                    .config()
-                    .account_env_write_paths()
-                    .is_some();
+                    .store
+                    .as_deref()
+                    .is_some_and(|s| s.account_writes_enabled());
                 if reason.is_none() && mirror_persistence {
                     let default_id = crate::account::default_account_id();
                     let mut c = core.lock().await;
