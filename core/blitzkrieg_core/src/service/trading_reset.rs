@@ -561,8 +561,8 @@ impl Core {
             CoreError::new(
                 CoreErrorCode::Internal,
                 format!(
-                    "the .env persist failed ({}) — the file is the source of truth, \
-                         so a write that cannot land there changes nothing (fix the file \
+                    "the .env persist failed ({}) — the configured carrier is the source of truth, \
+                         so a write that cannot land there changes nothing (fix the carrier \
                          and retry)",
                     e.message
                 ),
@@ -620,8 +620,8 @@ impl Core {
                     CoreErrorCode::Internal,
                     format!(
                         "exit discipline NOT applied: the .env persist failed ({}) — \
-                         the file is the source of truth, so a write that cannot land \
-                         there changes nothing (fix the file and retry)",
+                         the configured carrier is the source of truth, so a write that cannot land \
+                         there changes nothing (fix the carrier and retry)",
                         e.message
                     ),
                 )
