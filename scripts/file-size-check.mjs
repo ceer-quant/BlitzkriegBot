@@ -65,8 +65,9 @@ const ALLOW = [
   // #1140: per-account round duration grew trading_reset.rs past the limit
   // (the round_duration.set write path lives here). Debt marker — the file
   // may shrink or die, never grow past atAuthoring. 1543→1546: the issue
-  // 1199 R2 comment-honesty pass (+3 comment lines, zero logic).
-  { path: 'core/blitzkrieg_core/src/service/trading_reset.rs', atAuthoring: 1546 },
+  // 1199 R2 comment-honesty pass (+3 comment lines). 1546→1552: the R2
+  // T-03 zeroing (+6 lines: the two single-exit helpers' docblocks).
+  { path: 'core/blitzkrieg_core/src/service/trading_reset.rs', atAuthoring: 1552 },
   // #1186: max_order_notional_usd folded into AccountRiskLimits grew
   // schema/mod.rs past the limit. Debt marker — the file may shrink or die,
   // never grow past atAuthoring. 1501→1505: the issue 1199 R2
