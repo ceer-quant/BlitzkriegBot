@@ -22,7 +22,7 @@ defineProps<{
   historyRows: TradeRow[]
   cumStats: CumStats
   winBands: { label: string; tone: 'up' | 'down'; count: number; frac: number }[]
-  tradeStats: { count: number; today: number; todayNet: number; volume: number; avg: number }
+  tradeStats: { count: number; today: number; todayNet: number | null; todayUnknownPnlCount: number; volume: number; avg: number }
   recon: { equity: number | null; cash: number; seed: number | null; net: number; gross: number; fees: number }
   /** 持仓浮动合计（今日表现卡的浮动行）。 */
   positionUnrealized: number
@@ -52,12 +52,17 @@ defineProps<{
 
       <Card>
         <CardHeader label="胜率分布" />
+        <!-- issue 1199 P0-4：胜率 null = 未知（服务端 summary 缺字段/行折叠口径
+             无权威分母）——显示「未知」，绝不回落 0%（0% 是「全败」的读数，
+             不是「不知道」）。未知盈亏笔数同行披露，不进胜负分母。 -->
         <div class="stat-num text-[30px] leading-none">
-        <RollingNumber :value="pct(cumStats.winRate)" />
-      </div>
+          <span v-if="cumStats.winRate === null" class="text-faint-fg">未知</span>
+          <RollingNumber v-else :value="pct(cumStats.winRate)" />
+        </div>
       <div class="mt-1 flex items-center gap-3 text-[11.5px]">
         <span class="font-semibold text-up"><RollingNumber :value="cumStats.wins" /> 盈</span>
         <span class="font-semibold text-down"><RollingNumber :value="cumStats.losses" /> 亏</span>
+        <span v-if="cumStats.unknownPnlCount > 0" class="text-faint-fg">含 <span class="num"><RollingNumber :value="cumStats.unknownPnlCount" /></span> 笔未知盈亏</span>
       </div>
       <div class="mt-3.5 space-y-1.5">
         <div v-for="b in winBands" :key="b.label" class="flex items-center gap-2">
@@ -98,8 +103,15 @@ defineProps<{
       </div>
       <div class="mt-3.5 flex items-center justify-between border-t border-line pt-2.5 text-[11.5px]">
         <span class="text-faint-fg">今日净利</span>
-        <span class="stat-num" :class="tradeStats.todayNet >= 0 ? 'text-up' : 'text-down'">
-          <RollingNumber :value="signedMoney(tradeStats.todayNet)" />
+        <!-- issue 1199 P0-4：当日全部成交盈亏未知时净额显示「未知」（null）
+             —— 折叠成 0 会把「不知道」读成「打平」。部分未知时给出已知行
+             净额 + 未知笔数披露。 -->
+        <span class="flex items-center gap-2">
+          <span v-if="tradeStats.todayUnknownPnlCount > 0" class="text-[10.5px] text-faint-fg">含 <span class="num"><RollingNumber :value="tradeStats.todayUnknownPnlCount" /></span> 笔未知</span>
+          <span v-if="tradeStats.todayNet === null" class="stat-num text-faint-fg">未知</span>
+          <span v-else class="stat-num" :class="tradeStats.todayNet >= 0 ? 'text-up' : 'text-down'">
+            <RollingNumber :value="signedMoney(tradeStats.todayNet)" />
+          </span>
         </span>
       </div>
     </Card>

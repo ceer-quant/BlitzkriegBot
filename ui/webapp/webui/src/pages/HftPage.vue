@@ -25,7 +25,7 @@ import {
 } from '@/lib/format'
 import { useAccountBalance } from '@/lib/account-balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
-import { newestFirst, positionExpired } from '@/lib/trades'
+import { newestFirst, positionExpired, isKnownPnl } from '@/lib/trades'
 import { feedStaleness } from '@/lib/feed'
 import { useRoundDuration } from '@/lib/round-duration'
 import { useAlertSounds } from '@/composables/useAlertSounds'
@@ -438,17 +438,31 @@ const cumStats = computed(() => {
       net: s.attributedNetPnl ?? 0,
       wins: s.wins ?? 0,
       losses: s.losses ?? 0,
-      winRate: winRatePct(s.winRate),
+      // issue 1199 P0-4：服务端统计是胜率的唯一来源（本页不再自算 —— 自算与
+      // 服务端并存必然打架）。字段缺失（老内核 summary 无 winRate）时
+      // 显示「未知」：winRatePct 对 undefined/NaN 回落 0 会把「不知道」
+      // 读成「全败」，那是编造的读数。
+      winRate: s.winRate === undefined || s.winRate === null || !Number.isFinite(Number(s.winRate))
+        ? null
+        : winRatePct(s.winRate),
+      // 服务端 summary 是已裁决的聚合：没有「未知盈亏行」的口径可言
+      // （未知盈亏的行根本不进 summary 的 fold，是内核侧职责）。
+      unknownPnlCount: 0,
       avgHold: s.avgHoldTimeSec,
       best: s.best,
       worst: s.worst,
       fromSummary: true,
     }
   }
-  const net = rows.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0)
-  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
-  const pcts = rows.map((t) => Number(t.netPnlPct) || 0)
-  const fees = rows.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
+  // 行折叠口径（老内核无 summary）：未知盈亏（netPnlUsd 读数缺失/非法）
+  // 的行单独计数、不进分母 —— 折叠成 0 会稀释胜率与净额（issue 1199 P0-4
+  // 现金真相红线）。net/gross 只汇总已知行；胜负计数同分母。
+  const known = rows.filter(isKnownPnl)
+  const unknownPnlCount = rows.length - known.length
+  const net = known.reduce((x, t) => x + Number(t.netPnlUsd), 0)
+  const wins = known.filter((t) => Number(t.netPnlUsd) > 0).length
+  const pcts = known.map((t) => Number(t.netPnlPct) || 0)
+  const fees = known.reduce((x, t) => x + (Number(t.feesUsd) || 0), 0)
   return {
     total: rows.length,
     // `netPnlUsd` is already after fees, so gross is net plus the fees back —
@@ -458,8 +472,14 @@ const cumStats = computed(() => {
     fees,
     net,
     wins,
-    losses: rows.length - wins,
-    winRate: rows.length ? (wins / rows.length) * 100 : 0,
+    losses: known.length - wins,
+    // issue 1199 P0-4：自算胜率删除（原 `wins / rows.length`）——与统计卡
+    // 并存的两个胜率必然打架。行折叠路径下胜率口径是「已知行」的比值，
+    // 但页面只在服务端 summary 缺席时走到这里；此时胜率声明为未知
+    // （null），胜负计数如实给出已知行的盈/亏 —— 不为一个没有权威
+    // 分母的比率编造百分数。
+    winRate: null,
+    unknownPnlCount,
     avgHold: undefined as number | undefined,
     best: pcts.length ? Math.max(...pcts) : undefined,
     worst: pcts.length ? Math.min(...pcts) : undefined,
@@ -536,9 +556,13 @@ const filteredRows = computed<TradeRow[]>(() => {
     if (fTime.value === '7d' && ts < week) return false
     if (fAsset.value !== 'all' && t.asset !== fAsset.value) return false
     if (fStrategy.value !== 'all' && (t.strategy ?? '') !== fStrategy.value) return false
-    const pnl = Number(t.netPnlUsd) || 0
-    if (fOutcome.value === 'win' && pnl <= 0) return false
-    if (fOutcome.value === 'loss' && pnl > 0) return false
+    // issue 1199 P0-4：未知盈亏的行（netPnlUsd 读数缺失/非法）既不进「仅
+    // 盈利」也不进「仅亏损」—— 折叠成 0 会把它读成亏损。它只在「全部」
+    // 与「结算未裁决」两个视图里出现（后者按 exitReason 判，与读数无关）。
+    if (fOutcome.value !== 'all' && fOutcome.value !== 'unverifiable' && !isKnownPnl(t)) return false
+    const pnl = Number(t.netPnlUsd)
+    if (fOutcome.value === 'win' && !(isKnownPnl(t) && pnl > 0)) return false
+    if (fOutcome.value === 'loss' && !(isKnownPnl(t) && pnl <= 0)) return false
     if (fOutcome.value === 'unverifiable' && t.exitReason !== 'unverifiable_expiry') return false
     return true
   })
@@ -548,9 +572,18 @@ const filteredRows = computed<TradeRow[]>(() => {
 
 const filteredStats = computed(() => {
   const rows = filteredRows.value
-  const net = rows.reduce((a, t) => a + (Number(t.netPnlUsd) || 0), 0)
-  const wins = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
-  return { count: rows.length, net, wins, losses: rows.length - wins }
+  // issue 1199 P0-4：净额/胜负只汇总未知盈亏之外的行；未知行单独计数（下方
+  // 「含 N 笔未知盈亏」标注）。折叠成 0 会把它读成打平。
+  const known = rows.filter(isKnownPnl)
+  const net = known.reduce((a, t) => a + Number(t.netPnlUsd), 0)
+  const wins = known.filter((t) => Number(t.netPnlUsd) > 0).length
+  return {
+    count: rows.length,
+    net,
+    wins,
+    losses: known.length - wins,
+    unknownPnlCount: rows.length - known.length,
+  }
 })
 
 // ── waterfall pagination (30 per page, sentinel auto-loads) ─────────────────
@@ -580,7 +613,11 @@ const winBands = computed(() => {
     { label: '–$1 – $0', tone: 'down' as const, test: (v: number) => v <= -0.01 && v > -1 },
     { label: '≤ –$1.00', tone: 'down' as const, test: (v: number) => v <= -1 },
   ]
-  const counts = bands.map((b) => rows.filter((t) => b.test(Number(t.netPnlUsd) || 0)).length)
+  // issue 1199 P0-4：未知盈亏的行不进任何 band（折叠成 0 会落进「–$1–$0」
+  // 读成打平）。分布只画已知行；未知笔数由统计卡的「含 N 笔未知盈亏」
+  // 披露（cumStats.unknownPnlCount，同一 historyRows）。
+  const known = rows.filter(isKnownPnl)
+  const counts = bands.map((b) => known.filter((t) => b.test(Number(t.netPnlUsd))).length)
   const max = Math.max(...counts, 1)
   return bands.map((b, i) => ({ ...b, count: counts[i], frac: counts[i] / max }))
 })
@@ -812,10 +849,16 @@ const tradeStats = computed(() => {
   const dayStart = new Date(new Date().setHours(0, 0, 0, 0)).getTime()
   const todays = rows.filter((t) => (t.exitTime ?? 0) >= dayStart)
   const totalVol = rows.reduce((x, t) => x + (Number(t.entryPrice) * Number(t.shares) || 0), 0)
+  // issue 1199 P0-4：当日净额跳过未知盈亏的行（折叠成 0 = 当日打平，是编造
+  // 的读数）。全部未知时净额显示「未知」（null），部分未知时如实给出
+  // 已知行的净额并披露未知笔数 —— 卡片两条标注同源。
+  const todayKnown = todays.filter(isKnownPnl)
+  const todayUnknown = todays.length - todayKnown.length
   return {
     count: rows.length,
     today: todays.length,
-    todayNet: todays.reduce((x, t) => x + (Number(t.netPnlUsd) || 0), 0),
+    todayNet: todayKnown.length || todayUnknown === 0 ? todayKnown.reduce((x, t) => x + Number(t.netPnlUsd), 0) : null,
+    todayUnknownPnlCount: todayUnknown,
     volume: totalVol,
     avg: rows.length ? totalVol / rows.length : 0,
   }
@@ -1303,7 +1346,12 @@ const journalOpen = ref(false)
           </div>
           <div>
             <div class="label-micro">累计胜率</div>
-            <div class="stat-num mt-1 text-[22px] leading-none"><RollingNumber :value="pct(cumStats.winRate)" /></div>
+            <div class="stat-num mt-1 text-[22px] leading-none">
+              <!-- issue 1199 P0-4：胜率 null = 未知（服务端 summary 缺字段，或
+                   老内核行折叠口径无权威分母）——显示「未知」而不是 0%。 -->
+              <span v-if="cumStats.winRate === null" class="text-faint-fg">未知</span>
+              <RollingNumber v-else :value="pct(cumStats.winRate)" />
+            </div>
           </div>
           <div>
             <div class="label-micro">盈利 / 亏损</div>
@@ -1311,6 +1359,9 @@ const journalOpen = ref(false)
               <span class="text-up"><RollingNumber :value="cumStats.wins" /></span>
               <span class="text-faint-fg"> / </span>
               <span class="text-down"><RollingNumber :value="cumStats.losses" /></span>
+            </div>
+            <div v-if="cumStats.unknownPnlCount > 0" class="mt-1 text-[10.5px] text-faint-fg">
+              含 <span class="num"><RollingNumber :value="cumStats.unknownPnlCount" /></span> 笔未知盈亏（不进胜负分母）
             </div>
           </div>
         </div>
@@ -1325,6 +1376,10 @@ const journalOpen = ref(false)
           /></span>
           · 盈 <span class="text-up num"><RollingNumber :value="filteredStats.wins" /></span>
           / 亏 <span class="text-down num"><RollingNumber :value="filteredStats.losses" /></span>
+          <!-- issue 1199 P0-4：筛选集里的未知盈亏笔数 —— 不进上面的净利/胜负。 -->
+          <span v-if="filteredStats.unknownPnlCount > 0">· 含 <span class="num text-fg"><RollingNumber
+            :value="filteredStats.unknownPnlCount"
+          /></span> 笔未知盈亏</span>
         </div>
       </template>
 

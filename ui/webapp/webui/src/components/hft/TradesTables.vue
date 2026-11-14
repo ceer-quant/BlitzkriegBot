@@ -15,7 +15,7 @@ import EmptyState from '@/components/ui/empty/EmptyState.vue'
 import RollingNumber from '@/components/ui/roll/RollingNumber.vue'
 import type { Position, TradeRow, OrderRow } from '@/api/client'
 import { money, signedMoney, signedPct, duration, dateTime } from '@/lib/format'
-import { tradeIdentity, positionExpired } from '@/lib/trades'
+import { tradeIdentity, positionExpired, isKnownPnl } from '@/lib/trades'
 
 const props = defineProps<{
   /** 'positions' | 'orders' | 'history' — which tab body to render. */
@@ -297,13 +297,19 @@ const activePositions = computed(() => props.positions)
               <RollingNumber v-if="!orderRowIsSynthetic(t)" :value="t.feesUsd ? money(t.feesUsd, 3) : '—'" />
               <span v-else class="text-faint-fg">—</span>
             </td>
-            <td class="px-2 py-2.5 text-right num font-semibold" :class="Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down'">
+            <td class="px-2 py-2.5 text-right num font-semibold" :class="isKnownPnl(t) ? (Number(t.netPnlUsd) >= 0 ? 'text-up' : 'text-down') : 'text-faint-fg'">
               <template v-if="!orderRowIsSynthetic(t)">
-                <RollingNumber :value="signedMoney(t.netPnlUsd, 2)" />
-                <span
-                  v-if="t.exitReason === 'unverifiable_expiry'"
-                  class="block text-[10.5px] font-normal text-muted-fg"
-                >（fallback 记账，结算未裁决）</span>
+                <!-- issue 1199 P0-4：netPnlUsd 读数缺失/非法 = 未知盈亏 —— 显示
+                     「未知」，不显示 0（0 是「打平」的读数）。该行进
+                     统计卡「含 N 笔未知盈亏」，不进胜负分母。 -->
+                <span v-if="!isKnownPnl(t)" class="text-faint-fg">未知</span>
+                <template v-else>
+                  <RollingNumber :value="signedMoney(t.netPnlUsd, 2)" />
+                  <span
+                    v-if="t.exitReason === 'unverifiable_expiry'"
+                    class="block text-[10.5px] font-normal text-muted-fg"
+                  >（fallback 记账，结算未裁决）</span>
+                </template>
               </template>
               <span v-else class="text-faint-fg">—</span>
             </td>
