@@ -125,21 +125,17 @@ impl AccountRiskDb {
                     max_order_notional_usd: Bound::off(),
                 };
                 // #1186's cap lives in the settings table (the v1 schema has
-                // no column for it); a missing key stays off.
-                // .optional() splits "key truly absent" (Ok(None) -> off)
-                // from a genuine read error (column gone, db locked/corrupt),
-                // which is fail-closed here instead of silent-grown to off.
-                let cap = conn
-                    .query_row(
-                        "SELECT value FROM account_settings
+                // Match on the Result directly to distinguish "key truly absent"
+                // (QueryReturnedNoRows -> Bound::off()) from a genuine read error
+                // (column gone, db locked/corrupt) which is fail-closed.
+                match conn.query_row(
+                    "SELECT value FROM account_settings
                          WHERE account_id = ?1 AND key = ?2",
-                        [&id, MAX_ORDER_NOTIONAL_SETTING],
-                        |r| r.get(0),
-                    )
-                    .optional();
-                match cap {
-                    Ok(None) => {} // 键真缺失 -> Bound::off()，保持现行为
-                    Ok(Some(raw)) => limits.max_order_notional_usd = dec_bound(&raw),
+                    [&id, MAX_ORDER_NOTIONAL_SETTING],
+                    |r| -> Result<String, _> { r.get(0) },
+                ) {
+                    Ok(raw) => limits.max_order_notional_usd = dec_bound(&raw),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => {
                         return Err(format!(
                             "account_settings max_order_notional read failed for {id}: {e}"
