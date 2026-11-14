@@ -1417,12 +1417,13 @@ async fn open_account_risk_db_read_failure_fail_closed() {
 
     // Not a SQLite database: the store cannot be opened and its risk rows
     // cannot be read.
-    std::fs::write(dir.join("risk.sqlite"), "not a sqlite database").unwrap();
+    let db_path = dir.join("risk.sqlite");
+    std::fs::write(&db_path, "not a sqlite database").unwrap();
 
-    let result = c.open_account_risk_db(dir.join("risk.sqlite"));
+    let result = c.open_account_risk_db(&db_path);
     assert!(
         result.is_err(),
-        "a store whose risk read cannot be served must refuse boot: {result:?}"
+        "a store whose risk read cannot be served must refuse boot"
     );
     assert!(
         !c.account_risk_db_open(),
