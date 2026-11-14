@@ -23,11 +23,22 @@ pub struct Migration {
 
 /// Every migration this build knows, ascending. Append-only: an existing
 /// version's SQL is never edited, a correction is a new version.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: schema::SCHEMA_VERSION,
-    name: "v1: accounts, credentials, risk, runtime, ledger",
-    sql: schema::SCHEMA_V1,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "v1: accounts, credentials, risk, runtime, ledger",
+        sql: schema::SCHEMA_V1,
+    },
+    Migration {
+        // #1199 PR-0.5 (T-02, drop-table ruling): the five ledger tables
+        // (orders/fills/positions/trades/ledger_entries) had zero runtime
+        // writers — the live truth is the JSONL files. The v2 drop makes the
+        // schema stop advertising storage nothing reads.
+        version: schema::SCHEMA_VERSION,
+        name: "v2: drop zero-runtime-write ledger tables (orders/fills/positions/trades/ledger_entries, #1199 T-02)",
+        sql: schema::SCHEMA_V2,
+    },
+];
 
 /// The version ledger's own DDL. Created before the first read so a brand-new
 /// database can be inspected without a chicken-and-egg step;
@@ -170,10 +181,9 @@ mod tests {
         assert_eq!(current_version(&raw).unwrap(), 0);
         run(&raw).unwrap();
         assert_eq!(current_version(&raw).unwrap(), schema::SCHEMA_VERSION);
-        assert_eq!(
-            applied_versions(&raw).unwrap(),
-            vec![schema::SCHEMA_VERSION]
-        );
+        // Every migration from 1..=SCHEMA_VERSION is recorded, in order.
+        let expected: Vec<i64> = (1..=schema::SCHEMA_VERSION).collect();
+        assert_eq!(applied_versions(&raw).unwrap(), expected);
         drop(raw);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -184,9 +194,10 @@ mod tests {
         run(&db.connection()).unwrap();
         run(&db.connection()).unwrap();
         run(&db.connection()).unwrap();
+        let expected: Vec<i64> = (1..=schema::SCHEMA_VERSION).collect();
         assert_eq!(
             applied_versions(&db.connection()).unwrap(),
-            vec![schema::SCHEMA_VERSION],
+            expected,
             "an applied version is never recorded twice"
         );
     }
@@ -228,5 +239,103 @@ mod tests {
                 .query_row(&sql, [], |r| r.get::<_, i64>(0))
                 .unwrap_or_else(|e| panic!("table {table} must be queryable: {e}"));
         }
+    }
+
+    /// The upgrade path a real deployment takes (#1199 T-02): a database
+    /// created by the v1-only importer (five ledger tables populated) is
+    /// migrated in place — the rows go with the tables, the live tables stay,
+    /// and the version ledger records v2. A second run changes nothing.
+    #[test]
+    fn v1_database_upgrades_in_place_and_loses_the_five_tables() {
+        let dir = std::env::temp_dir().join(format!(
+            "blitzkrieg-mig-v1up-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("v1.sqlite")).unwrap();
+        // Apply ONLY v1: the shape the one-shot importer leaves behind.
+        conn.execute_batch(schema::SCHEMA_V1).unwrap();
+        conn.execute_batch(BOOTSTRAP).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (1, 0)",
+            [],
+        )
+        .unwrap();
+        // Rows in the doomed tables (the importer's legacy folds).
+        conn.execute(
+            "INSERT INTO orders (account_id, order_id, payload_json, updated_at_ms) \
+             VALUES ('default', 'o1', '{}', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ledger_entries (account_id, kind, amount, payload_json, ts_ms) \
+             VALUES ('default', 'seed', '1', '{}', 0)",
+            [],
+        )
+        .unwrap();
+        // One row in a live table, which must SURVIVE the upgrade.
+        conn.execute(
+            "INSERT INTO accounts (id, name, market_type, status, trading_enabled, updated_at_ms) \
+             VALUES ('default', 'D', 'prediction', 'active', 1, 0)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), schema::SCHEMA_VERSION);
+        assert_eq!(
+            applied_versions(&conn).unwrap(),
+            vec![1, 2],
+            "both migrations recorded"
+        );
+
+        // The five tables (and their indexes) are gone.
+        for (kind, name) in [
+            ("table", "orders"),
+            ("table", "fills"),
+            ("table", "positions"),
+            ("table", "trades"),
+            ("table", "ledger_entries"),
+            ("index", "idx_orders_account"),
+            ("index", "idx_fills_account"),
+            ("index", "idx_positions_account"),
+            ("index", "idx_trades_account"),
+            ("index", "idx_ledger_account"),
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                    [kind, name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 0, "{kind} {name} must be dropped by v2");
+        }
+        // The live tables are untouched and the account row survived.
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 1, "accounts table survives with its rows");
+        for table in schema::TABLES {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "table {table} must exist after the upgrade");
+        }
+
+        // Re-running the migration is a no-op (idempotent upgrade).
+        run(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), schema::SCHEMA_VERSION);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -289,6 +289,7 @@ impl Core {
         // working copy moves, and a persist failure refuses the whole apply.
         // (The old order — memory hot-write, then a best-effort persist in
         // the IPC face — is the divergence the ruling bans.)
+        // T-03: 双写分支归零待 StoreApi 收口（PR-1, issue #1199）。
         let persisted: bool = if let Some(db) = &self.account_risk_db {
             db.save_risk(&target, &row).map_err(|e| {
                 CoreError::new(
@@ -484,6 +485,7 @@ impl Core {
         // logged — is precisely the divergence the ruling bans.) Without a
         // file (backtester, unwired tests): the direct memory write is the
         // whole story, honestly reported as `persisted: false`.
+        // T-03: 双写分支归零待 StoreApi 收口（PR-1, issue #1199）。
         let exit_persisted: bool = if let Some(db) = self.account_risk_db.clone() {
             let exit = self.install_account_exit_row(&target, &current, patch);
             db.save_exit(&target, &exit).map_err(|e| {
