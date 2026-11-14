@@ -16,6 +16,7 @@ import { backtestLabel, loadBacktest, saveBacktest, clearBacktest } from '@/comp
 import type { BacktestReport } from '@/backtest'
 import { useChart, areaFade, palette, tooltipStyle, axisX, axisY } from '@/lib/chart'
 import { num, money, signedMoney, pct, duration, dateTime, shortAddr } from '@/lib/format'
+import { isKnownPnl } from '@/lib/trades'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -291,16 +292,16 @@ const netPnl = computed(() => Number(report.value?.trades?.netPnlUsd ?? 0))
 /** 超出 tradeLines 容量的笔数 — 曲线来自截断后的列表。 */
 const truncated = computed(() => Number(report.value?.tradeLinesTruncated ?? 0))
 
-/** 资金曲线：逐笔累计净盈亏，带 0 起点。 */
+/** 资金曲线：逐笔累计净盈亏，带 0 起点。未知盈亏不折叠为 0 —— 未知行
+ * 写 NaN 让曲线在该处断线，只对 isKnownPnl 的行做累加。 */
 const equity = computed<number[]>(() => {
   const r = report.value
   if (!r) return []
   let cum = 0
-  return [0, ...r.tradeLines.reduce<number[]>((acc, t) => {
-    cum += Number(t.netPnlUsd) || 0
-    acc.push(cum)
-    return acc
-  }, [])]
+  return [0, ...r.tradeLines.map<number>((t) => {
+    if (!isKnownPnl(t)) return NaN
+    return (cum += Number(t.netPnlUsd))
+  })]
 })
 
 interface DistRow {
@@ -309,18 +310,22 @@ interface DistRow {
   avg: number
 }
 
-/** 平仓原因分布：按 reason 聚合，桶色按该原因的平均盈亏符号。 */
+/** 平仓原因分布：按 reason 聚合，桶色按该原因的平均盈亏符号。未知盈亏
+ * 不进 pnl 累计，也不以 0 稀释平均；avg 仅对已知盈亏行求均值。 */
 const reasonDist = computed<DistRow[]>(() => {
-  const m = new Map<string, { count: number; pnl: number }>()
+  const m = new Map<string, { count: number; pnl: number; known: number }>()
   for (const t of report.value?.tradeLines ?? []) {
     const k = String(t.reason || '未注明')
-    const e = m.get(k) ?? { count: 0, pnl: 0 }
+    const e = m.get(k) ?? { count: 0, pnl: 0, known: 0 }
     e.count += 1
-    e.pnl += Number(t.netPnlUsd) || 0
+    if (isKnownPnl(t)) {
+      e.pnl += Number(t.netPnlUsd)
+      e.known += 1
+    }
     m.set(k, e)
   }
   return [...m.entries()]
-    .map(([label, v]) => ({ label, count: v.count, avg: v.count ? v.pnl / v.count : 0 }))
+    .map(([label, v]) => ({ label, count: v.count, avg: v.known ? v.pnl / v.known : 0 }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 10)
 })
@@ -330,10 +335,12 @@ function fmtPrice(p: number): string {
 }
 
 /** 入场价格带分布：entryPrice 分 12 桶，桶色按该桶平均盈亏符号。 */
-const bandDist = computed<DistRow[]>(() => {
-  const lines = (report.value?.tradeLines ?? [])
-    .map((t) => ({ price: Number(t.entryPrice), pnl: Number(t.netPnlUsd) || 0 }))
-    .filter((t) => Number.isFinite(t.price) && t.price > 0)
+	const bandDist = computed<DistRow[]>(() => {
+	  const lines = (report.value?.tradeLines ?? [])
+	    // 未知盈亏不进分布桶的平均盈亏（不折叠为 0 稀释桶色）。
+	    .filter(isKnownPnl)
+	    .map((t) => ({ price: Number(t.entryPrice), pnl: Number(t.netPnlUsd) }))
+	    .filter((t) => Number.isFinite(t.price) && t.price > 0)
   if (lines.length === 0) return []
   let lo = Infinity
   let hi = -Infinity

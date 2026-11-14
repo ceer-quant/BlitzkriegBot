@@ -17,6 +17,7 @@ import { api } from '@/api/client'
 import { useAccountBalance } from '@/lib/account-balance'
 import type { BalanceView } from '@/lib/balance'
 import { filterByAccount, filterByVenue } from '@/lib/account-filter'
+import { isKnownPnl } from '@/lib/trades'
 import StatTile from '@/components/ui/stat/StatTile.vue'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
@@ -122,14 +123,19 @@ const trades = computed(() => {
   // （真线实锤：default 自账 1 笔 −0.67，全局 17 笔含 kalshi −8.85，读全局
   // 块瓦片显示 990.48 而非 999.33）。无显示账户时全量行即进程级一拍。
   const rows = store.activeAccount ? accountFilteredRows.value : tradeRows.value
-  const win = rows.filter((t) => (Number(t.netPnlUsd) || 0) > 0).length
+  // 现金真相红线：未知盈亏不折叠为 0，不进胜负分母、不算进盈亏汇总；
+  // 未知行单独计数并在面板上披露，绝不被「硬塞」为输。
+  const known = rows.filter(isKnownPnl)
+  const unknownPnlCount = rows.length - known.length
+  const win = known.filter((t) => Number(t.netPnlUsd) > 0).length
   return {
     count: rows.length,
-    net: rows.reduce((a, t) => a + (Number(t.netPnlUsd) || 0), 0),
+    net: known.reduce((a, t) => a + Number(t.netPnlUsd), 0),
     fees: rows.reduce((a, t) => a + (Number(t.feesUsd) || 0), 0),
-    winRate: rows.length ? (win / rows.length) * 100 : 0,
+    winRate: known.length ? (win / known.length) * 100 : 0,
     win,
-    loss: rows.length - win,
+    loss: known.length - win,
+    unknownPnlCount,
   }
 })
 
@@ -511,6 +517,9 @@ const dbEmpty = computed(() => snap.value?.stats?.dbEmpty === true)
             <span>{{ trades.loss }}</span>
           </Badge>
         </div>
+        <p v-if="trades.unknownPnlCount" class="mt-2 flex items-center gap-1 text-[10px] text-faint-fg">
+          <span class="opacity-60">含 {{ trades.unknownPnlCount }} 笔未知盈亏（不计胜负）</span>
+        </p>
       </StatTile>
 
       <!-- Words, not figures: DRY / LIVE never rolls, so it stays plain text. -->

@@ -21,6 +21,7 @@ import {
 } from '@/api/client'
 import { usePanelStore } from '@/stores/panel'
 import { num, signedMoney, winRatePct, dateTime } from '@/lib/format'
+import { isKnownPnl } from '@/lib/trades'
 import Card from '@/components/ui/card/Card.vue'
 import CardHeader from '@/components/ui/card/CardHeader.vue'
 import Badge from '@/components/ui/badge/Badge.vue'
@@ -296,8 +297,10 @@ function deltaRow(name: string, base: string, variant: string, delta: string, be
 function metricsRows(b: EvolutionMetricsRow, v: EvolutionMetricsRow): MetricRow[] {
   const wrB = winRatePct(b.winRate)
   const wrV = winRatePct(v.winRate)
-  const netB = Number(b.netPnlUsd) || 0
-  const netV = Number(v.netPnlUsd) || 0
+  // 基线 vs 变体净额比较：未知盈亏不进比较基准，不折叠为 0 编造差值与方向。
+  const netB = isKnownPnl(b) ? Number(b.netPnlUsd) : NaN
+  const netV = isKnownPnl(v) ? Number(v.netPnlUsd) : NaN
+  const netKnown = Number.isFinite(netB) && Number.isFinite(netV)
   const pfB = Number(b.profitFactor) || 0
   const pfV = Number(v.profitFactor) || 0
   const poB = Number(b.payoff) || 0
@@ -311,13 +314,21 @@ function metricsRows(b: EvolutionMetricsRow, v: EvolutionMetricsRow): MetricRow[
       `${poV - poB >= 0 ? '+' : ''}${(poV - poB).toFixed(2)}`, poV > poB),
     deltaRow('盈利因子', pfB.toFixed(2), pfV.toFixed(2),
       `${pfV - pfB >= 0 ? '+' : ''}${(pfV - pfB).toFixed(2)}`, pfV > pfB),
-    deltaRow('净 PnL', signedMoney(netB), signedMoney(netV),
-      signedMoney(netV - netB), netV > netB),
+    deltaRow('净 PnL',
+      netKnown ? signedMoney(netB) : '未知',
+      netKnown ? signedMoney(netV) : '未知',
+      netKnown ? signedMoney(netV - netB) : '—',
+      netKnown ? netV > netB : null),
   ]
 }
 
-const cycleAgo = (ms: number): string => {
-  const s = Math.max(0, Date.now() - ms) / 1000
+	/** 指标卡里的净 PnL 读数：未知则如实说「未知」，绝不折叠成 $0.00。 */
+	function fmtNet(m: EvolutionMetricsRow): string {
+	  return isKnownPnl(m) ? signedMoney(m.netPnlUsd) : '未知'
+	}
+
+	const cycleAgo = (ms: number): string => {
+	  const s = Math.max(0, Date.now() - ms) / 1000
   if (s < 90) return `${Math.round(s)} 秒前`
   const m = Math.round(s / 60)
   if (m < 90) return `${m} 分钟前`
@@ -473,8 +484,8 @@ const cycleAgo = (ms: number): string => {
           <p class="mt-2 text-[12px] text-muted-fg">
             采纳时窗口：胜率 <span class="num">{{ winRatePct(row.p.baseline.winRate).toFixed(1) }}%</span>
             → <span class="num font-semibold">{{ winRatePct(row.p.variant.winRate).toFixed(1) }}%</span>
-            · 净 PnL <span class="num">{{ signedMoney(Number(row.p.baseline.netPnlUsd) || 0) }}</span>
-            → <span class="num font-semibold">{{ signedMoney(Number(row.p.variant.netPnlUsd) || 0) }}</span>
+            · 净 PnL <span class="num">{{ fmtNet(row.p.baseline) }}</span>
+            → <span class="num font-semibold">{{ fmtNet(row.p.variant) }}</span>
             · 样本 <span class="num">{{ num(row.p.sampleCount) }}</span> 笔
           </p>
 
