@@ -66,19 +66,22 @@ fn field_changes(changes: &[(&str, String)]) -> Vec<(String, String)> {
 }
 
 /// Serialize an apply reply with `persisted` + `persistence` on top (issue
-/// #966, receipt contract completed in #965). The panel shows "已持久化到
-/// .env" only when `persisted` is true; an unwired env path (a backtester, or
-/// a test that does not wire one) leaves the in-memory edit live for this
-/// process only, and saying so is the honest answer. `persistence` spells the
-/// carrier in words — `"env"` when the upsert landed, `"none"` when it did
-/// not — so a receipt never just says "已保存" without WHERE it went.
+/// #966, receipt contract completed in #965). The panel shows "已持久化" only
+/// when `persisted` is true; an unwired carrier (a backtester, or a test that
+/// does not wire one) leaves the in-memory edit live for this process only,
+/// and saying so is the honest answer. `persistence` spells the carrier in
+/// words — `"store"` when a durable carrier took the write (the DB when it is
+/// open — the default since #1199 PR-2; the `.env` backend otherwise — the
+/// assembly decides, so the receipt stays carrier-neutral), `"none"` when it
+/// did not — so a receipt never just says "已保存" without WHERE it went, and
+/// never names `.env` when the DB is the carrier.
 fn with_persisted(update: serde_json::Value, persisted: bool) -> Value {
     let mut reply = update;
     if let Value::Object(map) = &mut reply {
         map.insert("persisted".into(), Value::Bool(persisted));
         map.insert(
             "persistence".into(),
-            Value::String(if persisted { "env" } else { "none" }.to_string()),
+            Value::String(if persisted { "store" } else { "none" }.to_string()),
         );
     }
     reply
@@ -94,18 +97,21 @@ pub(crate) async fn handle_risk(
     match method {
         method::RISK_LIMITS => {
             let c = core.lock().await;
-            // File-sourced (operator ruling 2026-11-08): the cockpit sections
-            // of the readout come from the `.env` file at QUERY time — the
-            // panel reads the file (through the kernel), never a cache that
-            // can diverge from it (the 2026-11-08 panel-ON/file-OFF class).
+            // The readout's carrier is decided by assembly, not by the file's
+            // existence (operator ruling 2026-11-08, restated for the #1199
+            // store seam).
             //
             // issue #1199 (the readout asymmetry): with the SQLite store open
-            // the DB is the cockpit carrier — the working copies already carry
-            // the DB rows (boot overlay + the default-face mirror in
-            // `open_account_risk_db`), and an env overlay here would resurrect
-            // the file's STALE `BK_*` / `BK_EXIT_*` keys over them on every
-            // query. The overlay is the env-carrier backend's readout face
-            // only; with the DB open the snapshot IS the answer.
+            // (the default since PR-2) the DB is the cockpit carrier — the
+            // working copies already carry the DB rows (boot overlay + the
+            // default-face mirror in `open_account_risk_db`), and an env
+            // overlay here would resurrect the file's STALE `BK_*` /
+            // `BK_EXIT_*` keys over them on every query. The overlay is the
+            // env-carrier backend's readout face only — with the DB open the
+            // snapshot IS the answer; on the env-only backend the cockpit
+            // sections come from the `.env` file at QUERY time, so the panel
+            // reads the file (through the kernel), never a cache that can
+            // diverge from it (the 2026-11-08 panel-ON/file-OFF class).
             let file = if c.account_risk_db_open() {
                 None
             } else {

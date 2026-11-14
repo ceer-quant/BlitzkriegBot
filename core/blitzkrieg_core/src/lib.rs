@@ -51,9 +51,11 @@ pub mod db_import;
 pub mod env_file;
 /// .env file watcher for hot reload.
 pub use blitzkrieg_market_api::decimal;
-/// The cockpit families' single source of truth (operator ruling
-/// 2026-11-08): the `.env` file is authoritative for the exit discipline and
-/// per-account systemic limits; the in-memory config is a read-only cache.
+/// The cockpit families' carrier is decided by assembly (operator ruling
+/// 2026-11-08, restated for the #1199 store seam): with the DB open (the
+/// default since PR-2) the SQLite database is the cockpit truth and `.env`
+/// is read-only at runtime; on the env-only backend the `.env` file is
+/// authoritative and the in-memory config is its read-only cache.
 pub mod cockpit;
 pub mod engine;
 /// #363: the account-isolated execution policy rule engine. Strategy emits

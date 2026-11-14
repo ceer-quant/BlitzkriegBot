@@ -231,9 +231,10 @@ pub async fn run(
     // The env-file watcher (operator ruling 2026-11-08): an EXTERNAL hand
     // edit of the cockpit families in `.env` re-derives the working copies
     // within one poll — a hand edit is a first-class write, never a silent
-    // no-op (the file is the single source of truth; the in-memory config is
-    // its read-only cache). 2s mtime poll, dependency-free; the derived
-    // changes carry the audit line so the operator sees what their edit did.
+    // no-op. 2s mtime poll, dependency-free; the derived changes carry the
+    // audit line so the operator sees what their edit did. (The re-derive
+    // itself is the env-carrier backend's freshness mechanism — see the
+    // carrier asymmetry note below.)
     //
     // issue #1199 (the watcher asymmetry): with the SQLite store open the DB
     // is the cockpit carrier, so the cockpit re-derive is DISABLED — any

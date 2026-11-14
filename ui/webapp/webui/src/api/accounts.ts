@@ -62,7 +62,7 @@ export interface AccountVenueSetDoc {
 
 // ── 跨所套利创建（arb.config.set / arb.config.get，合同 v1）─────────────────
 // 配置意图模型：A 腿（交易所+账户）+ B 腿（交易所+账户）+ 币对多选，创建即
-// 持久化（内核写 accounts.toml，面板零持久化职责）。专用代理路由（body 即
+// 持久化（内核持久化进 durable 存储，面板零持久化职责）。专用代理路由（body 即
 // params 逐字转发，同 account-venue/set 的纪律）。B≠A（venue 与账户两个维度）
 // 的校验在内核是 APPLICATION 错误 —— 消息点名哪个字段非法，弹窗把原文转述。
 
@@ -90,7 +90,7 @@ export interface ArbConfigDoc {
 
 // ── 显示账户（issue 559）───────────────────────────────────────────────────
 // 身份唯一源改造：行情页倒计时卡的「这是谁的市场」不再从账户绑定派生，而
-// 是内核的 display_account 独立事实（accounts.toml 顶层持久化 + 运行时生
+// 是内核的 display_account 独立事实（内核 durable 存储持久化 + 运行时生
 // 效）。写动词 `display.account.set`（payload {accountId}）——内核回执里
 // 的 displayVenue 是该显示账户绑定 venue 的读数（空串 = 未绑定，可交易任
 // 意交易所），与本面板会话默认账户彻底解耦：切换器选新账户 ≠ 行情身份
@@ -241,7 +241,7 @@ export const accountsApi = {
     request<AccountVenueDoc>('/account-venue', {}, {
       accountId: params?.accountId,
     }),
-  /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 accounts.toml。 */
+  /** 绑定写：venue 空串 = 解绑。内核校验插件名并持久化进 durable 存储。 */
   accountVenueSet: (body: { accountId: string; venue: string; reason?: string }) =>
     request<AccountVenueSetDoc>('/account-venue/set', {
       method: 'POST',
@@ -267,7 +267,7 @@ export const accountsApi = {
   // 写的是「行情页显示谁的市场」——与 `account <id>`（本面板会话默认账户）
   // 是两个独立事实：切换器成功路径两者都写，本动词 fire-and-forget，失败
   // 静默（快照下一拍带回新 displayVenue，页面回落链兜底）。
-  /** 显示账户写：内核校验账户存在并持久化进 accounts.toml 顶层 display_account。 */
+  /** 显示账户写：内核校验账户存在并持久化进 durable 存储的 display_account。 */
   displayAccountSet: (body: { accountId: string; reason?: string }) =>
     request<DisplayAccountSetDoc>('/display-account/set', {
       method: 'POST',

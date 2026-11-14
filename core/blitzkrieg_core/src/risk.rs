@@ -540,7 +540,8 @@ impl RiskGate {
         }
         // Notional cap applies to BUY commitment; SELL is bounded by position (P2).
         // The cap is read from the per-account systemic matrix (account-level,
-        // persisted to .env, hot-reloaded) — not from the process-level CLI flag.
+        // persisted through the store seam, hot-reloaded) — not from the
+        // process-level CLI flag.
         // The CLI flag (`--max-order-notional`) still works as a fallback for
         // scripts that set it at boot; the two are OR'd: whichever is non-zero
         // binds, the tighter one wins if both are armed.

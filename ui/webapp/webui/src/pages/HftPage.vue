@@ -71,7 +71,7 @@ useAlertSounds(snap, () => store.tradeRows)
 // ── market identity ─────────────────────────────────────────────────────────
 // 倒计时卡的身份行（徽章/名字/slot/已过秒数）的身份唯一源（issue 559，随
 // issue 561 收敛）：显示账户 —— 内核快照顶层的 displayAccount/displayVenue
-// （accounts.toml 顶层持久化 + 运行时生效的独立事实）。issue 561（面板唯
+// （内核 durable 存储持久化 + 运行时生效的独立事实）。issue 561（面板唯
 // 一可信账户源裁决）后 store.activeAccountVenue 本身就派生自快照
 // displayVenue（account.list 行派生仅作快照缺字段时的回落），回落链合流为
 // 一条：快照在场全听内核的 —— 包括 displayVenue 为空串（显示账户未绑定 =

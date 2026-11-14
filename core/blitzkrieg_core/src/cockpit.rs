@@ -1,21 +1,30 @@
-//! The cockpit families' single source of truth (operator ruling
-//! 2026-11-08): the `.env` FILE is the authoritative state for the exit
-//! discipline (`BK_EXIT_*`) and the per-account systemic limits (`BK_RISK_*`)
-//! — the same families the panel's 风控与策略 card reads and writes. The
-//! kernel's in-memory config is a READ-ONLY CACHE of the file:
+//! The cockpit families' carrier is decided by ASSEMBLY (operator ruling
+//! 2026-11-08, restated for the #1199 store seam): the exit discipline
+//! (`BK_EXIT_*`) and the per-account systemic limits (`BK_RISK_*`) — the
+//! families the panel's 风控与策略 card reads and writes — persist through
+//! the store seam, and which backend is wired decides where the truth lives:
 //!
-//!   * every write (panel or RPC) lands in the file FIRST, then the cache is
-//!     re-derived FROM the file — the cache can never hold a value the file
-//!     does not have (the 2026-11-08 divergence class: panel ON / file OFF,
-//!     because the launcher's process-env snapshot had gone stale while the
-//!     kernel held the boot-time value — three layers, three answers);
-//!   * external hand edits are picked up by the env-file watcher (mtime
-//!     poll, `ipc/server`) and re-derived the same way;
-//!   * `risk.limits` sources its cockpit sections from the file at query
-//!     time, so the panel always reads the file (through the kernel), never
-//!     a divergent copy;
-//!   * boot derives the working copy from the file directly — the launcher's
-//!     env snapshot is no longer consulted for these keys.
+//!   * DB open (the default assembly since #1199 PR-2): the SQLite database
+//!     IS the cockpit truth — the working copies are its read-through cache
+//!     (boot overlay + the default-face mirror in `open_account_risk_db`),
+//!     and `.env` is READ-ONLY at runtime (the env-file watcher's cockpit
+//!     re-derive is disabled — see `cockpit_env_rederive_allowed`: a file
+//!     re-derive would clobber the DB-sourced copies with stale `BK_*` keys
+//!     on any unrelated `.env` write);
+//!   * env-only backend (no DB): the `.env` FILE is the authoritative state
+//!     and the kernel's in-memory config is a READ-ONLY CACHE of the file:
+//!     every write lands in the file FIRST, then the cache is re-derived
+//!     FROM the file — the cache can never hold a value the file does not
+//!     have (the 2026-11-08 divergence class: panel ON / file OFF, because
+//!     the launcher's process-env snapshot had gone stale while the kernel
+//!     held the boot-time value — three layers, three answers); external
+//!     hand edits are picked up by the env-file watcher (mtime poll,
+//!     `ipc/server`) and re-derived the same way.
+//!
+//! Either way a write that cannot land durably refuses the whole apply, and
+//! the receipt names the outcome (`persistence: "store" | "none"` — the
+//! carrier word is neutral because the carrier is assembly-decided; see
+//! `ipc/server/handlers/risk.rs`).
 //!
 //! One table here names every cockpit key once; since #1199 the write face
 //! (the store seam's risk/exit persist) reads its key mapping from this
@@ -160,10 +169,12 @@ pub fn parse_cockpit_value(key: &CockpitKey, raw: &str) -> Option<CockpitValue> 
 }
 
 /// Overlay the FILE's cockpit values onto a `risk.limits` readout — the
-/// panel reads the file (through the kernel), never a divergent cache. A key
-/// absent from the file leaves the working copy's value standing (the file
-/// no longer speaks for it); an unparseable value is skipped (same fail
-/// direction as the derivation).
+/// env-carrier backend's readout face ONLY (with the DB open the caller
+/// skips this: the DB-sourced snapshot IS the answer, and an overlay here
+/// would resurrect the file's stale `BK_*` keys — see
+/// `ipc/server/handlers/risk.rs`). A key absent from the file leaves the
+/// working copy's value standing (the file no longer speaks for it); an
+/// unparseable value is skipped (same fail direction as the derivation).
 pub fn overlay_risk_limits(
     vars: &std::collections::BTreeMap<String, String>,
     exit: &mut crate::schema::RiskExitView,

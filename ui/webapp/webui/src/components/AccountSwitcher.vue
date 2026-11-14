@@ -201,7 +201,7 @@ async function setTrading(a: AccountRow, enabled: boolean): Promise<void> {
     })
     if (res.error) throw new Error(res.error)
     tradingMsg.value = enabled
-      ? `账户 ${a.id} 已恢复交易${res.persisted ? '（已落盘）' : ''}。`
+      ? `账户 ${a.id} 已恢复交易${res.persisted ? '（已落盘）' : '（仅内存，重启丢失）'}。`
       : `账户 ${a.id} 已停止开仓——现有持仓继续管理到平完。`
     tradingConfirmOpen.value = false
     tradingConfirmTarget.value = null
@@ -616,7 +616,7 @@ onBeforeUnmount(() => {
         账本为空（核心未就绪或账户簿未配置）。
       </p>
       <p class="mt-1 border-t border-line px-2 pt-1.5 text-[10.5px] leading-relaxed text-faint-fg">
-        切换只改变显示账户（面板唯一可信账户源，accounts.toml 持久化、重启保持），行情/策略/流水视图随之跟随
+        切换只改变显示账户（面板唯一可信账户源，内核持久化、重启保持），行情/策略/流水视图随之跟随
         （各账户的策略在后台持续运行，切换不启停任何东西）；策略的启停在策略页按账户启用。绑定只在建户时设定
         （绑定即启用），已有账户不改绑——需要换交易所就删户重建；绑定了交易所的账户只能交易该交易所。
       </p>
@@ -632,7 +632,7 @@ onBeforeUnmount(() => {
       :word="removeTarget?.id ?? ''"
       title="删除账户"
       :lines="[
-        `账户 ${removeTarget?.id ?? ''} 将从账户簿删除（accounts.toml 落盘）——不可撤销。`,
+        `账户 ${removeTarget?.id ?? ''} 将从账户簿删除（内核持久化落盘）——不可撤销。`,
         '该账户的现金流水历史保留在账本日志里；有持仓的账户与最后一个账户内核会拒绝。',
         '删除的是当前默认账户时，面板默认账户自动回切剩余账户的第一个。',
       ]"
@@ -647,7 +647,7 @@ onBeforeUnmount(() => {
       title="停止交易"
       :lines="[
         `账户 ${tradingConfirmTarget?.id ?? ''} 将停止开仓——已有的挂单与持仓继续由策略管理到平完（关 = 拒开仓、放平仓）。`,
-        '恢复交易随时可点同一开关；开关状态持久化进 accounts.toml，重启后保持。',
+        '恢复交易随时可点同一开关；开关状态持久化进内核的 durable 存储（DB 或 .env，按装配），重启后保持。',
       ]"
       action-label="确认停止"
       :busy="tradingConfirmBusy"
