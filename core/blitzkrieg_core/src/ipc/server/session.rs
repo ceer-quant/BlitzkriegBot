@@ -46,11 +46,33 @@ pub async fn run(
     // fallback while the operator believes the DB is authoritative. The
     // error text distinguishes the two causes — an explicit path that will
     // not open vs. the default path that cannot be created.
+    //
+    // issue #1199 R2: the DEFAULT spelling is install-root anchored (the exe's
+    // ancestors — the #380 convention), so the same binary resolves the SAME
+    // database from any cwd: a cwd-relative default used to create a NEW empty
+    // database in whatever directory the operator launched from (the empty-DB
+    // split brain — the panel then read/wrote the empty file while the
+    // deployment's real database sat unread). An explicit relative
+    // `BLITZKRIEG_DB_PATH` stays honoured verbatim (the operator's spelling is
+    // their choice); only the default is anchored.
     let explicit_db = std::env::var(crate::db::DB_PATH_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
     let db_path = crate::db::default_db_path();
+    // issue #1199 R2: was this database file ALREADY on disk before the open?
+    // A `false` here means this boot CREATED the file (and possibly its
+    // parent directory) — the fact the empty-database WARN must name, so
+    // "the panel is about to read and write a brand-new empty database" is
+    // never silent (the split-brain root: a cwd-relative default used to
+    // create a NEW empty database in whatever directory the operator
+    // launched from, while the deployment's real database sat elsewhere).
+    let db_file_preexisted = db_path.exists();
+    let db_parent_preexisted = db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.is_dir())
+        .unwrap_or(true);
     if let Err(e) = core.open_account_risk_db(db_path.clone()) {
         return Err(anyhow::anyhow!(match explicit_db {
             Some(_) => format!(
@@ -66,6 +88,33 @@ pub async fn run(
                 db_path.display()
             ),
         }));
+    }
+    // issue #1199 R2: the empty-database WARN. The open above now ALWAYS runs
+    // (the default path resolves against the install root, so it is the same
+    // file from any cwd); when the file carries no data at all — zero
+    // `account_risk` rows AND no `import_v1` marker — the operator must hear
+    // that the panel's reads and writes are about to land in an EMPTY
+    // database. A database that already holds data stays silent (this is a
+    // boot-shape fact, not a per-boot alarm).
+    if !db_file_preexisted || core.account_risk_db_is_empty() {
+        let created = if !db_file_preexisted {
+            if db_parent_preexisted {
+                format!("created {}", db_path.display())
+            } else {
+                format!(
+                    "created {} (and its parent directory — the install-root default \
+                     resolved to a directory that did not exist yet)",
+                    db_path.display()
+                )
+            }
+        } else {
+            format!("opened {}", db_path.display())
+        };
+        eprintln!(
+            "blitzkrieg-core: WARNING 风控库为空 — {created}; 面板读写将落此库 \
+             (account_risk 零行、无 import_v1 导入标记)；旧 env 数据请用导入器 \
+             (db_import, import_v1)"
+        );
     }
     eprintln!(
         "blitzkrieg-core: core constructed t={} dt={} ms",

@@ -48,6 +48,19 @@ impl Core {
         self.account_risk_db.is_some()
     }
 
+    /// issue #1199 R2: whether the OPEN database carries no data at all —
+    /// zero `account_risk` rows AND no `import_v1` marker. Only meaningful
+    /// with a store open (an env-fallback core answers `false`: there is no
+    /// database to be empty). A read error answers `false` as well — the
+    /// probe must never turn a diagnostic into a boot failure, and the WARN
+    /// it feeds is a diagnostic.
+    pub fn account_risk_db_is_empty(&self) -> bool {
+        self.account_risk_db
+            .as_ref()
+            .and_then(|db| db.db().is_empty().ok())
+            .unwrap_or(false)
+    }
+
     /// issue #1199 (the env watcher asymmetry): whether the env-file watcher
     /// may re-derive the cockpit working copies from `.env`. The DB is the
     /// cockpit carrier when one is open — a file re-derive would clobber the

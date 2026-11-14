@@ -46,8 +46,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
-/// Default database path, relative to the process working directory (the same
-/// convention every other `data/` writer in the kernel uses).
+/// Default database path, resolved against the process working directory.
+///
+/// This spelling is the RELATIVE half of the resolution rule
+/// ([`resolve_db_path`] / issue #1199 R2): an explicit relative
+/// `BLITZKRIEG_DB_PATH` is honoured verbatim (the operator's cwd-relative
+/// spelling is their choice), and the DEFAULT is anchored to the install root
+/// so the same binary resolves the same database from any cwd. The constant
+/// itself stays cwd-relative — it is the joinable tail, not the location.
 pub const DEFAULT_DB_PATH: &str = "data/blitzkrieg.sqlite";
 
 /// The environment variable that names an EXPLICIT database path
@@ -60,20 +66,86 @@ pub const DB_PATH_ENV: &str = "BLITZKRIEG_DB_PATH";
 
 /// Resolve the database path this process runs: the explicit
 /// `BLITZKRIEG_DB_PATH` when it is set and non-blank, else the shipped
-/// [`DEFAULT_DB_PATH`]. The ONE resolver — the launcher's one-shot import and
-/// the session's store open both call it, so the file the import fills is the
-/// file the kernel reads.
+/// [`DEFAULT_DB_PATH`] anchored to the install root (the executable's
+/// directory and its ancestors — the #380 `execution_policy` convention,
+/// reused verbatim: a release bundle's `bin/`, a checkout's `target/release/`
+/// walking up to the repo root). The ONE resolver — the launcher's one-shot
+/// import and the session's store open both call it, so the file the import
+/// fills is the file the kernel reads.
 pub fn default_db_path() -> std::path::PathBuf {
     resolve_db_path(std::env::var(DB_PATH_ENV).ok().as_deref())
 }
 
 /// The pure resolution rule (the test seam — mutating the process environment
 /// to test precedence would be global state parallel tests race on).
+///
+/// * explicit non-blank `BLITZKRIEG_DB_PATH` → honoured VERBATIM (a relative
+///   spelling stays cwd-relative: an explicit path is a promise about which
+///   file to use, not a default to second-guess);
+/// * blank/absent → [`DEFAULT_DB_PATH`] joined onto the install root: the
+///   executable's own directory first, then its ancestors (the same walk
+///   [`crate::execution_policy::resolve_default_config_path`] runs — exe
+///   chain first, cwd second). The exe anchor is what makes the answer
+///   cwd-independent: `bin/blitzkrieg-core` in a bundle and
+///   `target/release/blitzkrieg-core` in a checkout both resolve to the
+///   deployment root's `data/blitzkrieg.sqlite` no matter where the process
+///   was started from (issue #1199 R2: a cwd-relative default silently
+///   created a NEW empty database in whatever directory the operator
+///   happened to launch from — the panel then read and wrote the empty file
+///   while the real data sat in the deployment's database).
 fn resolve_db_path(explicit: Option<&str>) -> std::path::PathBuf {
     match explicit.map(str::trim).filter(|v| !v.is_empty()) {
         Some(path) => std::path::PathBuf::from(path),
-        None => std::path::PathBuf::from(DEFAULT_DB_PATH),
+        None => install_root()
+            .map(|root| root.join(DEFAULT_DB_PATH))
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_DB_PATH)),
     }
+}
+
+/// The install root: the first directory at-or-above the EXECUTABLE that
+/// looks like a deployment root, else the first at-or-above the CWD.
+///
+/// The probe marker is the repo's own layout — a directory containing
+/// `user_layer/` (the #380 install-root convention's marker, same as
+/// [`crate::execution_policy`]'s lookup). Exe ancestors are probed FIRST so a
+/// bundle/checkout root wins over an unrelated directory the process happens
+/// to run from; the cwd chain is the dev-convenience second (a core run from
+/// an unusual binary location but the repo root still finds the shipped
+/// layout). `None` inputs (current_exe/current_dir failed) simply shorten
+/// their chain — a probe that cannot name a directory is skipped, not an
+/// error; no hit at all falls back to the exe's own directory (absolute
+/// whenever the exe path is), never to the bare cwd.
+fn install_root() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let cwd = std::env::current_dir().ok();
+    for dir in exe_dir
+        .iter()
+        .flat_map(|d| ancestor_chain(d))
+        .chain(cwd.iter().flat_map(|d| ancestor_chain(d)))
+    {
+        if dir.join("user_layer").is_dir() {
+            return Some(dir);
+        }
+    }
+    exe_dir
+}
+
+/// Walk `start` upward through its ancestors, `start` included (the #380
+/// chain shape: for a release bundle the exe sits at `<bundle>/bin/` and the
+/// layout lands at `<bundle>/user_layer/`, so the walk from the exe's own
+/// directory already covers the dev-checkout shape).
+fn ancestor_chain(start: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        out.push(dir.to_path_buf());
+        cur = dir.parent();
+    }
+    out
 }
 
 /// `busy_timeout` for every connection (issue #1189 §5): 5 seconds.
@@ -131,9 +203,10 @@ impl Database {
         })
     }
 
-    /// Open the shipped default path ([`DEFAULT_DB_PATH`]).
+    /// Open the shipped default path — the install-root-resolved spelling of
+    /// [`DEFAULT_DB_PATH`] ([`default_db_path`]).
     pub fn open_default() -> anyhow::Result<Self> {
-        Self::open(DEFAULT_DB_PATH)
+        Self::open(default_db_path())
     }
 
     /// The filesystem path this database was opened from.
@@ -163,6 +236,15 @@ impl Database {
         let guard = self.lock();
         migrations::current_version(&guard)
     }
+
+    /// Whether this database carries no data at all (issue #1199 R2): zero
+    /// `account_risk` rows and no `import_v1` marker — the shape a freshly
+    /// created (or never-written) file has, and the fact the boot path WARNs
+    /// about so "the panel reads/writes an empty DB" is never silent.
+    pub fn is_empty(&self) -> anyhow::Result<bool> {
+        let guard = self.lock();
+        is_empty_database(&guard)
+    }
 }
 
 /// Apply the per-connection pragmas (issue #1189 §5).
@@ -183,6 +265,23 @@ fn configure(conn: &Connection) -> anyhow::Result<()> {
 /// The journal mode a connection is actually running (for tests / diagnostics).
 pub fn journal_mode(conn: &Connection) -> anyhow::Result<String> {
     Ok(conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?)
+}
+
+/// Whether this database carries NO data: zero `account_risk` rows AND no
+/// `import_v1` done-marker (issue #1199 R2, the empty-database probe).
+///
+/// The two halves answer two different questions, and BOTH must be absent for
+/// "empty": the marker says "the one-shot legacy import already folded this
+/// database" (an imported-but-empty database is a valid operator state — the
+/// env simply had nothing), while the row count says "the panel/risk write
+/// path has ever landed anything". Either one present means the file is NOT
+/// the silently-new empty database the boot WARN is about.
+pub fn is_empty_database(conn: &Connection) -> anyhow::Result<bool> {
+    let risk_rows: i64 = conn.query_row("SELECT COUNT(*) FROM account_risk", [], |r| r.get(0))?;
+    if risk_rows > 0 {
+        return Ok(false);
+    }
+    Ok(kernel_meta_get(conn, META_IMPORT_V1)?.is_none())
 }
 
 // ── kernel_meta ─────────────────────────────────────────────────────────────
@@ -512,9 +611,11 @@ mod tests {
         assert_send::<Database>();
     }
 
-    /// issue #1199: the path resolution rule — an explicit non-blank
-    /// `BLITZKRIEG_DB_PATH` wins, blank/absent falls to the shipped default.
-    /// The pure seam (no process env mutation — parallel tests race on it).
+    /// issue #1199 R2: the path resolution rule — an explicit non-blank
+    /// `BLITZKRIEG_DB_PATH` wins (verbatim, relative spellings included —
+    /// the operator's choice), blank/absent falls to the install-root-anchored
+    /// shipped default. The pure seam (no process env mutation — parallel
+    /// tests race on it).
     #[test]
     fn resolve_db_path_prefers_an_explicit_spelling() {
         assert_eq!(
@@ -527,13 +628,164 @@ mod tests {
             std::path::PathBuf::from("/tmp/spaced.sqlite"),
             "the explicit path is trimmed"
         );
-        for blank in [None, Some(""), Some("   ")] {
+        // A relative explicit spelling stays relative: an explicit path is a
+        // promise about which file to use, not a default to second-guess.
+        assert_eq!(
+            resolve_db_path(Some("var/bank.sqlite")),
+            std::path::PathBuf::from("var/bank.sqlite"),
+            "an explicit relative path is honoured as the operator spelled it"
+        );
+        // The default branch: whatever install root this test binary can
+        // derive, the answer is that root joined with DEFAULT_DB_PATH — never
+        // the bare relative spelling (issue #1199 R2: a bare relative default
+        // resolved against the LAUNCH cwd, so the same binary started from a
+        // different directory silently opened a NEW empty database).
+        let resolved = resolve_db_path(None);
+        assert!(
+            resolved.is_absolute(),
+            "the default resolves to an absolute path (install-root anchored): {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.ends_with(DEFAULT_DB_PATH),
+            "the default ends with the shipped spelling: {}",
+            resolved.display()
+        );
+        for blank in [Some(""), Some("   ")] {
             assert_eq!(
                 resolve_db_path(blank),
-                std::path::PathBuf::from(DEFAULT_DB_PATH),
-                "blank/absent falls to the shipped default: {blank:?}"
+                resolved,
+                "blank falls to the same default: {blank:?}"
             );
         }
+    }
+
+    /// issue #1199 R2: the same binary resolves the SAME database from any
+    /// cwd. The install-root walk probes the exe chain first, so two
+    /// invocations with different cwds (the split-brain scenario — the panel
+    /// opened one file, the import filled another) cannot land on two
+    /// different default databases.
+    #[test]
+    fn default_db_path_is_the_same_file_from_any_cwd() {
+        // The pure half: the install-root anchor derivation is a function of
+        // the exe location only (the cwd chain is the second probe, and it
+        // only matters when the exe has no `user_layer/` ancestor at all).
+        // Build a scratch tree shaped like a deployment root, "run" the
+        // resolution from two different cwds against it, and require the
+        // same absolute answer both times.
+        let root = std::env::temp_dir().join(format!(
+            "bk-dbpath-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("user_layer")).unwrap();
+        let exe_dir = root.join("bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let other_cwd = std::env::temp_dir().join(format!(
+            "bk-dbpath-other-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&other_cwd).unwrap();
+
+        let from_a = resolve_default_with_anchors(Some(&exe_dir), Some(&exe_dir));
+        let from_b = resolve_default_with_anchors(Some(&exe_dir), Some(&other_cwd));
+        assert_eq!(
+            from_a, from_b,
+            "the same binary from two different cwds resolves one database"
+        );
+        assert_eq!(from_a, root.join(DEFAULT_DB_PATH));
+        assert!(from_a.is_absolute());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&other_cwd);
+    }
+
+    /// The exe-anchored default resolution with the anchor chain INJECTED
+    /// (the test seam for [`install_root`]'s walk: the process's own exe/cwd
+    /// are global state parallel tests must not depend on).
+    fn resolve_default_with_anchors(exe_dir: Option<&Path>, cwd: Option<&Path>) -> PathBuf {
+        let mut exe_chain: Vec<PathBuf> = Vec::new();
+        if let Some(d) = exe_dir {
+            let mut cur = Some(d);
+            while let Some(dir) = cur {
+                exe_chain.push(dir.to_path_buf());
+                cur = dir.parent();
+            }
+        }
+        let mut cwd_chain: Vec<PathBuf> = Vec::new();
+        if let Some(d) = cwd {
+            let mut cur = Some(d);
+            while let Some(dir) = cur {
+                cwd_chain.push(dir.to_path_buf());
+                cur = dir.parent();
+            }
+        }
+        for dir in exe_chain.iter().chain(cwd_chain.iter()) {
+            if dir.join("user_layer").is_dir() {
+                return dir.join(DEFAULT_DB_PATH);
+            }
+        }
+        exe_chain
+            .first()
+            .map(|d| d.join(DEFAULT_DB_PATH))
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_DB_PATH))
+    }
+
+    /// The empty-database probe (issue #1199 R2): a fresh database is empty;
+    /// a risk row OR the import marker alone makes it non-empty (the marker
+    /// is the "the importer already folded this database" fact — an
+    /// imported-but-empty database is a valid operator state, not the
+    /// silently-new file the boot WARN is about).
+    #[test]
+    fn empty_database_probe_flips_on_rows_or_marker() {
+        let db = TempDb::new();
+        assert!(
+            db.db().is_empty().unwrap(),
+            "a fresh database is empty (no rows, no marker)"
+        );
+        // A risk row alone makes it non-empty.
+        db.connection()
+            .execute(
+                "INSERT INTO accounts (id, name, market_type, status, trading_enabled, updated_at_ms)
+                 VALUES ('a1', 'A', 'prediction', 'active', 1, 0)",
+                [],
+            )
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO account_risk (account_id, max_single_loss_usd,
+                     max_daily_drawdown_usd, max_position_size, max_consecutive_losses,
+                     cooldown_minutes, source, updated_at_ms)
+                 VALUES ('a1', '0', '0', '0', '0', '0', 'default', 0)",
+                [],
+            )
+            .unwrap();
+        assert!(!db.db().is_empty().unwrap(), "one account_risk row is data");
+        // The marker alone (a second, marker-only database) also makes it
+        // non-empty: the import ran.
+        let dir = std::env::temp_dir().join(format!(
+            "bk-dbpath-marker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db2 = Database::open(dir.join("m.sqlite")).unwrap();
+        kernel_meta_set(&db2.lock(), META_IMPORT_V1, "1").unwrap();
+        assert!(
+            !db2.is_empty().unwrap(),
+            "the import marker alone means the database is known"
+        );
+        drop(db2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The `account_settings` EAV round-trip: set, get, upsert, remove, and
@@ -598,9 +850,10 @@ mod tests {
     }
 
     /// `default_db_path` reads the process env — with `BLITZKRIEG_DB_PATH`
-    /// unset in the test harness it resolves to the shipped default (the
-    /// launcher tests run with their own cwd sandboxes, so this is the
-    /// zero-config answer).
+    /// unset in the test harness it resolves to the install-root-anchored
+    /// shipped default (an absolute path ending in the shipped spelling; the
+    /// anchor is this test binary's own exe location, the same walk the
+    /// production binary runs).
     #[test]
     fn default_db_path_reads_the_environment() {
         // Guarded: a developer exporting BLITZKRIEG_DB_PATH must not flake
@@ -608,6 +861,16 @@ mod tests {
         if std::env::var(DB_PATH_ENV).is_ok() {
             return;
         }
-        assert_eq!(default_db_path(), std::path::PathBuf::from(DEFAULT_DB_PATH));
+        let resolved = default_db_path();
+        assert!(
+            resolved.is_absolute(),
+            "the default resolves to an absolute path: {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.ends_with(DEFAULT_DB_PATH),
+            "the default ends with the shipped spelling: {}",
+            resolved.display()
+        );
     }
 }
