@@ -100,7 +100,7 @@ const NUMERIC_CLASS = /(?:^|\s)(?:stat-num|num)(?:\s|$)/
  * 已按数字滚动。
  */
 const TEXT_MARKERS =
-  /^(?:dateTime|shortAddr|identity|stateLabel|marketTypeLabel|backtestLabel)\s*\(|^confirmedPreview\b|\.(?:ageLabel|asset|direction|name|strategy|source|exitReason|label|description|kind)\b/
+  /^(?:dateTime|shortAddr|identity|stateLabel|marketTypeLabel|backtestLabel)\s*\(|^confirmedPreview\b|^settlementAgeText\b|\.(?:ageLabel|asset|direction|name|strategy|source|exitReason|label|description|kind)\b/
 
 /**
  * Raw `{{ … }}` interpolations sitting directly inside a numeric slot.
