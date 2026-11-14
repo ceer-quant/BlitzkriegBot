@@ -595,6 +595,14 @@ pub fn render_json_full(
                 // is open and carries no data). The wire field the panel agent
                 // renders; `false` on older cores (the serde default).
                 "dbEmpty": st.db_empty,
+                // #1199 R4: the three stats blocks the panel's safety surfaces
+                // read — settlement (overdue-receivable banner), dailyLoss
+                // (daily-loss breaker re-read on unfreeze), archive
+                // (stopped-recording banner). The kernel sends them, the view
+                // type carries them; forward them to the wire.
+                "settlement": st.settlement,
+                "dailyLoss": st.daily_loss,
+                "archive": st.archive,
             })
         }),
         "strategies": s.strategies.iter().map(|x| serde_json::json!(x.clone())).collect::<Vec<_>>(),

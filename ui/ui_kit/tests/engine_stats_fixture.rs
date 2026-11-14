@@ -210,7 +210,6 @@ const NOT_CARRIED: &[(&str, &str)] = &[
         "accountingAudit",
         "in-kernel books audit; no panel surface yet",
     ),
-    ("dailyLoss", "day-loss budget; no panel surface yet"),
     (
         "orderbookFreshness",
         "staleness budget; no panel surface yet",
@@ -221,7 +220,6 @@ const NOT_CARRIED: &[(&str, &str)] = &[
         "pending-close reason table; no panel surface yet",
     ),
     ("confirmedDetail", "per-token confirmation diagnostics"),
-    ("archive", "event archive status; no panel surface yet"),
     (
         "kline",
         "K-line aggregator diagnostics (E29); the chart polls kline.history, \
