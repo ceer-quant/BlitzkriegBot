@@ -380,7 +380,7 @@ const needsStrategyHint = computed(() => {
  */
 	const dbEmpty = computed(() => snap.value?.stats?.dbEmpty === true)
 
-	// ── issue #1199 R4: 未核实敞口 ──────────────────────────────────────────
+	// ── issue 1199 R4: 未核实敞口 ──────────────────────────────────────────
 	// 结算已落但尚未被场馆裁决/兑回的估算金额（fallback 索赔）。读自快照
 	// stats.settlement（网关 render_json_full 现已转发自 engine.stats）。
 	// 内核未带该键、或无未核实索赔时不渲染，绝不冒充“零敞口”——与
@@ -624,7 +624,7 @@ const needsStrategyHint = computed(() => {
       </Card>
     </div>
 
-    <!-- issue #1199 R4: 未核实敞口 —— 结算已落但尚未被场馆裁决/兑回的估算
+    <!-- issue 1199 R4: 未核实敞口 —— 结算已落但尚未被场馆裁决/兑回的估算
          金额。仅在内核带该键且存在未核实索赔时渲染，绝不冒充“零敞口”。 -->
     <Card v-if="hasUnverifiedSettlement">
       <CardHeader label="未核实敞口">
@@ -636,13 +636,13 @@ const needsStrategyHint = computed(() => {
         <div>
           <div class="label-micro">回退应收（估算）</div>
           <div class="stat-num mt-1 text-[19px] leading-none">
-            {{ money(settlement?.fallbackReceivableUsd) }}
+            <RollingNumber :value="money(settlement?.fallbackReceivableUsd)" />
           </div>
         </div>
         <div>
           <div class="label-micro">未核实索赔</div>
           <div class="stat-num mt-1 text-[19px] leading-none num">
-            {{ num(settlement?.pendingFallbackClaims) }}
+            <RollingNumber :value="settlement?.pendingFallbackClaims ?? 0" />
           </div>
         </div>
         <div>
