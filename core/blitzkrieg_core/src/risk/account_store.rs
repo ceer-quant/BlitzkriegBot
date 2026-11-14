@@ -53,7 +53,8 @@ impl AccountRiskDb {
         self.db.with_connection(|conn| {
             let mut stmt = match conn.prepare(
                 "SELECT account_id, max_single_loss_usd, max_daily_drawdown_usd,
-                        max_position_size, max_consecutive_losses, cooldown_minutes
+                        max_position_size, max_consecutive_losses, cooldown_minutes,
+                        source
                  FROM account_risk",
             ) {
                 Ok(s) => s,
@@ -70,6 +71,7 @@ impl AccountRiskDb {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             }) {
                 Ok(r) => r,
@@ -80,19 +82,52 @@ impl AccountRiskDb {
             };
             let mut out = BTreeMap::new();
             for row in rows {
-                let (id, single, daily, position, losses, cooldown) = match row {
+                let (id, single, daily, position, losses, cooldown, source) = match row {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(error = %e, "account_risk row unreadable — skipped");
                         continue;
                     }
                 };
+                // The one-shot importer writes placeholder zeros
+                // (`source = "imported_env"`) for every BK_RISK_* key that
+                // was ABSENT — "we looked and found nothing", not a
+                // configured bound. A placeholder is no fact: read it as
+                // `Bound::off()` (factory default provenance), never as an
+                // env-sourced 0. Overlaying it as env would make readouts
+                // claim a provenance that never existed (E26 §4.1: the
+                // factory posture is `default`), on the all-zero row for
+                // the whole account and on the mixed row per key (issue
+                // #1199 PR-2 CI red, risk-systemic E26). A row whose
+                // values are ALL placeholders is skipped entirely — the
+                // boot chain (env → factory) resolves that account.
+                let imported_env = source == "imported_env";
+                let dec = |raw: &str| {
+                    if imported_env && raw.trim() == "0" {
+                        Bound::off()
+                    } else {
+                        dec_bound(raw)
+                    }
+                };
+                if imported_env
+                    && [
+                        single.as_str(),
+                        daily.as_str(),
+                        position.as_str(),
+                        losses.as_str(),
+                        cooldown.as_str(),
+                    ]
+                    .iter()
+                    .all(|v| v.trim() == "0")
+                {
+                    continue;
+                }
                 let mut limits = AccountRiskLimits {
-                    max_single_loss_usd: dec_bound(&single),
-                    max_daily_drawdown_usd: dec_bound(&daily),
-                    max_position_size: dec_bound(&position),
-                    max_consecutive_losses: dec_bound(&losses),
-                    cooldown_minutes: dec_bound(&cooldown),
+                    max_single_loss_usd: dec(&single),
+                    max_daily_drawdown_usd: dec(&daily),
+                    max_position_size: dec(&position),
+                    max_consecutive_losses: dec(&losses),
+                    cooldown_minutes: dec(&cooldown),
                     max_order_notional_usd: Bound::off(),
                 };
                 // #1186's cap lives in the settings table (the v1 schema has

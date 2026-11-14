@@ -307,13 +307,18 @@ const RISK_KEYS: &[&str] = &[
 ];
 
 /// The cockpit exit family (`BK_EXIT_*`) — folded per account into one
-/// `policy_json` object (the `ExitConfig` JSON projection).
-const EXIT_KEYS: &[&str] = &[
-    "STOP_LOSS_PCT",
-    "TAKE_PROFIT_PCT",
-    "FORCE_EXIT_SEC",
-    "TRAILING_ENABLED",
-    "STRATEGY_EXIT_MAKER_FIRST",
+/// `policy_json` object. The JSON keys are the `ExitConfig` field names
+/// (snake_case): `AccountRiskDb::load_exits` deserializes the row with
+/// `serde_json::from_str::<ExitConfig>`, so an UPPERCASE key spellings
+/// would fail the parse and the row would be silently skipped (the
+/// importer bug this shape fixes — issue #1199 PR-2 CI red, E26).
+const EXIT_KEYS: &[(&str, &str)] = &[
+    // (env key suffix, policy_json key)
+    ("STOP_LOSS_PCT", "stop_loss_pct"),
+    ("TAKE_PROFIT_PCT", "take_profit_pct"),
+    ("FORCE_EXIT_SEC", "force_exit_sec"),
+    ("TRAILING_ENABLED", "trailing_enabled"),
+    ("STRATEGY_EXIT_MAKER_FIRST", "strategy_exit_maker_first"),
 ];
 
 /// The `account_settings` key set: the cockpit systemic cap the risk matrix
@@ -554,12 +559,13 @@ fn insert_account_exit_policy(
 ) -> anyhow::Result<usize> {
     let sfx = env_account_suffix(account_id);
     let mut policy: Map<String, Value> = Map::new();
-    for key in EXIT_KEYS {
-        let value = env(&format!("BK_EXIT_{key}_{sfx}")).or_else(|| env(&format!("BK_EXIT_{key}")));
+    for (env_key, json_key) in EXIT_KEYS {
+        let value =
+            env(&format!("BK_EXIT_{env_key}_{sfx}")).or_else(|| env(&format!("BK_EXIT_{env_key}")));
         if let Some(value) = value {
             // Numbers stay numbers; booleans parse; anything else is kept
             // as the raw string (the panel's unparseable-value rule).
-            let parsed = if matches!(key, &"TRAILING_ENABLED" | &"STRATEGY_EXIT_MAKER_FIRST") {
+            let parsed = if matches!(*env_key, "TRAILING_ENABLED" | "STRATEGY_EXIT_MAKER_FIRST") {
                 match value.trim() {
                     "true" => Some(Value::Bool(true)),
                     "false" => Some(Value::Bool(false)),
@@ -579,7 +585,10 @@ fn insert_account_exit_policy(
                             .and_then(|n| serde_json::Number::from_f64(n).map(Value::Number))
                     })
             };
-            policy.insert((*key).to_string(), parsed.unwrap_or(Value::String(value)));
+            policy.insert(
+                (*json_key).to_string(),
+                parsed.unwrap_or(Value::String(value)),
+            );
         }
     }
     if policy.is_empty() {
