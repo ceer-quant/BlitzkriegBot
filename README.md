@@ -180,7 +180,7 @@ blitzkrieg run
 
 **Q：策略装了为什么不动？** 三道门：包在 `user_layer/strategies_lua/`（安装）→ 面板策略页按账户打开开关（启用）→ 请求了策略但一个都没加载成功时内核拒绝启动（保护）。启动日志逐包打印装载与启用状态。
 
-**Q：数据存哪里？** 账户、风控、账本、交易与运行时状态在 SQLite（`data/blitzkrieg.sqlite`，凭证为 AES-256-GCM 密文）；历史 JSONL 文件只读留档。`blitzkrieg backup` 一键备份（每日轻量 + 周日全量）。
+**Q：数据存哪里？** 账户、风控在 SQLite（`data/blitzkrieg.sqlite`，凭证为 AES-256-GCM 密文）或 `.env` 回落（未开库时）；账本、交易在 `data/*.jsonl`（`ledger.rs` / `trade_db.rs` 唯一运行期写面，历史文件追加留档）；运行时状态在 `data/runtime/config.json`（`runtime_config.rs`）。`blitzkrieg backup` 一键备份（每日轻量 + 周日全量）。
 
 **Q：怎么升级？** `blitzkrieg upgrade`（构建 → 停栈 → 换装 → 起栈 → 身份校验，全自动，上一代日志轮转保留）；或 `git pull && cargo build --release --workspace --locked`。正式版本以 [Releases](https://github.com/ceer-quant/BlitzkriegBot/releases) tag 为准（当前 **0.4.2**）。
 
