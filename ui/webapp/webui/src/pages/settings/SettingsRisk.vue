@@ -17,7 +17,7 @@
  * 落盘→重读→落审计后才应答），不新增任何旁路。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw, LockOpen, Minus } from 'lucide-vue-next'
+import { RefreshCw, LockOpen, Minus, Plug } from 'lucide-vue-next'
 import {
   api,
   type ExecutionPolicyListDoc, type ExecutionPolicySectionDoc,
@@ -211,6 +211,57 @@ async function unfreeze(accountId: string): Promise<void> {
   }
 }
 
+/** 扩展插件启停写（`extension.enable` / `extension.disable`，POST /api/extension/set，
+ * 网关路由已存在，之前面板无入口）。body 即 `{name, enabled}` 逐字转发，内核运行
+ * on_load/on_unload 并回答 `{name, enabled}`，或命名失败原因。 */
+const extensionOperateId = ref<string | null>(null)
+const extensionErr = ref<string | null>(null)
+const extensionMsg = ref<string | null>(null)
+
+async function setExtension(name: string, enabled: boolean): Promise<void> {
+  if (extensionOperateId.value) return
+  extensionOperateId.value = name
+  extensionErr.value = null
+  extensionMsg.value = null
+  try {
+    const res = await api.extensionSet({ name, enabled, reason: 'panel extension toggle' })
+    if (res.error) throw new Error(res.error)
+    extensionMsg.value = `扩展 ${name} 已${enabled ? '启用' : '停用'}。`
+  } catch (e) {
+    extensionErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    extensionOperateId.value = null
+    setTimeout(() => { extensionMsg.value = null }, 6000)
+  }
+}
+
+/** 行情插件选切写（`market.plugin.set`，POST /api/market-plugin/set，网关路由已存在，
+ * 之前面板无入口）：body 即 `{name?, reset?, reason?}` 逐字转发。只在下次会话生效，
+ * 运行中的会话 feed/discovery/executor 不受影响。回执 `nextSessionPlugin` 为下次会话
+ * 将选的插件。 */
+const pluginOperateId = ref<string | null>(null)
+const pluginErr = ref<string | null>(null)
+const pluginMsg = ref<string | null>(null)
+
+async function setMarketPlugin(name: string | undefined, reset: boolean): Promise<void> {
+  if (pluginOperateId.value) return
+  pluginOperateId.value = name ?? 'reset'
+  pluginErr.value = null
+  pluginMsg.value = null
+  try {
+    const res = await api.marketPluginSet({ name, reset, reason: 'panel plugin toggle' })
+    if (res.error) throw new Error(res.error)
+    pluginMsg.value = reset
+      ? '行情插件持久格已清，下次会话回落至启动分辨。'
+      : `行情插件下次会话将切至 ${res.nextSessionPlugin || name}。`
+  } catch (e) {
+    pluginErr.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    pluginOperateId.value = null
+    setTimeout(() => { pluginMsg.value = null }, 6000)
+  }
+}
+
 /** 「恢复 defaults 后自定义」：把当前编辑缓冲清回全局段的值（仍需保存落盘）。 */
 function resetToDefaultsLocal(): void {
   loadEditorFromSection(policyList.value?.defaults ?? null)
@@ -336,6 +387,59 @@ async function rollbackPolicy(): Promise<void> {
           {{ freezeOperateId === fa.id ? '解冻中…' : '解冻' }}
         </Button>
       </div>
+    </Card>
+
+    <!-- 插件与扩展启停（网关写路由补前端入口）：extension.enable/disable 与 market.plugin.set 此前
+         只有后端路由，面板无入口。此处补显式开关，每次操作读回执，成功或失败可见；不与注册态的只读
+         显示混为一谈。 -->
+    <Card class="mt-3.5 mb-4">
+      <CardHeader label="插件与扩展启停">
+        <template #title>
+          <Plug class="size-4 shrink-0 text-primary" />
+        </template>
+      </CardHeader>
+      <p class="mt-3 text-[11px] leading-snug text-muted-fg">
+        扩展插件启用/停用 与 行情插件下次会话选切，走网关已存在的写路由（extension.set / market-plugin.set），
+        每次操作读回执，成功或失败可见；不与注册态的只读显示混为一谈。
+      </p>
+
+      <!-- 扩展插件启停：逐个按钮，点击即调用 extension.enable/disable 并读回执。 -->
+      <div v-if="store.plugins" class="mt-3 flex flex-wrap gap-2">
+        <template v-for="ext in store.plugins.extensions" :key="ext.name">
+          <span class="flex items-center gap-2">
+            <span class="text-[11px] text-muted-fg shrink-0">{{ ext.name }}</span>
+            <Button
+              size="sm"
+              :disabled="extensionOperateId !== null || pluginOperateId !== null"
+              :class="ext.enabled ? 'bg-up/10 text-up' : 'bg-down/10 text-down'"
+              @click="setExtension(ext.name, !ext.enabled)"
+            >{{ ext.enabled ? '停用' : '启用' }}</Button>
+          </span>
+        </template>
+      </div>
+
+      <!-- 行情插件选切：仅在下次会话生效，运行中的会话不受影响。 -->
+      <div v-if="store.plugins" class="mt-3 flex flex-wrap gap-2 items-start">
+        <span class="text-[11px] text-muted-fg shrink-0 mt-0.5">行情插件（下次会话生效）：</span>
+        <template v-for="p in store.plugins.marketPlugins" :key="p.name">
+          <Button
+            size="sm"
+            :disabled="pluginOperateId !== null || extensionOperateId !== null"
+            :class="p.active ? 'bg-up/10 text-up' : 'bg-default/10 text-default'"
+            @click="setMarketPlugin(p.name, false)"
+          >{{ p.name }}</Button>
+        </template>
+        <Button
+          size="sm"
+          :disabled="pluginOperateId !== null || extensionOperateId !== null"
+          @click="setMarketPlugin(undefined, true)"
+        >重置持久格</Button>
+      </div>
+
+      <span v-if="extensionErr" class="mt-1 block text-[10.5px] text-down">{{ extensionErr }}</span>
+      <span v-else-if="extensionMsg" class="mt-1 block text-[10.5px] text-up">{{ extensionMsg }}</span>
+      <span v-if="pluginErr" class="mt-1 block text-[10.5px] text-down">{{ pluginErr }}</span>
+      <span v-else-if="pluginMsg" class="mt-1 block text-[10.5px] text-up">{{ pluginMsg }}</span>
     </Card>
 
     <!-- 配置态停用账户（不可从面板解冻；来源 account.status === 'frozen'，与风控冻结是两回事） -->
