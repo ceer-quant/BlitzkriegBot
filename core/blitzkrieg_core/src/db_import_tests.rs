@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
+use crate::db::migrations;
+
 use super::*;
 
 /// A process-unique tmpdir root, created on demand and removed on drop.
@@ -450,4 +452,59 @@ fn account_rounds_cells_survive_the_import() {
     assert!(rounds_a.contains("3600"), "{rounds_a}");
     let rounds_b = scalar_text(&db, "SELECT rounds_json FROM accounts WHERE id = 'paper'");
     assert!(rounds_b.contains("300"), "{rounds_b}");
+}
+
+/// #1199 第三次审计 P0-2 (此前结构性无防护)：v2 迁移已把
+/// orders/fills/positions/trades/ledger_entries 掉出来之后，随后的 `import_once`
+/// 不得再用 `SCHEMA_V1` 的 `CREATE TABLE IF NOT EXISTS` 把它们建回来。
+/// 旧行为把已迁移下到 13 表的库永久复活成 18 表的 schema 谎言。
+#[test]
+fn importer_does_not_resurrect_v2_dropped_ledger_tables() {
+    let dir = TmpDir::new();
+    let db = dir.path().join("bank.db");
+
+    // 先跑完整迁移链：v1 建 18 表，v2 掉五张零运行时写表（连同索引）；
+    // schema_migrations 记录 [1, 2]，库里只剩 13 张表。
+    {
+        let conn = Connection::open(&db).expect("open db");
+        migrations::run(&conn).expect("run v1 + v2 migrations");
+    }
+
+    let five = ["orders", "fills", "positions", "trades", "ledger_entries"];
+    assert_tables_absent(&db, &five, "post v2 migration");
+
+    // 导入器再跑一次（启动 #2 等价）：无 import_v1 标记，但
+    // schema_migrations 已非空（已迁移库），所以 SCHEMA_V1 不得执行，
+    // 五表继续缺席。
+    let report = import_once(&db, |_| None).expect("import on migrated db");
+    assert_eq!(report.accounts, 1, "default account still imports");
+    assert_tables_absent(&db, &five, "post import on migrated db");
+
+    // 标记已落，再跑是标记 no-op，五表仍必须缺席。
+    let second = import_once(&db, |_| None).expect("second import on migrated db");
+    assert_eq!(second.accounts, 0);
+    assert_eq!(second.audit, 0);
+    assert_tables_absent(&db, &five, "post second import on migrated db");
+
+    let marker: i64 = scalar_i64(
+        &db,
+        "SELECT COUNT(*) FROM kernel_meta WHERE key = 'import_v1'",
+    );
+    assert_eq!(marker, 1, "import_v1 marker must exist");
+}
+
+/// `sqlite_master` 里必须没有 `tables` 中任何一张表。
+fn assert_tables_absent(db: &Path, tables: &[&str], when: &str) {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open db read-only");
+    for table in tables {
+        let found: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(found, 0, "{table} must not exist in sqlite_master ({when})");
+    }
 }
