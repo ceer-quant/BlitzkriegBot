@@ -421,6 +421,76 @@ pub struct SettlementView {
     pub unverified_expiry_policy: String,
 }
 
+/// 日内亏损熔断快照：内核 `stats.dailyLoss` 块。`SettingsRisk` 的解冻复读
+/// 读 `dailyLoss.accounts[*].tripped` / `resetAtMs` 判断熔断是否仍在；老内核
+/// 或无熔断预算时整块缺失，全字段缺省，复读落空而不阻断解冻。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyLossView {
+    pub account: String,
+    #[serde(default)]
+    pub day_index: Option<u64>,
+    #[serde(default, deserialize_with = "de_num")]
+    pub realized_pnl_usd: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub limit_usd: f64,
+    #[serde(default, deserialize_with = "de_num")]
+    pub opening_equity_usd: f64,
+    pub equity_basis: Option<String>,
+    #[serde(default)]
+    pub tripped: bool,
+    #[serde(default)]
+    pub tripped_at_ms: Option<i64>,
+    #[serde(default)]
+    pub any_tripped: bool,
+    #[serde(default)]
+    pub accounts: Vec<DailyLossAccountView>,
+    #[serde(default)]
+    pub suppressed_stops: u64,
+}
+
+/// 单个账户的日内亏损熔断状态（`dailyLoss.accounts` 行）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyLossAccountView {
+    pub account: String,
+    #[serde(default, deserialize_with = "de_num")]
+    pub realized_pnl_usd: f64,
+    #[serde(default)]
+    pub tripped: bool,
+    #[serde(default)]
+    pub day_index: Option<u64>,
+    #[serde(default)]
+    pub reset_at_ms: Option<i64>,
+}
+
+/// 市场数据事件归档的状态：内核 `stats.archive`（`EventArchive::status()`；
+/// 未配置归档时内核发 `null`）。`archiveStoppedBanner` 读
+/// `recording === false` 与 `stoppedReason`。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveView {
+    pub path: String,
+    #[serde(default)]
+    pub events: u64,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub dropped: u64,
+    #[serde(default)]
+    pub recording: bool,
+    #[serde(default)]
+    pub rotate_bytes: u64,
+    #[serde(default)]
+    pub segment_bytes: u64,
+    #[serde(default)]
+    pub segments: u64,
+    #[serde(default)]
+    pub free_bytes: u64,
+    #[serde(default)]
+    pub stopped_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatsView {
@@ -475,6 +545,16 @@ pub struct EngineStatsView {
     /// banner quiet).
     #[serde(default, deserialize_with = "de_null_default")]
     pub settlement: SettlementView,
+    /// 日内亏损熔断快照（内核 `stats.dailyLoss`）。`SettingsRisk` 的解冻复读
+    /// 读 `dailyLoss.accounts[*].tripped` / `resetAtMs` 判断熔断是否仍在；
+    /// 老内核缺失则全字段缺省，复读落空而不阻断解冻。
+    #[serde(default)]
+    pub daily_loss: DailyLossView,
+    /// 市场数据事件归档状态（内核 `stats.archive`，`EventArchive::status()`；
+    /// 未配置归档时内核发 `null`）。`archiveStoppedBanner` 读
+    /// `recording === false` 与 `stoppedReason`。
+    #[serde(default)]
+    pub archive: Option<ArchiveView>,
     /// #163: newest trading-capability self-check report.
     #[serde(default)]
     pub self_check: Option<SelfCheckView>,
