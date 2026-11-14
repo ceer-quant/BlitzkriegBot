@@ -61,13 +61,21 @@ pub struct Core {
     /// issue #1189: the per-account risk/exit store, when one is open. `None`
     /// = the env fallback (every test, and a kernel with no store wired).
     /// Panel writes go here; a missing row falls back to the global matrix.
+    /// issue #1199 r2 (T-03, zeroed): the risk/exit write port's carrier
+    /// decision (`Core::persist_risk_bounds` / `Core::persist_exit`) reads
+    /// this FIRST — an open DB is the cockpit carrier (the whole merged row,
+    /// the pre-seam `AccountRiskDb::save_risk` / `save_exit` write), the
+    /// assembled `store` below is the env carrier, and `None`/`None` is the
+    /// backtester's memory-only posture.
     account_risk_db: Option<crate::risk::account_store::AccountRiskDb>,
     /// issue #1199 PR-1: the durable store every business write goes through
     /// (default assembly = [`crate::store::EnvStore`], the `.env` backend).
     /// `None` = persistence disabled for this core (backtester, most
     /// in-process tests) — the standard "persistence is disabled" refusals
-    /// read this. DB-open cores keep the `account_risk_db` branch ahead of
-    /// it for risk/exit (PR-2 collapses the split).
+    /// read this. With the DB closed this is the risk/exit carrier too (the
+    /// changed `BK_RISK_*` / `BK_EXIT_*` keys); with the DB open the DB
+    /// carries the cockpit families (issue #1199 ruling — the env is
+    /// read-only at runtime).
     pub(crate) store: Option<Box<dyn crate::store::StoreApi>>,
     /// Per-strategy consecutive-loss breakers (KI-10 / D-18 A). The daily loss
     /// cap and kill switch stay global — see [`LossBreakers`].
