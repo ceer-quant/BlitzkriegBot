@@ -114,15 +114,9 @@ impl Core {
                 .account(&target)
                 .and_then(|a| a.opening_equity)
                 .is_none()
-                && let Some((env_path, toml_path)) = self.config.account_env_write_paths()
+                && let Some(store) = self.store.as_deref()
             {
-                if let Err(e) = crate::account::config::env_persist_account_opening_equity(
-                    &toml_path,
-                    &env_path,
-                    target.as_str(),
-                    b,
-                    ts,
-                ) {
+                if let Err(e) = store.save_account_opening_equity(target.as_str(), b, ts) {
                     tracing::warn!(
                         account = %target.as_str(),
                         %e,

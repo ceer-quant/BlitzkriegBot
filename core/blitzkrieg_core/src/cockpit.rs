@@ -17,9 +17,11 @@
 //!   * boot derives the working copy from the file directly — the launcher's
 //!     env snapshot is no longer consulted for these keys.
 //!
-//! One table here names every cockpit key once; the write path's key mapping
-//! (`risk.rs` exit_env_key / systemic_env_key) and this table are pinned
-//! together by test, so the two faces cannot drift.
+//! One table here names every cockpit key once; since #1199 the write face
+//! (the store seam's risk/exit persist) reads its key mapping from this
+//! table, so there is exactly ONE spelling of every key — the drift class
+//! the pre-seam duplicate map (`risk.rs` exit_env_key / systemic_env_key)
+//! needed a pinning test for is structurally gone.
 
 /// Which working copy a cockpit key arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

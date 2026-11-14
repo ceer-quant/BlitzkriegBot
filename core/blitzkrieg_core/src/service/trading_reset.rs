@@ -300,14 +300,34 @@ impl Core {
             })?;
             true
         } else if self.cockpit_env_path().is_some() {
-            self.persist_cockpit_changes(
-                Some(&target),
-                changes
-                    .iter()
-                    .map(|c| (c.field, c.to.clone()))
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )?;
+            // #1199: the durable half goes through the store; a persist
+            // failure is the whole apply's refusal (file-first ruling —
+            // memory may never hold a value the file does not have). The
+            // refusal text is the pre-seam `persist_cockpit_changes`
+            // wording, verbatim.
+            let store = self
+                .store
+                .as_deref()
+                .expect("a cockpit env path implies an assembled store");
+            store
+                .save_risk_bounds(
+                    Some(&target),
+                    &changes
+                        .iter()
+                        .map(|c| (c.field.to_string(), c.to.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::Internal,
+                        format!(
+                            "the .env persist failed ({}) — the file is the source of truth, \
+                             so a write that cannot land there changes nothing (fix the file \
+                             and retry)",
+                            e.message
+                        ),
+                    )
+                })?;
             true
         } else {
             false
@@ -496,31 +516,32 @@ impl Core {
             })?;
             true
         } else if self.cockpit_env_path().is_some() {
-            let is_default = target == crate::model::default_account_id().as_str();
-            let vars: std::collections::BTreeMap<String, String> = changes
-                .iter()
-                .filter_map(|c| {
-                    let key = if is_default {
-                        crate::cockpit::env_key_for_field(c.field).map(str::to_string)
-                    } else {
-                        crate::cockpit::env_key_for_field_account(c.field, &target).or_else(|| {
-                            crate::cockpit::env_key_for_field(c.field).map(str::to_string)
-                        })
-                    };
-                    key.map(|k| (k, c.to.clone()))
-                })
-                .collect();
-            let path = self.cockpit_env_path().expect("checked above");
-            if let Err(e) = crate::env_file::upsert_env_vars(path, &vars) {
-                return Err(CoreError::new(
-                    CoreErrorCode::Internal,
-                    format!(
-                        "exit discipline NOT applied: the .env persist failed ({e}) — \
-                         the file is the source of truth, so a write that cannot land \
-                         there changes nothing (fix the file and retry)"
-                    ),
-                ));
-            }
+            // #1199: the durable half goes through the store; the re-derive
+            // of the working copy stays here (it is the service's cache
+            // discipline, not a storage fact).
+            let store = self
+                .store
+                .as_deref()
+                .expect("a cockpit env path implies an assembled store");
+            store
+                .save_exit(
+                    Some(&target),
+                    &changes
+                        .iter()
+                        .map(|c| (c.field.to_string(), c.to.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| {
+                    CoreError::new(
+                        CoreErrorCode::Internal,
+                        format!(
+                            "exit discipline NOT applied: the .env persist failed ({}) — \
+                             the file is the source of truth, so a write that cannot land \
+                             there changes nothing (fix the file and retry)",
+                            e.message
+                        ),
+                    )
+                })?;
             self.refresh_cockpit_from_env_file().map_err(|e| {
                 CoreError::new(
                     CoreErrorCode::Internal,
@@ -693,44 +714,20 @@ impl Core {
         // 失败则拒绝，无账簿副作用；无 env_file_path（回测/进程内测试）则
         // 跳过持久化，直接在内存执行。再撤单→市价强平（fail-closed），最后
         // 内存更新+引擎网格切换。任何一步失败都不留半边天。
-        if let Some(env_path) = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new)
-        {
-            let sfx: String = account_id
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() {
-                        c.to_ascii_uppercase()
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-
-            if patch.reset {
-                crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
-                    CoreError::new(
-                        CoreErrorCode::InvalidParams,
-                        format!("round_duration.set: persist reset failed: {e}"),
-                    )
-                })?;
-            } else {
-                let sec = sec.unwrap();
-                crate::env_file::upsert_env_vars(
-                    env_path,
-                    &std::collections::BTreeMap::from([(key, sec.to_string())]),
-                )
+        // #1199: the durable half goes through the store.
+        if self.cockpit_env_path().is_some() {
+            let store = self
+                .store
+                .as_deref()
+                .expect("an env path implies an assembled store");
+            store
+                .save_account_round_duration(account_id, if patch.reset { None } else { sec })
                 .map_err(|e| {
-                    CoreError::new(
-                        CoreErrorCode::InvalidParams,
-                        format!("round_duration.set: persist failed, nothing changed: {e}"),
-                    )
+                    // The store already refused with the round_duration.set
+                    // wording; the error code and message pass through
+                    // verbatim.
+                    CoreError::new(e.code, e.message)
                 })?;
-            }
         }
 
         // 撤单 → 市价强平 → 切网格的前两步，fail-closed（一律执行，秒切秒换）。

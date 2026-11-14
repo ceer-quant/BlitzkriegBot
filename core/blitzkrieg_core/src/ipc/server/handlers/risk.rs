@@ -8,117 +8,61 @@ use crate::schema::*;
 // the pre-split ones; the shared skeleton (READONLY gate, version gate, reply
 // encoding) stays in `server.rs`.
 
-/// Map a systemic-limit field name (the camelCase wire spelling) to its
-/// `.env` key so `risk.setSystemic` can persist the hot edit across a restart
-/// (issue #966). Only the nine `SystemicRiskLimits` fields are mapped — any
-/// other field name returns `None` and is skipped (a future field added to
-/// the wire without an env key must not crash the write).
-fn systemic_env_key(field: &str) -> Option<&'static str> {
-    Some(match field {
-        "maxSingleLossUsd" => "BK_RISK_MAX_SINGLE_LOSS_USD",
-        "maxDailyDrawdownUsd" => "BK_RISK_MAX_DAILY_DRAWDOWN_USD",
-        "maxPositionSize" => "BK_RISK_MAX_POSITION_SIZE",
-        "maxConsecutiveLosses" => "BK_RISK_MAX_CONSECUTIVE_LOSSES",
-        "cooldownMinutes" => "BK_RISK_COOLDOWN_MINUTES",
-        "maxOrderNotionalUsd" => "BK_RISK_MAX_ORDER_NOTIONAL_USD",
-        _ => return None,
-    })
-}
-
-/// Map an exit-discipline field name to its `.env` key (issue #966). The
-/// five `risk.setExit` fields map to `BK_EXIT_*` keys; trailing-enabled and
-/// strategy-exit-maker-first gained env support in #966 so a hot edit
-/// survives a restart.
-fn exit_env_key(field: &str) -> Option<&'static str> {
-    Some(match field {
-        "stopLossPct" => "BK_EXIT_STOP_LOSS_PCT",
-        "takeProfitPct" => "BK_EXIT_TAKE_PROFIT_PCT",
-        "forceExitSec" => "BK_EXIT_FORCE_EXIT_SEC",
-        "trailingEnabled" => "BK_EXIT_TRAILING_ENABLED",
-        "strategyExitMakerFirst" => "BK_EXIT_STRATEGY_EXIT_MAKER_FIRST",
-        _ => return None,
-    })
-}
-
-/// Persist a set of field→value changes to the kernel's `.env` file (issue
-/// #966). Skipped silently when the core has no `env_file_path` (backtester,
-/// tests that don't wire one) — the hot edit still lives in memory for this
-/// process. A write failure is logged but does NOT fail the RPC: the in-memory
-/// apply already succeeded; the operator sees the change immediately and the
-/// log tells them persistence failed.
-fn persist_changes_to_env(
-    env_path: Option<&std::path::Path>,
-    account_id: Option<&str>,
-    changes: &[(&'static str, String)],
-) -> bool {
-    let Some(env_path) = env_path else {
-        return false;
+/// Persist a set of field→value changes to the kernel's store (issue #966;
+/// #1199: the durable half runs through the store seam). Skipped silently
+/// when the core has no store (backtester, tests that don't wire one) — the
+/// hot edit still lives in memory for this process. A write failure is
+/// logged but does NOT fail the RPC: the in-memory apply already succeeded;
+/// the operator sees the change immediately and the log tells them
+/// persistence failed.
+fn persist_changes_to_env(c: &Core, account_id: Option<&str>, changes: &[(&str, String)]) -> bool {
+    let store = match c.store.as_deref() {
+        Some(s) => s,
+        None => return false,
     };
-    let is_default = account_id
-        .map(|id| id == crate::model::default_account_id().as_str())
-        .unwrap_or(true);
-    let vars: std::collections::BTreeMap<String, String> = changes
-        .iter()
-        .filter_map(|(field, value)| {
-            let key = if is_default {
-                systemic_env_key(field).map(str::to_string)
-            } else {
-                crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
-                    .or_else(|| systemic_env_key(field).map(str::to_string))
-            };
-            key.map(|k| (k, value.clone()))
-        })
-        .collect();
-    if vars.is_empty() {
-        return false;
+    match store.save_risk_bounds(account_id, &field_changes(changes)) {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                "risk.setSystemic: persistence to the store failed ({e}); the in-memory \
+                 change is live for this process but will NOT survive a restart"
+            );
+            false
+        }
     }
-    if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
-        tracing::warn!(
-            "risk.setSystemic: persistence to {} failed ({e}); the in-memory \
-             change is live for this process but will NOT survive a restart",
-            env_path.display()
-        );
-        return false;
-    }
-    true
 }
 
 /// Same as [`persist_changes_to_env`] but for exit-discipline field names.
 fn persist_exit_changes_to_env(
-    env_path: Option<&std::path::Path>,
+    c: &Core,
     account_id: Option<&str>,
-    changes: &[(&'static str, String)],
+    changes: &[(&str, String)],
 ) -> bool {
-    let Some(env_path) = env_path else {
-        return false;
+    let store = match c.store.as_deref() {
+        Some(s) => s,
+        None => return false,
     };
-    let is_default = account_id
-        .map(|id| id == crate::model::default_account_id().as_str())
-        .unwrap_or(true);
-    let vars: std::collections::BTreeMap<String, String> = changes
+    match store.save_exit(account_id, &field_changes(changes)) {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                "risk.setExit: persistence to the store failed ({e}); the in-memory \
+                 change is live for this process but will NOT survive a restart"
+            );
+            false
+        }
+    }
+}
+
+/// The wire audit's `(&'static str, String)` pairs to the store's owned
+/// `(String, String)` field list.
+fn field_changes(changes: &[(&str, String)]) -> Vec<(String, String)> {
+    changes
         .iter()
-        .filter_map(|(field, value)| {
-            let key = if is_default {
-                exit_env_key(field).map(str::to_string)
-            } else {
-                crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
-                    .or_else(|| exit_env_key(field).map(str::to_string))
-            };
-            key.map(|k| (k, value.clone()))
-        })
-        .collect();
-    if vars.is_empty() {
-        return false;
-    }
-    if let Err(e) = crate::env_file::upsert_env_vars(env_path, &vars) {
-        tracing::warn!(
-            "risk.setExit: persistence to {} failed ({e}); the in-memory \
-             change is live for this process but will NOT survive a restart",
-            env_path.display()
-        );
-        return false;
-    }
-    true
+        .map(|(f, v)| (f.to_string(), v.clone()))
+        .collect()
 }
 
 /// Serialize an apply reply with `persisted` + `persistence` on top (issue
@@ -236,22 +180,21 @@ pub(crate) async fn handle_risk(
                         PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                         _ => "uid:unknown".to_string(),
                     };
-                    // Hoisted above the `match` for the same reason as
-                    // `RISK_SET_EXIT`: no `core.lock()` may run inside an arm
-                    // whose scrutinee still holds the guard.
-                    let env_file = core.lock().await.config().env_file_path.clone();
-                    match core
+                    // The apply's own lock is scoped to the call (no
+                    // `core.lock()` inside a `match` scrutinee — that would
+                    // re-lock the same mutex while the guard is alive).
+                    let applied = core
                         .lock()
                         .await
-                        .apply_systemic_limits(&p, &actor, now_ms())
-                    {
+                        .apply_systemic_limits(&p, &actor, now_ms());
+                    match applied {
                         Ok(update) => {
-                            // #966: persist every changed bound to `.env` so a
-                            // restart re-arms the same values. The in-memory
-                            // apply already succeeded; a persistence failure is
-                            // logged but does not fail the RPC.
-                            let env_path = env_file.as_deref().map(std::path::Path::new);
-                            let changes: Vec<(&'static str, String)> = update
+                            // #966: persist every changed bound so a restart
+                            // re-arms the same values. The in-memory apply
+                            // already succeeded; a persistence failure is
+                            // logged but does not fail the RPC. #1199: the
+                            // durable half goes through the store seam.
+                            let changes: Vec<(&str, String)> = update
                                 .applied
                                 .iter()
                                 .map(|c| (c.field, c.to.clone()))
@@ -259,7 +202,8 @@ pub(crate) async fn handle_risk(
                             let persisted = if update.persisted {
                                 true
                             } else {
-                                persist_changes_to_env(env_path, p.account_id.as_deref(), &changes)
+                                let c = core.lock().await;
+                                persist_changes_to_env(&c, p.account_id.as_deref(), &changes)
                             };
                             Ok(with_persisted(
                                 serde_json::to_value(update).unwrap_or(Value::Null),
@@ -288,16 +232,15 @@ pub(crate) async fn handle_risk(
                     PeerAuth::SameUid { uid } => format!("uid:{uid}"),
                     _ => "uid:unknown".to_string(),
                 };
-                // Read the env path BEFORE taking the lock for the apply:
-                // a `core.lock().await` inside the match arm would re-lock the
-                // same mutex while the scrutinee's guard is still alive (the
-                // guard lives to the end of the `match`), deadlocking the RPC.
-                let env_file = core.lock().await.config().env_file_path.clone();
-                match core.lock().await.apply_exit_set(&p, &actor, now_ms()) {
+                // The apply's own lock is scoped to the call (no
+                // `core.lock()` inside a `match` scrutinee — that would
+                // re-lock the same mutex while the guard is alive).
+                let applied = core.lock().await.apply_exit_set(&p, &actor, now_ms());
+                match applied {
                     Ok(update) => {
-                        // #966: persist the exit-discipline changes to `.env`.
-                        let env_path = env_file.as_deref().map(std::path::Path::new);
-                        let changes: Vec<(&'static str, String)> = update
+                        // #966: persist the exit-discipline changes. #1199:
+                        // the durable half goes through the store seam.
+                        let changes: Vec<(&str, String)> = update
                             .applied
                             .iter()
                             .map(|c| (c.field, c.to.clone()))
@@ -305,7 +248,8 @@ pub(crate) async fn handle_risk(
                         let persisted = if update.persisted {
                             true
                         } else {
-                            persist_exit_changes_to_env(env_path, p.account_id.as_deref(), &changes)
+                            let c = core.lock().await;
+                            persist_exit_changes_to_env(&c, p.account_id.as_deref(), &changes)
                         };
                         Ok(with_persisted(
                             serde_json::to_value(update).unwrap_or(Value::Null),

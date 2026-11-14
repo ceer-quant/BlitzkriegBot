@@ -608,21 +608,21 @@ pub async fn apply_credentials_set(
         }
     };
     let allowed = plugin_obj.required_credential_env();
-    let path = core
-        .lock()
-        .await
-        .config()
-        .env_file_path
-        .clone()
-        .ok_or_else(|| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                "market.credentials.set: no .env path configured — \
-                 persistence is disabled for this core (backtests and \
-                 in-process tests); nothing was applied"
-                    .to_string(),
-            )
-        })?;
+    // #1199: the durable half goes through the store (the core's env layer
+    // is the store's carrier); the plugin registry check stays here — the
+    // allowed-set is market truth, not a storage fact. The existence probe
+    // keeps the pre-seam refusal order (env-path refusal BEFORE the
+    // var-name validation, exactly as the old `env_file_path.clone()?
+    // ok_or_else` did).
+    if core.lock().await.store.is_none() {
+        return Err(CoreError::new(
+            CoreErrorCode::InvalidParams,
+            "market.credentials.set: no .env path configured — \
+             persistence is disabled for this core (backtests and \
+             in-process tests); nothing was applied"
+                .to_string(),
+        ));
+    }
 
     let vars = patch.vars.clone();
     for name in vars.keys() {
@@ -642,22 +642,20 @@ pub async fn apply_credentials_set(
     } else {
         vars.keys().cloned().collect()
     };
-    let env_path = std::path::Path::new(&path);
-    if patch.reset {
-        crate::env_file::remove_env_vars(env_path, allowed).map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("market.credentials.set: .env write failed, nothing changed: {e}"),
-            )
-        })?;
-    } else {
-        crate::env_file::upsert_env_vars(env_path, &vars).map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!("market.credentials.set: .env write failed, nothing changed: {e}"),
-            )
-        })?;
-    }
+    let c = core.lock().await;
+    let store = c
+        .store
+        .as_deref()
+        .expect("existence probed above — the lock serializes writers, none removes the store");
+    store.save_credentials(&vars, allowed).map_err(|e| {
+        CoreError::new(
+            CoreErrorCode::InvalidParams,
+            format!(
+                "market.credentials.set: .env write failed, nothing changed: {}",
+                e.message
+            ),
+        )
+    })?;
     tracing::info!(
         target: "risk",
         actor = %actor,

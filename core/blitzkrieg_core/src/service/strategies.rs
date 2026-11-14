@@ -231,7 +231,7 @@ impl Core {
         // Persist FIRST (a failure leaves both stores untouched — the same
         // memory-after-disk transaction every account writer runs; issue 751:
         // the durable half upserts ACCOUNT_* keys into .env).
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
+        let Some(store) = self.store.as_deref() else {
             return Err(CoreError::new(
                 CoreErrorCode::InvalidParams,
                 "strategy.enable: no accounts config path configured — persistence \
@@ -240,21 +240,17 @@ impl Core {
                     .to_string(),
             ));
         };
-        crate::account::config::env_persist_account_strategies(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &set,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "strategy.enable: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        store
+            .save_account_strategies(id.as_str(), &set)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "strategy.enable: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         self.accounts.set_strategies(id, set.clone(), now_ms)?;
         // #537: the default account's scoped write keeps the persisted
         // enabled-set in lockstep (the same mirror `set_account_strategies_

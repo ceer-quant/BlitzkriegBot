@@ -100,6 +100,25 @@ impl Core {
         // (subscription allow-list). Fail-closed: if an account's anchor duration
         // is not in its allow-list, refuse the boot.
         let env_file_path = config.env_file_path.clone();
+        // issue #1199 PR-1: the store handle, assembled from the config's
+        // resolved paths BEFORE the config moves into the struct (same
+        // ordering as `env_file_path` above). `accounts_config_path` gates
+        // the account-book writers (None = persistence disabled), the env
+        // path gates the cockpit/policy/round-duration/credential writers —
+        // the exact per-call resolution the writers did before.
+        let store: Option<Box<dyn crate::store::StoreApi>> =
+            if config.accounts_config_path.is_some() || config.env_file_path.is_some() {
+                Some(Box::new(crate::store::EnvStore::new(
+                    config.account_env_write_paths(),
+                    config
+                        .env_file_path
+                        .as_deref()
+                        .map(std::path::PathBuf::from),
+                    config.execution_policy_path.clone(),
+                )))
+            } else {
+                None
+            };
         let env_lookup = crate::account::config::env_lookup_from_sources(
             env_file_path.as_deref().map(std::path::Path::new),
         );
@@ -600,6 +619,7 @@ impl Core {
         let mut core = Self {
             risk: RiskGate::new(config.risk.clone()),
             account_risk_db: None,
+            store,
             config,
             ome: Ome::new(),
             inflight_takers: Vec::new(),

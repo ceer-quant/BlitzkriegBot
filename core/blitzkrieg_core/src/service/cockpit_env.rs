@@ -24,7 +24,6 @@
 use super::Core;
 use crate::cockpit::{COCKPIT_KEYS, CockpitFamily, CockpitValue, parse_cockpit_value};
 use crate::env_file::read_env_vars;
-use crate::model::{CoreError, CoreErrorCode};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -120,49 +119,6 @@ impl Core {
             }
         }
         applied
-    }
-
-    /// File-first persistence for one cockpit write (the shared tail of the
-    /// setExit / setSystemic faces): the planned `(field, value)` changes are
-    /// upserted into the `.env` file — the single source of truth — BEFORE
-    /// the working copy moves. A persist failure is the caller's apply
-    /// refusal: memory may never hold a value the file does not have.
-    pub(crate) fn persist_cockpit_changes(
-        &self,
-        account_id: Option<&str>,
-        changes: &[(&str, String)],
-    ) -> Result<(), CoreError> {
-        let is_default = account_id
-            .map(|id| id == crate::model::default_account_id().as_str())
-            .unwrap_or(true);
-        let vars: std::collections::BTreeMap<String, String> = changes
-            .iter()
-            .filter_map(|(field, value)| {
-                let key = if is_default {
-                    crate::cockpit::env_key_for_field(field).map(str::to_string)
-                } else {
-                    crate::cockpit::env_key_for_field_account(field, account_id.unwrap_or(""))
-                };
-                key.map(|k| (k, value.clone()))
-            })
-            .collect();
-        let Some(path) = self.cockpit_env_path() else {
-            // No file layer (backtester, unwired tests): the caller's
-            // memory-only posture, honestly reported by its own `persisted`.
-            return Ok(());
-        };
-        crate::env_file::upsert_env_vars(path, &vars)
-            .map(|_| ())
-            .map_err(|e| {
-                CoreError::new(
-                    CoreErrorCode::Internal,
-                    format!(
-                        "the .env persist failed ({e}) — the file is the source of truth, \
-                         so a write that cannot land there changes nothing (fix the file \
-                         and retry)"
-                    ),
-                )
-            })
     }
 
     /// Apply one exit-discipline value onto the working copy. Returns whether
