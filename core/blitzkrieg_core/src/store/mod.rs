@@ -160,6 +160,12 @@ pub trait StoreApi: Send + Sync {
     /// `market.credentials.set`: upsert the plugin's declared variable
     /// names → values, or remove them all (`reset`). Values never appear
     /// in logs — only the key names do.
+    ///
+    /// `reset_keys` is the REMOVE set: empty = upsert `vars`; non-empty =
+    /// remove exactly those keys (the caller passes the plugin's declared
+    /// table on reset). The two branches are mutually exclusive — the
+    /// pre-seam semantics of `market.credentials.set` (an empty
+    /// `reset_keys` is NOT a reset request).
     fn save_credentials(
         &self,
         vars: &BTreeMap<String, String>,

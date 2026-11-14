@@ -647,7 +647,15 @@ pub async fn apply_credentials_set(
         .store
         .as_deref()
         .expect("existence probed above — the lock serializes writers, none removes the store");
-    store.save_credentials(&vars, allowed).map_err(|e| {
+    // The reset flag decides the branch; the allowed table is the remove
+    // set on reset, and irrelevant on upsert (the pre-seam semantics: a
+    // set with values NEVER removes — `reset_keys` must be empty then).
+    let reset_keys: Vec<&str> = if patch.reset {
+        allowed.to_vec()
+    } else {
+        Vec::new()
+    };
+    store.save_credentials(&vars, &reset_keys).map_err(|e| {
         CoreError::new(
             CoreErrorCode::InvalidParams,
             format!(
