@@ -705,7 +705,8 @@ impl Core {
     }
 
     /// The strategy-assignment write (`account.strategies.set`): memory AND
-    /// the operator's `.env` in one transaction, plus the engine scope rebuild.
+    /// the SQLite `account_settings` row (key `strategies`) in one
+    /// transaction, plus the engine scope rebuild.
     ///
     /// Names are validated against the engine's REGISTERED set (plan-first —
     /// a typo fails here, never as a silently inert assignment). The rebuild:
@@ -721,9 +722,10 @@ impl Core {
     /// 账户↔venue 解耦语义: `requested` is the account's strategy
     /// ENABLEMENT set (the 启用按钮's persistence), not an assignment or a
     /// visibility filter — strategies are global. The write is a whole-set
-    /// decision: memory AND the operator's `.env` in one transaction (persist
-    /// first), then the engine scopes rebuilt from it (removed-and-flat
-    /// drop; removed-and-held demote exits-only; added instantiate enabled).
+    /// decision: memory AND the account's SQLite settings row in one
+    /// transaction (persist first), then the engine scopes rebuilt from it
+    /// (removed-and-flat drop; removed-and-held demote exits-only; added
+    /// instantiate enabled).
     ///
     /// Returns the exits-only keep-list for the reply.
     pub fn set_account_strategies_persisting(
@@ -758,7 +760,8 @@ impl Core {
         // scope). A new unregistered name is a typo and must fail — never
         // silently inert (the doc contract: "a typo fails here").
         // Already-persisted-but-unregistered names are warn-skipped: they sit
-        // in .env from an earlier boot, can't be loaded, and the operator must
+        // in the durable store (a legacy .env row or a SQLite row) from an
+        // earlier boot, can't be loaded, and the operator must
         // still be able to remove them without the whole write being refused.
         if self.engine.is_none() {
             return Err(CoreError::new(
@@ -821,39 +824,28 @@ impl Core {
             .filter(|p| p.account_id == *id)
             .map(|p| p.strategy.clone())
             .collect();
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                "account.strategies.set: no accounts config path configured — \
-                 persistence is disabled for this core (backtests and \
-                 in-process tests); nothing was applied"
-                    .to_string(),
-            ));
-        };
-        crate::account::config::env_persist_account_strategies(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &requested,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "account.strategies.set: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        // #1189: the durable half is the SQLite `account_settings` row (key
+        // `strategies`, JSON array text) — the `.env` ACCOUNT_<ID>_STRATEGIES
+        // face is retired. Persist FIRST (a failure leaves both stores
+        // untouched — the same memory-after-disk transaction every account
+        // writer runs).
+        self.persist_account_strategies_db(id, &requested, now_ms)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!("account.strategies.set: {}", e.message),
+                )
+            })?;
         self.accounts
             .set_strategies(id, requested.clone(), now_ms)?;
         // #537: the default account's writes keep the persisted enabled-set
-        // in lockstep. The boot migrates the state file's set into the file
-        // ONLY while the default account has no `strategies` key; without
-        // this mirror, a set the operator emptied (key removed from
-        // the .env) would be re-imported from a stale state file at the
-        // next boot — the exact resurrection the default-toggle mirror above
-        // closes. Non-default accounts never migrate, so their state file is
+        // in lockstep. #1189: the ASSIGNMENT's durable home is the SQLite row
+        // written above; this mirror stays because the strategy-state file is
+        // also the GLOBAL toggle's store (`strategy.enable`'s global half
+        // persists the engine's enabled set there and `install_engine`
+        // replays it at boot) — keeping the two in lockstep is what stops a
+        // stale state file from resurrecting a set the operator emptied.
+        // Non-default accounts never migrate, so their state file is
         // untouched (the global toggle's file stays theirs alone).
         if *id == crate::account::default_account_id()
             && let Some(state_path) = self.config.strategy_state_path.as_deref()
@@ -878,6 +870,50 @@ impl Core {
              re-read at next boot ({ACCOUNT_STRATEGIES_SET_NOTE})",
         );
         Ok(kept_exits_only)
+    }
+
+    /// The durable half of a per-account strategy-assignment write (issue
+    /// #1189): the enablement set lands in the SQLite `account_settings` row
+    /// (key `strategies`, JSON array text) — the `.env`
+    /// ACCOUNT_<ID>_STRATEGIES face is retired. An EMPTY set writes `[]`: the
+    /// row is never removed on an operator "runs nothing" write, because an
+    /// absent row means "never set" and the boot's `.env` fallback must not
+    /// resurrect a value the operator cleared. A `None` database (backtests,
+    /// in-process tests, unmigrated deployments) refuses with the same
+    /// "persistence is disabled" shape the `.env` face ran.
+    pub(crate) fn persist_account_strategies_db(
+        &self,
+        id: &crate::account::AccountId,
+        strategies: &[String],
+        now_ms: i64,
+    ) -> CoreResult<()> {
+        let Some(db) = &self.account_risk_db else {
+            return Err(CoreError::new(
+                CoreErrorCode::InvalidParams,
+                "no database configured — persistence is disabled for this \
+                 core (backtests and in-process tests); nothing was applied"
+                    .to_string(),
+            ));
+        };
+        let value = serde_json::to_string(strategies).map_err(|e| {
+            CoreError::new(
+                CoreErrorCode::InvalidParams,
+                format!("the strategy assignment does not render as JSON: {e}"),
+            )
+        })?;
+        db.db()
+            .with_connection(|conn| {
+                crate::db::account_setting_set(
+                    conn,
+                    id.as_str(),
+                    crate::db::SETTING_STRATEGIES,
+                    &value,
+                    now_ms,
+                )
+            })
+            .map_err(|e| {
+                CoreError::new(CoreErrorCode::InvalidParams, format!("persist failed: {e}"))
+            })
     }
 
     /// The engine half of an enablement-set write: delegate to the engine's
@@ -906,14 +942,19 @@ impl Core {
 
     /// Boot application of the accounts file's strategy ENABLEMENT sets
     /// (账户↔venue 解耦语义) — the production `run()` calls this ONCE after
-    /// `install_engine`. For every account with a NON-EMPTY `strategies` key
-    /// the named scopes are instantiated and ENABLED; the default account
-    /// with NO key and a non-empty persisted enabled-set (strategy-state
-    /// .json — the old global toggle's durable form) is MIGRATED once: that
-    /// set is materialized as the default account's enablement rows in
-    /// the operator's `.env`, so the upgrade keeps the production behaviour exactly
-    /// (default 账户 strategies=["pair_discount_arb","spread_arb"] 升级后
-    /// 行为不变) and the file is the only truth from that boot on.
+    /// `install_engine`. First the SQLite `account_settings.strategies` rows
+    /// are overlaid onto the env-derived book (issue #1189: the row is the
+    /// assignment's durable home — a present row, an explicit empty one
+    /// included, REPLACES whatever the legacy `.env` face spelled, so a panel
+    /// write that cleared a set can never be resurrected by a stale
+    /// ACCOUNT_<ID>_STRATEGIES key). Then, for every account with a
+    /// NON-EMPTY `strategies` key, the named scopes are instantiated and
+    /// ENABLED; the default account with NO assignment anywhere and a
+    /// non-empty persisted enabled-set (strategy-state .json — the old global
+    /// toggle's durable form) is MIGRATED once: that set is materialized as
+    /// the default account's SQLite enablement row, so the upgrade keeps the
+    /// production behaviour exactly (default 账户 strategies=["pair_discount_arb",
+    /// "spread_arb"] 升级后行为不变) and the row is the only truth from that boot on.
     ///
     /// NOT part of `install_engine`: the replay/backtest boot goes through
     /// that path too and its single-default book must keep byte-identical
@@ -923,9 +964,77 @@ impl Core {
     /// Returns the migrated default enablement set (empty when nothing
     /// migrated) so the caller can report it on stderr.
     pub fn apply_account_strategy_assignments_at_boot(&mut self) -> Vec<String> {
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-            return Vec::new();
-        };
+        // #1189: the SQLite row is authoritative when present; the .env face
+        // is the legacy fallback (unmigrated deployments boot unchanged).
+        // No database (backtests, in-process tests) → the env-derived book
+        // stands, byte-identical to the pre-#1189 boot.
+        if self.account_risk_db.is_some() {
+            let account_ids: Vec<String> = self
+                .accounts
+                .account_list()
+                .iter()
+                .map(|a| a.id.as_str().to_string())
+                .collect();
+            for id in &account_ids {
+                // Overlay the per-account round duration from SQLite
+                // (issue #1189): the strategy_assignments row wins over the
+                // .env fallback read at book load. This must run regardless
+                // of whether an account_settings.strategies row exists.
+                let rd = self
+                    .account_risk_db_ref()
+                    .expect("checked above")
+                    .db()
+                    .with_connection(|conn| {
+                        crate::db::strategy_assignment_get_round_duration(conn, id, "default")
+                    });
+                match rd {
+                    Ok(Some(sec)) => {
+                        self.config
+                            .account_round_durations
+                            .insert(id.to_string(), sec);
+                    }
+                    Ok(None) => {} // no row: .env fallback stands
+                    Err(e) => {
+                        tracing::warn!(
+                            account = %id,
+                            error = %e,
+                            "strategy_assignments round_duration read failed — \
+                             the .env spelling stands"
+                        );
+                    }
+                }
+
+                let row = self
+                    .account_risk_db_ref()
+                    .expect("checked above")
+                    .db()
+                    .with_connection(|conn| crate::db::account_settings_for(conn, id));
+                let Ok(settings) = row else {
+                    tracing::warn!(
+                        account = %id,
+                        "account_settings read failed — the .env spelling stands"
+                    );
+                    continue;
+                };
+                let Some(value) = settings.get(crate::db::SETTING_STRATEGIES) else {
+                    continue; // no row: the .env fallback (or the empty default) stands
+                };
+                match serde_json::from_str::<Vec<String>>(value) {
+                    Ok(set) => {
+                        let account_id = crate::account::AccountId::from(id.as_str());
+                        let _ = self.accounts.set_strategies(&account_id, set, now_ms());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            account = %id,
+                            error = %e,
+                            "account_settings strategies row is not a JSON array — \
+                             the .env spelling stands"
+                        );
+                    }
+                }
+            }
+        }
         // The persisted enabled-set (strategy-state.json) drives the one-time
         // migration of the default account. Read BEFORE any write.
         let persisted_enabled: Vec<String> = match self.config.strategy_state_path.as_deref() {
@@ -933,34 +1042,47 @@ impl Core {
             None => Vec::new(),
         };
         let default_id = crate::account::default_account_id();
-        // The default account's assignment key decides whether the boot runs
-        // on the file's spelling (migration already happened) or migrates.
-        let default_has_key = self
-            .accounts
-            .account(&default_id)
-            .is_some_and(|a| !a.strategies.is_empty());
+        // The default account's assignment decides whether the boot runs on
+        // the durable spelling (migration already happened, or the operator
+        // wrote the set) or migrates. A SQLite row — an explicit EMPTY one
+        // included — counts as spelled: the migration must never overwrite
+        // the operator's "runs nothing". The overlay above already moved any
+        // present row into the book, so the book half covers the .env face.
+        let db_default_row = self.account_risk_db.as_ref().and_then(|db| {
+            db.db().with_connection(|conn| {
+                crate::db::account_setting_get(
+                    conn,
+                    default_id.as_str(),
+                    crate::db::SETTING_STRATEGIES,
+                )
+                .ok()
+                .flatten()
+            })
+        });
+        let default_has_key = db_default_row.is_some()
+            || self
+                .accounts
+                .account(&default_id)
+                .is_some_and(|a| !a.strategies.is_empty());
         let mut migrated: Vec<String> = Vec::new();
         if !default_has_key && !persisted_enabled.is_empty() {
-            // One-time migration: the file gains the explicit default
+            // One-time migration: the SQLite row gains the explicit default
             // assignment, spelling exactly what the old implicit behaviour
             // (inherit the persisted enabled set) produced. The write is
-            // best-effort — a read-only tree keeps the implicit shape and
-            // the boot proceeds (the persisted set is re-read next boot).
+            // best-effort — no database (or a read-only one) keeps the
+            // implicit shape and the boot proceeds (the persisted set is
+            // re-read next boot).
             //
             // #537: the persisted set is also kept in lockstep from here on —
             // the default toggle now rewrites BOTH stores, and a set the
-            // operator emptied (key removed from the file, empty state file)
-            // must not be resurrected by a stale state file left over from
-            // the pre-toggle era. This one-time gate fires only when the file
-            // never spelled an assignment; afterwards the accounts file is
-            // the sole truth, exactly as the contract above states.
-            if crate::account::config::env_persist_account_strategies(
-                &legacy,
-                &env_path,
-                default_id.as_str(),
-                &persisted_enabled,
-            )
-            .is_ok()
+            // operator emptied (row cleared, empty state file) must not be
+            // resurrected by a stale state file left over from the pre-toggle
+            // era. This one-time gate fires only when NO store ever spelled
+            // an assignment; afterwards the SQLite row is the sole truth,
+            // exactly as the contract above states.
+            if self
+                .persist_account_strategies_db(&default_id, &persisted_enabled, now_ms())
+                .is_ok()
             {
                 let _ =
                     self.accounts
@@ -969,8 +1091,8 @@ impl Core {
                 tracing::info!(
                     strategies = ?migrated,
                     "strategy enablement migration: the default account's persisted \
-                     enabled set is materialized as its .env enablement rows — \
-                     the env rows are the only truth from here on"
+                     enabled set is materialized as its SQLite enablement row — \
+                     the row is the only truth from here on"
                 );
             }
         }

@@ -398,6 +398,15 @@ pub fn load_account_ledgers_single_source(
             // account so a boot with only ACCOUNT_DEFAULT_STRATEGIES="lua_momentum"
             // actually runs that strategy, instead of registering it and leaving
             // every scope OFF.
+            //
+            // Issue #1189: this .env read is the LEGACY FALLBACK. When the
+            // SQLite store holds an `account_settings.strategies` row for the
+            // default account, that row is authoritative — the boot overlay in
+            // `Core::apply_account_strategy_assignments_at_boot` replaces
+            // whatever this read spelled (an explicit empty row included, so a
+            // panel write that cleared the set is never resurrected from a
+            // stale key). The fallback stays so unmigrated deployments boot
+            // byte-identically.
             let mut book = AccountLedgers::single_default(now_ms);
             let default_id = crate::account::default_account_id();
             if let Some(strategies) = env("ACCOUNT_DEFAULT_STRATEGIES")
@@ -1051,10 +1060,13 @@ pub fn read_credential_keys(keys: &CredentialKeys) -> CredentialKeys {
 // The operator retired the 10-23 judgment (ENV_MIGRATION.md §1/§6 kept
 // accounts.toml): ALL account configuration now lives in .env under the
 // ACCOUNT_* prefix, and every runtime write face (account.venue.set,
-// account.rounds.set, account.strategies.set, account.trading.set,
-// account.create/remove, display.account.set, arb.config.*) UPSERTS those
-// keys through `crate::env_file` (atomic + 0600 + comment-preserving — the
-// same primitive market.credentials.set runs).
+// account.rounds.set, account.trading.set, account.create/remove,
+// display.account.set, arb.config.*) UPSERTS those keys through
+// `crate::env_file` (atomic + 0600 + comment-preserving — the same primitive
+// market.credentials.set runs). Issue #1189: the per-account strategy
+// assignment is the exception — its write face persists to the SQLite
+// `account_settings` row (key `strategies`) and the ACCOUNT_<ID>_STRATEGIES
+// keys are a read-only legacy fallback (unmigrated deployments).
 //
 // Key grammar, per account id spelled like the policy env suffix (uppercase,
 // non-alphanumeric → `_`):
@@ -1063,7 +1075,8 @@ pub fn read_credential_keys(keys: &CredentialKeys) -> CredentialKeys {
 //   ACCOUNT_DISPLAY                 the display pointer (the old
 //                                   `display_account` key)
 //   ACCOUNT_<ID>_NAME / _VENUE / _STATUS / _TRADING_ENABLED /
-//                   _STRATEGIES (comma list) / _ROUNDS (comma list) /
+//                   _STRATEGIES (comma list, LEGACY read face since #1189) /
+//                   _ROUNDS (comma list) /
 //                   _API_KEY_ENV / _SECRET_ENV / _PASSPHRASE_ENV /
 //                   _PRIVATE_KEY_ENV   (credential key NAMES only, never values)
 //   ACCOUNT_ARB_LEG_A_VENUE / _LEG_A_ACCOUNT / _LEG_B_VENUE / _LEG_B_ACCOUNT /

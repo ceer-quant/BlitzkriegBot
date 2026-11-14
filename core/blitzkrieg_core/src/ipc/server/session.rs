@@ -34,20 +34,28 @@ pub async fn run(
     }
 
     let mut core = Core::new(config.clone());
-    // issue #1189: open the SQLite per-account risk/exit store when the
-    // deployment names one. Absent = the env fallback (the test posture and
-    // a kernel that has not migrated yet). A failure to open the DB the
-    // operator explicitly named is FAIL-CLOSED (issue #1189 §5): the kernel
-    // refuses to run rather than silently trading on the env fallback while
-    // the operator believes the DB is authoritative.
-    if let Ok(path) = std::env::var("BLITZKRIEG_DB_PATH")
-        && !path.trim().is_empty()
-        && let Err(e) = core.open_account_risk_db(path)
-    {
-        return Err(anyhow::anyhow!(
-            "account risk DB open failed ({e}) — refusing to boot on the env fallback \
-             (fail-closed: fix BLITZKRIEG_DB_PATH or unset it to run env-only)"
-        ));
+    // issue #1189: open the SQLite per-account risk/exit store. Prefer the
+    // operator-named `BLITZKRIEG_DB_PATH`; otherwise fall back to the default
+    // `data/blitzkrieg.sqlite` in the deployment cwd so a restart can read
+    // back the per-account overrides the previous session wrote. Absent both
+    // = the env fallback (unmigrated deployments boot unchanged). A failure to
+    // open a DB the operator explicitly named is FAIL-CLOSED (issue #1189 §5).
+    let db_path = std::env::var("BLITZKRIEG_DB_PATH")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| crate::db::DEFAULT_DB_PATH.to_string());
+    if let Err(e) = core.open_account_risk_db(&db_path) {
+        // Only fail-closed when the operator explicitly named a path; a missing
+        // default file is fine (the store is created on first write).
+        if std::env::var("BLITZKRIEG_DB_PATH").is_ok() {
+            return Err(anyhow::anyhow!(
+                "account risk DB open failed ({e}) — refusing to boot on the env fallback \
+                 (fail-closed: fix BLITZKRIEG_DB_PATH or unset it to run env-only)"
+            ));
+        }
+        // Default path missing: try creating it; if that fails too, keep going
+        // with the env fallback.
+        tracing::warn!(error = %e, "default risk DB open failed — env fallback stands");
     }
     eprintln!(
         "blitzkrieg-core: core constructed t={} dt={} ms",

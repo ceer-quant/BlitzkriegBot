@@ -271,7 +271,8 @@ async fn strategy_isolation_fixture() -> (
     Arc<AsyncMutex<Core>>,
     crate::market::registry::MarketPluginRegistry,
     PeerAuth,
-    std::path::PathBuf,
+    std::path::PathBuf, // env_path
+    std::path::PathBuf, // db_path
 ) {
     let (accounts_path, env_path) = scratch_env(
         "strategy-iso",
@@ -287,6 +288,9 @@ async fn strategy_isolation_fixture() -> (
         },
         two_account_book(now_ms()),
     );
+    let db_path = env_path.parent().unwrap().join("blitzkrieg.sqlite");
+    c.open_account_risk_db(&db_path)
+        .expect("test database opens");
     let mut engine = crate::engine::Engine::new(EngineConfig::default());
     test_support::host_disabled(
         &mut engine,
@@ -299,6 +303,7 @@ async fn strategy_isolation_fixture() -> (
         crate::market::registry::MarketPluginRegistry::new(),
         PeerAuth::SameUid { uid: own_uid() },
         env_path,
+        db_path,
     )
 }
 
@@ -310,7 +315,7 @@ async fn strategy_isolation_fixture() -> (
 /// pre-#1189 file-first read could resurrect cross-account state).
 #[tokio::test]
 async fn strategy_enable_is_per_account_isolated_between_default_and_paper() {
-    let (core, registry, peer, env_path) = strategy_isolation_fixture().await;
+    let (core, registry, peer, env_path, _db_path) = strategy_isolation_fixture().await;
 
     // Enable on paper.
     let reply = rpc(
@@ -326,15 +331,34 @@ async fn strategy_enable_is_per_account_isolated_between_default_and_paper() {
     );
     assert_eq!(reply["result"]["accountId"], serde_json::json!("paper"));
 
-    let on_file = env_map(&env_path);
+    let paper_row = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "paper", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
     assert_eq!(
-        on_file.get("ACCOUNT_PAPER_STRATEGIES").map(String::as_str),
-        Some("spread_arb"),
-        "paper's set is on disk: {on_file:?}"
+        paper_row.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "paper's set is in SQLite: {paper_row:?}"
     );
+    let default_row = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "default", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
     assert!(
-        !on_file.keys().any(|k| k == "ACCOUNT_DEFAULT_STRATEGIES"),
-        "the default account's set is untouched by paper's enable: {on_file:?}"
+        default_row.is_none(),
+        "the default account's row is untouched by paper's enable: {default_row:?}"
     );
 
     // The book answers per account (the same-process reload re-derived it).
@@ -370,18 +394,35 @@ async fn strategy_enable_is_per_account_isolated_between_default_and_paper() {
         reply.get("error").is_none(),
         "the enable must land: {reply}"
     );
-    let on_file = env_map(&env_path);
+    let default_row = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "default", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
     assert_eq!(
-        on_file
-            .get("ACCOUNT_DEFAULT_STRATEGIES")
-            .map(String::as_str),
-        Some("spread_arb"),
-        "the default account's set is on disk: {on_file:?}"
+        default_row.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "default's row is in SQLite: {default_row:?}"
     );
+    let paper_row2 = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "paper", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
     assert_eq!(
-        on_file.get("ACCOUNT_PAPER_STRATEGIES").map(String::as_str),
-        Some("spread_arb"),
-        "paper's set survives the default's enable: {on_file:?}"
+        paper_row2.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "paper's row survives default's enable: {paper_row2:?}"
     );
 
     // And disabling on paper leaves default's set alone (the isolation
@@ -397,17 +438,35 @@ async fn strategy_enable_is_per_account_isolated_between_default_and_paper() {
         reply.get("error").is_none(),
         "the disable must land: {reply}"
     );
-    let on_file = env_map(&env_path);
-    assert!(
-        !on_file.keys().any(|k| k == "ACCOUNT_PAPER_STRATEGIES"),
-        "paper's key left the file: {on_file:?}"
-    );
+    let paper_row3 = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "paper", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
     assert_eq!(
-        on_file
-            .get("ACCOUNT_DEFAULT_STRATEGIES")
-            .map(String::as_str),
-        Some("spread_arb"),
-        "the default account's set survives paper's disable: {on_file:?}"
+        paper_row3.as_deref(),
+        Some("[]"),
+        "paper's row is [] after disable: {paper_row3:?}"
+    );
+    let default_row2 = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::account_setting_get(conn, "default", crate::db::SETTING_STRATEGIES)
+                    .unwrap()
+            })
+    };
+    assert_eq!(
+        default_row2.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "default's row survives paper's disable: {default_row2:?}"
     );
     let _ = std::fs::remove_dir_all(env_path.parent().unwrap());
 }

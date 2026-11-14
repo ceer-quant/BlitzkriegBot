@@ -35,6 +35,8 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
         };
         let mut c = Core::new(cfg.clone());
         c.set_balance(cfg.dry_seed_balance);
+        c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+            .expect("test database opens");
         cfg.install_engine(&mut c).expect("engine install");
         (
             Arc::new(AsyncMutex::new(c)),
@@ -128,10 +130,19 @@ async fn round_duration_immediate_closes_position_and_switches_grid() {
         serde_json::json!(300),
         "the engine scanner clock switches with the account grid: {after}"
     );
-    let env_text = std::fs::read_to_string(&env_path).unwrap_or_default();
+    // Persistence lands in SQLite strategy_assignments (issue #1189), not .env.
+    let row = {
+        let c = core.lock().await;
+        c.account_risk_db_ref()
+            .unwrap()
+            .db()
+            .with_connection(|conn| {
+                crate::db::strategy_assignment_get_round_duration(conn, "default", "default")
+            })
+    };
     assert!(
-        env_text.contains("ACCOUNT_DEFAULT_ROUND_DURATION_SEC=\"300\""),
-        "the override is persisted: {env_text}"
+        matches!(row, Ok(Some(300))),
+        "the override is persisted in SQLite: row={row:?}"
     );
 }
 

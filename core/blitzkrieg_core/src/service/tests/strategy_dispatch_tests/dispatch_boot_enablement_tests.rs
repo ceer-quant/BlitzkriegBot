@@ -292,6 +292,8 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host(
         c.engine.as_mut().unwrap(),
@@ -372,10 +374,22 @@ fn strategies_set_empty_on_default_runs_nothing_explicitly() {
         &vec!["spread_arb".to_string()],
         "the book spells the named assignment"
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"spread_arb\""),
-        "the file spells the named assignment: {text}"
+    let row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(
+                conn,
+                crate::account::default_account_id().as_str(),
+                crate::db::SETTING_STRATEGIES,
+            )
+            .unwrap()
+        });
+    assert_eq!(
+        row.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "the SQLite row spells the named assignment: {row:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -415,6 +429,8 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -437,10 +453,22 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
             .expect("migrated into the book"),
         &vec!["spread_arb".to_string(), "trend_follow".to_string()],
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES"),
-        "the file gained the default's explicit assignment: {text}"
+    let migrated_row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(
+                conn,
+                crate::account::default_account_id().as_str(),
+                crate::db::SETTING_STRATEGIES,
+            )
+            .unwrap()
+        });
+    assert_eq!(
+        migrated_row.as_deref(),
+        Some(r#"["spread_arb","trend_follow"]"#),
+        "the SQLite row gained the default's migrated assignment: {migrated_row:?}"
     );
 
     // Idempotence: a SECOND boot call does not re-report (the file now
@@ -468,6 +496,8 @@ fn boot_applies_assignments_and_migrates_the_implicit_default_once() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),
@@ -610,6 +640,8 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -637,10 +669,18 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         vec!["paper".to_string()],
         "paper is the only account whose enablement set names it"
     );
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_PAPER_STRATEGIES=\"trend_follow\""),
-        "the file spells paper's enablement: {text}"
+    let paper_row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, paper.as_str(), crate::db::SETTING_STRATEGIES)
+                .unwrap()
+        });
+    assert_eq!(
+        paper_row.as_deref(),
+        Some(r#"["trend_follow"]"#),
+        "the SQLite row spells paper's enablement: {paper_row:?}"
     );
 
     // DISABLE it again for paper (flat scope → teardown), then re-enable:
@@ -650,10 +690,18 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         .expect("the scoped disable lands");
     assert!(kept.is_empty() && set_now.is_empty());
     assert!(c.strategy_enabled_accounts("trend_follow").is_empty());
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        !text.contains("ACCOUNT_PAPER_STRATEGIES"),
-        "the empty set is spelled by absence: {text}"
+    let paper_row2 = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, paper.as_str(), crate::db::SETTING_STRATEGIES)
+                .unwrap()
+        });
+    assert_eq!(
+        paper_row2.as_deref(),
+        Some("[]"),
+        "empty set writes [], the row is never removed: {paper_row2:?}"
     );
 
     // REBOOT: a fresh Core over the same file (paper re-enabled first so
@@ -681,6 +729,8 @@ fn scoped_enablement_persists_and_boots_back_exactly() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),
@@ -742,6 +792,8 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         )
         .unwrap(),
     );
+    c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c.engine.as_mut().unwrap(),
@@ -753,17 +805,25 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
     let default_id = crate::account::default_account_id();
 
     // The operator turns spread_arb off (the scoped write is what the
-    // panel's toggle now rides): the file's set loses the name AND the
+    // panel's toggle now rides): the SQLite row loses the name AND the
     // state file follows.
     let (kept, set_now) = c
         .set_scoped_strategy_enabled(&default_id, "spread_arb", false, "test", "panel off", 2)
         .expect("the default disable lands");
     assert!(kept.is_empty(), "flat scope → nothing demoted");
     assert_eq!(set_now, vec!["trend_follow".to_string()]);
-    let text = std::fs::read_to_string(&env_path).unwrap();
-    assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES=\"trend_follow\""),
-        "the file lost spread_arb the moment the toggle did: {text}"
+    let row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, default_id.as_str(), crate::db::SETTING_STRATEGIES)
+                .unwrap()
+        });
+    assert_eq!(
+        row.as_deref(),
+        Some(r#"["trend_follow"]"#),
+        "the SQLite row lost spread_arb the moment the toggle did: {row:?}"
     );
     assert_eq!(
         crate::strategy_state::load(&state_path),
@@ -787,6 +847,8 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
         )
         .unwrap(),
     );
+    c2.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     c2.enable_engine(Engine::new(EngineConfig::default()));
     crate::strategies::test_support::host_disabled(
         c2.engine.as_mut().unwrap(),
@@ -808,10 +870,19 @@ fn default_toggle_persists_and_boot_does_not_resurrect() {
     // The reverse direction: re-enabling through the same write lands the
     // name in BOTH stores again.
     let _ = c2.set_scoped_strategy_enabled(&default_id, "spread_arb", true, "test", "panel on", 3);
-    let text = std::fs::read_to_string(&env_path).unwrap();
+    let row2 = c2
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, default_id.as_str(), crate::db::SETTING_STRATEGIES)
+                .unwrap()
+        });
     assert!(
-        text.contains("ACCOUNT_DEFAULT_STRATEGIES") && text.contains("spread_arb"),
-        "the enable lands in the file too: {text}"
+        row2.as_deref()
+            .map(|r| r.contains("spread_arb"))
+            .unwrap_or(false),
+        "the enable lands in SQLite too: {row2:?}"
     );
     assert!(crate::strategy_state::load(&state_path).contains(&"spread_arb".to_string()));
     let _ = std::fs::remove_dir_all(&dir);

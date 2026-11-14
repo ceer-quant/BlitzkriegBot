@@ -32,6 +32,13 @@ impl Core {
         self.account_risk_db.is_some()
     }
 
+    /// Borrow the open store for test-side reads of `account_settings` rows.
+    /// `pub(crate)` so `ipc::server::tests` can assert on what was written
+    /// without reaching through IPC. Production code never calls this.
+    pub(crate) fn account_risk_db_ref(&self) -> Option<&crate::risk::account_store::AccountRiskDb> {
+        self.account_risk_db.as_ref()
+    }
+
     /// issue #1189: `budget_ratio = 1` lets the execution policy size an order
     /// at 100% of the account's available balance, while
     /// `BK_MAX_ORDER_NOTIONAL_PCT < 100` refuses any single order above that

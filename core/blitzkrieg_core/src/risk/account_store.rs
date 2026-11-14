@@ -40,6 +40,13 @@ impl AccountRiskDb {
         self.db.path()
     }
 
+    /// The raw `Database` handle — one file, one writer, shared with the
+    /// kernel-side `account_settings` seam (issue #1189). `pub(crate)` so
+    /// `service::accounts::persist` can write strategy rows through it.
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
+
     /// Every `account_risk` row, keyed by account id. A missing row means the
     /// caller's env/global fallback applies.
     pub fn load_risk(&self) -> BTreeMap<String, AccountRiskLimits> {

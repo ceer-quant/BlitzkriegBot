@@ -183,6 +183,151 @@ pub fn kernel_meta_set(conn: &Connection, key: &str, value: &str) -> anyhow::Res
     Ok(())
 }
 
+// ── account_settings keys ───────────────────────────────────────────────────
+// The account-scoped setting families the boot read prefers over the `.env`
+// legacy fallback (issue #1189): a row that exists WINS, an absent row is not
+// an error. These are the kernel-side spellings; the panel write paths land
+// the same keys through [`account_setting_set`].
+
+/// An account's round-length anchor in seconds (`ACCOUNT_<ID>_ROUND_DURATION_SEC`'s DB twin).
+pub const SETTING_ROUND_DURATION_SEC: &str = "round_duration_sec";
+/// This account's strategy ENABLEMENT set as a JSON array of names (the
+/// `ACCOUNT_<ID>_STRATEGIES` DB twin).
+pub const SETTING_STRATEGIES: &str = "strategies";
+/// Shadow Evolution on/off for this account (`"true"`/`"false"` text).
+pub const SETTING_SHADOW_ENABLED: &str = "shadow_enabled";
+/// Shadow Evolution unattended application on/off (`"true"`/`"false"` text).
+pub const SETTING_SHADOW_AUTO_EVOLVE: &str = "shadow_auto_evolve";
+
+// ── account_settings ────────────────────────────────────────────────────────
+
+/// Read one `account_settings` value. `None` = the key was never written for
+/// this account (the caller's env/global fallback applies — a missing row is
+/// NOT an error).
+pub fn account_setting_get(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM account_settings WHERE account_id = ?1 AND key = ?2",
+            [account_id, key],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
+/// Write one `account_settings` value (upsert) with the caller's clock.
+///
+/// The account's `accounts` row is ensured first (`INSERT OR IGNORE`, the
+/// same seam [`crate::risk::account_store::AccountRiskDb::save_risk`] uses):
+/// the store may be opened before the account book is mirrored into the DB,
+/// and the `account_settings` foreign key must be satisfied without inventing
+/// a second account source.
+pub fn account_setting_set(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+    value: &str,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts
+                (id, name, market_type, status, trading_enabled, updated_at_ms)
+             VALUES (?1, ?1, 'prediction', 'active', 1, ?2)",
+        rusqlite::params![account_id, now_ms],
+    )?;
+    conn.execute(
+        "INSERT INTO account_settings (account_id, key, value, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_id, key) DO UPDATE SET
+            value = excluded.value,
+            updated_at_ms = excluded.updated_at_ms",
+        rusqlite::params![account_id, key, value, now_ms],
+    )?;
+    Ok(())
+}
+
+/// Delete one `account_settings` row (the reset-to-fallback write). Removing a
+/// key that was never present is a no-op, not an error.
+pub fn account_setting_remove(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM account_settings WHERE account_id = ?1 AND key = ?2",
+        rusqlite::params![account_id, key],
+    )?;
+    Ok(())
+}
+
+/// Every `account_settings` row of ONE account (`key → value`). The read face
+/// for callers that need the whole family (a wire view, a reset diff); a
+/// missing account reads as an empty map.
+pub fn account_settings_for(
+    conn: &Connection,
+    account_id: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM account_settings WHERE account_id = ?1")?;
+    let rows = stmt.query_map(rusqlite::params![account_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (key, value) = row?;
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
+/// Upsert one row of `strategy_assignments` (issue #1189): the account's
+/// strategy row, with `round_duration_sec` carrying the per-account round
+/// override. The `accounts` row is ensured first so the FK is satisfied.
+pub(crate) fn strategy_assignment_set_round_duration(
+    conn: &Connection,
+    account_id: &str,
+    strategy: &str,
+    round_duration_sec: i64,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts
+                (id, name, market_type, status, trading_enabled, updated_at_ms)
+             VALUES (?1, ?1, 'prediction', 'active', 1, ?2)",
+        rusqlite::params![account_id, now_ms],
+    )?;
+    conn.execute(
+        "INSERT INTO strategy_assignments
+                (account_id, strategy, enabled, params_json, round_duration_sec, updated_at_ms)
+             VALUES (?1, ?2, 1, '[]', ?3, ?4)
+         ON CONFLICT(account_id, strategy) DO UPDATE SET
+            round_duration_sec = excluded.round_duration_sec,
+            updated_at_ms = excluded.updated_at_ms",
+        rusqlite::params![account_id, strategy, round_duration_sec, now_ms],
+    )?;
+    Ok(())
+}
+
+/// Read one `strategy_assignments` row's `round_duration_sec` (issue #1189).
+/// `None` when the row doesn't exist or the column is NULL.
+pub(crate) fn strategy_assignment_get_round_duration(
+    conn: &Connection,
+    account_id: &str,
+    strategy: &str,
+) -> anyhow::Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT round_duration_sec FROM strategy_assignments
+             WHERE account_id = ?1 AND strategy = ?2",
+            [account_id, strategy],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten())
+}
+
 /// Milliseconds since the Unix epoch, or 0 if the clock is before it.
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -347,6 +492,55 @@ mod tests {
             .is_err(),
             "the schema CHECK must also refuse dry_run"
         );
+    }
+
+    #[test]
+    fn account_settings_round_trip_set_get_remove() {
+        let db = TempDb::new();
+        let conn = db.connection();
+        // Missing row is not an error.
+        assert_eq!(
+            account_setting_get(&conn, "paper", SETTING_ROUND_DURATION_SEC).unwrap(),
+            None
+        );
+        account_setting_set(&conn, "paper", SETTING_ROUND_DURATION_SEC, "300", 1_000).unwrap();
+        assert_eq!(
+            account_setting_get(&conn, "paper", SETTING_ROUND_DURATION_SEC)
+                .unwrap()
+                .as_deref(),
+            Some("300")
+        );
+        // A second account's row is unaffected by the first's write/remove.
+        account_setting_set(&conn, "live", SETTING_ROUND_DURATION_SEC, "900", 1_000).unwrap();
+        account_setting_remove(&conn, "paper", SETTING_ROUND_DURATION_SEC).unwrap();
+        assert_eq!(
+            account_setting_get(&conn, "paper", SETTING_ROUND_DURATION_SEC).unwrap(),
+            None,
+            "the removed row is gone"
+        );
+        assert_eq!(
+            account_setting_get(&conn, "live", SETTING_ROUND_DURATION_SEC)
+                .unwrap()
+                .as_deref(),
+            Some("900"),
+            "the second account's row survives the first account's remove"
+        );
+        // Upsert, not duplicate, and the whole-family read answers per account.
+        account_setting_set(&conn, "live", SETTING_SHADOW_ENABLED, "true", 2_000).unwrap();
+        account_setting_set(&conn, "live", SETTING_SHADOW_ENABLED, "false", 3_000).unwrap();
+        let live = account_settings_for(&conn, "live").unwrap();
+        assert_eq!(live.len(), 2);
+        assert_eq!(
+            live.get(SETTING_ROUND_DURATION_SEC).map(String::as_str),
+            Some("900")
+        );
+        assert_eq!(
+            live.get(SETTING_SHADOW_ENABLED).map(String::as_str),
+            Some("false")
+        );
+        assert!(account_settings_for(&conn, "paper").unwrap().is_empty());
+        // Removing a key that was never present is a no-op.
+        account_setting_remove(&conn, "paper", SETTING_SHADOW_AUTO_EVOLVE).unwrap();
     }
 
     #[test]

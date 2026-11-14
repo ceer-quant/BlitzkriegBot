@@ -50,6 +50,8 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
         ..Default::default()
     };
     let mut c = Core::with_account_book(cfg, book);
+    c.open_account_risk_db(dir.join("blitzkrieg.sqlite"))
+        .expect("test database opens");
     let mut engine = crate::engine::Engine::new(EngineConfig::default());
     test_support::host_disabled(
         &mut engine,
@@ -88,11 +90,19 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
          even though the live dispatch hosted no pre-existing instance: {reply}"
     );
     assert_eq!(reply["result"]["accountId"], serde_json::json!("default"),);
-    let written =
-        std::fs::read_to_string(&env_path).expect("the enable must create the .env durable half");
-    assert!(
-        written.contains("ACCOUNT_DEFAULT_STRATEGIES=\"spread_arb\""),
-        "the durable half must carry the default account's set: {written}"
+    let c = core.lock().await;
+    let row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, "default", crate::db::SETTING_STRATEGIES).unwrap()
+        });
+    drop(c);
+    assert_eq!(
+        row.as_deref(),
+        Some(r#"["spread_arb"]"#),
+        "the durable SQLite row must carry the default account's set: {row:?}"
     );
 
     // The toggle-off half: empty set = the key LEAVES the file (the same
@@ -113,10 +123,19 @@ async fn default_enable_persists_the_env_half_without_the_legacy_toml() {
         serde_json::json!(true),
         "{reply}"
     );
-    let written = std::fs::read_to_string(&env_path).expect("the .env survives the disable");
-    assert!(
-        !written.contains("ACCOUNT_DEFAULT_STRATEGIES"),
-        "empty set = the key is gone (absence is no declared set): {written}"
+    let c = core.lock().await;
+    let row = c
+        .account_risk_db_ref()
+        .unwrap()
+        .db()
+        .with_connection(|conn| {
+            crate::db::account_setting_get(conn, "default", crate::db::SETTING_STRATEGIES).unwrap()
+        });
+    drop(c);
+    assert_eq!(
+        row.as_deref(),
+        Some("[]"),
+        "empty set writes [], the row is never removed: {row:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

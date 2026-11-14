@@ -689,54 +689,42 @@ impl Core {
                 ));
             }
         }
-        // ── Two-phase commit (持久优先)：有 env_file_path 时先 .env 持久化，
-        // 失败则拒绝，无账簿副作用；无 env_file_path（回测/进程内测试）则
-        // 跳过持久化，直接在内存执行。再撤单→市价强平（fail-closed），最后
-        // 内存更新+引擎网格切换。任何一步失败都不留半边天。
-        if let Some(env_path) = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new)
-        {
-            let sfx: String = account_id
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() {
-                        c.to_ascii_uppercase()
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-
-            if patch.reset {
-                crate::env_file::remove_env_vars(env_path, &[key.as_str()]).map_err(|e| {
-                    CoreError::new(
-                        CoreErrorCode::InvalidParams,
-                        format!("round_duration.set: persist reset failed: {e}"),
+        // ── Two-phase commit (持久优先)：先落 SQLite `strategy_assignments`
+        // 行（issue #1189），失败则拒绝，无账簿副作用；无数据库（回测/
+        // 进程内测试）则跳过持久化，直接在内存执行。再撤单→市价强平
+        //（fail-closed），最后内存更新+引擎网格切换。任何一步失败都不
+        // 留半边天。
+        if let Some(db) = &self.account_risk_db {
+            let value = sec.unwrap_or(self.config.default_round_duration_sec);
+            db.db()
+                .with_connection(|conn| {
+                    crate::db::strategy_assignment_set_round_duration(
+                        conn, account_id, "default", value, now_ms,
                     )
-                })?;
-            } else {
-                let sec = sec.unwrap();
-                crate::env_file::upsert_env_vars(
-                    env_path,
-                    &std::collections::BTreeMap::from([(key, sec.to_string())]),
-                )
+                })
                 .map_err(|e| {
                     CoreError::new(
                         CoreErrorCode::InvalidParams,
                         format!("round_duration.set: persist failed, nothing changed: {e}"),
                     )
                 })?;
-            }
         }
 
         // 撤单 → 市价强平 → 切网格的前两步，fail-closed（一律执行，秒切秒换）。
         self.cancel_and_flatten_account(account_id, now_ms, actor)?;
         // reset: clear the account's override from memory (already removed from .env above).
         if patch.reset {
+            // Clear the persisted row too (reverse acceptance: a neutered
+            // write leaves no row).
+            if let Some(db) = &self.account_risk_db {
+                let _ = db.db().with_connection(|conn| {
+                    conn.execute(
+                        "DELETE FROM strategy_assignments
+                         WHERE account_id = ?1 AND strategy = ?2",
+                        rusqlite::params![account_id, "default"],
+                    )
+                });
+            }
             self.config.account_round_durations.remove(account_id);
             if let Some(engine) = self.engine.as_mut() {
                 engine.set_scanner_round_duration(self.config.default_round_duration_sec);

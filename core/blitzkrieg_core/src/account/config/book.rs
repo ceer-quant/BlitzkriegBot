@@ -228,7 +228,11 @@ fn env_lookup_for_write(env_path: &Path) -> impl Fn(&str) -> Option<String> + '_
 }
 
 /// The full ACCOUNT_* key set ONE account id owns — the remove face's sweep
-/// list.
+/// list. `STRATEGIES` rides along for the LEGACY sweep only (issue #1189:
+/// the strategies family no longer writes `.env` — its home is the SQLite
+/// `account_settings` row — but `account.remove` still cleans the stale key
+/// from unmigrated `.env` files so it can never leak into a future account
+/// that reuses the id).
 fn account_env_keys(account_id: &str) -> Vec<String> {
     let sfx = env_suffix(account_id);
     [
@@ -505,34 +509,6 @@ pub fn env_persist_account_opening_equity(
     let key_src = format!("ACCOUNT_{}_OPENING_EQUITY_SOURCE", env_suffix(account_id));
     vars.insert(key_src, "venue".to_string());
     env_upsert(env_path, &vars, "opening_equity")?;
-    Ok(())
-}
-
-/// `account.strategies.set`'s persisted half — `ACCOUNT_<ID>_STRATEGIES`
-/// (empty list = remove the key: absence is "no restriction").
-pub fn env_persist_account_strategies(
-    toml_path: &Path,
-    env_path: &Path,
-    account_id: &str,
-    strategies: &[String],
-) -> Result<(), CoreError> {
-    refuse_while_legacy_toml(toml_path, "strategies")?;
-    let key = account_env_keys(account_id)
-        .into_iter()
-        .find(|k| k.ends_with("_STRATEGIES"))
-        .unwrap();
-    if strategies.is_empty() {
-        crate::env_file::remove_env_vars(env_path, &[&key]).map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(".env strategies remove failed: {e}"),
-            )
-        })?;
-    } else {
-        let mut vars = std::collections::BTreeMap::new();
-        vars.insert(key, strategies.join(","));
-        env_upsert(env_path, &vars, "strategies")?;
-    }
     Ok(())
 }
 

@@ -229,32 +229,20 @@ impl Core {
             set.retain(|s| s != trimmed);
         }
         // Persist FIRST (a failure leaves both stores untouched — the same
-        // memory-after-disk transaction every account writer runs; issue 751:
-        // the durable half upserts ACCOUNT_* keys into .env).
-        let Some((env_path, legacy)) = self.config.account_env_write_paths() else {
-            return Err(CoreError::new(
-                CoreErrorCode::InvalidParams,
-                "strategy.enable: no accounts config path configured — persistence \
-                 is disabled for this core (backtests and in-process tests); \
-                 nothing was applied"
-                    .to_string(),
-            ));
-        };
-        crate::account::config::env_persist_account_strategies(
-            &legacy,
-            &env_path,
-            id.as_str(),
-            &set,
-        )
-        .map_err(|e| {
-            CoreError::new(
-                CoreErrorCode::InvalidParams,
-                format!(
-                    "strategy.enable: persist failed, nothing changed: {}",
-                    e.message
-                ),
-            )
-        })?;
+        // memory-after-disk transaction every account writer runs; issue #1189:
+        // the durable half upserts the account's SQLite `account_settings`
+        // row (key `strategies`), the ACCOUNT_<ID>_STRATEGIES .env face is
+        // retired).
+        self.persist_account_strategies_db(id, &set, now_ms)
+            .map_err(|e| {
+                CoreError::new(
+                    CoreErrorCode::InvalidParams,
+                    format!(
+                        "strategy.enable: persist failed, nothing changed: {}",
+                        e.message
+                    ),
+                )
+            })?;
         self.accounts.set_strategies(id, set.clone(), now_ms)?;
         // #537: the default account's scoped write keeps the persisted
         // enabled-set in lockstep (the same mirror `set_account_strategies_

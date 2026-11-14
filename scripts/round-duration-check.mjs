@@ -8,11 +8,12 @@
  *   1. readout：effectiveSec 来自出厂默认（900），source=default，perAccount
  *      为空，可切换档位（插件声明并集）带 scanner 的 5m/15m/1h/4h/daily 标签。
  *   2. 写路径：round_duration.set {accountId:'default', durationSec:300} 把
- *      ACCOUNT_DEFAULT_ROUND_DURATION_SEC 落进 cwd/.env；回执点名账户与
- *      nextSessionSec=300；审计回执 actor 带 uid:。
+ *      ACCOUNT_DEFAULT_ROUND_DURATION_SEC 落进 SQLite `strategy_assignments`
+ *      行（issue #1189；回执点名账户与 nextSessionSec=300；审计回执 actor
+ *      带 uid:）。
  *   3. 立即生效：本会话 perAccount.default=300（内存 map 即时更新）；全局
  *      effectiveSec 一个字节不动（per-account 覆盖与默认网格分离）。
- *   4. 重启生效：重启后的内核从 .env 读回 perAccount.default=300 —— 持久
+ *   4. 重启生效：重启后的内核从 SQLite 读回 perAccount.default=300 —— 持久
  *      覆盖 outranks 出厂默认。
  *   5. 声明并集外拒绝：durationSec:60 拒绝且 perAccount 不动。
  *   6. 不存在的账户按名拒绝：`no such account` 报错，绝不崩核。
@@ -27,6 +28,7 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { DatabaseSync } from 'node:sqlite';
 import { CoreClient, defaultBinaryPath } from './lib/core-client.mjs';
 import { scratchSocketPath } from './lib/core-socket.mjs';
 import { createChecks } from './lib/gate-harness.mjs';
@@ -38,10 +40,10 @@ const check = gate.check;
 const cleanup = [];
 
 function makeCore(label, extraArgs = [], cwdOverride = null) {
-  // The override lives in the cwd-relative .env (ACCOUNT_<ID>_ROUND_DURATION_SEC),
-  // so a "restart" MUST reuse the SAME cwd the previous core ran in — a real
-  // deployment restarts in place; a fresh scratch dir would be a different
-  // deployment with nothing to read back.
+  // The override lives in the cwd's SQLite (`strategy_assignments`,
+  // issue #1189), so a "restart" MUST reuse the SAME cwd the previous core
+  // ran in — a real deployment restarts in place; a fresh scratch dir would
+  // be a different deployment with nothing to read back.
   const cwd = cwdOverride ?? mkdtempSync(join(tmpdir(), `blitzkrieg-rounddur-${label}-`));
   if (!cwdOverride) cleanup.push(cwd);
   return new CoreClient({
@@ -59,7 +61,27 @@ function makeCore(label, extraArgs = [], cwdOverride = null) {
     // 门禁要断言“引擎侧实际变化”，必须让核安装扫描引擎（--engine），
     // 否则 round_duration.set 的 engine 同步无对象可写。
     extraArgs: [...(extraArgs ?? []), '--engine'],
-});
+  });
+}
+
+// ── the SQLite read face (issue #1189): the write's landing row ─────────────
+// The `round_duration.set` override now lands in `strategy_assignments`
+// (account, 'default', round_duration_sec), NOT in the `.env` text — the
+// old gates grepped the file, these read the row. A scratch cwd has no
+// `BLITZKRIEG_DB_PATH`, so the launcher's default (`<cwd>/data/blitzkrieg.sqlite`)
+// is where the core wrote. Reading the DB file is safe while the core runs
+// (WAL readers never block the writer).
+function roundDurationRow(cwd) {
+  const dbPath = join(cwd, 'data', 'blitzkrieg.sqlite');
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare(
+      'SELECT strategy, round_duration_sec FROM strategy_assignments \
+       WHERE account_id = ?1 AND strategy = ?2',
+    ).get('default', 'default');
+  } finally {
+    db.close();
+  }
 }
 
 try {
@@ -88,6 +110,11 @@ try {
     JSON.stringify(set));
   check('the audit trail names the actor',
     typeof set.actor === 'string' && set.actor.startsWith('uid:'), JSON.stringify(set));
+  // issue #1189: the write lands as a DB row, not .env text — read the row
+  // back and pin it (reverse acceptance: a neutered write leaves no row).
+  const row = roundDurationRow(core.cwd);
+  check('the write landed as a strategy_assignments row (not .env text)',
+    Number(row?.round_duration_sec) === 300, JSON.stringify(row ?? null));
 
   // 3. Live semantics: the per-account map reflects the write immediately;
   //    the global default grid is untouched (the override is a separate tier),
@@ -227,6 +254,10 @@ try {
   check('reset clears the override (the reply names the fallback)',
     reset.reset === true && reset.accountId === 'default' && reset.nextSessionSec === 900,
     JSON.stringify(reset));
+  const clearedRow = roundDurationRow(core2.cwd);
+  check('the reset cleared the DB row (not just the reply)',
+    clearedRow === undefined || clearedRow?.round_duration_sec === null,
+    JSON.stringify(clearedRow ?? null));
   const afterReset = await core2.request('round_duration.get', {});
   check('after a reset the account falls back to the default grid',
     !('default' in (afterReset.perAccount ?? {})) && afterReset.effectiveSec === 900,
