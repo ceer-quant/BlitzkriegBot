@@ -287,12 +287,17 @@ pub fn is_empty_database(conn: &Connection) -> anyhow::Result<bool> {
 // ── kernel_meta ─────────────────────────────────────────────────────────────
 
 /// Read a `kernel_meta` value. `None` = the key was never written.
+/// A genuine read error (table gone, file locked/corrupt) is propagated as
+/// `Err` instead of being melted into `None` — absence and failure must stay
+/// distinguishable (issue #1199 §11-1).
 pub fn kernel_meta_get(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM kernel_meta WHERE key = ?1", [key], |r| {
-            r.get(0)
-        })
-        .ok())
+    match conn.query_row("SELECT value FROM kernel_meta WHERE key = ?1", [key], |r| {
+        r.get(0)
+    }) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Write a `kernel_meta` value (upsert).
@@ -331,19 +336,22 @@ pub(crate) fn now_ms() -> i64 {
 // runtime knobs land here too, so one table backs the whole settings family.
 
 /// Read one `account_settings` value. `None` = the key was never written for
-/// this account (the caller's fallback applies).
+/// this account (the caller's fallback applies). A genuine read error is
+/// propagated as `Err` rather than melted into `None` (issue #1199 §11-1).
 pub fn account_setting_get(
     conn: &Connection,
     account_id: &str,
     key: &str,
 ) -> anyhow::Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT value FROM account_settings WHERE account_id = ?1 AND key = ?2",
-            rusqlite::params![account_id, key],
-            |r| r.get(0),
-        )
-        .ok())
+    match conn.query_row(
+        "SELECT value FROM account_settings WHERE account_id = ?1 AND key = ?2",
+        rusqlite::params![account_id, key],
+        |r| r.get(0),
+    ) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Write one `account_settings` value (upsert).

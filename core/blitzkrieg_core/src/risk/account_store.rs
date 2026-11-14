@@ -80,8 +80,7 @@ impl AccountRiskDb {
                 let (id, single, daily, position, losses, cooldown, source) = match row {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(error = %e, "account_risk row unreadable — skipped");
-                        continue;
+                        return Err(format!("account_risk row unreadable — fail-closed: {e}"));
                     }
                 };
                 // The one-shot importer writes placeholder zeros
@@ -126,17 +125,22 @@ impl AccountRiskDb {
                     max_order_notional_usd: Bound::off(),
                 };
                 // #1186's cap lives in the settings table (the v1 schema has
-                // no column for it); a missing key stays off.
-                let cap: Option<String> = conn
-                    .query_row(
-                        "SELECT value FROM account_settings
+                // Match on the Result directly to distinguish "key truly absent"
+                // (QueryReturnedNoRows -> Bound::off()) from a genuine read error
+                // (column gone, db locked/corrupt) which is fail-closed.
+                match conn.query_row(
+                    "SELECT value FROM account_settings
                          WHERE account_id = ?1 AND key = ?2",
-                        [&id, MAX_ORDER_NOTIONAL_SETTING],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(raw) = cap {
-                    limits.max_order_notional_usd = dec_bound(&raw);
+                    [&id, MAX_ORDER_NOTIONAL_SETTING],
+                    |r| -> Result<String, _> { r.get(0) },
+                ) {
+                    Ok(raw) => limits.max_order_notional_usd = dec_bound(&raw),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(e) => {
+                        return Err(format!(
+                            "account_settings max_order_notional read failed for {id}: {e}"
+                        ));
+                    }
                 }
                 out.insert(id, limits);
             }
@@ -144,16 +148,18 @@ impl AccountRiskDb {
         })
     }
 
-    /// Every `account_exit_policy` row, deserialized over `base` (the global
-    /// exit config). A malformed JSON row is skipped with a warning; the
-    /// caller's global/account fallback stands. Zero rows is `Ok` with an
-    /// empty map ("this account has no DB row → use the env global") — but a
-    /// *query* failure (the table is gone, the file unreadable) is `Err`: it
-    /// is never silent-grown into "no rows", which the boot chain would read
-    /// as "use the env global" and keep trading with a silently-defaulted
-    /// exit discipline (issue #1199 fourth audit P0: the load_risk fix in
-    /// #1214 applied to the exit twin too).
-    pub fn load_exits(&self, base: &ExitConfig) -> Result<BTreeMap<String, ExitConfig>, String> {
+    /// Every `account_exit_policy` row, deserialized as the account's exit
+    /// config (stored rows are authoritative; nothing is layered over `base`
+    /// here — the caller overlays the global fallback for missing accounts).
+    /// A malformed JSON row is skipped with a warning; the caller's
+    /// global/account fallback stands. Zero rows is `Ok` with an empty map
+    /// ("this account has no DB row → use the env global") — but a *query*
+    /// failure (the table is gone, the file unreadable) is `Err`: it is
+    /// never silent-grown into "no rows", which the boot chain would read as
+    /// "use the env global" and keep trading with a silently-defaulted exit
+    /// discipline (issue #1199 fourth audit P0: the load_risk fix in #1214
+    /// applied to the exit twin too).
+    pub fn load_exits(&self) -> Result<BTreeMap<String, ExitConfig>, String> {
         self.db.with_connection(|conn| {
             let mut stmt = conn
                 .prepare("SELECT account_id, policy_json FROM account_exit_policy")
@@ -166,8 +172,9 @@ impl AccountRiskDb {
                 let (id, json) = match row {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(error = %e, "account_exit_policy row unreadable — skipped");
-                        continue;
+                        return Err(format!(
+                            "account_exit_policy row unreadable — fail-closed: {e}"
+                        ));
                     }
                 };
                 match serde_json::from_str::<ExitConfig>(&json) {
@@ -175,13 +182,12 @@ impl AccountRiskDb {
                         out.insert(id, exit);
                     }
                     Err(e) => tracing::warn!(
-                        account = %id,
+                            account = %id,
                         error = %e,
                         "account_exit_policy row malformed — global exit stays"
                     ),
                 }
             }
-            let _ = base;
             Ok(out)
         })
     }
@@ -453,7 +459,7 @@ mod tests {
             ..Default::default()
         };
         db.save_exit("paper", &exit).unwrap();
-        let rows = db.load_exits(&ExitConfig::default()).unwrap();
+        let rows = db.load_exits().unwrap();
         assert_eq!(rows["paper"].stop_loss_pct, dec!(8));
         assert_eq!(rows["paper"].take_profit_pct, dec!(90));
         drop(db);
@@ -500,7 +506,7 @@ mod tests {
     #[test]
     fn fresh_db_load_exits_is_ok_and_empty() {
         let (db, dir) = temp_db();
-        let rows = db.load_exits(&ExitConfig::default()).unwrap();
+        let rows = db.load_exits().unwrap();
         assert!(rows.is_empty(), "zero rows is Ok, not an error: {rows:?}");
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
@@ -517,7 +523,7 @@ mod tests {
         db.db()
             .with_connection(|conn| conn.execute("DROP TABLE account_exit_policy", []))
             .expect("drop the account_exit_policy table");
-        let err = db.load_exits(&ExitConfig::default()).unwrap_err();
+        let err = db.load_exits().unwrap_err();
         assert!(
             err.contains("account_exit_policy"),
             "the error must name the failing query: {err}"
