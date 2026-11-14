@@ -1049,6 +1049,48 @@ impl Policy {
     /// `path` is kept in the signature only so the IPC write face can refuse
     /// when a stale `execution_policy.toml` still exists on disk (the write
     /// is the only path that would have created one, and it refuses to).
+    /// 操作者裁决 2026-11-14（#1199 第六轮）：`execution_policy.set` 的持久化
+    /// 半边住进 SQLite 的 `account_settings`（键 = env 语法原名，defaults 段
+    /// 存伪账户 `defaults` 名下）。boot 时把 SQL 行作为**最上层**叠加：
+    /// 代码默认 < TOML(已退役) < env(旧部署兼容) < SQL。校验失败返回 Err
+    /// （fail-closed——一段写坏的策略不许静默失效，调用方拒绝启动）。
+    pub fn overlay_sql_settings(
+        &mut self,
+        settings: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    ) -> Result<(), String> {
+        fn lookup_of<'a>(
+            keys: &'a std::collections::BTreeMap<String, String>,
+        ) -> impl Fn(&str) -> Option<String> + 'a {
+            move |key: &str| keys.get(key).filter(|v| !v.trim().is_empty()).cloned()
+        }
+        let has_policy =
+            |keys: &std::collections::BTreeMap<String, String>| {
+                keys.keys().any(|k| k.starts_with("POLICY_"))
+            };
+        if let Some(keys) = settings
+            .iter()
+            .find(|(id, keys)| id.eq_ignore_ascii_case("defaults") && has_policy(keys))
+            .map(|(_, keys)| keys)
+        {
+            let env = lookup_of(keys);
+            apply_env(&mut self.defaults, None, &env)?;
+            self.defaults.validate("[defaults] (SQLite)")?;
+        }
+        for (id, keys) in settings {
+            if id.eq_ignore_ascii_case("defaults") || !has_policy(keys) {
+                continue;
+            }
+            let env = lookup_of(keys);
+            let resolved = self
+                .accounts
+                .entry(id.clone())
+                .or_insert_with(|| self.defaults.clone());
+            apply_env(resolved, Some(id), &env)?;
+            resolved.validate(&format!("[accounts.{id}] (SQLite)"))?;
+        }
+        Ok(())
+    }
+
     pub fn load_single_source(path: &Path, env_path: Option<&Path>) -> Result<Self, String> {
         let file_map: std::collections::HashMap<String, String> = env_path
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -1092,18 +1134,67 @@ impl Policy {
         env_path: &Path,
         written: &std::collections::BTreeMap<String, Option<String>>,
     ) -> Result<Self, String> {
-        Self::load_for_reload_with_env(path, env_path, written, |key| {
-            std::env::var(key).ok().filter(|v| !v.trim().is_empty())
-        })
+        Self::load_for_reload_with_sql(
+            path,
+            env_path,
+            written,
+            &Default::default(),
+            |key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()),
+        )
+    }
+
+    /// The SQL-aware reload (操作者裁决 2026-11-14): the kernel's write face
+    /// lands policy sections in SQLite now, so the reload resolves them.
+    /// Precedence: IPC write snapshot (含墓碑) > SQL 行 > `.env` 文件（旧部署
+    /// 兼容与手工编辑）> 进程环境。写快照在最前是因为 reset 的 `None` 墓碑
+    /// 必须挡住陈旧的文件行（#757）——SQL 行本身已含本会话写入。
+    pub fn load_for_reload_with_sql(
+        path: &Path,
+        env_path: &Path,
+        written: &std::collections::BTreeMap<String, Option<String>>,
+        sql: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+        process_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let flat: std::collections::BTreeMap<String, String> = sql
+            .values()
+            .flat_map(|keys| keys.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .collect();
+        Self::load_for_reload_with_env_inner(
+            path,
+            env_path,
+            written,
+            &flat,
+            process_env,
+        )
     }
 
     /// The test seam for [`Self::load_for_reload`]: the process-environment
     /// reader is injected so the precedence can be proven without mutating
     /// global state (parallel tests race on `std::env`).
+    /// The test seam for [`Self::load_for_reload`]: the process-environment
+    /// reader is injected so the precedence can be proven without mutating
+    /// global state (parallel tests race on `std::env`).
+    #[cfg(test)]
     fn load_for_reload_with_env(
         path: &Path,
         env_path: &Path,
         written: &std::collections::BTreeMap<String, Option<String>>,
+        process_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        Self::load_for_reload_with_env_inner(
+            path,
+            env_path,
+            written,
+            &Default::default(),
+            process_env,
+        )
+    }
+
+    fn load_for_reload_with_env_inner(
+        path: &Path,
+        env_path: &Path,
+        written: &std::collections::BTreeMap<String, Option<String>>,
+        sql_flat: &std::collections::BTreeMap<String, String>,
         process_env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let file_map: std::collections::HashMap<String, String> = std::fs::read_to_string(env_path)
@@ -1117,14 +1208,19 @@ impl Policy {
         // guard and is never read here.
         let _ = path;
         let env = |key: &str| -> Option<String> {
-            if let Some(v) = file_map.get(key) {
-                return Some(v.clone());
-            }
             // An IPC write owns its keys even when the file no longer
             // carries them: `None` is a reset tombstone, and the stale
-            // process value must NOT come back through the fallback.
+            // process value must NOT come back through the fallback (#757).
             if let Some(v) = written.get(key) {
                 return v.clone();
+            }
+            // The kernel's durable write face (SQLite) — newer than any
+            // file line; a SQL row outranks a legacy `.env` spelling.
+            if let Some(v) = sql_flat.get(key) {
+                return Some(v.clone());
+            }
+            if let Some(v) = file_map.get(key) {
+                return Some(v.clone());
             }
             process_env(key)
         };

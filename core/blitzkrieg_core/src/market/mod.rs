@@ -113,17 +113,11 @@ pub fn boot_enablement(
                 })
                 .is_some();
             if stale {
-                let env_path = core
-                    .config()
-                    .env_file_path
-                    .as_deref()
-                    .map(std::path::Path::new);
-                match crate::runtime_config::persist_market_plugin_to_with_env(
+                match crate::runtime_config::persist_market_plugin_to(
                     std::path::Path::new(path),
                     None,
                     "system:venue-derive-migration",
                     blitzkrieg_market_api::net::now_ms(),
-                    env_path,
                 ) {
                     Ok(()) => tracing::info!(
                         target: "risk",
@@ -505,12 +499,9 @@ async fn persist_cell(
     now_ms: i64,
 ) -> Result<(), crate::model::CoreError> {
     use crate::model::{CoreError, CoreErrorCode};
-    let (path, env_path) = {
+    let path = {
         let c = core.lock().await;
-        (
-            c.config().runtime_config_path.clone(),
-            c.config().env_file_path.clone(),
-        )
+        c.config().runtime_config_path.clone()
     };
     let path = path.ok_or_else(|| {
         CoreError::new(
@@ -521,13 +512,11 @@ async fn persist_cell(
                 .to_string(),
         )
     })?;
-    let env_path = env_path.as_deref().map(std::path::Path::new);
-    crate::runtime_config::persist_market_plugin_to_with_env(
+    crate::runtime_config::persist_market_plugin_to(
         std::path::Path::new(&path),
         plugin,
         actor,
         now_ms,
-        env_path,
     )
     .map_err(|e| {
         CoreError::new(
@@ -852,12 +841,11 @@ mod set_tests {
         let cell = cell_in(&dir);
         // Pre-seed a good cell: a refused write must leave it untouched
         // (plan-first — the validation happens before anything touches disk).
-        crate::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to(
             std::path::Path::new(&cell),
             Some("alpha"),
             "seed",
             0,
-            None,
         )
         .expect("seed the cell");
         let core = core_with_cell(Some(cell.clone()));
@@ -1083,12 +1071,11 @@ mod derive_tests {
         let cell = cell_in(&dir);
         // 旧持久格：上一次 UI 写的 alpha —— 现在账户绑定了 beta/gamma，派生
         // 集合非空，旧格必须退休。
-        crate::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to(
             std::path::Path::new(&cell),
             Some("alpha"),
             "uid:old",
             0,
-            None,
         )
         .expect("seed the old cell");
         let loaded = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
@@ -1145,12 +1132,11 @@ mod derive_tests {
         let dir = scratch("ghostcell");
         let cell = cell_in(&dir);
         // 格里只写一个未注册的名 "ghost" —— 不是可启动格。
-        crate::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to(
             std::path::Path::new(&cell),
             Some("ghost"),
             "uid:old",
             0,
-            None,
         )
         .expect("seed the unbootable cell");
         let loaded = crate::runtime_config::load_market_plugin_from(std::path::Path::new(&cell));
@@ -1280,12 +1266,11 @@ mod derive_tests {
         // 时 cell 是 None，直接落 fallback；persisted 层用带路径的核验证。
         let dir = scratch("readout");
         let path = cell_in(&dir);
-        crate::runtime_config::persist_market_plugin_to_with_env(
+        crate::runtime_config::persist_market_plugin_to(
             std::path::Path::new(&path),
             Some("alpha"),
             "uid:old",
             0,
-            None,
         )
         .expect("seed the cell");
         let core = core_with_bindings(&[], Some(path));

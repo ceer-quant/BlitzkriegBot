@@ -744,29 +744,6 @@ impl Core {
                     format!("round_duration.set: SQLite 落盘失败，未做任何变更（{e}）"),
                 )
             })?;
-            // 一次性清扫：旧部署的 `ACCOUNT_<ID>_ROUND_DURATION_SEC` 键从此
-            // 不再是数据源（零写值，只删键）。否则 reset 删掉行之后，启动会
-            // 读到那条陈旧的 env 值，把「回落默认网格」变成「回落到旧值」。
-            if let Some(env_path) = self.cockpit_env_path() {
-                let sfx: String = account_id
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() {
-                            c.to_ascii_uppercase()
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-                if let Err(e) = crate::env_file::remove_env_vars(env_path, &[key.as_str()]) {
-                    tracing::warn!(
-                        target: "risk",
-                        account = %account_id,
-                        "the legacy round-duration env key could not be swept ({e}) — the                          database row still wins at boot, but a later reset would fall back                          to the stale env value"
-                    );
-                }
-            }
         } else {
             tracing::warn!(
                 target: "risk",

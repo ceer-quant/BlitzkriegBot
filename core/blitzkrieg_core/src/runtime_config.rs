@@ -159,24 +159,17 @@ pub fn persist_market_plugin(
     persist_market_plugin_to(&state_path(), plugin, actor, now_ms)
 }
 
+
+
+/// Write (or clear) the persisted market-plugin choice. issue #1199 第六轮
+/// （操作者裁决 2026-11-14）：`.env` 对内核只读——config.json 的 cell 是
+/// 这一类进程级事实的文件落点，SQL 收口（kernel_meta）随 #1200；
+/// 本函数不再触碰任何 `.env`。
 pub fn persist_market_plugin_to(
     path: &std::path::Path,
     plugin: Option<&str>,
     actor: &str,
     now_ms: i64,
-) -> std::io::Result<()> {
-    persist_market_plugin_to_with_env(path, plugin, actor, now_ms, None)
-}
-
-/// Write (or clear) the persisted market-plugin choice, also updating the `.env`
-/// RUNTIME_MARKET_PLUGIN key when `env_path` is provided (issue 751).
-/// The JSON cell is kept as a migration fallback; the env key outranks it.
-pub fn persist_market_plugin_to_with_env(
-    path: &std::path::Path,
-    plugin: Option<&str>,
-    actor: &str,
-    now_ms: i64,
-    env_path: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let market_plugin_actor = plugin.map(|_| actor.to_string());
     let market_plugin_at_ms = plugin.map(|_| now_ms);
@@ -193,46 +186,20 @@ pub fn persist_market_plugin_to_with_env(
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
     std::fs::rename(&tmp, path)?;
-
-    // Issue 751: also write the env key when a path is provided.
-    if let Some(env) = env_path {
-        let mut vars = std::collections::BTreeMap::new();
-        if let Some(p) = plugin {
-            vars.insert("RUNTIME_MARKET_PLUGIN".to_string(), p.to_string());
-        }
-        if !vars.is_empty() {
-            crate::env_file::upsert_env_vars(env, &vars)?;
-        } else {
-            crate::env_file::remove_env_vars(env, &["RUNTIME_MARKET_PLUGIN"])?;
-        }
-    }
     Ok(())
 }
 
+
+
+/// Write (or clear) the persisted round duration. issue #1199 第六轮：
+/// `.env` 对内核只读；每账户轮次锚点的家是 SQLite（`account_settings`，
+/// `round_duration.set`），本全局 cell 只服务 config.json 的兼容读面。
 pub fn persist_round_duration_to(
     path: &std::path::Path,
     duration_sec: Option<i64>,
     actor: &str,
     now_ms: i64,
 ) -> std::io::Result<()> {
-    persist_round_duration_to_with_env(path, duration_sec, actor, now_ms, None)
-}
-
-/// Write (or clear) the persisted round duration, also updating the `.env`
-/// RUNTIME_ROUND_DURATION_SEC key when `env_path` is provided (issue 751).
-/// The JSON cell is kept as a migration fallback; the env key outranks it.
-pub fn persist_round_duration_to_with_env(
-    path: &std::path::Path,
-    duration_sec: Option<i64>,
-    actor: &str,
-    now_ms: i64,
-    env_path: Option<&std::path::Path>,
-) -> std::io::Result<()> {
-    // Read-modify-write so a future second cell in this file survives an
-    // unrelated round-duration write. A broken existing file is overwritten
-    // (the load path already warned); there is nothing else in it worth
-    // keeping. Every round-duration field is written together — a reset
-    // must not leave the old actor/at behind.
     let round_duration_actor = duration_sec.map(|_| actor.to_string());
     let round_duration_at_ms = duration_sec.map(|_| now_ms);
     let mut doc: RuntimeConfigDoc = std::fs::read_to_string(path)
@@ -248,72 +215,9 @@ pub fn persist_round_duration_to_with_env(
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
     std::fs::rename(&tmp, path)?;
-
-    // Issue 751: also write the env key when a path is provided.
-    if let Some(env) = env_path {
-        let mut vars = std::collections::BTreeMap::new();
-        if let Some(sec) = duration_sec {
-            vars.insert("RUNTIME_ROUND_DURATION_SEC".to_string(), sec.to_string());
-        }
-        if !vars.is_empty() {
-            crate::env_file::upsert_env_vars(env, &vars)?;
-        } else {
-            crate::env_file::remove_env_vars(env, &["RUNTIME_ROUND_DURATION_SEC"])?;
-        }
-    }
     Ok(())
 }
 
-/// One-shot boot migration: drain any legacy credentials cell from the
-/// runtime config (the retired `market.credentials.set` landing format) into
-/// the `.env` single source, then strip the key from the config file so a
-/// later sibling-cell write cannot resurrect it. Returns the number of
-/// credential VALUES moved. Idempotent: a file without the key moves zero.
-/// A missing config, a missing `.env` path, or an unreadable cell is the
-/// normal first-boot case — zero, no drama. Values never appear in logs;
-/// the caller reports the migrated KEY names if it wants to.
-pub fn migrate_credentials_cell_to_env(
-    config_path: &std::path::Path,
-    env_path: &std::path::Path,
-) -> std::io::Result<usize> {
-    let text = match std::fs::read_to_string(config_path) {
-        Ok(t) => t,
-        Err(_) => return Ok(0),
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Ok(0);
-    };
-    let Some(all) = v.get("credentials").and_then(|c| c.as_object()) else {
-        return Ok(0);
-    };
-    let mut moved = 0usize;
-    let mut drained: std::collections::BTreeMap<String, String> = Default::default();
-    for (_plugin, vars) in all {
-        let Some(vars) = vars.as_object() else {
-            continue;
-        };
-        for (name, value) in vars {
-            let Some(s) = value.as_str() else { continue };
-            if s.is_empty() {
-                continue;
-            }
-            drained.insert(name.clone(), s.to_string());
-            moved += 1;
-        }
-    }
-    if drained.is_empty() {
-        return Ok(0);
-    }
-    crate::env_file::upsert_env_vars(env_path, &drained)?;
-    // Strip the drained key from the config: read back through the strict
-    // doc type (unknown field ignored) and rewrite — the cell cannot come
-    // back through a sibling write.
-    let doc: RuntimeConfigDoc = serde_json::from_str(&text).unwrap_or_default();
-    let tmp = config_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc)?)?;
-    std::fs::rename(&tmp, config_path)?;
-    Ok(moved)
-}
 
 /// #458: append one JSONL record for a manual, destructive operation
 /// (`system.reset_trading`; #456's force-close rides the same file). The
@@ -491,60 +395,5 @@ mod tests {
     fn a_missing_file_yields_no_plugin_cell() {
         let d = tmpdir("noplugin");
         assert_eq!(load_market_plugin_from(&d.join("config.json")), None);
-    }
-
-    #[test]
-    fn legacy_credentials_cell_migrates_to_env_and_strips_the_key() {
-        let d = tmpdir("credmigrate");
-        let p = d.join("config.json");
-        let env = d.join(".env");
-        // The legacy shape: two plugins' cells written by the old kernel.
-        // Key names are arbitrary to the migrator (it drains whatever the
-        // cell holds); neutral names keep real credential spellings out of
-        // the source.
-        std::fs::write(
-            &p,
-            r#"{"credentials": {"kalshi": {"BK_TEST_KEY_A": "key-1",
-               "BK_TEST_KEY_B": "begin-marker"},
-               "polysimulator": {"BK_TEST_KEY_C": ""}}}"#,
-        )
-        .unwrap();
-        let moved = migrate_credentials_cell_to_env(&p, &env).unwrap();
-        assert_eq!(moved, 2, "the empty value is not a credential to move");
-        let env_text = std::fs::read_to_string(&env).unwrap();
-        assert!(env_text.contains("BK_TEST_KEY_A=\"key-1\""));
-        assert!(env_text.contains("BK_TEST_KEY_B=\"begin-marker\""));
-        assert!(
-            !env_text.contains("BK_TEST_KEY_C"),
-            "empty legacy values are noise, not credentials"
-        );
-        // The config key is stripped — the migration is one-shot.
-        let stripped = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            !stripped.contains("credentials"),
-            "the drained key must not survive: {stripped}"
-        );
-        assert_eq!(migrate_credentials_cell_to_env(&p, &env).unwrap(), 0);
-        // The sibling cells still work on the rewritten file.
-        persist_round_duration_to(&p, Some(900), "uid:test", 2_000).unwrap();
-        assert_eq!(
-            load_round_duration_from(&p, TEST_ALLOWED),
-            Some(RoundDurationCell { duration_sec: 900 })
-        );
-    }
-
-    #[test]
-    fn a_config_without_the_credentials_cell_migrates_zero() {
-        let d = tmpdir("credzero");
-        let p = d.join("config.json");
-        std::fs::write(&p, r#"{"marketPlugin": "polymarket"}"#).unwrap();
-        assert_eq!(
-            migrate_credentials_cell_to_env(&p, &d.join(".env")).unwrap(),
-            0
-        );
-        assert!(
-            !d.join(".env").exists(),
-            "zero moved must not create a .env"
-        );
     }
 }

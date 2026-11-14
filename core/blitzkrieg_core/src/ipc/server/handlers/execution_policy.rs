@@ -118,6 +118,53 @@ pub(crate) async fn handle_execution_policy(
     }
 }
 
+/// #965's toml gate, kept in the SQL world（#1199 第六轮，操作者裁决
+/// 2026-11-14）：loader 不读 toml，但 policy 路径上的文件要么是内核自产的
+/// bootstrap 模板（第一次真实写时清扫），要么是操作员手编文件（写按名
+/// 拒绝——死数据不许在 store 旁边静默堆积）。原探针住在 EnvStore；EnvStore
+/// 退役后这门跟着写面走（set 与 reset 同一姿态）。
+async fn policy_toml_gate(
+    core: &Arc<AsyncMutex<Core>>,
+) -> Result<(), (i32, String, Option<ErrorData>)> {
+    let policy_path = {
+        let c = core.lock().await;
+        c.config().execution_policy_path.clone()
+    };
+    let Some(policy_path) = policy_path else {
+        return Ok(());
+    };
+    let path = std::path::Path::new(&policy_path);
+    if !path.exists() {
+        return Ok(());
+    }
+    let is_kernel_template = std::fs::read_to_string(path)
+        .map(|text| text == crate::execution_policy::BOOTSTRAP_TEMPLATE)
+        .unwrap_or(false);
+    if is_kernel_template {
+        if let Err(e) = std::fs::remove_file(path) {
+            // The template is inert, so a failed sweep must not block the
+            // operator's write — warn and carry on.
+            tracing::warn!(
+                path = %policy_path,
+                error = %e,
+                "could not sweep the auto-generated execution_policy.toml \
+                 template — proceeding with the store write (the file is inert)"
+            );
+        }
+        return Ok(());
+    }
+    Err((
+        Failure::INVALID_PARAMS,
+        format!(
+            "refusing the policy write: the legacy {policy_path} still exists — \
+             run scripts/migrate-config-to-env.sh first (issue 751/#967: one source; \
+             the loader reads the store's POLICY_* rows only, so this file is \
+             dead data)"
+        ),
+        None,
+    ))
+}
+
 /// #363: the `execution_policy.set` flow — validate params, write the ONE
 /// named account's section, full-reload in memory, land one audit line.
 /// Separate from `handle_line` so the early returns are plain `?`/`return`
@@ -140,6 +187,7 @@ async fn execution_policy_set(
             ));
         }
     }
+    policy_toml_gate(core).await?;
     let before = {
         let c = core.lock().await;
         c.execution_policy_section_view(&p.account_id)
@@ -205,6 +253,7 @@ async fn execution_policy_reset(
             ));
         }
     }
+    policy_toml_gate(core).await?;
     let before = {
         let c = core.lock().await;
         c.execution_policy_section_view(&p.account_id)

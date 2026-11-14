@@ -25,8 +25,24 @@ impl Core {
         &mut self,
         path: impl Into<std::path::PathBuf>,
     ) -> Result<(), String> {
+        // 装配已经打开过库（生产路径，`config.db_path`）→ 不再二次打开：
+        // 同一个句柄已经在位，重复 open 只会制造第二个连接。
+        if self.account_risk_db.is_some() {
+            return Ok(());
+        }
         let db = crate::risk::account_store::AccountRiskDb::open(path)
             .map_err(|e| format!("account risk store open failed: {e}"))?;
+        self.install_risk_db(db)
+    }
+
+    /// 把一个已打开的 `AccountRiskDb` 安装进核心：风控行、退出纪律、账户
+    /// 设置（策略集合 / 轮次锚点）与进化开关句柄，全部来自同一连接。
+    /// 生产装配（`with_account_book`）与测试入口（`open_account_risk_db`）
+    /// 共用这一段——overlay 语义只有一份。
+    fn install_risk_db(
+        &mut self,
+        db: crate::risk::account_store::AccountRiskDb,
+    ) -> Result<(), String> {
         // issue #1199 P1-1: a risk read failure is never silent-grown into an
         // empty map (the boot chain would read that as "use the env global"
         // and keep trading with widened limits). Fail-closed: refuse boot.
@@ -161,6 +177,14 @@ impl Core {
         self.account_risk_db.is_some()
     }
 
+    /// The open durable store handle (`None` = no store on this core). The
+    /// session boot uses it for the credential-row injection.
+    pub fn account_risk_db_handle(
+        &self,
+    ) -> Option<crate::risk::account_store::AccountRiskDb> {
+        self.account_risk_db.clone()
+    }
+
     /// issue #1199 R2: whether the OPEN database carries no data at all —
     /// zero `account_risk` rows AND no `import_v1` marker. Only meaningful
     /// with a store open (an env-fallback core answers `false`: there is no
@@ -254,25 +278,134 @@ impl Core {
         // (subscription allow-list). Fail-closed: if an account's anchor duration
         // is not in its allow-list, refuse the boot.
         let env_file_path = config.env_file_path.clone();
-        // issue #1199 PR-1: the store handle, assembled from the config's
-        // resolved paths BEFORE the config moves into the struct (same
-        // ordering as `env_file_path` above). `accounts_config_path` gates
-        // the account-book writers (None = persistence disabled), the env
-        // path gates the cockpit/policy/round-duration/credential writers —
-        // the exact per-call resolution the writers did before.
-        let store: Option<Box<dyn crate::store::StoreApi>> =
-            if config.accounts_config_path.is_some() || config.env_file_path.is_some() {
-                Some(Box::new(crate::store::EnvStore::new(
-                    config.account_env_write_paths(),
-                    config
-                        .env_file_path
-                        .as_deref()
-                        .map(std::path::PathBuf::from),
-                    config.execution_policy_path.clone(),
-                )))
+        // issue #1199 第六轮（操作者裁决 2026-11-14）：`.env` 对内核是
+        // **只读**的——唯一的持久化后端是 SQLite（`config.db_path`，session
+        // 在生产里设为 `db::default_db_path()`）。打开失败 fail-closed：
+        // 拒绝启动，绝不静默降级成无存储继续跑。`None` = 回测/多数进程内
+        // 测试：每个写面如实拒绝，绝不写 `.env`。
+        let sqlite = config.db_path.as_ref().map(|path| {
+            crate::store::SqliteStore::open(path).unwrap_or_else(|e| {
+                panic!(
+                    "refusing to boot: SQLite store open failed ({e}) — fix the \
+                     database path and restart; a kernel without its durable \
+                     store must not trade"
+                )
+            })
+        });
+        let store: Option<Box<dyn crate::store::StoreApi>> = sqlite
+            .as_ref()
+            .map(|s| Box::new(s.clone()) as Box<dyn crate::store::StoreApi>);
+        // 账户簿的家（同裁决）：`accounts` 表非空 → 整簿从行重建，SQL 是
+        // 权威（`.env` 的 ACCOUNT_* 只是迁移前旧部署的兼容回退——读允许，
+        // 写路径已整体废除）。空表 → 沿用 env 簿（首次升级后的状态），此后
+        // 任何账户写面落库即切换。库里带的轮次锚点同时压过 env 键：
+        // `sql_round_anchors` 告诉下面的 env 锚点循环跳过这些账户（否则一条
+        // 陈旧的 env 键会把「库里权威」炸回「fail-closed 拒启」）。
+        let sql_round_anchors: std::collections::HashSet<String> = if let Some(s) = &sqlite {
+            let rows = s.risk_db().load_accounts().unwrap_or_else(|e| {
+                panic!(
+                    "refusing to boot: accounts table read failed ({e}) — the \
+                     durable book must be readable or the kernel must not trade"
+                )
+            });
+            let settings = s
+                .risk_db()
+                .load_settings()
+                .unwrap_or_else(|e| panic!("refusing to boot: account_settings read failed ({e})"));
+            let anchors: std::collections::HashSet<String> = settings
+                .into_iter()
+                .filter(|(_, keys)| {
+                    keys.contains_key(crate::risk::account_store::ROUND_DURATION_SETTING)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            if !rows.is_empty() {
+                accounts = Self::ledger_book_from_rows(&rows, s.risk_db(), now_ms());
             } else {
-                None
-            };
+                // 首次升级 boot：`accounts` 表空、簿来自只读 `.env`（兼容
+                // 回退）。物化：整簿写进 SQL —— 从这次 boot 起 `accounts`
+                // 表就是簿的家，运行时每个账户写面（venue/rounds/status/
+                // remove…）都有行可写。只读 env、写 SQL，同一裁决的两半。
+                // Fail-closed：物化写失败 = 库写不进 = 拒绝启动（与 store
+                // open 失败同一姿态：没有持久家的内核不交易）。
+                for acc in accounts.account_list() {
+                    use crate::account::AccountStatus;
+                    let status = match &acc.status {
+                        AccountStatus::Active => "active",
+                        AccountStatus::ReadOnly => "read_only",
+                        AccountStatus::Frozen => "frozen",
+                        AccountStatus::Suspended { .. } => "suspended",
+                    };
+                    if !matches!(
+                        acc.market_type,
+                        blitzkrieg_market_api::MarketType::Prediction
+                    ) {
+                        panic!(
+                            "refusing to boot: env account `{}` carries a non-prediction \
+                             market type — the env book can only spell prediction accounts \
+                             (fail-closed: the durable book must parse or the kernel must \
+                             not trade)",
+                            acc.id
+                        );
+                    }
+                    let rounds_json = serde_json::to_string(&acc.rounds)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "refusing to boot: env account `{}` rounds do not render \
+                                 as JSON ({e})",
+                                acc.id
+                            )
+                        });
+                    let row = crate::risk::account_store::AccountRow {
+                        id: acc.id.as_str().to_string(),
+                        name: acc.name.clone(),
+                        market_type: "prediction".to_string(),
+                        status: status.to_string(),
+                        venue: acc.venue.clone(),
+                        trading_enabled: acc.trading_enabled,
+                        rounds_json,
+                        opening_equity: acc.opening_equity.map(|d| d.to_string()),
+                        updated_at_ms: if acc.updated_at_ms > 0 {
+                            acc.updated_at_ms
+                        } else {
+                            now_ms()
+                        },
+                    };
+                    s.risk_db().save_account_row(&row).unwrap_or_else(|e| {
+                        panic!(
+                            "refusing to boot: env book materialization failed for `{}` \
+                             ({e}) — the durable book must be writable or the kernel \
+                             must not trade",
+                            acc.id
+                        )
+                    });
+                    let ck = &acc.credential_keys;
+                    if ck.api_key_env.is_some()
+                        || ck.secret_env.is_some()
+                        || ck.passphrase_env.is_some()
+                        || ck.private_key_env.is_some()
+                    {
+                        s.risk_db()
+                            .save_credential_names(acc.id.as_str(), ck)
+                            .unwrap_or_else(|e| {
+                                panic!(
+                                    "refusing to boot: credential names materialization \
+                                     failed for `{}` ({e})",
+                                    acc.id
+                                )
+                            });
+                    }
+                    tracing::info!(
+                        account = %acc.id,
+                        "env book materialized into SQL — the accounts table is the \
+                         book's durable home from this boot on (env stays read-only)"
+                    );
+                }
+            }
+            anchors
+        } else {
+            Default::default()
+        };
         let env_lookup = crate::account::config::env_lookup_from_sources(
             env_file_path.as_deref().map(std::path::Path::new),
         );
@@ -310,7 +443,11 @@ impl Core {
                 })
                 .collect();
             let key = format!("ACCOUNT_{sfx}_ROUND_DURATION_SEC");
-            if let Some(sec_str) = env_lookup(&key) {
+            // 库里有这个账户的轮次锚点行 → 行是权威，env 键（读允许）不再
+            // 参与校验：一条陈旧的 env 值不得否决库里的网格。
+            if !sql_round_anchors.contains(id)
+                && let Some(sec_str) = env_lookup(&key)
+            {
                 if let Ok(sec) = sec_str.trim().parse::<i64>() {
                     config.account_round_durations.insert(id.to_string(), sec);
                     // Validation: the anchor must be in the account's ROUNDS allow-list.
@@ -476,7 +613,30 @@ impl Core {
         // resolution (found / neutral-kernel WARN) there. The library
         // honours whatever path it is handed, verbatim, so an embedder (and
         // every in-process test) keeps exactly the semantics it asked for.
-        let execution_policy = Self::load_execution_policy_at_boot(&config);
+        // 操作者裁决 2026-11-14：策略段的 SQL 行是 boot 的最上层——先取行，
+        // 装载后叠加（file/env 是旧部署兼容，行是内核自己的新写入）。
+        let sql_policy_settings = sqlite.as_ref().map(|s| {
+            s.risk_db()
+                .load_settings()
+                .unwrap_or_else(|e| {
+                    panic!("refusing to boot: account_settings read failed ({e})")
+                })
+        });
+        let execution_policy = {
+            let policy = Self::load_execution_policy_at_boot(&config);
+            match (policy, sql_policy_settings.as_ref()) {
+                (Some(mut p), Some(settings)) => {
+                    if let Err(reason) = p.overlay_sql_settings(settings) {
+                        panic!(
+                            "refusing to boot: the SQLite policy sections do not validate \
+                             ({reason}) — fix the rows and restart (fail-closed)"
+                        );
+                    }
+                    Some(p)
+                }
+                (other, _) => other,
+            }
+        };
         // #363: the per-asset cap precedence — CLI flag > policy section >
         // compiled 1. The CLI already writes total `max_positions` straight
         // into `config.positions`; this mirrors that for per-asset, reading
@@ -923,6 +1083,14 @@ impl Core {
             // the backtester/most-test shape: session-scoped, as always).
             risk_state,
         };
+        // 操作者裁决 2026-11-14（#1199 第六轮）：库在装配里打开即安装——
+        // 风控行、退出纪律、账户设置与进化开关句柄全部来自同一连接。
+        // 失败 fail-closed：拒绝启动。
+        if let Some(s) = &sqlite
+            && let Err(e) = core.install_risk_db(s.risk_db().clone())
+        {
+            panic!("refusing to boot: {e}");
+        }
         // The kill switch and the freeze book land AFTER the struct exists
         // (they run the freeze paths, which emit and touch the book). The
         // entry caps were restored into `config` above, so the gate the boot
@@ -953,8 +1121,112 @@ impl Core {
         core
     }
 
-    /// #363: the boot-time policy load. Malformed input is audited
-    /// (`load-refused`) and logged as a warning — the boot continues with the
+/// 从 `accounts` 表的行重建账户簿（SQL 权威，操作者裁决 2026-11-14）。
+/// Fail-closed：任何一个格子的形状不对都拒绝启动——「写进去的和读出来的
+/// 不是同一个事实」的簿不允许交易。策略集合不在行里（它们住在
+/// `account_settings`，由 `install_risk_db` 的 overlay 负责）。
+fn ledger_book_from_rows(
+    rows: &[crate::risk::account_store::AccountRow],
+    db: &crate::risk::account_store::AccountRiskDb,
+    now_ms: i64,
+) -> crate::account::AccountLedgers {
+    use crate::account::{Account, AccountLedgers, AccountStatus};
+    let mut accounts = Vec::with_capacity(rows.len());
+    for row in rows {
+        // `defaults` 是策略段选择器的保留拼写（env_state.rs：它永远不是
+        // 真实账户 id）——`save_policy_section` 为它 ensure 了一个行，
+        // 这里不许把它物化成账户。
+        if row.id.eq_ignore_ascii_case("defaults") {
+            continue;
+        }
+        if row.market_type != "prediction" {
+            panic!(
+                "refusing to boot: accounts row `{}` has unknown market_type `{}` \
+                 (fail-closed: the durable book must parse or the kernel must not trade)",
+                row.id, row.market_type
+            );
+        }
+        let status = match row.status.as_str() {
+            "active" => AccountStatus::Active,
+            "read_only" => AccountStatus::ReadOnly,
+            "frozen" => AccountStatus::Frozen,
+            "suspended" => AccountStatus::Suspended {
+                reason: "suspended (reason not stated in the store row)".into(),
+            },
+            other => panic!(
+                "refusing to boot: accounts row `{}` has unknown status `{other}`",
+                row.id
+            ),
+        };
+        let rounds: Vec<i64> = serde_json::from_str(&row.rounds_json).unwrap_or_else(|e| {
+            panic!(
+                "refusing to boot: accounts row `{}` rounds_json malformed ({e})",
+                row.id
+            )
+        });
+        let opening_equity = row.opening_equity.as_deref().map(|s| {
+            use std::str::FromStr as _;
+            rust_decimal::Decimal::from_str(s).unwrap_or_else(|_| {
+                panic!(
+                    "refusing to boot: accounts row `{}` opening_equity `{s}` is not a decimal",
+                    row.id
+                )
+            })
+        });
+        let credential_keys = db
+            .load_account_credential_keys(&row.id)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "refusing to boot: account_credentials read for `{}` failed ({e})",
+                    row.id
+                )
+            })
+            .map(|names| crate::account::CredentialKeys {
+                api_key_env: names.api_key_env,
+                secret_env: names.secret_env,
+                passphrase_env: names.passphrase_env,
+                private_key_env: names.private_key_env,
+                loaded: true,
+            })
+            .unwrap_or_default();
+        accounts.push(Account {
+            id: crate::model::AccountId::from(row.id.as_str()),
+            name: row.name.clone(),
+            market_type: blitzkrieg_market_api::MarketType::Prediction,
+            status,
+            credential_keys,
+            venue: row.venue.clone(),
+            trading_enabled: row.trading_enabled,
+            strategies: Vec::new(),
+            rounds,
+            opening_equity,
+            updated_at_ms: row.updated_at_ms,
+        });
+    }
+    if accounts.is_empty() {
+        return AccountLedgers::single_default(now_ms);
+    }
+    // active：配置里有 `default` 就是它，否则第一行（与 env 装载器同一规则）。
+    let default_id = crate::model::default_account_id();
+    let active = if accounts.iter().any(|a| a.id == default_id) {
+        default_id
+    } else {
+        accounts[0].id.clone()
+    };
+    // display：`kernel_meta.display_account` 行（`save_display_account` 的
+    // 家）；没有行或缺指 → 与 active 同格（env 装载器的派生规则）。
+    let display = db
+        .load_kernel_meta(crate::db::META_DISPLAY_ACCOUNT)
+        .ok()
+        .flatten()
+        .map(|d| crate::model::AccountId::from(d.as_str()))
+        .filter(|d| accounts.iter().any(|a| &a.id == d))
+        .unwrap_or_else(|| active.clone());
+    AccountLedgers::new_with_display(accounts, active, display)
+}
+
+/// #363: the boot-time policy load. Malformed input is audited
+/// (`load-refused`) and logged as a warning — the boot continues with the
     /// neutral (no-policy) kernel instead of dying. This mirrors the cockpit
     /// families' posture (warn + keep last-known-good): a bad POLICY_* key in
     /// `.env` must not take the whole kernel down, and the operator can fix
@@ -1216,11 +1488,30 @@ impl Core {
             .as_deref()
             .map(std::path::Path::new)
             .ok_or_else(|| "env_file_path not set".to_string())?;
-        match crate::execution_policy::Policy::load_for_reload(
-            std::path::Path::new(&path),
-            env_file,
-            &self.execution_policy_env_writes,
-        ) {
+        // SQL 行先取（本会话的写入已即时落库）；读取失败 fail-closed 保留
+        // 旧策略（一次坏读不许让守卫消失）。
+        let sql_settings = match self.account_risk_db.as_ref() {
+            Some(db) => Some(
+                db.load_settings()
+                    .map_err(|e| format!("the SQLite policy sections are unreadable ({e})"))?,
+            ),
+            None => None,
+        };
+        let reload = match sql_settings.as_ref() {
+            Some(sql) => crate::execution_policy::Policy::load_for_reload_with_sql(
+                std::path::Path::new(&path),
+                env_file,
+                &self.execution_policy_env_writes,
+                sql,
+                |key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()),
+            ),
+            None => crate::execution_policy::Policy::load_for_reload(
+                std::path::Path::new(&path),
+                env_file,
+                &self.execution_policy_env_writes,
+            ),
+        };
+        match reload {
             Ok(policy) => {
                 let mut positions = self.config.positions.clone();
                 positions.max_positions_per_asset = policy.defaults.max_positions_per_asset;
@@ -1246,74 +1537,70 @@ impl Core {
         }
     }
 
-    /// Reload account configuration from .env (ACCOUNT_* keys).
-    /// Fails closed if the .env is malformed, keeping the current configuration.
+    /// Reload account configuration. 操作者裁决 2026-11-14：库里的
+    /// `accounts` 表非空 → SQL 是权威（与 boot 同一规则，行从
+    /// [`Self::ledger_book_from_rows`] 重建）；空表 → `.env` 的 ACCOUNT_*
+    /// 兼容回退（只读）。Fails closed if the source is malformed, keeping
+    /// the current configuration.
     pub fn reload_accounts(&mut self) -> Result<(), String> {
-        let env_file = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new)
-            .ok_or_else(|| "env_file_path not set".to_string())?;
         let now_ms = blitzkrieg_market_api::net::now_ms();
         let allowed = &self.config.allowed_round_secs;
-        // Env-only (issue 923): no legacy toml fallback — a .env without
-        // ACCOUNT_LIST reloads into the zero-config single default.
-        match crate::account::config::load_account_ledgers_for_reload(env_file, now_ms, allowed) {
-            Ok(accounts) => self.accounts.reload_config(accounts),
-            Err(e) => Err(e.to_string()),
-        }
+        let sql_rows = match self.account_risk_db.as_ref() {
+            Some(db) => Some(db.load_accounts().map_err(|e| {
+                format!("the durable account book is unreadable ({e}) — refusing the reload")
+            })?),
+            None => None,
+        };
+        let accounts = match &sql_rows {
+            Some(rows) if !rows.is_empty() => {
+                Self::ledger_book_from_rows(rows, self.account_risk_db.as_ref().expect("checked above"), now_ms)
+            }
+            _ => {
+                let env_file = self
+                    .config
+                    .env_file_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .ok_or_else(|| "env_file_path not set".to_string())?;
+                // Env-only (issue 923): no legacy toml fallback — a .env without
+                // ACCOUNT_LIST reloads into the zero-config single default.
+                crate::account::config::load_account_ledgers_for_reload(
+                    env_file, now_ms, allowed,
+                )
+                .map_err(|e| e.message)?
+            }
+        };
+        self.accounts.reload_config(accounts)
     }
 
-    /// Reload shadow evolution switches from .env (SHADOW_* keys).
-    /// Fails closed if the .env is malformed, keeping the current configuration.
+    /// Reload shadow evolution switches. 操作者裁决 2026-11-14（#1230 起）：
+    /// 开关的家是 `kernel_meta`（`.env` 的 SHADOW_* 只是旧部署回退，只读）。
+    /// 库里有行读行；没有行才解析 env。
     pub fn reload_shadow(&mut self) -> Result<(), String> {
-        let env_path = self
-            .config
-            .env_file_path
-            .as_deref()
-            .map(std::path::Path::new);
-
-        let env_path = env_path.ok_or_else(|| "env_file_path not set".to_string())?;
-
-        // Read the .env file and find SHADOW_ENABLED and SHADOW_AUTO_EVOLVE
-        let content =
-            std::fs::read_to_string(env_path).map_err(|e| format!("failed to read .env: {}", e))?;
-
-        let mut enabled = false;
-        let mut auto_evolve = false;
-
-        for line in content.lines() {
-            if let Some((key, value)) = crate::env_file::parse_line(line) {
-                match key.as_str() {
-                    "SHADOW_ENABLED" => {
-                        enabled = match value.as_str() {
-                            "true" => true,
-                            "false" => false,
-                            _ => {
-                                return Err(format!(
-                                    "SHADOW_ENABLED must be true/false, got: {}",
-                                    value
-                                ));
-                            }
-                        };
-                    }
-                    "SHADOW_AUTO_EVOLVE" => {
-                        auto_evolve = match value.as_str() {
-                            "true" => true,
-                            "false" => false,
-                            _ => {
-                                return Err(format!(
-                                    "SHADOW_AUTO_EVOLVE must be true/false, got: {}",
-                                    value
-                                ));
-                            }
-                        };
-                    }
-                    _ => {}
-                }
+        let (enabled, auto_evolve) = if let Some(db) = self.account_risk_db.as_ref() {
+            let enabled = db
+                .load_kernel_meta(crate::risk::account_store::SHADOW_ENABLED_META)
+                .map_err(|e| format!("kernel_meta read failed: {e}"))?;
+            let auto = db
+                .load_kernel_meta(crate::risk::account_store::SHADOW_AUTO_EVOLVE_META)
+                .map_err(|e| format!("kernel_meta read failed: {e}"))?;
+            if enabled.is_some() || auto.is_some() {
+                let parse = |name: &str, v: Option<String>| match v.as_deref() {
+                    Some("true") => Ok(true),
+                    Some("false") => Ok(false),
+                    Some(other) => Err(format!("{name} must be true/false, got: {other}")),
+                    None => Ok(false),
+                };
+                (
+                    parse("shadow_enabled", enabled)?,
+                    parse("shadow_auto_evolve", auto)?,
+                )
+            } else {
+                Self::shadow_switches_from_env(self.config.env_file_path.as_deref())?
             }
-        }
+        } else {
+            Self::shadow_switches_from_env(self.config.env_file_path.as_deref())?
+        };
 
         if enabled {
             self.shadow_evolution
@@ -1323,6 +1610,49 @@ impl Core {
         }
         self.shadow_evolution.set_auto_evolve(auto_evolve);
         Ok(())
+    }
+
+    /// The legacy env spelling of the two switches (read-only fallback).
+    fn shadow_switches_from_env(
+        env_path: Option<&str>,
+    ) -> Result<(bool, bool), String> {
+        let path = env_path
+            .map(std::path::Path::new)
+            .ok_or_else(|| "env_file_path not set".to_string())?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read .env: {e}"))?;
+        let mut enabled = false;
+        let mut auto_evolve = false;
+        for line in content.lines() {
+            if let Some((key, value)) = crate::env_file::parse_line(line) {
+                match key.as_str() {
+                    "SHADOW_ENABLED" => {
+                        enabled = match value.as_str() {
+                            "true" => true,
+                            "false" => false,
+                            other => {
+                                return Err(format!(
+                                    "SHADOW_ENABLED must be true/false, got: {other}"
+                                ))
+                            }
+                        };
+                    }
+                    "SHADOW_AUTO_EVOLVE" => {
+                        auto_evolve = match value.as_str() {
+                            "true" => true,
+                            "false" => false,
+                            other => {
+                                return Err(format!(
+                                    "SHADOW_AUTO_EVOLVE must be true/false, got: {other}"
+                                ))
+                            }
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok((enabled, auto_evolve))
     }
 
     pub fn set_event_sink(&mut self, tx: mpsc::UnboundedSender<Event>) {

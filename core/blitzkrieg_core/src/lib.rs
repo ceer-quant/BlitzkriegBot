@@ -45,9 +45,9 @@ pub mod db;
 /// #1189: the one-shot legacy-data importer — the Node-era `data/` files and
 /// `.env` knobs folded into the SQLite database, exactly once.
 pub mod db_import;
-/// The kernel-side `.env` writer (market.credentials.set landing). The read
-/// side is the launcher's `ui_kit_panel::env_file` — same file format, one
-/// contract.
+/// `.env` READ helpers only (操作者裁决 2026-11-14，#1199 第六轮：内核对
+/// `.env` 只读，写入路径已整体废除；读侧契约与 launcher 的
+/// `ui_kit_panel::env_file` 同一份).
 pub mod env_file;
 /// .env file watcher for hot reload.
 pub use blitzkrieg_market_api::decimal;

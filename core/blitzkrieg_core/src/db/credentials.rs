@@ -22,6 +22,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand::RngCore;
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use std::sync::Mutex;
 
 use crate::model::{CoreError, CoreErrorCode, CoreResult};
@@ -235,6 +237,108 @@ fn env_var_for_field(field: &str) -> Option<&'static str> {
     }
 }
 
+/// The process-environment lock for tests that touch `BLITZKRIEG_DB_KEY`
+/// (parallel tests race on `std::env`; every mutation happens under this).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+/// Base64-encode a sealed blob for the `kernel_meta` TEXT column
+/// (`nonce || ciphertext || tag`).
+pub fn encode_blob(blob: &[u8]) -> String {
+    STANDARD.encode(blob)
+}
+
+fn decode_blob(text: &str) -> Option<Vec<u8>> {
+    STANDARD.decode(text.trim()).ok()
+}
+
+/// Boot injection (操作者裁决 2026-11-14，#1199 第六轮): UI-submitted
+/// credentials live in the encrypted `kernel_meta.credential.*` rows, and
+/// the executor reads the process environment ONCE at boot — so the session
+/// injects the rows INTO the process environment before anything resolves
+/// credentials. Memory only: this is never a file write (`.env` stays
+/// read-only for the kernel). A SQL row wins over the env spelling; a
+/// missing/malformed master key or an undecryptable row keeps the env
+/// spelling with one loud line. Values never appear in logs.
+pub fn inject_credentials_into_process_env(
+    db: &crate::risk::account_store::AccountRiskDb,
+) {
+    let rows = match db
+        .load_kernel_meta_by_prefix(crate::risk::account_store::CREDENTIAL_META_PREFIX)
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "credential rows unreadable — the env spelling stands for this boot"
+            );
+            return;
+        }
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let master_key = match std::env::var(MASTER_KEY_ENV) {
+        Ok(k) if !k.trim().is_empty() => k,
+        _ => {
+            tracing::warn!(
+                count = rows.len(),
+                "credential rows exist but BLITZKRIEG_DB_KEY is not set — \
+                 the env spelling stands for this boot"
+            );
+            return;
+        }
+    };
+    let manager = match CredentialsManager::new(&master_key) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                error = %e.message,
+                "credential master key unusable — the env spelling stands for this boot"
+            );
+            return;
+        }
+    };
+    let prefix = crate::risk::account_store::CREDENTIAL_META_PREFIX;
+    for (meta_key, b64) in rows {
+        let Some(name) = meta_key.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(blob) = decode_blob(&b64) else {
+            tracing::error!(
+                var = name,
+                "credential row is not valid base64 — corrupt record; \
+                 the env spelling stands"
+            );
+            continue;
+        };
+        match manager.decrypt(&blob) {
+            Ok(plain) => match std::str::from_utf8(&plain) {
+                Ok(value) => {
+                    // SAFETY: single-threaded boot injection, before any
+                    // reader resolves credentials (the executor reads env
+                    // once at boot).
+                    unsafe { std::env::set_var(name, value) };
+                    tracing::info!(
+                        var = name,
+                        "credential injected from the database — the env fallback is shadowed"
+                    );
+                }
+                Err(_) => tracing::error!(
+                    var = name,
+                    "credential row is not valid UTF-8 — corrupt record; \
+                     the env spelling stands"
+                ),
+            },
+            Err(e) => tracing::error!(
+                var = name,
+                error = %e.message,
+                "credential row undecryptable — the env spelling stands"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +348,6 @@ mod tests {
     // these tests from racing each other (same pattern as
     // tests/pair_book_check.rs); the restore guard keeps the process env
     // clean for the sibling tests in this binary.
-    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     struct EnvRestore(&'static str);
     impl Drop for EnvRestore {

@@ -554,16 +554,10 @@ impl Core {
     /// FIRST (a failure leaves both the file and the memory untouched), memory
     /// after. `default` is settable like any account.
     ///
-    /// `.env` is the ONLY durable carrier (issue 751 / 923): the legacy
-    /// `accounts.toml` is never written — while it exists the write REFUSES
-    /// ([`crate::account::config::refuse_while_legacy_toml`]'s rule, shared by
-    /// every other ACCOUNT_* writer). An earlier revision wrote the toml first,
-    /// which could never succeed: production's `accounts_config_path` is a
-    /// write-refusal basis that does not exist on disk.
-    ///
-    /// Activating is ONE rewrite: `active` and `trading` are both spelled by
-    /// key absence, so [`crate::account::config::env_persist_account_active`]
-    /// drops `STATUS` and `TRADING_ENABLED` in a single `remove_env_vars`.
+    /// 操作者裁决 2026-11-14（#1199 第六轮）：`.env` 对内核只读——本写的
+    /// 持久化半边走 SQLite（`SqliteStore::save_account_status` /
+    /// `save_account_trading` / `save_account_active`，同一连接同一事务面）。
+    /// 运行时状态照旧先落内存再持久，失败不留半边天。
     pub fn set_account_status_persisting(
         &mut self,
         id: &crate::account::AccountId,

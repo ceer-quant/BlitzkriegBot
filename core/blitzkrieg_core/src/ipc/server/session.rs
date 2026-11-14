@@ -76,7 +76,6 @@ pub async fn run(
         }
     }
 
-    let mut core = Core::new(config.clone());
     // issue #1199 PR-2: the database opens BY DEFAULT. The path comes from
     // `db::default_db_path` — the SAME resolver the launcher's one-shot
     // import uses — so the file the import fills is the file the kernel
@@ -98,11 +97,17 @@ pub async fn run(
     // deployment's real database sat unread). An explicit relative
     // `BLITZKRIEG_DB_PATH` stays honoured verbatim (the operator's spelling is
     // their choice); only the default is anchored.
+    //
+    // issue #1199 第六轮（操作者裁决 2026-11-14）：这条路径在 `Core::new`
+    // **之前**解析并写进 `config.db_path` —— 装配以它打开 `SqliteStore`（
+    // 唯一持久化后端，`.env` 只读），打开失败在装配里 fail-closed。
     let explicit_db = std::env::var(crate::db::DB_PATH_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
     let db_path = crate::db::default_db_path();
+    config.db_path = Some(db_path.clone());
+    let mut core = Core::new(config.clone());
     // issue #1199 R2: was this database file ALREADY on disk before the open?
     // A `false` here means this boot CREATED the file (and possibly its
     // parent directory) — the fact the empty-database WARN must name, so
@@ -131,6 +136,13 @@ pub async fn run(
                 db_path.display()
             ),
         }));
+    }
+    // 操作者裁决 2026-11-14（#1199 第六轮）：UI 提交的凭证住在加密的
+    // `kernel_meta.credential.*` 行里；执行器在 boot 时一次性读进程环境，
+    // 所以这里把行注入进程环境（仅内存——绝不写任何文件）。SQL 行压过
+    // env 拼写；主键缺失/损坏时 env 拼写原样保留并大声报警。
+    if let Some(db) = core.account_risk_db_handle() {
+        crate::db::credentials::inject_credentials_into_process_env(&db);
     }
     // issue #1199 R2: the empty-database WARN. The open above now ALWAYS runs
     // (the default path resolves against the install root, so it is the same
