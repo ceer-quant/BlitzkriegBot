@@ -98,9 +98,20 @@ pub(crate) async fn handle_risk(
             // of the readout come from the `.env` file at QUERY time — the
             // panel reads the file (through the kernel), never a cache that
             // can diverge from it (the 2026-11-08 panel-ON/file-OFF class).
-            let file = c
-                .cockpit_env_path()
-                .and_then(|p| crate::env_file::read_env_vars(p).ok());
+            //
+            // issue #1199 (the readout asymmetry): with the SQLite store open
+            // the DB is the cockpit carrier — the working copies already carry
+            // the DB rows (boot overlay + the default-face mirror in
+            // `open_account_risk_db`), and an env overlay here would resurrect
+            // the file's STALE `BK_*` / `BK_EXIT_*` keys over them on every
+            // query. The overlay is the env-carrier backend's readout face
+            // only; with the DB open the snapshot IS the answer.
+            let file = if c.account_risk_db_open() {
+                None
+            } else {
+                c.cockpit_env_path()
+                    .and_then(|p| crate::env_file::read_env_vars(p).ok())
+            };
             let mut doc = crate::schema::RiskLimitsResult::snapshot(
                 &c.risk_config().systemic,
                 &c.config().positions.exit,

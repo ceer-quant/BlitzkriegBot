@@ -1096,7 +1096,16 @@ async fn main() -> anyhow::Result<()> {
     // being written. Absolute but deliberately NOT canonicalized: the files may
     // not exist yet, and on macOS canonicalizing `/tmp` would print a path the
     // operator never typed.
+    //
+    // issue #1199 PR-2: the SQLite database is a write path too (the one-shot
+    // import creates it on the first boot, the session opens it on every boot)
+    // — resolved through the SAME `db::default_db_path` the import and the
+    // store open use, and named here so "which database is this process
+    // about?" is answerable from the boot log alone.
+    let db_path = blitzkrieg_core::db::default_db_path();
+    let db_path_text = db_path.to_string_lossy().into_owned();
     for (label, path) in [
+        ("account-db", Some(db_path_text.as_str())),
         ("trade-log", config.trade_log_path.as_deref()),
         ("order-log", config.order_log_path.as_deref()),
         ("position-log", config.position_log_path.as_deref()),
@@ -1286,18 +1295,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ───────────────── issue #1189 PR-A: the one-shot legacy import ─────────
-    // The distribution binary carries the account store: when a database
-    // path is named (BLITZKRIEG_DB_PATH or the shipped default), the first
-    // boot imports the old world — the `.env` ACCOUNT_* / BK_RISK_* /
-    // POLICY_* rows and the `data/` json(l) ledgers — into SQLite, in one
+    // The distribution binary carries the account store: the first boot
+    // imports the old world — the `.env` ACCOUNT_* / BK_RISK_* / POLICY_*
+    // rows and the `data/` json(l) ledgers — into SQLite, in one
     // transaction, with the `import_v1` marker making every later boot a
-    // no-op. Only the serving path runs this (offline modes returned above);
-    // an import failure is fatal (fail-closed).
-    let db_path = std::env::var("BLITZKRIEG_DB_PATH")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(blitzkrieg_core::db::DEFAULT_DB_PATH));
+    // no-op (a marker hit inserts NOTHING and renames nothing: verified by
+    // `db_import::tests::import_once_is_idempotent_second_run_is_all_zero`).
+    // Only the serving path runs this (offline modes returned above); an
+    // import failure is fatal (fail-closed).
+    //
+    // issue #1199 PR-2: the path is the one resolved above (the same
+    // `db::default_db_path` `server::run` uses to open the store). The import
+    // fills the file the kernel reads; there is exactly one database per
+    // process, and the launcher/session split brain (import into the default
+    // path while the session only opened an explicit one) is structurally
+    // gone.
     let env_lookup = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
     match blitzkrieg_core::db_import::import_once(&db_path, env_lookup) {
         Ok(report) if report.imported_anything() => {
@@ -1314,7 +1326,8 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => {
             eprintln!(
                 "blitzkrieg-core: legacy import into {} FAILED: {e} — refusing to boot \
-                 (fix the old files and restart, or unset BLITZKRIEG_DB_PATH to run env-only)",
+                 (fix the old files and restart; the env fallback is retired — \
+                 issue #1199)",
                 db_path.display()
             );
             std::process::exit(2);

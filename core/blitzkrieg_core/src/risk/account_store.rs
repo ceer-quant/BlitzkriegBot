@@ -40,6 +40,13 @@ impl AccountRiskDb {
         self.db.path()
     }
 
+    /// The underlying connection handle (issue #1199 PR-2): the SQLite
+    /// store backend shares THIS connection — one file, one writer — instead
+    /// of opening a second handle on the same database.
+    pub(crate) fn db(&self) -> &crate::db::Database {
+        &self.db
+    }
+
     /// Every `account_risk` row, keyed by account id. A missing row means the
     /// caller's env/global fallback applies.
     pub fn load_risk(&self) -> BTreeMap<String, AccountRiskLimits> {

@@ -50,6 +50,32 @@ use rusqlite::Connection;
 /// convention every other `data/` writer in the kernel uses).
 pub const DEFAULT_DB_PATH: &str = "data/blitzkrieg.sqlite";
 
+/// The environment variable that names an EXPLICIT database path
+/// (issue #1189). Set by the operator to point the kernel at a store other
+/// than the shipped default; read through [`default_db_path`] so the launcher
+/// (legacy import) and the session (store open) can never resolve two
+/// different files (issue #1199: the split-brain root — the launcher imported
+/// into the default path while the session only opened an explicit one).
+pub const DB_PATH_ENV: &str = "BLITZKRIEG_DB_PATH";
+
+/// Resolve the database path this process runs: the explicit
+/// `BLITZKRIEG_DB_PATH` when it is set and non-blank, else the shipped
+/// [`DEFAULT_DB_PATH`]. The ONE resolver — the launcher's one-shot import and
+/// the session's store open both call it, so the file the import fills is the
+/// file the kernel reads.
+pub fn default_db_path() -> std::path::PathBuf {
+    resolve_db_path(std::env::var(DB_PATH_ENV).ok().as_deref())
+}
+
+/// The pure resolution rule (the test seam — mutating the process environment
+/// to test precedence would be global state parallel tests race on).
+fn resolve_db_path(explicit: Option<&str>) -> std::path::PathBuf {
+    match explicit.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::path::PathBuf::from(DEFAULT_DB_PATH),
+    }
+}
+
 /// `busy_timeout` for every connection (issue #1189 §5): 5 seconds.
 pub const BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -196,6 +222,71 @@ pub(crate) fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ── account_settings ────────────────────────────────────────────────────────
+// The per-account EAV family (issue #1189 §2): execution policy, sizing
+// ratios, daily loss, round anchor, hot caps — money and ratios as decimal
+// strings, JSON values as JSON text. The risk matrix's order-notional cap
+// (`risk.max_order_notional_usd`) already lives here; the account book's
+// runtime knobs land here too, so one table backs the whole settings family.
+
+/// Read one `account_settings` value. `None` = the key was never written for
+/// this account (the caller's fallback applies).
+pub fn account_setting_get(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM account_settings WHERE account_id = ?1 AND key = ?2",
+            rusqlite::params![account_id, key],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
+/// Write one `account_settings` value (upsert).
+///
+/// The account row is ensured first (INSERT OR IGNORE, the same shape
+/// `AccountRiskDb` uses): a settings write may arrive before the book is
+/// mirrored into the DB (tests, embedders), and the foreign key must be
+/// satisfied without inventing a second account source.
+pub fn account_setting_set(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts
+                (id, name, market_type, status, trading_enabled, updated_at_ms)
+             VALUES (?1, ?1, 'prediction', 'active', 1, ?2)",
+        rusqlite::params![account_id, now_ms()],
+    )?;
+    conn.execute(
+        "INSERT INTO account_settings (account_id, key, value, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_id, key) DO UPDATE SET
+            value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+        rusqlite::params![account_id, key, value, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Remove one `account_settings` key. Ok even when the key was absent (the
+/// remove face's "absence is the value" spelling — an idempotent sweep).
+pub fn account_setting_remove(
+    conn: &Connection,
+    account_id: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM account_settings WHERE account_id = ?1 AND key = ?2",
+        rusqlite::params![account_id, key],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -419,5 +510,104 @@ mod tests {
     fn database_is_send_but_not_sync() {
         fn assert_send<T: Send>() {}
         assert_send::<Database>();
+    }
+
+    /// issue #1199: the path resolution rule — an explicit non-blank
+    /// `BLITZKRIEG_DB_PATH` wins, blank/absent falls to the shipped default.
+    /// The pure seam (no process env mutation — parallel tests race on it).
+    #[test]
+    fn resolve_db_path_prefers_an_explicit_spelling() {
+        assert_eq!(
+            resolve_db_path(Some("/mnt/bank/other.sqlite")),
+            std::path::PathBuf::from("/mnt/bank/other.sqlite"),
+            "an explicit path wins verbatim"
+        );
+        assert_eq!(
+            resolve_db_path(Some("  /tmp/spaced.sqlite  ")),
+            std::path::PathBuf::from("/tmp/spaced.sqlite"),
+            "the explicit path is trimmed"
+        );
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_db_path(blank),
+                std::path::PathBuf::from(DEFAULT_DB_PATH),
+                "blank/absent falls to the shipped default: {blank:?}"
+            );
+        }
+    }
+
+    /// The `account_settings` EAV round-trip: set, get, upsert, remove, and
+    /// the account-row ensure (a settings write for an unknown id creates
+    /// the account row — the FK is satisfied without a second source).
+    #[test]
+    fn account_settings_round_trip_and_upsert() {
+        let db = TempDb::new();
+        let conn = db.connection();
+        assert_eq!(
+            account_setting_get(&conn, "paper", "risk.cap").unwrap(),
+            None
+        );
+        account_setting_set(&conn, "paper", "risk.cap", "25").unwrap();
+        assert_eq!(
+            account_setting_get(&conn, "paper", "risk.cap")
+                .unwrap()
+                .as_deref(),
+            Some("25")
+        );
+        // Upsert, not duplicate.
+        account_setting_set(&conn, "paper", "risk.cap", "30").unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM account_settings WHERE account_id = 'paper' AND key = 'risk.cap'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        // The ensure: the FK account row exists exactly once.
+        let accounts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM accounts WHERE id = 'paper'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(accounts, 1);
+        // Remove, then a second remove is Ok (idempotent sweep).
+        account_setting_remove(&conn, "paper", "risk.cap").unwrap();
+        account_setting_remove(&conn, "paper", "risk.cap").unwrap();
+        assert_eq!(
+            account_setting_get(&conn, "paper", "risk.cap").unwrap(),
+            None
+        );
+        // Sibling isolation: the same key on another account is a different row.
+        account_setting_set(&conn, "paper", "risk.cap", "1").unwrap();
+        account_setting_set(&conn, "live", "risk.cap", "2").unwrap();
+        assert_eq!(
+            account_setting_get(&conn, "paper", "risk.cap")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            account_setting_get(&conn, "live", "risk.cap")
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    /// `default_db_path` reads the process env — with `BLITZKRIEG_DB_PATH`
+    /// unset in the test harness it resolves to the shipped default (the
+    /// launcher tests run with their own cwd sandboxes, so this is the
+    /// zero-config answer).
+    #[test]
+    fn default_db_path_reads_the_environment() {
+        // Guarded: a developer exporting BLITZKRIEG_DB_PATH must not flake
+        // the suite — skip the assertion when the env speaks.
+        if std::env::var(DB_PATH_ENV).is_ok() {
+            return;
+        }
+        assert_eq!(default_db_path(), std::path::PathBuf::from(DEFAULT_DB_PATH));
     }
 }
