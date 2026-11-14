@@ -109,9 +109,9 @@ async function switchAccount(id: string): Promise<void> {
 // 1069），内核先 persist 配置态再清闸门，回执带 entriesAllowed，面板必读
 // 该字段，不得把「发出请求」当作「已解冻」。冻结持久，仅自动冻结可被
 // 健康探针自愈；不存在按会期自动解除，亦不随节点重启自动清。
-// 配置态停用（account.status === 'frozen'）：来自 .env AccountStatus，与
+// 配置态停用（account.status === 'frozen'）：来自账户配置（内核持久存储），与
 // 风控冻结是两回事，只读呈现「配置停用」，不提供内核解冻按钮（需改
-// .env 并重启）。
+// 账户配置并重启）。
 const freezeOperateId = ref<string | null>(null)
 
 // 风控冻结账户（可解冻）：唯一来源是内核 entry gate 簿 stats.accountGates，
@@ -127,7 +127,7 @@ const frozenAccounts = computed<{ id: string; reason: string }[]>(() => {
             g.blocked === true &&
             g.account &&
             g.account !== 'global' &&
-            // 配置态闸门不出现在可解冻列表：改 .env 并重启，面板无解冻门
+            // 配置态闸门不出现在可解冻列表：改账户配置并重启，面板无解冻门
             !isConfigGate(g.reasonKind)
         )
         .sort((a, b) => a.account.localeCompare(b.account))
@@ -161,7 +161,7 @@ const configGateAccounts = computed<{ id: string; reason: string; kind: string }
 const configuredFrozenAccounts = computed<{ id: string; reason: string }[]>(() => {
   return store.accounts
     .filter((a) => a.status === 'frozen')
-    .map((a) => ({ id: a.id, reason: a.statusReason || '配置态停用（需改 .env 并重启）' }))
+    .map((a) => ({ id: a.id, reason: a.statusReason || '配置态停用（需改账户配置并重启）' }))
 })
 
 async function unfreeze(accountId: string): Promise<void> {
@@ -346,8 +346,8 @@ async function rollbackPolicy(): Promise<void> {
         </template>
       </CardHeader>
       <p class="mt-3 text-[11px] leading-snug text-muted-fg">
-        配置停用 = 该账户在 .env 中 status=Frozen 或 trading_enabled=false，内核拒绝新单；
-        此状态由 .env 决定、重启后生效，面板不提供内核解冻（改 .env 并重启即可）。
+        配置停用 = 该账户的账户状态被配置为停用（status=Frozen 或 trading_enabled=false），内核拒绝新单；
+        此状态由账户配置决定、重启后生效，面板不提供内核解冻（改账户配置并重启即可）。
       </p>
       <div
         v-for="fa in configuredFrozenAccounts"
@@ -364,7 +364,7 @@ async function rollbackPolicy(): Promise<void> {
     </Card>
 
     <!-- 配置态闸门（read_only / suspended / trading disabled）：来自内核 accountGates，
-         不可从面板解冻，只读呈现配置语义提示；改 .env 并重启即可恢复。 -->
+         不可从面板解冻，只读呈现配置语义提示；改账户配置并重启即可恢复。 -->
     <Card v-if="configGateAccounts.length" class="mt-3.5 mb-4">
       <CardHeader label="配置态闸门（不可面板解冻）">
         <template #title>
@@ -372,8 +372,8 @@ async function rollbackPolicy(): Promise<void> {
         </template>
       </CardHeader>
       <p class="mt-3 text-[11px] leading-snug text-muted-fg">
-        配置态闸门由 .env AccountStatus / trading_enabled 派生，由配置决定、
-        重启后生效。面板不提供内核解冻：改 .env 并重启内核即可恢复。平仓照放，
+        配置态闸门由账户状态 / 交易开关等账户配置派生，由配置决定、
+        重启后生效。面板不提供内核解冻：改账户配置并重启内核即可恢复。平仓照放，
         仅新单被拒。
       </p>
       <div

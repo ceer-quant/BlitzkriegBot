@@ -217,7 +217,7 @@ async function doResetTrading(): Promise<void> {
       </CardHeader>
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
-          <div class="text-[12.5px] font-semibold">重新读取 .env</div>
+          <div class="text-[12.5px] font-semibold">重新读取配置</div>
           <p class="mt-0.5 text-[11px] leading-snug text-faint-fg">
             原地更新账户元数据、执行策略和影子进化开关，并保留余额、挂单与持仓。新增或删除账户、轮次等启动期设置仍需重启。
           </p>
@@ -322,7 +322,7 @@ async function doResetTrading(): Promise<void> {
         <p>
           行情与发现不需要凭据即可看数据；只有<b class="text-fg">下单执行器</b>在启动时读取环境变量。
           配置入口在 <button class="text-primary underline" @click="navToPlugins">顶栏账户切换器 → 添加账户</button>
-          （或直接写 <span class="font-mono">.env</span>，真实环境变量始终优先）。
+          （或直接设置对应的环境变量，真实环境变量始终优先）。
         </p>
         <div class="overflow-x-auto">
           <table class="w-full text-[12px]">
@@ -370,7 +370,7 @@ async function doResetTrading(): Promise<void> {
           </table>
         </div>
         <p class="text-[11.5px] text-faint-fg">
-          安全：值只下行不回显，保存在 <span class="font-mono">.env</span>（唯一持久凭据格，仅属主可读），
+          安全：值只下行不回显，持久保存（唯一持久凭据格，仅属主可读），
           留在本机；Live 模式风控与审计照常生效。写入后重启一次内核生效（执行器在启动时读取凭据）；
           账户切换器里的「凭证已载」徽章在重启后翻绿。
         </p>

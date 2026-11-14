@@ -238,8 +238,8 @@ export function accountFreezeBanners(stats: EngineStats | null | undefined): Saf
 /**
  * Configuration-posture gate banners (read_only / suspended / trading
  * disabled): amber, dismissible, auto-fade. No unfreeze door — the operator
- * must edit .env and restart. One banner per account whose gate is a config
- * gate.
+ * must edit the account config and restart. One banner per account whose gate
+ * is a config gate.
  */
 export function configGateBanners(stats: EngineStats | null | undefined): SafetyBanner[] {
   const gates = stats?.accountGates
@@ -262,10 +262,10 @@ export function configGateBanners(stats: EngineStats | null | undefined): Safety
             : `账户交易已关闭（${g.account}）`
       const hint =
         kind === 'ConfigReadOnly'
-          ? 'read_only 派生自 .env AccountStatus，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。平仓照放，仅新单被拒。'
+          ? 'read_only 派生自账户状态配置，由配置决定。面板不提供内核解冻：改账户配置并重启内核即可恢复。平仓照放，仅新单被拒。'
           : kind === 'ConfigSuspended'
-            ? 'suspended 派生自 .env AccountStatus，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。'
-            : 'trading_enabled=false 派生自 .env，由配置决定。面板不提供内核解冻：改 .env 并重启内核即可恢复。'
+            ? 'suspended 派生自账户状态配置，由配置决定。面板不提供内核解冻：改账户配置并重启内核即可恢复。'
+            : 'trading_enabled=false 由配置决定。面板不提供内核解冻：改账户配置并重启内核即可恢复。'
       return {
         tone: 'warn' as const,
         urgent: false,
@@ -303,11 +303,11 @@ export function accountFrozen(
 }
 
 /**
- * Configuration-derived gate kinds: the account is blocked because its .env /
- * config posture says so (read_only / suspended / trading disabled), NOT because
- * the risk system froze it. These gates are NOT liftable via account.unfreeze —
- * the operator must edit the config and restart. They must never render as a
- * red "account frozen" banner with an unfreeze door.
+ * Configuration-derived gate kinds: the account is blocked because its
+ * config posture says so (read_only / suspended / trading disabled), NOT
+ * because the risk system froze it. These gates are NOT liftable via
+ * account.unfreeze — the operator must edit the config and restart. They must
+ * never render as a red "account frozen" banner with an unfreeze door.
  */
 const CONFIG_GATE_KINDS = new Set([
   'ConfigReadOnly',

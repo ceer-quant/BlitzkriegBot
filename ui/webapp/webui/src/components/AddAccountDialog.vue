@@ -4,8 +4,8 @@
  *
  * 流程：选交易所（必选）→ 可选显示名 → 填该交易所执行器要求的凭据字段
  * （字段名来自 `market.credentials.status`，内核单一事实源；值只下行、
- * 从不回显）。确认后两步落盘：`account.create` 建身份（.env 账户簿），
- * `market.credentials.set` 写凭据格（值写入 .env；进程环境在下次启动时
+ * 从不回显）。确认后两步落盘：`account.create` 建身份（内核持久账户簿），
+ * `market.credentials.set` 写凭据格（值持久化；进程环境在下次启动时
  * 才携带新值，所以「凭证已载」徽章要重启一次才翻绿）。
  * 建户成功但凭据被拒时不回滚账户 —— 面板如实报两步各自的结果。
  *
@@ -114,10 +114,10 @@ async function submit(): Promise<void> {
         emit('created', id)
         return
       }
-      // 凭据写入的是 .env 持久格；本进程环境要等下一次启动（launcher 启动
-      // 时加载 .env）才携带新值，执行器也是启动时挂载的 —— 切换器徽章此刻
-      // 仍读「凭证未载」，重启一次内核才翻绿（.env 里已有同名值时无需重启）。
-      okMsg.value = `账户 ${id} 已创建，${cred.written?.length ?? 0} 项凭据已写入 .env —— 重启内核后生效（执行器在启动时读取凭据）。`
+      // 凭据写入的是内核持久凭据格；本进程环境要等下一次启动（launcher 启动
+      // 时加载）才携带新值，执行器也是启动时挂载的 —— 切换器徽章此刻
+      // 仍读「凭证未载」，重启一次内核才翻绿。
+      okMsg.value = `账户 ${id} 已创建，${cred.written?.length ?? 0} 项凭据已持久化 —— 重启内核后生效（执行器在启动时读取凭据）。`
     } else {
       okMsg.value = `账户 ${id} 已创建（未填凭据 —— 下单执行器启动时会缺凭据，稍后可补）。`
     }
@@ -199,7 +199,7 @@ async function submit(): Promise<void> {
               </div>
             </div>
             <p class="mt-1.5 text-[11px] text-faint-fg">
-              值写入 .env（唯一持久凭据格，仅属主可读），启动器下次启动时加载；.env 里已手工写的同名变量始终优先。如何申请见
+              值持久保存（唯一持久凭据格，仅属主可读），启动器下次启动时加载；手工设置的同名环境变量始终优先。如何申请见
               <span class="text-primary">设置页 → 如何创建 API</span>。
             </p>
           </div>
