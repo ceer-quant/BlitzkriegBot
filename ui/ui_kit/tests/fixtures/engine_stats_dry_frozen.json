@@ -44,6 +44,7 @@
     "tripped": false,
     "trippedAtMs": 0
   },
+  "dbEmpty": false,
   "evaluations": 0,
   "exitReasons": {
     "capacity": 64,

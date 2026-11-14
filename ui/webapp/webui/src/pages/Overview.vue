@@ -363,6 +363,16 @@ const needsStrategyHint = computed(() => {
   )
   return !anyOn
 })
+
+/**
+ * issue 1199 R2: the kernel opened its risk database and it is EMPTY (zero
+ * rows, no import marker — the boot WARN's fact). The panel's reads and
+ * writes land in a fresh file; old `.env` data is not in it. A quiet amber
+ * pointer to the fix (import or populate), never a silent "0" — the store
+ * being empty is a state, not a value. Older cores omit `dbEmpty`; absent
+ * claims nothing.
+ */
+const dbEmpty = computed(() => snap.value?.stats?.dbEmpty === true)
 </script>
 
 <template>
@@ -372,6 +382,14 @@ const needsStrategyHint = computed(() => {
       机器人还没有启用任何策略 —— 到
       <span class="font-semibold text-fg">策略</span>
       页内打开开关后，成交与裁决会出现在这里。
+    </AlertBanner>
+
+    <!-- issue 1199 R2: the risk DB is open but carries no data — the panel is
+         reading/writing a fresh store while the operator believes their old
+         settings are live. Amber pointer, never a silent zero. -->
+    <AlertBanner v-if="dbEmpty" tone="warn" class="mb-3.5">
+      风控数据库为空 —— 面板的读写正在落一个新建的空库，旧 .env
+      配置未在其中。用导入器迁移旧数据（import_v1），或直接在面板中重新设置。
     </AlertBanner>
 
     <!-- KPI row -->

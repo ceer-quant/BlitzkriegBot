@@ -488,6 +488,14 @@ pub struct EngineStatsView {
     /// panel needs to render freeze banners correctly.
     #[serde(default)]
     pub account_gates: Vec<AccountGateView>,
+    /// issue #1199 R2: `true` = the kernel's SQLite store is open AND empty
+    /// (zero `account_risk` rows, no `import_v1` marker) — the panel's reads
+    /// and writes are landing in a fresh database file. The kernel's boot log
+    /// WARNs about the same fact; this key lets the panel surface it too
+    /// (the wire field lands here; the UI consumption is the panel agent's
+    /// change). Older cores omit the key → `false` (no claim).
+    #[serde(default)]
+    pub db_empty: bool,
 }
 
 /// #1059: one account's entry gate, mirroring the kernel's `accountGates`

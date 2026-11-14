@@ -447,6 +447,16 @@ impl Core {
             "tops": self.stats.tops,
             "spots": self.stats.spots,
             "rounds": self.stats.rounds,
+            // issue #1199 R2: is the OPEN database an empty one? `true` = the
+            // store is open and carries NO data (zero `account_risk` rows, no
+            // `import_v1` marker) — the panel's reads and writes are landing
+            // in a fresh file, the fact the boot WARN names. `false` covers
+            // every other state: a database with data, an imported-but-empty
+            // one (the marker says the importer ran), and the env-fallback
+            // core with no store at all (there is no database to be empty —
+            // the probe must not invent one). An older core omits the key;
+            // the panel reads absence as "no claim".
+            "dbEmpty": self.account_risk_db_is_empty(),
             // #377 (治 #2): archive verdict events replayed into the core —
             // settlements that came from the stream instead of the dry ladder.
             "resolutions": self.stats.resolutions,

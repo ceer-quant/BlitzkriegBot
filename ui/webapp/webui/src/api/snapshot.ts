@@ -105,6 +105,13 @@ export interface EngineStats {
    * kernel is to freezing trading on its own. Older cores omit.
    */
   reconcile?: { consecutiveSweepFailures: number; freezeThreshold: number } | null
+  /**
+   * issue 1199 R2: the open risk database carries NO data (zero rows, no
+   * import marker) — the panel's reads and writes land in a fresh store.
+   * `false` covers every other state (data present, imported-but-empty, no
+   * store at all — there is no database to be empty). Older cores omit.
+   */
+  dbEmpty?: boolean
   /** Newest trading-capability self-check report. Older cores omit. */
   selfCheck?: {
     ok: boolean

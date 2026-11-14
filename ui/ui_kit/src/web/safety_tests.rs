@@ -71,6 +71,10 @@ fn the_snapshot_forwards_the_trading_safety_block() {
 
     assert_eq!(st["books"], 12, "the counters beside them are unchanged");
     assert_eq!(st["venueRejected"], 5, "refusal count reaches the panel");
+    // issue #1199 R2: the empty-database fact rides the same block — `false`
+    // on the default view (no claim), and a `true` view round-trips it (the
+    // panel agent reads this key).
+    assert_eq!(st["dbEmpty"], false, "the default view makes no claim");
     assert_eq!(st["lastError"]["tsMs"], 1_000_000_000_000i64);
     assert_eq!(st["lastError"]["code"], "NOT_AUTHENTICATED");
     assert_eq!(st["lastError"]["message"], "auth failed");
@@ -121,6 +125,23 @@ fn a_live_kernel_renders_no_banner() {
     assert!(st["selfCheck"].is_null(), "no self-check has run");
     assert!(st["lastVenueError"].is_null());
     assert_eq!(st["venueRejected"], 0);
+    assert_eq!(st["dbEmpty"], false, "no claim on a live default view");
+}
+
+/// issue #1199 R2: a `true` empty-database view round-trips through the
+/// snapshot — the panel agent's source for the empty-database banner.
+#[test]
+fn an_empty_database_view_round_trips_through_the_snapshot() {
+    let s = UiSnapshot {
+        connected: true,
+        stats: Some(EngineStatsView {
+            db_empty: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let doc = snapshot_json(&s);
+    assert_eq!(doc["stats"]["dbEmpty"], true);
 }
 
 /// An older core: the view carries only what the old keys provided, and the
