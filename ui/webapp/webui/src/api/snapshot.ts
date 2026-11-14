@@ -434,9 +434,9 @@ export interface Snapshot {
   /**
    * 显示账户（issue 559）——行情页身份行（倒计时卡的徽章/名/slot/已过秒）
    * 的唯一事实源，与「本面板会话默认账户」解耦：账户切换器切的是交易视
-   * 图，行情显示的是谁由内核的 display_account 决定（accounts.toml 顶层
-   * 持久化 + 运行时生效，写动词 display.account.set）。快照缺该字段（老
-   * 内核）= 回落账户绑定链派生，现行为不变。
+   * 图，行情显示的是谁由内核的 display_account 决定（内核 durable 存储持久化
+   * + 运行时生效，写动词 display.account.set）。快照缺该字段（老内核）
+   * = 回落账户绑定链派生，现行为不变。
    */
   displayAccount?: string | null
   /** displayAccount 绑定的 venue 读数；空串 = 未绑定（可交易任意交易所）。 */

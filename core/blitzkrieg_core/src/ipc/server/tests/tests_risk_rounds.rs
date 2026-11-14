@@ -130,7 +130,7 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
     assert_eq!(
         audit["persistence"],
         serde_json::json!("none"),
-        "the receipt names the carrier: no env file wired → none: {audit}"
+        "the receipt names the carrier: no durable carrier wired → none: {audit}"
     );
     assert_eq!(
         audit["actor"],
@@ -238,11 +238,12 @@ async fn risk_set_systemic_writes_the_matrix_and_names_each_effect() {
 }
 
 /// 生效风控的持久化回路（issue #965 验收一）：面板保存 → `BK_RISK_*` 键
-/// 落进内核 `.env`（回执 `persisted=true` + `persistence=env`）→ 「重启」
-/// （新解析走启动链的同一 seam `SystemicRiskLimits::from_lookup`，键位拼写
-/// 就是写路径写下的那些）→ 限额仍武装、来源诚实标注 env。持久化载体与回
-/// 读一致 —— 一条载体链，没有第二个 flag 标注的影子载体（issue #965 把
-/// risk-state 文件里的 systemic 格退役了）。
+/// 落进内核 `.env`（回执 `persisted=true` + `persistence=store` —— env-only
+/// 后端的载体）→ 「重启」（新解析走启动链的同一 seam
+/// `SystemicRiskLimits::from_lookup`，键位拼写就是写路径写下的那些）→ 限额
+/// 仍武装、来源诚实标注 env。持久化载体与回读一致 —— 一条载体链，没有第二
+/// 个 flag 标注的影子载体（issue #965 把 risk-state 文件里的 systemic 格
+/// 退役了）。
 #[tokio::test]
 async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     use rust_decimal_macros::dec;
@@ -290,8 +291,8 @@ async fn risk_set_systemic_persists_to_env_and_the_boot_rearms_it() {
     );
     assert_eq!(
         audit["persistence"],
-        serde_json::json!("env"),
-        "the receipt names the carrier: {audit}"
+        serde_json::json!("store"),
+        "the receipt names the carrier: the env backend took the write: {audit}"
     );
 
     // The `.env` the write face produced: exactly the two keys, exactly the
@@ -364,7 +365,7 @@ async fn risk_set_exit_writes_the_triple_and_names_each_change() {
     assert_eq!(
         audit["persistence"],
         serde_json::json!("none"),
-        "the receipt names the carrier: no env file wired → none: {audit}"
+        "the receipt names the carrier: no durable carrier wired → none: {audit}"
     );
     assert_eq!(
         audit["actor"],

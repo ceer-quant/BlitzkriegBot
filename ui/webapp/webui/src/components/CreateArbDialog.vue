@@ -4,7 +4,7 @@
  *
  * 模型裁决（2026-10）：跨所套利从「发现机会」改为「配置意图」—— 操作员
  * 选 A 腿（交易所+账户）+ B 腿（交易所+账户）+ 币对多选，创建即持久化
- * （内核写 accounts.toml，面板零持久化职责）。旧的「选目标映射」段整体
+ * （内核持久化进 durable 存储，面板零持久化职责）。旧的「选目标映射」段整体
  * 作废：它等一个 live 链路产不出的候选（unified.candidates），弹窗永远
  * 无法完成创建 —— 概念连同「已配对无差异」这个映射筛选条件一起删。
  *
@@ -36,7 +36,7 @@
  * —— 没有任何运行时字段能判定「谁是套利策略」（atomic_batch 只活在
  * manifest 里，不上 wire），所以候选集是静态单选项，平台化时换成能力
  * 声明驱动（内核 strategy.list 行带出套利能力后，候选集从该读数派生）。
- * 内核 arb.config.set 的 IPC 动词只认 accounts.toml 的 [cross_venue_arb]
+ * 内核 arb.config.set 的 IPC 动词只认内核 durable 存储里的 [cross_venue_arb]
  * 节 —— 选其它名字 = 该策略暂未支持，置灰不假提交（不提交一个内核必拒
  * 的配置）。
  *
@@ -728,7 +728,7 @@ function credLabel(leg: LegCredStatus | null): string {
                 <span class="label-micro">创建动作</span>
               </div>
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[11.5px] leading-relaxed text-muted-fg">
-                提交后：先写入双腿配置（内核持久化进 accounts.toml，重启保留），再以 A 腿账户作用域启用所选套利策略（{{ selectedArbStrategy }}）。
+                提交后：先写入双腿配置（内核持久化进 durable 存储——DB 开库时为 SQLite，env-only 后端时为 .env；重启保留），再以 A 腿账户作用域启用所选套利策略（{{ selectedArbStrategy }}）。
                 两腿各按其交易所的全局凭证（env）签名；凭证就绪见确认页披露。
               </div>
             </div>
@@ -854,7 +854,7 @@ function credLabel(leg: LegCredStatus | null): string {
               <div class="mt-1.5 rounded-md border border-line bg-panel-2/40 px-2.5 py-2 text-[12px]">
                 提交后启用 {{ selectedArbStrategy }}（arb.config.set 成功 → strategy {{ selectedArbStrategy }} on，A 腿账户作用域）。
                 <div class="mt-1 text-[11px] text-faint-fg">
-                  双腿配置由内核持久化（accounts.toml，重启保留）；启用失败时配置已落盘，修复原因后无需重写配置。
+                  双腿配置由内核持久化（durable 存储——DB 或 .env，按装配；重启保留）；启用失败时配置已落盘，修复原因后无需重写配置。
                 </div>
               </div>
             </div>

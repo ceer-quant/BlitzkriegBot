@@ -7,8 +7,8 @@
  * 改动过的字段，内核 plan-first（一项非法整体拒）+ 逐字段审计。效果分级由
  * 内核在回执里逐字段给出：六项 live（立即约束下一笔策略开仓），回撤预算 +
  * 连亏熔断 + 冷静期三项 next_session（本会话不追溯改判，重启后按新值武装）。
- * 未持久化：重启回到启动 flag/env/TOML 的解析结果 —— 来源徽标会变成
- * 「命令行/热改」，这是内核 LimitSource::Flag 的如实呈现。
+ * 未持久化（persisted=false）：重启回到启动 flag/env/TOML 的解析结果 —— 来源
+ * 徽标会变成「命令行/热改」，这是内核 LimitSource::Flag 的如实呈现。
  */
 import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, Save, ShieldCheck } from 'lucide-vue-next'
@@ -420,7 +420,7 @@ onMounted(() => void loadRisk())
       <p v-if="riskMsg" class="mt-2 text-[11px] leading-snug text-gold-400">{{ riskMsg }}</p>
       <div v-if="riskReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted || riskReceipt.persistence === 'env' ? '已持久化' : '未持久化，重启回到启动配置' }}）
+          已写入 {{ riskReceipt.applied.length }} 项（{{ riskReceipt.persisted || riskReceipt.persistence === 'store' ? '已持久化' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in riskReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ c.from === '0' ? '关闭' : c.from }} → {{ c.to === '0' ? '关闭' : c.to }}
@@ -429,7 +429,7 @@ onMounted(() => void loadRisk())
       </div>
       <div v-if="exitReceipt" class="mt-2 rounded border border-line bg-panel-2 px-2.5 py-2 text-[11px] leading-relaxed">
         <div class="font-semibold text-fg">
-          退出纪律已写入 {{ exitReceipt.applied.length }} 项（{{ exitReceipt.persisted || exitReceipt.persistence === 'env' ? '已持久化' : '未持久化，重启回到启动配置' }}）
+          退出纪律已写入 {{ exitReceipt.applied.length }} 项（{{ exitReceipt.persisted || exitReceipt.persistence === 'store' ? '已持久化' : '未持久化，重启回到启动配置' }}）
         </div>
         <div v-for="c in exitReceipt.applied" :key="c.field" class="mt-0.5 text-muted-fg">
           {{ fieldLabel(c.field) }}：{{ changeText(c) }}

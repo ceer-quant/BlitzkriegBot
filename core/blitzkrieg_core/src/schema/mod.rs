@@ -1078,13 +1078,15 @@ pub struct SystemicLimitChange {
 }
 
 /// `risk.setSystemic` result: the audited change list, in the
-/// `RiskLimitUpdate` shape. `persisted` is `true` when the IPC write face
-/// upserted the changed `BK_RISK_*` keys into the kernel's `.env` (issue
-/// #966/#965 — the bounds' durable carrier; the boot re-arms them with
-/// source=env) and `false` otherwise (no env file wired — backtester, most
-/// tests — or the upsert failed, which is logged with the path). The panel
-/// also receives `persistence: "env" | "none"` beside it, spelled by the
-/// write face.
+/// `RiskLimitUpdate` shape. `persisted` is `true` when the durable carrier
+/// took the write — the SQLite `account_risk` row when the DB is open (the
+/// default since #1199 PR-2), the `.env` `BK_RISK_*` keys on the env-only
+/// backend — and `false` otherwise (no carrier wired — backtester, most
+/// tests — or the write failed, which is logged with the path). The panel
+/// also receives `persistence: "store" | "none"` beside it, spelled by the
+/// write face: `"store"` = a durable carrier took it (carrier-neutral since
+/// #1199 PR-2 — the assembly decides which one), `"none"` = nothing landed
+/// durably.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemicLimitUpdate {
@@ -1099,8 +1101,9 @@ pub struct SystemicLimitUpdate {
 
 /// [`SystemicLimitUpdate::note`] — one spelling, used by the reply and the log.
 pub const SYSTEMIC_LIMIT_UPDATE_NOTE: &str = "single-loss + position-size live, drawdown budget + breaker pair arm \
-     next session; persisted to .env (BK_RISK_*) when the kernel has an env \
-     file, in-memory only otherwise";
+     next session; persisted to the kernel's store (SQLite when the DB is \
+     open, the .env BK_RISK_* keys otherwise) — in-memory only when no \
+     carrier is wired";
 
 /// `risk.setExit` params: the exit triple Gate 4 binds per entry, all fields
 /// optional; `accountId` picks the `account_exit_policy` row (absent = default).
@@ -1177,13 +1180,13 @@ pub struct ExitSetChange {
 }
 
 /// `risk.setExit` result: the audited change list, in the
-/// `SystemicLimitUpdate` shape. `persisted` is `true` when the IPC write face
-/// upserted the changed `BK_EXIT_*` keys into the kernel's `.env` (issue
-/// #966/#965 — the restart re-resolves the same values through the boot
-/// chain) and `false` otherwise (no env file wired — backtester, most tests —
-/// or the upsert failed, which is logged with the path). The panel also
-/// receives `persistence: "env" | "none"` beside it, spelled by the write
-/// face.
+/// `SystemicLimitUpdate` shape. `persisted` is `true` when the durable carrier
+/// took the write — the SQLite `account_exit_policy` row when the DB is open
+/// (the default since #1199 PR-2; the restart re-resolves the same values
+/// from it), the `.env` `BK_EXIT_*` keys on the env-only backend — and
+/// `false` otherwise (no carrier wired — backtester, most tests — or the
+/// write failed, which is logged with the path). The panel also receives
+/// `persistence: "store" | "none"` beside it, spelled by the write face.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitSetUpdate {
@@ -1198,8 +1201,9 @@ pub struct ExitSetUpdate {
 
 /// [`ExitSetUpdate::note`] — one spelling, used by the reply and the log.
 pub const EXIT_SET_UPDATE_NOTE: &str = "live for every new entry (Gate 4 binds per intent) and for the exit \
-     sweep of already-open positions; persisted to .env (BK_EXIT_*) when the \
-     kernel has an env file, in-memory only otherwise";
+     sweep of already-open positions; persisted to the kernel's store (SQLite \
+     when the DB is open, the .env BK_EXIT_* keys otherwise) — in-memory \
+     only when no carrier is wired";
 
 // ── 策略 tunables 编辑 — strategy.params.get / strategy.params.set (issue 481) ──
 

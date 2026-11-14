@@ -184,12 +184,11 @@ impl Core {
     ///   不动。
     ///
     /// Atomic：patch 先全量校验（非负）再落笔，被拒的 patch 不留半点痕迹。
-    /// 持久化的载体是 `.env`（issue #966/#965）：IPC 写路径
-    /// （`handlers/risk.rs`）在每个改动落进 matrix 后，把 `BK_RISK_*` 键
-    /// upsert 进 `.env`；重启后 `SystemicRiskLimits::from_env` 以
-    /// `source=env` 重新武装 —— 一条载体链：CLI > env(.env) > default。
+    /// 持久化走 store seam，载体由装配决定（issue #966/#965，#1199 PR-2）：
+    /// DB 开库（默认）时改动先落 SQLite 的 account_risk 行；env-only 后端时
+    /// `BK_RISK_*` 键 upsert 进 `.env`。重启后按同一载体重新武装 ——
     /// 这里只做内存矩阵热写，所以回执里的 `persisted` 恒为 false，写路径
-    /// 会用 `.env` 的真实落盘结果覆写它（并给出 persistence=env|none）。
+    /// 会用真实落盘结果覆写它（并给出 persistence=store|none）。
     pub fn apply_systemic_limits(
         &mut self,
         patch: &crate::schema::SetSystemicLimitsParams,
@@ -283,10 +282,12 @@ impl Core {
         // plan/persist orchestration only.
         let row = self.install_account_risk_row(&target, &matrix, patch);
 
-        // File-first (operator ruling 2026-11-08 — same posture as the exit
-        // discipline): the `.env` file is the single source of truth for the
-        // cockpit families, so the BK_RISK_* keys land there BEFORE the
-        // working copy moves, and a persist failure refuses the whole apply.
+        // Durable-first (operator ruling 2026-11-08 — same posture as the exit
+        // discipline), carrier by assembly since #1199 PR-2: the cockpit
+        // families' durable carrier takes the write BEFORE the working copy
+        // moves (the DB's account_risk row when the DB is open — the default;
+        // the `.env` BK_RISK_* keys on the env-only backend), and a persist
+        // failure refuses the whole apply.
         // (The old order — memory hot-write, then a best-effort persist in
         // the IPC face — is the divergence the ruling bans.)
         // T-03: 归零待 StoreApi 收口（PR-1）。
@@ -379,10 +380,11 @@ impl Core {
     /// 止损，`takeProfitPct: 0` 语义同样荒谬 —— 负数/零不是操作员想要的
     /// 「关闭」，是笔误）。强平接受 `0`、拒绝负数。
     ///
-    /// 持久化的载体是 `.env`（issue #966/#965）：IPC 写路径把改动的
-    /// `BK_EXIT_*` 键 upsert 进 `.env`，重启后启动链（CLI > env > default）
-    /// 重新解析出同样的值。这里只做内存热写，回执里的 `persisted` 由写路径
-    /// 用真实落盘结果覆写（并给出 persistence=env|none）。
+    /// 持久化走 store seam，载体由装配决定（issue #966/#965，#1199 PR-2）：
+    /// DB 开库（默认）时改动先落 SQLite 的 account_exit_policy 行；env-only
+    /// 后端时 `BK_EXIT_*` 键 upsert 进 `.env`。重启后按同一载体重新解析出
+    /// 同样的值。这里只做内存热写，回执里的 `persisted` 由写路径
+    /// 用真实落盘结果覆写（并给出 persistence=store|none）。
     pub fn apply_exit_set(
         &mut self,
         patch: &crate::schema::SetExitParams,
@@ -496,15 +498,19 @@ impl Core {
             ));
         }
 
-        // File-first (operator ruling 2026-11-08: the `.env` file is the
-        // single source of truth for the cockpit families). With a file: the
-        // keys land there BEFORE the working copy moves, and the cache is
-        // re-derived FROM the file — a persist failure refuses the whole
-        // apply, because memory may never hold a value the file does not
-        // have. (The old best-effort posture — memory applied, persistence
-        // logged — is precisely the divergence the ruling bans.) Without a
-        // file (backtester, unwired tests): the direct memory write is the
-        // whole story, honestly reported as `persisted: false`.
+        // Durable-first (operator ruling 2026-11-08), carrier by assembly
+        // since #1199 PR-2. With the DB open (the default): the
+        // account_exit_policy row takes the write BEFORE the working copy
+        // moves, and the working copy is re-derived from the stored row —
+        // a persist failure refuses the whole apply, because memory may
+        // never hold a value the carrier does not have. On the env-only
+        // backend: the `.env` keys land there BEFORE the working copy
+        // moves, and the cache is re-derived FROM the file (same posture,
+        // same refusal). (The old best-effort posture — memory applied,
+        // persistence logged — is precisely the divergence the ruling
+        // bans.) Without any carrier (backtester, unwired tests): the
+        // direct memory write is the whole story, honestly reported as
+        // `persisted: false`.
         // T-03: 归零待 StoreApi 收口（PR-1）。
         let exit_persisted: bool = if let Some(db) = self.account_risk_db.clone() {
             let exit = self.install_account_exit_row(&target, &current, patch);
